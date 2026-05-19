@@ -1,0 +1,36 @@
+{
+  "name": "exo",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "check": "pnpm lint && pnpm typecheck && pnpm test",
+    "e2e:agent-harnesses": "tsx scripts/agent-harness-e2e.ts",
+    "format": "oxfmt .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint .",
+    "lint:fix": "oxlint --fix .",
+    "prepare": "node scripts/setup-hooks.mjs",
+    "test": "vitest run",
+    "typecheck": "tsgo --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.126",
+    "@braintrust/lingua": "^0.1.0",
+    "@braintrust/lingua-wasm": "^0.1.0",
+    "@cursor/sdk": "^1.0.12",
+    "braintrust": "3.7.0",
+    "openai": "6.33.0"
+  },
+  "devDependencies": {
+    "@types/node": "25.5.0",
+    "@typescript/native-preview": "7.0.0-dev.20260328.1",
+    "oxfmt": "^0.42.0",
+    "oxlint": "^1.57.0",
+    "tsx": "4.21.0",
+    "typescript": "^5.9.0",
+    "vitest": "4.1.2"
+  },
+  "packageManager": "pnpm@10.26.2"
+}

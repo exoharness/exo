@@ -1,0 +1,11 @@
+.DS_Store
+.env
+.env.local
+.bt
+.next
+coverage
+node_modules
+target
+tsconfig.tsbuildinfo
+.exo
+.brain

@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["DOM", "DOM.Iterable", "ES2022"],
+    "allowJs": false,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "paths": {
+      "*": ["./*"],
+      "@exo/harness": ["./typescript/harness/index.ts"],
+      "@exo/model-runtime/responses": [
+        "./typescript/model-runtime/responses.ts"
+      ],
+      "@exo/codex/app-server": ["./typescript/codex/app-server.ts"],
+      "@exo/cursor/sdk": ["./typescript/cursor/sdk.ts"],
+      "@exo/cursor/protocol": ["./typescript/cursor/protocol.ts"]
+    },
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "incremental": true
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules"]
+}

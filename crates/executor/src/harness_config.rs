@@ -1,0 +1,128 @@
+use exoharness::{
+    AgentHandle, Artifact, ArtifactVersion, ConversationHandle, ReadArtifactRequest, Result,
+    WriteArtifactRequest,
+};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
+use crate::{AgentConfig, ConversationConfig};
+
+pub(crate) const AGENT_CONFIG_ARTIFACT_PATH: &str = "config/executor.json";
+pub(crate) const CONVERSATION_CONFIG_ARTIFACT_PATH: &str = "config/executor.json";
+
+pub async fn load_agent_config(agent: &dyn AgentHandle) -> Result<AgentConfig> {
+    Ok(
+        read_json_artifact_from_agent(agent, AGENT_CONFIG_ARTIFACT_PATH)
+            .await?
+            .unwrap_or_default(),
+    )
+}
+
+pub async fn store_agent_config(agent: &dyn AgentHandle, config: &AgentConfig) -> Result<()> {
+    write_json_artifact_to_agent(agent, AGENT_CONFIG_ARTIFACT_PATH, config).await
+}
+
+pub async fn load_conversation_config(
+    conversation: &dyn ConversationHandle,
+) -> Result<ConversationConfig> {
+    Ok(
+        read_json_artifact_from_conversation(conversation, CONVERSATION_CONFIG_ARTIFACT_PATH)
+            .await?
+            .unwrap_or_default(),
+    )
+}
+
+pub async fn store_conversation_config(
+    conversation: &dyn ConversationHandle,
+    config: &ConversationConfig,
+) -> Result<()> {
+    write_json_artifact_to_conversation(conversation, CONVERSATION_CONFIG_ARTIFACT_PATH, config)
+        .await
+}
+
+async fn write_json_artifact_to_agent<T: Serialize>(
+    agent: &dyn AgentHandle,
+    path: &str,
+    value: &T,
+) -> Result<()> {
+    agent
+        .write_artifact(WriteArtifactRequest {
+            path: path.to_string(),
+            contents: serde_json::to_vec_pretty(value)?,
+        })
+        .await?;
+    Ok(())
+}
+
+async fn write_json_artifact_to_conversation<T: Serialize>(
+    conversation: &dyn ConversationHandle,
+    path: &str,
+    value: &T,
+) -> Result<()> {
+    conversation
+        .write_artifact(WriteArtifactRequest {
+            path: path.to_string(),
+            contents: serde_json::to_vec_pretty(value)?,
+        })
+        .await?;
+    Ok(())
+}
+
+async fn read_json_artifact_from_agent<T: DeserializeOwned>(
+    agent: &dyn AgentHandle,
+    path: &str,
+) -> Result<Option<T>> {
+    let Some(artifact) = latest_artifact_from_agent(agent, path).await? else {
+        return Ok(None);
+    };
+    Ok(Some(serde_json::from_slice(&artifact.contents)?))
+}
+
+async fn read_json_artifact_from_conversation<T: DeserializeOwned>(
+    conversation: &dyn ConversationHandle,
+    path: &str,
+) -> Result<Option<T>> {
+    let Some(artifact) = latest_artifact_from_conversation(conversation, path).await? else {
+        return Ok(None);
+    };
+    Ok(Some(serde_json::from_slice(&artifact.contents)?))
+}
+
+async fn latest_artifact_from_agent(
+    agent: &dyn AgentHandle,
+    path: &str,
+) -> Result<Option<Artifact>> {
+    let latest_version = latest_artifact_version(agent.list_artifacts().await?, path);
+    let Some(latest_version) = latest_version else {
+        return Ok(None);
+    };
+    agent
+        .read_artifact(ReadArtifactRequest {
+            artifact_id: latest_version.artifact_id,
+            version: Some(latest_version.version),
+        })
+        .await
+}
+
+async fn latest_artifact_from_conversation(
+    conversation: &dyn ConversationHandle,
+    path: &str,
+) -> Result<Option<Artifact>> {
+    let latest_version = latest_artifact_version(conversation.list_artifacts().await?, path);
+    let Some(latest_version) = latest_version else {
+        return Ok(None);
+    };
+    conversation
+        .read_artifact(ReadArtifactRequest {
+            artifact_id: latest_version.artifact_id,
+            version: Some(latest_version.version),
+        })
+        .await
+}
+
+fn latest_artifact_version(artifacts: Vec<ArtifactVersion>, path: &str) -> Option<ArtifactVersion> {
+    artifacts
+        .into_iter()
+        .filter(|artifact| artifact.path == path)
+        .max_by_key(|artifact| artifact.version)
+}

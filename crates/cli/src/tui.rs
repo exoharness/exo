@@ -1,0 +1,609 @@
+use std::borrow::Cow;
+use std::error::Error;
+use std::io::{self, Write};
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use executor::{
+    ConversationHandle, EventData, EventId, EventQuery, EventQueryDirection, ExecutionStreamEvent,
+    HarnessConversation, SendRequest, SessionId,
+};
+use lingua::universal::{UserContent, UserContentPart};
+use lingua::{Message, UniversalStreamChunk};
+use rustyline::error::ReadlineError;
+use rustyline::history::{History, MemHistory, SearchDirection, SearchResult};
+use rustyline::{Cmd, Config, Editor, KeyCode, KeyEvent, Modifiers};
+use serde_json::{Map, Value};
+use tokio::runtime::Handle;
+use tokio_stream::StreamExt;
+
+use crate::{print_message, render_assistant_content};
+
+const REMOTE_HISTORY_BASE: usize = 1_000_000;
+const REMOTE_HISTORY_PAGE_SIZE: u32 = 32;
+
+pub async fn run_chat_repl(
+    conversation: Arc<dyn HarnessConversation>,
+) -> Result<(), Box<dyn Error>> {
+    let mut repl = ChatRepl::new(conversation)?;
+    repl.print_transcript().await?;
+    repl.run().await
+}
+
+struct ChatHistory {
+    state: Mutex<ChatHistoryState>,
+}
+
+struct ChatHistoryState {
+    conversation: Arc<dyn ConversationHandle>,
+    remote_cutoff: Option<EventId>,
+    remote_cursor: Option<EventId>,
+    remote_entries: Vec<String>,
+    remote_exhausted: bool,
+    local_history: MemHistory,
+}
+
+impl ChatHistory {
+    fn new(conversation: Arc<dyn ConversationHandle>, remote_cutoff: Option<EventId>) -> Self {
+        Self {
+            state: Mutex::new(ChatHistoryState {
+                conversation,
+                remote_cutoff,
+                remote_cursor: None,
+                remote_entries: Vec::new(),
+                remote_exhausted: false,
+                local_history: MemHistory::with_config(Config::default()),
+            }),
+        }
+    }
+
+    fn remote_enabled(state: &ChatHistoryState) -> bool {
+        state.remote_cutoff.is_some()
+    }
+
+    fn remote_len_sentinel(state: &ChatHistoryState) -> usize {
+        if Self::remote_enabled(state) {
+            REMOTE_HISTORY_BASE
+        } else {
+            0
+        }
+    }
+
+    fn history_len(state: &ChatHistoryState) -> usize {
+        Self::remote_len_sentinel(state).saturating_add(state.local_history.len())
+    }
+
+    fn ensure_remote_position_loaded(&self, remote_position: usize) -> rustyline::Result<()> {
+        loop {
+            let (conversation, cursor, cutoff, loaded_len, exhausted, enabled) = {
+                let state = self.state.lock().expect("chat history poisoned");
+                (
+                    Arc::clone(&state.conversation),
+                    state.remote_cursor,
+                    state.remote_cutoff,
+                    state.remote_entries.len(),
+                    state.remote_exhausted,
+                    Self::remote_enabled(&state),
+                )
+            };
+
+            if !enabled || loaded_len > remote_position || exhausted {
+                return Ok(());
+            }
+
+            let page = fetch_remote_user_messages(&conversation, cursor, cutoff)?;
+            let mut state = self.state.lock().expect("chat history poisoned");
+            state.remote_cursor = page.cursor;
+            if page.cursor.is_none() {
+                state.remote_exhausted = true;
+            }
+            if page.entries.is_empty() {
+                if state.remote_exhausted {
+                    return Ok(());
+                }
+                continue;
+            }
+            state.remote_entries.extend(page.entries);
+        }
+    }
+
+    fn get_entry(
+        &self,
+        index: usize,
+        dir: SearchDirection,
+    ) -> rustyline::Result<Option<SearchResult<'_>>> {
+        let remote_len_sentinel = {
+            let state = self.state.lock().expect("chat history poisoned");
+            Self::remote_len_sentinel(&state)
+        };
+
+        if index >= remote_len_sentinel {
+            let state = self.state.lock().expect("chat history poisoned");
+            let local_index = index - remote_len_sentinel;
+            return Ok(state
+                .local_history
+                .get(local_index, dir)?
+                .map(|result| SearchResult {
+                    entry: Cow::Owned(result.entry.into_owned()),
+                    idx: result.idx,
+                    pos: result.pos,
+                }));
+        }
+
+        let remote_position = remote_len_sentinel - 1 - index;
+        self.ensure_remote_position_loaded(remote_position)?;
+
+        let state = self.state.lock().expect("chat history poisoned");
+        Ok(state
+            .remote_entries
+            .get(remote_position)
+            .cloned()
+            .map(|entry| SearchResult {
+                entry: Cow::Owned(entry),
+                idx: index,
+                pos: 0,
+            }))
+    }
+}
+
+impl History for ChatHistory {
+    fn get(
+        &self,
+        index: usize,
+        dir: SearchDirection,
+    ) -> rustyline::Result<Option<SearchResult<'_>>> {
+        self.get_entry(index, dir)
+    }
+
+    fn add(&mut self, line: &str) -> rustyline::Result<bool> {
+        self.add_owned(line.to_string())
+    }
+
+    fn add_owned(&mut self, line: String) -> rustyline::Result<bool> {
+        let mut state = self.state.lock().expect("chat history poisoned");
+        state.local_history.add_owned(line)
+    }
+
+    fn len(&self) -> usize {
+        let state = self.state.lock().expect("chat history poisoned");
+        Self::history_len(&state)
+    }
+
+    fn is_empty(&self) -> bool {
+        let state = self.state.lock().expect("chat history poisoned");
+        !Self::remote_enabled(&state) && state.local_history.is_empty()
+    }
+
+    fn set_max_len(&mut self, len: usize) -> rustyline::Result<()> {
+        let mut state = self.state.lock().expect("chat history poisoned");
+        state.local_history.set_max_len(len)
+    }
+
+    fn ignore_dups(&mut self, yes: bool) -> rustyline::Result<()> {
+        let mut state = self.state.lock().expect("chat history poisoned");
+        state.local_history.ignore_dups(yes)
+    }
+
+    fn ignore_space(&mut self, yes: bool) {
+        let mut state = self.state.lock().expect("chat history poisoned");
+        state.local_history.ignore_space(yes);
+    }
+
+    fn save(&mut self, path: &Path) -> rustyline::Result<()> {
+        let mut state = self.state.lock().expect("chat history poisoned");
+        state.local_history.save(path)
+    }
+
+    fn append(&mut self, path: &Path) -> rustyline::Result<()> {
+        let mut state = self.state.lock().expect("chat history poisoned");
+        state.local_history.append(path)
+    }
+
+    fn load(&mut self, path: &Path) -> rustyline::Result<()> {
+        let mut state = self.state.lock().expect("chat history poisoned");
+        state.local_history.load(path)
+    }
+
+    fn clear(&mut self) -> rustyline::Result<()> {
+        let mut state = self.state.lock().expect("chat history poisoned");
+        state.remote_cursor = None;
+        state.remote_entries.clear();
+        state.remote_exhausted = false;
+        state.local_history.clear()
+    }
+
+    fn search(
+        &self,
+        term: &str,
+        start: usize,
+        dir: SearchDirection,
+    ) -> rustyline::Result<Option<SearchResult<'_>>> {
+        let mut index = start;
+        loop {
+            let Some(result) = self.get(index, dir)? else {
+                return Ok(None);
+            };
+            if let Some(pos) = result.entry.find(term) {
+                return Ok(Some(SearchResult {
+                    entry: result.entry,
+                    idx: result.idx,
+                    pos,
+                }));
+            }
+            match dir {
+                SearchDirection::Forward => {
+                    index += 1;
+                    if index >= self.len() {
+                        return Ok(None);
+                    }
+                }
+                SearchDirection::Reverse => {
+                    if index == 0 {
+                        return Ok(None);
+                    }
+                    index -= 1;
+                }
+            }
+        }
+    }
+
+    fn starts_with(
+        &self,
+        term: &str,
+        start: usize,
+        dir: SearchDirection,
+    ) -> rustyline::Result<Option<SearchResult<'_>>> {
+        let mut index = start;
+        loop {
+            let Some(result) = self.get(index, dir)? else {
+                return Ok(None);
+            };
+            if result.entry.starts_with(term) {
+                return Ok(Some(SearchResult {
+                    entry: result.entry,
+                    idx: result.idx,
+                    pos: 0,
+                }));
+            }
+            match dir {
+                SearchDirection::Forward => {
+                    index += 1;
+                    if index >= self.len() {
+                        return Ok(None);
+                    }
+                }
+                SearchDirection::Reverse => {
+                    if index == 0 {
+                        return Ok(None);
+                    }
+                    index -= 1;
+                }
+            }
+        }
+    }
+}
+
+struct RemoteHistoryPage {
+    entries: Vec<String>,
+    cursor: Option<EventId>,
+}
+
+fn fetch_remote_user_messages(
+    conversation: &Arc<dyn ConversationHandle>,
+    cursor: Option<EventId>,
+    cutoff: Option<EventId>,
+) -> rustyline::Result<RemoteHistoryPage> {
+    let runtime = Handle::try_current().map_err(|error| {
+        ReadlineError::Io(io::Error::other(format!(
+            "failed to access tokio runtime for chat history: {error}"
+        )))
+    })?;
+    let result = tokio::task::block_in_place(|| {
+        runtime.block_on(conversation.get_events(Some(EventQuery {
+            cursor,
+            direction: Some(EventQueryDirection::Desc),
+            limit: Some(REMOTE_HISTORY_PAGE_SIZE),
+            session_id: None,
+            turn_id: None,
+            types: None,
+        })))
+    })
+    .map_err(|error| {
+        ReadlineError::Io(io::Error::other(format!(
+            "failed to fetch chat history events: {error}"
+        )))
+    })?;
+
+    let mut entries = Vec::new();
+    for event in result.events {
+        if cutoff.is_some_and(|event_id| event.id > event_id) {
+            continue;
+        }
+        if let EventData::Messages { messages, .. } = event.data {
+            for message in messages.into_iter().rev() {
+                if let Message::User { content } = message {
+                    let text = render_user_content_for_history(&content);
+                    if !text.trim().is_empty() {
+                        entries.push(text);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(RemoteHistoryPage {
+        entries,
+        cursor: result.cursor,
+    })
+}
+
+struct ChatRepl {
+    conversation: Arc<dyn HarnessConversation>,
+    editor: Editor<(), ChatHistory>,
+    session_id: Option<SessionId>,
+}
+
+impl ChatRepl {
+    fn new(conversation: Arc<dyn HarnessConversation>) -> Result<Self, Box<dyn Error>> {
+        let history = ChatHistory::new(
+            conversation.exoharness_handle(),
+            conversation.record().latest_event_id,
+        );
+        let mut editor = Editor::with_history(Config::default(), history)?;
+        editor.bind_sequence(KeyEvent(KeyCode::Enter, Modifiers::ALT), Cmd::Newline);
+        Ok(Self {
+            conversation,
+            editor,
+            session_id: None,
+        })
+    }
+
+    async fn print_transcript(&self) -> Result<(), Box<dyn Error>> {
+        for message in self.conversation.messages().await? {
+            print_message(&message);
+        }
+        Ok(())
+    }
+
+    async fn run(&mut self) -> Result<(), Box<dyn Error>> {
+        loop {
+            let prompt = format!("{}> ", self.conversation.record().slug);
+            match self.editor.readline(&prompt) {
+                Ok(line) => {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    if trimmed == "/quit" || trimmed == "/exit" {
+                        break;
+                    }
+                    if trimmed == "/history" {
+                        self.print_transcript().await?;
+                        continue;
+                    }
+
+                    self.editor.add_history_entry(line.as_str())?;
+                    self.send(trimmed).await?;
+                }
+                Err(ReadlineError::Interrupted) => {
+                    println!();
+                    continue;
+                }
+                Err(ReadlineError::Eof) => {
+                    println!();
+                    break;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        if let Some(session_id) = self.session_id.take() {
+            self.conversation.close_session(session_id).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn send(&mut self, input: &str) -> Result<(), Box<dyn Error>> {
+        let mut stream = self
+            .conversation
+            .send_stream(SendRequest {
+                input: vec![Message::User {
+                    content: UserContent::String(input.to_string()),
+                }],
+                session_id: self.session_id,
+            })
+            .await?;
+        let mut stdout = io::stdout();
+        let mut printed_assistant = false;
+        let mut streamed_text = String::new();
+
+        while let Some(event) = stream.next().await {
+            match event? {
+                ExecutionStreamEvent::FirstChunk { ttft } => {
+                    print_ttft(ttft);
+                }
+                ExecutionStreamEvent::Chunk(chunk) => {
+                    let text = chunk_text(&chunk);
+                    if text.is_empty() {
+                        continue;
+                    }
+                    if !printed_assistant {
+                        print!("assistant: ");
+                        stdout.flush()?;
+                        printed_assistant = true;
+                    }
+                    stdout.write_all(text.as_bytes())?;
+                    stdout.flush()?;
+                    streamed_text.push_str(&text);
+                }
+                ExecutionStreamEvent::ToolCall {
+                    tool_name,
+                    arguments,
+                    ..
+                } => {
+                    if printed_assistant && !streamed_text.ends_with('\n') {
+                        println!();
+                    }
+                    println!("{}", render_tool_call(&tool_name, &arguments));
+                    printed_assistant = false;
+                    streamed_text.clear();
+                }
+                ExecutionStreamEvent::ToolResult { result, .. } => {
+                    println!("{}", render_tool_result(&result));
+                }
+                ExecutionStreamEvent::Completed(result) => {
+                    self.session_id = Some(result.session_id);
+                }
+            }
+        }
+
+        if printed_assistant {
+            println!();
+        } else if let Some(last_message) = self.conversation.messages().await?.last().cloned() {
+            if let Message::Assistant { content, .. } = last_message {
+                let rendered = render_assistant_content(&content);
+                if !rendered.is_empty() {
+                    println!("assistant: {}", rendered);
+                }
+            }
+        }
+        println!();
+        Ok(())
+    }
+}
+
+fn chunk_text(chunk: &UniversalStreamChunk) -> String {
+    let mut text = String::new();
+    for choice in &chunk.choices {
+        if let Some(delta) = choice.delta_view()
+            && let Some(content) = delta.content
+        {
+            text.push_str(&content);
+        }
+    }
+    text
+}
+
+fn print_ttft(ttft: Duration) {
+    let ttft_ms = ttft.as_millis();
+    if ttft_ms == 0 {
+        println!("[ttft <1 ms]");
+    } else {
+        println!("[ttft {ttft_ms} ms]");
+    }
+}
+
+fn render_tool_call(tool_name: &str, arguments: &Map<String, Value>) -> String {
+    let mut lines = vec![format!("tool call {tool_name}")];
+    append_object_fields(&mut lines, arguments, "  ");
+    lines.join("\n")
+}
+
+fn render_tool_result(result: &Value) -> String {
+    let mut lines = vec!["tool result".to_string()];
+    match result {
+        Value::Object(object) => append_object_fields(&mut lines, object, "  "),
+        other => lines.push(format!("  {}", render_value_inline(other))),
+    }
+    lines.join("\n")
+}
+
+fn append_object_fields(lines: &mut Vec<String>, object: &Map<String, Value>, indent: &str) {
+    if object.is_empty() {
+        lines.push(format!("{indent}{{}}"));
+        return;
+    }
+
+    for (key, value) in object {
+        append_field(lines, key, value, indent);
+    }
+}
+
+fn append_field(lines: &mut Vec<String>, key: &str, value: &Value, indent: &str) {
+    match value {
+        Value::String(text) if text.contains('\n') => {
+            lines.push(format!("{indent}{key}:"));
+            for line in text.lines() {
+                lines.push(format!("{indent}  {line}"));
+            }
+            if text.ends_with('\n') {
+                lines.push(format!("{indent}  "));
+            }
+        }
+        Value::Object(object) => {
+            lines.push(format!("{indent}{key}:"));
+            append_object_fields(lines, object, &format!("{indent}  "));
+        }
+        other => lines.push(format!("{indent}{key}: {}", render_value_inline(other))),
+    }
+}
+
+fn render_value_inline(value: &Value) -> String {
+    match value {
+        Value::String(text) => format!("{text:?}"),
+        other => serde_json::to_string(other).unwrap_or_else(|_| "<unrenderable>".to_string()),
+    }
+}
+
+fn render_user_content_for_history(content: &UserContent) -> String {
+    match content {
+        UserContent::String(text) => text.clone(),
+        UserContent::Array(parts) => parts
+            .iter()
+            .filter_map(|part| match part {
+                UserContentPart::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(""),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{render_tool_call, render_tool_result, render_user_content_for_history};
+    use lingua::universal::UserContent;
+    use serde_json::{Map, Value};
+
+    #[test]
+    fn renders_multiline_tool_call_arguments_as_indented_block() {
+        let arguments = Map::from_iter([(
+            "code".to_string(),
+            Value::String("const x = 1;\nconst y = 2;".to_string()),
+        )]);
+
+        let rendered = render_tool_call("repl_execute", &arguments);
+
+        assert_eq!(
+            rendered,
+            "tool call repl_execute\n  code:\n    const x = 1;\n    const y = 2;"
+        );
+    }
+
+    #[test]
+    fn renders_multiline_tool_result_fields_as_indented_block() {
+        let result = Value::Object(Map::from_iter([
+            ("error".to_string(), Value::Null),
+            (
+                "stdout".to_string(),
+                Value::String("line 1\nline 2".to_string()),
+            ),
+        ]));
+
+        let rendered = render_tool_result(&result);
+
+        assert_eq!(
+            rendered,
+            "tool result\n  error: null\n  stdout:\n    line 1\n    line 2"
+        );
+    }
+
+    #[test]
+    fn renders_user_string_content_for_history() {
+        let content = UserContent::String("first second".to_string());
+
+        assert_eq!(render_user_content_for_history(&content), "first second");
+    }
+}

@@ -1,0 +1,61 @@
+[workspace]
+members = ["crates/cli", "crates/exoharness", "crates/executor"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1.0.100"
+async-trait = "0.1.89"
+braintrust-sdk-rust = { git = "https://github.com/braintrustdata/braintrust-sdk-rust", rev = "55dcefd989b6038edb5ef8dfc438384340d5f4ae" }
+bytes = "1.10.1"
+chrono = { version = "0.4.42", features = ["serde"] }
+clap = { version = "4.5.48", features = ["derive", "env"] }
+flate2 = "1.1.2"
+futures = "0.3.31"
+object_store = { version = "0.12.5", features = [
+  "fs",
+  "aws",
+  "gcp",
+  "azure",
+  "http",
+] }
+reqwest = { version = "0.12.23", default-features = false, features = [
+  "json",
+  "rustls-tls",
+] }
+shell-words = "1.1.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+sqlx = { version = "0.8.6", default-features = false, features = [
+  "runtime-tokio-rustls",
+  "any",
+  "sqlite",
+  "postgres",
+  "macros",
+] }
+thiserror = "2.0.17"
+tokio = { version = "1.52.1", features = [
+  "io-std",
+  "io-util",
+  "macros",
+  "process",
+  "rt-multi-thread",
+  "sync",
+] }
+tokio-stream = "0.1.17"
+tokio-util = { version = "0.7.18", features = ["compat"] }
+url = "2.5.7"
+uuid = { version = "1.18.1", features = ["serde", "v4", "v7"] }
+
+lingua = { git = "https://github.com/braintrustdata/lingua.git", rev = "4f8c678a30bb385cd8093875111605cfd712c976" }
+braintrust-llm-router = { git = "https://github.com/braintrustdata/lingua.git", package = "braintrust-llm-router", rev = "4f8c678a30bb385cd8093875111605cfd712c976", default-features = false, features = [
+  "provider-openai",
+  "provider-anthropic",
+  "provider-google",
+  "provider-bedrock",
+  "rustls",
+] }

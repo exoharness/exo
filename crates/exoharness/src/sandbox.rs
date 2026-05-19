@@ -1,0 +1,1097 @@
+use std::collections::{HashMap, hash_map::DefaultHasher};
+use std::fmt;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, Result, anyhow, bail};
+use async_trait::async_trait;
+use futures::future::BoxFuture;
+use serde::Deserialize;
+use tokio::process::{Child, Command};
+use tokio::sync::Mutex;
+use tokio::time;
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use uuid::Uuid;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SandboxKey {
+    ConversationSandbox {
+        conversation_id: String,
+        sandbox_id: String,
+    },
+}
+
+impl fmt::Display for SandboxKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ConversationSandbox {
+                conversation_id,
+                sandbox_id,
+            } => write!(f, "conversation:{conversation_id}:{sandbox_id}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SandboxLifecycleConfig {
+    pub idle_ttl: Option<Duration>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SandboxMountAccess {
+    ReadOnly,
+    ReadWrite,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SandboxMount {
+    pub host_path: PathBuf,
+    pub guest_path: String,
+    pub access: SandboxMountAccess,
+    pub internal: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SandboxNetworkPolicy {
+    Enabled,
+    Disabled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SandboxSpec {
+    pub image: String,
+    pub mounts: Vec<SandboxMount>,
+    pub network: SandboxNetworkPolicy,
+    pub default_workdir: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxRequest {
+    pub key: SandboxKey,
+    pub spec: SandboxSpec,
+    pub lifecycle: SandboxLifecycleConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct SandboxCommand {
+    pub argv: Vec<String>,
+    pub env: HashMap<String, String>,
+    pub display_argv: Option<Vec<String>>,
+    pub cwd: Option<String>,
+    pub timeout: Option<Duration>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SandboxCommandOutput {
+    pub ok: bool,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub command: Vec<String>,
+    pub cwd: String,
+}
+
+#[async_trait]
+pub trait ManagedSandboxHandle: Send + Sync {
+    fn id(&self) -> &str;
+
+    async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput>;
+
+    async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts>;
+
+    async fn stop(&self) -> Result<()>;
+}
+
+#[async_trait]
+pub trait ManagedSandboxBackend: Send + Sync {
+    async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>>;
+}
+
+pub const DEFAULT_SANDBOX_IMAGE: &str = "docker.io/library/debian:bookworm";
+pub const SANDBOX_HOME_DIR: &str = "/home/exo";
+pub const SANDBOX_MAIN_MOUNT_DIR: &str = "/home/exo/workspace";
+
+const DEFAULT_ENABLED_NETWORK_NAME: &str = "exo-default";
+const WARM_SANDBOX_KEEPALIVE_ARGV: &[&str] = &["sleep", "infinity"];
+const WARM_SANDBOX_HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(3);
+const WARM_SANDBOX_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+const ORPHANED_WARM_SANDBOX_MIN_AGE: Duration = Duration::from_secs(60 * 60);
+const WARM_SANDBOX_KEY_LABEL: &str = "exo.sandbox.key";
+const WARM_SANDBOX_SPEC_HASH_LABEL: &str = "exo.sandbox.spec-hash";
+const WARM_SANDBOX_OWNER_PID_LABEL: &str = "exo.sandbox.owner-pid";
+const APPLE_ABSOLUTE_TIME_UNIX_OFFSET_SECONDS: f64 = 978_307_200.0;
+
+#[derive(Debug, Clone)]
+struct WarmSandboxEntry {
+    name: String,
+    request: SandboxRequest,
+    last_used_at: Instant,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContainerListItem {
+    status: Option<String>,
+    #[serde(rename = "startedDate")]
+    started_date: Option<f64>,
+    configuration: ContainerListConfiguration,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContainerListConfiguration {
+    id: String,
+    #[serde(default)]
+    labels: HashMap<String, String>,
+}
+
+#[derive(Debug)]
+pub struct AppleContainerSandboxBackend {
+    container_bin: PathBuf,
+    system_started: Mutex<bool>,
+    network_created: Mutex<bool>,
+    warm_sandboxes: Arc<Mutex<HashMap<SandboxKey, WarmSandboxEntry>>>,
+}
+
+impl AppleContainerSandboxBackend {
+    pub fn new() -> Self {
+        Self {
+            container_bin: PathBuf::from("container"),
+            system_started: Mutex::new(false),
+            network_created: Mutex::new(false),
+            warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    async fn ensure_system_started(&self) -> Result<()> {
+        let mut started = self.system_started.lock().await;
+        if *started {
+            return Ok(());
+        }
+
+        let output = Command::new(&self.container_bin)
+            .arg("system")
+            .arg("start")
+            .kill_on_drop(true)
+            .output()
+            .await?;
+        if !output.status.success() {
+            return Err(anyhow!(
+                "failed to start container system: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+
+        if let Err(error) = reap_orphaned_warm_sandboxes(&self.container_bin).await {
+            eprintln!("failed to reap orphaned warm sandboxes: {error}");
+        }
+        *started = true;
+        Ok(())
+    }
+
+    async fn ensure_default_network_created(&self) -> Result<()> {
+        let mut created = self.network_created.lock().await;
+        if *created {
+            return Ok(());
+        }
+
+        let output = Command::new(&self.container_bin)
+            .arg("network")
+            .arg("create")
+            .arg(DEFAULT_ENABLED_NETWORK_NAME)
+            .kill_on_drop(true)
+            .output()
+            .await?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if !stderr.contains("already exists") {
+                return Err(anyhow!(
+                    "failed to create default container network {DEFAULT_ENABLED_NETWORK_NAME}: {stderr}"
+                ));
+            }
+        }
+
+        *created = true;
+        Ok(())
+    }
+
+    async fn prepare_request(&self, request: SandboxRequest) -> Result<SandboxRequest> {
+        self.ensure_system_started().await?;
+        if matches!(request.spec.network, SandboxNetworkPolicy::Enabled) {
+            self.ensure_default_network_created().await?;
+        }
+
+        let mounts = request
+            .spec
+            .mounts
+            .into_iter()
+            .map(|mount| {
+                let host_path = std::fs::canonicalize(&mount.host_path)?;
+                if !host_path.is_dir() {
+                    bail!(
+                        "sandbox mount root is not a directory: {}",
+                        host_path.display()
+                    );
+                }
+                Ok(SandboxMount { host_path, ..mount })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(SandboxRequest {
+            key: request.key,
+            spec: SandboxSpec {
+                image: if request.spec.image.trim().is_empty() {
+                    DEFAULT_SANDBOX_IMAGE.to_string()
+                } else {
+                    request.spec.image
+                },
+                mounts,
+                network: request.spec.network,
+                default_workdir: request.spec.default_workdir,
+            },
+            lifecycle: request.lifecycle,
+        })
+    }
+
+    async fn reap_expired_warm_sandboxes(&self) -> Result<()> {
+        let now = Instant::now();
+        let expired = {
+            let mut warm_sandboxes = self.warm_sandboxes.lock().await;
+            let expired_keys = warm_sandboxes
+                .iter()
+                .filter_map(|(key, entry)| {
+                    let ttl = entry.request.lifecycle.idle_ttl?;
+                    (entry.last_used_at + ttl <= now).then(|| key.clone())
+                })
+                .collect::<Vec<_>>();
+
+            expired_keys
+                .into_iter()
+                .filter_map(|key| warm_sandboxes.remove(&key))
+                .collect::<Vec<_>>()
+        };
+
+        for entry in expired {
+            cleanup_named_container(&self.container_bin, &entry.name).await?;
+        }
+
+        Ok(())
+    }
+}
+
+impl Default for AppleContainerSandboxBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for AppleContainerSandboxBackend {
+    fn drop(&mut self) {
+        let Ok(mut warm_sandboxes) = self.warm_sandboxes.try_lock() else {
+            return;
+        };
+        let names = warm_sandboxes
+            .drain()
+            .map(|(_, entry)| entry.name)
+            .collect::<Vec<_>>();
+        for name in names {
+            cleanup_named_container_blocking(&self.container_bin, &name);
+        }
+    }
+}
+
+#[async_trait]
+impl ManagedSandboxBackend for AppleContainerSandboxBackend {
+    async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
+        let request = self.prepare_request(request).await?;
+
+        if request.lifecycle.idle_ttl.is_none() {
+            return Ok(Arc::new(AppleOneShotSandboxHandle {
+                id: format!("oneshot:{}", request.key),
+                container_bin: self.container_bin.clone(),
+                request,
+            }));
+        }
+
+        self.reap_expired_warm_sandboxes().await?;
+
+        let replaced = {
+            let mut warm_sandboxes = self.warm_sandboxes.lock().await;
+            match warm_sandboxes.get(&request.key) {
+                Some(entry) if entry.request.spec == request.spec => {
+                    return Ok(Arc::new(AppleWarmSandboxHandle {
+                        id: format!("warm:{}", request.key),
+                        container_bin: self.container_bin.clone(),
+                        request,
+                        warm_sandboxes: Arc::clone(&self.warm_sandboxes),
+                    }));
+                }
+                Some(_) => warm_sandboxes.remove(&request.key),
+                None => None,
+            }
+        };
+        if let Some(entry) = replaced {
+            schedule_cleanup_named_container(self.container_bin.clone(), entry.name);
+        }
+
+        let name = create_unique_warm_sandbox(&self.container_bin, &request).await?;
+
+        {
+            let mut warm_sandboxes = self.warm_sandboxes.lock().await;
+            warm_sandboxes.insert(
+                request.key.clone(),
+                WarmSandboxEntry {
+                    name: name.clone(),
+                    request: request.clone(),
+                    last_used_at: Instant::now(),
+                },
+            );
+        }
+
+        Ok(Arc::new(AppleWarmSandboxHandle {
+            id: format!("warm:{}", request.key),
+            container_bin: self.container_bin.clone(),
+            request,
+            warm_sandboxes: Arc::clone(&self.warm_sandboxes),
+        }))
+    }
+}
+
+struct AppleOneShotSandboxHandle {
+    id: String,
+    container_bin: PathBuf,
+    request: SandboxRequest,
+}
+
+#[async_trait]
+impl ManagedSandboxHandle for AppleOneShotSandboxHandle {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {
+        exec_one_shot(
+            &self.container_bin,
+            &self.request.spec,
+            network_name_for_policy(self.request.spec.network),
+            command,
+        )
+        .await
+    }
+
+    async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts> {
+        start_one_shot_process(
+            &self.container_bin,
+            &self.request.spec,
+            network_name_for_policy(self.request.spec.network),
+            command,
+        )
+        .await
+    }
+
+    async fn stop(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+struct AppleWarmSandboxHandle {
+    id: String,
+    container_bin: PathBuf,
+    request: SandboxRequest,
+    warm_sandboxes: Arc<Mutex<HashMap<SandboxKey, WarmSandboxEntry>>>,
+}
+
+#[async_trait]
+impl ManagedSandboxHandle for AppleWarmSandboxHandle {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {
+        let name =
+            ensure_warm_sandbox_ready(&self.container_bin, &self.request, &self.warm_sandboxes)
+                .await?;
+        touch_warm_sandbox(&self.warm_sandboxes, &self.request.key).await;
+        let output = exec_warm(&self.container_bin, &name, &self.request.spec, command).await;
+        touch_warm_sandbox(&self.warm_sandboxes, &self.request.key).await;
+        output
+    }
+
+    async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts> {
+        let name =
+            ensure_warm_sandbox_ready(&self.container_bin, &self.request, &self.warm_sandboxes)
+                .await?;
+        touch_warm_sandbox(&self.warm_sandboxes, &self.request.key).await;
+        start_warm_process(&self.container_bin, &name, &self.request.spec, command).await
+    }
+
+    async fn stop(&self) -> Result<()> {
+        let removed = {
+            let mut warm_sandboxes = self.warm_sandboxes.lock().await;
+            warm_sandboxes.remove(&self.request.key)
+        };
+
+        if let Some(entry) = removed {
+            cleanup_named_container(&self.container_bin, &entry.name).await
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct LocalProcessSandboxBackend;
+
+impl LocalProcessSandboxBackend {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl ManagedSandboxBackend for LocalProcessSandboxBackend {
+    async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
+        Ok(Arc::new(LocalProcessSandboxHandle {
+            id: format!("local:{}", request.key),
+            request,
+        }))
+    }
+}
+
+struct LocalProcessSandboxHandle {
+    id: String,
+    request: SandboxRequest,
+}
+
+#[async_trait]
+impl ManagedSandboxHandle for LocalProcessSandboxHandle {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {
+        if command.argv.is_empty() {
+            bail!("sandbox command requires at least one argv entry");
+        }
+        let cwd = command
+            .cwd
+            .clone()
+            .unwrap_or_else(|| self.request.spec.default_workdir.clone());
+        let mut process = Command::new(&command.argv[0]);
+        process.args(&command.argv[1..]);
+        process.envs(&command.env);
+        if let Some(workdir) = resolve_local_workdir(&self.request.spec, &cwd) {
+            process.current_dir(workdir);
+        }
+        process.kill_on_drop(true);
+        run_command(process, command, cwd).await
+    }
+
+    async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts> {
+        if command.argv.is_empty() {
+            bail!("sandbox command requires at least one argv entry");
+        }
+        let cwd = command
+            .cwd
+            .clone()
+            .unwrap_or_else(|| self.request.spec.default_workdir.clone());
+        let mut process = Command::new(&command.argv[0]);
+        process.args(&command.argv[1..]);
+        process.envs(&command.env);
+        if let Some(workdir) = resolve_local_workdir(&self.request.spec, &cwd) {
+            process.current_dir(workdir);
+        }
+        process.kill_on_drop(true);
+        spawn_sandbox_process(process, command).await
+    }
+
+    async fn stop(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+fn resolve_local_workdir(spec: &SandboxSpec, cwd: &str) -> Option<PathBuf> {
+    let cwd_path = PathBuf::from(cwd);
+    if cwd_path.is_absolute() {
+        if let Some(mount) = spec.mounts.iter().find(|mount| mount.guest_path == cwd) {
+            return Some(mount.host_path.clone());
+        }
+        return cwd_path.exists().then_some(cwd_path);
+    }
+
+    spec.mounts
+        .iter()
+        .find(|mount| mount.guest_path == cwd)
+        .map(|mount| mount.host_path.clone())
+}
+
+async fn touch_warm_sandbox(
+    warm_sandboxes: &Arc<Mutex<HashMap<SandboxKey, WarmSandboxEntry>>>,
+    key: &SandboxKey,
+) {
+    let mut warm_sandboxes = warm_sandboxes.lock().await;
+    if let Some(entry) = warm_sandboxes.get_mut(key) {
+        entry.last_used_at = Instant::now();
+    }
+}
+
+async fn create_named_warm_sandbox(
+    container_bin: &Path,
+    request: &SandboxRequest,
+    name: &str,
+) -> Result<()> {
+    let mut process = Command::new(container_bin);
+    process
+        .arg("run")
+        .arg("--detach")
+        .arg("--name")
+        .arg(name)
+        .arg("--label")
+        .arg(format!("{WARM_SANDBOX_KEY_LABEL}={}", request.key))
+        .arg("--label")
+        .arg(format!(
+            "{WARM_SANDBOX_SPEC_HASH_LABEL}={}",
+            sandbox_spec_hash(&request.spec)
+        ))
+        .arg("--label")
+        .arg(format!(
+            "{WARM_SANDBOX_OWNER_PID_LABEL}={}",
+            std::process::id()
+        ))
+        .arg("--workdir")
+        .arg(&request.spec.default_workdir);
+
+    configure_network_args(
+        &mut process,
+        request.spec.network,
+        Some(DEFAULT_ENABLED_NETWORK_NAME),
+    );
+    configure_mount_args(&mut process, &request.spec.mounts);
+
+    process.arg(&request.spec.image);
+    process.args(WARM_SANDBOX_KEEPALIVE_ARGV);
+    process.kill_on_drop(true);
+
+    let output = process.output().await?;
+    if !output.status.success() {
+        let stderr = render_command_error(&output.stderr);
+        return Err(anyhow!("failed to start warm sandbox {}: {}", name, stderr));
+    }
+
+    Ok(())
+}
+
+async fn create_unique_warm_sandbox(
+    container_bin: &Path,
+    request: &SandboxRequest,
+) -> Result<String> {
+    for _ in 0..4 {
+        let name = new_warm_container_name(&request.key);
+        match create_named_warm_sandbox(container_bin, request, &name).await {
+            Ok(()) => return Ok(name),
+            Err(err) if is_already_exists_error(&err.to_string()) => continue,
+            Err(err) => return Err(err),
+        }
+    }
+
+    Err(anyhow!(
+        "failed to allocate a unique warm sandbox name for {}",
+        request.key
+    ))
+}
+
+async fn ensure_warm_sandbox_ready(
+    container_bin: &Path,
+    request: &SandboxRequest,
+    warm_sandboxes: &Arc<Mutex<HashMap<SandboxKey, WarmSandboxEntry>>>,
+) -> Result<String> {
+    let healthcheck = SandboxCommand {
+        argv: vec!["/bin/true".to_string()],
+        env: HashMap::new(),
+        display_argv: Some(vec!["/bin/true".to_string()]),
+        cwd: None,
+        timeout: Some(WARM_SANDBOX_HEALTHCHECK_TIMEOUT),
+    };
+
+    let mut warm_sandboxes = warm_sandboxes.lock().await;
+    let current_name = match warm_sandboxes.get_mut(&request.key) {
+        Some(entry) if entry.request.spec == request.spec => {
+            entry.last_used_at = Instant::now();
+            entry.name.clone()
+        }
+        Some(_) => {
+            let stale = warm_sandboxes
+                .remove(&request.key)
+                .expect("entry disappeared while locked");
+            schedule_cleanup_named_container(container_bin.to_path_buf(), stale.name);
+            let name = create_unique_warm_sandbox(container_bin, request).await?;
+            warm_sandboxes.insert(
+                request.key.clone(),
+                WarmSandboxEntry {
+                    name: name.clone(),
+                    request: request.clone(),
+                    last_used_at: Instant::now(),
+                },
+            );
+            return Ok(name);
+        }
+        None => {
+            let name = create_unique_warm_sandbox(container_bin, request).await?;
+            warm_sandboxes.insert(
+                request.key.clone(),
+                WarmSandboxEntry {
+                    name: name.clone(),
+                    request: request.clone(),
+                    last_used_at: Instant::now(),
+                },
+            );
+            return Ok(name);
+        }
+    };
+
+    let healthy = matches!(
+        exec_warm(container_bin, &current_name, &request.spec, &healthcheck).await,
+        Ok(output) if output.ok
+    );
+    if healthy {
+        return Ok(current_name);
+    }
+
+    let replacement_name = create_unique_warm_sandbox(container_bin, request).await?;
+    warm_sandboxes.insert(
+        request.key.clone(),
+        WarmSandboxEntry {
+            name: replacement_name.clone(),
+            request: request.clone(),
+            last_used_at: Instant::now(),
+        },
+    );
+    drop(warm_sandboxes);
+    schedule_cleanup_named_container(container_bin.to_path_buf(), current_name);
+    Ok(replacement_name)
+}
+
+async fn exec_one_shot(
+    container_bin: &Path,
+    spec: &SandboxSpec,
+    network_name: Option<&'static str>,
+    command: &SandboxCommand,
+) -> Result<SandboxCommandOutput> {
+    if command.argv.is_empty() {
+        bail!("sandbox command requires at least one argv entry");
+    }
+
+    let cwd = command
+        .cwd
+        .clone()
+        .unwrap_or_else(|| spec.default_workdir.clone());
+
+    let mut process = Command::new(container_bin);
+    process.arg("run").arg("--rm").arg("--workdir").arg(&cwd);
+    configure_network_args(&mut process, spec.network, network_name);
+    configure_mount_args(&mut process, &spec.mounts);
+    configure_env_args(&mut process, &command.env);
+    process.arg(&spec.image);
+    process.args(&command.argv);
+    process.kill_on_drop(true);
+
+    run_command(process, command, cwd).await
+}
+
+async fn start_one_shot_process(
+    container_bin: &Path,
+    spec: &SandboxSpec,
+    network_name: Option<&'static str>,
+    command: &SandboxCommand,
+) -> Result<crate::SandboxProcessParts> {
+    if command.argv.is_empty() {
+        bail!("sandbox command requires at least one argv entry");
+    }
+
+    let cwd = command
+        .cwd
+        .clone()
+        .unwrap_or_else(|| spec.default_workdir.clone());
+
+    let mut process = Command::new(container_bin);
+    process
+        .arg("run")
+        .arg("--rm")
+        .arg("--interactive")
+        .arg("--workdir")
+        .arg(&cwd);
+    configure_network_args(&mut process, spec.network, network_name);
+    configure_mount_args(&mut process, &spec.mounts);
+    configure_env_args(&mut process, &command.env);
+    process.arg(&spec.image);
+    process.args(&command.argv);
+    process.kill_on_drop(true);
+
+    spawn_sandbox_process(process, command).await
+}
+
+async fn exec_warm(
+    container_bin: &Path,
+    name: &str,
+    spec: &SandboxSpec,
+    command: &SandboxCommand,
+) -> Result<SandboxCommandOutput> {
+    if command.argv.is_empty() {
+        bail!("sandbox command requires at least one argv entry");
+    }
+
+    let cwd = command
+        .cwd
+        .clone()
+        .unwrap_or_else(|| spec.default_workdir.clone());
+
+    let mut process = Command::new(container_bin);
+    process.arg("exec").arg("--workdir").arg(&cwd);
+    configure_env_args(&mut process, &command.env);
+    process.arg(name);
+    process.args(&command.argv);
+    process.kill_on_drop(true);
+
+    run_command(process, command, cwd).await
+}
+
+async fn start_warm_process(
+    container_bin: &Path,
+    name: &str,
+    spec: &SandboxSpec,
+    command: &SandboxCommand,
+) -> Result<crate::SandboxProcessParts> {
+    if command.argv.is_empty() {
+        bail!("sandbox command requires at least one argv entry");
+    }
+
+    let cwd = command
+        .cwd
+        .clone()
+        .unwrap_or_else(|| spec.default_workdir.clone());
+
+    let mut process = Command::new(container_bin);
+    process
+        .arg("exec")
+        .arg("--interactive")
+        .arg("--workdir")
+        .arg(&cwd);
+    configure_env_args(&mut process, &command.env);
+    process.arg(name);
+    process.args(&command.argv);
+    process.kill_on_drop(true);
+
+    spawn_sandbox_process(process, command).await
+}
+
+async fn run_command(
+    mut process: Command,
+    command: &SandboxCommand,
+    cwd: String,
+) -> Result<SandboxCommandOutput> {
+    let output = match command.timeout {
+        Some(timeout) => match time::timeout(timeout, process.output()).await {
+            Ok(output) => output?,
+            Err(_) => {
+                return Err(anyhow!(
+                    "sandbox command timed out after {}s: {}",
+                    timeout.as_secs(),
+                    command
+                        .display_argv
+                        .as_ref()
+                        .unwrap_or(&command.argv)
+                        .join(" ")
+                ));
+            }
+        },
+        None => process.output().await?,
+    };
+
+    Ok(SandboxCommandOutput {
+        ok: output.status.success(),
+        exit_code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        command: command
+            .display_argv
+            .clone()
+            .unwrap_or_else(|| command.argv.clone()),
+        cwd,
+    })
+}
+
+async fn spawn_sandbox_process(
+    mut process: Command,
+    command: &SandboxCommand,
+) -> Result<crate::SandboxProcessParts> {
+    process
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = process.spawn().with_context(|| {
+        format!(
+            "failed to start sandbox command: {}",
+            command
+                .display_argv
+                .as_ref()
+                .unwrap_or(&command.argv)
+                .join(" ")
+        )
+    })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("sandbox process did not expose stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("sandbox process did not expose stderr"))?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("sandbox process did not expose stdin"))?;
+
+    Ok(crate::SandboxProcessParts {
+        stdout: Box::pin(stdout.compat()),
+        stderr: Box::pin(stderr.compat()),
+        stdin: Box::pin(stdin.compat_write()),
+        wait: wait_for_child(child),
+    })
+}
+
+fn wait_for_child(mut child: Child) -> BoxFuture<'static, crate::Result<i32>> {
+    Box::pin(async move {
+        let status = child.wait().await?;
+        Ok(status.code().unwrap_or_default())
+    })
+}
+
+fn configure_network_args(
+    process: &mut Command,
+    policy: SandboxNetworkPolicy,
+    network_name: Option<&str>,
+) {
+    match policy {
+        SandboxNetworkPolicy::Disabled => {
+            process.arg("--network").arg("none");
+        }
+        SandboxNetworkPolicy::Enabled => {
+            if let Some(network_name) = network_name {
+                process.arg("--network").arg(network_name);
+            }
+        }
+    }
+}
+
+fn configure_mount_args(process: &mut Command, mounts: &[SandboxMount]) {
+    for mount in mounts {
+        let mut volume = format!("{}:{}", mount.host_path.display(), mount.guest_path);
+        if matches!(mount.access, SandboxMountAccess::ReadOnly) {
+            volume.push_str(":ro");
+        }
+        process.arg("--volume").arg(volume);
+    }
+}
+
+fn configure_env_args(process: &mut Command, env: &HashMap<String, String>) {
+    for (key, value) in env {
+        process.arg("--env").arg(format!("{key}={value}"));
+    }
+}
+
+async fn cleanup_named_container(container_bin: &Path, name: &str) -> Result<()> {
+    let stop =
+        run_container_admin_command(container_bin, WARM_SANDBOX_CLEANUP_TIMEOUT, ["stop", name])
+            .await?;
+    if !stop.status.success() {
+        let stderr = String::from_utf8_lossy(&stop.stderr).trim().to_string();
+        if !is_missing_container_error(&stderr) {
+            return Err(anyhow!("failed to stop warm sandbox {}: {}", name, stderr));
+        }
+    }
+
+    let delete = run_container_admin_command(
+        container_bin,
+        WARM_SANDBOX_CLEANUP_TIMEOUT,
+        ["delete", name],
+    )
+    .await?;
+    if !delete.status.success() {
+        let stderr = String::from_utf8_lossy(&delete.stderr).trim().to_string();
+        if !is_missing_container_error(&stderr) {
+            return Err(anyhow!(
+                "failed to delete warm sandbox {}: {}",
+                name,
+                stderr
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+async fn reap_orphaned_warm_sandboxes(container_bin: &Path) -> Result<()> {
+    let output = run_container_admin_command(
+        container_bin,
+        WARM_SANDBOX_CLEANUP_TIMEOUT,
+        ["list", "--format", "json"],
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "failed to list warm sandboxes: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let now = apple_absolute_time_now()?;
+    let containers: Vec<ContainerListItem> = serde_json::from_slice(&output.stdout)?;
+    for container in containers {
+        if !container
+            .configuration
+            .labels
+            .contains_key(WARM_SANDBOX_KEY_LABEL)
+        {
+            continue;
+        }
+        if let Some(owner_pid) = container
+            .configuration
+            .labels
+            .get(WARM_SANDBOX_OWNER_PID_LABEL)
+            && owner_pid_is_alive(owner_pid)
+        {
+            continue;
+        }
+        if container.status.as_deref() != Some("running") {
+            continue;
+        }
+        let Some(started_date) = container.started_date else {
+            continue;
+        };
+        if now - started_date < ORPHANED_WARM_SANDBOX_MIN_AGE.as_secs_f64() {
+            continue;
+        }
+        if let Err(error) =
+            cleanup_named_container(container_bin, &container.configuration.id).await
+        {
+            eprintln!(
+                "failed to clean up orphaned warm sandbox {}: {error}",
+                container.configuration.id
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn apple_absolute_time_now() -> Result<f64> {
+    let unix_now = SystemTime::now().duration_since(UNIX_EPOCH)?;
+    Ok(unix_now.as_secs_f64() - APPLE_ABSOLUTE_TIME_UNIX_OFFSET_SECONDS)
+}
+
+fn owner_pid_is_alive(pid: &str) -> bool {
+    if pid.parse::<u32>().is_err() {
+        return false;
+    }
+    std::process::Command::new("ps")
+        .arg("-p")
+        .arg(pid)
+        .arg("-o")
+        .arg("pid=")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn cleanup_named_container_blocking(container_bin: &Path, name: &str) {
+    run_container_admin_command_blocking(container_bin, ["stop", name]);
+    run_container_admin_command_blocking(container_bin, ["delete", name]);
+}
+
+fn schedule_cleanup_named_container(container_bin: PathBuf, name: String) {
+    tokio::spawn(async move {
+        if let Err(error) = cleanup_named_container(&container_bin, &name).await {
+            eprintln!("failed to clean up warm sandbox {name}: {error}");
+        }
+    });
+}
+
+async fn run_container_admin_command<const N: usize>(
+    container_bin: &Path,
+    timeout: Duration,
+    args: [&str; N],
+) -> Result<std::process::Output> {
+    let mut command = Command::new(container_bin);
+    command.args(args).kill_on_drop(true);
+    match time::timeout(timeout, command.output()).await {
+        Ok(output) => Ok(output?),
+        Err(_) => Err(anyhow!(
+            "container {} timed out after {}s",
+            args.join(" "),
+            timeout.as_secs()
+        )),
+    }
+}
+
+fn run_container_admin_command_blocking<const N: usize>(container_bin: &Path, args: [&str; N]) {
+    let Ok(mut child) = std::process::Command::new(container_bin)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+
+    let deadline = Instant::now() + WARM_SANDBOX_CLEANUP_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            Ok(None) => {
+                if let Err(error) = child.kill() {
+                    eprintln!("failed to kill timed out container admin command: {error}");
+                }
+                if let Err(error) = child.wait() {
+                    eprintln!("failed to wait for timed out container admin command: {error}");
+                }
+                return;
+            }
+            Err(_) => return,
+        }
+    }
+}
+
+fn is_missing_container_error(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("not found") || lower.contains("no such")
+}
+
+fn is_already_exists_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("already exists")
+}
+
+fn sandbox_spec_hash(spec: &SandboxSpec) -> String {
+    let mut hasher = DefaultHasher::new();
+    spec.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn render_command_error(stderr: &[u8]) -> String {
+    String::from_utf8_lossy(stderr).trim().to_string()
+}
+
+fn network_name_for_policy(policy: SandboxNetworkPolicy) -> Option<&'static str> {
+    matches!(policy, SandboxNetworkPolicy::Enabled).then_some(DEFAULT_ENABLED_NETWORK_NAME)
+}
+
+fn new_warm_container_name(key: &SandboxKey) -> String {
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    let hash = hasher.finish();
+    let generation = Uuid::new_v4().simple().to_string();
+    format!("exo-{hash:016x}-{}", &generation[..8])
+}

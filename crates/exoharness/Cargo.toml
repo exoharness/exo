@@ -1,0 +1,54 @@
+[package]
+name = "exoharness"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+basic-backend = [
+  "dep:aes-gcm",
+  "dep:keyring",
+  "dep:keyring-core",
+  "dep:object_store",
+  "dep:tokio",
+  "dep:tokio-stream",
+  "dep:tokio-util",
+]
+
+[dependencies]
+aes-gcm = { version = "0.11.0-rc.3", optional = true }
+anyhow.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+futures.workspace = true
+keyring = { version = "4.0.0-rc.3", optional = true }
+keyring-core = { version = "0.7.2", optional = true }
+lingua.workspace = true
+object_store = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1.52.1", default-features = false, features = [
+  "fs",
+  "io-util",
+  "process",
+  "rt",
+  "sync",
+  "time",
+], optional = true }
+tokio-stream = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true, features = ["compat"] }
+uuid = { workspace = true, features = ["serde", "v4", "v7", "js"] }
+
+[dev-dependencies]
+tempfile = "3.23.0"
+tokio = { version = "1.52.1", features = [
+  "fs",
+  "macros",
+  "process",
+  "rt",
+  "sync",
+  "time",
+] }
