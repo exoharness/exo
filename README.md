@@ -91,6 +91,9 @@ Models are registered through explicit bindings:
 ./target/debug/exo model register gpt-5.4 --secret openai
 ```
 
+`--env` takes the variable name literally. Use `--value "$OPENAI_API_KEY"` if
+you intentionally want the shell to expand the value.
+
 Create an agent and start a conversation:
 
 ```bash
@@ -121,6 +124,9 @@ Then create an agent backed by a TypeScript harness module:
 
 The `examples/typescript` directory also contains Codex, Claude Code, Cursor,
 and recursive-language-model harness experiments.
+
+For the coding-agent setup commands, see
+[docs/coding-agent-harnesses.md](./docs/coding-agent-harnesses.md).
 
 ## Repository Layout
 

@@ -5,6 +5,8 @@ mod env_tests;
 mod mount_tests;
 #[cfg(test)]
 mod naming_tests;
+#[cfg(test)]
+mod secret_tests;
 mod tui;
 
 use std::collections::HashMap;
@@ -973,8 +975,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             SecretCommands::Set { name, env, value } => {
                 let value = match (env, value) {
-                    (Some(env), None) => std::env::var(&env)
-                        .map_err(|_| format!("environment variable is not set: {env}"))?,
+                    (Some(env), None) => secret_value_from_env_arg(&env)?,
                     (None, Some(value)) => value,
                     (Some(_), Some(_)) => {
                         return Err("provide either --env or --value, not both".into());
@@ -1437,6 +1438,29 @@ fn slugify(input: &str) -> String {
     }
 
     slug
+}
+
+pub(crate) fn secret_value_from_env_arg(env: &str) -> Result<String, String> {
+    if !is_env_var_name(env) {
+        return Err(
+            "invalid --env value; pass an environment variable name such as OPENAI_API_KEY, not the secret value"
+                .to_string(),
+        );
+    }
+
+    std::env::var(env).map_err(|_| "environment variable passed to --env is not set".to_string())
+}
+
+fn is_env_var_name(env: &str) -> bool {
+    let mut chars = env.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 const SLUG_WORDS_A: &[&str] = &[
