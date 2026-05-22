@@ -4,6 +4,8 @@ Exo is a minimal system for building agents. It separates the trusted
 infrastructure needed for state, resources, and security from agent-specific
 logic.
 
+![Exo architecture overview](docs/images/architecture-overview.svg)
+
 The goal is to provide a small, durable kernel for agents: minimal enough to
 stay independent of any particular agent design, but complete enough to support
 agents of arbitrary complexity. That includes agents that safely evolve their
@@ -19,52 +21,24 @@ durable sessions you can stop, resume, and rewind across runs.
 
 ## The Why and What of Exo
 
-Most agent systems conflate trusted infrastructure with agent specific
-implementations (such as prompts and memory compaction), which makes reuse,
-recovery, isolation, and self-modification hard. We view the two concerns
-roughly as follows:
+Enabling powerful autonomy requires agents to be (1) **adaptable**, i.e. be able to adapt their policies, tools, and architecture to a target domain, and (2) **trustworthy**, i.e. be durable across crashes, isolated from one another, and recoverable to known-good states. Existing harnesses struggle to provide both: most agent systems conflate trusted infrastructure with agent-specific implementations (such as prompts and memory compaction), which makes reuse, recovery, isolation, and self-modification hard. 
 
-- system resources: the infrastructure needed to serve an agent, such as durable history,
-  artifacts, credentials, sandboxes, and tool execution
-- agent specific implementations: the policy that makes the agent behave a
-  particular way, such as prompt assembly, model calls, memory, compaction,
-  approvals, and tool choice
+The `exo` agent harness instead decouples trusted infrastructure from agent-specific implementations into two halves:
 
-Coupling these two things carries the usual cost of weak systems boundaries:
-they become hard to evolve independently, hard to isolate, and hard to recover
-to known-good states.
+1. The **exoharness** as the durable substrate that owns identity (agents, conversations, turns), history (event log), artifacts, secrets, and sandbox management. It is trusted and stateful.
+2. The **executor** as the policy layer that owns prompt assembly, model calling, tool dispatch, memory compaction, approvals, etc., i.e. all *semantic* decisions about how the agent behaves. It is ephemeral, swappable, and can be killed without losing the agent. 
 
-The problem is especially acute with AI agents because the agent-specific layer
-is often exactly the part you want to make programmable. You may want an agent
-to change how it compacts context, resumes from history, delegates work, exposes
-tools, builds memory, or configures its environment. If that logic lives in the
-same layer that owns persistence, secrets, and sandboxing, the agent has to
-muck around with the layer responsible for keeping it safe.
+![Exo architecture, detailed](docs/images/architecture-detailed.svg)
 
-`exo` makes that boundary explicit. An agent harness is composed of an
-**exoharness** and an **executor**:
-
-- The **exoharness** is the trusted, non-semantic foundation. It manages durable
-  state and privileged resources: agents, conversations, sessions, turns,
-  append-only events, artifacts, bindings, secrets, and sandbox handles.
-- The **executor** owns agent semantics. It decides how to assemble prompts,
-  call models, expose tools, manage memory and compaction, ask for approvals,
-  and drive the turn loop.
-
-This structure lets us:
-
-- Build infrastructure primitives as first-class components, not as incidental
-  harness internals, so they can survive and improve as harness design evolves.
-- Reuse those primitives across agent runtimes without rebuilding state,
-  secrets, sandboxes, and history each time. The same exoharness can back Codex,
-  Claude Code, Cursor sdk, a recursive-language-model executor, and custom harnesses.
-- Expose the substrate to agents when useful, so they can inspect their own
-  history, manage artifacts, control sandboxes, and evolve their implementation
-  without owning the layer responsible for recovery.
-
-Decisions that affect what an agent means or does belong in the executor, or in
+This architecture pushes the minimal infrastructure into the protected exoharness to enforce safety, while leaving all non-safety-essential components to the executor to manage and evolve at will. Decisions that affect what an agent means or does belong in the executor, or in
 the agent itself. The exoharness provides the durable building blocks those
 decisions run on: history, state, secrets, and sandboxing.
+
+Because the exoharness substrate doesn't depend on the executor, an agent built on exo can:
+
+ * **Fork or rewind** at any past event, without losing secrets, sandboxes, or history.
+ * **Swap executors**, running the same agent via Codex, Claude Code, the Cursor SDK,  or your own executor, without rebuilding state.
+ * **Evolve safely** to change its own policy processes, with access to inspect its own history and artifacts while the exoharness isolates secrets and compute resources to maintain safety. 
 
 For the architectural model and terminology, see
 [spec/exoharness.md](./spec/exoharness.md).
