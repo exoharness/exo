@@ -18,7 +18,8 @@ use crate::sandbox::{
     SandboxSpec,
 };
 use crate::secrets::{
-    AppleKeychainSecretKeyProvider, EncryptedSecret, SecretCipher, StaticSecretKeyProvider,
+    AppleKeychainSecretKeyProvider, EncryptedSecret, SecretCipher, SecretKeyProvider,
+    StaticSecretKeyProvider,
 };
 use crate::storage::BasicObjectStore;
 use crate::{
@@ -31,6 +32,26 @@ use crate::{
     SandboxProcessParts, Secret, SecretId, SecretMetadata, SecretType, SessionId, SnapshotId,
     StartSandboxRequest, TurnHandle, TurnId, TurnRecord, Uuid7, WriteArtifactRequest,
 };
+
+#[derive(Debug, Clone)]
+pub enum SecretBackendChoice {
+    AppleKeychain,
+    Static([u8; 32]),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum SandboxBackendChoice {
+    AppleContainer,
+    LocalProcess,
+}
+
+// TODO: as more knobs land here, swap to a builder pattern.
+#[derive(Debug, Clone)]
+pub struct BasicExoHarnessConfig {
+    pub root: PathBuf,
+    pub secret_backend: SecretBackendChoice,
+    pub sandbox_backend: SandboxBackendChoice,
+}
 
 #[derive(Clone)]
 pub struct BasicExoHarness {
@@ -47,61 +68,16 @@ struct BasicExoHarnessInner {
 }
 
 impl BasicExoHarness {
-    pub async fn new(root: impl Into<PathBuf>) -> Result<Self> {
-        let root = root.into();
+    pub async fn new(config: BasicExoHarnessConfig) -> Result<Self> {
+        let BasicExoHarnessConfig {
+            root,
+            secret_backend,
+            sandbox_backend,
+        } = config;
         let storage = BasicObjectStore::local_filesystem(&root).await?;
-        let secret_cipher = SecretCipher::new(Arc::new(AppleKeychainSecretKeyProvider::new(
-            root.to_string_lossy().to_string(),
-        )));
-        Self::new_with_components(
-            storage,
-            secret_cipher,
-            Arc::new(AppleContainerSandboxBackend::new()),
-        )
-        .await
-    }
-
-    pub async fn new_with_local_process_sandbox(root: impl Into<PathBuf>) -> Result<Self> {
-        let storage = BasicObjectStore::local_filesystem(root).await?;
-        let secret_cipher = SecretCipher::new(Arc::new(StaticSecretKeyProvider::new([7u8; 32])));
-        Self::new_with_components(
-            storage,
-            secret_cipher,
-            Arc::new(LocalProcessSandboxBackend::new()),
-        )
-        .await
-    }
-
-    pub async fn new_with_object_store(store: Arc<dyn object_store::ObjectStore>) -> Result<Self> {
-        let keychain_account = store.to_string();
-        let secret_cipher = SecretCipher::new(Arc::new(AppleKeychainSecretKeyProvider::new(
-            keychain_account,
-        )));
-        Self::new_with_components(
-            BasicObjectStore::new(store),
-            secret_cipher,
-            Arc::new(AppleContainerSandboxBackend::new()),
-        )
-        .await
-    }
-
-    pub async fn new_with_object_store_and_sandbox_backend(
-        store: Arc<dyn object_store::ObjectStore>,
-        sandbox_backend: Arc<dyn ManagedSandboxBackend>,
-    ) -> Result<Self> {
-        let keychain_account = store.to_string();
-        let secret_cipher = SecretCipher::new(Arc::new(AppleKeychainSecretKeyProvider::new(
-            keychain_account,
-        )));
-        Self::new_with_components(BasicObjectStore::new(store), secret_cipher, sandbox_backend)
-            .await
-    }
-
-    async fn new_with_components(
-        storage: BasicObjectStore,
-        secret_cipher: SecretCipher,
-        sandbox_backend: Arc<dyn ManagedSandboxBackend>,
-    ) -> Result<Self> {
+        let secret_cipher =
+            build_secret_cipher(secret_backend, root.to_string_lossy().to_string())?;
+        let sandbox_backend = build_sandbox_backend(sandbox_backend);
         Ok(Self {
             inner: Arc::new(BasicExoHarnessInner {
                 storage,
@@ -1791,4 +1767,24 @@ fn agent_secrets_dir(harness: &BasicExoHarness, agent_id: AgentId) -> PathBuf {
         .agents_dir()
         .join(agent_id.to_string())
         .join("secrets")
+}
+
+fn build_secret_cipher(
+    choice: SecretBackendChoice,
+    keychain_account: String,
+) -> Result<SecretCipher> {
+    let provider: Arc<dyn SecretKeyProvider> = match choice {
+        SecretBackendChoice::AppleKeychain => {
+            Arc::new(AppleKeychainSecretKeyProvider::new(keychain_account))
+        }
+        SecretBackendChoice::Static(key) => Arc::new(StaticSecretKeyProvider::new(key)),
+    };
+    Ok(SecretCipher::new(provider))
+}
+
+fn build_sandbox_backend(choice: SandboxBackendChoice) -> Arc<dyn ManagedSandboxBackend> {
+    match choice {
+        SandboxBackendChoice::AppleContainer => Arc::new(AppleContainerSandboxBackend::new()),
+        SandboxBackendChoice::LocalProcess => Arc::new(LocalProcessSandboxBackend::new()),
+    }
 }

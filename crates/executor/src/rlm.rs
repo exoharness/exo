@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -11,8 +10,8 @@ use crate::{
 };
 use anyhow::{Context as AnyhowContext, anyhow, bail};
 use exoharness::{
-    AgentHandle, BasicExoHarness, ConversationHandle, EventData, EventId, ExoHarness,
-    FileSystemMountMode, Result, ToolCallId, ToolRequest, ToolResult, TurnHandle,
+    AgentHandle, BasicExoHarness, BasicExoHarnessConfig, ConversationHandle, EventData, EventId,
+    ExoHarness, FileSystemMountMode, Result, ToolCallId, ToolRequest, ToolResult, TurnHandle,
 };
 use lingua::Message;
 use lingua::universal::{ToolContentPart, ToolResultContentPart};
@@ -772,13 +771,12 @@ impl<M> RlmHarness<M> {
 }
 
 impl RlmHarness<RouterModelClient> {
-    pub async fn from_root(
-        root: impl AsRef<Path>,
+    pub async fn from_config(
+        exo_config: BasicExoHarnessConfig,
         runtime_config: Option<BraintrustRuntimeConfig>,
         env: HashMap<String, String>,
     ) -> Result<Self> {
-        let root = root.as_ref();
-        let exoharness = Arc::new(BasicExoHarness::new(root.join("exoharness")).await?);
+        let exoharness = Arc::new(BasicExoHarness::new(exo_config).await?);
         let model = Arc::new(RouterModelClient::new(env));
         let runtime = ExecutorHarnessRuntime::new(RlmExecutor::new(model), runtime_config);
 
