@@ -1,15 +1,12 @@
 //! Integration test exercising the real `exo` binary against:
-//!   - a real Docker container (sandbox), and
+//!   - a real sandbox backend (docker / apple-container / local-process), and
 //!   - a wiremock-backed fake OpenAI Responses endpoint.
 //!
 //! `#[ignore]`'d so `cargo test` skips it by default; the integration workflow
-//! runs `cargo test --workspace -- --ignored` on push to main.
-//!
-//! Linux-only because the production sandbox backend on macOS is the Apple
-//! `container` CLI, which is not assumed to be present on macOS CI runners
-//! today. Verifying the Apple arm in CI is a separate follow-up.
-
-#![cfg(target_os = "linux")]
+//! runs `cargo test --workspace -- --ignored` and selects the backend via the
+//! `EXO_TEST_SANDBOX_BACKEND` env var (defaults to `docker`). The secret
+//! backend is always `file`, with the master key materialised inside a
+//! per-test tempdir via `XDG_CONFIG_HOME`.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -19,13 +16,63 @@ use tempfile::TempDir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SandboxBackend {
+    Docker,
+    AppleContainer,
+    LocalProcess,
+}
+
+impl SandboxBackend {
+    fn from_env() -> Self {
+        let raw = std::env::var("EXO_TEST_SANDBOX_BACKEND").unwrap_or_else(|_| "docker".into());
+        match raw.as_str() {
+            "docker" => Self::Docker,
+            "apple-container" => Self::AppleContainer,
+            "local-process" => Self::LocalProcess,
+            other => panic!("unknown EXO_TEST_SANDBOX_BACKEND={other}"),
+        }
+    }
+
+    fn cli_arg(self) -> &'static str {
+        match self {
+            Self::Docker => "docker",
+            Self::AppleContainer => "apple-container",
+            Self::LocalProcess => "local-process",
+        }
+    }
+
+    fn runtime_available(self) -> bool {
+        match self {
+            Self::Docker => Command::new("docker")
+                .arg("info")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false),
+            Self::AppleContainer => Command::new("container")
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false),
+            Self::LocalProcess => true,
+        }
+    }
+}
+
 fn exo_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_exo"))
 }
 
-fn run_exo(args: &[&str], root: &str, xdg: &str) -> std::process::Output {
+fn run_exo(
+    args: &[&str],
+    root: &str,
+    xdg: &str,
+    backend: SandboxBackend,
+) -> std::process::Output {
     let output = Command::new(exo_bin())
         .args(["--root", root])
+        .args(["--secret-backend", "file"])
+        .args(["--sandbox-backend", backend.cli_arg()])
         .args(args)
         .env("XDG_CONFIG_HOME", xdg)
         .env("OPENAI_API_KEY", "sk-test-key")
@@ -42,9 +89,6 @@ fn run_exo(args: &[&str], root: &str, xdg: &str) -> std::process::Output {
     output
 }
 
-/// Canned OpenAI Responses API completion body. Format derived from the
-/// public API surface; if lingua's parsing tightens, this is the place to
-/// update.
 fn canned_response_body() -> Value {
     json!({
         "id": "resp_test_abc123",
@@ -76,16 +120,14 @@ fn canned_response_body() -> Value {
 }
 
 #[tokio::test]
-#[ignore = "spawns real exo binary + real Docker container + wiremock; run with cargo test -- --ignored"]
-async fn chat_send_round_trips_through_real_docker_and_mocked_openai() {
-    // Pre-flight: skip cleanly if Docker isn't available on the runner.
-    let docker_available = Command::new("docker")
-        .arg("info")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if !docker_available {
-        eprintln!("docker not available, skipping integration test");
+#[ignore = "spawns real exo binary + real sandbox + wiremock; run with cargo test -- --ignored"]
+async fn chat_send_round_trips_through_real_sandbox_and_mocked_openai() {
+    let backend = SandboxBackend::from_env();
+    if !backend.runtime_available() {
+        eprintln!(
+            "sandbox backend {:?} not available on this runner, skipping",
+            backend
+        );
         return;
     }
 
@@ -94,8 +136,6 @@ async fn chat_send_round_trips_through_real_docker_and_mocked_openai() {
     let root = root_dir.path().to_string_lossy().into_owned();
     let xdg = xdg_dir.path().to_string_lossy().into_owned();
 
-    // Stand up the fake OpenAI Responses endpoint. lingua targets `/responses`
-    // relative to the supplied base_url (it does not auto-prepend `/v1`).
     let mock_server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/responses"))
@@ -103,11 +143,11 @@ async fn chat_send_round_trips_through_real_docker_and_mocked_openai() {
         .mount(&mock_server)
         .await;
 
-    // Wire up secret + model + agent + conversation via the real binary.
     run_exo(
         &["secret", "set", "test-key", "--env", "OPENAI_API_KEY"],
         &root,
         &xdg,
+        backend,
     );
     run_exo(
         &[
@@ -121,6 +161,7 @@ async fn chat_send_round_trips_through_real_docker_and_mocked_openai() {
         ],
         &root,
         &xdg,
+        backend,
     );
     run_exo(
         &[
@@ -134,19 +175,20 @@ async fn chat_send_round_trips_through_real_docker_and_mocked_openai() {
         ],
         &root,
         &xdg,
+        backend,
     );
     run_exo(
         &["conversation", "create", "test-agent", "first"],
         &root,
         &xdg,
+        backend,
     );
 
-    // Send a chat; this is the bit that hits the mock server through the real
-    // executor + the real Docker sandbox.
     let output = run_exo(
         &["chat", "send", "test-agent", "first", "hello there"],
         &root,
         &xdg,
+        backend,
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -154,7 +196,6 @@ async fn chat_send_round_trips_through_real_docker_and_mocked_openai() {
         "expected mocked assistant text in stdout; got: {stdout}"
     );
 
-    // The mock server should have received exactly one /responses request.
     let recorded = mock_server.received_requests().await.unwrap_or_default();
     let responses_calls = recorded
         .iter()
@@ -169,8 +210,6 @@ async fn chat_send_round_trips_through_real_docker_and_mocked_openai() {
             .collect::<Vec<_>>()
     );
 
-    // The conversation's event log should contain the assistant message we
-    // returned from the mock.
     let conv_root = root_dir
         .path()
         .join("exoharness/agents")
@@ -215,27 +254,26 @@ async fn chat_send_round_trips_through_real_docker_and_mocked_openai() {
         events_dir.display()
     );
 
-    // Sandbox lifecycle: the harness should have created at least one
-    // labeled Docker container while running, and `docker rm -f` should
-    // have cleaned it up by the time the binary exited.
-    let leftover_containers = Command::new("docker")
-        .args([
-            "ps",
-            "-aq",
-            "--filter",
-            "label=exo.sandbox.owner-pid",
-            "--filter",
-            "status=exited",
-        ])
-        .output()
-        .expect("docker ps");
-    let stdout = String::from_utf8_lossy(&leftover_containers.stdout);
-    let stale = stdout
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .collect::<Vec<_>>();
-    assert!(
-        stale.is_empty(),
-        "expected zero leftover Exited exo containers after binary exit; found: {stale:?}"
-    );
+    if backend == SandboxBackend::Docker {
+        let leftover_containers = Command::new("docker")
+            .args([
+                "ps",
+                "-aq",
+                "--filter",
+                "label=exo.sandbox.owner-pid",
+                "--filter",
+                "status=exited",
+            ])
+            .output()
+            .expect("docker ps");
+        let stdout = String::from_utf8_lossy(&leftover_containers.stdout);
+        let stale = stdout
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .collect::<Vec<_>>();
+        assert!(
+            stale.is_empty(),
+            "expected zero leftover Exited exo containers after binary exit; found: {stale:?}"
+        );
+    }
 }
