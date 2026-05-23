@@ -24,6 +24,8 @@ pub struct AgentConfig {
     pub typescript: Option<TypeScriptHarnessConfig>,
     #[serde(default)]
     pub library_tools: Vec<ToolManifestEntry>,
+    #[serde(default = "default_enable_agent_tool_creation")]
+    pub enable_agent_tool_creation: bool,
     #[serde(default)]
     pub sandbox_image: Option<String>,
     #[serde(default)]
@@ -53,6 +55,10 @@ pub struct TypeScriptHarnessConfig {
 pub struct ToolManifestEntry {
     pub module_path: String,
     pub initialization: Value,
+}
+
+pub fn default_enable_agent_tool_creation() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]

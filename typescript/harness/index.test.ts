@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import {
   buildShellToolDefinitions,
@@ -6,14 +9,19 @@ import {
   createToolRegistry,
   initializeTool,
   registerBuiltInTools,
+  registerAgentToolsFromManifestPathIfExists,
   registerAgentToolsFromManifest,
   registerLibraryToolsFromManifest,
   registerToolsFromManifest,
+  materializeEventsToMessages,
+  toolResultMessage,
   toolResultEvent,
+  type Event,
   type EventData,
   type JsonObject,
   type ToolExecutionContext,
   type ToolInstance,
+  type Tool,
   type ToolResult,
   type TurnContext,
 } from "./index";
@@ -119,7 +127,107 @@ describe("HarnessToolRegistry", () => {
           },
         },
       ]),
-    ).rejects.toThrow("tool execution is not configured for missing");
+    ).resolves.toEqual([
+      toolResultEvent("call_1", {
+        ok: false,
+        error: "tool execution is not configured for missing",
+      }),
+    ]);
+  });
+
+  it("returns tool result errors instead of throwing tool failures", async () => {
+    const context = fakeTurnContext();
+    const registry = createToolRegistry(context).register(
+      fakeTool("fail", async () => {
+        throw new Error("boom");
+      }),
+    );
+
+    await expect(
+      registry.executePending([
+        {
+          toolCallId: "call_1",
+          request: {
+            functionName: "fail",
+            arguments: {},
+          },
+        },
+      ]),
+    ).resolves.toEqual([
+      toolResultEvent("call_1", {
+        ok: false,
+        error: "boom",
+      }),
+    ]);
+  });
+});
+
+describe("materializeEventsToMessages", () => {
+  it("synthesizes results for dangling tool calls before later messages", () => {
+    const events: Event[] = [
+      {
+        id: "1",
+        conversationId: "conversation",
+        createdAt: "2026-01-01T00:00:00Z",
+        data: {
+          type: "messages",
+          messages: [
+            {
+              role: "assistant",
+              content: [
+                {
+                  type: "tool_call",
+                  tool_call_id: "call_1",
+                  tool_name: "install_agent_tool",
+                  arguments: {},
+                },
+              ],
+            },
+          ],
+        },
+      },
+      {
+        id: "2",
+        conversationId: "conversation",
+        createdAt: "2026-01-01T00:00:01Z",
+        data: {
+          type: "tool_requested",
+          tool_call_id: "call_1",
+          request: {
+            function_name: "install_agent_tool",
+            arguments: {},
+          },
+        },
+      },
+      {
+        id: "3",
+        conversationId: "conversation",
+        createdAt: "2026-01-01T00:00:02Z",
+        data: {
+          type: "messages",
+          messages: [{ role: "user", content: "try again" }],
+        },
+      },
+    ];
+
+    expect(materializeEventsToMessages(events)).toEqual([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_call",
+            tool_call_id: "call_1",
+            tool_name: "install_agent_tool",
+            arguments: {},
+          },
+        ],
+      },
+      toolResultMessage("call_1", "install_agent_tool", {
+        ok: false,
+        error: "tool execution did not complete before the previous turn ended",
+      }),
+      { role: "user", content: "try again" },
+    ]);
   });
 });
 
@@ -395,6 +503,66 @@ describe("agent tool loading", () => {
     expect(registry.get("uppercase")?.source).toBe("library");
   });
 
+  it("installs an agent tool and loads it from the default manifest path", async () => {
+    const previousCwd = process.cwd();
+    const tempdir = await fs.mkdtemp(path.join(os.tmpdir(), "exo-agent-tool-"));
+    process.chdir(tempdir);
+    try {
+      const context = fakeTurnContext();
+      const installerRegistry = createToolRegistry(context);
+      registerBuiltInTools(installerRegistry, context, ["install_agent_tool"]);
+
+      await expect(
+        installerRegistry.executePending([
+          {
+            toolCallId: "install_1",
+            request: {
+              functionName: "install_agent_tool",
+              arguments: {
+                name: "reverse-text",
+                moduleSource: reverseTextToolSource(),
+                initialization: {},
+              },
+            },
+          },
+        ]),
+      ).resolves.toEqual([
+        toolResultEvent("install_1", {
+          ok: true,
+          toolName: "reverse_text",
+          modulePath: ".exo/agent-tools/reverse-text.ts",
+          manifestPath: ".exo/agent-tools/manifest.json",
+          availableNextRound: true,
+        }),
+      ]);
+
+      const registry = createToolRegistry(context);
+      await registerAgentToolsFromManifestPathIfExists(registry, context);
+
+      expect(registry.get("reverse_text")?.source).toBe("agent");
+      await expect(
+        registry.executePending([
+          {
+            toolCallId: "call_1",
+            request: {
+              functionName: "reverse_text",
+              arguments: {
+                text: "hello",
+              },
+            },
+          },
+        ]),
+      ).resolves.toEqual([
+        toolResultEvent("call_1", {
+          text: "olleh",
+        }),
+      ]);
+    } finally {
+      process.chdir(previousCwd);
+      await fs.rm(tempdir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects agent tool modules without a default Tool export", async () => {
     const registry = createToolRegistry(fakeTurnContext());
 
@@ -423,6 +591,39 @@ describe("agent tool loading", () => {
         ],
       }),
     ).rejects.toThrow("tool initialization.prefix is required");
+  });
+
+  it("rejects generated tools using legacy inputSchema and invoke shapes", async () => {
+    const generatedTool = {
+      definition: {
+        name: "curl-tool",
+        description: "Fetch a URL.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            url: { type: "string" },
+          },
+          required: ["url"],
+        },
+      },
+      initializationParameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {},
+      },
+      initialize() {
+        return {
+          async *invoke() {
+            yield { ok: true };
+          },
+        };
+      },
+    } as unknown as Tool;
+
+    await expect(
+      initializeTool(generatedTool, "agent", {}, fakeTurnContext()),
+    ).rejects.toThrow("tool definition must use parameters, not inputSchema");
   });
 });
 
@@ -456,6 +657,45 @@ function uppercaseToolModulePath(): string {
   ).href;
 }
 
+function reverseTextToolSource(): string {
+  return `
+import type { JsonObject, Tool, ToolResult } from "@exo/harness";
+
+const reverseTextTool = {
+  definition: {
+    name: "reverse_text",
+    description: "Reverse text.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        text: { type: "string" },
+      },
+      required: ["text"],
+    },
+  },
+  initializationParameters: {
+    type: "object",
+    additionalProperties: false,
+    properties: {},
+  },
+  initialize() {
+    return {
+      async execute(args: JsonObject): Promise<ToolResult> {
+        const value = args.text;
+        if (typeof value !== "string") {
+          throw new Error("text must be a string");
+        }
+        return { text: value.split("").reverse().join("") };
+      },
+    };
+  },
+} satisfies Tool;
+
+export default reverseTextTool;
+`;
+}
+
 function fakeTurnContext(
   options: {
     streaming?: boolean;
@@ -471,6 +711,7 @@ function fakeTurnContext(
       harness: "typescript",
       typescript: null,
       libraryTools: [],
+      enableAgentToolCreation: true,
       sandboxImage: null,
       enableNetworking: false,
       model: "test-model",

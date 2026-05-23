@@ -118,6 +118,8 @@ enum AgentCommands {
         #[arg(long = "tool-manifest")]
         tool_manifests: Vec<PathBuf>,
         #[arg(long)]
+        disable_agent_tool_creation: bool,
+        #[arg(long)]
         sandbox_image: Option<String>,
         #[arg(long, value_enum)]
         networking: Option<NetworkingMode>,
@@ -146,6 +148,10 @@ enum AgentCommands {
         tool_manifests: Vec<PathBuf>,
         #[arg(long)]
         clear_tool_manifests: bool,
+        #[arg(long)]
+        enable_agent_tool_creation: bool,
+        #[arg(long)]
+        disable_agent_tool_creation: bool,
         #[arg(long)]
         sandbox_image: Option<String>,
         #[arg(long)]
@@ -398,6 +404,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 slug,
                 module,
                 tool_manifests,
+                disable_agent_tool_creation,
                 sandbox_image,
                 networking,
                 model,
@@ -427,6 +434,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         harness: agent_harness_kind,
                         typescript,
                         library_tools,
+                        enable_agent_tool_creation: !disable_agent_tool_creation,
                         sandbox_image,
                         enable_networking: matches!(networking, Some(NetworkingMode::Enabled)),
                         model,
@@ -452,6 +460,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 clear_module,
                 tool_manifests,
                 clear_tool_manifests,
+                enable_agent_tool_creation,
+                disable_agent_tool_creation,
                 sandbox_image,
                 clear_sandbox_image,
                 networking,
@@ -471,6 +481,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if clear_tool_manifests && !tool_manifests.is_empty() {
                     return Err(
                         "provide either --clear-tool-manifests or --tool-manifest, not both".into(),
+                    );
+                }
+                if enable_agent_tool_creation && disable_agent_tool_creation {
+                    return Err(
+                        "provide either --enable-agent-tool-creation or --disable-agent-tool-creation, not both"
+                            .into(),
                     );
                 }
                 if clear_sandbox_image && sandbox_image.is_some() {
@@ -531,6 +547,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         config.library_tools = library_tools;
                         changed = true;
                     }
+                }
+                if enable_agent_tool_creation {
+                    if !config.enable_agent_tool_creation {
+                        config.enable_agent_tool_creation = true;
+                        changed = true;
+                    }
+                } else if disable_agent_tool_creation && config.enable_agent_tool_creation {
+                    config.enable_agent_tool_creation = false;
+                    changed = true;
                 }
                 if clear_sandbox_image {
                     config.sandbox_image = None;
@@ -594,7 +619,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )?;
                     if updated_braintrust.is_none() && !changed {
                         return Err(
-                            "no changes provided; pass --set-harness, --module, --tool-manifest, --sandbox-image, --networking, model flags, --clear-braintrust, or Braintrust project flags"
+                            "no changes provided; pass --set-harness, --module, --tool-manifest, --enable-agent-tool-creation, --disable-agent-tool-creation, --sandbox-image, --networking, model flags, --clear-braintrust, or Braintrust project flags"
                                 .into(),
                         );
                     }
@@ -633,6 +658,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for tool in &config.library_tools {
                     println!("  - {}", tool.module_path);
                 }
+                println!(
+                    "enable_agent_tool_creation: {}",
+                    config.enable_agent_tool_creation
+                );
                 println!(
                     "sandbox_image: {}",
                     config.sandbox_image.as_deref().unwrap_or("default")
