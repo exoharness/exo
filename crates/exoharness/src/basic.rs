@@ -1158,15 +1158,28 @@ impl ConversationHandle for BasicConversationHandle {
         if request.command.is_empty() {
             bail!("sandbox command must not be empty");
         }
-        let sandbox_handle = self
-            .harness
-            .inner
-            .running_sandboxes
-            .lock()
-            .await
-            .get(&request.id)
-            .cloned()
-            .ok_or_else(|| anyhow!("sandbox is not active in this process: {}", request.id))?;
+        let sandbox_handle = {
+            let running_sandboxes = self.harness.inner.running_sandboxes.lock().await;
+            running_sandboxes.get(&request.id).cloned()
+        };
+        let sandbox_handle = match sandbox_handle {
+            Some(sandbox_handle) => sandbox_handle,
+            None => {
+                let sandbox_handle = self
+                    .harness
+                    .inner
+                    .sandbox_backend
+                    .acquire(sandbox_request(self.record.id, &request.id, &sandbox))
+                    .await?;
+                self.harness
+                    .inner
+                    .running_sandboxes
+                    .lock()
+                    .await
+                    .insert(request.id.clone(), sandbox_handle.clone());
+                sandbox_handle
+            }
+        };
         let parts = sandbox_handle
             .start_process(&SandboxCommand {
                 argv: request.command.clone(),

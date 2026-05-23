@@ -107,12 +107,33 @@ and recursive-language-model harness experiments.
 For the coding-agent setup commands, see
 [docs/coding-agent-harnesses.md](./docs/coding-agent-harnesses.md).
 
+## Exoclaw Long-Running Harness
+
+Exoclaw is the TypeScript harness example for long-running local agents. It uses
+the same TypeScript runner path as the minimal harness, but opts into scheduled
+task tools and scheduler-aware sandbox policy.
+
+Start a local Exoclaw REPL with:
+
+```bash
+scripts/exoclaw-repl
+```
+
+Scheduled tasks can be created, listed, cancelled, and deleted by the agent. The
+corresponding CLI commands are under:
+
+```bash
+./target/debug/exo --harness exoclaw schedule --help
+```
+
 ## Repository Layout
 
 - `crates`: Rust workspace for the CLI, exoharness substrate, and executors.
 - `typescript`: TypeScript harness runtime, model-runtime helpers, and
   adapter-specific support code.
 - `examples/typescript`: runnable TypeScript harness examples.
+- `examples/exoclaw`: long-running TypeScript harness example with scheduled
+  task support.
 - `containers`: sandbox images used by the coding-agent harness examples.
 - `spec`: core architecture and terminology.
 - `docs`: design notes for in-progress directions.

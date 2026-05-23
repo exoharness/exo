@@ -44,6 +44,7 @@ pub enum AgentHarnessKind {
     Rlm,
     #[serde(rename = "typescript")]
     TypeScript,
+    Exoclaw,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

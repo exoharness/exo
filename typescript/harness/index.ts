@@ -7,6 +7,7 @@ export interface JsonObject {
 export * from "./tools";
 export * from "./built-in-tools";
 export * from "./tool-manifest";
+export * from "./scheduler-tools";
 
 export type MessageRole =
   | "system"
@@ -23,7 +24,7 @@ export interface Message {
 
 export interface AgentConfig {
   instructions: Message[];
-  harness: "basic" | "rlm" | "typescript";
+  harness: "basic" | "rlm" | "typescript" | "exoclaw";
   typescript?: {
     modulePath: string;
   } | null;
