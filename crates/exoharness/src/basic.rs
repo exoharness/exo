@@ -12,14 +12,14 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::sandbox::{
-    AppleContainerSandboxBackend, LocalProcessSandboxBackend, ManagedSandboxBackend,
+    CliContainerSandboxBackend, LocalProcessSandboxBackend, ManagedSandboxBackend,
     ManagedSandboxHandle, SANDBOX_MAIN_MOUNT_DIR, SandboxCommand, SandboxKey,
     SandboxLifecycleConfig, SandboxMount, SandboxMountAccess, SandboxNetworkPolicy, SandboxRequest,
     SandboxSpec,
 };
 use crate::secrets::{
-    AppleKeychainSecretKeyProvider, EncryptedSecret, SecretCipher, SecretKeyProvider,
-    StaticSecretKeyProvider,
+    AppleKeychainSecretKeyProvider, EncryptedSecret, FileBackedSecretKeyProvider, SecretCipher,
+    SecretKeyProvider, StaticSecretKeyProvider, default_master_key_path,
 };
 use crate::storage::BasicObjectStore;
 use crate::{
@@ -36,12 +36,14 @@ use crate::{
 #[derive(Debug, Clone)]
 pub enum SecretBackendChoice {
     AppleKeychain,
+    File { path: Option<PathBuf> },
     Static([u8; 32]),
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum SandboxBackendChoice {
     AppleContainer,
+    Docker,
     LocalProcess,
 }
 
@@ -1777,6 +1779,13 @@ fn build_secret_cipher(
         SecretBackendChoice::AppleKeychain => {
             Arc::new(AppleKeychainSecretKeyProvider::new(keychain_account))
         }
+        SecretBackendChoice::File { path } => {
+            let path = match path {
+                Some(path) => path,
+                None => default_master_key_path()?,
+            };
+            Arc::new(FileBackedSecretKeyProvider::new(path))
+        }
         SecretBackendChoice::Static(key) => Arc::new(StaticSecretKeyProvider::new(key)),
     };
     Ok(SecretCipher::new(provider))
@@ -1784,7 +1793,10 @@ fn build_secret_cipher(
 
 fn build_sandbox_backend(choice: SandboxBackendChoice) -> Arc<dyn ManagedSandboxBackend> {
     match choice {
-        SandboxBackendChoice::AppleContainer => Arc::new(AppleContainerSandboxBackend::new()),
+        SandboxBackendChoice::AppleContainer => {
+            Arc::new(CliContainerSandboxBackend::apple_container())
+        }
+        SandboxBackendChoice::Docker => Arc::new(CliContainerSandboxBackend::docker()),
         SandboxBackendChoice::LocalProcess => Arc::new(LocalProcessSandboxBackend::new()),
     }
 }
