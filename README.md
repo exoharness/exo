@@ -58,17 +58,22 @@ cargo build -p exo
 ./target/debug/exo --help
 ```
 
-Models are registered through explicit bindings:
+Register a model, then drop into a REPL:
 
 ```bash
 ./target/debug/exo secret set openai --env OPENAI_API_KEY
 ./target/debug/exo model register gpt-5.4 --secret openai
+./target/debug/exo repl
 ```
+
+`exo repl` reuses or creates a default agent and conversation and uses a
+registered model, so you can start chatting in one command. It's a plain chat
+with no shell sandbox; create a conversation explicitly when you want tools.
 
 `--env` takes the variable name literally. Use `--value "$OPENAI_API_KEY"` if
 you intentionally want the shell to expand the value.
 
-Create an agent and start a conversation:
+For explicit control over agents, conversations, or a shell-enabled sandbox:
 
 ```bash
 ./target/debug/exo agent create --model gpt-5.4 "Sandbox Example"
