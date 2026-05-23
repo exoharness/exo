@@ -975,7 +975,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             SecretCommands::Set { name, env, value } => {
                 let value = match (env, value) {
-                    (Some(env), None) => secret_value_from_env_arg(&env)?,
+                    (Some(env), None) => secret_value_from_env_arg(&env, &env_vars)?,
                     (None, Some(value)) => value,
                     (Some(_), Some(_)) => {
                         return Err("provide either --env or --value, not both".into());
@@ -1440,7 +1440,10 @@ fn slugify(input: &str) -> String {
     slug
 }
 
-pub(crate) fn secret_value_from_env_arg(env: &str) -> Result<String, String> {
+pub(crate) fn secret_value_from_env_arg(
+    env: &str,
+    loaded_env: &HashMap<String, String>,
+) -> Result<String, String> {
     if !is_env_var_name(env) {
         return Err(
             "invalid --env value; pass an environment variable name such as OPENAI_API_KEY, not the secret value"
@@ -1448,7 +1451,11 @@ pub(crate) fn secret_value_from_env_arg(env: &str) -> Result<String, String> {
         );
     }
 
-    std::env::var(env).map_err(|_| "environment variable passed to --env is not set".to_string())
+    loaded_env
+        .get(env)
+        .cloned()
+        .or_else(|| std::env::var(env).ok())
+        .ok_or_else(|| "environment variable passed to --env is not set".to_string())
 }
 
 fn is_env_var_name(env: &str) -> bool {
