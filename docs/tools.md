@@ -86,6 +86,18 @@ This means the durable conversation history records:
 Tracing can separately record richer information, such as duration, errors, or
 tool source, without changing the canonical event shape.
 
+Tool results are artifact-backed. The registry writes the full tool result to a
+conversation artifact and returns a compact model-facing result containing:
+
+- artifact metadata for the full result
+- a small preview
+- the inline value only when the serialized result is small enough
+
+For shell-like results, non-empty `stdout` and `stderr` are also written as
+separate text artifacts. This keeps large HTML pages, logs, browser output, and
+data dumps out of the model context while preserving the complete data for later
+inspection or targeted reads.
+
 ## Configuration And Secrets
 
 Tools should use existing exoharness configuration primitives:
@@ -141,6 +153,8 @@ Recommended defaults:
 - Validate initialization parameters before exposing a tool.
 - Validate generated tools against the `Tool` contract before adding them to the
   manifest.
+- Keep `tool_result` payloads compact; full tool outputs should flow through
+  artifacts.
 - Require explicit networking enablement for tools that call external services.
 - Require confirmation for tools with external side effects.
 - Avoid persisting agent tools beyond the conversation or workspace unless a

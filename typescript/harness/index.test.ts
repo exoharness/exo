@@ -70,7 +70,7 @@ describe("HarnessToolRegistry", () => {
     ]);
 
     expect(events).toEqual([
-      toolResultEvent("call_1", {
+      wrappedToolResultEvent("call_1", "echo", "library", 1, {
         echoed: "hello",
       }),
     ]);
@@ -109,7 +109,9 @@ describe("HarnessToolRegistry", () => {
       {
         type: "tool_result_streamed",
         toolCallId: "call_1",
-        result: { echoed: "hello" },
+        result: wrappedToolResult("call_1", "echo", "library", 1, {
+          echoed: "hello",
+        }),
       },
     ]);
   });
@@ -128,7 +130,7 @@ describe("HarnessToolRegistry", () => {
         },
       ]),
     ).resolves.toEqual([
-      toolResultEvent("call_1", {
+      wrappedToolResultEvent("call_1", "missing", "built_in", 1, {
         ok: false,
         error: "tool execution is not configured for missing",
       }),
@@ -154,9 +156,74 @@ describe("HarnessToolRegistry", () => {
         },
       ]),
     ).resolves.toEqual([
-      toolResultEvent("call_1", {
+      wrappedToolResultEvent("call_1", "fail", "library", 1, {
         ok: false,
         error: "boom",
+      }),
+    ]);
+  });
+
+  it("stores large shell-style output in artifacts instead of inline value", async () => {
+    const context = fakeTurnContext();
+    const stdout = "x".repeat(9_000);
+    const registry = createToolRegistry(context).register(
+      fakeTool("shell", async () => ({
+        stdout,
+        stderr: "",
+        exit_code: 0,
+      })),
+    );
+
+    const events = await registry.executePending([
+      {
+        toolCallId: "call_1",
+        request: {
+          functionName: "shell",
+          arguments: {},
+        },
+      },
+    ]);
+
+    expect(events).toEqual([
+      toolResultEvent("call_1", {
+        ok: true,
+        toolName: "shell",
+        toolCallId: "call_1",
+        source: "library",
+        resultArtifact: {
+          artifactId: "artifact-1",
+          path: "tool-results/shell/call_1/result.json",
+          version: 1,
+          sizeBytes: 9053,
+          mimeType: "application/json",
+        },
+        artifacts: [
+          {
+            artifactId: "artifact-1",
+            path: "tool-results/shell/call_1/result.json",
+            version: 1,
+            sizeBytes: 9053,
+            mimeType: "application/json",
+          },
+          {
+            artifactId: "artifact-2",
+            path: "tool-results/shell/call_1/stdout.txt",
+            version: 1,
+            sizeBytes: 9000,
+            mimeType: "text/plain",
+          },
+        ],
+        truncated: true,
+        preview: `${JSON.stringify(
+          {
+            stdout,
+            stderr: "",
+            exit_code: 0,
+          },
+          null,
+          2,
+        ).slice(0, 4_000)}\n...[truncated]`,
+        value: null,
       }),
     ]);
   });
@@ -356,7 +423,7 @@ describe("library tool modules", () => {
         },
       ]),
     ).resolves.toEqual([
-      toolResultEvent("call_1", {
+      wrappedToolResultEvent("call_1", "uppercase", "library", 1, {
         text: "result: HELLO",
       }),
     ]);
@@ -396,7 +463,7 @@ describe("library tool modules", () => {
         },
       ]),
     ).resolves.toEqual([
-      toolResultEvent("call_1", {
+      wrappedToolResultEvent("call_1", "irc_send_message", "library", 1, {
         ok: true,
         dryRun: true,
         registered: false,
@@ -438,7 +505,7 @@ describe("agent tool loading", () => {
         },
       ]),
     ).resolves.toEqual([
-      toolResultEvent("call_1", {
+      wrappedToolResultEvent("call_1", "uppercase", "library", 1, {
         text: "library: HELLO",
       }),
     ]);
@@ -474,7 +541,7 @@ describe("agent tool loading", () => {
         },
       ]),
     ).resolves.toEqual([
-      toolResultEvent("call_1", {
+      wrappedToolResultEvent("call_1", "uppercase", "agent", 1, {
         text: "agent: HELLO",
       }),
     ]);
@@ -527,13 +594,19 @@ describe("agent tool loading", () => {
           },
         ]),
       ).resolves.toEqual([
-        toolResultEvent("install_1", {
-          ok: true,
-          toolName: "reverse_text",
-          modulePath: ".exo/agent-tools/reverse-text.ts",
-          manifestPath: ".exo/agent-tools/manifest.json",
-          availableNextRound: true,
-        }),
+        wrappedToolResultEvent(
+          "install_1",
+          "install_agent_tool",
+          "built_in",
+          1,
+          {
+            ok: true,
+            toolName: "reverse_text",
+            modulePath: ".exo/agent-tools/reverse-text.ts",
+            manifestPath: ".exo/agent-tools/manifest.json",
+            availableNextRound: true,
+          },
+        ),
       ]);
 
       const registry = createToolRegistry(context);
@@ -553,7 +626,7 @@ describe("agent tool loading", () => {
           },
         ]),
       ).resolves.toEqual([
-        toolResultEvent("call_1", {
+        wrappedToolResultEvent("call_1", "reverse_text", "agent", 2, {
           text: "olleh",
         }),
       ]);
@@ -696,6 +769,58 @@ export default reverseTextTool;
 `;
 }
 
+function wrappedToolResultEvent(
+  toolCallId: string,
+  toolName: string,
+  source: "built_in" | "library" | "agent",
+  artifactIndex: number,
+  value: ToolResult,
+): EventData {
+  return toolResultEvent(
+    toolCallId,
+    wrappedToolResult(toolCallId, toolName, source, artifactIndex, value),
+  );
+}
+
+function wrappedToolResult(
+  toolCallId: string,
+  toolName: string,
+  source: "built_in" | "library" | "agent",
+  artifactIndex: number,
+  value: ToolResult,
+): ToolResult {
+  const serialized =
+    typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  const artifact = {
+    artifactId: `artifact-${artifactIndex}`,
+    path: `tool-results/${toolName}/${toolCallId}/result.json`,
+    version: 1,
+    sizeBytes: `${serialized}\n`.length,
+    mimeType: "application/json",
+  };
+  return {
+    ok: resultOk(value),
+    toolName,
+    toolCallId,
+    source,
+    resultArtifact: artifact,
+    artifacts: [artifact],
+    truncated: false,
+    preview: serialized,
+    value,
+  };
+}
+
+function resultOk(value: ToolResult): boolean {
+  return (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    typeof (value as { ok?: unknown }).ok !== "boolean" ||
+    (value as { ok: boolean }).ok
+  );
+}
+
 function fakeTurnContext(
   options: {
     streaming?: boolean;
@@ -705,6 +830,7 @@ function fakeTurnContext(
   } = {},
 ): TurnContext {
   const streamEvents = options.streamEvents ?? [];
+  let artifactIndex = 0;
   return {
     agentConfig: {
       instructions: [],
@@ -733,7 +859,18 @@ function fakeTurnContext(
     exoharness: {
       current: {
         agent: {},
-        conversation: {},
+        conversation: {
+          async writeArtifactText(args: { path: string; text: string }) {
+            artifactIndex += 1;
+            return {
+              artifactId: `artifact-${artifactIndex}`,
+              path: args.path,
+              version: 1,
+              createdAt: "2026-01-01T00:00:00Z",
+              sizeBytes: args.text.length,
+            };
+          },
+        },
         turn: {},
       },
     },
