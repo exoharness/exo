@@ -310,6 +310,57 @@ mod tests {
             [Message::Assistant { id: None, .. }]
         ));
     }
+
+    #[test]
+    fn stream_accumulator_drops_tool_call_slots_without_id_and_name() {
+        let mut accumulator = UniversalResponseAccumulator::default();
+        accumulator.push(&UniversalStreamChunk::new(
+            Some("resp_123".to_string()),
+            Some("gpt-5.4".to_string()),
+            vec![lingua::UniversalStreamChoice {
+                index: 0,
+                delta: Some(lingua_json::json!({
+                    "role": "assistant",
+                    "tool_calls": [
+                        { "index": 0 },
+                        {
+                            "index": 1,
+                            "id": "call_real",
+                            "function": { "name": "shell", "arguments": "{}" }
+                        }
+                    ]
+                })),
+                finish_reason: None,
+            }],
+            None,
+            None,
+        ));
+
+        let response = accumulator.finalize();
+
+        let Some(Message::Assistant {
+            content: AssistantContent::Array(parts),
+            ..
+        }) = response.messages.first()
+        else {
+            panic!("expected a single Assistant message with array content");
+        };
+        let tool_calls: Vec<&AssistantContentPart> = parts
+            .iter()
+            .filter(|part| matches!(part, AssistantContentPart::ToolCall { .. }))
+            .collect();
+        assert_eq!(tool_calls.len(), 1);
+        let AssistantContentPart::ToolCall {
+            tool_call_id,
+            tool_name,
+            ..
+        } = tool_calls[0]
+        else {
+            unreachable!();
+        };
+        assert_eq!(tool_call_id, "call_real");
+        assert_eq!(tool_name, "shell");
+    }
 }
 
 fn serialize_request(format: ProviderFormat, request: &UniversalRequest) -> Result<Bytes> {
@@ -483,13 +534,16 @@ impl UniversalResponseAccumulator {
         }
 
         for tool_call in &self.tool_calls {
+            let Some(id) = tool_call.id.clone() else {
+                continue;
+            };
             let function = tool_call.function.clone().unwrap_or_default();
+            let Some(name) = function.name else {
+                continue;
+            };
             content_parts.push(AssistantContentPart::ToolCall {
-                tool_call_id: tool_call
-                    .id
-                    .clone()
-                    .unwrap_or_else(|| format!("tool-call-{}", content_parts.len())),
-                tool_name: function.name.unwrap_or_else(|| "unknown".to_string()),
+                tool_call_id: id,
+                tool_name: name,
                 arguments: ToolCallArguments::from(function.arguments.unwrap_or_default()),
                 encrypted_content: None,
                 provider_options: None,
