@@ -8,6 +8,7 @@ use crate::{
     Artifact, ArtifactVersion, BasicExoHarness, BeginTurnRequest, Binding, CreateSandboxRequest,
     EventData, EventQuery, EventQueryDirection, ExoHarness, ForkConversationRequest,
     NewAgentRequest, NewConversationRequest, PutSecretRequest, RunInSandboxRequest, Secret,
+    WriteArtifactRequest,
 };
 
 #[tokio::test(flavor = "current_thread")]
@@ -108,6 +109,47 @@ async fn begin_turn_tracks_events_through_finish() {
     assert!(matches!(events[3].data, EventData::Messages { .. }));
     assert!(matches!(events[4].data, EventData::TurnEnded));
     assert_eq!(events.last().expect("turn ended").id, latest_event_id);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn turn_events_continue_after_artifact_writes() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new_with_local_process_sandbox(tempdir.path())
+        .await
+        .expect("harness should initialize");
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let conversation = agent
+        .new_conversation(NewConversationRequest::default())
+        .await
+        .expect("conversation");
+
+    let turn = conversation
+        .begin_turn(BeginTurnRequest {
+            session_id: None,
+            input: vec![user_message("ping")],
+        })
+        .await
+        .expect("turn");
+    conversation
+        .write_artifact(WriteArtifactRequest {
+            path: "tool-results/example.json".to_string(),
+            contents: br#"{"ok":true}"#.to_vec(),
+        })
+        .await
+        .expect("write artifact");
+    turn.add_events(vec![EventData::Messages {
+        messages: vec![assistant_message("pong")],
+        response_id: None,
+    }])
+    .await
+    .expect("append after artifact write");
+    turn.finish().await.expect("finish after artifact write");
 }
 
 #[tokio::test(flavor = "current_thread")]

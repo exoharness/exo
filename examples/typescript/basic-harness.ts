@@ -6,6 +6,7 @@ import {
   registerAgentToolsFromManifestPathIfExists,
   registerLibraryToolsFromManifest,
   turnMetadata,
+  type EventData,
   type Message,
   type TurnContext,
 } from "@exo/harness";
@@ -39,7 +40,7 @@ async function runBasicTurnLoop(
   turnParent: TraceParent,
   model: string,
 ): Promise<string | null> {
-  const { conversation, turn } = context.exoharness.current;
+  const { conversation } = context.exoharness.current;
   const maxToolRoundTrips = context.agentConfig.maxToolRoundTrips;
   let latestEventId: string | null = null;
 
@@ -84,7 +85,7 @@ async function runBasicTurnLoop(
 
     const events = responseToLinguaEvents(response);
     if (events.length > 0) {
-      latestEventId = (await turn.addEvents(events)).latestEventId;
+      latestEventId = await appendTurnEvents(context, events);
     }
 
     const toolCalls = responseToolCalls(response);
@@ -101,10 +102,24 @@ async function runBasicTurnLoop(
         (toolCall) => tools.executePending([toolCall]),
       );
       if (toolResultEvents.length > 0) {
-        latestEventId = (await turn.addEvents(toolResultEvents)).latestEventId;
+        latestEventId = await appendTurnEvents(context, toolResultEvents);
       }
     }
   }
+}
+
+async function appendTurnEvents(
+  context: TurnContext,
+  data: EventData[],
+): Promise<string> {
+  const { conversation, turn } = context.exoharness.current;
+  return (
+    await conversation.addEvents({
+      sessionId: turn.record.sessionId,
+      turnId: turn.record.id,
+      data,
+    })
+  ).latestEventId;
 }
 
 function basicHarnessInstructions(context: TurnContext): Message[] {

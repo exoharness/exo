@@ -1,4 +1,5 @@
 import type {
+  ArtifactVersion,
   EventData,
   JsonObject,
   JsonValue,
@@ -9,6 +10,9 @@ import type {
 } from "./index";
 
 export type HarnessToolSource = "built_in" | "library" | "agent";
+
+const TOOL_RESULT_INLINE_LIMIT_CHARS = 8_000;
+const TOOL_RESULT_PREVIEW_CHARS = 4_000;
 
 export interface ToolExecutionContext {
   readonly context: TurnContext;
@@ -76,26 +80,27 @@ export class HarnessToolRegistry {
   private async executeToolCallOrError(
     toolCall: PendingToolCall,
   ): Promise<ToolResult> {
+    const configuredTool =
+      this.tools.get(toolCall.request.functionName) ?? null;
     try {
-      return await this.executeToolCall(toolCall);
+      const { tool, result } = await this.executeToolCall(toolCall);
+      return await this.normalizeAndStreamToolResult(toolCall, tool, result);
     } catch (error) {
-      const result = {
+      const result: ToolResult = {
         ok: false,
         error: errorMessage(error),
       };
-      if (this.context.streaming) {
-        await this.context.stream.toolResult({
-          toolCallId: toolCall.toolCallId,
-          result,
-        });
-      }
-      return result;
+      return await this.normalizeAndStreamToolResult(
+        toolCall,
+        configuredTool,
+        result,
+      );
     }
   }
 
   private async executeToolCall(
     toolCall: PendingToolCall,
-  ): Promise<ToolResult> {
+  ): Promise<{ tool: ToolInstance; result: ToolResult }> {
     const tool = this.tools.get(toolCall.request.functionName);
     if (!tool) {
       throw new Error(
@@ -113,14 +118,146 @@ export class HarnessToolRegistry {
       context: this.context,
       toolCallId: toolCall.toolCallId,
     });
+    return { tool, result };
+  }
+
+  private async normalizeAndStreamToolResult(
+    toolCall: PendingToolCall,
+    tool: ToolInstance | null,
+    result: ToolResult,
+  ): Promise<ToolResult> {
+    const normalized = await compactToolResult(this.context, {
+      toolCallId: toolCall.toolCallId,
+      toolName: tool?.definition.name ?? toolCall.request.functionName,
+      source: tool?.source ?? "built_in",
+      result,
+    });
     if (this.context.streaming) {
       await this.context.stream.toolResult({
         toolCallId: toolCall.toolCallId,
-        result,
+        result: normalized,
       });
     }
-    return result;
+    return normalized;
   }
+}
+
+interface CompactToolResultArgs {
+  toolCallId: string;
+  toolName: string;
+  source: HarnessToolSource;
+  result: ToolResult;
+}
+
+interface ToolResultArtifactReference extends JsonObject {
+  artifactId: string;
+  path: string;
+  version: number;
+  sizeBytes: number;
+  mimeType: string;
+}
+
+async function compactToolResult(
+  context: TurnContext,
+  args: CompactToolResultArgs,
+): Promise<ToolResult> {
+  const fullResultArtifact = await writeToolResultArtifact(
+    context,
+    args,
+    "result.json",
+    `${JSON.stringify(args.result, null, 2)}\n`,
+    "application/json",
+  );
+  const serialized = stringifyToolResult(args.result);
+  const shellArtifacts = await writeShellOutputArtifacts(context, args);
+  const value =
+    serialized.length <= TOOL_RESULT_INLINE_LIMIT_CHARS ? args.result : null;
+  return {
+    ok: resultOk(args.result),
+    toolName: args.toolName,
+    toolCallId: args.toolCallId,
+    source: args.source,
+    resultArtifact: fullResultArtifact,
+    artifacts: [fullResultArtifact, ...shellArtifacts],
+    truncated: serialized.length > TOOL_RESULT_INLINE_LIMIT_CHARS,
+    preview: previewText(serialized),
+    value,
+  };
+}
+
+async function writeShellOutputArtifacts(
+  context: TurnContext,
+  args: CompactToolResultArgs,
+): Promise<ToolResultArtifactReference[]> {
+  if (!isRecord(args.result)) {
+    return [];
+  }
+  const artifacts: ToolResultArtifactReference[] = [];
+  for (const key of ["stdout", "stderr"] as const) {
+    const value = args.result[key];
+    if (typeof value !== "string" || value.length === 0) {
+      continue;
+    }
+    artifacts.push(
+      await writeToolResultArtifact(
+        context,
+        args,
+        `${key}.txt`,
+        value,
+        "text/plain",
+      ),
+    );
+  }
+  return artifacts;
+}
+
+async function writeToolResultArtifact(
+  context: TurnContext,
+  args: CompactToolResultArgs,
+  fileName: string,
+  text: string,
+  mimeType: string,
+): Promise<ToolResultArtifactReference> {
+  const artifact =
+    await context.exoharness.current.conversation.writeArtifactText({
+      path: `tool-results/${sanitizePathSegment(args.toolName)}/${sanitizePathSegment(args.toolCallId)}/${fileName}`,
+      text,
+    });
+  return artifactReference(artifact, mimeType);
+}
+
+function artifactReference(
+  artifact: ArtifactVersion,
+  mimeType: string,
+): ToolResultArtifactReference {
+  return {
+    artifactId: artifact.artifactId,
+    path: artifact.path,
+    version: artifact.version,
+    sizeBytes: artifact.sizeBytes,
+    mimeType,
+  };
+}
+
+function resultOk(result: ToolResult): boolean {
+  if (isRecord(result) && typeof result.ok === "boolean") {
+    return result.ok;
+  }
+  return true;
+}
+
+function stringifyToolResult(result: ToolResult): string {
+  return typeof result === "string" ? result : JSON.stringify(result, null, 2);
+}
+
+function previewText(text: string): string {
+  return text.length > TOOL_RESULT_PREVIEW_CHARS
+    ? `${text.slice(0, TOOL_RESULT_PREVIEW_CHARS)}\n...[truncated]`
+    : text;
+}
+
+function sanitizePathSegment(value: string): string {
+  return value.replace(/[^A-Za-z0-9_.-]+/g, "_").slice(0, 96) || "unknown";
 }
 
 function errorMessage(error: unknown): string {
