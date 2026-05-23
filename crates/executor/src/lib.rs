@@ -27,8 +27,8 @@ pub use braintrust::{BraintrustProject, BraintrustRuntimeConfig, BraintrustTraci
 pub use executor_types::{
     AgentConfig, AgentHarnessKind, ConversationConfig, ConversationModelConfig,
     ExecutionStreamEvent, ExecutionStreamHandle, ModelClient, ModelRequest, ModelResponse,
-    ModelResponseStream, PendingToolCall, SendRequest, SendResult, ToolDefinition, ToolRuntime,
-    TypeScriptHarnessConfig,
+    ModelResponseStream, PendingToolCall, SendRequest, SendResult, ToolDefinition,
+    ToolManifestEntry, ToolRuntime, TypeScriptHarnessConfig,
 };
 pub use exoharness::{
     AgentHandle, BasicExoHarness, Binding, BindingMetadata, ConversationHandle, EventData, EventId,

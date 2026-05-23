@@ -19,8 +19,8 @@ use executor::{
     BraintrustRuntimeConfig, BraintrustTracingConfig, ConversationModelConfig, CreateAgentRequest,
     CreateConversationRequest, EventQuery, EventQueryDirection, ExoHarness, FileSystemMount,
     FileSystemMountMode, ForkConversationRequest, Harness, HarnessAgent, HarnessConversation,
-    PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR, Secret, SendRequest, TypeScriptHarness,
-    TypeScriptHarnessConfig, Uuid7, load_agent_config,
+    PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR, Secret, SendRequest, ToolManifestEntry,
+    TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, load_agent_config,
 };
 use lingua::Message;
 use lingua::universal::{AssistantContent, AssistantContentPart, ToolContentPart, UserContent};
@@ -100,6 +100,8 @@ enum AgentCommands {
         slug: Option<String>,
         #[arg(long)]
         module: Option<PathBuf>,
+        #[arg(long = "tool-manifest")]
+        tool_manifests: Vec<PathBuf>,
         #[arg(long)]
         sandbox_image: Option<String>,
         #[arg(long, value_enum)]
@@ -125,6 +127,10 @@ enum AgentCommands {
         module: Option<PathBuf>,
         #[arg(long)]
         clear_module: bool,
+        #[arg(long = "tool-manifest")]
+        tool_manifests: Vec<PathBuf>,
+        #[arg(long)]
+        clear_tool_manifests: bool,
         #[arg(long)]
         sandbox_image: Option<String>,
         #[arg(long)]
@@ -323,6 +329,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 name,
                 slug,
                 module,
+                tool_manifests,
                 sandbox_image,
                 networking,
                 model,
@@ -342,13 +349,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 {
                     return Err("sandbox image must not be empty".into());
                 }
+                let agent_harness_kind = to_agent_harness_kind(harness_kind);
                 let typescript = build_typescript_harness_config(harness_kind, module.as_deref())?;
+                let library_tools = load_tool_manifests(agent_harness_kind, &tool_manifests)?;
                 let agent = harness
                     .create_agent(CreateAgentRequest {
                         slug,
                         name: Some(name),
-                        harness: to_agent_harness_kind(harness_kind),
+                        harness: agent_harness_kind,
                         typescript,
+                        library_tools,
                         sandbox_image,
                         enable_networking: matches!(networking, Some(NetworkingMode::Enabled)),
                         model,
@@ -372,6 +382,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 set_harness,
                 module,
                 clear_module,
+                tool_manifests,
+                clear_tool_manifests,
                 sandbox_image,
                 clear_sandbox_image,
                 networking,
@@ -387,6 +399,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             } => {
                 if clear_module && module.is_some() {
                     return Err("provide either --clear-module or --module, not both".into());
+                }
+                if clear_tool_manifests && !tool_manifests.is_empty() {
+                    return Err(
+                        "provide either --clear-tool-manifests or --tool-manifest, not both".into(),
+                    );
                 }
                 if clear_sandbox_image && sandbox_image.is_some() {
                     return Err(
@@ -432,6 +449,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let typescript = Some(resolve_typescript_module_path(module)?);
                     if config.typescript != typescript {
                         config.typescript = typescript;
+                        changed = true;
+                    }
+                }
+                if clear_tool_manifests {
+                    if !config.library_tools.is_empty() {
+                        config.library_tools.clear();
+                        changed = true;
+                    }
+                } else if !tool_manifests.is_empty() {
+                    let library_tools = load_tool_manifests(config.harness, &tool_manifests)?;
+                    if config.library_tools != library_tools {
+                        config.library_tools = library_tools;
                         changed = true;
                     }
                 }
@@ -497,7 +526,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )?;
                     if updated_braintrust.is_none() && !changed {
                         return Err(
-                            "no changes provided; pass --set-harness, --module, --sandbox-image, --networking, model flags, --clear-braintrust, or Braintrust project flags"
+                            "no changes provided; pass --set-harness, --module, --tool-manifest, --sandbox-image, --networking, model flags, --clear-braintrust, or Braintrust project flags"
                                 .into(),
                         );
                     }
@@ -532,6 +561,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .map(|config| config.module_path.as_str())
                         .unwrap_or("none")
                 );
+                println!("library_tools: {}", config.library_tools.len());
+                for tool in &config.library_tools {
+                    println!("  - {}", tool.module_path);
+                }
                 println!(
                     "sandbox_image: {}",
                     config.sandbox_image.as_deref().unwrap_or("default")
@@ -1167,6 +1200,75 @@ fn resolve_typescript_module_path(
     Ok(TypeScriptHarnessConfig {
         module_path: module_path.to_string_lossy().into_owned(),
     })
+}
+
+#[derive(serde::Deserialize)]
+struct CliToolManifest {
+    tools: Vec<CliToolManifestEntry>,
+}
+
+#[derive(serde::Deserialize)]
+struct CliToolManifestEntry {
+    #[serde(rename = "modulePath", alias = "module_path")]
+    module_path: String,
+    #[serde(default = "empty_json_object")]
+    initialization: serde_json::Value,
+}
+
+fn empty_json_object() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+fn load_tool_manifests(
+    harness_kind: AgentHarnessKind,
+    paths: &[PathBuf],
+) -> Result<Vec<ToolManifestEntry>, Box<dyn std::error::Error>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    if harness_kind != AgentHarnessKind::TypeScript {
+        return Err("--tool-manifest is only valid with TypeScript agents".into());
+    }
+
+    let mut tools = Vec::new();
+    for path in paths {
+        let manifest_path = std::fs::canonicalize(path)?;
+        let manifest_dir = manifest_path
+            .parent()
+            .ok_or_else(|| format!("tool manifest has no parent directory: {}", path.display()))?;
+        let manifest: CliToolManifest =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path)?)?;
+
+        for entry in manifest.tools {
+            if entry.module_path.trim().is_empty() {
+                return Err(format!(
+                    "tool manifest {} contains an empty modulePath",
+                    manifest_path.display()
+                )
+                .into());
+            }
+            if !entry.initialization.is_object() {
+                return Err(format!(
+                    "tool manifest {} entry {} must use an object initialization value",
+                    manifest_path.display(),
+                    entry.module_path
+                )
+                .into());
+            }
+
+            let module_path = PathBuf::from(&entry.module_path);
+            let resolved_module_path = if module_path.is_absolute() {
+                std::fs::canonicalize(&module_path)?
+            } else {
+                std::fs::canonicalize(manifest_dir.join(module_path))?
+            };
+            tools.push(ToolManifestEntry {
+                module_path: resolved_module_path.to_string_lossy().into_owned(),
+                initialization: entry.initialization,
+            });
+        }
+    }
+    Ok(tools)
 }
 
 struct RegisteredModel {
