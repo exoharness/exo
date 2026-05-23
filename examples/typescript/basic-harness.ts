@@ -1,7 +1,8 @@
 import {
-  buildShellToolDefinitions,
+  createToolRegistry,
   defineHarness,
   materializePromptMessages,
+  registerBuiltInTools,
   turnMetadata,
   type TurnContext,
 } from "@exo/harness";
@@ -37,6 +38,8 @@ async function runBasicTurnLoop(
 ): Promise<string | null> {
   const { conversation, turn } = context.exoharness.current;
   const maxToolRoundTrips = context.agentConfig.maxToolRoundTrips;
+  const tools = createToolRegistry(context);
+  registerBuiltInTools(tools, context, ["shell"]);
   let latestEventId: string | null = null;
 
   for (let round = 0; ; round += 1) {
@@ -55,7 +58,7 @@ async function runBasicTurnLoop(
     const request: NativeResponsesRequest = {
       model,
       messages,
-      tools: buildShellToolDefinitions(context.conversationConfig),
+      tools: tools.definitions(),
       maxOutputTokens: context.agentConfig.maxOutputTokens,
       metadata: turnMetadata(context),
     };
@@ -93,6 +96,7 @@ async function runBasicTurnLoop(
         context,
         toolCall,
         round,
+        (toolCall) => tools.executePending([toolCall]),
       );
       if (toolResultEvents.length > 0) {
         latestEventId = (await turn.addEvents(toolResultEvents)).latestEventId;
