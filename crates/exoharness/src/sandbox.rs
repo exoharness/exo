@@ -114,6 +114,25 @@ pub const DEFAULT_SANDBOX_IMAGE: &str = "docker.io/library/debian:bookworm";
 pub const SANDBOX_HOME_DIR: &str = "/home/exo";
 pub const SANDBOX_MAIN_MOUNT_DIR: &str = "/home/exo/workspace";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerCliFlavor {
+    AppleContainer,
+    Docker,
+}
+
+impl ContainerCliFlavor {
+    fn default_binary(self) -> &'static str {
+        match self {
+            Self::AppleContainer => "container",
+            Self::Docker => "docker",
+        }
+    }
+
+    fn requires_system_start(self) -> bool {
+        matches!(self, Self::AppleContainer)
+    }
+}
+
 const DEFAULT_ENABLED_NETWORK_NAME: &str = "exo-default";
 const WARM_SANDBOX_KEEPALIVE_ARGV: &[&str] = &["sleep", "infinity"];
 const WARM_SANDBOX_HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(3);
@@ -147,17 +166,27 @@ struct ContainerListConfiguration {
 }
 
 #[derive(Debug)]
-pub struct AppleContainerSandboxBackend {
+pub struct CliContainerSandboxBackend {
+    cli: ContainerCliFlavor,
     container_bin: PathBuf,
     system_started: Mutex<bool>,
     network_created: Mutex<bool>,
     warm_sandboxes: Arc<Mutex<HashMap<SandboxKey, WarmSandboxEntry>>>,
 }
 
-impl AppleContainerSandboxBackend {
-    pub fn new() -> Self {
+impl CliContainerSandboxBackend {
+    pub fn apple_container() -> Self {
+        Self::new(ContainerCliFlavor::AppleContainer)
+    }
+
+    pub fn docker() -> Self {
+        Self::new(ContainerCliFlavor::Docker)
+    }
+
+    fn new(cli: ContainerCliFlavor) -> Self {
         Self {
-            container_bin: PathBuf::from("container"),
+            cli,
+            container_bin: PathBuf::from(cli.default_binary()),
             system_started: Mutex::new(false),
             network_created: Mutex::new(false),
             warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),
@@ -165,6 +194,9 @@ impl AppleContainerSandboxBackend {
     }
 
     async fn ensure_system_started(&self) -> Result<()> {
+        if !self.cli.requires_system_start() {
+            return Ok(());
+        }
         let mut started = self.system_started.lock().await;
         if *started {
             return Ok(());
@@ -273,20 +305,14 @@ impl AppleContainerSandboxBackend {
         };
 
         for entry in expired {
-            cleanup_named_container(&self.container_bin, &entry.name).await?;
+            cleanup_named_container(&self.container_bin, self.cli, &entry.name).await?;
         }
 
         Ok(())
     }
 }
 
-impl Default for AppleContainerSandboxBackend {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Drop for AppleContainerSandboxBackend {
+impl Drop for CliContainerSandboxBackend {
     fn drop(&mut self) {
         let Ok(mut warm_sandboxes) = self.warm_sandboxes.try_lock() else {
             return;
@@ -296,18 +322,18 @@ impl Drop for AppleContainerSandboxBackend {
             .map(|(_, entry)| entry.name)
             .collect::<Vec<_>>();
         for name in names {
-            cleanup_named_container_blocking(&self.container_bin, &name);
+            cleanup_named_container_blocking(&self.container_bin, self.cli, &name);
         }
     }
 }
 
 #[async_trait]
-impl ManagedSandboxBackend for AppleContainerSandboxBackend {
+impl ManagedSandboxBackend for CliContainerSandboxBackend {
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
         let request = self.prepare_request(request).await?;
 
         if request.lifecycle.idle_ttl.is_none() {
-            return Ok(Arc::new(AppleOneShotSandboxHandle {
+            return Ok(Arc::new(OneShotSandboxHandle {
                 id: format!("oneshot:{}", request.key),
                 container_bin: self.container_bin.clone(),
                 request,
@@ -320,8 +346,9 @@ impl ManagedSandboxBackend for AppleContainerSandboxBackend {
             let mut warm_sandboxes = self.warm_sandboxes.lock().await;
             match warm_sandboxes.get(&request.key) {
                 Some(entry) if entry.request.spec == request.spec => {
-                    return Ok(Arc::new(AppleWarmSandboxHandle {
+                    return Ok(Arc::new(WarmSandboxHandle {
                         id: format!("warm:{}", request.key),
+                        cli: self.cli,
                         container_bin: self.container_bin.clone(),
                         request,
                         warm_sandboxes: Arc::clone(&self.warm_sandboxes),
@@ -332,7 +359,7 @@ impl ManagedSandboxBackend for AppleContainerSandboxBackend {
             }
         };
         if let Some(entry) = replaced {
-            schedule_cleanup_named_container(self.container_bin.clone(), entry.name);
+            schedule_cleanup_named_container(self.container_bin.clone(), self.cli, entry.name);
         }
 
         let name = create_unique_warm_sandbox(&self.container_bin, &request).await?;
@@ -349,8 +376,9 @@ impl ManagedSandboxBackend for AppleContainerSandboxBackend {
             );
         }
 
-        Ok(Arc::new(AppleWarmSandboxHandle {
+        Ok(Arc::new(WarmSandboxHandle {
             id: format!("warm:{}", request.key),
+            cli: self.cli,
             container_bin: self.container_bin.clone(),
             request,
             warm_sandboxes: Arc::clone(&self.warm_sandboxes),
@@ -358,14 +386,14 @@ impl ManagedSandboxBackend for AppleContainerSandboxBackend {
     }
 }
 
-struct AppleOneShotSandboxHandle {
+struct OneShotSandboxHandle {
     id: String,
     container_bin: PathBuf,
     request: SandboxRequest,
 }
 
 #[async_trait]
-impl ManagedSandboxHandle for AppleOneShotSandboxHandle {
+impl ManagedSandboxHandle for OneShotSandboxHandle {
     fn id(&self) -> &str {
         &self.id
     }
@@ -395,22 +423,23 @@ impl ManagedSandboxHandle for AppleOneShotSandboxHandle {
     }
 }
 
-struct AppleWarmSandboxHandle {
+struct WarmSandboxHandle {
     id: String,
+    cli: ContainerCliFlavor,
     container_bin: PathBuf,
     request: SandboxRequest,
     warm_sandboxes: Arc<Mutex<HashMap<SandboxKey, WarmSandboxEntry>>>,
 }
 
 #[async_trait]
-impl ManagedSandboxHandle for AppleWarmSandboxHandle {
+impl ManagedSandboxHandle for WarmSandboxHandle {
     fn id(&self) -> &str {
         &self.id
     }
 
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {
         let name =
-            ensure_warm_sandbox_ready(&self.container_bin, &self.request, &self.warm_sandboxes)
+            ensure_warm_sandbox_ready(&self.container_bin, self.cli, &self.request, &self.warm_sandboxes)
                 .await?;
         touch_warm_sandbox(&self.warm_sandboxes, &self.request.key).await;
         let output = exec_warm(&self.container_bin, &name, &self.request.spec, command).await;
@@ -420,7 +449,7 @@ impl ManagedSandboxHandle for AppleWarmSandboxHandle {
 
     async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts> {
         let name =
-            ensure_warm_sandbox_ready(&self.container_bin, &self.request, &self.warm_sandboxes)
+            ensure_warm_sandbox_ready(&self.container_bin, self.cli, &self.request, &self.warm_sandboxes)
                 .await?;
         touch_warm_sandbox(&self.warm_sandboxes, &self.request.key).await;
         start_warm_process(&self.container_bin, &name, &self.request.spec, command).await
@@ -433,11 +462,21 @@ impl ManagedSandboxHandle for AppleWarmSandboxHandle {
         };
 
         if let Some(entry) = removed {
-            cleanup_named_container(&self.container_bin, &entry.name).await
+            cleanup_named_container(&self.container_bin, self.cli, &entry.name).await
         } else {
             Ok(())
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+pub fn default_sandbox_backend() -> Arc<dyn ManagedSandboxBackend> {
+    Arc::new(CliContainerSandboxBackend::apple_container())
+}
+
+#[cfg(target_os = "linux")]
+pub fn default_sandbox_backend() -> Arc<dyn ManagedSandboxBackend> {
+    Arc::new(CliContainerSandboxBackend::docker())
 }
 
 #[derive(Debug, Default)]
@@ -603,6 +642,7 @@ async fn create_unique_warm_sandbox(
 
 async fn ensure_warm_sandbox_ready(
     container_bin: &Path,
+    cli: ContainerCliFlavor,
     request: &SandboxRequest,
     warm_sandboxes: &Arc<Mutex<HashMap<SandboxKey, WarmSandboxEntry>>>,
 ) -> Result<String> {
@@ -624,7 +664,7 @@ async fn ensure_warm_sandbox_ready(
             let stale = warm_sandboxes
                 .remove(&request.key)
                 .expect("entry disappeared while locked");
-            schedule_cleanup_named_container(container_bin.to_path_buf(), stale.name);
+            schedule_cleanup_named_container(container_bin.to_path_buf(), cli, stale.name);
             let name = create_unique_warm_sandbox(container_bin, request).await?;
             warm_sandboxes.insert(
                 request.key.clone(),
@@ -668,7 +708,7 @@ async fn ensure_warm_sandbox_ready(
         },
     );
     drop(warm_sandboxes);
-    schedule_cleanup_named_container(container_bin.to_path_buf(), current_name);
+    schedule_cleanup_named_container(container_bin.to_path_buf(), cli, current_name);
     Ok(replacement_name)
 }
 
@@ -900,31 +940,63 @@ fn configure_env_args(process: &mut Command, env: &HashMap<String, String>) {
     }
 }
 
-async fn cleanup_named_container(container_bin: &Path, name: &str) -> Result<()> {
-    let stop =
-        run_container_admin_command(container_bin, WARM_SANDBOX_CLEANUP_TIMEOUT, ["stop", name])
+async fn cleanup_named_container(
+    container_bin: &Path,
+    cli: ContainerCliFlavor,
+    name: &str,
+) -> Result<()> {
+    match cli {
+        ContainerCliFlavor::AppleContainer => {
+            let stop = run_container_admin_command(
+                container_bin,
+                WARM_SANDBOX_CLEANUP_TIMEOUT,
+                ["stop", name],
+            )
             .await?;
-    if !stop.status.success() {
-        let stderr = String::from_utf8_lossy(&stop.stderr).trim().to_string();
-        if !is_missing_container_error(&stderr) {
-            return Err(anyhow!("failed to stop warm sandbox {}: {}", name, stderr));
-        }
-    }
+            if !stop.status.success() {
+                let stderr = String::from_utf8_lossy(&stop.stderr).trim().to_string();
+                if !is_missing_container_error(&stderr) {
+                    return Err(anyhow!("failed to stop warm sandbox {}: {}", name, stderr));
+                }
+            }
 
-    let delete = run_container_admin_command(
-        container_bin,
-        WARM_SANDBOX_CLEANUP_TIMEOUT,
-        ["delete", name],
-    )
-    .await?;
-    if !delete.status.success() {
-        let stderr = String::from_utf8_lossy(&delete.stderr).trim().to_string();
-        if !is_missing_container_error(&stderr) {
-            return Err(anyhow!(
-                "failed to delete warm sandbox {}: {}",
-                name,
-                stderr
-            ));
+            let delete = run_container_admin_command(
+                container_bin,
+                WARM_SANDBOX_CLEANUP_TIMEOUT,
+                ["delete", name],
+            )
+            .await?;
+            if !delete.status.success() {
+                let stderr = String::from_utf8_lossy(&delete.stderr).trim().to_string();
+                if !is_missing_container_error(&stderr) {
+                    return Err(anyhow!(
+                        "failed to delete warm sandbox {}: {}",
+                        name,
+                        stderr
+                    ));
+                }
+            }
+        }
+        ContainerCliFlavor::Docker => {
+            // `docker rm -f` is SIGKILL + remove in one shot. Avoids racing
+            // the daemon's default 10s SIGTERM grace against our cleanup
+            // timeout, which otherwise leaves Exited containers behind.
+            let rm = run_container_admin_command(
+                container_bin,
+                WARM_SANDBOX_CLEANUP_TIMEOUT,
+                ["rm", "-f", name],
+            )
+            .await?;
+            if !rm.status.success() {
+                let stderr = String::from_utf8_lossy(&rm.stderr).trim().to_string();
+                if !is_missing_container_error(&stderr) {
+                    return Err(anyhow!(
+                        "failed to delete warm sandbox {}: {}",
+                        name,
+                        stderr
+                    ));
+                }
+            }
         }
     }
 
@@ -972,8 +1044,12 @@ async fn reap_orphaned_warm_sandboxes(container_bin: &Path) -> Result<()> {
         if now - started_date < ORPHANED_WARM_SANDBOX_MIN_AGE.as_secs_f64() {
             continue;
         }
-        if let Err(error) =
-            cleanup_named_container(container_bin, &container.configuration.id).await
+        if let Err(error) = cleanup_named_container(
+            container_bin,
+            ContainerCliFlavor::AppleContainer,
+            &container.configuration.id,
+        )
+        .await
         {
             eprintln!(
                 "failed to clean up orphaned warm sandbox {}: {error}",
@@ -1005,14 +1081,25 @@ fn owner_pid_is_alive(pid: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-fn cleanup_named_container_blocking(container_bin: &Path, name: &str) {
-    run_container_admin_command_blocking(container_bin, ["stop", name]);
-    run_container_admin_command_blocking(container_bin, ["delete", name]);
+fn cleanup_named_container_blocking(
+    container_bin: &Path,
+    cli: ContainerCliFlavor,
+    name: &str,
+) {
+    match cli {
+        ContainerCliFlavor::AppleContainer => {
+            run_container_admin_command_blocking(container_bin, ["stop", name]);
+            run_container_admin_command_blocking(container_bin, ["delete", name]);
+        }
+        ContainerCliFlavor::Docker => {
+            run_container_admin_command_blocking(container_bin, ["rm", "-f", name]);
+        }
+    }
 }
 
-fn schedule_cleanup_named_container(container_bin: PathBuf, name: String) {
+fn schedule_cleanup_named_container(container_bin: PathBuf, cli: ContainerCliFlavor, name: String) {
     tokio::spawn(async move {
-        if let Err(error) = cleanup_named_container(&container_bin, &name).await {
+        if let Err(error) = cleanup_named_container(&container_bin, cli, &name).await {
             eprintln!("failed to clean up warm sandbox {name}: {error}");
         }
     });

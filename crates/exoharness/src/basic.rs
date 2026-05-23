@@ -12,10 +12,10 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::sandbox::{
-    AppleContainerSandboxBackend, LocalProcessSandboxBackend, ManagedSandboxBackend,
-    ManagedSandboxHandle, SANDBOX_MAIN_MOUNT_DIR, SandboxCommand, SandboxKey,
-    SandboxLifecycleConfig, SandboxMount, SandboxMountAccess, SandboxNetworkPolicy, SandboxRequest,
-    SandboxSpec,
+    LocalProcessSandboxBackend, ManagedSandboxBackend, ManagedSandboxHandle,
+    SANDBOX_MAIN_MOUNT_DIR, SandboxCommand, SandboxKey, SandboxLifecycleConfig, SandboxMount,
+    SandboxMountAccess, SandboxNetworkPolicy, SandboxRequest, SandboxSpec,
+    default_sandbox_backend,
 };
 use crate::secrets::{
     EncryptedSecret, SecretCipher, StaticSecretKeyProvider, default_secret_cipher,
@@ -54,7 +54,7 @@ impl BasicExoHarness {
         Self::new_with_components(
             storage,
             secret_cipher,
-            Arc::new(AppleContainerSandboxBackend::new()),
+            default_sandbox_backend(),
         )
         .await
     }
@@ -75,7 +75,7 @@ impl BasicExoHarness {
         Self::new_with_components(
             BasicObjectStore::new(store),
             secret_cipher,
-            Arc::new(AppleContainerSandboxBackend::new()),
+            default_sandbox_backend(),
         )
         .await
     }
