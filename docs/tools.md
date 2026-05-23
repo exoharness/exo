@@ -14,11 +14,21 @@ execute project-specific code.
 Built-in tools are maintained by the `exo` project and shipped with the harness
 runtime.
 
-Currently the only built-in tool is `shell`. The shell tool runs commands in the
-conversation sandbox, using the conversation’s configured `shellProgram`. The
-TypeScript harness exposes the model-facing tool, but execution is delegated to
-the Rust host runtime so sandbox lifecycle and process execution remain
-host-managed.
+The basic TypeScript harness exposes `shell` and, when agent tool creation is
+enabled, `install_agent_tool`. The shell tool runs commands in the conversation
+sandbox, using the conversation's configured `shellProgram`. Execution is
+delegated to the Rust host runtime so sandbox lifecycle and process execution
+remain host-managed.
+
+`install_agent_tool` writes an agent-created TypeScript tool module into
+`.exo/agent-tools/`, validates it, and updates `.exo/agent-tools/manifest.json`.
+The basic harness refreshes tools before each model round, so an installed tool
+can be used later in the same user turn.
+
+If a tool throws during execution or installation, the registry records a
+`tool_result` error instead of crashing the turn. If a previous process crash
+left a tool request without a result, prompt materialization synthesizes an error
+result so the conversation can continue.
 
 ### Library Tools
 
@@ -28,6 +38,15 @@ maintainer. They are loaded explicitly by the harness.
 
 A library tool is a TypeScript module with a default export satisfying `Tool`:
 
+- `definition.name` is the model-facing tool name.
+- `definition.parameters` is a strict JSON object schema with
+  `additionalProperties: false`.
+- `initializationParameters` validates manifest-time configuration.
+- `initialize(...)` returns a handler with `execute(args, execution)`.
+
+Tools should not use `inputSchema`, `call`, or `invoke`; those are not part of
+the `exo` tool contract.
+
 ### Agent Tools
 
 Agent tools are created by the agent itself. They use the same default-export
@@ -35,7 +54,9 @@ Agent tools are created by the agent itself. They use the same default-export
 `"agent"` instead of `"library"`.
 
 Agent tools should be treated as less trusted than built-in or library tools.
-Load them from an explicit manifest and keep the scope narrow:
+The basic harness loads them from `.exo/agent-tools/manifest.json` when agent
+tool creation is enabled. That setting is enabled by default and can be disabled
+per agent.
 
 The loader:
 
@@ -94,6 +115,17 @@ exo --harness typescript agent create "Tool Demo" \
 `--tool-manifest` may be passed more than once. Relative `modulePath` values in
 each manifest are resolved relative to that manifest file.
 
+Agent tool creation is enabled by default. Disable or re-enable it with:
+
+```bash
+exo agent create "Locked Down" \
+  --model gpt-5.4 \
+  --disable-agent-tool-creation
+
+exo agent update demo --disable-agent-tool-creation
+exo agent update demo --enable-agent-tool-creation
+```
+
 ## Safety Considerations
 
 Different tool sources have different trust levels:
@@ -107,19 +139,28 @@ Recommended defaults:
 
 - Load tools explicitly, not by scanning directories.
 - Validate initialization parameters before exposing a tool.
+- Validate generated tools against the `Tool` contract before adding them to the
+  manifest.
 - Require explicit networking enablement for tools that call external services.
 - Require confirmation for tools with external side effects.
 - Avoid persisting agent tools beyond the conversation or workspace unless a
   user reviews and promotes them.
 - Keep large logs in artifacts, not event payloads.
 
+Agent tools currently run in the TypeScript harness process. They can use Node
+built-ins, global APIs such as `fetch`, and dependencies already available to
+the harness. Dependencies installed inside the conversation sandbox are not
+automatically available to host-loaded agent tools; tools that need sandbox
+state should call sandbox APIs from their handler.
+
 ## Current Status
 
-The generic registry, built-in shell registration, library tool loading, and
+The generic registry, built-in tool registration, library tool loading, and
 agent tool manifest loading are implemented in the TypeScript harness API.
 
-The basic TypeScript harness currently opts into the built-in shell tool and
-loads library tool manifests stored on the agent config.
+The basic TypeScript harness currently opts into `shell`, library tool manifests
+stored on the agent config, and agent-created tools from
+`.exo/agent-tools/manifest.json` when agent tool creation is enabled.
 
 There is an example library tool at `examples/typescript/tools/uppercase.ts`.
 It exists to test and demonstrate the registry contract, and can be enabled with

@@ -67,10 +67,30 @@ export class HarnessToolRegistry {
   async executePending(toolCalls: PendingToolCall[]): Promise<EventData[]> {
     const events: EventData[] = [];
     for (const toolCall of toolCalls) {
-      const result = await this.executeToolCall(toolCall);
+      const result = await this.executeToolCallOrError(toolCall);
       events.push(toolResultEvent(toolCall.toolCallId, result));
     }
     return events;
+  }
+
+  private async executeToolCallOrError(
+    toolCall: PendingToolCall,
+  ): Promise<ToolResult> {
+    try {
+      return await this.executeToolCall(toolCall);
+    } catch (error) {
+      const result = {
+        ok: false,
+        error: errorMessage(error),
+      };
+      if (this.context.streaming) {
+        await this.context.stream.toolResult({
+          toolCallId: toolCall.toolCallId,
+          result,
+        });
+      }
+      return result;
+    }
   }
 
   private async executeToolCall(
@@ -103,6 +123,10 @@ export class HarnessToolRegistry {
   }
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function createToolRegistry(context: TurnContext): HarnessToolRegistry {
   return new HarnessToolRegistry(context);
 }
@@ -113,19 +137,70 @@ export async function initializeTool(
   initializationArgs: JsonObject,
   context: TurnContext,
 ): Promise<ToolInstance> {
+  validateToolDefinition(tool.definition);
   validateJsonSchema(
     tool.initializationParameters,
     initializationArgs,
     "tool initialization",
   );
+  const handler = await tool.initialize(initializationArgs, {
+    context,
+    source,
+  });
+  validateToolHandler(handler);
   return {
     definition: tool.definition,
     source,
-    handler: await tool.initialize(initializationArgs, {
-      context,
-      source,
-    }),
+    handler,
   };
+}
+
+function validateToolDefinition(definition: ToolDefinition): void {
+  if (typeof definition.name !== "string" || definition.name.length === 0) {
+    throw new Error("tool definition.name must be a non-empty string");
+  }
+  if (
+    !/^[A-Za-z0-9_-]+$/.test(definition.name) ||
+    definition.name.length > 64
+  ) {
+    throw new Error(
+      "tool definition.name must contain only letters, numbers, underscores, and dashes, and be at most 64 characters",
+    );
+  }
+  if (
+    typeof definition.description !== "string" ||
+    definition.description.length === 0
+  ) {
+    throw new Error("tool definition.description must be a non-empty string");
+  }
+  const rawDefinition = definition as unknown as { inputSchema?: unknown };
+  if (definition.parameters === undefined && rawDefinition.inputSchema) {
+    throw new Error("tool definition must use parameters, not inputSchema");
+  }
+  if (!isRecord(definition.parameters)) {
+    throw new Error("tool definition.parameters must be an object JSON schema");
+  }
+  if (definition.parameters.type !== "object") {
+    throw new Error("tool definition.parameters.type must be object");
+  }
+  if (definition.parameters.additionalProperties !== false) {
+    throw new Error(
+      "tool definition.parameters.additionalProperties must be false",
+    );
+  }
+}
+
+function validateToolHandler(handler: ToolHandler): void {
+  if (!handler || typeof handler !== "object") {
+    throw new Error("tool initialize must return a handler object");
+  }
+  const candidate = handler as { execute?: unknown; invoke?: unknown };
+  if (typeof candidate.execute !== "function" && candidate.invoke) {
+    throw new Error("tool handler must implement execute, not invoke");
+  }
+  if (typeof candidate.execute !== "function") {
+    throw new Error("tool handler must implement execute");
+  }
 }
 
 function validateJsonSchema(

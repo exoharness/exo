@@ -48,6 +48,7 @@ interface RawAgentConfig {
     module_path: string;
   } | null;
   library_tools?: RawToolManifestEntry[];
+  enable_agent_tool_creation?: boolean;
   sandbox_image?: string | null;
   enable_networking: boolean;
   model: string;
@@ -784,6 +785,7 @@ function toAgentConfig(raw: RawAgentConfig): AgentConfig {
         }
       : null,
     libraryTools: (raw.library_tools ?? []).map(toToolManifestEntry),
+    enableAgentToolCreation: raw.enable_agent_tool_creation ?? true,
     sandboxImage: raw.sandbox_image ?? null,
     enableNetworking: raw.enable_networking,
     model: raw.model,

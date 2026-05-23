@@ -125,6 +125,7 @@ where
             harness: request.harness,
             typescript: request.typescript,
             library_tools: request.library_tools,
+            enable_agent_tool_creation: request.enable_agent_tool_creation,
             sandbox_image: request.sandbox_image,
             enable_networking: request.enable_networking,
             model: request.model,

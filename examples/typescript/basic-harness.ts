@@ -3,8 +3,10 @@ import {
   defineHarness,
   materializePromptMessages,
   registerBuiltInTools,
+  registerAgentToolsFromManifestPathIfExists,
   registerLibraryToolsFromManifest,
   turnMetadata,
+  type Message,
   type TurnContext,
 } from "@exo/harness";
 import {
@@ -39,11 +41,6 @@ async function runBasicTurnLoop(
 ): Promise<string | null> {
   const { conversation, turn } = context.exoharness.current;
   const maxToolRoundTrips = context.agentConfig.maxToolRoundTrips;
-  const tools = createToolRegistry(context);
-  registerBuiltInTools(tools, context, ["shell"]);
-  await registerLibraryToolsFromManifest(tools, context, {
-    tools: context.agentConfig.libraryTools,
-  });
   let latestEventId: string | null = null;
 
   for (let round = 0; ; round += 1) {
@@ -55,9 +52,10 @@ async function runBasicTurnLoop(
       return latestEventId;
     }
 
+    const tools = await createBasicToolRegistry(context);
     const messages = await materializePromptMessages(
       conversation,
-      context.agentConfig.instructions,
+      basicHarnessInstructions(context),
     );
     const request: NativeResponsesRequest = {
       model,
@@ -107,4 +105,38 @@ async function runBasicTurnLoop(
       }
     }
   }
+}
+
+function basicHarnessInstructions(context: TurnContext): Message[] {
+  return context.agentConfig.enableAgentToolCreation
+    ? [...context.agentConfig.instructions, agentToolCreationInstruction()]
+    : context.agentConfig.instructions;
+}
+
+function agentToolCreationInstruction(): Message {
+  return {
+    role: "developer",
+    content:
+      "Agent-created tools are supported. When the user asks you to create a reusable tool, call install_agent_tool with a complete TypeScript moduleSource. Do not claim the tool was created unless install_agent_tool returns ok: true. The moduleSource must default-export a Tool from @exo/harness using { definition, initializationParameters, initialize(...) }; definition.parameters must be a strict JSON schema object with additionalProperties: false; handlers must implement execute(args, execution), not invoke or call. Do not use zod, inputSchema, or external npm packages. After install_agent_tool succeeds, the new tool is available in the next model round of the same turn, so use it directly rather than falling back to shell.",
+  };
+}
+
+async function createBasicToolRegistry(context: TurnContext) {
+  const tools = createToolRegistry(context);
+  registerBuiltInTools(tools, context, builtInToolNames(context));
+  await registerLibraryToolsFromManifest(tools, context, {
+    tools: context.agentConfig.libraryTools,
+  });
+  if (context.agentConfig.enableAgentToolCreation) {
+    await registerAgentToolsFromManifestPathIfExists(tools, context);
+  }
+  return tools;
+}
+
+function builtInToolNames(
+  context: TurnContext,
+): Array<"shell" | "install_agent_tool"> {
+  return context.agentConfig.enableAgentToolCreation
+    ? ["shell", "install_agent_tool"]
+    : ["shell"];
 }
