@@ -6,6 +6,8 @@ mod mount_tests;
 #[cfg(test)]
 mod naming_tests;
 #[cfg(test)]
+mod repl_tests;
+#[cfg(test)]
 mod secret_tests;
 mod tui;
 
@@ -69,6 +71,19 @@ enum NetworkingMode {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Start a chat REPL using a registered model, creating a default agent and
+    /// conversation if they don't exist yet.
+    Repl {
+        /// Model binding to use (defaults to the first registered model).
+        #[arg(long)]
+        model: Option<String>,
+        /// Agent slug to use or create (default: "repl").
+        #[arg(long)]
+        agent: Option<String>,
+        /// Conversation slug to use or create (default: "repl").
+        #[arg(long)]
+        conversation: Option<String>,
+    },
     Agent {
         #[command(subcommand)]
         command: AgentCommands,
@@ -312,6 +327,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     match cli.command {
+        Commands::Repl {
+            model,
+            agent,
+            conversation,
+        } => {
+            let agent_slug = agent.unwrap_or_else(|| DEFAULT_REPL_SLUG.to_string());
+            // Without --conversation, start a fresh session each run (the usual CLI
+            // behavior); pass --conversation <slug> to resume or target a specific one.
+            let conversation_slug = conversation.unwrap_or_else(generate_fun_slug);
+
+            let agent = match harness.get_agent(&agent_slug).await? {
+                Some(agent) => agent,
+                None => {
+                    let model = ensure_repl_model(harness.as_ref(), model).await?;
+                    harness
+                        .create_agent(CreateAgentRequest {
+                            slug: agent_slug.clone(),
+                            name: Some(agent_slug),
+                            harness: to_agent_harness_kind(harness_kind),
+                            typescript: None,
+                            sandbox_image: None,
+                            enable_networking: false,
+                            model,
+                            max_output_tokens: None,
+                            max_tool_round_trips: None,
+                            braintrust: None,
+                        })
+                        .await?
+                }
+            };
+
+            let conversation = match agent.get_conversation(&conversation_slug).await? {
+                Some(conversation) => conversation,
+                None => {
+                    let conversation = agent
+                        .create_conversation(CreateConversationRequest {
+                            slug: Some(conversation_slug.clone()),
+                            name: Some(conversation_slug),
+                        })
+                        .await?;
+                    // The default REPL is a plain chat: drop the shell tool so no
+                    // sandbox is provisioned. Use a regular conversation for tools.
+                    let mut config = conversation.config().await?;
+                    if config.shell_program.is_some() {
+                        config.shell_program = None;
+                        conversation.put_config(config).await?;
+                    }
+                    conversation
+                }
+            };
+
+            run_chat_repl(conversation).await?;
+        }
         Commands::Agent { command } => match command {
             AgentCommands::List => {
                 println!("AGENT\tNAME");
@@ -1078,6 +1146,7 @@ fn command_agent_ref(command: &Commands) -> Option<&str> {
                 Some(agent.as_str())
             }
         },
+        Commands::Repl { agent, .. } => Some(agent.as_deref().unwrap_or(DEFAULT_REPL_SLUG)),
         Commands::Secret { .. } | Commands::Model { .. } => None,
     }
 }
@@ -1205,6 +1274,46 @@ async fn list_model_bindings(
         });
     }
     Ok(models)
+}
+
+const DEFAULT_REPL_SLUG: &str = "repl";
+
+/// Resolves the model binding a quickstart REPL agent should use. Registering a
+/// model is left to `exo secret set` / `exo model register`, so the substrate
+/// never reads credentials from the environment on its own.
+async fn ensure_repl_model(
+    harness: &dyn Harness,
+    requested: Option<String>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let registered: Vec<String> = list_model_bindings(harness.exoharness_handle().as_ref())
+        .await?
+        .into_iter()
+        .map(|binding| binding.name)
+        .collect();
+    pick_repl_model(&registered, requested)
+}
+
+/// Picks the model an explicit request names, falling back to the first
+/// registered binding. Errors with setup guidance when neither is available.
+fn pick_repl_model(
+    registered: &[String],
+    requested: Option<String>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if let Some(requested) = requested {
+        if registered.iter().any(|name| name == &requested) {
+            return Ok(requested);
+        }
+        return Err(format!(
+            "model is not registered: {requested}; register it with `exo model register {requested} --secret <secret>`"
+        )
+        .into());
+    }
+    registered.first().cloned().ok_or_else(|| {
+        "no model is registered; set one up first:\n  \
+         exo secret set openai --env OPENAI_API_KEY\n  \
+         exo model register gpt-5.5 --secret openai"
+            .into()
+    })
 }
 
 async fn find_secret_id(
@@ -1497,5 +1606,30 @@ mod create_tests {
             chat_repl_command("rlm", "aster-lantern-47db"),
             "exo chat repl rlm aster-lantern-47db"
         );
+    }
+
+    #[test]
+    fn repl_command_parses_without_arguments() {
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from(["exo", "repl"]).expect("repl parses with no args");
+        assert!(matches!(
+            cli.command,
+            super::Commands::Repl {
+                model: None,
+                agent: None,
+                conversation: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn repl_command_accepts_overrides() {
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from(["exo", "repl", "--model", "gpt-5.4"])
+            .expect("repl parses with --model");
+        assert!(matches!(
+            cli.command,
+            super::Commands::Repl { model: Some(model), .. } if model == "gpt-5.4"
+        ));
     }
 }
