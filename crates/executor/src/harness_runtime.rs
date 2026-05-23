@@ -14,7 +14,7 @@ use bytes::Bytes;
 use exoharness::{Result, Uuid7};
 use futures::{Stream, StreamExt};
 use lingua::processing::adapter_for_format;
-use lingua::serde_json::{self as lingua_json, Value as LinguaValue};
+use lingua::serde_json as lingua_json;
 use lingua::universal::{
     AssistantContent, AssistantContentPart, TextContentPart, TokenBudget, ToolCallArguments,
     ToolChoiceConfig, ToolChoiceMode, UniversalParams, UniversalRequest, UniversalResponse,
@@ -42,11 +42,12 @@ impl ModelClient for RouterModelClient {
         let format = ProviderFormat::Responses;
         let config = resolve_runtime_config(&request, self.env.as_ref())?;
         let router = build_router(&request, format, &config)?;
-        let universal_request = build_universal_request(&request, format, false)?;
+        let universal_request = build_universal_request(&request, false)?;
         let payload = serialize_request(format, &universal_request)?;
-        let body = router
-            .complete(payload, &request.model, format, &ClientHeaders::new())
+        let (prepared, _router_metadata) = router
+            .create_request(payload, &request.model, format)
             .await?;
+        let body = router.complete(prepared, &ClientHeaders::new()).await?;
         let response = lingua::response_to_universal(body)?;
         normalize_model_response(response)
     }
@@ -55,10 +56,13 @@ impl ModelClient for RouterModelClient {
         let format = ProviderFormat::Responses;
         let config = resolve_runtime_config(&request, self.env.as_ref())?;
         let router = build_router(&request, format, &config)?;
-        let universal_request = build_universal_request(&request, format, true)?;
+        let universal_request = build_universal_request(&request, true)?;
         let payload = serialize_request(format, &universal_request)?;
+        let (prepared, _router_metadata) = router
+            .create_stream_request(payload, &request.model, format)
+            .await?;
         let raw_stream = router
-            .complete_stream(payload, &request.model, format, &ClientHeaders::new())
+            .complete_stream(prepared, &ClientHeaders::new())
             .await?;
         Ok(Box::new(RouterModelResponseStream {
             stream: map_universal_stream(raw_stream, format),
@@ -151,6 +155,7 @@ fn build_router(
         config.endpoint_template.as_deref(),
         None,
         &config.metadata,
+        None,
     )?;
 
     let mut catalog = ModelCatalog::empty();
@@ -190,14 +195,10 @@ fn build_router(
         .map_err(Into::into)
 }
 
-fn build_universal_request(
-    request: &ModelRequest,
-    format: ProviderFormat,
-    stream: bool,
-) -> Result<UniversalRequest> {
+fn build_universal_request(request: &ModelRequest, stream: bool) -> Result<UniversalRequest> {
     let tools = build_universal_tools(&request.tools)?;
     let has_tools = !tools.is_empty();
-    let mut params = UniversalParams {
+    let params = UniversalParams {
         token_budget: request.max_output_tokens.map(TokenBudget::OutputTokens),
         tools: if tools.is_empty() { None } else { Some(tools) },
         tool_choice: has_tools.then_some(ToolChoiceConfig {
@@ -208,20 +209,6 @@ fn build_universal_request(
         stream: Some(stream),
         ..Default::default()
     };
-
-    if stream
-        && matches!(
-            format,
-            ProviderFormat::ChatCompletions | ProviderFormat::Responses
-        )
-    {
-        let mut stream_options = lingua_json::Map::new();
-        stream_options.insert("include_usage".into(), LinguaValue::Bool(true));
-
-        let mut extras = lingua_json::Map::new();
-        extras.insert("stream_options".into(), LinguaValue::Object(stream_options));
-        params.extras.insert(format, extras);
-    }
 
     Ok(UniversalRequest {
         model: Some(request.model.clone()),
@@ -241,6 +228,88 @@ fn tool_definition_to_universal(tool: &ToolDefinition) -> Result<UniversalTool> 
         Some(to_lingua_value(tool.parameters.clone())),
         Some(true),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize)]
+    struct SerializedChatStreamRequest {
+        stream: Option<bool>,
+        stream_options: Option<SerializedChatStreamOptions>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SerializedChatStreamOptions {
+        include_usage: Option<bool>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SerializedResponsesStreamRequest {
+        stream: Option<bool>,
+        stream_options: Option<SerializedResponsesStreamOptions>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SerializedResponsesStreamOptions {}
+
+    fn model_request() -> ModelRequest {
+        ModelRequest {
+            model: "gpt-5.4".to_string(),
+            api_key: None,
+            base_url: None,
+            messages: Vec::new(),
+            tools: Vec::new(),
+            max_output_tokens: None,
+        }
+    }
+
+    #[test]
+    fn responses_stream_request_does_not_include_chat_usage_stream_option() {
+        let request = build_universal_request(&model_request(), true).unwrap();
+        let serialized = serialize_request(ProviderFormat::Responses, &request).unwrap();
+        let payload: SerializedResponsesStreamRequest =
+            lingua_json::from_slice(&serialized).unwrap();
+
+        assert_eq!(payload.stream, Some(true));
+        assert!(payload.stream_options.is_none());
+    }
+
+    #[test]
+    fn chat_completions_stream_request_includes_lingua_usage_stream_option() {
+        let request = build_universal_request(&model_request(), true).unwrap();
+        let serialized = serialize_request(ProviderFormat::ChatCompletions, &request).unwrap();
+        let payload: SerializedChatStreamRequest = lingua_json::from_slice(&serialized).unwrap();
+
+        assert_eq!(payload.stream, Some(true));
+        assert_eq!(
+            payload
+                .stream_options
+                .and_then(|options| options.include_usage),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn stream_accumulator_does_not_treat_chunk_id_as_assistant_message_id() {
+        let mut accumulator = UniversalResponseAccumulator::default();
+        accumulator.push(&UniversalStreamChunk::new(
+            Some("resp_123".to_string()),
+            Some("gpt-5.4".to_string()),
+            vec![lingua::UniversalStreamChoice::text_delta(0, "hello")],
+            None,
+            None,
+        ));
+
+        let response = accumulator.finalize();
+
+        assert!(matches!(
+            response.messages.as_slice(),
+            [Message::Assistant { id: None, .. }]
+        ));
+    }
 }
 
 fn serialize_request(format: ProviderFormat, request: &UniversalRequest) -> Result<Bytes> {
@@ -330,7 +399,6 @@ fn to_exoharness_arguments(
 struct UniversalResponseAccumulator {
     model: Option<String>,
     usage: Option<lingua::UniversalUsage>,
-    assistant_id: Option<String>,
     text: String,
     reasoning: Vec<String>,
     tool_calls: Vec<lingua::UniversalToolCallDelta>,
@@ -344,9 +412,6 @@ impl UniversalResponseAccumulator {
 
         if self.model.is_none() {
             self.model = chunk.model.clone();
-        }
-        if self.assistant_id.is_none() {
-            self.assistant_id = chunk.id.clone();
         }
         if let Some(usage) = &chunk.usage {
             self.usage = Some(usage.clone());
@@ -438,17 +503,17 @@ impl UniversalResponseAccumulator {
             match &content_parts[0] {
                 AssistantContentPart::Text(text) => Some(Message::Assistant {
                     content: AssistantContent::String(text.text.clone()),
-                    id: self.assistant_id.clone(),
+                    id: None,
                 }),
                 _ => Some(Message::Assistant {
                     content: AssistantContent::Array(content_parts),
-                    id: self.assistant_id.clone(),
+                    id: None,
                 }),
             }
         } else {
             Some(Message::Assistant {
                 content: AssistantContent::Array(content_parts),
-                id: self.assistant_id.clone(),
+                id: None,
             })
         };
 
