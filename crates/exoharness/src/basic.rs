@@ -18,7 +18,7 @@ use crate::sandbox::{
     SandboxSpec,
 };
 use crate::secrets::{
-    AppleKeychainSecretKeyProvider, EncryptedSecret, SecretCipher, StaticSecretKeyProvider,
+    EncryptedSecret, SecretCipher, StaticSecretKeyProvider, default_secret_cipher,
 };
 use crate::storage::BasicObjectStore;
 use crate::{
@@ -50,9 +50,7 @@ impl BasicExoHarness {
     pub async fn new(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
         let storage = BasicObjectStore::local_filesystem(&root).await?;
-        let secret_cipher = SecretCipher::new(Arc::new(AppleKeychainSecretKeyProvider::new(
-            root.to_string_lossy().to_string(),
-        )));
+        let secret_cipher = default_secret_cipher(root.to_string_lossy().to_string())?;
         Self::new_with_components(
             storage,
             secret_cipher,
@@ -73,10 +71,7 @@ impl BasicExoHarness {
     }
 
     pub async fn new_with_object_store(store: Arc<dyn object_store::ObjectStore>) -> Result<Self> {
-        let keychain_account = store.to_string();
-        let secret_cipher = SecretCipher::new(Arc::new(AppleKeychainSecretKeyProvider::new(
-            keychain_account,
-        )));
+        let secret_cipher = default_secret_cipher(store.to_string())?;
         Self::new_with_components(
             BasicObjectStore::new(store),
             secret_cipher,
@@ -89,10 +84,7 @@ impl BasicExoHarness {
         store: Arc<dyn object_store::ObjectStore>,
         sandbox_backend: Arc<dyn ManagedSandboxBackend>,
     ) -> Result<Self> {
-        let keychain_account = store.to_string();
-        let secret_cipher = SecretCipher::new(Arc::new(AppleKeychainSecretKeyProvider::new(
-            keychain_account,
-        )));
+        let secret_cipher = default_secret_cipher(store.to_string())?;
         Self::new_with_components(BasicObjectStore::new(store), secret_cipher, sandbox_backend)
             .await
     }
