@@ -42,6 +42,12 @@ struct Cli {
     root: PathBuf,
     #[arg(long, global = true, value_enum)]
     harness: Option<HarnessKind>,
+    #[arg(long, global = true, value_enum, env = "EXO_SECRET_BACKEND")]
+    secret_backend: Option<SecretBackendArg>,
+    #[arg(long, global = true, value_enum, env = "EXO_SANDBOX_BACKEND")]
+    sandbox_backend: Option<SandboxBackendArg>,
+    #[arg(long, global = true, env = "EXO_MASTER_KEY_PATH")]
+    master_key_path: Option<PathBuf>,
     #[arg(long, global = true)]
     env_file: Option<PathBuf>,
     #[arg(long, global = true)]
@@ -64,12 +70,59 @@ enum HarnessKind {
     TypeScript,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SecretBackendArg {
+    #[value(name = "apple-keychain")]
+    AppleKeychain,
+    File,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SandboxBackendArg {
+    #[value(name = "apple-container")]
+    AppleContainer,
+    Docker,
+    #[value(name = "local-process")]
+    LocalProcess,
+}
+
 fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig, Box<dyn std::error::Error>> {
+    let secret_backend = match cli.secret_backend.unwrap_or_else(default_secret_backend) {
+        SecretBackendArg::AppleKeychain => SecretBackendChoice::AppleKeychain,
+        SecretBackendArg::File => SecretBackendChoice::File {
+            path: cli.master_key_path.clone(),
+        },
+    };
+    let sandbox_backend = match cli.sandbox_backend.unwrap_or_else(default_sandbox_backend) {
+        SandboxBackendArg::AppleContainer => SandboxBackendChoice::AppleContainer,
+        SandboxBackendArg::Docker => SandboxBackendChoice::Docker,
+        SandboxBackendArg::LocalProcess => SandboxBackendChoice::LocalProcess,
+    };
     Ok(BasicExoHarnessConfig {
         root: cli.root.join("exoharness"),
-        secret_backend: SecretBackendChoice::AppleKeychain,
-        sandbox_backend: SandboxBackendChoice::AppleContainer,
+        secret_backend,
+        sandbox_backend,
     })
+}
+
+#[cfg(target_os = "macos")]
+fn default_secret_backend() -> SecretBackendArg {
+    SecretBackendArg::AppleKeychain
+}
+
+#[cfg(not(target_os = "macos"))]
+fn default_secret_backend() -> SecretBackendArg {
+    SecretBackendArg::File
+}
+
+#[cfg(target_os = "macos")]
+fn default_sandbox_backend() -> SandboxBackendArg {
+    SandboxBackendArg::AppleContainer
+}
+
+#[cfg(not(target_os = "macos"))]
+fn default_sandbox_backend() -> SandboxBackendArg {
+    SandboxBackendArg::Docker
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
