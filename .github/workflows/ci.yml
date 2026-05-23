@@ -39,8 +39,12 @@ jobs:
         run: pnpm check
 
   rust-tests:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
 
     steps:
       - name: Check out repository
