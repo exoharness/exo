@@ -4,6 +4,10 @@ export interface JsonObject {
   [key: string]: JsonValue;
 }
 
+export * from "./tools";
+export * from "./built-in-tools";
+export * from "./tool-manifest";
+
 export type MessageRole =
   | "system"
   | "developer"
@@ -94,6 +98,7 @@ export interface ToolDefinition {
   name: string;
   description: string;
   parameters: JsonValue;
+  outputSchema?: JsonValue;
 }
 
 export interface ToolRequest {
@@ -607,32 +612,6 @@ export function toolResultMessage(
       },
     ],
   };
-}
-
-export function buildShellToolDefinitions(
-  config: ConversationConfig,
-): ToolDefinition[] {
-  if (!config.shellProgram) {
-    return [];
-  }
-
-  return [
-    {
-      name: "shell",
-      description: `Run a shell command using ${config.shellProgram}.`,
-      parameters: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          command: {
-            type: "string",
-            description: "Shell command to execute.",
-          },
-        },
-        required: ["command"],
-      },
-    },
-  ];
 }
 
 export function filterMessages(
