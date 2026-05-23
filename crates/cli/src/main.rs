@@ -333,22 +333,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             conversation,
         } => {
             let agent_slug = agent.unwrap_or_else(|| DEFAULT_REPL_SLUG.to_string());
-            let conversation_slug = conversation.unwrap_or_else(|| DEFAULT_REPL_SLUG.to_string());
+            // Without --conversation, start a fresh session each run (the usual CLI
+            // behavior); pass --conversation <slug> to resume or target a specific one.
+            let conversation_slug = conversation.unwrap_or_else(generate_fun_slug);
 
-            let existing_agent = harness.get_agent(&agent_slug).await?;
-            if existing_agent.is_some() && model.is_some() {
-                eprintln!(
-                    "note: agent '{agent_slug}' already exists; --model only applies when creating it"
-                );
-            }
-            let agent = match existing_agent {
+            let agent = match harness.get_agent(&agent_slug).await? {
                 Some(agent) => agent,
                 None => {
                     let model = ensure_repl_model(harness.as_ref(), model).await?;
-                    let agent = harness
+                    harness
                         .create_agent(CreateAgentRequest {
-                            slug: agent_slug,
-                            name: Some("REPL".to_string()),
+                            slug: agent_slug.clone(),
+                            name: Some(agent_slug),
                             harness: to_agent_harness_kind(harness_kind),
                             typescript: None,
                             sandbox_image: None,
@@ -358,13 +354,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             max_tool_round_trips: None,
                             braintrust: None,
                         })
-                        .await?;
-                    println!(
-                        "created agent {} ({})",
-                        agent.record().slug,
-                        agent.record().id
-                    );
-                    agent
+                        .await?
                 }
             };
 
@@ -373,8 +363,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => {
                     let conversation = agent
                         .create_conversation(CreateConversationRequest {
-                            slug: Some(conversation_slug),
-                            name: Some("REPL".to_string()),
+                            slug: Some(conversation_slug.clone()),
+                            name: Some(conversation_slug),
                         })
                         .await?;
                     // The default REPL is a plain chat: drop the shell tool so no
