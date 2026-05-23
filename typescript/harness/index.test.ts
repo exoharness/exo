@@ -17,6 +17,7 @@ import {
   type ToolResult,
   type TurnContext,
 } from "./index";
+import ircTool from "../../examples/typescript/tools/irc";
 import uppercaseTool from "../../examples/typescript/tools/uppercase";
 
 describe("HarnessToolRegistry", () => {
@@ -249,6 +250,49 @@ describe("library tool modules", () => {
     ).resolves.toEqual([
       toolResultEvent("call_1", {
         text: "result: HELLO",
+      }),
+    ]);
+  });
+
+  it("initializes and executes the demo IRC tool in dry-run mode", async () => {
+    const context = fakeTurnContext();
+    const tool = await initializeTool(
+      ircTool,
+      "library",
+      {
+        server: "irc.example.test",
+        port: 6697,
+        nick: "exo-agent",
+        username: "exo",
+        realname: "Exo Agent",
+        tls: true,
+        dryRun: true,
+        passwordSecretId: null,
+      },
+      context,
+    );
+    const registry = createToolRegistry(context).register(tool);
+
+    expect(registry.definitions()).toEqual([ircTool.definition]);
+    await expect(
+      registry.executePending([
+        {
+          toolCallId: "call_1",
+          request: {
+            functionName: "irc_send_message",
+            arguments: {
+              channel: "#exo",
+              text: "hello",
+            },
+          },
+        },
+      ]),
+    ).resolves.toEqual([
+      toolResultEvent("call_1", {
+        ok: true,
+        dryRun: true,
+        server: "irc.example.test",
+        channel: "#exo",
       }),
     ]);
   });
