@@ -21,3 +21,4 @@ tokio-stream.workspace = true
 
 [dev-dependencies]
 tempfile = "3.23.0"
+wiremock = "0.6"

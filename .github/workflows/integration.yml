@@ -1,0 +1,35 @@
+name: Integration tests
+
+# Runs the heavier integration tests (real Docker, real binary spawn,
+# wiremock-backed fake OpenAI) that we don't want on every PR. Triggers
+# on push to main (post-merge confirmation) and manual workflow dispatch.
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-integration-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Cache Rust dependencies and build output
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+
+      - name: Verify Docker is available
+        run: docker info
+
+      - name: Run integration tests
+        run: cargo test --workspace --all-targets -- --ignored
