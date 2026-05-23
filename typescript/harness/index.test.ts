@@ -291,6 +291,8 @@ describe("library tool modules", () => {
       toolResultEvent("call_1", {
         ok: true,
         dryRun: true,
+        registered: false,
+        joined: false,
         server: "irc.example.test",
         channel: "#exo",
       }),
@@ -468,6 +470,7 @@ function fakeTurnContext(
       instructions: [],
       harness: "typescript",
       typescript: null,
+      libraryTools: [],
       sandboxImage: null,
       enableNetworking: false,
       model: "test-model",

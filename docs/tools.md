@@ -79,6 +79,21 @@ For example, an IRC tool might take `passwordSecretId` as an initialization
 parameter. The tool handler can resolve the secret at execution time through the
 exoharness API.
 
+## Command Line Loading
+
+TypeScript agents can load library tools from manifest files when the agent is
+created or updated:
+
+```bash
+exo --harness typescript agent create "Tool Demo" \
+  --module examples/typescript/basic-harness.ts \
+  --model gpt-5.4 \
+  --tool-manifest examples/typescript/tools/uppercase.manifest.json
+```
+
+`--tool-manifest` may be passed more than once. Relative `modulePath` values in
+each manifest are resolved relative to that manifest file.
+
 ## Safety Considerations
 
 Different tool sources have different trust levels:
@@ -103,10 +118,9 @@ Recommended defaults:
 The generic registry, built-in shell registration, library tool loading, and
 agent tool manifest loading are implemented in the TypeScript harness API.
 
-The basic TypeScript harness currently opts into only the built-in shell tool.
-Library and agent tools can be registered by harnesses using the manifest
-helpers, but the basic harness does not load manifests automatically yet.
+The basic TypeScript harness currently opts into the built-in shell tool and
+loads library tool manifests stored on the agent config.
 
 There is an example library tool at `examples/typescript/tools/uppercase.ts`.
-It exists to test and demonstrate the registry contract; no example harness
-exposes it to a model by default.
+It exists to test and demonstrate the registry contract, and can be enabled with
+`examples/typescript/tools/uppercase.manifest.json`.

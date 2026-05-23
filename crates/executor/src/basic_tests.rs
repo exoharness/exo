@@ -988,6 +988,7 @@ fn default_agent_config() -> AgentConfig {
         instructions: Vec::new(),
         harness: crate::AgentHarnessKind::Basic,
         typescript: None,
+        library_tools: Vec::new(),
         sandbox_image: None,
         enable_networking: false,
         model: "test-model".to_string(),

@@ -3,6 +3,7 @@ import {
   defineHarness,
   materializePromptMessages,
   registerBuiltInTools,
+  registerLibraryToolsFromManifest,
   turnMetadata,
   type TurnContext,
 } from "@exo/harness";
@@ -40,6 +41,9 @@ async function runBasicTurnLoop(
   const maxToolRoundTrips = context.agentConfig.maxToolRoundTrips;
   const tools = createToolRegistry(context);
   registerBuiltInTools(tools, context, ["shell"]);
+  await registerLibraryToolsFromManifest(tools, context, {
+    tools: context.agentConfig.libraryTools,
+  });
   let latestEventId: string | null = null;
 
   for (let round = 0; ; round += 1) {

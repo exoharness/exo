@@ -27,6 +27,10 @@ export interface AgentConfig {
   typescript?: {
     modulePath: string;
   } | null;
+  libraryTools: Array<{
+    modulePath: string;
+    initialization: JsonObject;
+  }>;
   sandboxImage?: string | null;
   enableNetworking: boolean;
   model: string;

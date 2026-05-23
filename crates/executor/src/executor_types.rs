@@ -23,6 +23,8 @@ pub struct AgentConfig {
     #[serde(default)]
     pub typescript: Option<TypeScriptHarnessConfig>,
     #[serde(default)]
+    pub library_tools: Vec<ToolManifestEntry>,
+    #[serde(default)]
     pub sandbox_image: Option<String>,
     #[serde(default)]
     pub enable_networking: bool,
@@ -45,6 +47,12 @@ pub enum AgentHarnessKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypeScriptHarnessConfig {
     pub module_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolManifestEntry {
+    pub module_path: String,
+    pub initialization: Value,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]

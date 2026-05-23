@@ -124,6 +124,7 @@ where
             instructions: Vec::new(),
             harness: request.harness,
             typescript: request.typescript,
+            library_tools: request.library_tools,
             sandbox_image: request.sandbox_image,
             enable_networking: request.enable_networking,
             model: request.model,
