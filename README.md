@@ -62,7 +62,7 @@ Register a model, then drop into a REPL:
 
 ```bash
 ./target/debug/exo secret set openai --env OPENAI_API_KEY
-./target/debug/exo model register gpt-5.4 --secret openai
+./target/debug/exo model register gpt-5.5 --secret openai
 ./target/debug/exo repl
 ```
 
@@ -76,7 +76,7 @@ you intentionally want the shell to expand the value.
 For explicit control over agents, conversations, or a shell-enabled sandbox:
 
 ```bash
-./target/debug/exo agent create --model gpt-5.4 "Sandbox Example"
+./target/debug/exo agent create --model gpt-5.5 "Sandbox Example"
 ./target/debug/exo conversation create sandbox-example "Local Dev"
 ./target/debug/exo chat repl sandbox-example local-dev
 ```
@@ -98,7 +98,7 @@ Then create an agent backed by a TypeScript harness module:
 ```bash
 ./target/debug/exo --harness typescript agent create "TS Basic" \
   --module examples/typescript/basic-harness.ts \
-  --model gpt-5.4
+  --model gpt-5.5
 ```
 
 The `examples/typescript` directory also contains Codex, Claude Code, Cursor,

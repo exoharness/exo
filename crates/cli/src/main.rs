@@ -374,11 +374,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         config.shell_program = None;
                         conversation.put_config(config).await?;
                     }
-                    println!(
-                        "created conversation {} ({})",
-                        conversation.record().slug,
-                        conversation.record().id
-                    );
                     conversation
                 }
             };
@@ -1316,7 +1311,7 @@ fn pick_repl_model(
     registered.first().cloned().ok_or_else(|| {
         "no model is registered; set one up first:\n  \
          exo secret set openai --env OPENAI_API_KEY\n  \
-         exo model register gpt-5.4 --secret openai"
+         exo model register gpt-5.5 --secret openai"
             .into()
     })
 }
