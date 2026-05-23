@@ -115,8 +115,10 @@ impl SecretKeyProvider for AppleKeychainSecretKeyProvider {
             }
             Err(error) => return Err(error.into()),
         };
-        let _ = self.key.set(key);
-        Ok(key)
+        match self.key.set(key) {
+            Ok(()) => Ok(key),
+            Err(key) => Ok(self.key.get().copied().unwrap_or(key)),
+        }
     }
 }
 
