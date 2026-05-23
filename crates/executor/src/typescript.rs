@@ -23,10 +23,11 @@ use tokio::process::{Child, ChildStdout, Command};
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 
+use crate::conversation_sandbox::ensure_conversation_sandbox;
 use crate::execution_tracing::TurnExecutionTrace;
 use crate::harness_executor::{ExecutorHarnessRuntime, ExecutorStreamMode, HarnessExecutor};
 use crate::harness_facade::{SharedHarness, SharedHarnessBacked};
-use crate::harness_tool::{BasicToolRuntime, ensure_shell_sandbox};
+use crate::harness_tool::{BasicToolRuntime, ExoclawToolRuntime};
 use crate::shared::try_send_stream_event;
 use crate::{
     AgentConfig, BraintrustRuntimeConfig, ConversationConfig, ExecutionStreamEvent, SendRequest,
@@ -496,7 +497,7 @@ impl TypeScriptRunnerProcess {
         env: HashMap<String, String>,
     ) -> Result<RuntimeResponsePayload> {
         let sandbox_id =
-            ensure_shell_sandbox(conversation, agent_config, conversation_config).await?;
+            ensure_conversation_sandbox(conversation, agent_config, conversation_config).await?;
         let process = conversation
             .run_in_sandbox(RunInSandboxRequest {
                 id: sandbox_id,
@@ -597,6 +598,30 @@ impl TypeScriptHarness<BasicToolRuntime> {
         let exoharness: Arc<dyn ExoHarness> =
             Arc::new(BasicExoHarness::new(root.join("exoharness")).await?);
         let tools = Arc::new(BasicToolRuntime);
+        let runtime = ExecutorHarnessRuntime::new(
+            TypeScriptExecutor::new(Arc::clone(&exoharness), workspace_root, env, tools),
+            runtime_config,
+        );
+        Ok(Self {
+            inner: SharedHarness::new(exoharness, runtime),
+        })
+    }
+}
+
+impl TypeScriptHarness<ExoclawToolRuntime> {
+    pub async fn exoclaw_from_root(
+        root: impl AsRef<Path>,
+        runtime_config: Option<BraintrustRuntimeConfig>,
+        env: HashMap<String, String>,
+    ) -> Result<Self> {
+        let workspace_root = std::env::current_dir()
+            .context("failed to resolve current directory for Exoclaw harness")?;
+        let root = root.as_ref();
+        let exoharness: Arc<dyn ExoHarness> =
+            Arc::new(BasicExoHarness::new(root.join("exoharness")).await?);
+        let tools = Arc::new(ExoclawToolRuntime::with_scheduler_root(
+            root.join("scheduled-tasks"),
+        ));
         let runtime = ExecutorHarnessRuntime::new(
             TypeScriptExecutor::new(Arc::clone(&exoharness), workspace_root, env, tools),
             runtime_config,

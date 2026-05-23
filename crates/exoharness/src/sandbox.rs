@@ -129,6 +129,7 @@ struct WarmSandboxEntry {
     name: String,
     request: SandboxRequest,
     last_used_at: Instant,
+    owned: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -262,7 +263,7 @@ impl AppleContainerSandboxBackend {
                 .iter()
                 .filter_map(|(key, entry)| {
                     let ttl = entry.request.lifecycle.idle_ttl?;
-                    (entry.last_used_at + ttl <= now).then(|| key.clone())
+                    (entry.owned && entry.last_used_at + ttl <= now).then(|| key.clone())
                 })
                 .collect::<Vec<_>>();
 
@@ -273,7 +274,9 @@ impl AppleContainerSandboxBackend {
         };
 
         for entry in expired {
-            cleanup_named_container(&self.container_bin, &entry.name).await?;
+            if entry.owned {
+                cleanup_named_container(&self.container_bin, &entry.name).await?;
+            }
         }
 
         Ok(())
@@ -293,7 +296,7 @@ impl Drop for AppleContainerSandboxBackend {
         };
         let names = warm_sandboxes
             .drain()
-            .map(|(_, entry)| entry.name)
+            .filter_map(|(_, entry)| entry.owned.then_some(entry.name))
             .collect::<Vec<_>>();
         for name in names {
             cleanup_named_container_blocking(&self.container_bin, &name);
@@ -331,11 +334,19 @@ impl ManagedSandboxBackend for AppleContainerSandboxBackend {
                 None => None,
             }
         };
-        if let Some(entry) = replaced {
+        if let Some(entry) = replaced
+            && entry.owned
+        {
             schedule_cleanup_named_container(self.container_bin.clone(), entry.name);
         }
 
-        let name = create_unique_warm_sandbox(&self.container_bin, &request).await?;
+        let (name, owned) = match find_running_warm_sandbox(&self.container_bin, &request).await? {
+            Some(name) => (name, false),
+            None => (
+                create_unique_warm_sandbox(&self.container_bin, &request).await?,
+                true,
+            ),
+        };
 
         {
             let mut warm_sandboxes = self.warm_sandboxes.lock().await;
@@ -345,6 +356,7 @@ impl ManagedSandboxBackend for AppleContainerSandboxBackend {
                     name: name.clone(),
                     request: request.clone(),
                     last_used_at: Instant::now(),
+                    owned,
                 },
             );
         }
@@ -432,7 +444,9 @@ impl ManagedSandboxHandle for AppleWarmSandboxHandle {
             warm_sandboxes.remove(&self.request.key)
         };
 
-        if let Some(entry) = removed {
+        if let Some(entry) = removed
+            && entry.owned
+        {
             cleanup_named_container(&self.container_bin, &entry.name).await
         } else {
             Ok(())
@@ -601,6 +615,40 @@ async fn create_unique_warm_sandbox(
     ))
 }
 
+async fn find_running_warm_sandbox(
+    container_bin: &Path,
+    request: &SandboxRequest,
+) -> Result<Option<String>> {
+    let output = run_container_admin_command(
+        container_bin,
+        WARM_SANDBOX_CLEANUP_TIMEOUT,
+        ["list", "--format", "json"],
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "failed to list warm sandboxes: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let spec_hash = sandbox_spec_hash(&request.spec);
+    let containers: Vec<ContainerListItem> = serde_json::from_slice(&output.stdout)?;
+    Ok(containers.into_iter().find_map(|container| {
+        if container.status.as_deref() != Some("running") {
+            return None;
+        }
+        let labels = &container.configuration.labels;
+        let key_matches = labels
+            .get(WARM_SANDBOX_KEY_LABEL)
+            .is_some_and(|value| value == &request.key.to_string());
+        let spec_matches = labels
+            .get(WARM_SANDBOX_SPEC_HASH_LABEL)
+            .is_some_and(|value| value == &spec_hash);
+        (key_matches && spec_matches).then_some(container.configuration.id)
+    }))
+}
+
 async fn ensure_warm_sandbox_ready(
     container_bin: &Path,
     request: &SandboxRequest,
@@ -615,35 +663,51 @@ async fn ensure_warm_sandbox_ready(
     };
 
     let mut warm_sandboxes = warm_sandboxes.lock().await;
-    let current_name = match warm_sandboxes.get_mut(&request.key) {
+    let (current_name, current_owned) = match warm_sandboxes.get_mut(&request.key) {
         Some(entry) if entry.request.spec == request.spec => {
             entry.last_used_at = Instant::now();
-            entry.name.clone()
+            (entry.name.clone(), entry.owned)
         }
         Some(_) => {
             let stale = warm_sandboxes
                 .remove(&request.key)
                 .expect("entry disappeared while locked");
-            schedule_cleanup_named_container(container_bin.to_path_buf(), stale.name);
-            let name = create_unique_warm_sandbox(container_bin, request).await?;
+            if stale.owned {
+                schedule_cleanup_named_container(container_bin.to_path_buf(), stale.name);
+            }
+            let (name, owned) = match find_running_warm_sandbox(container_bin, request).await? {
+                Some(name) => (name, false),
+                None => (
+                    create_unique_warm_sandbox(container_bin, request).await?,
+                    true,
+                ),
+            };
             warm_sandboxes.insert(
                 request.key.clone(),
                 WarmSandboxEntry {
                     name: name.clone(),
                     request: request.clone(),
                     last_used_at: Instant::now(),
+                    owned,
                 },
             );
             return Ok(name);
         }
         None => {
-            let name = create_unique_warm_sandbox(container_bin, request).await?;
+            let (name, owned) = match find_running_warm_sandbox(container_bin, request).await? {
+                Some(name) => (name, false),
+                None => (
+                    create_unique_warm_sandbox(container_bin, request).await?,
+                    true,
+                ),
+            };
             warm_sandboxes.insert(
                 request.key.clone(),
                 WarmSandboxEntry {
                     name: name.clone(),
                     request: request.clone(),
                     last_used_at: Instant::now(),
+                    owned,
                 },
             );
             return Ok(name);
@@ -658,17 +722,26 @@ async fn ensure_warm_sandbox_ready(
         return Ok(current_name);
     }
 
-    let replacement_name = create_unique_warm_sandbox(container_bin, request).await?;
+    let (replacement_name, owned) = match find_running_warm_sandbox(container_bin, request).await? {
+        Some(name) => (name, false),
+        None => (
+            create_unique_warm_sandbox(container_bin, request).await?,
+            true,
+        ),
+    };
     warm_sandboxes.insert(
         request.key.clone(),
         WarmSandboxEntry {
             name: replacement_name.clone(),
             request: request.clone(),
             last_used_at: Instant::now(),
+            owned,
         },
     );
     drop(warm_sandboxes);
-    schedule_cleanup_named_container(container_bin.to_path_buf(), current_name);
+    if current_owned {
+        schedule_cleanup_named_container(container_bin.to_path_buf(), current_name);
+    }
     Ok(replacement_name)
 }
 
@@ -972,14 +1045,10 @@ async fn reap_orphaned_warm_sandboxes(container_bin: &Path) -> Result<()> {
         if now - started_date < ORPHANED_WARM_SANDBOX_MIN_AGE.as_secs_f64() {
             continue;
         }
-        if let Err(error) =
-            cleanup_named_container(container_bin, &container.configuration.id).await
-        {
-            eprintln!(
-                "failed to clean up orphaned warm sandbox {}: {error}",
-                container.configuration.id
-            );
-        }
+        schedule_cleanup_named_container_silent(
+            container_bin.to_path_buf(),
+            container.configuration.id,
+        );
     }
 
     Ok(())
@@ -1015,6 +1084,12 @@ fn schedule_cleanup_named_container(container_bin: PathBuf, name: String) {
         if let Err(error) = cleanup_named_container(&container_bin, &name).await {
             eprintln!("failed to clean up warm sandbox {name}: {error}");
         }
+    });
+}
+
+fn schedule_cleanup_named_container_silent(container_bin: PathBuf, name: String) {
+    tokio::spawn(async move {
+        let _ = cleanup_named_container(&container_bin, &name).await;
     });
 }
 

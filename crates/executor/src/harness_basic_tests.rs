@@ -327,7 +327,11 @@ async fn send_executes_shell_tool_when_enabled() {
             usage: None,
         },
     ]));
-    let harness = BasicHarness::new(exoharness, Arc::clone(&model), Arc::new(BasicToolRuntime));
+    let harness = BasicHarness::new(
+        exoharness,
+        Arc::clone(&model),
+        Arc::new(BasicToolRuntime::default()),
+    );
     register_test_models(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness
@@ -474,7 +478,7 @@ async fn harness_exposes_raw_exoharness_handles() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn updating_mounts_recreates_shell_sandbox() {
+async fn updating_mounts_recreates_conversation_sandbox() {
     let tempdir = TempDir::new().expect("tempdir should exist");
     let mount_dir = tempdir.path().join("mount");
     std::fs::create_dir_all(&mount_dir).expect("mount dir should exist");
@@ -498,7 +502,7 @@ async fn updating_mounts_recreates_shell_sandbox() {
             usage: None,
         },
     ]));
-    let harness = BasicHarness::new(exoharness, model, Arc::new(BasicToolRuntime));
+    let harness = BasicHarness::new(exoharness, model, Arc::new(BasicToolRuntime::default()));
     register_test_models(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness

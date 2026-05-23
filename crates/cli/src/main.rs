@@ -5,6 +5,7 @@ mod env_tests;
 mod mount_tests;
 #[cfg(test)]
 mod naming_tests;
+mod schedule;
 #[cfg(test)]
 mod secret_tests;
 mod tui;
@@ -12,15 +13,17 @@ mod tui;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use executor::{
     AgentHarnessKind, BasicExoHarness, BasicHarness, Binding, BraintrustProject,
     BraintrustRuntimeConfig, BraintrustTracingConfig, ConversationModelConfig, CreateAgentRequest,
-    CreateConversationRequest, EventQuery, EventQueryDirection, ExoHarness, FileSystemMount,
-    FileSystemMountMode, ForkConversationRequest, Harness, HarnessAgent, HarnessConversation,
-    PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR, Secret, SendRequest, ToolManifestEntry,
-    TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, load_agent_config,
+    CreateConversationRequest, EventQuery, EventQueryDirection, ExoHarness, ExoclawToolRuntime,
+    FileSystemMount, FileSystemMountMode, ForkConversationRequest, Harness, HarnessAgent,
+    HarnessConversation, PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR, Secret,
+    ToolManifestEntry, TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, load_agent_config,
+    send_conversation_wakeup,
 };
 use lingua::Message;
 use lingua::universal::{AssistantContent, AssistantContentPart, ToolContentPart, UserContent};
@@ -59,6 +62,7 @@ enum HarnessKind {
     Rlm,
     #[value(name = "typescript")]
     TypeScript,
+    Exoclaw,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -88,6 +92,10 @@ enum Commands {
     Model {
         #[command(subcommand)]
         command: ModelCommands,
+    },
+    Schedule {
+        #[command(subcommand)]
+        command: schedule::ScheduleCommands,
     },
 }
 
@@ -324,6 +332,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     match cli.command {
+        Commands::Schedule { command } => {
+            schedule::handle_schedule_command(&cli.root, Arc::clone(&harness), command).await?;
+        }
         Commands::Agent { command } => match command {
             AgentCommands::List => {
                 println!("AGENT\tNAME");
@@ -563,9 +574,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if !changed {
                     return Err("no changes provided".into());
                 }
-                if config.harness == AgentHarnessKind::TypeScript && config.typescript.is_none() {
+                if matches!(
+                    config.harness,
+                    AgentHarnessKind::TypeScript | AgentHarnessKind::Exoclaw
+                ) && config.typescript.is_none()
+                {
                     return Err(
-                        "typescript agents require a module path; pass --module <path>".into(),
+                        "TypeScript and Exoclaw agents require a module path; pass --module <path>"
+                            .into(),
                     );
                 }
                 agent.put_config(config).await?;
@@ -1002,15 +1018,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let conversation =
                     must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
                 let previous_messages = conversation.messages().await?;
-                let result = conversation
-                    .send(SendRequest {
-                        input: vec![Message::User {
-                            content: UserContent::String(prompt),
-                        }],
-                        session_id: None,
-                    })
-                    .await?;
-                conversation.close_session(result.session_id).await?;
+                send_conversation_wakeup(conversation.as_ref(), prompt).await?;
                 let messages = conversation.messages().await?;
                 for message in &messages[previous_messages.len()..] {
                     print_message(message);
@@ -1140,7 +1148,7 @@ fn command_agent_ref(command: &Commands) -> Option<&str> {
                 Some(agent.as_str())
             }
         },
-        Commands::Secret { .. } | Commands::Model { .. } => None,
+        Commands::Secret { .. } | Commands::Model { .. } | Commands::Schedule { .. } => None,
     }
 }
 
@@ -1180,6 +1188,14 @@ async fn instantiate_harness(
         HarnessKind::TypeScript => {
             Arc::new(TypeScriptHarness::from_root(root, runtime_config, env_vars).await?)
         }
+        HarnessKind::Exoclaw => Arc::new(
+            TypeScriptHarness::<ExoclawToolRuntime>::exoclaw_from_root(
+                root,
+                runtime_config,
+                env_vars,
+            )
+            .await?,
+        ),
     };
     Ok(harness)
 }
@@ -1189,6 +1205,7 @@ fn to_agent_harness_kind(kind: HarnessKind) -> AgentHarnessKind {
         HarnessKind::Basic => AgentHarnessKind::Basic,
         HarnessKind::Rlm => AgentHarnessKind::Rlm,
         HarnessKind::TypeScript => AgentHarnessKind::TypeScript,
+        HarnessKind::Exoclaw => AgentHarnessKind::Exoclaw,
     }
 }
 
@@ -1197,6 +1214,7 @@ fn from_agent_harness_kind(kind: AgentHarnessKind) -> HarnessKind {
         AgentHarnessKind::Basic => HarnessKind::Basic,
         AgentHarnessKind::Rlm => HarnessKind::Rlm,
         AgentHarnessKind::TypeScript => HarnessKind::TypeScript,
+        AgentHarnessKind::Exoclaw => HarnessKind::Exoclaw,
     }
 }
 
@@ -1205,6 +1223,7 @@ fn format_harness_kind(kind: AgentHarnessKind) -> &'static str {
         AgentHarnessKind::Basic => "basic",
         AgentHarnessKind::Rlm => "rlm",
         AgentHarnessKind::TypeScript => "typescript",
+        AgentHarnessKind::Exoclaw => "exoclaw",
     }
 }
 
@@ -1213,11 +1232,13 @@ fn build_typescript_harness_config(
     module: Option<&Path>,
 ) -> Result<Option<TypeScriptHarnessConfig>, Box<dyn std::error::Error>> {
     match (harness_kind, module) {
-        (HarnessKind::TypeScript, Some(module)) => {
+        (HarnessKind::TypeScript | HarnessKind::Exoclaw, Some(module)) => {
             Ok(Some(resolve_typescript_module_path(module)?))
         }
-        (HarnessKind::TypeScript, None) => Err("typescript agents require --module <path>".into()),
-        (_, Some(_)) => Err("--module is only valid with --harness typescript".into()),
+        (HarnessKind::TypeScript | HarnessKind::Exoclaw, None) => {
+            Err("TypeScript and Exoclaw agents require --module <path>".into())
+        }
+        (_, Some(_)) => Err("--module is only valid with --harness typescript or exoclaw".into()),
         (_, None) => Ok(None),
     }
 }
@@ -1255,8 +1276,11 @@ fn load_tool_manifests(
     if paths.is_empty() {
         return Ok(Vec::new());
     }
-    if harness_kind != AgentHarnessKind::TypeScript {
-        return Err("--tool-manifest is only valid with TypeScript agents".into());
+    if !matches!(
+        harness_kind,
+        AgentHarnessKind::TypeScript | AgentHarnessKind::Exoclaw
+    ) {
+        return Err("--tool-manifest is only valid with TypeScript or Exoclaw agents".into());
     }
 
     let mut tools = Vec::new();
@@ -1486,26 +1510,41 @@ async fn must_get_conversation(
 }
 
 pub(crate) fn print_message(message: &Message) {
+    let timestamp = compact_timestamp();
     match message {
         Message::User { content } => {
-            println!("user: {}", render_user_content(content));
+            println!("{timestamp} user: {}", render_user_content(content));
         }
         Message::Assistant { content, .. } => {
-            println!("assistant: {}", render_assistant_content(content));
+            println!(
+                "{timestamp} assistant: {}",
+                render_assistant_content(content)
+            );
         }
         Message::Tool { content } => {
             for part in content {
                 let ToolContentPart::ToolResult(result) = part;
-                println!("tool {}: {}", result.tool_name, result.output);
+                println!("{timestamp} tool {}: {}", result.tool_name, result.output);
             }
         }
         Message::System { content } => {
-            println!("system: {}", render_user_content(content));
+            println!("{timestamp} system: {}", render_user_content(content));
         }
         Message::Developer { content } => {
-            println!("developer: {}", render_user_content(content));
+            println!("{timestamp} developer: {}", render_user_content(content));
         }
     }
+}
+
+pub(crate) fn compact_timestamp() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() % 86_400)
+        .unwrap_or(0);
+    let hours = seconds / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let seconds = seconds % 60;
+    format!("[{hours:02}:{minutes:02}:{seconds:02}]")
 }
 
 fn render_user_content(content: &UserContent) -> String {
