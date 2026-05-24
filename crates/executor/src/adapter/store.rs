@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tokio::fs;
 
-use crate::adapter_types::{
+use super::types::{
     AdapterBuildStatus, AdapterEventRecord, AdapterEventType, AdapterOutboundMessageRecord,
     AdapterRecord, NewAdapter, now_ms,
 };
@@ -294,8 +294,8 @@ async fn remove_dir_if_exists(path: PathBuf) -> Result<()> {
 mod tests {
     use tempfile::TempDir;
 
-    use crate::adapter_types::{
-        AdapterConfig, AdapterEventType, AdapterSource, IrcAdapterConfig, IrcTriggerPolicy,
+    use super::super::types::{
+        AdapterConfig, AdapterEventType, AdapterSource, WorkerAdapterConfig,
     };
 
     use super::*;
@@ -310,16 +310,13 @@ mod tests {
                 conversation_id: "conversation".to_string(),
                 name: "irc".to_string(),
                 source: AdapterSource::BuiltIn,
-                config: AdapterConfig::Irc(IrcAdapterConfig {
-                    server: "irc.example.com".to_string(),
-                    port: 6667,
-                    tls: false,
-                    nick: "exo".to_string(),
-                    username: "exo".to_string(),
-                    realname: "Exo".to_string(),
-                    channel: "#exo".to_string(),
-                    password_secret_id: None,
-                    trigger: IrcTriggerPolicy::Mention,
+                config: AdapterConfig::Worker(WorkerAdapterConfig {
+                    adapter_type: "irc".to_string(),
+                    worker_command: vec!["node".to_string(), "irc.js".to_string()],
+                    initialization: serde_json::json!({}),
+                    capabilities: vec!["receive".to_string(), "send_message".to_string()],
+                    state_dir: None,
+                    secret_env: Vec::new(),
                 }),
             })
             .await

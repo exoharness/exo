@@ -2,10 +2,10 @@ use exoharness::{AgentHandle, ConversationHandle, Result, ToolRequest, ToolResul
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::adapter_registry::{adapter_definition, validate_adapter_build};
-use crate::adapter_runtime::send_adapter_message_with_handles;
-use crate::adapter_store::AdapterStore;
-use crate::adapter_types::{AdapterBuildStatus, AdapterConfig, AdapterSource, NewAdapter};
+use super::registry::{adapter_definition, validate_adapter_build};
+use super::runtime::send_adapter_message_with_handles;
+use super::store::AdapterStore;
+use super::types::{AdapterBuildStatus, AdapterConfig, AdapterSource, NewAdapter};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -217,16 +217,13 @@ mod tests {
                     "name": "irc",
                     "source": "built_in",
                     "config": {
-                        "type": "irc",
-                        "server": "irc.example.com",
-                        "port": 6667,
-                        "tls": false,
-                        "nick": "exo",
-                        "username": "exo",
-                        "realname": "Exo",
-                        "channel": "#exo",
-                        "passwordSecretId": null,
-                        "trigger": "mention"
+                        "type": "worker",
+                        "adapterType": "irc",
+                        "workerCommand": ["node", "irc.js"],
+                        "initialization": {},
+                        "capabilities": ["receive", "send_message"],
+                        "stateDir": null,
+                        "secretEnv": []
                     }
                 })
                 .as_object()

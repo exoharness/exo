@@ -2,43 +2,59 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 
-use crate::adapter_types::WhatsappAdapterConfig;
+use super::types::WorkerAdapterConfig;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WorkerCommand {
-    SendMessage { target: String, text: String },
+    SendMessage {
+        #[serde(default)]
+        target: Option<String>,
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WorkerEvent {
-    Qr {
-        qr: String,
-    },
     Connected {
-        jid: Option<String>,
+        #[serde(default)]
+        subject: Option<String>,
+        #[serde(default)]
+        metadata: Value,
     },
     Message {
-        chat_id: String,
+        target: String,
+        #[serde(default)]
         sender: Option<String>,
         text: String,
+        #[serde(default)]
         message_id: Option<String>,
+        #[serde(default)]
+        metadata: Value,
+    },
+    Lifecycle {
+        name: String,
+        #[serde(default)]
+        metadata: Value,
     },
     Error {
         message: String,
     },
     Disconnected {
+        #[serde(default)]
         reason: Option<String>,
     },
 }
 
-pub async fn run_whatsapp_worker_loop<F, Fut, G, OutFut>(
+pub async fn run_worker_loop<F, Fut, G, OutFut>(
     adapter_id: &str,
-    config: &WhatsappAdapterConfig,
+    config: &WorkerAdapterConfig,
+    secret_env: Vec<(String, String)>,
     mut on_event: F,
     mut take_outbound_messages: G,
 ) -> Result<()>
@@ -48,35 +64,39 @@ where
     G: FnMut() -> OutFut,
     OutFut: std::future::Future<Output = Result<Vec<WorkerCommand>>>,
 {
-    let mut command = worker_command(adapter_id, config);
+    eprintln!(
+        "starting {} adapter worker {}: {:?}",
+        config.adapter_type, adapter_id, config.worker_command
+    );
+    let mut command = worker_command(adapter_id, config, secret_env);
     let mut child = command
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
         .spawn()
-        .context("failed to spawn WhatsApp adapter worker")?;
+        .context("failed to spawn adapter worker")?;
     let mut stdin = child
         .stdin
         .take()
-        .ok_or_else(|| anyhow!("WhatsApp worker stdin was not piped"))?;
+        .ok_or_else(|| anyhow!("adapter worker stdin was not piped"))?;
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| anyhow!("WhatsApp worker stdout was not piped"))?;
+        .ok_or_else(|| anyhow!("adapter worker stdout was not piped"))?;
     let mut lines = BufReader::new(stdout).lines();
 
     loop {
         tokio::select! {
             status = child.wait() => {
                 let status = status?;
-                bail!("WhatsApp worker exited with status {status}");
+                bail!("adapter worker exited with status {status}");
             }
             line = lines.next_line() => {
                 let Some(line) = line? else {
-                    bail!("WhatsApp worker closed stdout");
+                    bail!("adapter worker closed stdout");
                 };
                 let event = serde_json::from_str::<WorkerEvent>(&line)
-                    .with_context(|| format!("failed to parse WhatsApp worker event: {line}"))?;
+                    .with_context(|| format!("failed to parse adapter worker event: {line}"))?;
                 on_event(event).await?;
             }
             result = send_pending_commands(&mut stdin, &mut take_outbound_messages) => {
@@ -86,28 +106,33 @@ where
     }
 }
 
-fn worker_command(adapter_id: &str, config: &WhatsappAdapterConfig) -> Command {
-    let args = config.worker_command.clone().unwrap_or_else(|| {
-        vec![
-            "pnpm".to_string(),
-            "tsx".to_string(),
-            "examples/exoclaw/adapters/whatsapp/worker.ts".to_string(),
-        ]
-    });
+fn worker_command(
+    adapter_id: &str,
+    config: &WorkerAdapterConfig,
+    secret_env: Vec<(String, String)>,
+) -> Command {
+    let args = &config.worker_command;
     let mut command = Command::new(&args[0]);
     command.args(&args[1..]);
     command.env("EXO_ADAPTER_ID", adapter_id);
-    command.env("EXO_WHATSAPP_AUTH_DIR", auth_dir(adapter_id, config));
+    command.env("EXO_ADAPTER_TYPE", &config.adapter_type);
+    command.env("EXO_ADAPTER_STATE_DIR", state_dir(adapter_id, config));
+    command.env(
+        "EXO_ADAPTER_CONFIG",
+        serde_json::to_string(&config.initialization).expect("adapter initialization is JSON"),
+    );
+    for (name, value) in secret_env {
+        command.env(name, value);
+    }
     command
 }
 
-fn auth_dir(adapter_id: &str, config: &WhatsappAdapterConfig) -> String {
-    config.auth_dir.clone().unwrap_or_else(|| {
+fn state_dir(adapter_id: &str, config: &WorkerAdapterConfig) -> String {
+    config.state_dir.clone().unwrap_or_else(|| {
         Path::new(".exo")
             .join("adapters")
-            .join("whatsapp")
+            .join(&config.adapter_type)
             .join(adapter_id)
-            .join("auth")
             .to_string_lossy()
             .to_string()
     })
@@ -123,6 +148,7 @@ where
 {
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     for command in take_outbound_messages().await? {
+        eprintln!("sending adapter worker command: {:?}", command);
         stdin
             .write_all(serde_json::to_string(&command)?.as_bytes())
             .await?;

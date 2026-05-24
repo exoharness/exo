@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 use serde::Serialize;
 
-use crate::adapter_types::{AdapterConfig, AdapterKind, AdapterRecord, AdapterSource};
+use super::types::{AdapterConfig, AdapterKind, AdapterRecord, AdapterSource};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AdapterDefinition {
@@ -13,8 +13,7 @@ pub struct AdapterDefinition {
 
 pub fn adapter_definition(adapter: &AdapterRecord) -> AdapterDefinition {
     let capabilities = match &adapter.config {
-        AdapterConfig::Irc(_) => vec!["receive".to_string(), "send_message".to_string()],
-        AdapterConfig::Whatsapp(_) => vec!["receive".to_string(), "send_message".to_string()],
+        AdapterConfig::Worker(config) => config.capabilities.clone(),
         AdapterConfig::Module(config) => config.capabilities.clone(),
     };
     AdapterDefinition {
@@ -35,14 +34,14 @@ pub fn validate_adapter_build(adapter: &AdapterRecord) -> Result<()> {
                 }
                 Ok(())
             }
-            AdapterConfig::Irc(_) | AdapterConfig::Whatsapp(_) => Ok(()),
+            AdapterConfig::Worker(_) => Ok(()),
         },
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::adapter_types::{AdapterSource, ModuleAdapterConfig, NewAdapter};
+    use super::super::types::{AdapterSource, ModuleAdapterConfig, NewAdapter};
 
     use super::*;
 

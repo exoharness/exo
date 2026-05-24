@@ -49,29 +49,43 @@ function createAdapterToolInstances(): ToolInstance[] {
 }
 
 function createAdapterTool(): ToolInstance {
-  return hostTool({
-    name: "create_adapter",
-    description:
-      "Create and enable a long-running Exoclaw adapter for this conversation. Use source 'built_in' with config type 'irc' or 'whatsapp' for built-in adapters. Use source 'library' or 'agent' with config type 'module' for adapter modules.",
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        name: {
-          type: "string",
-          description:
-            "Stable adapter name using letters, numbers, dashes, or underscores.",
+  return {
+    source: "built_in",
+    definition: {
+      name: "create_adapter",
+      description:
+        "Create and enable a long-running Exoclaw adapter for this conversation. Use source 'built_in' with config type 'irc' or 'whatsapp' for built-in adapters. Use source 'library' or 'agent' with config type 'module' for adapter modules.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          name: {
+            type: "string",
+            description:
+              "Stable adapter name using letters, numbers, dashes, or underscores.",
+          },
+          source: {
+            type: "string",
+            enum: ["built_in", "library", "agent"],
+            description: "Adapter source.",
+          },
+          config: adapterConfigSchema(),
         },
-        source: {
-          type: "string",
-          enum: ["built_in", "library", "agent"],
-          description: "Adapter source.",
-        },
-        config: adapterConfigSchema(),
+        required: ["name", "source", "config"],
       },
-      required: ["name", "source", "config"],
     },
-  });
+    handler: {
+      execute(toolArgs, execution) {
+        return execution.context.executeTool({
+          functionName: "create_adapter",
+          arguments: withConversationScope(
+            execution.context,
+            transformCreateAdapterArguments(toolArgs),
+          ),
+        });
+      },
+    },
+  };
 }
 
 function listAdaptersTool(): ToolInstance {
@@ -148,7 +162,7 @@ function sendAdapterMessageTool(): ToolInstance {
         target: {
           type: ["string", "null"],
           description:
-            "External destination for adapters that need one. Required for WhatsApp chat ids; use null for IRC.",
+            "External destination for adapters that need one. Use the target from the inbound wakeup when available; WhatsApp requires a chat id.",
         },
       },
       required: ["adapterId", "text", "target"],
@@ -322,6 +336,62 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
   } as ToolDefinition["parameters"];
 }
 
+function transformCreateAdapterArguments(args: JsonObject): JsonObject {
+  const config = objectField(args, "config");
+  return {
+    ...args,
+    config: transformAdapterConfig(config),
+  };
+}
+
+function transformAdapterConfig(config: JsonObject): JsonObject {
+  const type = stringField(config, "type");
+  if (type === "irc") {
+    const passwordSecretId = nullableStringField(config, "passwordSecretId");
+    return {
+      type: "worker",
+      adapterType: "irc",
+      workerCommand: ["pnpm", "tsx", "examples/exoclaw/adapters/irc/worker.ts"],
+      initialization: {
+        server: stringField(config, "server"),
+        port: numberField(config, "port"),
+        tls: booleanField(config, "tls"),
+        nick: stringField(config, "nick"),
+        username: stringField(config, "username"),
+        realname: stringField(config, "realname"),
+        channel: stringField(config, "channel"),
+        trigger: stringField(config, "trigger"),
+      },
+      capabilities: ["receive", "send_message"],
+      stateDir: null,
+      secretEnv:
+        passwordSecretId === null
+          ? []
+          : [{ env: "EXO_IRC_PASSWORD", secretId: passwordSecretId }],
+    };
+  }
+  if (type === "whatsapp") {
+    return {
+      type: "worker",
+      adapterType: "whatsapp",
+      workerCommand: [
+        "pnpm",
+        "tsx",
+        "examples/exoclaw/adapters/whatsapp/worker.ts",
+      ],
+      initialization: {
+        authDir: nullableStringField(config, "authDir"),
+        trigger: stringField(config, "trigger"),
+        allowedChats: nullableStringArrayField(config, "allowedChats"),
+      },
+      capabilities: ["receive", "send_message"],
+      stateDir: null,
+      secretEnv: [],
+    };
+  }
+  return config;
+}
+
 function adapterIdParameters(
   description: string,
 ): ToolDefinition["parameters"] {
@@ -452,6 +522,35 @@ function stringField(args: JsonObject, name: string): string {
   return value;
 }
 
+function nullableStringField(args: JsonObject, name: string): string | null {
+  const value = args[name];
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(
+      `adapter argument ${name} must be null or a non-empty string`,
+    );
+  }
+  return value;
+}
+
+function numberField(args: JsonObject, name: string): number {
+  const value = args[name];
+  if (typeof value !== "number") {
+    throw new Error(`adapter argument ${name} must be a number`);
+  }
+  return value;
+}
+
+function booleanField(args: JsonObject, name: string): boolean {
+  const value = args[name];
+  if (typeof value !== "boolean") {
+    throw new Error(`adapter argument ${name} must be a boolean`);
+  }
+  return value;
+}
+
 function objectField(args: JsonObject, name: string): JsonObject {
   const value = args[name];
   if (!isRecord(value)) {
@@ -467,6 +566,25 @@ function stringArrayField(args: JsonObject, name: string): string[] {
     !value.every((item) => typeof item === "string")
   ) {
     throw new Error(`adapter argument ${name} must be an array of strings`);
+  }
+  return value;
+}
+
+function nullableStringArrayField(
+  args: JsonObject,
+  name: string,
+): string[] | null {
+  const value = args[name];
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (
+    !Array.isArray(value) ||
+    !value.every((item) => typeof item === "string")
+  ) {
+    throw new Error(
+      `adapter argument ${name} must be null or an array of strings`,
+    );
   }
   return value;
 }

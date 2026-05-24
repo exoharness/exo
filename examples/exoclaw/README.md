@@ -67,18 +67,19 @@ reconnect behavior, inbound message parsing, event history, and conversation
 wake-ups. Agents configure adapters with tools, and the local adapter runner
 started by `scripts/exoclaw-repl` keeps them connected.
 
-The first built-in adapter is IRC. It connects to a configured server/channel,
-responds to `PING`, parses `PRIVMSG`, and wakes the conversation when the trigger
-policy matches. The recommended trigger is `mention`, which only wakes the
-conversation when a channel message mentions the adapter nick. `all_messages` is
-available for quieter channels.
+The first built-in adapter is IRC. It runs as a host-supervised Node.js worker
+that connects to a configured server/channel, responds to `PING`, parses
+`PRIVMSG`, and wakes the conversation when the trigger policy matches. The
+recommended trigger is `mention`, which only wakes the conversation when a
+channel message mentions the adapter nick. `all_messages` is available for
+quieter channels.
 
-Exoclaw also includes an experimental WhatsApp adapter. It is built as a
-host-supervised Node.js worker using Baileys. The Rust adapter runtime owns
-supervision, durable events, conversation wakeups, and outbox draining; the
-worker owns WhatsApp pairing/session state and the live socket. When first run,
-it emits a QR pairing event into adapter history and logs; after pairing, Baileys
-auth state is stored under `.exo/adapters/whatsapp/<adapter-id>/auth` by default.
+Exoclaw also includes an experimental WhatsApp adapter using Baileys. The Rust
+adapter runtime owns supervision, durable events, conversation wakeups, and
+outbox draining; workers own protocol-specific sockets and parsing. When first
+run, the WhatsApp worker emits a QR pairing event into adapter history and logs;
+after pairing, Baileys auth state is stored under
+`.exo/adapters/whatsapp/<adapter-id>/auth` by default.
 
 Example IRC adapter tool arguments:
 
@@ -120,15 +121,14 @@ Example WhatsApp adapter tool arguments:
 Inbound adapter messages do not automatically send model output back to the
 external service. The agent must explicitly call `send_adapter_message`, which
 keeps external side effects visible in tool history. WhatsApp sends require the
-`target` chat id from the inbound wakeup; IRC sends use `target: null` because
-the adapter channel is fixed in config.
+`target` chat id from the inbound wakeup. IRC sends go to the configured channel;
+using the inbound channel target is fine, but the worker does not require it.
 
 If an IRC or WhatsApp user asks Exoclaw to schedule recurring work and expects
 future results in the originating app, the agent should put that routing
-instruction in the task's `reportPrompt`, including the `adapterId` and, for
-WhatsApp, the `target` chat id. Scheduler wakeups are normal Exoclaw turns, so
-they can call `send_adapter_message` when the `reportPrompt` says to post the
-result back.
+instruction in the task's `reportPrompt`, including the `adapterId` and target
+from the wakeup. Scheduler wakeups are normal Exoclaw turns, so they can call
+`send_adapter_message` when the `reportPrompt` says to post the result back.
 
 Adapters use the same source model as tools:
 
@@ -137,10 +137,10 @@ Adapters use the same source model as tools:
 - `agent`: installed by the agent with `install_agent_adapter`, then validated
   with `build_agent_adapter`.
 
-The initial host runtime can run IRC adapters for any source once non-built-in
-adapters pass `build_agent_adapter`. Module-backed library and agent adapters are
-persisted and build-validated so the source model is in place; richer module
-execution can be layered on the same registry/runtime boundary.
+The host runtime runs built-in IRC and WhatsApp adapters through the same generic
+worker bridge. Module-backed library and agent adapters are persisted and
+build-validated so the source model is in place; richer module execution can be
+layered on the same registry/runtime boundary.
 
 ## Sandbox Modes
 

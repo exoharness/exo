@@ -16,8 +16,7 @@ pub enum AdapterSource {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AdapterKind {
-    Irc,
-    Whatsapp,
+    Worker,
     Module,
 }
 
@@ -34,54 +33,30 @@ pub enum AdapterBuildStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AdapterConfig {
-    Irc(IrcAdapterConfig),
-    Whatsapp(WhatsappAdapterConfig),
+    Worker(WorkerAdapterConfig),
     Module(ModuleAdapterConfig),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct IrcAdapterConfig {
-    pub server: String,
-    pub port: u16,
-    pub tls: bool,
-    pub nick: String,
-    pub username: String,
-    pub realname: String,
-    pub channel: String,
+pub struct WorkerAdapterConfig {
+    pub adapter_type: String,
+    pub worker_command: Vec<String>,
     #[serde(default)]
-    pub password_secret_id: Option<String>,
+    pub initialization: Value,
     #[serde(default)]
-    pub trigger: IrcTriggerPolicy,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum IrcTriggerPolicy {
-    #[default]
-    Mention,
-    AllMessages,
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub state_dir: Option<String>,
+    #[serde(default)]
+    pub secret_env: Vec<WorkerSecretEnvVar>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct WhatsappAdapterConfig {
-    #[serde(default)]
-    pub auth_dir: Option<String>,
-    #[serde(default)]
-    pub trigger: WhatsappTriggerPolicy,
-    #[serde(default)]
-    pub allowed_chats: Option<Vec<String>>,
-    #[serde(default)]
-    pub worker_command: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum WhatsappTriggerPolicy {
-    #[default]
-    AllMessages,
-    ContactsOnly,
+pub struct WorkerSecretEnvVar {
+    pub env: String,
+    pub secret_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -183,50 +158,34 @@ impl AdapterRecord {
 impl AdapterConfig {
     pub fn kind(&self) -> AdapterKind {
         match self {
-            Self::Irc(_) => AdapterKind::Irc,
-            Self::Whatsapp(_) => AdapterKind::Whatsapp,
+            Self::Worker(_) => AdapterKind::Worker,
             Self::Module(_) => AdapterKind::Module,
         }
     }
 
     pub fn validate(&self) -> Result<()> {
         match self {
-            Self::Irc(config) => config.validate(),
-            Self::Whatsapp(config) => config.validate(),
+            Self::Worker(config) => config.validate(),
             Self::Module(config) => config.validate(),
         }
     }
 }
 
-impl IrcAdapterConfig {
+impl WorkerAdapterConfig {
     fn validate(&self) -> Result<()> {
-        non_empty_ref("server", &self.server)?;
-        non_empty_ref("nick", &self.nick)?;
-        non_empty_ref("username", &self.username)?;
-        non_empty_ref("realname", &self.realname)?;
-        non_empty_ref("channel", &self.channel)?;
-        if self.port == 0 {
-            bail!("IRC adapter port must be greater than zero");
+        non_empty_ref("adapterType", &self.adapter_type)?;
+        if self.worker_command.is_empty() {
+            bail!("worker adapter workerCommand must not be empty");
         }
-        if !self.channel.starts_with('#') {
-            bail!("IRC adapter channel must start with '#'");
+        for arg in &self.worker_command {
+            non_empty_ref("workerCommand item", arg)?;
         }
-        Ok(())
-    }
-}
-
-impl WhatsappAdapterConfig {
-    fn validate(&self) -> Result<()> {
-        if let Some(auth_dir) = &self.auth_dir {
-            non_empty_ref("authDir", auth_dir)?;
+        if let Some(state_dir) = &self.state_dir {
+            non_empty_ref("stateDir", state_dir)?;
         }
-        if let Some(worker_command) = &self.worker_command {
-            if worker_command.is_empty() {
-                bail!("WhatsApp adapter workerCommand must not be empty when provided");
-            }
-            for arg in worker_command {
-                non_empty_ref("workerCommand item", arg)?;
-            }
+        for secret in &self.secret_env {
+            non_empty_ref("secretEnv env", &secret.env)?;
+            non_empty_ref("secretEnv secretId", &secret.secret_id)?;
         }
         Ok(())
     }

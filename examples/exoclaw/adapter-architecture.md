@@ -17,20 +17,20 @@ be handled by the agent.
 The implementation is split across a few small executor and CLI modules:
 
 - `crates/executor/src/adapter_types.rs` defines durable adapter records,
-  source/kind enums, IRC/WhatsApp config, event records, and outbound message
+  source/kind enums, generic worker config, event records, and outbound message
   records.
 - `crates/executor/src/adapter_store.rs` is the file-backed store under
   `.exo/adapters`. It stores adapter records, per-adapter event history, and
   the adapter outbox.
-- `crates/executor/src/adapter_runtime.rs` supervises enabled adapters,
-  dispatches by adapter kind, writes event artifacts, sends conversation
-  wakeups, and queues outbound messages.
-- `crates/executor/src/adapter_irc.rs` implements IRC connection behavior:
+- `crates/executor/src/adapter_runtime.rs` supervises enabled worker adapters,
+  writes event artifacts, sends conversation wakeups, and queues outbound
+  messages.
+- `crates/executor/src/adapter_worker.rs` implements the generic JSONL worker
+  bridge used by host-supervised sidecar adapters.
+- `examples/exoclaw/adapters/irc/worker.ts` implements IRC connection behavior:
   TLS/plain TCP, `PASS`/`NICK`/`USER`, `JOIN`, `PING`/`PONG`, `PRIVMSG`
   parsing, trigger matching, and draining outbound messages over the persistent
   IRC connection.
-- `crates/executor/src/adapter_worker.rs` implements the generic JSONL worker
-  bridge used by host-supervised sidecar adapters such as WhatsApp.
 - `examples/exoclaw/adapters/whatsapp/worker.ts` is the Baileys worker for the
   built-in WhatsApp adapter.
 - `crates/executor/src/adapter_tools.rs` implements the host-backed tool calls
@@ -43,7 +43,8 @@ At a high level:
 
 ```mermaid
 flowchart LR
-  irc["IRC server / channel"] <--> runtime["Adapter Runtime"]
+  externalApp["IRC / WhatsApp"] <--> worker["Adapter Worker"]
+  worker <--> runtime["Adapter Runtime"]
   runtime --> store["Adapter Store"]
   tools["Adapter Tools"] --> store
   runtime --> wakeup["Conversation Wakeup"]
@@ -70,9 +71,11 @@ The key record is `AdapterRecord`:
 - `agent_id` and `conversation_id`: the owning Exoclaw agent/conversation.
 - `name`: human-friendly adapter name.
 - `source`: `built_in`, `library`, or `agent`.
-- `kind`: `irc`, experimental `whatsapp`, or `module`.
+- `kind`: `worker` or `module`.
 - `enabled`: disabled adapters preserve history but stop receiving.
-- `config`: adapter-specific config, such as IRC server/channel/nick.
+- `config`: generic worker config, including adapter type, command,
+  initialization JSON, capabilities, optional state dir, and optional secret
+  environment bindings.
 - `latest_event_artifact_id`, `last_connected_at_ms`, `last_error`: runtime
   status fields.
 
@@ -116,12 +119,12 @@ An IRC adapter can be created from the REPL with arguments like:
 }
 ```
 
-The runtime connects to the server, sends optional `PASS`, then `NICK` and
+The IRC worker connects to the server, sends optional `PASS`, then `NICK` and
 `USER`, waits for IRC welcome numeric `001`, joins the configured channel, and
 keeps the socket open. It responds to `PING` with `PONG` so the server does not
 disconnect it.
 
-For each channel `PRIVMSG`, the runtime applies the trigger policy:
+For each channel `PRIVMSG`, the worker applies the trigger policy:
 
 - `mention`: wake the conversation only if the message mentions the bot nick.
 - `all_messages`: wake the conversation for every channel message.
@@ -129,13 +132,13 @@ For each channel `PRIVMSG`, the runtime applies the trigger policy:
 The `mention` default is important. Busy channels can generate many messages,
 and waking the model for every line would be noisy and expensive.
 
-When a message matches, the runtime writes an inbound artifact containing the raw
-line, parsed nick/channel/text, adapter id, and timestamps. It also records an
-inbound event, then wakes the owning conversation with a user message that
-includes the adapter id:
+When a message matches, the worker emits a JSONL `message` event. The Rust
+runtime writes an inbound artifact containing the target, sender, text, metadata,
+adapter id, and timestamps. It also records an inbound event, then wakes the
+owning conversation with a user message that includes the adapter id:
 
 ```text
-IRC message received in ##exo12345 from spooky via adapter `libera-test`:
+irc message received at target `##exo12345` from spooky via adapter `libera-test`:
 
 hello @exo12345
 
@@ -145,10 +148,30 @@ Use send_adapter_message with adapterId `...` if you should reply to IRC.
 The agent decides whether to respond. There is no automatic model-output-to-IRC
 bridge.
 
+## Worker Protocol
+
+Both IRC and WhatsApp are implemented as Node.js workers. Rust launches each
+worker with:
+
+- `EXO_ADAPTER_ID`
+- `EXO_ADAPTER_TYPE`
+- `EXO_ADAPTER_STATE_DIR`
+- `EXO_ADAPTER_CONFIG`, a JSON object containing adapter-specific initialization
+- any secret-derived environment variables declared by the worker config
+
+Worker communication is newline-delimited JSON:
+
+- Worker to Rust: `connected`, `message`, `lifecycle`, `error`, and
+  `disconnected`.
+- Rust to worker: `send_message` with `target` and `text`.
+
+This keeps protocol code in Exoclaw while preserving one host-owned supervision,
+event, wakeup, and outbox implementation in Rust.
+
 ## WhatsApp Worker Example
 
 The WhatsApp adapter uses the same durable adapter store and runtime lifecycle as
-IRC, but delegates protocol-specific work to a Node.js worker:
+IRC, with protocol-specific work in a Node.js worker:
 
 ```mermaid
 flowchart LR
@@ -165,16 +188,10 @@ The worker is launched with:
 pnpm tsx examples/exoclaw/adapters/whatsapp/worker.ts
 ```
 
-The runtime passes `EXO_ADAPTER_ID` and `EXO_WHATSAPP_AUTH_DIR`. If `authDir` is
-not configured, auth state is stored under
-`.exo/adapters/whatsapp/<adapter-id>/auth`. On first connection the worker emits
-a `qr` event; scan that QR with WhatsApp to pair the account. After pairing, the
+If `authDir` is not configured, auth state is stored under the worker state dir's
+`auth` subdirectory. On first connection the worker emits a `lifecycle` event
+named `qr`; scan that QR with WhatsApp to pair the account. After pairing, the
 worker emits `connected` and then `message` events for text messages.
-
-Worker communication is newline-delimited JSON:
-
-- Worker to Rust: `qr`, `connected`, `message`, `error`, and `disconnected`.
-- Rust to worker: `send_message` with `target` and `text`.
 
 For inbound WhatsApp messages, the runtime writes an artifact with the chat id,
 sender, message id, and text, then wakes the conversation. The wakeup instructs
@@ -193,11 +210,11 @@ Adapter sends must be explicit and auditable. When the agent calls
 1. Writes an outbound artifact and event for history.
 2. Writes an `AdapterOutboundMessageRecord` into the adapter outbox.
 
-The long-running IRC adapter loop drains that outbox once per second and sends
-queued messages as `PRIVMSG` over the already-connected IRC socket. The WhatsApp
-runtime drains the same outbox and sends `send_message` commands to the Baileys
-worker. WhatsApp messages require an outbox `target` chat id; IRC messages do
-not because the destination channel is fixed in adapter config.
+The long-running adapter runtime drains that outbox once per second and sends
+queued messages to the worker as `send_message` commands. The IRC worker sends
+them as `PRIVMSG` over the already-connected IRC socket. The WhatsApp worker
+sends them through Baileys. WhatsApp messages require an outbox `target` chat id;
+IRC messages do not because the destination channel is fixed in adapter config.
 
 The outbox also decouples conversation turns from socket ownership. The model
 turn can finish after queueing a message; the adapter runtime owns the external
@@ -286,8 +303,8 @@ Adapters mirror the tool source model:
 - `library`: reusable adapter modules loaded from manifest metadata.
 - `agent`: adapter modules written or installed by the agent at runtime.
 
-The current runtime directly runs built-in IRC adapters and host-supervised
-WhatsApp workers. Module-backed library and agent adapters are persisted and
+The current runtime runs built-in IRC and WhatsApp adapters as host-supervised
+workers. Module-backed library and agent adapters are persisted and
 build-validated so the registry boundary is in place; a future module runner can
 implement the same host-owned lifecycle and outbox semantics without changing the
 model-facing tools.

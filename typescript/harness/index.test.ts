@@ -704,6 +704,68 @@ describe("agent tool loading", () => {
     expect(JSON.stringify(sendMessage)).toContain('"target"');
   });
 
+  it("transforms built-in IRC adapters into worker adapter records", async () => {
+    const executed: JsonObject[] = [];
+    const registry = createToolRegistry(
+      fakeTurnContext({
+        executeTool: async (request) => {
+          executed.push(request.arguments);
+          return { ok: true };
+        },
+      }),
+    );
+    registerAdapterTools(registry, ["create_adapter"]);
+
+    await registry.executePending([
+      {
+        toolCallId: "create_irc",
+        request: {
+          functionName: "create_adapter",
+          arguments: {
+            name: "irc",
+            source: "built_in",
+            config: {
+              type: "irc",
+              server: "irc.example.com",
+              port: 6697,
+              tls: true,
+              nick: "exo",
+              username: "exo",
+              realname: "Exo",
+              channel: "#exo",
+              passwordSecretId: "secret-1",
+              trigger: "mention",
+            },
+          },
+        },
+      },
+    ]);
+
+    expect(executed[0]).toMatchObject({
+      agentId: "agent-id",
+      conversationId: "conversation-id",
+      name: "irc",
+      source: "built_in",
+      config: {
+        type: "worker",
+        adapterType: "irc",
+        workerCommand: [
+          "pnpm",
+          "tsx",
+          "examples/exoclaw/adapters/irc/worker.ts",
+        ],
+        initialization: {
+          server: "irc.example.com",
+          channel: "#exo",
+          trigger: "mention",
+        },
+        capabilities: ["receive", "send_message"],
+        stateDir: null,
+        secretEnv: [{ env: "EXO_IRC_PASSWORD", secretId: "secret-1" }],
+      },
+    });
+  });
+
   it("rejects agent tool modules without a default Tool export", async () => {
     const registry = createToolRegistry(fakeTurnContext());
 
@@ -926,8 +988,15 @@ function fakeTurnContext(
     braintrustParent: null,
     exoharness: {
       current: {
-        agent: {},
+        agent: {
+          record: {
+            id: "agent-id",
+          },
+        },
         conversation: {
+          record: {
+            id: "conversation-id",
+          },
           async writeArtifactText(args: { path: string; text: string }) {
             artifactIndex += 1;
             return {

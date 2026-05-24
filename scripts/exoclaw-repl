@@ -30,6 +30,7 @@ Usage:
   scripts/exoclaw-repl [options]
   scripts/exoclaw-repl list
   scripts/exoclaw-repl delall all
+  scripts/exoclaw-repl fresh
   scripts/exoclaw-repl setup-sandbox
 
 Default behavior creates or reuses an Exoclaw agent and conversation, starts the
@@ -81,6 +82,10 @@ ensure_exo_bin() {
   if [[ "$EXO_BIN" != "$ROOT_DIR/target/debug/exo" ]]; then
     die "exo binary is not executable: $EXO_BIN"
   fi
+  build_exo
+}
+
+build_exo() {
   echo "Building exo binary..."
   (cd "$ROOT_DIR" && CARGO_TARGET_DIR=target cargo build -p exo --ignore-rust-version)
 }
@@ -306,31 +311,45 @@ list_agents_and_conversations() {
 stop_scheduler() {
   local pid_file pid
   pid_file="$(scheduler_pid_file)"
-  [[ -f "$pid_file" ]] || return
-  pid="$(<"$pid_file")"
-  if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" >/dev/null 2>&1; then
-    echo "Stopping Exoclaw scheduler..."
-    kill "$pid" >/dev/null 2>&1 || true
+  if [[ -f "$pid_file" ]]; then
+    pid="$(<"$pid_file")"
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" >/dev/null 2>&1; then
+      echo "Stopping Exoclaw scheduler..."
+      kill "$pid" >/dev/null 2>&1 || true
+    fi
   fi
+  pkill -f "exo .*schedule run --watch" >/dev/null 2>&1 || true
   rm -f "$pid_file"
 }
 
 stop_adapters() {
   local pid_file pid
   pid_file="$(adapters_pid_file)"
-  [[ -f "$pid_file" ]] || return
-  pid="$(<"$pid_file")"
-  if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" >/dev/null 2>&1; then
-    echo "Stopping Exoclaw adapter runner..."
-    kill "$pid" >/dev/null 2>&1 || true
+  if [[ -f "$pid_file" ]]; then
+    pid="$(<"$pid_file")"
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" >/dev/null 2>&1; then
+      echo "Stopping Exoclaw adapter runner..."
+      kill "$pid" >/dev/null 2>&1 || true
+    fi
   fi
+  pkill -f "exo .*adapters run --watch" >/dev/null 2>&1 || true
+  pkill -f "tsx examples/exoclaw/adapters/.*/worker.ts" >/dev/null 2>&1 || true
   rm -f "$pid_file"
+}
+
+delete_adapter_state() {
+  stop_adapters
+  rm -rf "$ROOT_DIR/.exo/adapters"
+  rm -f \
+    "$ROOT_DIR/.exo/exoclaw-adapters.pid" \
+    "$ROOT_DIR/.exo/exoclaw-adapters.log" \
+    "$ROOT_DIR/.exo/exoclaw-adapters.lock"
 }
 
 delete_all_agents_and_conversations() {
   ensure_exo_bin
   stop_scheduler
-  stop_adapters
+  delete_adapter_state
 
   local agents
   agents="$(exo agent list | awk 'NR > 1 { print $1 }')"
@@ -355,6 +374,12 @@ delete_all_agents_and_conversations() {
   done <<<"$agents"
 
   echo "Deleted all agents and conversations."
+}
+
+fresh_start() {
+  build_exo
+  delete_all_agents_and_conversations
+  run_repl
 }
 
 run_repl() {
@@ -386,6 +411,10 @@ while [[ $# -gt 0 ]]; do
       shift
       [[ $# -eq 0 ]] || die "delall all does not accept additional arguments"
       COMMAND="delall"
+      ;;
+    fresh|reset)
+      shift
+      COMMAND="fresh"
       ;;
     setup-sandbox)
       shift
@@ -504,6 +533,9 @@ case "$COMMAND" in
     ;;
   delall)
     delete_all_agents_and_conversations
+    ;;
+  fresh)
+    fresh_start
     ;;
   setup-sandbox)
     setup_sandbox

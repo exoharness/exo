@@ -10,11 +10,24 @@ import makeWASocket, {
 import type { ILogger } from "@whiskeysockets/baileys/lib/Utils/logger.js";
 import qrcodeTerminal from "qrcode-terminal";
 
-import { parseWorkerCommand, writeWorkerEvent } from "./protocol";
+import {
+  adapterConfig,
+  optionalStringField,
+  parseWorkerCommand,
+  writeWorkerEvent,
+} from "../protocol";
 
+const config = adapterConfig();
+const trigger = optionalStringField(config, "trigger") ?? "all_messages";
+const allowedChats = stringArrayOrNull(config.allowedChats);
+if (trigger !== "all_messages" && trigger !== "contacts_only") {
+  throw new Error("WhatsApp trigger must be all_messages or contacts_only");
+}
 const authDir =
-  process.env.EXO_WHATSAPP_AUTH_DIR ??
-  `.exo/adapters/whatsapp/${process.env.EXO_ADAPTER_ID ?? "default"}/auth`;
+  optionalStringField(config, "authDir") ??
+  (process.env.EXO_ADAPTER_STATE_DIR === undefined
+    ? `.exo/adapters/whatsapp/${process.env.EXO_ADAPTER_ID ?? "default"}/auth`
+    : `${process.env.EXO_ADAPTER_STATE_DIR}/auth`);
 
 const logger: ILogger = {
   level: "silent",
@@ -53,12 +66,16 @@ socket.ev.on("connection.update", (update) => {
         `\n[whatsapp-adapter] Scan this QR with WhatsApp:\n${qr}\n`,
       );
     });
-    writeWorkerEvent({ type: "qr", qr: update.qr });
+    writeWorkerEvent({
+      type: "lifecycle",
+      name: "qr",
+      metadata: { qr: update.qr },
+    });
   }
   if (update.connection === "open") {
     writeWorkerEvent({
       type: "connected",
-      jid: socket.user?.id ?? null,
+      subject: socket.user?.id ?? null,
     });
   }
   if (update.connection === "close") {
@@ -87,6 +104,9 @@ socket.ev.on("messages.upsert", (event) => {
     if (inbound === null) {
       continue;
     }
+    if (!shouldTrigger(inbound.target)) {
+      continue;
+    }
     writeWorkerEvent(inbound);
   }
 });
@@ -102,6 +122,9 @@ for await (const line of input) {
   }
   try {
     const command = parseWorkerCommand(JSON.parse(line));
+    if (!command.target) {
+      throw new Error("WhatsApp send_message requires a target chat id");
+    }
     await socket.sendMessage(command.target, { text: command.text });
   } catch (error) {
     writeWorkerEvent({
@@ -125,7 +148,7 @@ function inboundMessage(message: WAMessage) {
   }
   return {
     type: "message" as const,
-    chat_id: chatId,
+    target: chatId,
     sender: message.key.participant ?? message.key.remoteJid ?? null,
     text,
     message_id: message.key.id ?? null,
@@ -150,6 +173,26 @@ function messageText(message: WAMessage): string | null {
     return content.videoMessage.caption;
   }
   return null;
+}
+
+function shouldTrigger(chatId: string): boolean {
+  if (allowedChats !== null && !allowedChats.includes(chatId)) {
+    return false;
+  }
+  if (trigger === "contacts_only") {
+    return !chatId.endsWith("@g.us");
+  }
+  return true;
+}
+
+function stringArrayOrNull(value: unknown): string[] | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (Array.isArray(value) && value.every((item) => typeof item === "string")) {
+    return value;
+  }
+  throw new Error("WhatsApp allowedChats must be null or an array of strings");
 }
 
 function statusCodeFromError(error: unknown): number | null {

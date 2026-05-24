@@ -14,12 +14,10 @@ bytes.workspace = true
 exoharness = { path = "../exoharness", features = ["basic-backend"] }
 futures.workspace = true
 lingua.workspace = true
-native-tls = "0.2.18"
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-tokio-native-tls = "0.3.1"
 tokio-stream.workspace = true
 url.workspace = true
 

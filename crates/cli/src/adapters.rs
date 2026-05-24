@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::{fs, process::Command};
 
 use clap::Subcommand;
 use executor::{
@@ -58,6 +59,7 @@ pub async fn handle_adapter_command(
         }
         AdapterCommands::Run { watch, limit } => {
             if watch {
+                let _lock = AdapterRunnerLock::acquire(root)?;
                 run_adapters_watch(harness, store, AdapterRunOptions { limit }).await?;
             } else {
                 let handled =
@@ -104,4 +106,54 @@ pub async fn handle_adapter_command(
         }
     }
     Ok(())
+}
+
+struct AdapterRunnerLock {
+    path: std::path::PathBuf,
+}
+
+impl AdapterRunnerLock {
+    fn acquire(root: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let path = root.join("exoclaw-adapters.lock");
+        let pid = std::process::id().to_string();
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                use std::io::Write;
+                writeln!(file, "{pid}")?;
+                Ok(Self { path })
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let existing_pid = fs::read_to_string(&path).unwrap_or_default();
+                if process_is_running(existing_pid.trim()) {
+                    return Err(format!(
+                        "adapter runner already appears to be running with pid {}",
+                        existing_pid.trim()
+                    )
+                    .into());
+                }
+                fs::remove_file(&path)?;
+                Self::acquire(root)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+impl Drop for AdapterRunnerLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn process_is_running(pid: &str) -> bool {
+    !pid.is_empty()
+        && Command::new("kill")
+            .arg("-0")
+            .arg(pid)
+            .status()
+            .is_ok_and(|status| status.success())
 }

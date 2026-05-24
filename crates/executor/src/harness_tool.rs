@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use crate::adapter_store::AdapterStore;
-use crate::adapter_tools::{
+use crate::adapter::AdapterStore;
+use crate::adapter::tools::{
     execute_build_adapter_tool, execute_create_adapter_tool, execute_delete_adapter_tool,
     execute_disable_adapter_tool, execute_list_adapters_tool, execute_send_adapter_message_tool,
 };
