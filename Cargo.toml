@@ -6,6 +6,7 @@ resolver = "2"
 edition = "2024"
 version = "0.1.0"
 license = "MIT"
+rust-version = "1.95"
 
 [workspace.dependencies]
 anyhow = "1.0.100"
@@ -44,8 +45,8 @@ tokio-util = { version = "0.7.18", features = ["compat"] }
 url = "2.5.7"
 uuid = { version = "1.18.1", features = ["serde", "v4", "v7"] }
 
-lingua = { git = "https://github.com/braintrustdata/lingua.git", rev = "4f8c678a30bb385cd8093875111605cfd712c976" }
-braintrust-llm-router = { git = "https://github.com/braintrustdata/lingua.git", package = "braintrust-llm-router", rev = "4f8c678a30bb385cd8093875111605cfd712c976", default-features = false, features = [
+lingua = { git = "https://github.com/braintrustdata/lingua.git", rev = "10f863cf9215c003fcbb4f315b25c011b4bb7569" }
+braintrust-llm-router = { git = "https://github.com/braintrustdata/lingua.git", package = "braintrust-llm-router", rev = "10f863cf9215c003fcbb4f315b25c011b4bb7569", default-features = false, features = [
   "provider-openai",
   "provider-anthropic",
   "provider-google",

@@ -47,9 +47,10 @@ pub use executor_types::{
     ToolManifestEntry, ToolRuntime, TypeScriptHarnessConfig, effective_sandbox_scope,
 };
 pub use exoharness::{
-    AgentHandle, BasicExoHarness, Binding, BindingMetadata, ConversationHandle, EventData, EventId,
-    EventQuery, EventQueryDirection, ExoHarness, FileSystemMount, FileSystemMountMode,
-    ForkConversationRequest, PutSecretRequest, SANDBOX_MAIN_MOUNT_DIR, Secret, SecretMetadata,
+    AgentHandle, BasicExoHarness, BasicExoHarnessConfig, Binding, BindingMetadata,
+    ConversationHandle, EventData, EventId, EventQuery, EventQueryDirection, ExoHarness,
+    FileSystemMount, FileSystemMountMode, ForkConversationRequest, PutSecretRequest,
+    SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, Secret, SecretBackendChoice, SecretMetadata,
     SessionId, Uuid7,
 };
 pub use harness_basic::BasicHarness;

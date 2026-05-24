@@ -23,7 +23,7 @@ use serde_json::{Map, Value};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use crate::harness_executor::HarnessExecutor;
+use crate::harness_executor::{ExecutorStreamMode, HarnessExecutor};
 use crate::*;
 
 #[tokio::test(flavor = "current_thread")]
@@ -75,6 +75,7 @@ async fn send_appends_user_and_assistant_messages() {
         &default_agent_config(),
         &ConversationConfig::default(),
         &(),
+        ExecutorStreamMode::Disabled,
         None,
     )
     .await
@@ -171,6 +172,7 @@ async fn send_executes_tool_round_trip() {
         &agent_config,
         &conversation_config,
         &(),
+        ExecutorStreamMode::Disabled,
         None,
     )
     .await
@@ -268,7 +270,7 @@ async fn send_stream_emits_chunks_and_persists_final_response() {
         )
         .await
         .expect("prepare conversation should succeed");
-    HarnessExecutor::execute_turn_stream(
+    HarnessExecutor::execute_turn(
         &executor,
         agent.as_ref(),
         conversation.as_ref(),
@@ -276,7 +278,7 @@ async fn send_stream_emits_chunks_and_persists_final_response() {
         &default_agent_config(),
         &ConversationConfig::default(),
         &(),
-        &event_tx,
+        ExecutorStreamMode::Enabled(&event_tx),
         None,
     )
     .await

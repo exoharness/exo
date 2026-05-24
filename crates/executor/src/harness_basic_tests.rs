@@ -7,9 +7,18 @@ use crate::{
 use anyhow::anyhow;
 use async_trait::async_trait;
 use exoharness::{
-    BasicExoHarness, Binding, EventData, EventQuery, EventQueryDirection, ExoHarness,
-    FileSystemMount, FileSystemMountMode, PutSecretRequest, Result, Secret, ToolRequest, Uuid7,
+    BasicExoHarness, BasicExoHarnessConfig, Binding, EventData, EventQuery, EventQueryDirection,
+    ExoHarness, FileSystemMount, FileSystemMountMode, PutSecretRequest, Result,
+    SandboxBackendChoice, Secret, SecretBackendChoice, ToolRequest, Uuid7,
 };
+
+fn local_test_config(root: impl Into<std::path::PathBuf>) -> BasicExoHarnessConfig {
+    BasicExoHarnessConfig {
+        root: root.into(),
+        secret_backend: SecretBackendChoice::Static([7u8; 32]),
+        sandbox_backend: SandboxBackendChoice::LocalProcess,
+    }
+}
 use lingua::universal::{AssistantContent, UserContent};
 use lingua::{Message, UniversalStreamChunk};
 use serde_json::{Map, Value};
@@ -24,7 +33,7 @@ use crate::{
 async fn creates_agents_and_conversations_with_persisted_config() {
     let tempdir = TempDir::new().expect("tempdir should exist");
     let exoharness = Arc::new(
-        BasicExoHarness::new_with_local_process_sandbox(tempdir.path().join("exoharness"))
+        BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
             .await
             .expect("basic exoharness should initialize"),
     ) as Arc<dyn ExoHarness>;
@@ -91,7 +100,7 @@ async fn creates_agents_and_conversations_with_persisted_config() {
 async fn send_persists_messages_through_harness() {
     let tempdir = TempDir::new().expect("tempdir should exist");
     let exoharness = Arc::new(
-        BasicExoHarness::new_with_local_process_sandbox(tempdir.path().join("exoharness"))
+        BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
             .await
             .expect("basic exoharness should initialize"),
     ) as Arc<dyn ExoHarness>;
@@ -147,7 +156,7 @@ async fn send_persists_messages_through_harness() {
 async fn close_session_appends_session_ended_event() {
     let tempdir = TempDir::new().expect("tempdir should exist");
     let exoharness: Arc<dyn ExoHarness> = Arc::new(
-        BasicExoHarness::new_with_local_process_sandbox(tempdir.path().join("exoharness"))
+        BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
             .await
             .expect("basic exoharness should initialize"),
     );
@@ -223,7 +232,7 @@ async fn close_session_appends_session_ended_event() {
 async fn updating_agent_config_refreshes_executor_cache() {
     let tempdir = TempDir::new().expect("tempdir should exist");
     let exoharness = Arc::new(
-        BasicExoHarness::new_with_local_process_sandbox(tempdir.path().join("exoharness"))
+        BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
             .await
             .expect("basic exoharness should initialize"),
     );
@@ -303,7 +312,7 @@ async fn updating_agent_config_refreshes_executor_cache() {
 async fn send_executes_shell_tool_when_enabled() {
     let tempdir = TempDir::new().expect("tempdir should exist");
     let exoharness = Arc::new(
-        BasicExoHarness::new_with_local_process_sandbox(tempdir.path().join("exoharness"))
+        BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
             .await
             .expect("basic exoharness should initialize"),
     );
@@ -413,7 +422,7 @@ async fn send_executes_shell_tool_when_enabled() {
 async fn harness_exposes_raw_exoharness_handles() {
     let tempdir = TempDir::new().expect("tempdir should exist");
     let exoharness = Arc::new(
-        BasicExoHarness::new_with_local_process_sandbox(tempdir.path().join("exoharness"))
+        BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
             .await
             .expect("basic exoharness should initialize"),
     );
@@ -484,7 +493,7 @@ async fn updating_mounts_recreates_conversation_sandbox() {
     std::fs::create_dir_all(&mount_dir).expect("mount dir should exist");
 
     let exoharness = Arc::new(
-        BasicExoHarness::new_with_local_process_sandbox(tempdir.path().join("exoharness"))
+        BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
             .await
             .expect("basic exoharness should initialize"),
     );
@@ -607,7 +616,7 @@ async fn updating_mounts_recreates_conversation_sandbox() {
 async fn conversation_model_override_changes_effective_model() {
     let tempdir = TempDir::new().expect("tempdir should exist");
     let exoharness: Arc<dyn ExoHarness> = Arc::new(
-        BasicExoHarness::new_with_local_process_sandbox(tempdir.path().join("exoharness"))
+        BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
             .await
             .expect("basic exoharness should initialize"),
     );

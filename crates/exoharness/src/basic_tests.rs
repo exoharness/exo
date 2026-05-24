@@ -5,16 +5,24 @@ use tempfile::TempDir;
 use tokio::fs;
 
 use crate::{
-    Artifact, ArtifactVersion, BasicExoHarness, BeginTurnRequest, Binding, CreateSandboxRequest,
-    EventData, EventQuery, EventQueryDirection, ExoHarness, ForkConversationRequest,
-    NewAgentRequest, NewConversationRequest, PutSecretRequest, RunInSandboxRequest, Secret,
-    WriteArtifactRequest,
+    Artifact, ArtifactVersion, BasicExoHarness, BasicExoHarnessConfig, BeginTurnRequest, Binding,
+    CreateSandboxRequest, EventData, EventQuery, EventQueryDirection, ExoHarness,
+    ForkConversationRequest, NewAgentRequest, NewConversationRequest, PutSecretRequest,
+    RunInSandboxRequest, SandboxBackendChoice, Secret, SecretBackendChoice, WriteArtifactRequest,
 };
+
+fn local_test_config(root: impl Into<std::path::PathBuf>) -> BasicExoHarnessConfig {
+    BasicExoHarnessConfig {
+        root: root.into(),
+        secret_backend: SecretBackendChoice::Static([7u8; 32]),
+        sandbox_backend: SandboxBackendChoice::LocalProcess,
+    }
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn basic_backend_supports_agent_and_conversation_crud() {
     let tempdir = TempDir::new().expect("tempdir");
-    let harness = BasicExoHarness::new_with_local_process_sandbox(tempdir.path())
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
         .await
         .expect("harness should initialize");
 
@@ -60,7 +68,7 @@ async fn basic_backend_supports_agent_and_conversation_crud() {
 #[tokio::test(flavor = "current_thread")]
 async fn begin_turn_tracks_events_through_finish() {
     let tempdir = TempDir::new().expect("tempdir");
-    let harness = BasicExoHarness::new_with_local_process_sandbox(tempdir.path())
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
         .await
         .expect("harness should initialize");
     let agent = harness
@@ -114,7 +122,7 @@ async fn begin_turn_tracks_events_through_finish() {
 #[tokio::test(flavor = "current_thread")]
 async fn turn_events_continue_after_artifact_writes() {
     let tempdir = TempDir::new().expect("tempdir");
-    let harness = BasicExoHarness::new_with_local_process_sandbox(tempdir.path())
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
         .await
         .expect("harness should initialize");
     let agent = harness
@@ -155,7 +163,7 @@ async fn turn_events_continue_after_artifact_writes() {
 #[tokio::test(flavor = "current_thread")]
 async fn artifacts_are_versioned_by_path() {
     let tempdir = TempDir::new().expect("tempdir");
-    let harness = BasicExoHarness::new_with_local_process_sandbox(tempdir.path())
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
         .await
         .expect("harness should initialize");
     let agent = harness
@@ -193,7 +201,7 @@ async fn artifacts_are_versioned_by_path() {
 #[tokio::test(flavor = "current_thread")]
 async fn artifacts_store_metadata_and_raw_contents_separately() {
     let tempdir = TempDir::new().expect("tempdir");
-    let harness = BasicExoHarness::new_with_local_process_sandbox(tempdir.path())
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
         .await
         .expect("harness should initialize");
     let agent = harness
@@ -234,7 +242,7 @@ async fn artifacts_store_metadata_and_raw_contents_separately() {
 #[tokio::test(flavor = "current_thread")]
 async fn legacy_json_artifacts_are_still_readable() {
     let tempdir = TempDir::new().expect("tempdir");
-    let harness = BasicExoHarness::new_with_local_process_sandbox(tempdir.path())
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
         .await
         .expect("harness should initialize");
     let agent = harness
@@ -286,7 +294,7 @@ async fn legacy_json_artifacts_are_still_readable() {
 #[tokio::test(flavor = "current_thread")]
 async fn conversation_scope_overrides_agent_scope_and_fork_copies_local_state() {
     let tempdir = TempDir::new().expect("tempdir");
-    let harness = BasicExoHarness::new_with_local_process_sandbox(tempdir.path())
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
         .await
         .expect("harness should initialize");
     let agent = harness
@@ -386,7 +394,7 @@ async fn conversation_scope_overrides_agent_scope_and_fork_copies_local_state() 
 #[tokio::test(flavor = "current_thread")]
 async fn secrets_are_encrypted_at_rest() {
     let tempdir = TempDir::new().expect("tempdir");
-    let harness = BasicExoHarness::new_with_local_process_sandbox(tempdir.path())
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
         .await
         .expect("harness should initialize");
     let agent = harness
@@ -426,7 +434,7 @@ async fn secrets_are_encrypted_at_rest() {
 #[tokio::test(flavor = "current_thread")]
 async fn basic_backend_runs_commands_in_created_sandbox() {
     let tempdir = TempDir::new().expect("tempdir");
-    let harness = BasicExoHarness::new_with_local_process_sandbox(tempdir.path())
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
         .await
         .expect("harness should initialize");
     let agent = harness
@@ -484,7 +492,7 @@ async fn basic_backend_runs_commands_in_created_sandbox() {
 #[tokio::test(flavor = "current_thread")]
 async fn basic_backend_reattaches_running_sandbox_in_new_harness_process() {
     let tempdir = TempDir::new().expect("tempdir");
-    let harness = BasicExoHarness::new_with_local_process_sandbox(tempdir.path())
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
         .await
         .expect("harness should initialize");
     let agent = harness
@@ -515,7 +523,7 @@ async fn basic_backend_reattaches_running_sandbox_in_new_harness_process() {
     drop(agent);
     drop(harness);
 
-    let reloaded_harness = BasicExoHarness::new_with_local_process_sandbox(tempdir.path())
+    let reloaded_harness = BasicExoHarness::new(local_test_config(tempdir.path()))
         .await
         .expect("harness should reload");
     let reloaded_agent = reloaded_harness
