@@ -3,13 +3,23 @@
 Status: implemented for the Docker sandbox backend; stubs in place for the
 other backends.
 
+Two snapshot modes are available:
+
+- **Filesystem-only** (`SnapshotMode::Filesystem`, default). Fast, portable,
+  always-available. Captures the container's filesystem and re-creates a
+  fresh container from it on restore. Running processes are not preserved.
+- **Full-state** (`SnapshotMode::FullState`). Captures the entire frozen
+  process tree (memory pages, open FDs, sockets) in addition to the
+  filesystem. Backed by CRIU on Docker. Brittler and larger; requires
+  additional host setup (see `docs/requirements.md`).
+
 ## Summary
 
-A snapshot captures the current filesystem state of a sandboxed container so
-that the sandbox can later be rewound to that state. Snapshots are taken,
-listed, and replayed within an `exo` conversation. They give the user — or in
-a later iteration, an executor policy — the ability to time-travel a
-sandbox's state without forking the conversation itself.
+A snapshot captures the state of a sandboxed container so the sandbox can
+later be rewound. Snapshots are taken, listed, and replayed within an `exo`
+conversation. They give the user — or in a later iteration, an executor
+policy — the ability to time-travel a sandbox's state without forking the
+conversation itself.
 
 The earlier model only recorded snapshot _metadata_ (a UUID written to the
 event log). This work adds the captured artifact, the persistence layer for
@@ -17,19 +27,19 @@ it, and the restore path that actually consumes it.
 
 ## What you get
 
-- `ConversationHandle::snapshot_sandbox(id)` actually captures the live
-  container's filesystem and persists it.
+- `ConversationHandle::snapshot_sandbox(id, mode)` captures the live
+  container's state and persists it. `mode` selects filesystem-only vs
+  full-state capture.
 - `ConversationHandle::start_sandbox(StartSandboxRequest { id, snapshot_id, .. })`
-  starts a fresh container whose filesystem is sourced from the snapshot,
+  starts a fresh container whose state is sourced from the snapshot,
   preserving the original sandbox's mounts, network policy, and lifecycle.
-- A chat-REPL slash-command surface — `/snapshot`, `/snapshots`, `/rewind <id>`
-  — that drives the round-trip without leaving the conversation.
+  The restore path dispatches on the snapshot's `kind` tag.
+- A chat-REPL slash-command surface — `/snapshot`, `/checkpoint`,
+  `/snapshots`, `/rewind <id>` — that drives the round-trip without leaving
+  the conversation.
 
 ## What this is not
 
-- **Not a process or memory checkpoint.** Only filesystem state is captured.
-  Running processes inside the container are not preserved; they are
-  re-launched fresh from the restored image.
 - **Not a conversation rewind.** The event log, message history, and prior
   tool calls are untouched. Use `conversation fork` to rewind the
   conversation itself.
@@ -60,29 +70,43 @@ payload, persists the bytes, updates sandbox metadata, and emits the
 `ManagedSandboxBackend::acquire_from_snapshot` are the backend-specific
 methods that produce and consume the bytes.
 
-### SnapshotPayload and SnapshotKind
+### SnapshotMode, SnapshotPayload, SnapshotKind
 
 ```rust
+// Caller's intent — what kind of capture they want.
+pub enum SnapshotMode {
+    Filesystem,   // fast, no extra deps
+    FullState,    // CRIU-backed; docker only, needs setup
+}
+
+// The artifact itself. Opaque to the harness; only the producing backend
+// knows how to interpret `bytes`.
 pub struct SnapshotPayload {
     pub kind: SnapshotKind,
     pub bytes: Bytes,
 }
 
+// Tag on the artifact identifying which on-disk format it is.
 pub enum SnapshotKind {
-    DockerImageTar,
+    DockerImageTar,         // SnapshotMode::Filesystem on docker
+    DockerCheckpointTar,    // SnapshotMode::FullState on docker
     // future: AppleContainerImageTar, etc.
 }
 ```
 
-`SnapshotPayload` is opaque to the harness. The `kind` tag is the contract
-between producer and consumer: a payload produced by one backend can only be
-restored by a backend that knows how to interpret that kind. The harness
-never inspects `bytes` — it just persists them and hands them back on
-restore.
+`mode` and `kind` are intentionally separate. `mode` describes the caller's
+desired capture _semantics_ (filesystem vs full state). `kind` describes the
+_on-disk format_ of what the backend actually produced — that's the bit the
+restore path needs to dispatch on. A given backend maps each supported mode
+to a specific kind; another backend implementing the same mode may produce a
+different kind. The harness never inspects `bytes` — it just persists them
+and hands them back on restore.
 
-## Docker pipeline
+## Docker pipelines
 
-`ManagedSandboxHandle::snapshot` (Docker):
+### Filesystem (`SnapshotMode::Filesystem` → `SnapshotKind::DockerImageTar`)
+
+`ManagedSandboxHandle::snapshot(Filesystem)`:
 
 1. `ensure_warm_sandbox_ready` — make sure the container exists and is the
    one in the warm cache for this `SandboxKey`.
@@ -94,20 +118,42 @@ restore.
 4. `docker image rm exo-snap-<uuid>` — drop the local image. The canonical
    store of the snapshot lives in exoharness storage, not the docker daemon.
 
-`ManagedSandboxBackend::acquire_from_snapshot` (Docker):
+`acquire_from_snapshot` with `DockerImageTar`:
 
-1. Validate that `payload.kind == DockerImageTar`.
-2. `docker load < payload.bytes` — load the image back into the local
-   daemon; parse stdout to find the assigned image reference (the line
-   `Loaded image: <ref>`).
-3. Build a fresh `SandboxRequest` with `spec.image` swapped for the loaded
+1. `docker load < payload.bytes` — load the image back into the local
+   daemon; parse stdout to find the assigned image reference.
+2. Build a fresh `SandboxRequest` with `spec.image` swapped for the loaded
    reference. Mounts, network policy, default workdir, lifecycle, and
    `SandboxKey` are preserved from the original request.
-4. Evict any pre-existing warm container for this key (we want a fresh
-   container booted from the restored image, not a reuse of whatever was
-   running before).
-5. `docker run --detach …` with the loaded image — exactly the same path as
-   a normal cold-start container, just with a different image.
+3. Evict any pre-existing warm container for this key.
+4. `docker run --detach …` with the loaded image.
+
+### Full state (`SnapshotMode::FullState` → `SnapshotKind::DockerCheckpointTar`)
+
+`ManagedSandboxHandle::snapshot(FullState)`:
+
+1. Preflight: `docker info --format '{{.ExperimentalBuild}}'` must return
+   `true`. If not, surface a clean error pointing at `docs/requirements.md`
+   rather than letting docker error cryptically.
+2. `docker checkpoint create --checkpoint-dir=<tmp> <container> exo-snap`
+   — invokes CRIU under the hood to freeze the process tree and dump
+   memory, FDs, sockets, and filesystem diff into `<tmp>/exo-snap/`.
+3. `tar -cf - -C <tmp>/exo-snap .` — pack the checkpoint dir.
+4. Clean up `<tmp>` (the canonical store lives in exoharness storage).
+
+`acquire_from_snapshot` with `DockerCheckpointTar`:
+
+1. Preflight as above.
+2. Untar `payload.bytes` into a fresh `<tmp>/exo-snap/`.
+3. `docker create` a new container using the original request's image,
+   mounts, network, workdir, and labels. `--checkpoint` only works on a
+   container that hasn't been started yet, so we `create` rather than `run`.
+4. `docker start --checkpoint exo-snap --checkpoint-dir=<tmp> <name>` —
+   docker passes the checkpoint to CRIU which restores the process tree
+   onto the new container.
+
+If the start fails, the half-created container is removed with
+`docker rm -f` (best effort) before bubbling the error up.
 
 ## On-disk layout
 
@@ -145,13 +191,19 @@ The snapshot's existence is also recorded in the conversation event log as
 Inside the chat REPL (`exo chat repl <agent> <conv>`):
 
 ```
-/snapshot           capture the conversation's currently-running sandbox;
-                    prints the new snapshot id
+/snapshot           filesystem-only capture of the running sandbox
+/checkpoint         full-state (CRIU) capture; requires host setup
+                    (see docs/requirements.md)
 /snapshots          list snapshots taken in this conversation
 /rewind <id>        stop the current sandbox, start a fresh one from the
-                    named snapshot
+                    named snapshot — works for either kind, dispatching
+                    on the persisted manifest
 /help               show command list
 ```
+
+Both `/snapshot` and `/checkpoint` write under the same `snapshots/<id>/`
+directory and surface as the same `SandboxSnapshotted` event. The kind is
+recorded in `manifest.json` and dispatched on at restore time.
 
 There is intentionally no top-level `exo conversation snapshot` subcommand
 today — see "Known limits" for the cross-invocation gap that makes such
