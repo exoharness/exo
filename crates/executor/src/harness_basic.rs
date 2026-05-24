@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::{BasicExecutor, BraintrustRuntimeConfig, ModelClient, ToolRuntime};
+use exoharness::pricing::PricingTable;
 use exoharness::{BasicExoHarness, BasicExoHarnessConfig, ExoHarness, Result};
 
 use crate::harness_executor::ExecutorHarnessRuntime;
@@ -20,6 +21,29 @@ impl<M, T> BasicHarness<M, T> {
         T: ToolRuntime + 'static,
     {
         let runtime = ExecutorHarnessRuntime::new(BasicExecutor::new(model, tools), None);
+        Self {
+            inner: SharedHarness::new(exoharness, runtime),
+        }
+    }
+
+    /// Construct a harness whose executor uses an explicit pricing table
+    /// instead of the global LiteLLM loader. Use this when you want
+    /// deterministic, hermetic cost computation (tests) or you're
+    /// running offline.
+    pub fn with_pricing_table(
+        exoharness: Arc<dyn ExoHarness>,
+        model: Arc<M>,
+        tools: Arc<T>,
+        pricing: Arc<PricingTable>,
+    ) -> Self
+    where
+        M: ModelClient + 'static,
+        T: ToolRuntime + 'static,
+    {
+        let runtime = ExecutorHarnessRuntime::new(
+            BasicExecutor::with_pricing(model, tools, pricing),
+            None,
+        );
         Self {
             inner: SharedHarness::new(exoharness, runtime),
         }

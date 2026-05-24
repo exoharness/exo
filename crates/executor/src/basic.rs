@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use exoharness::{
     AgentHandle, ConversationHandle, ConversationId, EventData, EventId, EventQuery,
     EventQueryDirection, Result, ToolCallId, ToolRequest, TurnHandle, UsageRecord,
-    pricing::{TokenCounts, compute_cost_usd},
+    pricing::{PricingTable, TokenCounts},
 };
 use lingua::Message;
 use lingua::universal::{ToolContentPart, ToolResultContentPart};
@@ -25,6 +25,10 @@ pub struct BasicExecutor<M, T> {
     model: Arc<M>,
     tools: Arc<T>,
     history_cache: Arc<RwLock<HashMap<ConversationId, HistoryCacheEntry>>>,
+    /// If `Some`, this table is used for cost computation in place of the
+    /// global LiteLLM loader. Lets tests inject a deterministic price set
+    /// and lets embedders supply their own.
+    pricing_override: Option<Arc<PricingTable>>,
 }
 
 impl<M, T> BasicExecutor<M, T> {
@@ -33,6 +37,26 @@ impl<M, T> BasicExecutor<M, T> {
             model,
             tools,
             history_cache: Arc::new(RwLock::new(HashMap::new())),
+            pricing_override: None,
+        }
+    }
+
+    /// Construct with an explicit pricing table. Bypasses the global
+    /// LiteLLM loader — useful for tests, embedders that vendor their
+    /// own price data, or air-gapped deployments.
+    pub fn with_pricing(model: Arc<M>, tools: Arc<T>, pricing: Arc<PricingTable>) -> Self {
+        Self {
+            model,
+            tools,
+            history_cache: Arc::new(RwLock::new(HashMap::new())),
+            pricing_override: Some(pricing),
+        }
+    }
+
+    async fn pricing_table(&self) -> Arc<PricingTable> {
+        match &self.pricing_override {
+            Some(p) => Arc::clone(p),
+            None => crate::pricing_loader::get_pricing_table().await,
         }
     }
 }
@@ -43,6 +67,7 @@ impl<M, T> Clone for BasicExecutor<M, T> {
             model: Arc::clone(&self.model),
             tools: Arc::clone(&self.tools),
             history_cache: Arc::clone(&self.history_cache),
+            pricing_override: self.pricing_override.clone(),
         }
     }
 }
@@ -133,7 +158,8 @@ where
                 .complete_model_round(request, round as usize, stream_mode, turn_trace)
                 .await?;
 
-            let events = interpret_model_response(response);
+            let pricing = self.pricing_table().await;
+            let events = interpret_model_response(response, &pricing);
             turn.add_events(events.clone()).await?;
 
             let tool_requests = collect_tool_requests(&events);
@@ -411,11 +437,14 @@ fn extend_message_history(
     }
 }
 
-fn interpret_model_response(response: ModelResponse) -> Vec<EventData> {
+fn interpret_model_response(
+    response: ModelResponse,
+    pricing: &PricingTable,
+) -> Vec<EventData> {
     let mut events = Vec::new();
 
     if !response.messages.is_empty() {
-        let usage = build_usage_record(&response);
+        let usage = build_usage_record(&response, pricing);
         events.push(EventData::Messages {
             messages: response.messages,
             response_id: response.response_id,
@@ -434,7 +463,7 @@ fn interpret_model_response(response: ModelResponse) -> Vec<EventData> {
     events
 }
 
-fn build_usage_record(response: &ModelResponse) -> Option<UsageRecord> {
+fn build_usage_record(response: &ModelResponse, pricing: &PricingTable) -> Option<UsageRecord> {
     // Only emit a record when we have *something* worth recording — token usage
     // or timing. Skipping when both are absent keeps event JSON clean for
     // tests/fakes that don't populate metadata.
@@ -463,7 +492,7 @@ fn build_usage_record(response: &ModelResponse) -> Option<UsageRecord> {
     };
 
     let cost_usd = if has_usage && !model.is_empty() {
-        compute_cost_usd(
+        pricing.compute_cost_usd(
             &model,
             TokenCounts {
                 prompt: prompt_tokens,

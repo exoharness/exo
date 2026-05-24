@@ -155,13 +155,31 @@ async fn send_persists_messages_through_harness() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn usage_record_is_persisted_with_computed_cost() {
+    // Use an inline LiteLLM-schema fixture so the assertion is hermetic
+    // and doesn't depend on whatever rates the upstream JSON happens to
+    // ship today.
+    const PRICING_FIXTURE: &str = r#"{
+        "claude-sonnet-4-6": {
+            "litellm_provider": "anthropic",
+            "mode": "chat",
+            "input_cost_per_token": 3e-06,
+            "output_cost_per_token": 1.5e-05,
+            "cache_read_input_token_cost": 3e-07,
+            "cache_creation_input_token_cost": 3.75e-06
+        }
+    }"#;
+    let pricing = Arc::new(
+        exoharness::pricing::PricingTable::from_json_str(PRICING_FIXTURE)
+            .expect("fixture should parse"),
+    );
+
     let tempdir = TempDir::new().expect("tempdir should exist");
     let exoharness = Arc::new(
         BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
             .await
             .expect("basic exoharness should initialize"),
     ) as Arc<dyn ExoHarness>;
-    let harness = BasicHarness::new(
+    let harness = BasicHarness::with_pricing_table(
         Arc::clone(&exoharness),
         Arc::new(FakeModelClient::new(vec![ModelResponse {
             response_id: Some(Uuid7::now()),
@@ -179,6 +197,7 @@ async fn usage_record_is_persisted_with_computed_cost() {
             duration: None,
         }])),
         Arc::new(BasicToolRuntime::default()),
+        pricing,
     );
 
     let secret_id = exoharness

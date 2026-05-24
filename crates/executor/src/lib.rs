@@ -17,6 +17,7 @@ mod harness_js_repl;
 mod harness_runtime;
 mod harness_tool;
 mod harness_types;
+mod pricing_loader;
 mod rlm;
 #[cfg(test)]
 mod rlm_tests;
