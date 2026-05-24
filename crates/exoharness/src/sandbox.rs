@@ -118,7 +118,7 @@ const DEFAULT_ENABLED_NETWORK_NAME: &str = "exo-default";
 const WARM_SANDBOX_KEEPALIVE_ARGV: &[&str] = &["sleep", "infinity"];
 const WARM_SANDBOX_HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(3);
 const WARM_SANDBOX_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
-const ORPHANED_WARM_SANDBOX_MIN_AGE: Duration = Duration::from_secs(60 * 60);
+const ORPHANED_WARM_SANDBOX_MIN_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const WARM_SANDBOX_KEY_LABEL: &str = "exo.sandbox.key";
 const WARM_SANDBOX_SPEC_HASH_LABEL: &str = "exo.sandbox.spec-hash";
 const WARM_SANDBOX_OWNER_PID_LABEL: &str = "exo.sandbox.owner-pid";
@@ -291,16 +291,9 @@ impl Default for AppleContainerSandboxBackend {
 
 impl Drop for AppleContainerSandboxBackend {
     fn drop(&mut self) {
-        let Ok(mut warm_sandboxes) = self.warm_sandboxes.try_lock() else {
-            return;
-        };
-        let names = warm_sandboxes
-            .drain()
-            .filter_map(|(_, entry)| entry.owned.then_some(entry.name))
-            .collect::<Vec<_>>();
-        for name in names {
-            cleanup_named_container_blocking(&self.container_bin, &name);
-        }
+        // Warm sandboxes intentionally outlive a single CLI/REPL process so a
+        // restarted Exoclaw agent can reattach to the same environment. Stale
+        // containers are cleaned by the orphan reaper on later backend startup.
     }
 }
 
@@ -1074,11 +1067,6 @@ fn owner_pid_is_alive(pid: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-fn cleanup_named_container_blocking(container_bin: &Path, name: &str) {
-    run_container_admin_command_blocking(container_bin, ["stop", name]);
-    run_container_admin_command_blocking(container_bin, ["delete", name]);
-}
-
 fn schedule_cleanup_named_container(container_bin: PathBuf, name: String) {
     tokio::spawn(async move {
         if let Err(error) = cleanup_named_container(&container_bin, &name).await {
@@ -1107,35 +1095,6 @@ async fn run_container_admin_command<const N: usize>(
             args.join(" "),
             timeout.as_secs()
         )),
-    }
-}
-
-fn run_container_admin_command_blocking<const N: usize>(container_bin: &Path, args: [&str; N]) {
-    let Ok(mut child) = std::process::Command::new(container_bin)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        return;
-    };
-
-    let deadline = Instant::now() + WARM_SANDBOX_CLEANUP_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-            Ok(None) => {
-                if let Err(error) = child.kill() {
-                    eprintln!("failed to kill timed out container admin command: {error}");
-                }
-                if let Err(error) = child.wait() {
-                    eprintln!("failed to wait for timed out container admin command: {error}");
-                }
-                return;
-            }
-            Err(_) => return,
-        }
     }
 }
 

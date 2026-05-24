@@ -65,6 +65,7 @@ interface RawToolManifestEntry {
 interface RawConversationConfig {
   enable_networking: boolean;
   shell_program?: string | null;
+  sandbox_scope?: "agent" | "conversation" | null;
   mounts: Array<{
     host_path: string;
     mount_path: string;
@@ -809,6 +810,7 @@ function toConversationConfig(raw: RawConversationConfig): ConversationConfig {
   return {
     enableNetworking: raw.enable_networking,
     shellProgram: raw.shell_program ?? null,
+    sandboxScope: raw.sandbox_scope ?? null,
     mounts: raw.mounts.map(toFileSystemMount),
   };
 }

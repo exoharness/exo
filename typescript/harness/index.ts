@@ -90,6 +90,7 @@ export interface SecretMetadata {
 export interface ConversationConfig {
   enableNetworking: boolean;
   shellProgram?: string | null;
+  sandboxScope?: "agent" | "conversation" | null;
   mounts: FileSystemMount[];
 }
 

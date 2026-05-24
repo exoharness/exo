@@ -1,3 +1,4 @@
+mod agent_sandbox;
 mod basic;
 #[cfg(test)]
 mod basic_tests;
@@ -33,8 +34,8 @@ pub use conversation_wakeup::send_conversation_wakeup;
 pub use executor_types::{
     AgentConfig, AgentHarnessKind, ConversationConfig, ConversationModelConfig,
     ExecutionStreamEvent, ExecutionStreamHandle, ModelClient, ModelRequest, ModelResponse,
-    ModelResponseStream, PendingToolCall, SendRequest, SendResult, ToolDefinition,
-    ToolManifestEntry, ToolRuntime, TypeScriptHarnessConfig,
+    ModelResponseStream, PendingToolCall, SandboxScope, SendRequest, SendResult, ToolDefinition,
+    ToolManifestEntry, ToolRuntime, TypeScriptHarnessConfig, effective_sandbox_scope,
 };
 pub use exoharness::{
     AgentHandle, BasicExoHarness, Binding, BindingMetadata, ConversationHandle, EventData, EventId,

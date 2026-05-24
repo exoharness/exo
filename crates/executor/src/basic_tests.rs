@@ -60,6 +60,7 @@ async fn send_appends_user_and_assistant_messages() {
 
     executor
         .prepare_conversation(
+            agent.as_ref(),
             conversation.as_ref(),
             &default_agent_config(),
             &ConversationConfig::default(),
@@ -152,6 +153,7 @@ async fn send_executes_tool_round_trip() {
         enable_networking: true,
         shell_program: Some("bash".to_string()),
         mounts: Vec::new(),
+        sandbox_scope: None,
     };
     let turn = conversation
         .begin_turn(BeginTurnRequest {
@@ -259,6 +261,7 @@ async fn send_stream_emits_chunks_and_persists_final_response() {
 
     executor
         .prepare_conversation(
+            agent.as_ref(),
             conversation.as_ref(),
             &default_agent_config(),
             &ConversationConfig::default(),
@@ -439,7 +442,9 @@ impl FakeToolRuntime {
 impl ToolRuntime for FakeToolRuntime {
     async fn execute(
         &self,
+        _agent: &dyn AgentHandle,
         _conversation: &dyn ConversationHandle,
+        _agent_config: &AgentConfig,
         _config: &ConversationConfig,
         _request: &ToolRequest,
     ) -> Result<ToolResult> {
