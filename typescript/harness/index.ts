@@ -8,6 +8,7 @@ export * from "./tools";
 export * from "./built-in-tools";
 export * from "./tool-manifest";
 export * from "./scheduler-tools";
+export * from "./adapter-tools";
 
 export type MessageRole =
   | "system"

@@ -11,6 +11,7 @@ import {
   registerBuiltInTools,
   registerAgentToolsFromManifestPathIfExists,
   registerAgentToolsFromManifest,
+  registerAdapterTools,
   registerLibraryToolsFromManifest,
   registerToolsFromManifest,
   materializeEventsToMessages,
@@ -634,6 +635,73 @@ describe("agent tool loading", () => {
       process.chdir(previousCwd);
       await fs.rm(tempdir, { recursive: true, force: true });
     }
+  });
+
+  it("installs an agent adapter and writes the adapter manifest", async () => {
+    const previousCwd = process.cwd();
+    const tempdir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "exo-agent-adapter-"),
+    );
+    process.chdir(tempdir);
+    try {
+      const registry = createToolRegistry(fakeTurnContext());
+      registerAdapterTools(registry, ["install_agent_adapter"]);
+      const moduleSource = "export const definition = { name: 'demo' };\n";
+      const modulePath = path.resolve(".exo/agent-adapters/demo.ts");
+
+      await expect(
+        registry.executePending([
+          {
+            toolCallId: "install_1",
+            request: {
+              functionName: "install_agent_adapter",
+              arguments: {
+                name: "demo",
+                moduleSource,
+                initialization: { channel: "demo" },
+                capabilities: ["receive", "send_message"],
+              },
+            },
+          },
+        ]),
+      ).resolves.toEqual([
+        wrappedToolResultEvent(
+          "install_1",
+          "install_agent_adapter",
+          "built_in",
+          1,
+          {
+            ok: true,
+            modulePath,
+            manifestPath: ".exo/agent-adapters/manifest.json",
+            initialization: { channel: "demo" },
+            capabilities: ["receive", "send_message"],
+          },
+        ),
+      ]);
+
+      await expect(fs.readFile(modulePath, "utf8")).resolves.toBe(moduleSource);
+      await expect(
+        fs.readFile(".exo/agent-adapters/manifest.json", "utf8"),
+      ).resolves.toContain('"modulePath": "./demo.ts"');
+    } finally {
+      process.chdir(previousCwd);
+      await fs.rm(tempdir, { recursive: true, force: true });
+    }
+  });
+
+  it("exposes WhatsApp adapter config and message target schemas", () => {
+    const registry = createToolRegistry(fakeTurnContext());
+    registerAdapterTools(registry, ["create_adapter", "send_adapter_message"]);
+
+    const createAdapter = registry.get("create_adapter")?.definition
+      .parameters as JsonObject;
+    const sendMessage = registry.get("send_adapter_message")?.definition
+      .parameters as JsonObject;
+
+    expect(JSON.stringify(createAdapter)).toContain('"whatsapp"');
+    expect(JSON.stringify(createAdapter)).toContain('"workerCommand"');
+    expect(JSON.stringify(sendMessage)).toContain('"target"');
   });
 
   it("rejects agent tool modules without a default Tool export", async () => {

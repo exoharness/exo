@@ -1,3 +1,4 @@
+mod adapters;
 mod env;
 #[cfg(test)]
 mod env_tests;
@@ -111,6 +112,10 @@ enum Commands {
     Schedule {
         #[command(subcommand)]
         command: schedule::ScheduleCommands,
+    },
+    Adapters {
+        #[command(subcommand)]
+        command: adapters::AdapterCommands,
     },
 }
 
@@ -351,6 +356,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     match cli.command {
+        Commands::Adapters { command } => {
+            adapters::handle_adapter_command(&cli.root, Arc::clone(&harness), command).await?;
+        }
         Commands::Schedule { command } => {
             schedule::handle_schedule_command(&cli.root, Arc::clone(&harness), command).await?;
         }
@@ -1190,7 +1198,10 @@ fn command_agent_ref(command: &Commands) -> Option<&str> {
                 Some(agent.as_str())
             }
         },
-        Commands::Secret { .. } | Commands::Model { .. } | Commands::Schedule { .. } => None,
+        Commands::Secret { .. }
+        | Commands::Model { .. }
+        | Commands::Schedule { .. }
+        | Commands::Adapters { .. } => None,
     }
 }
 

@@ -21,6 +21,8 @@ COMMAND="repl"
 USE_SANDBOX=true
 PULL_SANDBOX=false
 START_SCHEDULER="${EXO_START_SCHEDULER:-true}"
+START_ADAPTERS="${EXO_START_ADAPTERS:-true}"
+ADAPTER_LIMIT="${EXO_ADAPTER_LIMIT:-50}"
 
 usage() {
   cat <<'EOF'
@@ -31,7 +33,8 @@ Usage:
   scripts/exoclaw-repl setup-sandbox
 
 Default behavior creates or reuses an Exoclaw agent and conversation, starts the
-local scheduler loop, then starts a REPL. It reads .env by default if present.
+local scheduler and adapter loops, then starts a REPL. It reads .env by default
+if present.
 
 Options:
   --model <model>              Model binding name (default: gpt-5.4)
@@ -48,6 +51,9 @@ Options:
   --scheduler-interval <secs>  Scheduler polling interval (default: 10)
   --no-scheduler               Do not start the local scheduled task runner
   --scheduler                  Start the local scheduled task runner
+  --no-adapters                Do not start the local adapter runner
+  --adapters                   Start the local adapter runner
+  --adapter-limit <n>          Max adapters supervised by the runner (default: 50)
   --pull-sandbox               Pull the sandbox image before starting
   --no-sandbox                 Do not require or configure sandbox shell support
   --env-file <path>            Env file to read if present (default: .env)
@@ -58,7 +64,8 @@ Environment overrides:
   EXO_MODEL, EXO_AGENT, EXO_CONVERSATION, EXO_AGENT_NAME,
   EXO_CONVERSATION_NAME, EXO_MODULE, EXO_SANDBOX_IMAGE,
   EXO_NETWORKING, EXO_SHELL_PROGRAM, EXO_SANDBOX_SCOPE, EXO_ENV_FILE,
-  EXO_BIN, EXO_START_SCHEDULER, EXO_SCHEDULER_INTERVAL_SECONDS
+  EXO_BIN, EXO_START_SCHEDULER, EXO_START_ADAPTERS,
+  EXO_SCHEDULER_INTERVAL_SECONDS, EXO_ADAPTER_LIMIT
 EOF
 }
 
@@ -90,6 +97,14 @@ scheduler_log_file() {
   echo "$ROOT_DIR/.exo/exoclaw-scheduler.log"
 }
 
+adapters_pid_file() {
+  echo "$ROOT_DIR/.exo/exoclaw-adapters.pid"
+}
+
+adapters_log_file() {
+  echo "$ROOT_DIR/.exo/exoclaw-adapters.log"
+}
+
 scheduler_process_running() {
   local pid_file pid command_line
   pid_file="$(scheduler_pid_file)"
@@ -104,6 +119,22 @@ scheduler_process_running() {
   fi
   command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
   [[ "$command_line" == *"schedule run --watch"* ]]
+}
+
+adapters_process_running() {
+  local pid_file pid command_line
+  pid_file="$(adapters_pid_file)"
+  [[ -f "$pid_file" ]] || return 1
+  pid="$(<"$pid_file")"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" >/dev/null 2>&1 || return 1
+  if [[ "$EXO_BIN" -nt "$pid_file" ]]; then
+    echo "Restarting adapter runner because $EXO_BIN is newer..."
+    kill "$pid" >/dev/null 2>&1 || true
+    return 1
+  fi
+  command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  [[ "$command_line" == *"adapters run --watch"* ]]
 }
 
 ensure_scheduler() {
@@ -124,6 +155,26 @@ ensure_scheduler() {
     >>"$log_file" 2>&1 &
   echo "$!" >"$pid_file"
   echo "Scheduler log: $log_file"
+}
+
+ensure_adapters() {
+  if [[ "$START_ADAPTERS" != true ]]; then
+    return
+  fi
+  if adapters_process_running; then
+    return
+  fi
+
+  mkdir -p "$ROOT_DIR/.exo"
+  local pid_file log_file
+  pid_file="$(adapters_pid_file)"
+  log_file="$(adapters_log_file)"
+  echo "Starting adapter runner..."
+  nohup "$EXO_BIN" --env-file-if-exists "$ENV_FILE" --harness "$HARNESS" \
+    adapters run --watch --limit "$ADAPTER_LIMIT" \
+    >>"$log_file" 2>&1 &
+  echo "$!" >"$pid_file"
+  echo "Adapter log: $log_file"
 }
 
 container_image_exists() {
@@ -264,9 +315,22 @@ stop_scheduler() {
   rm -f "$pid_file"
 }
 
+stop_adapters() {
+  local pid_file pid
+  pid_file="$(adapters_pid_file)"
+  [[ -f "$pid_file" ]] || return
+  pid="$(<"$pid_file")"
+  if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" >/dev/null 2>&1; then
+    echo "Stopping Exoclaw adapter runner..."
+    kill "$pid" >/dev/null 2>&1 || true
+  fi
+  rm -f "$pid_file"
+}
+
 delete_all_agents_and_conversations() {
   ensure_exo_bin
   stop_scheduler
+  stop_adapters
 
   local agents
   agents="$(exo agent list | awk 'NR > 1 { print $1 }')"
@@ -305,6 +369,7 @@ run_repl() {
   ensure_agent
   ensure_conversation
   ensure_scheduler
+  ensure_adapters
   exec "$EXO_BIN" --env-file-if-exists "$ENV_FILE" chat repl "$AGENT" "$CONVERSATION"
 }
 
@@ -388,6 +453,19 @@ while [[ $# -gt 0 ]]; do
     --scheduler)
       START_SCHEDULER=true
       shift
+      ;;
+    --no-adapters)
+      START_ADAPTERS=false
+      shift
+      ;;
+    --adapters)
+      START_ADAPTERS=true
+      shift
+      ;;
+    --adapter-limit)
+      ADAPTER_LIMIT="${2:-}"
+      [[ "$ADAPTER_LIMIT" =~ ^[0-9]+$ && "$ADAPTER_LIMIT" -gt 0 ]] || die "--adapter-limit requires a positive integer"
+      shift 2
       ;;
     --pull-sandbox)
       PULL_SANDBOX=true

@@ -1,3 +1,10 @@
+mod adapter_irc;
+mod adapter_registry;
+mod adapter_runtime;
+mod adapter_store;
+mod adapter_tools;
+mod adapter_types;
+mod adapter_worker;
 mod agent_sandbox;
 mod basic;
 #[cfg(test)]
@@ -29,6 +36,14 @@ mod scheduler_types;
 mod shared;
 mod typescript;
 
+pub use adapter_registry::validate_adapter_build;
+pub use adapter_runtime::{AdapterRunOptions, run_adapters_once, run_adapters_watch};
+pub use adapter_store::AdapterStore;
+pub use adapter_types::{
+    AdapterBuildStatus, AdapterConfig, AdapterEventRecord, AdapterEventType, AdapterKind,
+    AdapterRecord, AdapterSource, IrcAdapterConfig, IrcTriggerPolicy, ModuleAdapterConfig,
+    NewAdapter, WhatsappAdapterConfig, WhatsappTriggerPolicy,
+};
 pub use braintrust::{BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig};
 pub use conversation_wakeup::send_conversation_wakeup;
 pub use executor_types::{

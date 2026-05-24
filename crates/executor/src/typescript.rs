@@ -626,8 +626,9 @@ impl TypeScriptHarness<ExoclawToolRuntime> {
         let root = root.as_ref();
         let exoharness: Arc<dyn ExoHarness> =
             Arc::new(BasicExoHarness::new(root.join("exoharness")).await?);
-        let tools = Arc::new(ExoclawToolRuntime::with_scheduler_root(
+        let tools = Arc::new(ExoclawToolRuntime::with_roots(
             root.join("scheduled-tasks"),
+            root.join("adapters"),
         ));
         let runtime = ExecutorHarnessRuntime::new(
             TypeScriptExecutor::new(Arc::clone(&exoharness), workspace_root, env, tools),

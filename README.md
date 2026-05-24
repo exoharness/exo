@@ -106,7 +106,7 @@ For the coding-agent setup commands, see
 
 Exoclaw is the TypeScript harness example for long-running local agents. It uses
 the same TypeScript runner path as the minimal harness, but opts into scheduled
-task tools and scheduler-aware sandbox policy.
+task tools, long-running adapters, and scheduler-aware sandbox policy.
 
 Start a local Exoclaw REPL with:
 
@@ -119,6 +119,17 @@ corresponding CLI commands are under:
 
 ```bash
 ./target/debug/exo --harness exoclaw schedule --help
+```
+
+Adapters connect Exoclaw conversations to external applications. Built-in
+adapters include IRC and an experimental WhatsApp adapter backed by Baileys.
+Adapters keep external connections open in a host-owned runtime, wake the
+configured conversation when the trigger policy matches, and require the agent to
+call `send_adapter_message` for explicit outbound replies. Adapter CLI commands
+are under:
+
+```bash
+./target/debug/exo --harness exoclaw adapters --help
 ```
 
 By default, Exoclaw uses an agent-scoped sandbox for shell commands and scheduled
@@ -144,7 +155,7 @@ scripts/exoclaw-repl --conversation isolated-dev --sandbox-scope conversation
   adapter-specific support code.
 - `examples/typescript`: runnable TypeScript harness examples.
 - `examples/exoclaw`: long-running TypeScript harness example with scheduled
-  task support.
+  task and adapter support.
 - `containers`: sandbox images used by the coding-agent harness examples.
 - `spec`: core architecture and terminology.
 - `docs`: design notes for in-progress directions.

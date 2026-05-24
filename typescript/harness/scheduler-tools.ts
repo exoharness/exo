@@ -84,7 +84,7 @@ function createScheduleSandboxTaskTool(): ToolInstance {
           reportPrompt: {
             type: "string",
             description:
-              "Instructions for how to report each completed run back to the user.",
+              "Instructions for how to report each completed run back to the user. If the task was requested from an adapter like IRC and future results should go back there, include the adapter id and tell the agent to call send_adapter_message.",
           },
           maxOutputBytes: {
             type: ["number", "null"],

@@ -1,5 +1,10 @@
 use std::path::PathBuf;
 
+use crate::adapter_store::AdapterStore;
+use crate::adapter_tools::{
+    execute_build_adapter_tool, execute_create_adapter_tool, execute_delete_adapter_tool,
+    execute_disable_adapter_tool, execute_list_adapters_tool, execute_send_adapter_message_tool,
+};
 use crate::agent_sandbox::ensure_agent_sandbox;
 use crate::conversation_sandbox::{conversation_sandboxes, ensure_conversation_sandbox};
 use crate::scheduler_store::SchedulerStore;
@@ -23,12 +28,17 @@ pub struct BasicToolRuntime;
 #[derive(Debug, Clone)]
 pub struct ExoclawToolRuntime {
     scheduler_store: SchedulerStore,
+    adapter_store: AdapterStore,
 }
 
 impl ExoclawToolRuntime {
-    pub fn with_scheduler_root(root: impl Into<PathBuf>) -> Self {
+    pub fn with_roots(
+        scheduler_root: impl Into<PathBuf>,
+        adapter_root: impl Into<PathBuf>,
+    ) -> Self {
         Self {
-            scheduler_store: SchedulerStore::new(root),
+            scheduler_store: SchedulerStore::new(scheduler_root),
+            adapter_store: AdapterStore::new(adapter_root),
         }
     }
 }
@@ -109,6 +119,19 @@ impl ToolRuntime for ExoclawToolRuntime {
             }
             "delete_scheduled_task" => {
                 execute_delete_scheduled_task_tool(conversation, &self.scheduler_store, request)
+                    .await
+            }
+            "create_adapter" => execute_create_adapter_tool(&self.adapter_store, request).await,
+            "list_adapters" => execute_list_adapters_tool(&self.adapter_store, request).await,
+            "disable_adapter" => {
+                execute_disable_adapter_tool(conversation, &self.adapter_store, request).await
+            }
+            "delete_adapter" => {
+                execute_delete_adapter_tool(conversation, &self.adapter_store, request).await
+            }
+            "build_adapter" => execute_build_adapter_tool(&self.adapter_store, request).await,
+            "send_adapter_message" => {
+                execute_send_adapter_message_tool(agent, conversation, &self.adapter_store, request)
                     .await
             }
             other => Err(anyhow::anyhow!(

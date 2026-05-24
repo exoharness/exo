@@ -4,6 +4,7 @@ Exoclaw is the long-running agent harness example. It builds on the minimal
 TypeScript harness turn loop, but opts into heavier runtime features:
 
 - scheduled sandbox tasks
+- long-running adapters for external applications
 - live conversation wake-ups
 - sticky agent sandbox policy
 - optional `sandboxScope: "conversation"` conversation-scoped shell sandboxes
@@ -14,7 +15,17 @@ Use Exoclaw when the agent should keep working over time. Use
 `examples/typescript/basic-harness.ts` for a minimal TypeScript harness without
 scheduler tools.
 
+For a deeper explanation of the adapter runtime, IRC example, and scheduler
+cooperation, see [adapter-architecture.md](./adapter-architecture.md).
+
 Start an Exoclaw REPL with the default agent-scoped sandbox:
+
+```bash
+scripts/exoclaw-repl --pull-sandbox
+```
+
+The script also starts local scheduler and adapter runner processes by default.
+Use `--no-scheduler` or `--no-adapters` when you only want the interactive REPL.
 
 ## Tools
 
@@ -33,6 +44,103 @@ It also adds scheduler tools:
 
 `cancel_scheduled_task` disables a task and preserves its record/history.
 `delete_scheduled_task` removes the task record and stored run history.
+
+And adapter tools:
+
+- `create_adapter`
+- `list_adapters`
+- `disable_adapter`
+- `delete_adapter`
+- `send_adapter_message`
+- `install_agent_adapter`
+- `build_agent_adapter`
+
+`disable_adapter` stops future adapter wake-ups while preserving the adapter
+record and event history. `delete_adapter` removes the adapter record and stored
+events.
+
+## Adapters
+
+Adapters are host-owned long-running runtimes for external applications. They
+are intentionally separate from scheduled sandbox commands: adapters own sockets,
+reconnect behavior, inbound message parsing, event history, and conversation
+wake-ups. Agents configure adapters with tools, and the local adapter runner
+started by `scripts/exoclaw-repl` keeps them connected.
+
+The first built-in adapter is IRC. It connects to a configured server/channel,
+responds to `PING`, parses `PRIVMSG`, and wakes the conversation when the trigger
+policy matches. The recommended trigger is `mention`, which only wakes the
+conversation when a channel message mentions the adapter nick. `all_messages` is
+available for quieter channels.
+
+Exoclaw also includes an experimental WhatsApp adapter. It is built as a
+host-supervised Node.js worker using Baileys. The Rust adapter runtime owns
+supervision, durable events, conversation wakeups, and outbox draining; the
+worker owns WhatsApp pairing/session state and the live socket. When first run,
+it emits a QR pairing event into adapter history and logs; after pairing, Baileys
+auth state is stored under `.exo/adapters/whatsapp/<adapter-id>/auth` by default.
+
+Example IRC adapter tool arguments:
+
+```json
+{
+  "name": "libera-exo",
+  "source": "built_in",
+  "config": {
+    "type": "irc",
+    "server": "irc.libera.chat",
+    "port": 6697,
+    "tls": true,
+    "nick": "exo-bot",
+    "username": "exo-bot",
+    "realname": "Exoclaw Bot",
+    "channel": "#example",
+    "passwordSecretId": null,
+    "trigger": "mention"
+  }
+}
+```
+
+Example WhatsApp adapter tool arguments:
+
+```json
+{
+  "name": "whatsapp-dev",
+  "source": "built_in",
+  "config": {
+    "type": "whatsapp",
+    "authDir": null,
+    "trigger": "all_messages",
+    "allowedChats": null,
+    "workerCommand": null
+  }
+}
+```
+
+Inbound adapter messages do not automatically send model output back to the
+external service. The agent must explicitly call `send_adapter_message`, which
+keeps external side effects visible in tool history. WhatsApp sends require the
+`target` chat id from the inbound wakeup; IRC sends use `target: null` because
+the adapter channel is fixed in config.
+
+If an IRC or WhatsApp user asks Exoclaw to schedule recurring work and expects
+future results in the originating app, the agent should put that routing
+instruction in the task's `reportPrompt`, including the `adapterId` and, for
+WhatsApp, the `target` chat id. Scheduler wakeups are normal Exoclaw turns, so
+they can call `send_adapter_message` when the `reportPrompt` says to post the
+result back.
+
+Adapters use the same source model as tools:
+
+- `built_in`: shipped with Exoclaw, starting with IRC and experimental WhatsApp.
+- `library`: registered from reusable module metadata.
+- `agent`: installed by the agent with `install_agent_adapter`, then validated
+  with `build_agent_adapter`.
+
+The initial host runtime can run IRC adapters for any source once non-built-in
+adapters pass `build_agent_adapter`. Module-backed library and agent adapters are
+persisted and build-validated so the source model is in place; richer module
+execution can be layered on the same registry/runtime boundary.
 
 ## Sandbox Modes
 

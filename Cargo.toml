@@ -14,7 +14,6 @@ braintrust-sdk-rust = { git = "https://github.com/braintrustdata/braintrust-sdk-
 bytes = "1.10.1"
 chrono = { version = "0.4.42", features = ["serde"] }
 clap = { version = "4.5.48", features = ["derive", "env"] }
-flate2 = "1.1.2"
 futures = "0.3.31"
 object_store = { version = "0.12.5", features = [
   "fs",
@@ -27,24 +26,18 @@ reqwest = { version = "0.12.23", default-features = false, features = [
   "json",
   "rustls-tls",
 ] }
-shell-words = "1.1.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
-sqlx = { version = "0.8.6", default-features = false, features = [
-  "runtime-tokio-rustls",
-  "any",
-  "sqlite",
-  "postgres",
-  "macros",
-] }
 thiserror = "2.0.17"
 tokio = { version = "1.52.1", features = [
   "io-std",
   "io-util",
   "macros",
+  "net",
   "process",
   "rt-multi-thread",
   "sync",
+  "time",
 ] }
 tokio-stream = "0.1.17"
 tokio-util = { version = "0.7.18", features = ["compat"] }
