@@ -1,0 +1,433 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+EXO_BIN="${EXO_BIN:-$ROOT_DIR/target/debug/exo}"
+ENV_FILE="${EXO_ENV_FILE:-$ROOT_DIR/.env}"
+MODEL="${EXO_MODEL:-gpt-5.4}"
+AGENT="${EXO_AGENT:-exoclaw-agent}"
+AGENT_NAME="${EXO_AGENT_NAME:-Exoclaw Agent}"
+CONVERSATION="${EXO_CONVERSATION:-dev}"
+CONVERSATION_NAME="${EXO_CONVERSATION_NAME:-Dev}"
+MODULE="${EXO_MODULE:-examples/exoclaw/harness.ts}"
+HARNESS="exoclaw"
+SANDBOX_IMAGE="${EXO_SANDBOX_IMAGE:-ubuntu:24.04}"
+NETWORKING="${EXO_NETWORKING:-enabled}"
+SHELL_PROGRAM="${EXO_SHELL_PROGRAM:-/bin/bash}"
+SANDBOX_SCOPE="${EXO_SANDBOX_SCOPE:-}"
+SCHEDULER_INTERVAL_SECONDS="${EXO_SCHEDULER_INTERVAL_SECONDS:-10}"
+COMMAND="repl"
+USE_SANDBOX=true
+PULL_SANDBOX=false
+START_SCHEDULER="${EXO_START_SCHEDULER:-true}"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  scripts/exoclaw-repl [options]
+  scripts/exoclaw-repl list
+  scripts/exoclaw-repl delall all
+  scripts/exoclaw-repl setup-sandbox
+
+Default behavior creates or reuses an Exoclaw agent and conversation, starts the
+local scheduler loop, then starts a REPL. It reads .env by default if present.
+
+Options:
+  --model <model>              Model binding name (default: gpt-5.4)
+  --agent <slug>               Agent slug (default: exoclaw-agent)
+  --conversation <slug>        Conversation slug (default: dev)
+  --convo <slug>               Alias for --conversation
+  --agent-name <name>          Agent display name (default: Exoclaw Agent)
+  --conversation-name <name>   Conversation display name (default: Dev)
+  --module <path>              Exoclaw TypeScript harness module
+  --sandbox-image <image>      Sandbox image (default: ubuntu:24.04)
+  --networking <mode>          enabled or disabled (default: enabled)
+  --shell-program <path>       Shell in the sandbox (default: /bin/bash)
+  --sandbox-scope <scope>      agent or conversation (default: Exoclaw agent)
+  --scheduler-interval <secs>  Scheduler polling interval (default: 10)
+  --no-scheduler               Do not start the local scheduled task runner
+  --scheduler                  Start the local scheduled task runner
+  --pull-sandbox               Pull the sandbox image before starting
+  --no-sandbox                 Do not require or configure sandbox shell support
+  --env-file <path>            Env file to read if present (default: .env)
+  --exo-bin <path>             exo binary path (default: ./target/debug/exo)
+  --help                       Show this help
+
+Environment overrides:
+  EXO_MODEL, EXO_AGENT, EXO_CONVERSATION, EXO_AGENT_NAME,
+  EXO_CONVERSATION_NAME, EXO_MODULE, EXO_SANDBOX_IMAGE,
+  EXO_NETWORKING, EXO_SHELL_PROGRAM, EXO_SANDBOX_SCOPE, EXO_ENV_FILE,
+  EXO_BIN, EXO_START_SCHEDULER, EXO_SCHEDULER_INTERVAL_SECONDS
+EOF
+}
+
+die() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+ensure_exo_bin() {
+  if [[ -x "$EXO_BIN" ]]; then
+    return
+  fi
+  if [[ "$EXO_BIN" != "$ROOT_DIR/target/debug/exo" ]]; then
+    die "exo binary is not executable: $EXO_BIN"
+  fi
+  echo "Building exo binary..."
+  (cd "$ROOT_DIR" && CARGO_TARGET_DIR=target cargo build -p exo --ignore-rust-version)
+}
+
+exo() {
+  "$EXO_BIN" --env-file-if-exists "$ENV_FILE" "$@"
+}
+
+scheduler_pid_file() {
+  echo "$ROOT_DIR/.exo/exoclaw-scheduler.pid"
+}
+
+scheduler_log_file() {
+  echo "$ROOT_DIR/.exo/exoclaw-scheduler.log"
+}
+
+scheduler_process_running() {
+  local pid_file pid command_line
+  pid_file="$(scheduler_pid_file)"
+  [[ -f "$pid_file" ]] || return 1
+  pid="$(<"$pid_file")"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" >/dev/null 2>&1 || return 1
+  if [[ "$EXO_BIN" -nt "$pid_file" ]]; then
+    echo "Restarting scheduler because $EXO_BIN is newer..."
+    kill "$pid" >/dev/null 2>&1 || true
+    return 1
+  fi
+  command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  [[ "$command_line" == *"schedule run --watch"* ]]
+}
+
+ensure_scheduler() {
+  if [[ "$START_SCHEDULER" != true ]]; then
+    return
+  fi
+  if scheduler_process_running; then
+    return
+  fi
+
+  mkdir -p "$ROOT_DIR/.exo"
+  local pid_file log_file
+  pid_file="$(scheduler_pid_file)"
+  log_file="$(scheduler_log_file)"
+  echo "Starting scheduler loop..."
+  nohup "$EXO_BIN" --env-file-if-exists "$ENV_FILE" --harness "$HARNESS" \
+    schedule run --watch --interval-seconds "$SCHEDULER_INTERVAL_SECONDS" \
+    >>"$log_file" 2>&1 &
+  echo "$!" >"$pid_file"
+  echo "Scheduler log: $log_file"
+}
+
+container_image_exists() {
+  if command -v docker >/dev/null 2>&1; then
+    docker image inspect "$SANDBOX_IMAGE" >/dev/null 2>&1
+    return
+  fi
+  if command -v podman >/dev/null 2>&1; then
+    podman image exists "$SANDBOX_IMAGE" >/dev/null 2>&1
+    return
+  fi
+  return 2
+}
+
+container_pull_image() {
+  if command -v docker >/dev/null 2>&1; then
+    docker pull "$SANDBOX_IMAGE"
+    return
+  fi
+  if command -v podman >/dev/null 2>&1; then
+    podman pull "$SANDBOX_IMAGE"
+    return
+  fi
+  die "docker or podman is required to pre-pull sandbox images"
+}
+
+preflight_sandbox_image() {
+  local status=0
+  container_image_exists || status=$?
+  case "$status" in
+    0)
+      return
+      ;;
+    1)
+      die "sandbox image $SANDBOX_IMAGE is not present; you have to either --pull-sandbox or use --no-sandbox"
+      ;;
+    2)
+      die "docker/podman not found; you have to either install one or use --no-sandbox"
+      ;;
+  esac
+}
+
+setup_sandbox() {
+  ensure_exo_bin
+  container_pull_image
+}
+
+agent_exists() {
+  exo agent show "$AGENT" >/dev/null 2>&1
+}
+
+conversation_exists() {
+  exo conversation show "$AGENT" "$CONVERSATION" >/dev/null 2>&1
+}
+
+ensure_agent() {
+  if agent_exists; then
+    return
+  fi
+
+  echo "Creating agent $AGENT..."
+  local args=(
+    --harness "$HARNESS"
+    agent create "$AGENT_NAME"
+    --slug "$AGENT"
+    --module "$MODULE"
+    --model "$MODEL"
+  )
+  if [[ "$USE_SANDBOX" == true ]]; then
+    args+=(--sandbox-image "$SANDBOX_IMAGE" --networking "$NETWORKING")
+  fi
+  exo "${args[@]}"
+}
+
+ensure_conversation() {
+  if conversation_exists; then
+    if [[ -n "$SANDBOX_SCOPE" ]]; then
+      exo conversation update "$AGENT" "$CONVERSATION" \
+        --sandbox-scope "$SANDBOX_SCOPE" >/dev/null
+    fi
+    return
+  fi
+
+  echo "Creating conversation $CONVERSATION..."
+  local args=(conversation create "$AGENT" "$CONVERSATION_NAME" --slug "$CONVERSATION")
+  if [[ -n "$SANDBOX_SCOPE" ]]; then
+    args+=(--sandbox-scope "$SANDBOX_SCOPE")
+  fi
+  exo "${args[@]}"
+  if [[ "$USE_SANDBOX" == true ]]; then
+    local update_args=(conversation update "$AGENT" "$CONVERSATION" --shell-program "$SHELL_PROGRAM")
+    if [[ -n "$SANDBOX_SCOPE" ]]; then
+      update_args+=(--sandbox-scope "$SANDBOX_SCOPE")
+    fi
+    exo "${update_args[@]}" >/dev/null
+  fi
+}
+
+list_agents_and_conversations() {
+  ensure_exo_bin
+  echo "Agents and conversations:"
+  local agents
+  agents="$(exo agent list | awk 'NR > 1 { print $1 }')"
+  if [[ -z "$agents" ]]; then
+    echo "  none"
+    return
+  fi
+
+  while IFS= read -r agent; do
+    [[ -z "$agent" ]] && continue
+    echo
+    exo agent show "$agent" | awk '
+      /^slug:/ { slug=$2 }
+      /^name:/ { name=substr($0, 7) }
+      END {
+        if (slug != "") {
+          printf "%s", slug
+          if (name != "") {
+            printf " - %s", name
+          }
+          printf "\n"
+        }
+      }
+    '
+    exo conversation list "$agent" | awk -F '\t' 'NR == 1 { next } { printf "  %s - %s\n", $1, $2 }'
+  done <<<"$agents"
+}
+
+stop_scheduler() {
+  local pid_file pid
+  pid_file="$(scheduler_pid_file)"
+  [[ -f "$pid_file" ]] || return
+  pid="$(<"$pid_file")"
+  if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" >/dev/null 2>&1; then
+    echo "Stopping Exoclaw scheduler..."
+    kill "$pid" >/dev/null 2>&1 || true
+  fi
+  rm -f "$pid_file"
+}
+
+delete_all_agents_and_conversations() {
+  ensure_exo_bin
+  stop_scheduler
+
+  local agents
+  agents="$(exo agent list | awk 'NR > 1 { print $1 }')"
+  if [[ -z "$agents" ]]; then
+    echo "No agents to delete."
+    return
+  fi
+
+  while IFS= read -r agent; do
+    [[ -z "$agent" ]] && continue
+
+    local conversations
+    conversations="$(exo conversation list "$agent" | awk -F '\t' 'NR > 1 { print $1 }')"
+    while IFS= read -r conversation; do
+      [[ -z "$conversation" ]] && continue
+      echo "Deleting conversation $agent/$conversation..."
+      exo conversation delete "$agent" "$conversation" >/dev/null
+    done <<<"$conversations"
+
+    echo "Deleting agent $agent..."
+    exo agent delete "$agent" >/dev/null
+  done <<<"$agents"
+
+  echo "Deleted all agents and conversations."
+}
+
+run_repl() {
+  ensure_exo_bin
+  if [[ "$USE_SANDBOX" == true ]]; then
+    if [[ "$PULL_SANDBOX" == true ]]; then
+      container_pull_image
+    else
+      preflight_sandbox_image
+    fi
+  fi
+  ensure_agent
+  ensure_conversation
+  ensure_scheduler
+  exec "$EXO_BIN" --env-file-if-exists "$ENV_FILE" chat repl "$AGENT" "$CONVERSATION"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    list)
+      shift
+      [[ $# -eq 0 ]] || die "list does not accept additional arguments"
+      COMMAND="list"
+      ;;
+    delall|delete-all)
+      shift
+      [[ "${1:-}" == "all" ]] || die "delall requires literal argument: all"
+      shift
+      [[ $# -eq 0 ]] || die "delall all does not accept additional arguments"
+      COMMAND="delall"
+      ;;
+    setup-sandbox)
+      shift
+      COMMAND="setup-sandbox"
+      ;;
+    --model)
+      MODEL="${2:-}"
+      [[ -n "$MODEL" ]] || die "--model requires a value"
+      shift 2
+      ;;
+    --agent)
+      AGENT="${2:-}"
+      [[ -n "$AGENT" ]] || die "--agent requires a value"
+      shift 2
+      ;;
+    --conversation|--convo)
+      CONVERSATION="${2:-}"
+      [[ -n "$CONVERSATION" ]] || die "$1 requires a value"
+      shift 2
+      ;;
+    --agent-name)
+      AGENT_NAME="${2:-}"
+      [[ -n "$AGENT_NAME" ]] || die "--agent-name requires a value"
+      shift 2
+      ;;
+    --conversation-name)
+      CONVERSATION_NAME="${2:-}"
+      [[ -n "$CONVERSATION_NAME" ]] || die "--conversation-name requires a value"
+      shift 2
+      ;;
+    --module)
+      MODULE="${2:-}"
+      [[ -n "$MODULE" ]] || die "--module requires a value"
+      shift 2
+      ;;
+    --sandbox-image)
+      SANDBOX_IMAGE="${2:-}"
+      [[ -n "$SANDBOX_IMAGE" ]] || die "--sandbox-image requires a value"
+      shift 2
+      ;;
+    --networking)
+      NETWORKING="${2:-}"
+      [[ "$NETWORKING" == "enabled" || "$NETWORKING" == "disabled" ]] || die "--networking must be enabled or disabled"
+      shift 2
+      ;;
+    --shell-program)
+      SHELL_PROGRAM="${2:-}"
+      [[ -n "$SHELL_PROGRAM" ]] || die "--shell-program requires a value"
+      shift 2
+      ;;
+    --sandbox-scope)
+      SANDBOX_SCOPE="${2:-}"
+      [[ "$SANDBOX_SCOPE" == "agent" || "$SANDBOX_SCOPE" == "conversation" ]] || die "--sandbox-scope must be agent or conversation"
+      shift 2
+      ;;
+    --scheduler-interval)
+      SCHEDULER_INTERVAL_SECONDS="${2:-}"
+      [[ "$SCHEDULER_INTERVAL_SECONDS" =~ ^[0-9]+$ && "$SCHEDULER_INTERVAL_SECONDS" -gt 0 ]] || die "--scheduler-interval requires a positive integer"
+      shift 2
+      ;;
+    --no-scheduler)
+      START_SCHEDULER=false
+      shift
+      ;;
+    --scheduler)
+      START_SCHEDULER=true
+      shift
+      ;;
+    --pull-sandbox)
+      PULL_SANDBOX=true
+      shift
+      ;;
+    --no-sandbox)
+      USE_SANDBOX=false
+      shift
+      ;;
+    --env-file)
+      ENV_FILE="${2:-}"
+      [[ -n "$ENV_FILE" ]] || die "--env-file requires a value"
+      shift 2
+      ;;
+    --exo-bin)
+      EXO_BIN="${2:-}"
+      [[ -n "$EXO_BIN" ]] || die "--exo-bin requires a value"
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown argument: $1"
+      ;;
+  esac
+done
+
+case "$COMMAND" in
+  repl)
+    run_repl
+    ;;
+  list)
+    list_agents_and_conversations
+    ;;
+  delall)
+    delete_all_agents_and_conversations
+    ;;
+  setup-sandbox)
+    setup_sandbox
+    ;;
+esac

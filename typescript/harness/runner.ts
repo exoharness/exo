@@ -43,10 +43,12 @@ import {
 
 interface RawAgentConfig {
   instructions: Message[];
-  harness: "basic" | "rlm" | "typescript" | "type_script";
+  harness: "basic" | "rlm" | "typescript" | "type_script" | "exoclaw";
   typescript?: {
     module_path: string;
   } | null;
+  library_tools?: RawToolManifestEntry[];
+  enable_agent_tool_creation?: boolean;
   sandbox_image?: string | null;
   enable_networking: boolean;
   model: string;
@@ -55,9 +57,15 @@ interface RawAgentConfig {
   braintrust?: unknown;
 }
 
+interface RawToolManifestEntry {
+  module_path: string;
+  initialization: JsonObject;
+}
+
 interface RawConversationConfig {
   enable_networking: boolean;
   shell_program?: string | null;
+  sandbox_scope?: "agent" | "conversation" | null;
   mounts: Array<{
     host_path: string;
     mount_path: string;
@@ -777,6 +785,8 @@ function toAgentConfig(raw: RawAgentConfig): AgentConfig {
           modulePath: raw.typescript.module_path,
         }
       : null,
+    libraryTools: (raw.library_tools ?? []).map(toToolManifestEntry),
+    enableAgentToolCreation: raw.enable_agent_tool_creation ?? true,
     sandboxImage: raw.sandbox_image ?? null,
     enableNetworking: raw.enable_networking,
     model: raw.model,
@@ -786,10 +796,21 @@ function toAgentConfig(raw: RawAgentConfig): AgentConfig {
   };
 }
 
+function toToolManifestEntry(raw: RawToolManifestEntry): {
+  modulePath: string;
+  initialization: JsonObject;
+} {
+  return {
+    modulePath: raw.module_path,
+    initialization: raw.initialization,
+  };
+}
+
 function toConversationConfig(raw: RawConversationConfig): ConversationConfig {
   return {
     enableNetworking: raw.enable_networking,
     shellProgram: raw.shell_program ?? null,
+    sandboxScope: raw.sandbox_scope ?? null,
     mounts: raw.mounts.map(toFileSystemMount),
   };
 }

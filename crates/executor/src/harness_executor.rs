@@ -34,6 +34,7 @@ pub(crate) trait HarnessExecutor: Send + Sync + Clone + 'static {
 
     async fn prepare_conversation(
         &self,
+        _agent: &dyn AgentHandle,
         _conversation: &dyn ConversationHandle,
         _agent_config: &AgentConfig,
         _conversation_config: &ConversationConfig,
@@ -160,7 +161,12 @@ where
         )?;
         apply_conversation_model_override(&mut agent_config, model_override);
         self.executor
-            .prepare_conversation(conversation.as_ref(), &agent_config, &conversation_config)
+            .prepare_conversation(
+                agent.as_ref(),
+                conversation.as_ref(),
+                &agent_config,
+                &conversation_config,
+            )
             .await?;
         let prepared = self.executor.prepare_request(&request)?;
         let turn = conversation
@@ -214,7 +220,12 @@ where
         )?;
         apply_conversation_model_override(&mut agent_config, model_override);
         self.executor
-            .prepare_conversation(conversation.as_ref(), &agent_config, &conversation_config)
+            .prepare_conversation(
+                agent.as_ref(),
+                conversation.as_ref(),
+                &agent_config,
+                &conversation_config,
+            )
             .await?;
         let prepared = self.executor.prepare_request(&request)?;
         let turn = conversation

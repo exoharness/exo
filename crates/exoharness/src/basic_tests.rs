@@ -8,6 +8,7 @@ use crate::{
     Artifact, ArtifactVersion, BasicExoHarness, BeginTurnRequest, Binding, CreateSandboxRequest,
     EventData, EventQuery, EventQueryDirection, ExoHarness, ForkConversationRequest,
     NewAgentRequest, NewConversationRequest, PutSecretRequest, RunInSandboxRequest, Secret,
+    WriteArtifactRequest,
 };
 
 #[tokio::test(flavor = "current_thread")]
@@ -108,6 +109,47 @@ async fn begin_turn_tracks_events_through_finish() {
     assert!(matches!(events[3].data, EventData::Messages { .. }));
     assert!(matches!(events[4].data, EventData::TurnEnded));
     assert_eq!(events.last().expect("turn ended").id, latest_event_id);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn turn_events_continue_after_artifact_writes() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new_with_local_process_sandbox(tempdir.path())
+        .await
+        .expect("harness should initialize");
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let conversation = agent
+        .new_conversation(NewConversationRequest::default())
+        .await
+        .expect("conversation");
+
+    let turn = conversation
+        .begin_turn(BeginTurnRequest {
+            session_id: None,
+            input: vec![user_message("ping")],
+        })
+        .await
+        .expect("turn");
+    conversation
+        .write_artifact(WriteArtifactRequest {
+            path: "tool-results/example.json".to_string(),
+            contents: br#"{"ok":true}"#.to_vec(),
+        })
+        .await
+        .expect("write artifact");
+    turn.add_events(vec![EventData::Messages {
+        messages: vec![assistant_message("pong")],
+        response_id: None,
+    }])
+    .await
+    .expect("append after artifact write");
+    turn.finish().await.expect("finish after artifact write");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -435,6 +477,85 @@ async fn basic_backend_runs_commands_in_created_sandbox() {
     stdout_result.expect("stdout should read");
     stderr_result.expect("stderr should read");
     assert_eq!(String::from_utf8_lossy(&stdout_bytes), "hello");
+    assert_eq!(String::from_utf8_lossy(&stderr_bytes), "");
+    assert_eq!(wait_result.expect("process should exit"), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn basic_backend_reattaches_running_sandbox_in_new_harness_process() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new_with_local_process_sandbox(tempdir.path())
+        .await
+        .expect("harness should initialize");
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let conversation = agent
+        .new_conversation(NewConversationRequest::default())
+        .await
+        .expect("conversation");
+    let agent_id = agent.record().id;
+    let conversation_id = conversation.record().id;
+
+    let sandbox_id = conversation
+        .create_sandbox(CreateSandboxRequest {
+            image: "basic-local-process".to_string(),
+            default_workdir: Some(tempdir.path().display().to_string()),
+            file_system_mounts: None,
+            enable_networking: Some(true),
+            idle_seconds: Some(60),
+        })
+        .await
+        .expect("sandbox should be created");
+    drop(conversation);
+    drop(agent);
+    drop(harness);
+
+    let reloaded_harness = BasicExoHarness::new_with_local_process_sandbox(tempdir.path())
+        .await
+        .expect("harness should reload");
+    let reloaded_agent = reloaded_harness
+        .get_agent(&agent_id)
+        .await
+        .expect("get agent")
+        .expect("agent exists");
+    let reloaded_conversation = reloaded_agent
+        .get_conversation(&conversation_id)
+        .await
+        .expect("get conversation")
+        .expect("conversation exists");
+
+    let process = reloaded_conversation
+        .run_in_sandbox(RunInSandboxRequest {
+            id: sandbox_id,
+            command: vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                "printf reattached".to_string(),
+            ],
+            env: Default::default(),
+        })
+        .await
+        .expect("sandbox command should run after reload");
+    let parts = process.into_parts();
+    let mut stdout = parts.stdout;
+    let mut stderr = parts.stderr;
+    drop(parts.stdin);
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    let (stdout_result, stderr_result, wait_result) = tokio::join!(
+        stdout.read_to_end(&mut stdout_bytes),
+        stderr.read_to_end(&mut stderr_bytes),
+        parts.wait,
+    );
+
+    stdout_result.expect("stdout should read");
+    stderr_result.expect("stderr should read");
+    assert_eq!(String::from_utf8_lossy(&stdout_bytes), "reattached");
     assert_eq!(String::from_utf8_lossy(&stderr_bytes), "");
     assert_eq!(wait_result.expect("process should exit"), 0);
 }

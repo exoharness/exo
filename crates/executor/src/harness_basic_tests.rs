@@ -41,6 +41,8 @@ async fn creates_agents_and_conversations_with_persisted_config() {
             name: Some("Demo".to_string()),
             harness: crate::AgentHarnessKind::Basic,
             typescript: None,
+            library_tools: Vec::new(),
+            enable_agent_tool_creation: true,
             sandbox_image: None,
             enable_networking: false,
             model: "gpt-5.4".to_string(),
@@ -111,6 +113,8 @@ async fn send_persists_messages_through_harness() {
             name: None,
             harness: crate::AgentHarnessKind::Basic,
             typescript: None,
+            library_tools: Vec::new(),
+            enable_agent_tool_creation: true,
             sandbox_image: None,
             enable_networking: false,
             model: "gpt-5.4".to_string(),
@@ -165,6 +169,8 @@ async fn close_session_appends_session_ended_event() {
             name: None,
             harness: crate::AgentHarnessKind::Basic,
             typescript: None,
+            library_tools: Vec::new(),
+            enable_agent_tool_creation: true,
             sandbox_image: None,
             enable_networking: false,
             model: "gpt-5.4".to_string(),
@@ -248,6 +254,8 @@ async fn updating_agent_config_refreshes_executor_cache() {
             name: Some("Demo".to_string()),
             harness: crate::AgentHarnessKind::Basic,
             typescript: None,
+            library_tools: Vec::new(),
+            enable_agent_tool_creation: true,
             sandbox_image: None,
             enable_networking: false,
             model: "gpt-5.4".to_string(),
@@ -319,7 +327,11 @@ async fn send_executes_shell_tool_when_enabled() {
             usage: None,
         },
     ]));
-    let harness = BasicHarness::new(exoharness, Arc::clone(&model), Arc::new(BasicToolRuntime));
+    let harness = BasicHarness::new(
+        exoharness,
+        Arc::clone(&model),
+        Arc::new(BasicToolRuntime::default()),
+    );
     register_test_models(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness
@@ -328,6 +340,8 @@ async fn send_executes_shell_tool_when_enabled() {
             name: Some("Demo".to_string()),
             harness: crate::AgentHarnessKind::Basic,
             typescript: None,
+            library_tools: Vec::new(),
+            enable_agent_tool_creation: true,
             sandbox_image: None,
             enable_networking: true,
             model: "gpt-5.4".to_string(),
@@ -416,6 +430,8 @@ async fn harness_exposes_raw_exoharness_handles() {
             name: Some("Demo".to_string()),
             harness: crate::AgentHarnessKind::Basic,
             typescript: None,
+            library_tools: Vec::new(),
+            enable_agent_tool_creation: true,
             sandbox_image: None,
             enable_networking: false,
             model: "gpt-5.4".to_string(),
@@ -462,7 +478,7 @@ async fn harness_exposes_raw_exoharness_handles() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn updating_mounts_recreates_shell_sandbox() {
+async fn updating_mounts_recreates_conversation_sandbox() {
     let tempdir = TempDir::new().expect("tempdir should exist");
     let mount_dir = tempdir.path().join("mount");
     std::fs::create_dir_all(&mount_dir).expect("mount dir should exist");
@@ -486,7 +502,7 @@ async fn updating_mounts_recreates_shell_sandbox() {
             usage: None,
         },
     ]));
-    let harness = BasicHarness::new(exoharness, model, Arc::new(BasicToolRuntime));
+    let harness = BasicHarness::new(exoharness, model, Arc::new(BasicToolRuntime::default()));
     register_test_models(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness
@@ -495,6 +511,8 @@ async fn updating_mounts_recreates_shell_sandbox() {
             name: Some("Demo".to_string()),
             harness: crate::AgentHarnessKind::Basic,
             typescript: None,
+            library_tools: Vec::new(),
+            enable_agent_tool_creation: true,
             sandbox_image: None,
             enable_networking: false,
             model: "gpt-5.4".to_string(),
@@ -626,6 +644,8 @@ async fn conversation_model_override_changes_effective_model() {
             name: None,
             harness: crate::AgentHarnessKind::Basic,
             typescript: None,
+            library_tools: Vec::new(),
+            enable_agent_tool_creation: true,
             sandbox_image: None,
             enable_networking: false,
             model: "gpt-5.4".to_string(),

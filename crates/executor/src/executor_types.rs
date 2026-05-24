@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use exoharness::{
-    ConversationHandle, EventId, FileSystemMount, ResponseId, Result, SessionId, ToolArguments,
-    ToolCallId, ToolRequest, ToolResult, TurnId,
+    AgentHandle, ConversationHandle, EventId, FileSystemMount, ResponseId, Result, SessionId,
+    ToolArguments, ToolCallId, ToolRequest, ToolResult, TurnId,
 };
 use lingua::{Message, UniversalStreamChunk, UniversalUsage};
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,10 @@ pub struct AgentConfig {
     pub harness: AgentHarnessKind,
     #[serde(default)]
     pub typescript: Option<TypeScriptHarnessConfig>,
+    #[serde(default)]
+    pub library_tools: Vec<ToolManifestEntry>,
+    #[serde(default = "default_enable_agent_tool_creation")]
+    pub enable_agent_tool_creation: bool,
     #[serde(default)]
     pub sandbox_image: Option<String>,
     #[serde(default)]
@@ -40,11 +44,22 @@ pub enum AgentHarnessKind {
     Rlm,
     #[serde(rename = "typescript")]
     TypeScript,
+    Exoclaw,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypeScriptHarnessConfig {
     pub module_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolManifestEntry {
+    pub module_path: String,
+    pub initialization: Value,
+}
+
+pub fn default_enable_agent_tool_creation() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -53,6 +68,15 @@ pub struct ConversationConfig {
     pub shell_program: Option<String>,
     #[serde(default)]
     pub mounts: Vec<FileSystemMount>,
+    #[serde(default)]
+    pub sandbox_scope: Option<SandboxScope>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxScope {
+    Agent,
+    Conversation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,8 +104,21 @@ impl Default for ConversationConfig {
             enable_networking: false,
             shell_program: Some("/bin/bash".to_string()),
             mounts: Vec::new(),
+            sandbox_scope: None,
         }
     }
+}
+
+pub fn effective_sandbox_scope(
+    agent_config: &AgentConfig,
+    conversation_config: &ConversationConfig,
+) -> SandboxScope {
+    conversation_config
+        .sandbox_scope
+        .unwrap_or(match agent_config.harness {
+            AgentHarnessKind::Exoclaw => SandboxScope::Agent,
+            _ => SandboxScope::Conversation,
+        })
 }
 
 #[async_trait]
@@ -100,6 +137,7 @@ pub trait ModelResponseStream: Send {
 pub trait ToolRuntime: Send + Sync {
     async fn prepare_conversation(
         &self,
+        _agent: &dyn AgentHandle,
         _conversation: &dyn ConversationHandle,
         _agent_config: &AgentConfig,
         _config: &ConversationConfig,
@@ -109,7 +147,9 @@ pub trait ToolRuntime: Send + Sync {
 
     async fn execute(
         &self,
+        agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
+        agent_config: &AgentConfig,
         config: &ConversationConfig,
         request: &ToolRequest,
     ) -> Result<ToolResult>;

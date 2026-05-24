@@ -4,6 +4,11 @@ export interface JsonObject {
   [key: string]: JsonValue;
 }
 
+export * from "./tools";
+export * from "./built-in-tools";
+export * from "./tool-manifest";
+export * from "./scheduler-tools";
+
 export type MessageRole =
   | "system"
   | "developer"
@@ -19,10 +24,15 @@ export interface Message {
 
 export interface AgentConfig {
   instructions: Message[];
-  harness: "basic" | "rlm" | "typescript";
+  harness: "basic" | "rlm" | "typescript" | "exoclaw";
   typescript?: {
     modulePath: string;
   } | null;
+  libraryTools: Array<{
+    modulePath: string;
+    initialization: JsonObject;
+  }>;
+  enableAgentToolCreation: boolean;
   sandboxImage?: string | null;
   enableNetworking: boolean;
   model: string;
@@ -80,6 +90,7 @@ export interface SecretMetadata {
 export interface ConversationConfig {
   enableNetworking: boolean;
   shellProgram?: string | null;
+  sandboxScope?: "agent" | "conversation" | null;
   mounts: FileSystemMount[];
 }
 
@@ -94,6 +105,7 @@ export interface ToolDefinition {
   name: string;
   description: string;
   parameters: JsonValue;
+  outputSchema?: JsonValue;
 }
 
 export interface ToolRequest {
@@ -550,10 +562,17 @@ export async function materializeConversationMessages(
 export function materializeEventsToMessages(events: Event[]): Message[] {
   const messages: Message[] = [];
   const toolCallNames = new Map<string, string>();
+  const pendingToolCallIds: string[] = [];
 
   for (const event of events) {
-    extendMaterializedMessages(messages, toolCallNames, event);
+    extendMaterializedMessages(
+      messages,
+      toolCallNames,
+      pendingToolCallIds,
+      event,
+    );
   }
+  flushDanglingToolResults(messages, toolCallNames, pendingToolCallIds);
 
   return messages;
 }
@@ -607,32 +626,6 @@ export function toolResultMessage(
       },
     ],
   };
-}
-
-export function buildShellToolDefinitions(
-  config: ConversationConfig,
-): ToolDefinition[] {
-  if (!config.shellProgram) {
-    return [];
-  }
-
-  return [
-    {
-      name: "shell",
-      description: `Run a shell command using ${config.shellProgram}.`,
-      parameters: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          command: {
-            type: "string",
-            description: "Shell command to execute.",
-          },
-        },
-        required: ["command"],
-      },
-    },
-  ];
 }
 
 export function filterMessages(
@@ -717,9 +710,11 @@ function contentText(content: unknown): string {
 function extendMaterializedMessages(
   messages: Message[],
   toolCallNames: Map<string, string>,
+  pendingToolCallIds: string[],
   event: Event,
 ): void {
   if (isMessagesEvent(event.data)) {
+    flushDanglingToolResults(messages, toolCallNames, pendingToolCallIds);
     messages.push(...event.data.messages);
     return;
   }
@@ -729,6 +724,7 @@ function extendMaterializedMessages(
       event.data.tool_call_id,
       event.data.request.function_name,
     );
+    pendingToolCallIds.push(event.data.tool_call_id);
     return;
   }
 
@@ -737,9 +733,43 @@ function extendMaterializedMessages(
     if (!toolName) {
       return;
     }
+    removePendingToolCall(pendingToolCallIds, event.data.tool_call_id);
     messages.push(
       toolResultMessage(event.data.tool_call_id, toolName, event.data.result),
     );
+  }
+}
+
+function flushDanglingToolResults(
+  messages: Message[],
+  toolCallNames: Map<string, string>,
+  pendingToolCallIds: string[],
+): void {
+  while (pendingToolCallIds.length > 0) {
+    const toolCallId = pendingToolCallIds.shift();
+    if (!toolCallId) {
+      continue;
+    }
+    const toolName = toolCallNames.get(toolCallId);
+    if (!toolName) {
+      continue;
+    }
+    messages.push(
+      toolResultMessage(toolCallId, toolName, {
+        ok: false,
+        error: "tool execution did not complete before the previous turn ended",
+      }),
+    );
+  }
+}
+
+function removePendingToolCall(
+  pendingToolCallIds: string[],
+  toolCallId: string,
+): void {
+  const index = pendingToolCallIds.indexOf(toolCallId);
+  if (index >= 0) {
+    pendingToolCallIds.splice(index, 1);
   }
 }
 

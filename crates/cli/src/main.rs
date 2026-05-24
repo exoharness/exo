@@ -7,6 +7,7 @@ mod mount_tests;
 mod naming_tests;
 #[cfg(test)]
 mod repl_tests;
+mod schedule;
 #[cfg(test)]
 mod secret_tests;
 mod tui;
@@ -14,15 +15,17 @@ mod tui;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use executor::{
     AgentHarnessKind, BasicExoHarness, BasicHarness, Binding, BraintrustProject,
     BraintrustRuntimeConfig, BraintrustTracingConfig, ConversationModelConfig, CreateAgentRequest,
-    CreateConversationRequest, EventQuery, EventQueryDirection, ExoHarness, FileSystemMount,
-    FileSystemMountMode, ForkConversationRequest, Harness, HarnessAgent, HarnessConversation,
-    PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR, Secret, SendRequest, TypeScriptHarness,
-    TypeScriptHarnessConfig, Uuid7, load_agent_config,
+    CreateConversationRequest, EventQuery, EventQueryDirection, ExoHarness, ExoclawToolRuntime,
+    FileSystemMount, FileSystemMountMode, ForkConversationRequest, Harness, HarnessAgent,
+    HarnessConversation, PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR, SandboxScope,
+    Secret, ToolManifestEntry, TypeScriptHarness, TypeScriptHarnessConfig, Uuid7,
+    effective_sandbox_scope, load_agent_config, send_conversation_wakeup,
 };
 use lingua::Message;
 use lingua::universal::{AssistantContent, AssistantContentPart, ToolContentPart, UserContent};
@@ -61,12 +64,28 @@ enum HarnessKind {
     Rlm,
     #[value(name = "typescript")]
     TypeScript,
+    Exoclaw,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum NetworkingMode {
     Enabled,
     Disabled,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SandboxScopeArg {
+    Agent,
+    Conversation,
+}
+
+impl From<SandboxScopeArg> for SandboxScope {
+    fn from(value: SandboxScopeArg) -> Self {
+        match value {
+            SandboxScopeArg::Agent => SandboxScope::Agent,
+            SandboxScopeArg::Conversation => SandboxScope::Conversation,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -104,6 +123,10 @@ enum Commands {
         #[command(subcommand)]
         command: ModelCommands,
     },
+    Schedule {
+        #[command(subcommand)]
+        command: schedule::ScheduleCommands,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -115,6 +138,10 @@ enum AgentCommands {
         slug: Option<String>,
         #[arg(long)]
         module: Option<PathBuf>,
+        #[arg(long = "tool-manifest")]
+        tool_manifests: Vec<PathBuf>,
+        #[arg(long)]
+        disable_agent_tool_creation: bool,
         #[arg(long)]
         sandbox_image: Option<String>,
         #[arg(long, value_enum)]
@@ -140,6 +167,14 @@ enum AgentCommands {
         module: Option<PathBuf>,
         #[arg(long)]
         clear_module: bool,
+        #[arg(long = "tool-manifest")]
+        tool_manifests: Vec<PathBuf>,
+        #[arg(long)]
+        clear_tool_manifests: bool,
+        #[arg(long)]
+        enable_agent_tool_creation: bool,
+        #[arg(long)]
+        disable_agent_tool_creation: bool,
         #[arg(long)]
         sandbox_image: Option<String>,
         #[arg(long)]
@@ -183,6 +218,8 @@ enum ConversationCommands {
         name: Option<String>,
         #[arg(long)]
         slug: Option<String>,
+        #[arg(long, value_enum)]
+        sandbox_scope: Option<SandboxScopeArg>,
         #[arg(long)]
         repl: bool,
     },
@@ -206,6 +243,8 @@ enum ConversationCommands {
         clear_shell_program: bool,
         #[arg(long, value_enum)]
         networking: Option<NetworkingMode>,
+        #[arg(long, value_enum)]
+        sandbox_scope: Option<SandboxScopeArg>,
         #[arg(long)]
         model: Option<String>,
         #[arg(long)]
@@ -347,6 +386,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             name: Some(agent_slug),
                             harness: to_agent_harness_kind(harness_kind),
                             typescript: None,
+                            library_tools: Vec::new(),
+                            enable_agent_tool_creation: true,
                             sandbox_image: None,
                             enable_networking: false,
                             model,
@@ -380,6 +421,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             run_chat_repl(conversation).await?;
         }
+        Commands::Schedule { command } => {
+            schedule::handle_schedule_command(&cli.root, Arc::clone(&harness), command).await?;
+        }
         Commands::Agent { command } => match command {
             AgentCommands::List => {
                 println!("AGENT\tNAME");
@@ -391,6 +435,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 name,
                 slug,
                 module,
+                tool_manifests,
+                disable_agent_tool_creation,
                 sandbox_image,
                 networking,
                 model,
@@ -410,13 +456,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 {
                     return Err("sandbox image must not be empty".into());
                 }
+                let agent_harness_kind = to_agent_harness_kind(harness_kind);
                 let typescript = build_typescript_harness_config(harness_kind, module.as_deref())?;
+                let library_tools = load_tool_manifests(agent_harness_kind, &tool_manifests)?;
                 let agent = harness
                     .create_agent(CreateAgentRequest {
                         slug,
                         name: Some(name),
-                        harness: to_agent_harness_kind(harness_kind),
+                        harness: agent_harness_kind,
                         typescript,
+                        library_tools,
+                        enable_agent_tool_creation: !disable_agent_tool_creation,
                         sandbox_image,
                         enable_networking: matches!(networking, Some(NetworkingMode::Enabled)),
                         model,
@@ -440,6 +490,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 set_harness,
                 module,
                 clear_module,
+                tool_manifests,
+                clear_tool_manifests,
+                enable_agent_tool_creation,
+                disable_agent_tool_creation,
                 sandbox_image,
                 clear_sandbox_image,
                 networking,
@@ -455,6 +509,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             } => {
                 if clear_module && module.is_some() {
                     return Err("provide either --clear-module or --module, not both".into());
+                }
+                if clear_tool_manifests && !tool_manifests.is_empty() {
+                    return Err(
+                        "provide either --clear-tool-manifests or --tool-manifest, not both".into(),
+                    );
+                }
+                if enable_agent_tool_creation && disable_agent_tool_creation {
+                    return Err(
+                        "provide either --enable-agent-tool-creation or --disable-agent-tool-creation, not both"
+                            .into(),
+                    );
                 }
                 if clear_sandbox_image && sandbox_image.is_some() {
                     return Err(
@@ -502,6 +567,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         config.typescript = typescript;
                         changed = true;
                     }
+                }
+                if clear_tool_manifests {
+                    if !config.library_tools.is_empty() {
+                        config.library_tools.clear();
+                        changed = true;
+                    }
+                } else if !tool_manifests.is_empty() {
+                    let library_tools = load_tool_manifests(config.harness, &tool_manifests)?;
+                    if config.library_tools != library_tools {
+                        config.library_tools = library_tools;
+                        changed = true;
+                    }
+                }
+                if enable_agent_tool_creation {
+                    if !config.enable_agent_tool_creation {
+                        config.enable_agent_tool_creation = true;
+                        changed = true;
+                    }
+                } else if disable_agent_tool_creation && config.enable_agent_tool_creation {
+                    config.enable_agent_tool_creation = false;
+                    changed = true;
                 }
                 if clear_sandbox_image {
                     config.sandbox_image = None;
@@ -565,7 +651,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )?;
                     if updated_braintrust.is_none() && !changed {
                         return Err(
-                            "no changes provided; pass --set-harness, --module, --sandbox-image, --networking, model flags, --clear-braintrust, or Braintrust project flags"
+                            "no changes provided; pass --set-harness, --module, --tool-manifest, --enable-agent-tool-creation, --disable-agent-tool-creation, --sandbox-image, --networking, model flags, --clear-braintrust, or Braintrust project flags"
                                 .into(),
                         );
                     }
@@ -577,9 +663,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if !changed {
                     return Err("no changes provided".into());
                 }
-                if config.harness == AgentHarnessKind::TypeScript && config.typescript.is_none() {
+                if matches!(
+                    config.harness,
+                    AgentHarnessKind::TypeScript | AgentHarnessKind::Exoclaw
+                ) && config.typescript.is_none()
+                {
                     return Err(
-                        "typescript agents require a module path; pass --module <path>".into(),
+                        "TypeScript and Exoclaw agents require a module path; pass --module <path>"
+                            .into(),
                     );
                 }
                 agent.put_config(config).await?;
@@ -599,6 +690,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .as_ref()
                         .map(|config| config.module_path.as_str())
                         .unwrap_or("none")
+                );
+                println!("library_tools: {}", config.library_tools.len());
+                for tool in &config.library_tools {
+                    println!("  - {}", tool.module_path);
+                }
+                println!(
+                    "enable_agent_tool_creation: {}",
+                    config.enable_agent_tool_creation
                 );
                 println!(
                     "sandbox_image: {}",
@@ -644,6 +743,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 agent,
                 name,
                 slug,
+                sandbox_scope,
                 repl,
             } => {
                 let agent = must_get_agent(harness.as_ref(), &agent).await?;
@@ -662,6 +762,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         name,
                     })
                     .await?;
+                if let Some(sandbox_scope) = sandbox_scope {
+                    let mut config = conversation.config().await?;
+                    config.sandbox_scope = Some(sandbox_scope.into());
+                    conversation.put_config(config).await?;
+                }
                 println!(
                     "created conversation {} ({})",
                     conversation.record().slug,
@@ -723,6 +828,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 shell_program,
                 clear_shell_program,
                 networking,
+                sandbox_scope,
                 model,
                 max_output_tokens,
                 clear_max_output_tokens,
@@ -769,6 +875,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if let Some(networking) = networking {
                     config.enable_networking = matches!(networking, NetworkingMode::Enabled);
+                    changed = true;
+                }
+
+                if let Some(sandbox_scope) = sandbox_scope {
+                    config.sandbox_scope = Some(sandbox_scope.into());
                     changed = true;
                 }
 
@@ -935,7 +1046,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 println!(
                     "shell_program: {}",
-                    config.shell_program.unwrap_or_else(|| "none".to_string())
+                    config.shell_program.as_deref().unwrap_or("none")
+                );
+                println!(
+                    "sandbox_scope: {}",
+                    config
+                        .sandbox_scope
+                        .map(sandbox_scope_name)
+                        .unwrap_or("default")
+                );
+                println!(
+                    "effective_sandbox_scope: {}",
+                    sandbox_scope_name(effective_sandbox_scope(&agent_config, &config))
                 );
                 println!(
                     "effective_sandbox_image: {}",
@@ -1008,15 +1130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let conversation =
                     must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
                 let previous_messages = conversation.messages().await?;
-                let result = conversation
-                    .send(SendRequest {
-                        input: vec![Message::User {
-                            content: UserContent::String(prompt),
-                        }],
-                        session_id: None,
-                    })
-                    .await?;
-                conversation.close_session(result.session_id).await?;
+                send_conversation_wakeup(conversation.as_ref(), prompt).await?;
                 let messages = conversation.messages().await?;
                 for message in &messages[previous_messages.len()..] {
                     print_message(message);
@@ -1043,7 +1157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             SecretCommands::Set { name, env, value } => {
                 let value = match (env, value) {
-                    (Some(env), None) => secret_value_from_env_arg(&env)?,
+                    (Some(env), None) => secret_value_from_env_arg(&env, &env_vars)?,
                     (None, Some(value)) => value,
                     (Some(_), Some(_)) => {
                         return Err("provide either --env or --value, not both".into());
@@ -1147,7 +1261,7 @@ fn command_agent_ref(command: &Commands) -> Option<&str> {
             }
         },
         Commands::Repl { agent, .. } => Some(agent.as_deref().unwrap_or(DEFAULT_REPL_SLUG)),
-        Commands::Secret { .. } | Commands::Model { .. } => None,
+        Commands::Secret { .. } | Commands::Model { .. } | Commands::Schedule { .. } => None,
     }
 }
 
@@ -1187,6 +1301,14 @@ async fn instantiate_harness(
         HarnessKind::TypeScript => {
             Arc::new(TypeScriptHarness::from_root(root, runtime_config, env_vars).await?)
         }
+        HarnessKind::Exoclaw => Arc::new(
+            TypeScriptHarness::<ExoclawToolRuntime>::exoclaw_from_root(
+                root,
+                runtime_config,
+                env_vars,
+            )
+            .await?,
+        ),
     };
     Ok(harness)
 }
@@ -1196,6 +1318,7 @@ fn to_agent_harness_kind(kind: HarnessKind) -> AgentHarnessKind {
         HarnessKind::Basic => AgentHarnessKind::Basic,
         HarnessKind::Rlm => AgentHarnessKind::Rlm,
         HarnessKind::TypeScript => AgentHarnessKind::TypeScript,
+        HarnessKind::Exoclaw => AgentHarnessKind::Exoclaw,
     }
 }
 
@@ -1204,6 +1327,7 @@ fn from_agent_harness_kind(kind: AgentHarnessKind) -> HarnessKind {
         AgentHarnessKind::Basic => HarnessKind::Basic,
         AgentHarnessKind::Rlm => HarnessKind::Rlm,
         AgentHarnessKind::TypeScript => HarnessKind::TypeScript,
+        AgentHarnessKind::Exoclaw => HarnessKind::Exoclaw,
     }
 }
 
@@ -1212,6 +1336,7 @@ fn format_harness_kind(kind: AgentHarnessKind) -> &'static str {
         AgentHarnessKind::Basic => "basic",
         AgentHarnessKind::Rlm => "rlm",
         AgentHarnessKind::TypeScript => "typescript",
+        AgentHarnessKind::Exoclaw => "exoclaw",
     }
 }
 
@@ -1220,11 +1345,13 @@ fn build_typescript_harness_config(
     module: Option<&Path>,
 ) -> Result<Option<TypeScriptHarnessConfig>, Box<dyn std::error::Error>> {
     match (harness_kind, module) {
-        (HarnessKind::TypeScript, Some(module)) => {
+        (HarnessKind::TypeScript | HarnessKind::Exoclaw, Some(module)) => {
             Ok(Some(resolve_typescript_module_path(module)?))
         }
-        (HarnessKind::TypeScript, None) => Err("typescript agents require --module <path>".into()),
-        (_, Some(_)) => Err("--module is only valid with --harness typescript".into()),
+        (HarnessKind::TypeScript | HarnessKind::Exoclaw, None) => {
+            Err("TypeScript and Exoclaw agents require --module <path>".into())
+        }
+        (_, Some(_)) => Err("--module is only valid with --harness typescript or exoclaw".into()),
         (_, None) => Ok(None),
     }
 }
@@ -1236,6 +1363,78 @@ fn resolve_typescript_module_path(
     Ok(TypeScriptHarnessConfig {
         module_path: module_path.to_string_lossy().into_owned(),
     })
+}
+
+#[derive(serde::Deserialize)]
+struct CliToolManifest {
+    tools: Vec<CliToolManifestEntry>,
+}
+
+#[derive(serde::Deserialize)]
+struct CliToolManifestEntry {
+    #[serde(rename = "modulePath", alias = "module_path")]
+    module_path: String,
+    #[serde(default = "empty_json_object")]
+    initialization: serde_json::Value,
+}
+
+fn empty_json_object() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+fn load_tool_manifests(
+    harness_kind: AgentHarnessKind,
+    paths: &[PathBuf],
+) -> Result<Vec<ToolManifestEntry>, Box<dyn std::error::Error>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !matches!(
+        harness_kind,
+        AgentHarnessKind::TypeScript | AgentHarnessKind::Exoclaw
+    ) {
+        return Err("--tool-manifest is only valid with TypeScript or Exoclaw agents".into());
+    }
+
+    let mut tools = Vec::new();
+    for path in paths {
+        let manifest_path = std::fs::canonicalize(path)?;
+        let manifest_dir = manifest_path
+            .parent()
+            .ok_or_else(|| format!("tool manifest has no parent directory: {}", path.display()))?;
+        let manifest: CliToolManifest =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path)?)?;
+
+        for entry in manifest.tools {
+            if entry.module_path.trim().is_empty() {
+                return Err(format!(
+                    "tool manifest {} contains an empty modulePath",
+                    manifest_path.display()
+                )
+                .into());
+            }
+            if !entry.initialization.is_object() {
+                return Err(format!(
+                    "tool manifest {} entry {} must use an object initialization value",
+                    manifest_path.display(),
+                    entry.module_path
+                )
+                .into());
+            }
+
+            let module_path = PathBuf::from(&entry.module_path);
+            let resolved_module_path = if module_path.is_absolute() {
+                std::fs::canonicalize(&module_path)?
+            } else {
+                std::fs::canonicalize(manifest_dir.join(module_path))?
+            };
+            tools.push(ToolManifestEntry {
+                module_path: resolved_module_path.to_string_lossy().into_owned(),
+                initialization: entry.initialization,
+            });
+        }
+    }
+    Ok(tools)
 }
 
 struct RegisteredModel {
@@ -1464,26 +1663,41 @@ async fn must_get_conversation(
 }
 
 pub(crate) fn print_message(message: &Message) {
+    let timestamp = compact_timestamp();
     match message {
         Message::User { content } => {
-            println!("user: {}", render_user_content(content));
+            println!("{timestamp} user: {}", render_user_content(content));
         }
         Message::Assistant { content, .. } => {
-            println!("assistant: {}", render_assistant_content(content));
+            println!(
+                "{timestamp} assistant: {}",
+                render_assistant_content(content)
+            );
         }
         Message::Tool { content } => {
             for part in content {
                 let ToolContentPart::ToolResult(result) = part;
-                println!("tool {}: {}", result.tool_name, result.output);
+                println!("{timestamp} tool {}: {}", result.tool_name, result.output);
             }
         }
         Message::System { content } => {
-            println!("system: {}", render_user_content(content));
+            println!("{timestamp} system: {}", render_user_content(content));
         }
         Message::Developer { content } => {
-            println!("developer: {}", render_user_content(content));
+            println!("{timestamp} developer: {}", render_user_content(content));
         }
     }
+}
+
+pub(crate) fn compact_timestamp() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() % 86_400)
+        .unwrap_or(0);
+    let hours = seconds / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let seconds = seconds % 60;
+    format!("[{hours:02}:{minutes:02}:{seconds:02}]")
 }
 
 fn render_user_content(content: &UserContent) -> String {
@@ -1527,6 +1741,13 @@ fn chat_repl_command(agent_slug: &str, conversation_slug: &str) -> String {
     format!("exo chat repl {agent_slug} {conversation_slug}")
 }
 
+fn sandbox_scope_name(scope: SandboxScope) -> &'static str {
+    match scope {
+        SandboxScope::Agent => "agent",
+        SandboxScope::Conversation => "conversation",
+    }
+}
+
 fn slugify(input: &str) -> String {
     let mut slug = String::new();
     let mut last_was_dash = false;
@@ -1549,7 +1770,10 @@ fn slugify(input: &str) -> String {
     slug
 }
 
-pub(crate) fn secret_value_from_env_arg(env: &str) -> Result<String, String> {
+pub(crate) fn secret_value_from_env_arg(
+    env: &str,
+    loaded_env: &HashMap<String, String>,
+) -> Result<String, String> {
     if !is_env_var_name(env) {
         return Err(
             "invalid --env value; pass an environment variable name such as OPENAI_API_KEY, not the secret value"
@@ -1557,7 +1781,11 @@ pub(crate) fn secret_value_from_env_arg(env: &str) -> Result<String, String> {
         );
     }
 
-    std::env::var(env).map_err(|_| "environment variable passed to --env is not set".to_string())
+    loaded_env
+        .get(env)
+        .cloned()
+        .or_else(|| std::env::var(env).ok())
+        .ok_or_else(|| "environment variable passed to --env is not set".to_string())
 }
 
 fn is_env_var_name(env: &str) -> bool {
