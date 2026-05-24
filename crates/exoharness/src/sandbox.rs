@@ -105,6 +105,21 @@ pub struct SnapshotPayload {
     pub bytes: Bytes,
 }
 
+/// What kind of snapshot the caller wants. Producers honour the mode or
+/// return an explicit error if they can't (e.g. CRIU not installed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotMode {
+    /// Capture filesystem state only. Fast, portable, doesn't preserve
+    /// running processes or memory.
+    Filesystem,
+    /// Capture full state: filesystem plus running processes, memory,
+    /// open file descriptors. Backed by CRIU on Docker; requires CRIU on
+    /// the host and `experimental` enabled in the docker daemon. Brittler
+    /// and larger than filesystem-only snapshots; only use when the
+    /// captured workload has live in-flight state worth preserving.
+    FullState,
+}
+
 /// Tag identifying the on-disk format of a snapshot payload. Backends both
 /// produce and consume a specific kind; the conversation layer just hands the
 /// bytes back to the same backend type that produced them.
@@ -112,8 +127,12 @@ pub struct SnapshotPayload {
 #[serde(rename_all = "snake_case")]
 pub enum SnapshotKind {
     /// `docker save` output: a tar of OCI image layers + manifest, loadable
-    /// with `docker load`.
+    /// with `docker load`. Filesystem-only.
     DockerImageTar,
+    /// Tar of a `docker checkpoint`'s CRIU dump directory. Contains the full
+    /// frozen process tree (memory pages, FDs, sockets) in addition to the
+    /// filesystem diff. Restored with `docker start --checkpoint`.
+    DockerCheckpointTar,
 }
 
 #[async_trait]
@@ -126,9 +145,11 @@ pub trait ManagedSandboxHandle: Send + Sync {
 
     async fn stop(&self) -> Result<()>;
 
-    /// Capture the sandbox's current state as an opaque blob. Returns an
-    /// error if this backend doesn't (yet) support snapshotting.
-    async fn snapshot(&self) -> Result<SnapshotPayload>;
+    /// Capture the sandbox's current state as an opaque blob. The `mode`
+    /// selects between filesystem-only and full-state capture; backends
+    /// may not support all modes and return an explicit error in that
+    /// case (e.g. CRIU not installed on the host).
+    async fn snapshot(&self, mode: SnapshotMode) -> Result<SnapshotPayload>;
 }
 
 #[async_trait]
@@ -430,24 +451,18 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
         if request.lifecycle.idle_ttl.is_none() {
             bail!("restore-from-snapshot requires a warm sandbox lifecycle (idle_ttl must be set)");
         }
-        match (self.cli, payload.kind) {
-            (ContainerCliFlavor::Docker, SnapshotKind::DockerImageTar) => {}
-            (ContainerCliFlavor::AppleContainer, _) => bail!(
-                "restore-from-snapshot is not yet implemented for the apple-container backend"
-            ),
+        if !matches!(self.cli, ContainerCliFlavor::Docker) {
+            bail!(
+                "restore-from-snapshot is not yet implemented for the {:?} backend",
+                self.cli
+            );
         }
 
-        let image_tag = docker_load_image(&self.container_bin, &payload.bytes).await?;
+        // Both kinds share the post-restore warm-pool plumbing (evict any
+        // pre-existing container for this key, then put the restored
+        // container into the cache). Only the bring-up step differs.
+        let request = self.prepare_request(request).await?;
 
-        // Build a fresh request that points at the loaded image. Mounts,
-        // network policy, lifecycle, and key are all preserved from the
-        // original request so the restored sandbox is otherwise identical.
-        let mut request = self.prepare_request(request).await?;
-        request.spec.image = image_tag;
-
-        // Evict any pre-existing warm container for this key — we want a
-        // fresh container booted from the restored image, not a reuse of
-        // whatever was running before.
         let replaced = {
             let mut warm_sandboxes = self.warm_sandboxes.lock().await;
             warm_sandboxes.remove(&request.key)
@@ -456,7 +471,31 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
             schedule_cleanup_named_container(self.container_bin.clone(), self.cli, entry.name);
         }
 
-        let name = create_unique_warm_sandbox(&self.container_bin, &request).await?;
+        let (name, request) = match payload.kind {
+            SnapshotKind::DockerImageTar => {
+                // Load the saved image, swap request.spec.image, then take the
+                // normal warm-bring-up path.
+                let image_tag =
+                    docker_load_image(&self.container_bin, &payload.bytes).await?;
+                let mut request = request;
+                request.spec.image = image_tag;
+                let name = create_unique_warm_sandbox(&self.container_bin, &request).await?;
+                (name, request)
+            }
+            SnapshotKind::DockerCheckpointTar => {
+                // Create a fresh container off the original image (the
+                // checkpoint will overlay its own filesystem + restore the
+                // process tree on start). Then `docker start --checkpoint`
+                // brings up the saved process state on that container.
+                docker_restore_container_checkpoint(
+                    &self.container_bin,
+                    &request,
+                    &payload.bytes,
+                )
+                .await?
+            }
+        };
+
         {
             let mut warm_sandboxes = self.warm_sandboxes.lock().await;
             warm_sandboxes.insert(
@@ -515,7 +554,7 @@ impl ManagedSandboxHandle for OneShotSandboxHandle {
         Ok(())
     }
 
-    async fn snapshot(&self) -> Result<SnapshotPayload> {
+    async fn snapshot(&self, _mode: SnapshotMode) -> Result<SnapshotPayload> {
         bail!(
             "snapshot is not supported for one-shot sandboxes (set a positive idle_ttl to enable warm sandbox + snapshotting)"
         )
@@ -567,7 +606,7 @@ impl ManagedSandboxHandle for WarmSandboxHandle {
         }
     }
 
-    async fn snapshot(&self) -> Result<SnapshotPayload> {
+    async fn snapshot(&self, mode: SnapshotMode) -> Result<SnapshotPayload> {
         match self.cli {
             ContainerCliFlavor::Docker => {
                 let name = ensure_warm_sandbox_ready(
@@ -578,15 +617,24 @@ impl ManagedSandboxHandle for WarmSandboxHandle {
                 )
                 .await?;
                 touch_warm_sandbox(&self.warm_sandboxes, &self.request.key).await;
-                docker_snapshot_container(&self.container_bin, &name).await
+                match mode {
+                    SnapshotMode::Filesystem => {
+                        docker_snapshot_container_filesystem(&self.container_bin, &name).await
+                    }
+                    SnapshotMode::FullState => {
+                        docker_snapshot_container_checkpoint(&self.container_bin, &name).await
+                    }
+                }
             }
             // The Apple `container` CLI exposes `container image save` and a
             // `container commit`-style flow on its roadmap but neither is in
             // the released versions we target today. When it lands, the path
-            // will mirror docker_snapshot_container: produce a single tarball
-            // and tag it with a new SnapshotKind variant (e.g.
-            // AppleContainerImageTar). Until then, fail explicitly so callers
-            // know to choose Docker for snapshot-using flows.
+            // will mirror docker_snapshot_container_filesystem: produce a
+            // single tarball and tag it with a new SnapshotKind variant
+            // (e.g. AppleContainerImageTar). Full-state capture maps to VZ's
+            // pause + saveMachineStateTo: API but the CLI doesn't expose
+            // that yet either. Until then, fail explicitly so callers know
+            // to choose Docker for snapshot-using flows.
             ContainerCliFlavor::AppleContainer => bail!(
                 "snapshot is not yet implemented for the apple-container backend; \
                  use --sandbox-backend docker for snapshot-using flows"
@@ -673,7 +721,7 @@ impl ManagedSandboxHandle for LocalProcessSandboxHandle {
         Ok(())
     }
 
-    async fn snapshot(&self) -> Result<SnapshotPayload> {
+    async fn snapshot(&self, _mode: SnapshotMode) -> Result<SnapshotPayload> {
         // The local-process backend runs commands directly on the host; there
         // is no container filesystem to capture. A meaningful implementation
         // would tar up the writable mounts, but the semantics differ enough
@@ -1325,7 +1373,7 @@ fn new_warm_container_name(key: &SandboxKey) -> String {
 ///
 /// `commit -p` pauses the container during commit to ensure a consistent
 /// filesystem capture (no half-written files).
-async fn docker_snapshot_container(
+async fn docker_snapshot_container_filesystem(
     container_bin: &Path,
     container_name: &str,
 ) -> Result<SnapshotPayload> {
@@ -1390,6 +1438,239 @@ async fn docker_snapshot_container(
         kind: SnapshotKind::DockerImageTar,
         bytes,
     })
+}
+
+/// Capture a docker container's *full state* (filesystem + running processes
+/// + memory + FDs) as a SnapshotPayload backed by a CRIU dump.
+///
+/// Pipeline:
+///   docker checkpoint create --checkpoint-dir=<tmp> <container> exo-snap
+///   tar -cf - -C <tmp>/exo-snap .                     // tarball on stdout
+///   rm -rf <tmp>
+///
+/// Requires:
+///   - the docker daemon to have `experimental: true`
+///   - CRIU installed on the host (the daemon shells out to it)
+/// We probe `docker info` for experimental once and surface a clean error
+/// pointing at the requirements doc when missing, rather than letting the
+/// raw `docker checkpoint create` failure bubble up.
+async fn docker_snapshot_container_checkpoint(
+    container_bin: &Path,
+    container_name: &str,
+) -> Result<SnapshotPayload> {
+    docker_require_experimental(container_bin).await?;
+
+    let tmpdir = tempfile::Builder::new()
+        .prefix("exo-checkpoint-")
+        .tempdir()
+        .context("creating tempdir for docker checkpoint")?;
+    let checkpoint_name = "exo-snap";
+
+    let create_output = Command::new(container_bin)
+        .arg("checkpoint")
+        .arg("create")
+        .arg("--checkpoint-dir")
+        .arg(tmpdir.path())
+        .arg(container_name)
+        .arg(checkpoint_name)
+        .output()
+        .await
+        .with_context(|| format!("running `docker checkpoint create` for {container_name}"))?;
+    if !create_output.status.success() {
+        bail!(
+            "docker checkpoint create failed for {container_name}: {}\n\
+             (full-state snapshots require CRIU on the host and `experimental: true` \
+             in docker's daemon.json — see docs/requirements.md)",
+            render_command_error(&create_output.stderr)
+        );
+    }
+
+    // The checkpoint dir docker writes to is <tmpdir>/<name>. Tar it up.
+    let checkpoint_path = tmpdir.path().join(checkpoint_name);
+    let tar_output = Command::new("tar")
+        .arg("-cf")
+        .arg("-")
+        .arg("-C")
+        .arg(&checkpoint_path)
+        .arg(".")
+        .output()
+        .await
+        .context("tarring docker checkpoint directory")?;
+    if !tar_output.status.success() {
+        bail!(
+            "tarring docker checkpoint failed: {}",
+            render_command_error(&tar_output.stderr)
+        );
+    }
+    let bytes = Bytes::from(tar_output.stdout);
+
+    Ok(SnapshotPayload {
+        kind: SnapshotKind::DockerCheckpointTar,
+        bytes,
+    })
+}
+
+/// Restore a docker container from a CRIU checkpoint tarball.
+///
+/// Pipeline:
+///   1. Untar the checkpoint into a fresh tempdir.
+///   2. Create a new container (`docker create`) using the original request's
+///      image + mounts + network + workdir + keepalive argv. We do *not*
+///      start it yet — `--checkpoint` only works on a not-yet-started
+///      container.
+///   3. `docker start --checkpoint exo-snap --checkpoint-dir=<tmp> <new-container>`
+///      to bring it up with the restored state.
+///
+/// Returns the new container's name and the (unchanged) request, ready for
+/// insertion into the warm-sandbox cache.
+async fn docker_restore_container_checkpoint(
+    container_bin: &Path,
+    request: &SandboxRequest,
+    payload: &Bytes,
+) -> Result<(String, SandboxRequest)> {
+    docker_require_experimental(container_bin).await?;
+
+    let tmpdir = tempfile::Builder::new()
+        .prefix("exo-restore-")
+        .tempdir()
+        .context("creating tempdir for docker checkpoint restore")?;
+    let checkpoint_name = "exo-snap";
+    let checkpoint_path = tmpdir.path().join(checkpoint_name);
+    std::fs::create_dir_all(&checkpoint_path)
+        .with_context(|| format!("creating {}", checkpoint_path.display()))?;
+
+    // Untar payload into <tmp>/<checkpoint_name>.
+    use tokio::io::AsyncWriteExt;
+    let mut untar = Command::new("tar")
+        .arg("-xf")
+        .arg("-")
+        .arg("-C")
+        .arg(&checkpoint_path)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawning tar -xf for checkpoint restore")?;
+    let mut stdin = untar
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("failed to acquire tar stdin"))?;
+    stdin
+        .write_all(payload)
+        .await
+        .context("writing checkpoint bytes to tar stdin")?;
+    stdin.shutdown().await.ok();
+    drop(stdin);
+    let untar_output = untar
+        .wait_with_output()
+        .await
+        .context("waiting on tar -xf")?;
+    if !untar_output.status.success() {
+        bail!(
+            "untarring docker checkpoint failed: {}",
+            render_command_error(&untar_output.stderr)
+        );
+    }
+
+    // Create (don't start) the container. Same arg shape as
+    // create_named_warm_sandbox but with `create` instead of `run --detach`.
+    let name = new_warm_container_name(&request.key);
+    let mut create_proc = Command::new(container_bin);
+    create_proc
+        .arg("create")
+        .arg("--name")
+        .arg(&name)
+        .arg("--label")
+        .arg(format!("{WARM_SANDBOX_KEY_LABEL}={}", request.key))
+        .arg("--label")
+        .arg(format!(
+            "{WARM_SANDBOX_SPEC_HASH_LABEL}={}",
+            sandbox_spec_hash(&request.spec)
+        ))
+        .arg("--label")
+        .arg(format!(
+            "{WARM_SANDBOX_OWNER_PID_LABEL}={}",
+            std::process::id()
+        ))
+        .arg("--workdir")
+        .arg(&request.spec.default_workdir);
+    configure_network_args(
+        &mut create_proc,
+        request.spec.network,
+        Some(DEFAULT_ENABLED_NETWORK_NAME),
+    );
+    configure_mount_args(&mut create_proc, &request.spec.mounts);
+    create_proc.arg(&request.spec.image);
+    create_proc.args(WARM_SANDBOX_KEEPALIVE_ARGV);
+    create_proc.kill_on_drop(true);
+    let create_output = create_proc
+        .output()
+        .await
+        .context("running `docker create` for checkpoint restore")?;
+    if !create_output.status.success() {
+        bail!(
+            "docker create failed: {}",
+            render_command_error(&create_output.stderr)
+        );
+    }
+
+    // Start the container from the checkpoint.
+    let start_output = Command::new(container_bin)
+        .arg("start")
+        .arg("--checkpoint")
+        .arg(checkpoint_name)
+        .arg("--checkpoint-dir")
+        .arg(tmpdir.path())
+        .arg(&name)
+        .output()
+        .await
+        .context("running `docker start --checkpoint`")?;
+    if !start_output.status.success() {
+        // Best-effort cleanup of the failed-to-start container.
+        let _ = Command::new(container_bin)
+            .arg("rm")
+            .arg("-f")
+            .arg(&name)
+            .output()
+            .await;
+        bail!(
+            "docker start --checkpoint failed: {}\n\
+             (full-state restore requires CRIU on the host and `experimental: true` \
+             in docker's daemon.json — see docs/requirements.md)",
+            render_command_error(&start_output.stderr)
+        );
+    }
+
+    Ok((name, request.clone()))
+}
+
+/// Verify the local docker daemon has experimental features enabled. The
+/// `checkpoint` subcommand is hidden behind that flag. Surfaces a clear
+/// error message pointing at the setup doc rather than letting the cryptic
+/// "Unknown command" error from docker bubble up.
+async fn docker_require_experimental(container_bin: &Path) -> Result<()> {
+    let info = Command::new(container_bin)
+        .arg("info")
+        .arg("--format")
+        .arg("{{.ExperimentalBuild}}")
+        .output()
+        .await
+        .context("running `docker info` to check experimental flag")?;
+    if !info.status.success() {
+        bail!(
+            "could not query docker info: {}",
+            render_command_error(&info.stderr)
+        );
+    }
+    let value = String::from_utf8_lossy(&info.stdout).trim().to_string();
+    if value != "true" {
+        bail!(
+            "full-state (CRIU) snapshots require the docker daemon to have \
+             experimental features enabled. Edit /etc/docker/daemon.json to \
+             include `\"experimental\": true` and restart docker. \
+             See docs/requirements.md for the full setup."
+        );
+    }
+    Ok(())
 }
 
 /// Load a docker-save tarball back into the local docker daemon and return

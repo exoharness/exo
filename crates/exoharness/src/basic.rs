@@ -991,7 +991,11 @@ impl ConversationHandle for BasicConversationHandle {
         Ok(sandbox_id)
     }
 
-    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
+    async fn snapshot_sandbox(
+        &self,
+        id: SandboxId,
+        mode: crate::SnapshotMode,
+    ) -> Result<SnapshotId> {
         // Capture the payload *before* taking the write lock — backends may
         // need to talk to docker / pause the container, which can be slow.
         // The lock is then only held for the metadata persistence below.
@@ -1004,7 +1008,7 @@ impl ConversationHandle for BasicConversationHandle {
             .get(&id)
             .cloned()
             .ok_or_else(|| anyhow!("sandbox {id} is not running; start it before snapshotting"))?;
-        let payload = handle.snapshot().await?;
+        let payload = handle.snapshot(mode).await?;
 
         let _guard = self.harness.inner.write_lock.lock().await;
         let mut sandbox = self.load_sandbox(&id).await?;

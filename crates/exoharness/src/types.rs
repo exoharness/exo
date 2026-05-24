@@ -77,7 +77,11 @@ pub trait ConversationHandle: Send + Sync {
     async fn list_artifacts(&self) -> Result<Vec<ArtifactVersion>>;
 
     async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId>;
-    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId>;
+    async fn snapshot_sandbox(
+        &self,
+        id: SandboxId,
+        mode: crate::SnapshotMode,
+    ) -> Result<SnapshotId>;
     async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()>;
     async fn stop_sandbox(&self, id: SandboxId) -> Result<()>;
     async fn run_in_sandbox(&self, request: RunInSandboxRequest)

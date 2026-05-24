@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use executor::{
     ConversationHandle, EventData, EventId, EventQuery, EventQueryDirection, ExecutionStreamEvent,
-    HarnessConversation, SandboxId, SendRequest, SessionId, SnapshotId, StartSandboxRequest,
+    HarnessConversation, SandboxId, SendRequest, SessionId, SnapshotId, SnapshotMode,
+    StartSandboxRequest,
 };
 use lingua::universal::{UserContent, UserContentPart};
 use lingua::{Message, UniversalStreamChunk};
@@ -387,9 +388,22 @@ impl ChatRepl {
                         continue;
                     }
                     if trimmed == "/snapshot" {
-                        match self.snapshot_current_sandbox().await {
+                        match self
+                            .snapshot_current_sandbox(SnapshotMode::Filesystem)
+                            .await
+                        {
                             Ok(snapshot_id) => println!("snapshot {snapshot_id}"),
                             Err(error) => println!("snapshot failed: {error:#}"),
+                        }
+                        continue;
+                    }
+                    if trimmed == "/checkpoint" {
+                        match self
+                            .snapshot_current_sandbox(SnapshotMode::FullState)
+                            .await
+                        {
+                            Ok(snapshot_id) => println!("checkpoint {snapshot_id}"),
+                            Err(error) => println!("checkpoint failed: {error:#}"),
                         }
                         continue;
                     }
@@ -446,14 +460,17 @@ impl ChatRepl {
     /// Find the most recent `SandboxCreated` event and snapshot that sandbox.
     /// The conversation's active sandbox must have been created (or started)
     /// in *this* REPL session — running_sandboxes is a per-process map.
-    async fn snapshot_current_sandbox(&self) -> Result<SnapshotId, Box<dyn Error>> {
+    async fn snapshot_current_sandbox(
+        &self,
+        mode: SnapshotMode,
+    ) -> Result<SnapshotId, Box<dyn Error>> {
         let sandbox_id = latest_sandbox_id(self.conversation.as_ref())
             .await?
             .ok_or("no sandbox has been created in this conversation yet")?;
         let id = self
             .conversation
             .exoharness_handle()
-            .snapshot_sandbox(sandbox_id)
+            .snapshot_sandbox(sandbox_id, mode)
             .await?;
         Ok(id)
     }
@@ -643,9 +660,13 @@ fn print_help() {
     println!("repl commands:");
     println!("  /quit | /exit        exit the repl");
     println!("  /history             reprint the conversation transcript");
-    println!("  /snapshot            snapshot this conversation's running sandbox");
+    println!("  /snapshot            capture filesystem-only snapshot of the sandbox");
+    println!("  /checkpoint          capture full-state snapshot (filesystem +");
+    println!("                       running processes + memory); requires CRIU");
+    println!("                       + docker experimental on the host");
     println!("  /snapshots           list snapshots taken in this conversation");
     println!("  /rewind <id>         restore the sandbox to a previous snapshot");
+    println!("                       or checkpoint");
     println!("  /help                show this message");
 }
 

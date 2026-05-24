@@ -787,7 +787,11 @@ impl ConversationHandle for FakeConversationHandle {
         Err(anyhow!("not implemented"))
     }
 
-    async fn snapshot_sandbox(&self, _id: SandboxId) -> Result<SnapshotId> {
+    async fn snapshot_sandbox(
+        &self,
+        _id: SandboxId,
+        _mode: exoharness::SnapshotMode,
+    ) -> Result<SnapshotId> {
         Err(anyhow!("not implemented"))
     }
 
