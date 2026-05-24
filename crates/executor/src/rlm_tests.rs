@@ -54,12 +54,18 @@ async fn rlm_send_executes_repl_steps_and_persists_final_answer() {
                 },
             }],
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
         ModelResponse {
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("FINAL(done)")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
     ]));
     let harness = RlmHarness::new(exoharness, model);
@@ -150,6 +156,9 @@ async fn rlm_subquery_variable_can_store_final_answer() {
                 },
             }],
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
         ModelResponse {
             response_id: Some(Uuid7::now()),
@@ -175,18 +184,27 @@ async fn rlm_subquery_variable_can_store_final_answer() {
                 },
             }],
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
         ModelResponse {
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("4")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
         ModelResponse {
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("FINAL_VAR(final_answer)")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
     ]));
     let harness = RlmHarness::new(exoharness, Arc::clone(&model));
@@ -252,6 +270,9 @@ async fn rlm_send_stream_suppresses_internal_control_text() {
             messages: vec![assistant_message("FINAL(2)")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
     }]));
     let harness = RlmHarness::new(exoharness, model);
@@ -320,6 +341,9 @@ async fn rlm_exposes_history_via_get_messages() {
             messages: vec![assistant_message("FINAL(recorded)")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
         ModelResponse {
             response_id: Some(Uuid7::now()),
@@ -348,12 +372,18 @@ globalThis.answer = String(\n\
                 },
             }],
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
         ModelResponse {
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("FINAL_VAR(answer)")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
     ]));
     let harness = RlmHarness::new(exoharness, model);
@@ -425,6 +455,9 @@ async fn rlm_can_finish_by_setting_final_in_repl() {
             },
         }],
         usage: None,
+        model: None,
+        ttft: None,
+        duration: None,
     }]));
     let harness = RlmHarness::new(exoharness, Arc::clone(&model));
     register_test_model(harness.exoharness_handle().as_ref()).await;

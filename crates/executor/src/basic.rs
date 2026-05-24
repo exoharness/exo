@@ -5,7 +5,8 @@ use std::time::Instant;
 use async_trait::async_trait;
 use exoharness::{
     AgentHandle, ConversationHandle, ConversationId, EventData, EventId, EventQuery,
-    EventQueryDirection, Result, ToolCallId, ToolRequest, TurnHandle,
+    EventQueryDirection, Result, ToolCallId, ToolRequest, TurnHandle, UsageRecord,
+    pricing::{TokenCounts, compute_cost_usd},
 };
 use lingua::Message;
 use lingua::universal::{ToolContentPart, ToolResultContentPart};
@@ -167,9 +168,11 @@ where
             Some(turn_trace) => turn_trace.start_llm_round(&request, round).await,
             None => None,
         };
+        let requested_model = request.model.clone();
 
         match stream_mode {
             ExecutorStreamMode::Disabled => {
+                let started_at = Instant::now();
                 let response = match self.model.complete(request).await {
                     Ok(response) => response,
                     Err(error) => {
@@ -179,6 +182,14 @@ where
                         return Err(error);
                     }
                 };
+                let duration = started_at.elapsed();
+                let mut response = response;
+                if response.model.is_none() {
+                    response.model = Some(requested_model);
+                }
+                if response.duration.is_none() {
+                    response.duration = Some(duration);
+                }
                 if let Some(llm_trace) = llm_trace {
                     llm_trace.finish_success(&response, None).await;
                 }
@@ -233,6 +244,17 @@ where
                         return Err(error);
                     }
                 };
+                let duration = started_at.elapsed();
+                let mut response = response;
+                if response.model.is_none() {
+                    response.model = Some(requested_model);
+                }
+                if response.ttft.is_none() {
+                    response.ttft = ttft;
+                }
+                if response.duration.is_none() {
+                    response.duration = Some(duration);
+                }
                 if let Some(llm_trace) = llm_trace {
                     llm_trace.finish_success(&response, ttft).await;
                 }
@@ -393,9 +415,11 @@ fn interpret_model_response(response: ModelResponse) -> Vec<EventData> {
     let mut events = Vec::new();
 
     if !response.messages.is_empty() {
+        let usage = build_usage_record(&response);
         events.push(EventData::Messages {
             messages: response.messages,
             response_id: response.response_id,
+            usage,
         });
     }
 
@@ -408,6 +432,62 @@ fn interpret_model_response(response: ModelResponse) -> Vec<EventData> {
     }
 
     events
+}
+
+fn build_usage_record(response: &ModelResponse) -> Option<UsageRecord> {
+    // Only emit a record when we have *something* worth recording — token usage
+    // or timing. Skipping when both are absent keeps event JSON clean for
+    // tests/fakes that don't populate metadata.
+    let has_usage = response.usage.is_some();
+    let has_timing = response.ttft.is_some() || response.duration.is_some();
+    if !has_usage && !has_timing {
+        return None;
+    }
+
+    let model = response.model.clone().unwrap_or_default();
+    let (
+        prompt_tokens,
+        completion_tokens,
+        prompt_cached_tokens,
+        prompt_cache_creation_tokens,
+        completion_reasoning_tokens,
+    ) = match &response.usage {
+        Some(u) => (
+            u.prompt_tokens,
+            u.completion_tokens,
+            u.prompt_cached_tokens,
+            u.prompt_cache_creation_tokens,
+            u.completion_reasoning_tokens,
+        ),
+        None => (None, None, None, None, None),
+    };
+
+    let cost_usd = if has_usage && !model.is_empty() {
+        compute_cost_usd(
+            &model,
+            TokenCounts {
+                prompt: prompt_tokens,
+                completion: completion_tokens,
+                prompt_cached: prompt_cached_tokens,
+                prompt_cache_creation: prompt_cache_creation_tokens,
+            },
+        )
+    } else {
+        None
+    };
+
+    Some(UsageRecord {
+        model,
+        prompt_tokens,
+        completion_tokens,
+        prompt_cached_tokens,
+        prompt_cache_creation_tokens,
+        completion_reasoning_tokens,
+        cost_usd,
+        ttft_ms: response.ttft.map(|d| d.as_millis() as u64),
+        duration_ms: response.duration.map(|d| d.as_millis() as u64),
+        server_duration_ms: None,
+    })
 }
 
 #[derive(Debug, Clone)]

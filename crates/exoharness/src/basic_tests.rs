@@ -93,6 +93,7 @@ async fn begin_turn_tracks_events_through_finish() {
     turn.add_events(vec![EventData::Messages {
         messages: vec![assistant_message("pong")],
         response_id: None,
+        usage: None,
     }])
     .await
     .expect("append assistant message");

@@ -3,6 +3,7 @@ mod basic;
 #[cfg(all(test, not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod basic_tests;
 mod error;
+pub mod pricing;
 pub mod protocol;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod sandbox;

@@ -585,6 +585,7 @@ impl ConversationHandle for BasicConversationHandle {
             events_to_append.push(EventData::Messages {
                 messages: request.input,
                 response_id: None,
+                usage: None,
             });
         }
 

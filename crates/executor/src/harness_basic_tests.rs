@@ -20,7 +20,7 @@ fn local_test_config(root: impl Into<std::path::PathBuf>) -> BasicExoHarnessConf
     }
 }
 use lingua::universal::{AssistantContent, UserContent};
-use lingua::{Message, UniversalStreamChunk};
+use lingua::{Message, UniversalStreamChunk, UniversalUsage};
 use serde_json::{Map, Value};
 use tempfile::TempDir;
 
@@ -110,6 +110,9 @@ async fn send_persists_messages_through_harness() {
             messages: vec![assistant_message("pong")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         }])),
         Arc::new(BasicToolRuntime),
     );
@@ -151,6 +154,128 @@ async fn send_persists_messages_through_harness() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn usage_record_is_persisted_with_computed_cost() {
+    let tempdir = TempDir::new().expect("tempdir should exist");
+    let exoharness = Arc::new(
+        BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
+            .await
+            .expect("basic exoharness should initialize"),
+    ) as Arc<dyn ExoHarness>;
+    let harness = BasicHarness::new(
+        Arc::clone(&exoharness),
+        Arc::new(FakeModelClient::new(vec![ModelResponse {
+            response_id: Some(Uuid7::now()),
+            messages: vec![assistant_message("pong")],
+            tool_calls: Vec::new(),
+            usage: Some(UniversalUsage {
+                prompt_tokens: Some(1_000),
+                completion_tokens: Some(500),
+                prompt_cached_tokens: None,
+                prompt_cache_creation_tokens: None,
+                completion_reasoning_tokens: None,
+            }),
+            model: Some("claude-sonnet-4-6".to_string()),
+            ttft: None,
+            duration: None,
+        }])),
+        Arc::new(BasicToolRuntime::default()),
+    );
+
+    let secret_id = exoharness
+        .put_secret(PutSecretRequest {
+            name: "cost-test-key".to_string(),
+            secret: Secret::Key {
+                value: "test-key".to_string(),
+            },
+        })
+        .await
+        .expect("test secret should register");
+    exoharness
+        .put_binding(Binding::Llm {
+            name: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
+            base_url: None,
+            secret_id: Some(secret_id),
+        })
+        .await
+        .expect("binding should register");
+
+    let agent = harness
+        .create_agent(CreateAgentRequest {
+            slug: "cost-demo".to_string(),
+            name: None,
+            harness: crate::AgentHarnessKind::Basic,
+            typescript: None,
+            sandbox_image: None,
+            enable_networking: false,
+            model: "claude-sonnet-4-6".to_string(),
+            max_output_tokens: None,
+            max_tool_round_trips: Some(2),
+            braintrust: None,
+        })
+        .await
+        .expect("agent should be created");
+    let conversation = agent
+        .create_conversation(CreateConversationRequest::default())
+        .await
+        .expect("conversation should be created");
+
+    conversation
+        .send(SendRequest {
+            input: vec![user_message("ping")],
+            session_id: None,
+        })
+        .await
+        .expect("send should succeed");
+
+    let events = conversation
+        .exoharness_handle()
+        .get_events(Some(EventQuery {
+            cursor: None,
+            direction: Some(EventQueryDirection::Asc),
+            limit: None,
+            session_id: None,
+            turn_id: None,
+            types: None,
+        }))
+        .await
+        .expect("get events should succeed")
+        .events;
+
+    let assistant_usage = events
+        .iter()
+        .find_map(|event| match &event.data {
+            EventData::Messages {
+                messages,
+                usage: Some(usage),
+                ..
+            } if messages
+                .iter()
+                .any(|m| matches!(m, Message::Assistant { .. })) =>
+            {
+                Some(usage)
+            }
+            _ => None,
+        })
+        .expect("assistant message event should carry a UsageRecord");
+
+    assert_eq!(assistant_usage.model, "claude-sonnet-4-6");
+    assert_eq!(assistant_usage.prompt_tokens, Some(1_000));
+    assert_eq!(assistant_usage.completion_tokens, Some(500));
+    // 1000 prompt @ $3/M + 500 completion @ $15/M = $0.003 + $0.0075 = $0.0105
+    let cost = assistant_usage.cost_usd.expect("cost should be computed");
+    assert!(
+        (cost - 0.0105).abs() < 1e-9,
+        "expected cost ~0.0105, got {cost}"
+    );
+    // Non-streaming path measures total duration.
+    assert!(
+        assistant_usage.duration_ms.is_some(),
+        "duration should be recorded"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn close_session_appends_session_ended_event() {
     let tempdir = TempDir::new().expect("tempdir should exist");
     let exoharness: Arc<dyn ExoHarness> = Arc::new(
@@ -165,6 +290,9 @@ async fn close_session_appends_session_ended_event() {
             messages: vec![assistant_message("pong")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         }])),
         Arc::new(BasicToolRuntime),
     );
@@ -239,12 +367,18 @@ async fn updating_agent_config_refreshes_executor_cache() {
             messages: vec![assistant_message("pong-1")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
         ModelResponse {
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("pong-2")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
     ]));
     let harness = BasicHarness::new(exoharness, Arc::clone(&model), Arc::new(BasicToolRuntime));
@@ -320,12 +454,18 @@ async fn send_executes_shell_tool_when_enabled() {
                 },
             }],
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
         ModelResponse {
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("done")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
     ]));
     let harness = BasicHarness::new(exoharness, Arc::clone(&model), Arc::new(BasicToolRuntime));
@@ -489,12 +629,18 @@ async fn updating_mounts_recreates_shell_sandbox() {
             messages: vec![assistant_message("done-1")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
         ModelResponse {
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("done-2")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
     ]));
     let harness = BasicHarness::new(exoharness, model, Arc::new(BasicToolRuntime));
@@ -611,18 +757,27 @@ async fn conversation_model_override_changes_effective_model() {
             messages: vec![assistant_message("first")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
         ModelResponse {
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("second")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
         ModelResponse {
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("third")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
     ]));
     let harness = BasicHarness::new(exoharness, Arc::clone(&model), Arc::new(BasicToolRuntime));
