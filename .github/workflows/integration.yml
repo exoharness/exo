@@ -1,0 +1,118 @@
+name: Integration tests
+
+# Heavier integration tests (real sandbox, real binary spawn, wiremock fake
+# OpenAI). Matrix covers each (os, sandbox-backend) cell we plausibly support
+# in CI; the secret backend is always `file` (with the master key inside a
+# per-test tempdir via XDG_CONFIG_HOME).
+#
+# Triggers on push to main and manual workflow_dispatch.
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-integration-tests:
+    name: ${{ matrix.os }} / ${{ matrix.sandbox-backend }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-latest
+            sandbox-backend: local-process
+          - os: linux
+            runner: ubuntu-latest
+            sandbox-backend: docker
+          - os: macos
+            runner: macos-15
+            sandbox-backend: local-process
+          - os: macos
+            runner: macos-15-intel # Intel runner exposes HVF; arm64 doesn't (nested virt)
+            sandbox-backend: docker
+          # macOS / apple-container is intentionally not covered by CI.
+          #
+          # Apple's `container` CLI uses VZ.framework, which requires
+          # hardware virtualization on Apple Silicon. GitHub-hosted
+          # Apple Silicon runners do not expose nested virtualization
+          # (tracked upstream: https://github.com/actions/runner-images/issues/13505),
+          # so VZ fails with "Virtualization is not available on this
+          # hardware" no matter how the container CLI is configured.
+          #
+          # To exercise this cell, run on either:
+          #   - a self-hosted Apple Silicon runner on macOS 26+, or
+          #   - a third-party Mac CI service such as Cirrus or MacStadium.
+          #
+          # The install-step + run-step plumbing for apple-container is
+          # left in place below so a self-hosted matrix entry can be
+          # added by just uncommenting and pointing `runner:` at a
+          # labelled self-hosted runner.
+          # - os: macos
+          #   runner: self-hosted-macos-26
+          #   sandbox-backend: apple-container
+
+    env:
+      EXO_TEST_SANDBOX_BACKEND: ${{ matrix.sandbox-backend }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Cache Rust dependencies and build output
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+
+      # Linux runners ship with Docker preinstalled; just confirm it's up.
+      - name: Verify Docker is available
+        if: matrix.os == 'linux' && matrix.sandbox-backend == 'docker'
+        run: docker info
+
+      # macOS runners don't ship Docker. Use the crazy-max action which
+      # handles the Colima + Lima setup with a known-good config —
+      # brew-installed Colima 0.10.1 + Lima 2.1.1 hits a hostagent Go panic
+      # on macos-15.
+      - name: Install Docker (macOS)
+        if: matrix.os == 'macos' && matrix.sandbox-backend == 'docker'
+        uses: crazy-max/ghaction-setup-docker@b2189fbf2a6592b51fee7cdd93ee2bfaeba733db # v5.1.0
+
+      - name: Verify Docker is available (macOS)
+        if: matrix.os == 'macos' && matrix.sandbox-backend == 'docker'
+        run: docker info
+
+      # Apple's `container` CLI is distributed as a signed .pkg from the
+      # apple/container repo. No matrix cell exercises this today (see the
+      # commented-out apple-container entry in the matrix above), but the
+      # install step is kept so a self-hosted-runner cell can re-enable it
+      # without re-discovering the install incantation.
+      - name: Install Apple container CLI (macOS)
+        if: matrix.os == 'macos' && matrix.sandbox-backend == 'apple-container'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          # Authed download via gh CLI to avoid api.github.com rate limiting.
+          gh release download --repo apple/container \
+            --pattern '*-installer-signed.pkg' \
+            --dir /tmp
+          PKG=$(ls /tmp/*-installer-signed.pkg | head -n1)
+          sudo installer -pkg "$PKG" -target /
+          container --version
+          # --enable-kernel-install skips the first-run interactive prompt
+          # asking whether to install the default kernel.
+          container system start --enable-kernel-install
+          container system status
+
+      - name: Run integration tests
+        # Narrow to the one integration target — unit tests are already
+        # covered by the rust-tests job in ci.yml, no need to recompile or
+        # rerun them here.
+        run: cargo test --package exo --test integration_chat -- --ignored
