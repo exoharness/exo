@@ -26,6 +26,16 @@ scripts/exoclaw-repl --pull-sandbox
 
 The script also starts local scheduler and adapter runner processes by default.
 Use `--no-scheduler` or `--no-adapters` when you only want the interactive REPL.
+For repeatable setup tests, pass an initial prompt file; the script sends it to
+the conversation before dropping into the REPL:
+
+```bash
+scripts/exoclaw-repl fresh --pull-sandbox \
+  --initial-prompt-file examples/exoclaw/prompts/irc-test.md
+```
+
+Edit the nick and channel in `examples/exoclaw/prompts/irc-test.md` before using
+it on a real IRC network.
 
 ## Tools
 

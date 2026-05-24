@@ -23,6 +23,7 @@ PULL_SANDBOX=false
 START_SCHEDULER="${EXO_START_SCHEDULER:-true}"
 START_ADAPTERS="${EXO_START_ADAPTERS:-true}"
 ADAPTER_LIMIT="${EXO_ADAPTER_LIMIT:-50}"
+INITIAL_PROMPT_FILE="${EXO_INITIAL_PROMPT_FILE:-}"
 
 usage() {
   cat <<'EOF'
@@ -55,6 +56,7 @@ Options:
   --no-adapters                Do not start the local adapter runner
   --adapters                   Start the local adapter runner
   --adapter-limit <n>          Max adapters supervised by the runner (default: 50)
+  --initial-prompt-file <path> Send this file as the first message before REPL
   --pull-sandbox               Pull the sandbox image before starting
   --no-sandbox                 Do not require or configure sandbox shell support
   --env-file <path>            Env file to read if present (default: .env)
@@ -66,7 +68,8 @@ Environment overrides:
   EXO_CONVERSATION_NAME, EXO_MODULE, EXO_SANDBOX_IMAGE,
   EXO_NETWORKING, EXO_SHELL_PROGRAM, EXO_SANDBOX_SCOPE, EXO_ENV_FILE,
   EXO_BIN, EXO_START_SCHEDULER, EXO_START_ADAPTERS,
-  EXO_SCHEDULER_INTERVAL_SECONDS, EXO_ADAPTER_LIMIT
+  EXO_SCHEDULER_INTERVAL_SECONDS, EXO_ADAPTER_LIMIT,
+  EXO_INITIAL_PROMPT_FILE
 EOF
 }
 
@@ -395,7 +398,26 @@ run_repl() {
   ensure_conversation
   ensure_scheduler
   ensure_adapters
+  send_initial_prompt
   exec "$EXO_BIN" --env-file-if-exists "$ENV_FILE" chat repl "$AGENT" "$CONVERSATION"
+}
+
+send_initial_prompt() {
+  if [[ -z "$INITIAL_PROMPT_FILE" ]]; then
+    return
+  fi
+  if [[ ! -f "$INITIAL_PROMPT_FILE" ]]; then
+    die "initial prompt file not found: $INITIAL_PROMPT_FILE"
+  fi
+
+  local prompt
+  prompt="$(<"$INITIAL_PROMPT_FILE")"
+  if [[ -z "${prompt//[[:space:]]/}" ]]; then
+    die "initial prompt file is empty: $INITIAL_PROMPT_FILE"
+  fi
+
+  echo "Sending initial prompt from $INITIAL_PROMPT_FILE..."
+  exo chat send "$AGENT" "$CONVERSATION" "$prompt"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -494,6 +516,11 @@ while [[ $# -gt 0 ]]; do
     --adapter-limit)
       ADAPTER_LIMIT="${2:-}"
       [[ "$ADAPTER_LIMIT" =~ ^[0-9]+$ && "$ADAPTER_LIMIT" -gt 0 ]] || die "--adapter-limit requires a positive integer"
+      shift 2
+      ;;
+    --initial-prompt-file)
+      INITIAL_PROMPT_FILE="${2:-}"
+      [[ -n "$INITIAL_PROMPT_FILE" ]] || die "--initial-prompt-file requires a value"
       shift 2
       ;;
     --pull-sandbox)
