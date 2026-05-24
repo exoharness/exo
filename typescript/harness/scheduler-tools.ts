@@ -39,7 +39,7 @@ function createScheduleSandboxTaskTool(): ToolInstance {
     definition: {
       name: "schedule_sandbox_task",
       description:
-        "Schedule a recurring command to run in this conversation's sandbox. A host scheduler owns timing and will wake this conversation with compact results when runs complete. The scheduler reuses the shared conversation sandbox when available; use setupCommand for task-specific setup that should run before each scheduled run.",
+        "Schedule a recurring command to run in this Exoclaw agent's shared sandbox by default. A host scheduler owns timing and will wake this conversation with compact results when runs complete. Use setupCommand for task-specific setup that should run before each scheduled run.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -63,11 +63,11 @@ function createScheduleSandboxTaskTool(): ToolInstance {
           },
           sandboxMode: {
             anyOf: [
-              { type: "string", enum: ["conversation", "task_fresh"] },
+              { type: "string", enum: ["agent", "conversation", "task_fresh"] },
               { type: "null" },
             ],
             description:
-              "Sandbox selection mode. Use 'conversation' or null to run in the shared persistent conversation sandbox. Use 'task_fresh' to create a separate fresh sandbox for this task and reuse it across that task's runs.",
+              "Sandbox selection mode. Use 'agent' or null to run in the shared persistent agent sandbox. Use 'conversation' for a sandbox scoped to this conversation. Use 'task_fresh' to create a separate fresh sandbox for this task and reuse it across that task's runs.",
           },
           setupCommand: {
             anyOf: [
@@ -79,7 +79,7 @@ function createScheduleSandboxTaskTool(): ToolInstance {
               { type: "null" },
             ],
             description:
-              "Optional argv to run immediately before each scheduled run in the shared conversation sandbox, for example ['bash', '-lc', 'apt-get update && apt-get install -y curl']. Use this for dependencies that should be prepared before each run.",
+              "Optional argv to run immediately before each scheduled run, for example ['bash', '-lc', 'apt-get update && apt-get install -y curl']. Use this for dependencies that should be prepared before each run.",
           },
           reportPrompt: {
             type: "string",

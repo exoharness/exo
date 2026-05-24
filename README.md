@@ -121,6 +121,22 @@ corresponding CLI commands are under:
 ./target/debug/exo --harness exoclaw schedule --help
 ```
 
+By default, Exoclaw uses an agent-scoped sandbox for shell commands and scheduled
+tasks, so setup done through the REPL is shared by future tasks and conversations
+for that agent while the warm sandbox is alive, including across normal REPL
+restarts. Conversation-scoped and task-scoped sandboxes are available for
+isolation. The sandbox filesystem is not yet durable across warm container
+cleanup; use a prepared image or task `setupCommand` for dependencies that must
+survive host/container cleanup.
+
+To make a conversation use its own sandbox for shell commands instead of the
+agent sandbox, create or update it with `--sandbox-scope conversation`:
+
+```bash
+./target/debug/exo --harness exoclaw conversation create exoclaw-agent "Isolated Dev" --sandbox-scope conversation
+scripts/exoclaw-repl --conversation isolated-dev --sandbox-scope conversation
+```
+
 ## Repository Layout
 
 - `crates`: Rust workspace for the CLI, exoharness substrate, and executors.

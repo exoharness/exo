@@ -21,9 +21,9 @@ use executor::{
     BraintrustRuntimeConfig, BraintrustTracingConfig, ConversationModelConfig, CreateAgentRequest,
     CreateConversationRequest, EventQuery, EventQueryDirection, ExoHarness, ExoclawToolRuntime,
     FileSystemMount, FileSystemMountMode, ForkConversationRequest, Harness, HarnessAgent,
-    HarnessConversation, PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR, Secret,
-    ToolManifestEntry, TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, load_agent_config,
-    send_conversation_wakeup,
+    HarnessConversation, PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR, SandboxScope,
+    Secret, ToolManifestEntry, TypeScriptHarness, TypeScriptHarnessConfig, Uuid7,
+    effective_sandbox_scope, load_agent_config, send_conversation_wakeup,
 };
 use lingua::Message;
 use lingua::universal::{AssistantContent, AssistantContentPart, ToolContentPart, UserContent};
@@ -69,6 +69,21 @@ enum HarnessKind {
 enum NetworkingMode {
     Enabled,
     Disabled,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SandboxScopeArg {
+    Agent,
+    Conversation,
+}
+
+impl From<SandboxScopeArg> for SandboxScope {
+    fn from(value: SandboxScopeArg) -> Self {
+        match value {
+            SandboxScopeArg::Agent => SandboxScope::Agent,
+            SandboxScopeArg::Conversation => SandboxScope::Conversation,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -188,6 +203,8 @@ enum ConversationCommands {
         name: Option<String>,
         #[arg(long)]
         slug: Option<String>,
+        #[arg(long, value_enum)]
+        sandbox_scope: Option<SandboxScopeArg>,
         #[arg(long)]
         repl: bool,
     },
@@ -211,6 +228,8 @@ enum ConversationCommands {
         clear_shell_program: bool,
         #[arg(long, value_enum)]
         networking: Option<NetworkingMode>,
+        #[arg(long, value_enum)]
+        sandbox_scope: Option<SandboxScopeArg>,
         #[arg(long)]
         model: Option<String>,
         #[arg(long)]
@@ -654,6 +673,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 agent,
                 name,
                 slug,
+                sandbox_scope,
                 repl,
             } => {
                 let agent = must_get_agent(harness.as_ref(), &agent).await?;
@@ -672,6 +692,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         name,
                     })
                     .await?;
+                if let Some(sandbox_scope) = sandbox_scope {
+                    let mut config = conversation.config().await?;
+                    config.sandbox_scope = Some(sandbox_scope.into());
+                    conversation.put_config(config).await?;
+                }
                 println!(
                     "created conversation {} ({})",
                     conversation.record().slug,
@@ -733,6 +758,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 shell_program,
                 clear_shell_program,
                 networking,
+                sandbox_scope,
                 model,
                 max_output_tokens,
                 clear_max_output_tokens,
@@ -779,6 +805,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if let Some(networking) = networking {
                     config.enable_networking = matches!(networking, NetworkingMode::Enabled);
+                    changed = true;
+                }
+
+                if let Some(sandbox_scope) = sandbox_scope {
+                    config.sandbox_scope = Some(sandbox_scope.into());
                     changed = true;
                 }
 
@@ -945,7 +976,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 println!(
                     "shell_program: {}",
-                    config.shell_program.unwrap_or_else(|| "none".to_string())
+                    config.shell_program.as_deref().unwrap_or("none")
+                );
+                println!(
+                    "sandbox_scope: {}",
+                    config
+                        .sandbox_scope
+                        .map(sandbox_scope_name)
+                        .unwrap_or("default")
+                );
+                println!(
+                    "effective_sandbox_scope: {}",
+                    sandbox_scope_name(effective_sandbox_scope(&agent_config, &config))
                 );
                 println!(
                     "effective_sandbox_image: {}",
@@ -1586,6 +1628,13 @@ pub(crate) fn render_assistant_content(content: &AssistantContent) -> String {
 
 fn chat_repl_command(agent_slug: &str, conversation_slug: &str) -> String {
     format!("exo chat repl {agent_slug} {conversation_slug}")
+}
+
+fn sandbox_scope_name(scope: SandboxScope) -> &'static str {
+    match scope {
+        SandboxScope::Agent => "agent",
+        SandboxScope::Conversation => "conversation",
+    }
 }
 
 fn slugify(input: &str) -> String {

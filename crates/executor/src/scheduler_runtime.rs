@@ -5,6 +5,7 @@ use exoharness::{RunInSandboxRequest, SandboxProcess, WriteArtifactRequest};
 use futures::io::{AsyncRead, AsyncReadExt};
 use serde::Serialize;
 
+use crate::agent_sandbox::{AgentSandboxHandle, ensure_agent_sandbox};
 use crate::conversation_sandbox::{create_conversation_sandbox, ensure_conversation_sandbox};
 use crate::conversation_wakeup::send_conversation_wakeup;
 use crate::scheduler_store::SchedulerStore;
@@ -141,17 +142,19 @@ async fn run_task_inner(
     let agent_config = agent.config().await?;
     let conversation_config = conversation.config().await?;
     let conversation_handle = conversation.exoharness_handle();
-    let sandbox_id = resolve_task_sandbox(
+    let sandbox = resolve_task_sandbox(
         task,
-        conversation_handle.as_ref(),
+        agent.exoharness_handle().as_ref(),
+        std::sync::Arc::clone(&conversation_handle),
         &agent_config,
         &conversation_config,
     )
     .await?;
     let command_result: Result<CommandOutput> = async {
-        let process = conversation_handle
+        let process = sandbox
+            .conversation
             .run_in_sandbox(RunInSandboxRequest {
-                id: sandbox_id.clone(),
+                id: sandbox.sandbox_id.clone(),
                 command: task
                     .setup_command
                     .clone()
@@ -162,7 +165,7 @@ async fn run_task_inner(
         let setup_output = read_process_output(process, task.max_output_bytes).await?;
         if task.setup_command.is_none() {
             return Ok(CommandOutput {
-                sandbox_id,
+                sandbox_id: sandbox.sandbox_id.clone(),
                 setup: None,
                 main: setup_output,
                 error: None,
@@ -170,22 +173,23 @@ async fn run_task_inner(
         }
         if setup_output.exit_code != Some(0) {
             return Ok(CommandOutput {
-                sandbox_id,
+                sandbox_id: sandbox.sandbox_id.clone(),
                 setup: Some(setup_output),
                 main: ProcessOutput::empty(),
                 error: Some("setup command exited non-zero".to_string()),
             });
         }
-        let process = conversation_handle
+        let process = sandbox
+            .conversation
             .run_in_sandbox(RunInSandboxRequest {
-                id: sandbox_id.clone(),
+                id: sandbox.sandbox_id.clone(),
                 command: task.command.clone(),
                 env: Default::default(),
             })
             .await?;
         let main_output = read_process_output(process, task.max_output_bytes).await?;
         Ok(CommandOutput {
-            sandbox_id: sandbox_id.clone(),
+            sandbox_id: sandbox.sandbox_id.clone(),
             setup: Some(setup_output),
             main: main_output,
             error: None,
@@ -271,23 +275,48 @@ async fn run_task_inner(
 
 async fn resolve_task_sandbox(
     task: &mut ScheduledTaskRecord,
-    conversation: &dyn exoharness::ConversationHandle,
+    agent: &dyn exoharness::AgentHandle,
+    conversation: std::sync::Arc<dyn exoharness::ConversationHandle>,
     agent_config: &crate::AgentConfig,
     conversation_config: &crate::ConversationConfig,
-) -> Result<String> {
+) -> Result<AgentSandboxHandle> {
     match task.sandbox_mode {
-        ScheduledTaskSandboxMode::Conversation => {
-            ensure_conversation_sandbox(conversation, agent_config, conversation_config).await
+        ScheduledTaskSandboxMode::Agent => {
+            ensure_agent_sandbox(
+                agent,
+                conversation.as_ref(),
+                agent_config,
+                conversation_config,
+            )
+            .await
         }
+        ScheduledTaskSandboxMode::Conversation => Ok(AgentSandboxHandle {
+            sandbox_id: ensure_conversation_sandbox(
+                conversation.as_ref(),
+                agent_config,
+                conversation_config,
+            )
+            .await?,
+            conversation,
+        }),
         ScheduledTaskSandboxMode::TaskFresh => {
             if let Some(sandbox_id) = &task.task_sandbox_id {
-                return Ok(sandbox_id.clone());
+                return Ok(AgentSandboxHandle {
+                    conversation,
+                    sandbox_id: sandbox_id.clone(),
+                });
             }
-            let sandbox_id =
-                create_conversation_sandbox(conversation, agent_config, conversation_config)
-                    .await?;
+            let sandbox_id = create_conversation_sandbox(
+                conversation.as_ref(),
+                agent_config,
+                conversation_config,
+            )
+            .await?;
             task.task_sandbox_id = Some(sandbox_id.clone());
-            Ok(sandbox_id)
+            Ok(AgentSandboxHandle {
+                conversation,
+                sandbox_id,
+            })
         }
     }
 }

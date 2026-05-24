@@ -48,6 +48,7 @@ pub struct NewScheduledTask {
 #[serde(rename_all = "snake_case")]
 pub enum ScheduledTaskSandboxMode {
     #[default]
+    Agent,
     Conversation,
     TaskFresh,
 }
@@ -246,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_task_defaults_to_conversation_sandbox() {
+    fn scheduled_task_defaults_to_agent_sandbox() {
         let task = ScheduledTaskRecord::new(
             NewScheduledTask {
                 agent_id: "agent".to_string(),
@@ -263,7 +264,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(task.sandbox_mode, ScheduledTaskSandboxMode::Conversation);
+        assert_eq!(task.sandbox_mode, ScheduledTaskSandboxMode::Agent);
         assert_eq!(task.task_sandbox_id, None);
     }
 

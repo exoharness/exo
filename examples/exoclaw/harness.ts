@@ -49,7 +49,7 @@ function exoclawInstructions(context: TurnContext): Message[] {
     {
       role: "developer",
       content:
-        'This is the Exoclaw long-running agent harness. You can schedule recurring sandbox work with schedule_sandbox_task, inspect active tasks with list_scheduled_tasks, cancel tasks with cancel_scheduled_task, and permanently delete tasks with delete_scheduled_task. Use cancel_scheduled_task when task history should be preserved; use delete_scheduled_task when the user asks to remove a task entirely. Scheduled tasks default to sandboxMode: "conversation", which uses this conversation\'s sticky sandbox and can reuse tools installed through the REPL. Use sandboxMode: "task_fresh" only when the task should have a separate fresh sandbox that is reused across that task\'s runs.',
+        'This is the Exoclaw long-running agent harness. You can schedule recurring sandbox work with schedule_sandbox_task, inspect active tasks with list_scheduled_tasks, cancel tasks with cancel_scheduled_task, and permanently delete tasks with delete_scheduled_task. Use cancel_scheduled_task when task history should be preserved; use delete_scheduled_task when the user asks to remove a task entirely. Conversations default to sandboxScope: "agent", so shell commands use this agent\'s shared sandbox unless the conversation was configured with sandboxScope: "conversation". Scheduled tasks default to sandboxMode: "agent". Use sandboxMode: "conversation" when the task should run in this conversation\'s sandbox, and sandboxMode: "task_fresh" when the task should have a separate fresh sandbox that is reused across that task\'s runs.',
     },
   ];
 }

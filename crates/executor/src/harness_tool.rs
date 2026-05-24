@@ -1,13 +1,18 @@
 use std::path::PathBuf;
 
+use crate::agent_sandbox::ensure_agent_sandbox;
 use crate::conversation_sandbox::{conversation_sandboxes, ensure_conversation_sandbox};
 use crate::scheduler_store::SchedulerStore;
 use crate::scheduler_types::{
     DEFAULT_MAX_OUTPUT_BYTES, NewScheduledTask, ScheduledTaskSandboxMode,
 };
 use crate::{AgentConfig, ConversationConfig, ToolRuntime};
+use crate::{SandboxScope, effective_sandbox_scope};
 use async_trait::async_trait;
-use exoharness::{ConversationHandle, Result, RunInSandboxRequest, ToolRequest, ToolResult};
+use exoharness::{
+    AgentHandle, ConversationHandle, Result, RunInSandboxRequest, SandboxProcess, ToolRequest,
+    ToolResult,
+};
 use futures::io::AsyncReadExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -32,6 +37,7 @@ impl ExoclawToolRuntime {
 impl ToolRuntime for BasicToolRuntime {
     async fn prepare_conversation(
         &self,
+        _agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
         agent_config: &AgentConfig,
         config: &ConversationConfig,
@@ -44,7 +50,9 @@ impl ToolRuntime for BasicToolRuntime {
 
     async fn execute(
         &self,
+        _agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
+        _agent_config: &AgentConfig,
         config: &ConversationConfig,
         request: &ToolRequest,
     ) -> Result<ToolResult> {
@@ -61,22 +69,34 @@ impl ToolRuntime for BasicToolRuntime {
 impl ToolRuntime for ExoclawToolRuntime {
     async fn prepare_conversation(
         &self,
+        agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
         agent_config: &AgentConfig,
         config: &ConversationConfig,
     ) -> Result<()> {
-        ensure_conversation_sandbox(conversation, agent_config, config).await?;
+        match effective_sandbox_scope(agent_config, config) {
+            SandboxScope::Agent => {
+                ensure_agent_sandbox(agent, conversation, agent_config, config).await?;
+            }
+            SandboxScope::Conversation => {
+                ensure_conversation_sandbox(conversation, agent_config, config).await?;
+            }
+        }
         Ok(())
     }
 
     async fn execute(
         &self,
+        agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
+        agent_config: &AgentConfig,
         config: &ConversationConfig,
         request: &ToolRequest,
     ) -> Result<ToolResult> {
         match request.function_name.as_str() {
-            "shell" => execute_shell_tool(conversation, config, request).await,
+            "shell" => {
+                execute_exoclaw_shell_tool(agent, conversation, agent_config, config, request).await
+            }
             "schedule_sandbox_task" => {
                 execute_schedule_task_tool(&self.scheduler_store, request).await
             }
@@ -276,6 +296,10 @@ async fn execute_shell_tool(
             env: Default::default(),
         })
         .await?;
+    read_shell_process(process).await
+}
+
+async fn read_shell_process(process: Box<dyn SandboxProcess>) -> Result<ToolResult> {
     let parts = process.into_parts();
     let mut stdout = parts.stdout;
     let mut stderr = parts.stderr;
@@ -297,4 +321,33 @@ async fn execute_shell_tool(
         stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
         exit_code,
     })?)
+}
+
+async fn execute_exoclaw_shell_tool(
+    agent: &dyn AgentHandle,
+    conversation: &dyn ConversationHandle,
+    agent_config: &AgentConfig,
+    config: &ConversationConfig,
+    request: &ToolRequest,
+) -> Result<ToolResult> {
+    if effective_sandbox_scope(agent_config, config) == SandboxScope::Conversation {
+        return execute_shell_tool(conversation, config, request).await;
+    }
+
+    let args =
+        serde_json::from_value::<ShellToolArguments>(Value::Object(request.arguments.clone()))?;
+    let program = config
+        .shell_program
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("shell tool is not enabled for this conversation"))?;
+    let agent_sandbox = ensure_agent_sandbox(agent, conversation, agent_config, config).await?;
+    let process = agent_sandbox
+        .conversation
+        .run_in_sandbox(RunInSandboxRequest {
+            id: agent_sandbox.sandbox_id,
+            command: vec![program, "-lc".to_string(), args.command],
+            env: Default::default(),
+        })
+        .await?;
+    read_shell_process(process).await
 }

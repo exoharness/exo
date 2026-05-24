@@ -7,15 +7,15 @@ use exoharness::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConversationSandboxInfo {
     pub(crate) id: String,
-    image: String,
-    default_workdir: String,
-    file_system_mounts: Vec<FileSystemMount>,
-    enable_networking: bool,
-    idle_seconds: u64,
+    pub(crate) image: String,
+    pub(crate) default_workdir: String,
+    pub(crate) file_system_mounts: Vec<FileSystemMount>,
+    pub(crate) enable_networking: bool,
+    pub(crate) idle_seconds: u64,
 }
 
 impl ConversationSandboxInfo {
-    fn matches_spec(&self, spec: &ConversationSandboxSpec) -> bool {
+    pub(crate) fn matches_spec(&self, spec: &ConversationSandboxSpec) -> bool {
         self.image == spec.image
             && self.default_workdir == spec.default_workdir
             && self.file_system_mounts == spec.file_system_mounts
@@ -25,12 +25,12 @@ impl ConversationSandboxInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ConversationSandboxSpec {
-    image: String,
-    default_workdir: String,
-    file_system_mounts: Vec<FileSystemMount>,
-    enable_networking: bool,
-    idle_seconds: u64,
+pub(crate) struct ConversationSandboxSpec {
+    pub(crate) image: String,
+    pub(crate) default_workdir: String,
+    pub(crate) file_system_mounts: Vec<FileSystemMount>,
+    pub(crate) enable_networking: bool,
+    pub(crate) idle_seconds: u64,
 }
 
 pub(crate) async fn ensure_conversation_sandbox(
@@ -106,7 +106,7 @@ pub(crate) async fn conversation_sandboxes(
     Ok(sandboxes)
 }
 
-fn conversation_sandbox_spec(
+pub(crate) fn conversation_sandbox_spec(
     agent_config: &AgentConfig,
     config: &ConversationConfig,
 ) -> ConversationSandboxSpec {

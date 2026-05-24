@@ -80,12 +80,13 @@ where
 
     async fn prepare_conversation(
         &self,
+        agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
     ) -> Result<()> {
         self.tools
-            .prepare_conversation(conversation, agent_config, conversation_config)
+            .prepare_conversation(agent, conversation, agent_config, conversation_config)
             .await
     }
 
@@ -169,7 +170,7 @@ where
 
     async fn execute_runtime_request(
         &self,
-        _agent: &dyn AgentHandle,
+        agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
         _agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
@@ -179,7 +180,13 @@ where
             RuntimeRequest::ExecuteTool { request } => Ok(RuntimeResponsePayload::ToolResult {
                 result: self
                     .tools
-                    .execute(conversation, conversation_config, &request)
+                    .execute(
+                        agent,
+                        conversation,
+                        _agent_config,
+                        conversation_config,
+                        &request,
+                    )
                     .await?,
             }),
             RuntimeRequest::StartSandboxProcess { .. }
