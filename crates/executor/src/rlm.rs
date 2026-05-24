@@ -412,7 +412,7 @@ where
         Ok(messages_to_transcript(&request.input))
     }
 
-    async fn run_turn(
+    async fn execute_turn(
         &self,
         _agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,

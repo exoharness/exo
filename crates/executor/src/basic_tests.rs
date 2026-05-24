@@ -66,7 +66,7 @@ async fn send_appends_user_and_assistant_messages() {
         )
         .await
         .expect("prepare conversation should succeed");
-    HarnessExecutor::run_turn(
+    HarnessExecutor::execute_turn(
         &executor,
         agent.as_ref(),
         conversation.as_ref(),
@@ -162,7 +162,7 @@ async fn send_executes_tool_round_trip() {
         .await
         .expect("begin turn should succeed");
 
-    HarnessExecutor::run_turn(
+    HarnessExecutor::execute_turn(
         &executor,
         agent.as_ref(),
         conversation.as_ref(),
@@ -267,7 +267,7 @@ async fn send_stream_emits_chunks_and_persists_final_response() {
         )
         .await
         .expect("prepare conversation should succeed");
-    HarnessExecutor::run_turn(
+    HarnessExecutor::execute_turn(
         &executor,
         agent.as_ref(),
         conversation.as_ref(),

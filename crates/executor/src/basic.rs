@@ -330,7 +330,7 @@ where
         Ok(())
     }
 
-    async fn run_turn(
+    async fn execute_turn(
         &self,
         _agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
