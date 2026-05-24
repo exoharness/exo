@@ -43,7 +43,7 @@ pub(crate) trait HarnessExecutor: Send + Sync + Clone + 'static {
 
     fn prepare_request(&self, request: &SendRequest) -> Result<Self::Prepared>;
 
-    async fn run_turn(
+    async fn execute_turn(
         &self,
         agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
@@ -184,7 +184,7 @@ where
             |turn_trace| {
                 Box::pin(async move {
                     executor
-                        .run_turn(
+                        .execute_turn(
                             run_agent.as_ref(),
                             run_conversation.as_ref(),
                             Arc::clone(&run_turn),
@@ -238,7 +238,7 @@ where
             move |turn_trace, event_tx| {
                 Box::pin(async move {
                     executor
-                        .run_turn(
+                        .execute_turn(
                             run_agent.as_ref(),
                             run_conversation.as_ref(),
                             Arc::clone(&run_turn),

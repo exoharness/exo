@@ -93,7 +93,7 @@ where
         Ok(request.clone())
     }
 
-    async fn run_turn(
+    async fn execute_turn(
         &self,
         agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
@@ -117,7 +117,7 @@ where
         let result = {
             let mut runner = runner.lock().await;
             runner
-                .run_turn(
+                .execute_turn(
                     self,
                     agent,
                     conversation,
@@ -284,7 +284,7 @@ impl TypeScriptRunnerProcess {
         })
     }
 
-    async fn run_turn<T>(
+    async fn execute_turn<T>(
         &mut self,
         executor: &TypeScriptExecutor<T>,
         agent: &dyn AgentHandle,
