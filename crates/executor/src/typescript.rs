@@ -7,8 +7,9 @@ use std::time::Duration;
 use anyhow::{Context as AnyhowContext, anyhow, bail};
 use async_trait::async_trait;
 use exoharness::{
-    AgentHandle, BasicExoHarness, BoxAsyncRead, BoxAsyncWrite, ConversationHandle, ExoHarness,
-    Result, RunInSandboxRequest, ToolArguments, ToolRequest, ToolResult, TurnHandle,
+    AgentHandle, BasicExoHarness, BasicExoHarnessConfig, BoxAsyncRead, BoxAsyncWrite,
+    ConversationHandle, ExoHarness, Result, RunInSandboxRequest, ToolArguments, ToolRequest,
+    ToolResult, TurnHandle,
     protocol::{
         ConversationHandleInfo, Request as ExoRequest, Response as ExoResponse, TurnHandleInfo,
     },
@@ -586,16 +587,14 @@ impl<T> TypeScriptHarness<T> {
 }
 
 impl TypeScriptHarness<BasicToolRuntime> {
-    pub async fn from_root(
-        root: impl AsRef<Path>,
+    pub async fn from_config(
+        exo_config: BasicExoHarnessConfig,
         runtime_config: Option<BraintrustRuntimeConfig>,
         env: HashMap<String, String>,
     ) -> Result<Self> {
         let workspace_root = std::env::current_dir()
             .context("failed to resolve current directory for TypeScript harness")?;
-        let root = root.as_ref();
-        let exoharness: Arc<dyn ExoHarness> =
-            Arc::new(BasicExoHarness::new(root.join("exoharness")).await?);
+        let exoharness: Arc<dyn ExoHarness> = Arc::new(BasicExoHarness::new(exo_config).await?);
         let tools = Arc::new(BasicToolRuntime);
         let runtime = ExecutorHarnessRuntime::new(
             TypeScriptExecutor::new(Arc::clone(&exoharness), workspace_root, env, tools),

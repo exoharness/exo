@@ -17,11 +17,12 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use executor::{
-    AgentHarnessKind, BasicExoHarness, BasicHarness, Binding, BraintrustProject,
-    BraintrustRuntimeConfig, BraintrustTracingConfig, ConversationModelConfig, CreateAgentRequest,
-    CreateConversationRequest, EventQuery, EventQueryDirection, ExoHarness, FileSystemMount,
-    FileSystemMountMode, ForkConversationRequest, Harness, HarnessAgent, HarnessConversation,
-    PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR, Secret, SendRequest, TypeScriptHarness,
+    AgentHarnessKind, BasicExoHarness, BasicExoHarnessConfig, BasicHarness, Binding,
+    BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig, ConversationModelConfig,
+    CreateAgentRequest, CreateConversationRequest, EventQuery, EventQueryDirection, ExoHarness,
+    FileSystemMount, FileSystemMountMode, ForkConversationRequest, Harness, HarnessAgent,
+    HarnessConversation, PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR,
+    SandboxBackendChoice, Secret, SecretBackendChoice, SendRequest, TypeScriptHarness,
     TypeScriptHarnessConfig, Uuid7, load_agent_config,
 };
 use lingua::Message;
@@ -41,6 +42,12 @@ struct Cli {
     root: PathBuf,
     #[arg(long, global = true, value_enum)]
     harness: Option<HarnessKind>,
+    #[arg(long, global = true, value_enum, env = "EXO_SECRET_BACKEND")]
+    secret_backend: Option<SecretBackendArg>,
+    #[arg(long, global = true, value_enum, env = "EXO_SANDBOX_BACKEND")]
+    sandbox_backend: Option<SandboxBackendArg>,
+    #[arg(long, global = true, env = "EXO_MASTER_KEY_PATH")]
+    master_key_path: Option<PathBuf>,
     #[arg(long, global = true)]
     env_file: Option<PathBuf>,
     #[arg(long, global = true)]
@@ -61,6 +68,61 @@ enum HarnessKind {
     Rlm,
     #[value(name = "typescript")]
     TypeScript,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SecretBackendArg {
+    #[value(name = "apple-keychain")]
+    AppleKeychain,
+    File,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SandboxBackendArg {
+    #[value(name = "apple-container")]
+    AppleContainer,
+    Docker,
+    #[value(name = "local-process")]
+    LocalProcess,
+}
+
+fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig, Box<dyn std::error::Error>> {
+    let secret_backend = match cli.secret_backend.unwrap_or_else(default_secret_backend) {
+        SecretBackendArg::AppleKeychain => SecretBackendChoice::AppleKeychain,
+        SecretBackendArg::File => SecretBackendChoice::File {
+            path: cli.master_key_path.clone(),
+        },
+    };
+    let sandbox_backend = match cli.sandbox_backend.unwrap_or_else(default_sandbox_backend) {
+        SandboxBackendArg::AppleContainer => SandboxBackendChoice::AppleContainer,
+        SandboxBackendArg::Docker => SandboxBackendChoice::Docker,
+        SandboxBackendArg::LocalProcess => SandboxBackendChoice::LocalProcess,
+    };
+    Ok(BasicExoHarnessConfig {
+        root: cli.root.join("exoharness"),
+        secret_backend,
+        sandbox_backend,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn default_secret_backend() -> SecretBackendArg {
+    SecretBackendArg::AppleKeychain
+}
+
+#[cfg(not(target_os = "macos"))]
+fn default_secret_backend() -> SecretBackendArg {
+    SecretBackendArg::File
+}
+
+#[cfg(target_os = "macos")]
+fn default_sandbox_backend() -> SandboxBackendArg {
+    SandboxBackendArg::AppleContainer
+}
+
+#[cfg(not(target_os = "macos"))]
+fn default_sandbox_backend() -> SandboxBackendArg {
+    SandboxBackendArg::Docker
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -310,6 +372,7 @@ enum ChatCommands {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    let exo_config = build_exo_config(&cli)?;
     let env = CliEnvironment::load(cli.env_file_if_exists.as_deref(), cli.env_file.as_deref())?;
     let runtime_config = env.braintrust_runtime_config(
         cli.braintrust_api_key,
@@ -317,9 +380,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.braintrust_api_url,
     );
     let env_vars = env.into_vars();
-    let harness_kind = determine_harness_kind(&cli.root, cli.harness, &cli.command).await?;
+    let harness_kind = determine_harness_kind(&exo_config, cli.harness, &cli.command).await?;
     let harness = instantiate_harness(
-        &cli.root,
+        &exo_config,
         harness_kind,
         runtime_config.clone(),
         env_vars.clone(),
@@ -1102,7 +1165,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn determine_harness_kind(
-    root: &Path,
+    exo_config: &BasicExoHarnessConfig,
     override_kind: Option<HarnessKind>,
     command: &Commands,
 ) -> Result<HarnessKind, Box<dyn std::error::Error>> {
@@ -1114,7 +1177,7 @@ async fn determine_harness_kind(
         return Ok(HarnessKind::Basic);
     };
 
-    Ok(infer_agent_harness_kind(root, agent_ref)
+    Ok(infer_agent_harness_kind(exo_config, agent_ref)
         .await?
         .unwrap_or(HarnessKind::Basic))
 }
@@ -1152,10 +1215,10 @@ fn command_agent_ref(command: &Commands) -> Option<&str> {
 }
 
 async fn infer_agent_harness_kind(
-    root: &Path,
+    exo_config: &BasicExoHarnessConfig,
     agent_ref: &str,
 ) -> Result<Option<HarnessKind>, Box<dyn std::error::Error>> {
-    let exoharness = BasicExoHarness::new(root.join("exoharness")).await?;
+    let exoharness = BasicExoHarness::new(exo_config.clone()).await?;
     let agent = if let Ok(agent_id) = agent_ref.parse::<Uuid7>() {
         exoharness.get_agent(&agent_id).await?
     } else {
@@ -1174,19 +1237,21 @@ async fn infer_agent_harness_kind(
 }
 
 async fn instantiate_harness(
-    root: &Path,
+    exo_config: &BasicExoHarnessConfig,
     kind: HarnessKind,
     runtime_config: Option<BraintrustRuntimeConfig>,
     env_vars: HashMap<String, String>,
 ) -> Result<Arc<dyn Harness>, Box<dyn std::error::Error>> {
     let harness: Arc<dyn Harness> = match kind {
-        HarnessKind::Basic => {
-            Arc::new(BasicHarness::from_root(root, runtime_config, env_vars).await?)
+        HarnessKind::Basic => Arc::new(
+            BasicHarness::from_config(exo_config.clone(), runtime_config, env_vars).await?,
+        ),
+        HarnessKind::Rlm => {
+            Arc::new(RlmHarness::from_config(exo_config.clone(), runtime_config, env_vars).await?)
         }
-        HarnessKind::Rlm => Arc::new(RlmHarness::from_root(root, runtime_config, env_vars).await?),
-        HarnessKind::TypeScript => {
-            Arc::new(TypeScriptHarness::from_root(root, runtime_config, env_vars).await?)
-        }
+        HarnessKind::TypeScript => Arc::new(
+            TypeScriptHarness::from_config(exo_config.clone(), runtime_config, env_vars).await?,
+        ),
     };
     Ok(harness)
 }

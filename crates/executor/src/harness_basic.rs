@@ -1,9 +1,8 @@
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 
 use crate::{BasicExecutor, BraintrustRuntimeConfig, ModelClient, ToolRuntime};
-use exoharness::{BasicExoHarness, ExoHarness, Result};
+use exoharness::{BasicExoHarness, BasicExoHarnessConfig, ExoHarness, Result};
 
 use crate::harness_executor::ExecutorHarnessRuntime;
 use crate::harness_facade::{SharedHarness, SharedHarnessBacked};
@@ -28,13 +27,12 @@ impl<M, T> BasicHarness<M, T> {
 }
 
 impl BasicHarness<RouterModelClient, BasicToolRuntime> {
-    pub async fn from_root(
-        root: impl AsRef<Path>,
+    pub async fn from_config(
+        exo_config: BasicExoHarnessConfig,
         runtime_config: Option<BraintrustRuntimeConfig>,
         env: HashMap<String, String>,
     ) -> Result<Self> {
-        let root = root.as_ref();
-        let exoharness = Arc::new(BasicExoHarness::new(root.join("exoharness")).await?);
+        let exoharness = Arc::new(BasicExoHarness::new(exo_config).await?);
         let model = Arc::new(RouterModelClient::new(env));
         let tools = Arc::new(BasicToolRuntime);
         let runtime = ExecutorHarnessRuntime::new(BasicExecutor::new(model, tools), runtime_config);

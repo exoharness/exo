@@ -8,9 +8,18 @@ use crate::{
 use anyhow::{anyhow, bail};
 use async_trait::async_trait;
 use exoharness::{
-    BasicExoHarness, Binding, EventData, EventQuery, EventQueryDirection, ExoHarness,
-    PutSecretRequest, Secret, ToolRequest, Uuid7,
+    BasicExoHarness, BasicExoHarnessConfig, Binding, EventData, EventQuery, EventQueryDirection,
+    ExoHarness, PutSecretRequest, SandboxBackendChoice, Secret, SecretBackendChoice, ToolRequest,
+    Uuid7,
 };
+
+fn local_test_config(root: impl Into<std::path::PathBuf>) -> BasicExoHarnessConfig {
+    BasicExoHarnessConfig {
+        root: root.into(),
+        secret_backend: SecretBackendChoice::Static([7u8; 32]),
+        sandbox_backend: SandboxBackendChoice::LocalProcess,
+    }
+}
 use lingua::universal::{AssistantContent, UserContent};
 use lingua::{Message, UniversalStreamChunk};
 use serde_json::{Map, Value};
@@ -23,7 +32,7 @@ use crate::{CreateAgentRequest, CreateConversationRequest, Harness, RlmHarness};
 async fn rlm_send_executes_repl_steps_and_persists_final_answer() {
     let tempdir = TempDir::new().expect("tempdir should exist");
     let exoharness = Arc::new(
-        BasicExoHarness::new_with_local_process_sandbox(tempdir.path().join("exoharness"))
+        BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
             .await
             .expect("basic exoharness should initialize"),
     ) as Arc<dyn ExoHarness>;
@@ -121,7 +130,7 @@ async fn rlm_send_executes_repl_steps_and_persists_final_answer() {
 async fn rlm_subquery_variable_can_store_final_answer() {
     let tempdir = TempDir::new().expect("tempdir should exist");
     let exoharness = Arc::new(
-        BasicExoHarness::new_with_local_process_sandbox(tempdir.path().join("exoharness"))
+        BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
             .await
             .expect("basic exoharness should initialize"),
     ) as Arc<dyn ExoHarness>;
@@ -225,7 +234,7 @@ async fn rlm_subquery_variable_can_store_final_answer() {
 async fn rlm_send_stream_suppresses_internal_control_text() {
     let tempdir = TempDir::new().expect("tempdir should exist");
     let exoharness = Arc::new(
-        BasicExoHarness::new_with_local_process_sandbox(tempdir.path().join("exoharness"))
+        BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
             .await
             .expect("basic exoharness should initialize"),
     ) as Arc<dyn ExoHarness>;
@@ -298,7 +307,7 @@ async fn rlm_send_stream_suppresses_internal_control_text() {
 async fn rlm_exposes_history_via_get_messages() {
     let tempdir = TempDir::new().expect("tempdir should exist");
     let exoharness = Arc::new(
-        BasicExoHarness::new_with_local_process_sandbox(tempdir.path().join("exoharness"))
+        BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
             .await
             .expect("basic exoharness should initialize"),
     ) as Arc<dyn ExoHarness>;
@@ -394,7 +403,7 @@ globalThis.answer = String(\n\
 async fn rlm_can_finish_by_setting_final_in_repl() {
     let tempdir = TempDir::new().expect("tempdir should exist");
     let exoharness = Arc::new(
-        BasicExoHarness::new_with_local_process_sandbox(tempdir.path().join("exoharness"))
+        BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
             .await
             .expect("basic exoharness should initialize"),
     ) as Arc<dyn ExoHarness>;
