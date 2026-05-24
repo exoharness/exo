@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>exo.md</title>
+<meta name="description" content="A minimal substrate for building durable agents. Exo separates trusted infrastructure from the policy code above it." />
+
+<style>
+  :root {
+    --bg:        #131318;
+    --ink:       #c8c8cc;
+    --ink-2:     #9a9aa0;
+    --muted:     #4f4f57;
+    --muted-2:   #353540;
+    --accent:    #e89160;
+    --accent-2:  #c2410c;
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg:      #faf8f3;
+      --ink:     #2a2825;
+      --ink-2:   #6a6862;
+      --muted:   #b8b3a5;
+      --muted-2: #d4cebe;
+      --accent:  #c2410c;
+      --accent-2:#9a3412;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 13.5px;
+    line-height: 1.72;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    font-variant-ligatures: none;
+  }
+
+  ::selection { background: var(--accent); color: var(--bg); }
+
+  main.readme {
+    /* left-aligned to mimic a browser viewing a raw .md file —
+       no auto-centering, just a small viewport gutter on the left
+       and a comfortable measure on the right so long paragraphs
+       don't run edge-to-edge on wide screens */
+    max-width: 880px;
+    margin: 0;
+    padding: 48px 24px 96px 32px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+  }
+
+  /* the diagram block keeps its own whitespace mode (no wrap) */
+  pre.diagram {
+    white-space: pre;
+    margin: 0;
+    padding: 0;
+    font-family: inherit;
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--ink);
+    overflow-x: auto;
+    font-variant-ligatures: none;
+  }
+
+  /* ============================================================
+     markdown syntax highlights
+     keep the literal source markers visible, just dim them
+     ============================================================ */
+  a {
+    color: var(--accent);
+    text-decoration: none;
+    border-bottom: 1px dotted transparent;
+    transition: border-color .15s;
+  }
+  a:hover { border-bottom-color: var(--accent); }
+
+  .dim       { color: var(--muted); }
+  .strong    { color: var(--accent); }
+  .code      { color: var(--accent); }
+  .url       { color: var(--muted); }
+  .flag      { color: var(--accent); }
+  .com       { color: var(--muted); }
+  .str       { color: var(--ink-2); }
+
+  /* heading sizes — keep the literal "# " / "## " markers but let the
+     whole line scale up for hierarchy. font-size is the only knob; weight
+     stays close to body so it still reads as a text file, not a "design". */
+  .h1 {
+    font-size: 28px;
+    line-height: 1.25;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+  }
+  .h2 {
+    font-size: 17px;
+    line-height: 1.4;
+    font-weight: 500;
+  }
+
+  /* ============================================================
+     diagram chrome
+     ============================================================ */
+  pre.diagram .brd  { color: var(--muted); }
+  pre.diagram .lbl  { color: var(--muted); letter-spacing: 0.04em; }
+  pre.diagram .desc { color: var(--ink-2); }
+  pre.diagram .arrow{ color: var(--muted); }
+  pre.diagram .pin  { color: var(--ink); }
+
+  /* executor name slot — overlap variants on a fixed-width placeholder */
+  .slot { position: relative; display: inline-block; }
+  .slot .ph { color: transparent; user-select: none; }
+  .slot .exo-name {
+    position: absolute;
+    left: 0; top: 0;
+    opacity: 0;
+    color: var(--ink);
+    white-space: pre;
+  }
+
+  /* ============================================================
+     animations — same 16s loop as before, four scenes
+     ============================================================ */
+  .e { opacity: 0; color: var(--ink); }
+  .e1 { animation: ev-pop  16s linear infinite both; animation-delay: 0.6s; }
+  .e2 { animation: ev-pop  16s linear infinite both; animation-delay: 1.6s; }
+  .e3 { animation: ev-pop  16s linear infinite both; animation-delay: 2.6s; }
+  .e4 { animation: ev-pop  16s linear infinite both; animation-delay: 3.6s; }
+  .e5 { animation: ev-late 16s linear infinite both; }
+  .e6 { animation: ev-late 16s linear infinite both; animation-delay: 0.6s; }
+  .e7 { animation: ev-late 16s linear infinite both; animation-delay: 1.2s; }
+  .e8 { animation: ev-late 16s linear infinite both; animation-delay: 1.8s; }
+  @keyframes ev-pop  { 0% {opacity:0} 3% {opacity:1} 100% {opacity:1} }
+  @keyframes ev-late {
+    0%, 28%   { opacity: 0; }
+    31%, 52%  { opacity: 1; }
+    62%, 100% { opacity: 0.16; }
+  }
+
+  .exo-name.codex  { animation: name-codex  16s steps(1, end) infinite; }
+  .exo-name.claude { animation: name-claude 16s steps(1, end) infinite; }
+  .exo-name.custom { animation: name-custom 16s steps(1, end) infinite; }
+  /* codex carries the lion's share of the cycle (~55%) — claude code
+     only shows up briefly during the swap/rewind scene */
+  @keyframes name-codex  { 0%, 54%       { opacity: 1; } 55%, 100%   { opacity: 0; } }
+  @keyframes name-claude { 0%, 55%       { opacity: 0; } 56%, 77%    { opacity: 1; } 78%, 100% { opacity: 0; } }
+  @keyframes name-custom { 0%, 78%       { opacity: 0; } 79%, 100%   { opacity: 1; } }
+
+  .pin { opacity: 0.25; animation: pin-pulse 16s linear infinite; }
+  @keyframes pin-pulse {
+    0%,3%    { opacity: 0.2; }
+    4%,5%    { opacity: 1; }
+    9%,10%   { opacity: 0.2; }
+    10%,11%  { opacity: 1; }
+    15%,16%  { opacity: 0.2; }
+    17%,18%  { opacity: 1; }
+    21%,22%  { opacity: 0.2; }
+    23%,24%  { opacity: 1; }
+    28%,32%  { opacity: 0.2; }
+    33%,34%  { opacity: 1; }
+    37%,38%  { opacity: 0.2; }
+    39%,40%  { opacity: 1; }
+    43%,44%  { opacity: 0.2; }
+    45%,46%  { opacity: 1; }
+    49%,50%  { opacity: 0.2; }
+    51%,52%  { opacity: 1; }
+    55%,100% { opacity: 0.2; }
+  }
+
+  .fork {
+    color: var(--accent);
+    opacity: 0;
+    animation: fork-in 16s linear infinite;
+  }
+  @keyframes fork-in {
+    0%, 78%   { opacity: 0; }
+    81%, 96%  { opacity: 1; }
+    98%, 100% { opacity: 0; }
+  }
+
+  .rewind {
+    color: var(--accent);
+    opacity: 0;
+    display: inline-block;
+    animation: rewind-slide 16s linear infinite;
+  }
+  @keyframes rewind-slide {
+    0%, 56%   { opacity: 0; transform: translateX(0); }
+    58%       { opacity: 1; transform: translateX(0); }
+    73%       { opacity: 1; transform: translateX(-20ch); }
+    78%       { opacity: 1; transform: translateX(-20ch); }
+    80%, 100% { opacity: 0; transform: translateX(-20ch); }
+  }
+
+  /* the caption line cycles through 4 scenes */
+  .scene {
+    position: absolute;
+    left: 0; top: 0;
+    opacity: 0;
+    color: var(--ink);
+    white-space: pre;
+  }
+  .scene-slot {
+    position: relative;
+    display: inline-block;
+    vertical-align: top;
+  }
+  .scene-slot .ph { color: transparent; user-select: none; }
+  .scene.s1 { animation: sc1 16s steps(1, end) infinite; }
+  .scene.s2 { animation: sc2 16s steps(1, end) infinite; }
+  .scene.s3 { animation: sc3 16s steps(1, end) infinite; }
+  .scene.s4 { animation: sc4 16s steps(1, end) infinite; }
+  /* boundaries match the executor-name cycle: codex dominates scenes 1-2,
+     claude code appears only in scene 3 (swap+rewind), your executor in scene 4 */
+  @keyframes sc1 { 0%, 31%  { opacity: 1; } 32%, 100% { opacity: 0; } }
+  @keyframes sc2 { 0%, 32%  { opacity: 0; } 33%, 54%  { opacity: 1; } 55%, 100% { opacity: 0; } }
+  @keyframes sc3 { 0%, 55%  { opacity: 0; } 56%, 77%  { opacity: 1; } 78%, 100% { opacity: 0; } }
+  @keyframes sc4 { 0%, 78%  { opacity: 0; } 79%, 100% { opacity: 1; } }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.001s !important;
+      animation-iteration-count: 1 !important;
+      transition: none !important;
+    }
+    .e1, .e2, .e3, .e4 { opacity: 1; }
+    .e5, .e6, .e7, .e8 { opacity: 0.2; }
+    .exo-name.codex { opacity: 1; }
+    .scene.s1 { opacity: 1; }
+    .pin { opacity: 1; }
+  }
+
+  @media (max-width: 640px) {
+    main.readme { padding: 32px 16px 64px; }
+    pre.diagram { font-size: 10.5px; }
+  }
+</style>
+</head>
+<body>
+<main class="readme"><span class="h1"><span class="dim"># </span>exo</span>
+
+A minimal substrate for building <span class="dim">**</span><span class="strong">durable</span><span class="dim">**</span> agents.
+
+<span class="dim">&gt; </span>Exo separates the trusted infrastructure an agent needs — identity, history, secrets, sandboxes — from the policy code above it. The substrate stays put; the executor on top can be killed, swapped, or rewound without losing state.
+
+<span class="dim">`</span><span class="code">rust core</span><span class="dim">`</span> · <span class="dim">`</span><span class="code">typescript harness</span><span class="dim">`</span> · <span class="dim">`</span><span class="code">codex</span><span class="dim">`</span> · <span class="dim">`</span><span class="code">cursor sdk</span><span class="dim">`</span> · <span class="dim">`</span><span class="code">claude code</span><span class="dim">`</span> · <span class="dim">`</span><span class="code">mit</span><span class="dim">`</span>
+
+<span class="dim">---</span>
+
+<span class="h2"><span class="dim">## </span>architecture</span>
+
+<pre class="diagram" aria-label="Animated architecture diagram">
+<span class="lbl">EXECUTOR &middot; ephemeral &middot; swappable</span>
+<span class="brd">┌──────────────────────────────────────────────────────────────────┐</span>
+<span class="brd">│</span>                                                                  <span class="brd">│</span>
+<span class="brd">│</span>  <span class="strong">▸</span> <span class="slot"><span class="ph">your executor</span><span class="exo-name codex">codex</span><span class="exo-name claude">claude code</span><span class="exo-name custom">your executor</span></span>                                                 <span class="brd">│</span>
+<span class="brd">│</span>      <span class="desc">↳ assembles prompts &middot; calls models &middot; dispatches tools</span>       <span class="brd">│</span>
+<span class="brd">│</span>                                                                  <span class="brd">│</span>
+<span class="brd">└─────────────────────────────────</span><span class="brd pin">┬</span><span class="brd">────────────────────────────────┘</span>
+                                  <span class="brd pin">│</span> <span class="desc">append event</span>
+                                  <span class="brd pin">▼</span>
+<span class="lbl">EXOHARNESS &middot; durable &middot; trusted</span>
+<span class="brd">┌──────────────────────────────────────────────────────────────────┐</span>
+<span class="brd">│</span>                                                                  <span class="brd">│</span>
+<span class="brd">│</span>  secrets         sandboxes        artifacts       identity       <span class="brd">│</span>
+<span class="brd">│</span>  <span class="desc">scoped, sealed  isolated         tool output    agents · turns </span> <span class="brd">│</span>
+<span class="brd">│</span>                                                                  <span class="brd">│</span>
+<span class="brd">│</span>  event log                                                       <span class="brd">│</span>
+<span class="brd">│</span>                   <span class="fork">┌──●──●→ fork</span>                                  <span class="brd">│</span>
+<span class="brd">│</span>                   <span class="fork">│</span>                                              <span class="brd">│</span>
+<span class="brd">│</span>   <span class="e e1">●</span>────<span class="e e2">●</span>────<span class="e e3">●</span>────<span class="e e4">●</span>────<span class="e e5">●</span>────<span class="e e6">●</span>────<span class="e e7">●</span>────<span class="e e8">●</span><span class="arrow">─────→</span>                     <span class="brd">│</span>
+<span class="brd">│</span>                                       <span class="rewind">▲</span>                          <span class="brd">│</span>
+<span class="brd">│</span>                                       <span class="rewind">└ rewind</span>                   <span class="brd">│</span>
+<span class="brd">│</span>                                                                  <span class="brd">│</span>
+<span class="brd">└──────────────────────────────────────────────────────────────────┘</span>
+</pre>
+
+<span class="dim">&gt; </span><span class="scene-slot"><span class="ph">log accumulates — independent of the executor   </span><span class="scene s1">executor appends events to the durable log</span><span class="scene s2">log accumulates — independent of the executor</span><span class="scene s3">swap executor or rewind — substrate persists</span><span class="scene s4">fork a new branch from that event</span></span>
+
+<span class="dim">---</span>
+
+<span class="h2"><span class="dim">## </span>why</span>
+
+Most agent harnesses conflate trusted infrastructure with agent-specific implementation — prompts, memory compaction, tool dispatch — making reuse, recovery, isolation, and self-modification hard.
+
+Exo pushes the minimum into a protected substrate so safety is enforced once, and leaves everything semantic to the executor above. The executor can be killed at any moment without taking the agent with it.
+
+<span class="dim">- </span><span class="dim">**</span><span class="strong">fork &amp; rewind</span><span class="dim">**</span> — Resume from any past event with secrets, sandboxes, and history intact.
+<span class="dim">- </span><span class="dim">**</span><span class="strong">swap</span><span class="dim">**</span> — Run the same agent under Codex, the Cursor SDK, Claude Code, or your own executor — without rebuilding state.
+<span class="dim">- </span><span class="dim">**</span><span class="strong">self-modify</span><span class="dim">**</span> — Agents can rewrite themselves (tools, prompts, even their own loop) while the substrate isolates the things that matter.
+<span class="dim">- </span><span class="dim">**</span><span class="strong">durable</span><span class="dim">**</span> — Event log is source of truth. Everything is reconstructible from it.
+
+<span class="dim">---</span>
+
+<span class="h2"><span class="dim">## </span>quick start</span>
+
+Install Rust and pnpm, then:
+
+<span class="dim">```bash</span>
+<span class="com"># build the cli</span>
+$ cargo build <span class="flag">-p</span> exo
+
+<span class="com"># register a model</span>
+$ exo secret set openai <span class="flag">--env</span> OPENAI_API_KEY
+$ exo model register gpt-5.5 <span class="flag">--secret</span> openai
+
+<span class="com"># drop into a repl</span>
+$ exo repl
+<span class="dim">```</span>
+
+Or back Codex, the Cursor SDK, or Claude Code with a durable exoharness session:
+
+<span class="dim">```bash</span>
+$ exo <span class="flag">--harness</span> typescript agent create \
+    <span class="flag">--module</span> examples/typescript/codex.ts \
+    <span class="flag">--model</span> gpt-5.5 \
+    <span class="str">"Coding Agent"</span>
+
+<span class="com"># resume, fork, or swap at any time</span>
+$ exo session resume &lt;id&gt;
+<span class="dim">```</span>
+
+<span class="dim">---</span>
+
+<span class="h2"><span class="dim">## </span>repo</span>
+
+<span class="dim">- </span><span class="dim">`</span><span class="code">crates/</span><span class="dim">`</span> — Rust workspace · CLI, exoharness substrate, executors
+<span class="dim">- </span><span class="dim">`</span><span class="code">typescript/</span><span class="dim">`</span> — Harness runtime, model-runtime helpers
+<span class="dim">- </span><span class="dim">`</span><span class="code">examples/typescript/</span><span class="dim">`</span> — Runnable Codex, Claude Code, Cursor harnesses
+<span class="dim">- </span><span class="dim">`</span><span class="code">containers/</span><span class="dim">`</span> — Sandbox images
+<span class="dim">- </span><span class="dim">`</span><span class="code">spec/</span><span class="dim">`</span> — Core architecture and terminology
+
+<span class="dim">---</span>
+
+<span class="h2"><span class="dim">## </span>status</span>
+
+Early software. The Rust crates, CLI, TypeScript runtime, and example coding-agent harnesses are useful for experimentation — but the public API should still be treated as unstable.
+
+<span class="dim">---</span>
+
+<span class="dim">[</span><a href="https://github.com/ankrgyl/exo">github</a><span class="dim">]</span><span class="dim">(</span><span class="url">https://github.com/ankrgyl/exo</span><span class="dim">)</span> · <span class="dim">[</span><a href="https://github.com/ankrgyl/exo/blob/main/spec/exoharness.md">spec</a><span class="dim">]</span><span class="dim">(</span><span class="url">./spec/exoharness.md</span><span class="dim">)</span> · mit · 2026
+</main>
+</body>
+</html>
