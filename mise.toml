@@ -2,7 +2,7 @@
 nodejs = "22.15.0"
 pnpm = "10.26.2"
 python = "3.11"
-rust = "1.92"
+rust = "1.95"
 
 [env]
 # Cargo debug binaries are emitted into target/debug.

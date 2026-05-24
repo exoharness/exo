@@ -3,6 +3,7 @@ name = "exo"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [[bin]]
 name = "exo"
@@ -21,3 +22,4 @@ tokio-stream.workspace = true
 
 [dev-dependencies]
 tempfile = "3.23.0"
+wiremock = "0.6"

@@ -6,6 +6,8 @@ mod mount_tests;
 #[cfg(test)]
 mod naming_tests;
 #[cfg(test)]
+mod repl_tests;
+#[cfg(test)]
 mod secret_tests;
 mod tui;
 
@@ -15,11 +17,12 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use executor::{
-    AgentHarnessKind, BasicExoHarness, BasicHarness, Binding, BraintrustProject,
-    BraintrustRuntimeConfig, BraintrustTracingConfig, ConversationModelConfig, CreateAgentRequest,
-    CreateConversationRequest, EventQuery, EventQueryDirection, ExoHarness, FileSystemMount,
-    FileSystemMountMode, ForkConversationRequest, Harness, HarnessAgent, HarnessConversation,
-    PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR, Secret, SendRequest, ToolManifestEntry,
+    AgentHarnessKind, BasicExoHarness, BasicExoHarnessConfig, BasicHarness, Binding,
+    BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig, ConversationModelConfig,
+    CreateAgentRequest, CreateConversationRequest, EventQuery, EventQueryDirection, ExoHarness,
+    FileSystemMount, FileSystemMountMode, ForkConversationRequest, Harness, HarnessAgent,
+    HarnessConversation, PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR,
+    SandboxBackendChoice, Secret, SecretBackendChoice, SendRequest, ToolManifestEntry,
     TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, load_agent_config,
 };
 use lingua::Message;
@@ -39,6 +42,12 @@ struct Cli {
     root: PathBuf,
     #[arg(long, global = true, value_enum)]
     harness: Option<HarnessKind>,
+    #[arg(long, global = true, value_enum, env = "EXO_SECRET_BACKEND")]
+    secret_backend: Option<SecretBackendArg>,
+    #[arg(long, global = true, value_enum, env = "EXO_SANDBOX_BACKEND")]
+    sandbox_backend: Option<SandboxBackendArg>,
+    #[arg(long, global = true, env = "EXO_MASTER_KEY_PATH")]
+    master_key_path: Option<PathBuf>,
     #[arg(long, global = true)]
     env_file: Option<PathBuf>,
     #[arg(long, global = true)]
@@ -62,6 +71,61 @@ enum HarnessKind {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum SecretBackendArg {
+    #[value(name = "apple-keychain")]
+    AppleKeychain,
+    File,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SandboxBackendArg {
+    #[value(name = "apple-container")]
+    AppleContainer,
+    Docker,
+    #[value(name = "local-process")]
+    LocalProcess,
+}
+
+fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig, Box<dyn std::error::Error>> {
+    let secret_backend = match cli.secret_backend.unwrap_or_else(default_secret_backend) {
+        SecretBackendArg::AppleKeychain => SecretBackendChoice::AppleKeychain,
+        SecretBackendArg::File => SecretBackendChoice::File {
+            path: cli.master_key_path.clone(),
+        },
+    };
+    let sandbox_backend = match cli.sandbox_backend.unwrap_or_else(default_sandbox_backend) {
+        SandboxBackendArg::AppleContainer => SandboxBackendChoice::AppleContainer,
+        SandboxBackendArg::Docker => SandboxBackendChoice::Docker,
+        SandboxBackendArg::LocalProcess => SandboxBackendChoice::LocalProcess,
+    };
+    Ok(BasicExoHarnessConfig {
+        root: cli.root.join("exoharness"),
+        secret_backend,
+        sandbox_backend,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn default_secret_backend() -> SecretBackendArg {
+    SecretBackendArg::AppleKeychain
+}
+
+#[cfg(not(target_os = "macos"))]
+fn default_secret_backend() -> SecretBackendArg {
+    SecretBackendArg::File
+}
+
+#[cfg(target_os = "macos")]
+fn default_sandbox_backend() -> SandboxBackendArg {
+    SandboxBackendArg::AppleContainer
+}
+
+#[cfg(not(target_os = "macos"))]
+fn default_sandbox_backend() -> SandboxBackendArg {
+    SandboxBackendArg::Docker
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum NetworkingMode {
     Enabled,
     Disabled,
@@ -69,6 +133,19 @@ enum NetworkingMode {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Start a chat REPL using a registered model, creating a default agent and
+    /// conversation if they don't exist yet.
+    Repl {
+        /// Model binding to use (defaults to the first registered model).
+        #[arg(long)]
+        model: Option<String>,
+        /// Agent slug to use or create (default: "repl").
+        #[arg(long)]
+        agent: Option<String>,
+        /// Conversation slug to use or create (default: "repl").
+        #[arg(long)]
+        conversation: Option<String>,
+    },
     Agent {
         #[command(subcommand)]
         command: AgentCommands,
@@ -307,6 +384,7 @@ enum ChatCommands {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    let exo_config = build_exo_config(&cli)?;
     let env = CliEnvironment::load(cli.env_file_if_exists.as_deref(), cli.env_file.as_deref())?;
     let runtime_config = env.braintrust_runtime_config(
         cli.braintrust_api_key,
@@ -314,9 +392,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.braintrust_api_url,
     );
     let env_vars = env.into_vars();
-    let harness_kind = determine_harness_kind(&cli.root, cli.harness, &cli.command).await?;
+    let harness_kind = determine_harness_kind(&exo_config, cli.harness, &cli.command).await?;
     let harness = instantiate_harness(
-        &cli.root,
+        &exo_config,
         harness_kind,
         runtime_config.clone(),
         env_vars.clone(),
@@ -324,6 +402,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     match cli.command {
+        Commands::Repl {
+            model,
+            agent,
+            conversation,
+        } => {
+            let agent_slug = agent.unwrap_or_else(|| DEFAULT_REPL_SLUG.to_string());
+            // Without --conversation, start a fresh session each run (the usual CLI
+            // behavior); pass --conversation <slug> to resume or target a specific one.
+            let conversation_slug = conversation.unwrap_or_else(generate_fun_slug);
+
+            let agent = match harness.get_agent(&agent_slug).await? {
+                Some(agent) => agent,
+                None => {
+                    let model = ensure_repl_model(harness.as_ref(), model).await?;
+                    harness
+                        .create_agent(CreateAgentRequest {
+                            slug: agent_slug.clone(),
+                            name: Some(agent_slug),
+                            harness: to_agent_harness_kind(harness_kind),
+                            typescript: None,
+                            library_tools: Vec::new(),
+                            enable_agent_tool_creation: true,
+                            sandbox_image: None,
+                            enable_networking: false,
+                            model,
+                            max_output_tokens: None,
+                            max_tool_round_trips: None,
+                            braintrust: None,
+                        })
+                        .await?
+                }
+            };
+
+            let conversation = match agent.get_conversation(&conversation_slug).await? {
+                Some(conversation) => conversation,
+                None => {
+                    let conversation = agent
+                        .create_conversation(CreateConversationRequest {
+                            slug: Some(conversation_slug.clone()),
+                            name: Some(conversation_slug),
+                        })
+                        .await?;
+                    // The default REPL is a plain chat: drop the shell tool so no
+                    // sandbox is provisioned. Use a regular conversation for tools.
+                    let mut config = conversation.config().await?;
+                    if config.shell_program.is_some() {
+                        config.shell_program = None;
+                        conversation.put_config(config).await?;
+                    }
+                    conversation
+                }
+            };
+
+            run_chat_repl(conversation).await?;
+        }
         Commands::Agent { command } => match command {
             AgentCommands::List => {
                 println!("AGENT\tNAME");
@@ -1096,7 +1229,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn determine_harness_kind(
-    root: &Path,
+    exo_config: &BasicExoHarnessConfig,
     override_kind: Option<HarnessKind>,
     command: &Commands,
 ) -> Result<HarnessKind, Box<dyn std::error::Error>> {
@@ -1108,7 +1241,7 @@ async fn determine_harness_kind(
         return Ok(HarnessKind::Basic);
     };
 
-    Ok(infer_agent_harness_kind(root, agent_ref)
+    Ok(infer_agent_harness_kind(exo_config, agent_ref)
         .await?
         .unwrap_or(HarnessKind::Basic))
 }
@@ -1140,15 +1273,16 @@ fn command_agent_ref(command: &Commands) -> Option<&str> {
                 Some(agent.as_str())
             }
         },
+        Commands::Repl { agent, .. } => Some(agent.as_deref().unwrap_or(DEFAULT_REPL_SLUG)),
         Commands::Secret { .. } | Commands::Model { .. } => None,
     }
 }
 
 async fn infer_agent_harness_kind(
-    root: &Path,
+    exo_config: &BasicExoHarnessConfig,
     agent_ref: &str,
 ) -> Result<Option<HarnessKind>, Box<dyn std::error::Error>> {
-    let exoharness = BasicExoHarness::new(root.join("exoharness")).await?;
+    let exoharness = BasicExoHarness::new(exo_config.clone()).await?;
     let agent = if let Ok(agent_id) = agent_ref.parse::<Uuid7>() {
         exoharness.get_agent(&agent_id).await?
     } else {
@@ -1167,19 +1301,21 @@ async fn infer_agent_harness_kind(
 }
 
 async fn instantiate_harness(
-    root: &Path,
+    exo_config: &BasicExoHarnessConfig,
     kind: HarnessKind,
     runtime_config: Option<BraintrustRuntimeConfig>,
     env_vars: HashMap<String, String>,
 ) -> Result<Arc<dyn Harness>, Box<dyn std::error::Error>> {
     let harness: Arc<dyn Harness> = match kind {
         HarnessKind::Basic => {
-            Arc::new(BasicHarness::from_root(root, runtime_config, env_vars).await?)
+            Arc::new(BasicHarness::from_config(exo_config.clone(), runtime_config, env_vars).await?)
         }
-        HarnessKind::Rlm => Arc::new(RlmHarness::from_root(root, runtime_config, env_vars).await?),
-        HarnessKind::TypeScript => {
-            Arc::new(TypeScriptHarness::from_root(root, runtime_config, env_vars).await?)
+        HarnessKind::Rlm => {
+            Arc::new(RlmHarness::from_config(exo_config.clone(), runtime_config, env_vars).await?)
         }
+        HarnessKind::TypeScript => Arc::new(
+            TypeScriptHarness::from_config(exo_config.clone(), runtime_config, env_vars).await?,
+        ),
     };
     Ok(harness)
 }
@@ -1336,6 +1472,46 @@ async fn list_model_bindings(
         });
     }
     Ok(models)
+}
+
+const DEFAULT_REPL_SLUG: &str = "repl";
+
+/// Resolves the model binding a quickstart REPL agent should use. Registering a
+/// model is left to `exo secret set` / `exo model register`, so the substrate
+/// never reads credentials from the environment on its own.
+async fn ensure_repl_model(
+    harness: &dyn Harness,
+    requested: Option<String>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let registered: Vec<String> = list_model_bindings(harness.exoharness_handle().as_ref())
+        .await?
+        .into_iter()
+        .map(|binding| binding.name)
+        .collect();
+    pick_repl_model(&registered, requested)
+}
+
+/// Picks the model an explicit request names, falling back to the first
+/// registered binding. Errors with setup guidance when neither is available.
+fn pick_repl_model(
+    registered: &[String],
+    requested: Option<String>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if let Some(requested) = requested {
+        if registered.iter().any(|name| name == &requested) {
+            return Ok(requested);
+        }
+        return Err(format!(
+            "model is not registered: {requested}; register it with `exo model register {requested} --secret <secret>`"
+        )
+        .into());
+    }
+    registered.first().cloned().ok_or_else(|| {
+        "no model is registered; set one up first:\n  \
+         exo secret set openai --env OPENAI_API_KEY\n  \
+         exo model register gpt-5.5 --secret openai"
+            .into()
+    })
 }
 
 async fn find_secret_id(
@@ -1635,5 +1811,30 @@ mod create_tests {
             chat_repl_command("rlm", "aster-lantern-47db"),
             "exo chat repl rlm aster-lantern-47db"
         );
+    }
+
+    #[test]
+    fn repl_command_parses_without_arguments() {
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from(["exo", "repl"]).expect("repl parses with no args");
+        assert!(matches!(
+            cli.command,
+            super::Commands::Repl {
+                model: None,
+                agent: None,
+                conversation: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn repl_command_accepts_overrides() {
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from(["exo", "repl", "--model", "gpt-5.4"])
+            .expect("repl parses with --model");
+        assert!(matches!(
+            cli.command,
+            super::Commands::Repl { model: Some(model), .. } if model == "gpt-5.4"
+        ));
     }
 }
