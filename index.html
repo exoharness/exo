@@ -18,17 +18,8 @@
     --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   }
 
-  @media (prefers-color-scheme: light) {
-    :root {
-      --bg:      #faf8f3;
-      --ink:     #2a2825;
-      --ink-2:   #6a6862;
-      --muted:   #b8b3a5;
-      --muted-2: #d4cebe;
-      --accent:  #c2410c;
-      --accent-2:#9a3412;
-    }
-  }
+  /* light scheme intentionally disabled — the orange-on-near-black
+     contrast is part of the identity. */
 
   * { box-sizing: border-box; }
   html, body {
@@ -62,11 +53,11 @@
   /* the diagram block keeps its own whitespace mode (no wrap) */
   pre.diagram {
     white-space: pre;
-    margin: 0;
+    margin: 12px 0;
     padding: 0;
     font-family: inherit;
-    font-size: 12.5px;
-    line-height: 1.5;
+    font-size: 13.5px;
+    line-height: 1.55;
     color: var(--ink);
     overflow-x: auto;
     font-variant-ligatures: none;
@@ -96,15 +87,21 @@
      whole line scale up for hierarchy. font-size is the only knob; weight
      stays close to body so it still reads as a text file, not a "design". */
   .h1 {
-    font-size: 28px;
-    line-height: 1.25;
-    font-weight: 500;
+    font-size: 30px;
+    line-height: 1.2;
+    font-weight: 600;
     letter-spacing: -0.01em;
   }
   .h2 {
     font-size: 17px;
     line-height: 1.4;
     font-weight: 500;
+  }
+  .lede {
+    font-size: 16px;
+    line-height: 1.6;
+    color: var(--ink);
+    max-width: 38em;
   }
 
   /* ============================================================
@@ -248,15 +245,7 @@
 <body>
 <main class="readme"><span class="h1"><span class="dim"># </span>exo</span>
 
-A minimal substrate for building <span class="dim">**</span><span class="strong">durable</span><span class="dim">**</span> agents.
-
-<span class="dim">&gt; </span>Exo separates the trusted infrastructure an agent needs — identity, history, secrets, sandboxes — from the policy code above it. The substrate stays put; the executor on top can be killed, swapped, or rewound without losing state.
-
-<span class="dim">`</span><span class="code">rust core</span><span class="dim">`</span> · <span class="dim">`</span><span class="code">typescript harness</span><span class="dim">`</span> · <span class="dim">`</span><span class="code">codex</span><span class="dim">`</span> · <span class="dim">`</span><span class="code">cursor sdk</span><span class="dim">`</span> · <span class="dim">`</span><span class="code">claude code</span><span class="dim">`</span> · <span class="dim">`</span><span class="code">mit</span><span class="dim">`</span>
-
-<span class="dim">---</span>
-
-<span class="h2"><span class="dim">## </span>architecture</span>
+<span class="lede">Exo is a minimal system for building agents. It separates the trusted infrastructure needed for state, resources, and security from agent-specific logic.</span>
 
 <pre class="diagram" aria-label="Animated architecture diagram">
 <span class="lbl">EXECUTOR &middot; ephemeral &middot; swappable</span>
@@ -284,70 +273,84 @@ A minimal substrate for building <span class="dim">**</span><span class="strong"
 <span class="brd">└──────────────────────────────────────────────────────────────────┘</span>
 </pre>
 
-<span class="dim">&gt; </span><span class="scene-slot"><span class="ph">log accumulates — independent of the executor   </span><span class="scene s1">executor appends events to the durable log</span><span class="scene s2">log accumulates — independent of the executor</span><span class="scene s3">swap executor or rewind — substrate persists</span><span class="scene s4">fork a new branch from that event</span></span>
+<span class="dim">&gt; </span><span class="caption-row scene-slot"><span class="ph">log accumulates — independent of the executor   </span><span class="scene s1">executor appends events to the durable log</span><span class="scene s2">log accumulates — independent of the executor</span><span class="scene s3">swap executor or rewind — substrate persists</span><span class="scene s4">fork a new branch from that event</span></span>
 
-<span class="dim">---</span>
+The goal is to provide a small, durable kernel for agents: minimal enough to stay independent of any particular agent design, but complete enough to support agents of arbitrary complexity. That includes agents that safely evolve their own implementations, such as tools, compute environments, and memory systems.
 
-<span class="h2"><span class="dim">## </span>why</span>
+Because the trusted substrate is separate from the agent code changing above it, agents can fork, rewind, or return to known-good states without losing critical state such as secrets, config, or history.
 
-Most agent harnesses conflate trusted infrastructure with agent-specific implementation — prompts, memory compaction, tool dispatch — making reuse, recovery, isolation, and self-modification hard.
+<span class="tags-row"><span class="dim">`</span><span class="code">rust core</span><span class="dim">`</span> · <span class="dim">`</span><span class="code">typescript harness</span><span class="dim">`</span> · <span class="dim">`</span><span class="code">codex</span><span class="dim">`</span> · <span class="dim">`</span><span class="code">cursor sdk</span><span class="dim">`</span> · <span class="dim">`</span><span class="code">claude code</span><span class="dim">`</span> · <span class="dim">`</span><span class="code">mit</span><span class="dim">`</span></span>
 
-Exo pushes the minimum into a protected substrate so safety is enforced once, and leaves everything semantic to the executor above. The executor can be killed at any moment without taking the agent with it.
+<span class="below-fold"><span class="dim">---</span>
 
-<span class="dim">- </span><span class="dim">**</span><span class="strong">fork &amp; rewind</span><span class="dim">**</span> — Resume from any past event with secrets, sandboxes, and history intact.
-<span class="dim">- </span><span class="dim">**</span><span class="strong">swap</span><span class="dim">**</span> — Run the same agent under Codex, the Cursor SDK, Claude Code, or your own executor — without rebuilding state.
-<span class="dim">- </span><span class="dim">**</span><span class="strong">self-modify</span><span class="dim">**</span> — Agents can rewrite themselves (tools, prompts, even their own loop) while the substrate isolates the things that matter.
-<span class="dim">- </span><span class="dim">**</span><span class="strong">durable</span><span class="dim">**</span> — Event log is source of truth. Everything is reconstructible from it.
+<span class="h2"><span class="dim">## </span>the why and what</span>
+
+Enabling powerful autonomy requires agents to be (1) <span class="dim">**</span><span class="strong">adaptable</span><span class="dim">**</span>, i.e. be able to adapt their policies, tools, and architecture to a target domain, and (2) <span class="dim">**</span><span class="strong">trustworthy</span><span class="dim">**</span>, i.e. be durable across crashes, isolated from one another, and recoverable to known-good states. Existing harnesses struggle to provide both: most agent systems conflate trusted infrastructure with agent-specific implementations (such as prompts and memory compaction), which makes reuse, recovery, isolation, and self-modification hard.
+
+The <span class="dim">`</span><span class="code">exo</span><span class="dim">`</span> agent harness instead decouples trusted infrastructure from agent-specific implementations into two halves:
+
+<span class="dim">1.</span> The <span class="dim">**</span><span class="strong">exoharness</span><span class="dim">**</span> as the durable substrate that owns identity (agents, conversations, turns), history (event log), artifacts, secrets, and sandbox management. It is trusted and stateful.
+<span class="dim">2.</span> The <span class="dim">**</span><span class="strong">executor</span><span class="dim">**</span> as the policy layer that owns prompt assembly, model calling, tool dispatch, memory compaction, approvals, etc. — i.e. all <span class="dim">_</span><em>semantic</em><span class="dim">_</span> decisions about how the agent behaves. It is ephemeral, swappable, and can be killed without losing the agent.
+
+This architecture pushes the minimal infrastructure into the protected exoharness to enforce safety, while leaving all non-safety-essential components to the executor to manage and evolve at will. The exoharness provides the durable building blocks those decisions run on: history, state, secrets, and sandboxing.
+
+Because the exoharness substrate doesn't depend on the executor, an agent built on exo can:
+
+<span class="dim">- </span><span class="dim">**</span><span class="strong">Fork or rewind</span><span class="dim">**</span> at any past event, without losing secrets, sandboxes, or history.
+<span class="dim">- </span><span class="dim">**</span><span class="strong">Swap executors</span><span class="dim">**</span>, running the same agent via Codex, the Cursor SDK, Claude Code, or your own executor, without rebuilding state.
+<span class="dim">- </span><span class="dim">**</span><span class="strong">Evolve safely</span><span class="dim">**</span> to change its own policy processes, with access to inspect its own history and artifacts while the exoharness isolates secrets and compute resources to maintain safety.
+
+For the architectural model and terminology, see <span class="dim">[</span><a href="https://github.com/ankrgyl/exo/blob/main/spec/exoharness.md">spec/exoharness.md</a><span class="dim">]</span>.
 
 <span class="dim">---</span>
 
 <span class="h2"><span class="dim">## </span>quick start</span>
 
-Install Rust and pnpm, then:
+Install Rust and pnpm, then build the CLI:
 
 <span class="dim">```bash</span>
-<span class="com"># build the cli</span>
 $ cargo build <span class="flag">-p</span> exo
-
-<span class="com"># register a model</span>
-$ exo secret set openai <span class="flag">--env</span> OPENAI_API_KEY
-$ exo model register gpt-5.5 <span class="flag">--secret</span> openai
-
-<span class="com"># drop into a repl</span>
-$ exo repl
+$ ./target/debug/exo <span class="flag">--help</span>
 <span class="dim">```</span>
 
-Or back Codex, the Cursor SDK, or Claude Code with a durable exoharness session:
+Register a model, then drop into a REPL:
 
 <span class="dim">```bash</span>
-$ exo <span class="flag">--harness</span> typescript agent create \
-    <span class="flag">--module</span> examples/typescript/codex.ts \
-    <span class="flag">--model</span> gpt-5.5 \
-    <span class="str">"Coding Agent"</span>
+$ ./target/debug/exo secret set openai <span class="flag">--env</span> OPENAI_API_KEY
+$ ./target/debug/exo model register gpt-5.5 <span class="flag">--secret</span> openai
+$ ./target/debug/exo repl
+<span class="dim">```</span>
 
-<span class="com"># resume, fork, or swap at any time</span>
-$ exo session resume &lt;id&gt;
+<span class="dim">`</span><span class="code">exo repl</span><span class="dim">`</span> reuses or creates a default agent and conversation and uses a registered model, so you can start chatting in one command.
+
+For TypeScript harnesses backing Codex, Claude Code, or the Cursor SDK with a durable session:
+
+<span class="dim">```bash</span>
+$ ./target/debug/exo <span class="flag">--harness</span> typescript agent create <span class="str">"TS Basic"</span> \
+    <span class="flag">--module</span> examples/typescript/basic-harness.ts \
+    <span class="flag">--model</span> gpt-5.5
 <span class="dim">```</span>
 
 <span class="dim">---</span>
 
-<span class="h2"><span class="dim">## </span>repo</span>
+<span class="h2"><span class="dim">## </span>repository layout</span>
 
-<span class="dim">- </span><span class="dim">`</span><span class="code">crates/</span><span class="dim">`</span> — Rust workspace · CLI, exoharness substrate, executors
-<span class="dim">- </span><span class="dim">`</span><span class="code">typescript/</span><span class="dim">`</span> — Harness runtime, model-runtime helpers
-<span class="dim">- </span><span class="dim">`</span><span class="code">examples/typescript/</span><span class="dim">`</span> — Runnable Codex, Claude Code, Cursor harnesses
-<span class="dim">- </span><span class="dim">`</span><span class="code">containers/</span><span class="dim">`</span> — Sandbox images
-<span class="dim">- </span><span class="dim">`</span><span class="code">spec/</span><span class="dim">`</span> — Core architecture and terminology
+<span class="dim">- </span><span class="dim">`</span><span class="code">crates</span><span class="dim">`</span>: Rust workspace for the CLI, exoharness substrate, and executors.
+<span class="dim">- </span><span class="dim">`</span><span class="code">typescript</span><span class="dim">`</span>: TypeScript harness runtime, model-runtime helpers, and adapter-specific support code.
+<span class="dim">- </span><span class="dim">`</span><span class="code">examples/typescript</span><span class="dim">`</span>: runnable TypeScript harness examples.
+<span class="dim">- </span><span class="dim">`</span><span class="code">containers</span><span class="dim">`</span>: sandbox images used by the coding-agent harness examples.
+<span class="dim">- </span><span class="dim">`</span><span class="code">spec</span><span class="dim">`</span>: core architecture and terminology.
+<span class="dim">- </span><span class="dim">`</span><span class="code">docs</span><span class="dim">`</span>: design notes for in-progress directions.
 
 <span class="dim">---</span>
 
 <span class="h2"><span class="dim">## </span>status</span>
 
-Early software. The Rust crates, CLI, TypeScript runtime, and example coding-agent harnesses are useful for experimentation — but the public API should still be treated as unstable.
+This repository is early software. The Rust crates, CLI, TypeScript harness runtime, and example coding-agent harnesses are useful for experimentation, but the public API should still be treated as unstable.
 
 <span class="dim">---</span>
 
-<span class="dim">[</span><a href="https://github.com/ankrgyl/exo">github</a><span class="dim">]</span><span class="dim">(</span><span class="url">https://github.com/ankrgyl/exo</span><span class="dim">)</span> · <span class="dim">[</span><a href="https://github.com/ankrgyl/exo/blob/main/spec/exoharness.md">spec</a><span class="dim">]</span><span class="dim">(</span><span class="url">./spec/exoharness.md</span><span class="dim">)</span> · mit · 2026
+<span class="dim">[</span><a href="https://github.com/ankrgyl/exo">github</a><span class="dim">]</span><span class="dim">(</span><span class="url">https://github.com/ankrgyl/exo</span><span class="dim">)</span> · <span class="dim">[</span><a href="https://github.com/ankrgyl/exo/blob/main/spec/exoharness.md">spec</a><span class="dim">]</span><span class="dim">(</span><span class="url">./spec/exoharness.md</span><span class="dim">)</span> · mit</span>
 </main>
 </body>
 </html>
