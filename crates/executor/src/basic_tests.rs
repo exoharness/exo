@@ -23,7 +23,7 @@ use serde_json::{Map, Value};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use crate::harness_executor::HarnessExecutor;
+use crate::harness_executor::{ExecutorStreamMode, HarnessExecutor};
 use crate::*;
 
 #[tokio::test(flavor = "current_thread")]
