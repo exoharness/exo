@@ -2,6 +2,6 @@
   "name": "exo",
   "compatibility_date": "2026-05-24",
   "assets": {
-    "directory": "."
-  }
+    "directory": ".",
+  },
 }
