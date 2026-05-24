@@ -34,8 +34,8 @@ pub use exoharness::{
     AgentHandle, BasicExoHarness, BasicExoHarnessConfig, Binding, BindingMetadata,
     ConversationHandle, EventData, EventId, EventQuery, EventQueryDirection, ExoHarness,
     FileSystemMount, FileSystemMountMode, ForkConversationRequest, PutSecretRequest,
-    SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, Secret, SecretBackendChoice, SecretMetadata,
-    SessionId, Uuid7,
+    SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxId, Secret, SecretBackendChoice,
+    SecretMetadata, SessionId, SnapshotId, StartSandboxRequest, Uuid7,
 };
 pub use harness_basic::BasicHarness;
 pub use harness_config::load_agent_config;
