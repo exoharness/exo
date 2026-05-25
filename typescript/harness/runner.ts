@@ -46,6 +46,7 @@ interface RawAgentConfig {
   harness: "basic" | "rlm" | "typescript" | "type_script";
   typescript?: {
     module_path: string;
+    tool_module_paths?: string[];
   } | null;
   enable_agent_tool_creation?: boolean;
   sandbox_image?: string | null;
@@ -781,6 +782,7 @@ function toAgentConfig(raw: RawAgentConfig): AgentConfig {
     typescript: raw.typescript
       ? {
           modulePath: raw.typescript.module_path,
+          toolModulePaths: raw.typescript.tool_module_paths ?? [],
         }
       : null,
     enableAgentToolCreation: raw.enable_agent_tool_creation ?? true,

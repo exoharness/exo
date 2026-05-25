@@ -27,7 +27,7 @@ import {
   type TurnContext,
 } from "./index";
 import { ircTool } from "../../examples/typescript/tools/irc";
-import uppercaseTool from "../../examples/typescript/tools/uppercase";
+import { uppercaseTool } from "../../examples/typescript/tools/uppercase";
 
 describe("HarnessToolRegistry", () => {
   it("returns registered tool definitions", () => {

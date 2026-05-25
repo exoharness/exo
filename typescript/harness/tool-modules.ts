@@ -28,7 +28,7 @@ export type ToolModuleExport =
   | Tool
   | ToolModuleEntry
   | ToolModule
-  | Array<Tool | ToolModuleEntry>;
+  | Array<Tool | ToolModuleEntry | ToolModule>;
 
 export function defineToolModule(module: ToolModule): ToolModule {
   return module;

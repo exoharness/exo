@@ -1,13 +1,18 @@
-// Example library tool used by the harness registry tests. No example harness
-// exposes this tool to a model yet.
+// Example library tool used by the harness registry tests and CLI tool-manifest
+// loading docs.
 
-import type { JsonObject, Tool, ToolResult } from "@exo/harness/tool";
+import type {
+  JsonObject,
+  Tool,
+  ToolModuleEntry,
+  ToolResult,
+} from "@exo/harness/tool";
 
 interface UppercaseConfig {
   prefix: string;
 }
 
-const uppercaseTool = {
+export const uppercaseTool = {
   definition: {
     name: "uppercase",
     description: "Uppercase text and optionally prefix the result.",
@@ -55,7 +60,12 @@ const uppercaseTool = {
   },
 } satisfies Tool;
 
-export default uppercaseTool;
+export default {
+  tool: uppercaseTool,
+  initialization: {
+    prefix: "UPPER: ",
+  },
+} satisfies ToolModuleEntry;
 
 function parseConfig(args: JsonObject): UppercaseConfig {
   return {

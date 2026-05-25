@@ -1,3 +1,5 @@
+import type { ToolModuleExport } from "./tool-modules";
+
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
 export interface JsonObject {
@@ -26,6 +28,7 @@ export interface AgentConfig {
   harness: "basic" | "rlm" | "typescript";
   typescript?: {
     modulePath: string;
+    toolModulePaths: string[];
   } | null;
   enableAgentToolCreation: boolean;
   sandboxImage?: string | null;
@@ -357,6 +360,7 @@ export interface TurnContext {
 }
 
 export interface TypeScriptHarness {
+  tools?: ToolModuleExport;
   runTurn(context: TurnContext): Promise<void>;
 }
 

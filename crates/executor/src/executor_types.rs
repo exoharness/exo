@@ -47,6 +47,8 @@ pub enum AgentHarnessKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypeScriptHarnessConfig {
     pub module_path: String,
+    #[serde(default)]
+    pub tool_module_paths: Vec<String>,
 }
 
 pub fn default_enable_agent_tool_creation() -> bool {

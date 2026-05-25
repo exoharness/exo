@@ -4,6 +4,8 @@ import {
   materializePromptMessages,
   registerBuiltInTools,
   registerAgentToolsFromDirectoryIfExists,
+  registerLibraryTools,
+  registerLibraryToolModulePath,
   turnMetadata,
   type EventData,
   type Message,
@@ -20,7 +22,9 @@ import {
 
 import { resolveLlmBinding } from "./shared";
 
-export default defineHarness({
+const harness = defineHarness({
+  tools: [],
+
   async runTurn(context) {
     const modelBinding = await resolveLlmBinding(context);
     const runtime = ResponsesRuntime.fromModelBinding(
@@ -32,6 +36,8 @@ export default defineHarness({
     );
   },
 });
+
+export default harness;
 
 async function runBasicTurnLoop(
   runtime: ResponsesRuntimeLike,
@@ -138,6 +144,11 @@ function agentToolCreationInstruction(): Message {
 async function createBasicToolRegistry(context: TurnContext) {
   const tools = createToolRegistry(context);
   registerBuiltInTools(tools, context, builtInToolNames(context));
+  await registerLibraryTools(tools, context, harness.tools ?? []);
+  for (const modulePath of context.agentConfig.typescript?.toolModulePaths ??
+    []) {
+    await registerLibraryToolModulePath(tools, context, modulePath);
+  }
   if (context.agentConfig.enableAgentToolCreation) {
     await registerAgentToolsFromDirectoryIfExists(tools, context);
   }
