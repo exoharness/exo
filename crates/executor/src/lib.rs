@@ -42,7 +42,7 @@ pub use executor_types::{
     AgentConfig, AgentHarnessKind, ConversationConfig, ConversationModelConfig,
     ExecutionStreamEvent, ExecutionStreamHandle, ModelClient, ModelRequest, ModelResponse,
     ModelResponseStream, PendingToolCall, SandboxScope, SendRequest, SendResult, ToolDefinition,
-    ToolManifestEntry, ToolRuntime, TypeScriptHarnessConfig, effective_sandbox_scope,
+    ToolRuntime, TypeScriptHarnessConfig, effective_sandbox_scope,
 };
 pub use exoharness::{
     AgentHandle, BasicExoHarness, BasicExoHarnessConfig, Binding, BindingMetadata,

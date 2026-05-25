@@ -57,11 +57,6 @@ interface RawAgentConfig {
   braintrust?: unknown;
 }
 
-interface RawToolManifestEntry {
-  module_path: string;
-  initialization: JsonObject;
-}
-
 interface RawConversationConfig {
   enable_networking: boolean;
   shell_program?: string | null;
@@ -798,16 +793,6 @@ function toAgentConfig(raw: RawAgentConfig): AgentConfig {
     maxOutputTokens: raw.max_output_tokens ?? null,
     maxToolRoundTrips: raw.max_tool_round_trips ?? null,
     braintrust: raw.braintrust,
-  };
-}
-
-function toToolManifestEntry(raw: RawToolManifestEntry): {
-  modulePath: string;
-  initialization: JsonObject;
-} {
-  return {
-    modulePath: raw.module_path,
-    initialization: raw.initialization,
   };
 }
 

@@ -25,8 +25,8 @@ use executor::{
     CreateAgentRequest, CreateConversationRequest, EventQuery, EventQueryDirection, ExoHarness,
     ExoclawToolRuntime, FileSystemMount, FileSystemMountMode, ForkConversationRequest, Harness,
     HarnessAgent, HarnessConversation, PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR,
-    SandboxBackendChoice, SandboxScope, Secret, SecretBackendChoice, ToolManifestEntry,
-    TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, effective_sandbox_scope, load_agent_config,
+    SandboxBackendChoice, SandboxScope, Secret, SecretBackendChoice, TypeScriptHarness,
+    TypeScriptHarnessConfig, Uuid7, effective_sandbox_scope, load_agent_config,
     send_conversation_wakeup,
 };
 use lingua::Message;
@@ -139,6 +139,21 @@ enum EnabledDisabled {
 impl EnabledDisabled {
     fn enabled(self) -> bool {
         matches!(self, Self::Enabled)
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SandboxScopeArg {
+    Agent,
+    Conversation,
+}
+
+impl From<SandboxScopeArg> for SandboxScope {
+    fn from(value: SandboxScopeArg) -> Self {
+        match value {
+            SandboxScopeArg::Agent => SandboxScope::Agent,
+            SandboxScopeArg::Conversation => SandboxScope::Conversation,
+        }
     }
 }
 
@@ -299,6 +314,8 @@ enum ConversationCommands {
         clear_shell_program: bool,
         #[arg(long, value_enum)]
         networking: Option<EnabledDisabled>,
+        #[arg(long, value_enum)]
+        sandbox_scope: Option<SandboxScopeArg>,
         #[arg(long)]
         model: Option<String>,
         #[arg(long)]
@@ -620,8 +637,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     config.typescript = None;
                     changed = true;
                 } else if let Some(module) = module.as_deref() {
-                    if config.harness != AgentHarnessKind::TypeScript {
-                        return Err("--module is only valid with TypeScript agents".into());
+                    if !matches!(
+                        config.harness,
+                        AgentHarnessKind::TypeScript | AgentHarnessKind::Exoclaw
+                    ) {
+                        return Err(
+                            "--module is only valid with TypeScript or Exoclaw agents".into()
+                        );
                     }
                     let existing_tool_modules = config
                         .typescript
@@ -649,8 +671,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         changed = true;
                     }
                 } else if !tool_modules.is_empty() {
-                    if config.harness != AgentHarnessKind::TypeScript {
-                        return Err("--tool-module is only valid with TypeScript agents".into());
+                    if !matches!(
+                        config.harness,
+                        AgentHarnessKind::TypeScript | AgentHarnessKind::Exoclaw
+                    ) {
+                        return Err(
+                            "--tool-module is only valid with TypeScript or Exoclaw agents".into(),
+                        );
                     }
                     let Some(typescript) = config.typescript.as_mut() else {
                         return Err(
@@ -669,27 +696,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         config.enable_agent_tool_creation = enable_agent_tool_creation;
                         changed = true;
                     }
-                }
-                if clear_tool_manifests {
-                    if !config.library_tools.is_empty() {
-                        config.library_tools.clear();
-                        changed = true;
-                    }
-                } else if !tool_manifests.is_empty() {
-                    let library_tools = load_tool_manifests(config.harness, &tool_manifests)?;
-                    if config.library_tools != library_tools {
-                        config.library_tools = library_tools;
-                        changed = true;
-                    }
-                }
-                if enable_agent_tool_creation {
-                    if !config.enable_agent_tool_creation {
-                        config.enable_agent_tool_creation = true;
-                        changed = true;
-                    }
-                } else if disable_agent_tool_creation && config.enable_agent_tool_creation {
-                    config.enable_agent_tool_creation = false;
-                    changed = true;
                 }
                 if clear_sandbox_image {
                     config.sandbox_image = None;
@@ -1463,16 +1469,22 @@ fn build_typescript_harness_config(
     module: Option<&Path>,
     tool_modules: &[PathBuf],
 ) -> Result<Option<TypeScriptHarnessConfig>, Box<dyn std::error::Error>> {
-    if !matches!(harness_kind, HarnessKind::TypeScript) && !tool_modules.is_empty() {
-        return Err("--tool-module is only valid with --harness typescript".into());
+    if !matches!(harness_kind, HarnessKind::TypeScript | HarnessKind::Exoclaw)
+        && !tool_modules.is_empty()
+    {
+        return Err("--tool-module is only valid with --harness typescript or exoclaw".into());
     }
     match (harness_kind, module) {
-        (HarnessKind::TypeScript, Some(module)) => Ok(Some(resolve_typescript_harness_config(
-            module,
-            resolve_typescript_tool_module_paths(tool_modules)?,
-        )?)),
-        (HarnessKind::TypeScript, None) => Err("typescript agents require --module <path>".into()),
-        (_, Some(_)) => Err("--module is only valid with --harness typescript".into()),
+        (HarnessKind::TypeScript | HarnessKind::Exoclaw, Some(module)) => {
+            Ok(Some(resolve_typescript_harness_config(
+                module,
+                resolve_typescript_tool_module_paths(tool_modules)?,
+            )?))
+        }
+        (HarnessKind::TypeScript | HarnessKind::Exoclaw, None) => {
+            Err("typescript and exoclaw agents require --module <path>".into())
+        }
+        (_, Some(_)) => Err("--module is only valid with --harness typescript or exoclaw".into()),
         (_, None) => Ok(None),
     }
 }

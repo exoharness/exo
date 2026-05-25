@@ -3,8 +3,8 @@ import { readFileSync } from "node:fs";
 import {
   defineHarness,
   registerBuiltInTools,
-  registerLibraryToolsFromManifest,
-  registerAgentToolsFromManifestPathIfExists,
+  registerAgentToolsFromDirectoryIfExists,
+  registerLibraryToolModulePath,
   registerAdapterTools,
   registerSchedulerTools,
   type BuiltInToolName,
@@ -40,11 +40,12 @@ async function registerExoclawTools(
   registerBuiltInTools(tools, context, builtInToolNames(context));
   registerSchedulerTools(tools);
   registerAdapterTools(tools);
-  await registerLibraryToolsFromManifest(tools, context, {
-    tools: context.agentConfig.libraryTools,
-  });
+  for (const modulePath of context.agentConfig.typescript?.toolModulePaths ??
+    []) {
+    await registerLibraryToolModulePath(tools, context, modulePath);
+  }
   if (context.agentConfig.enableAgentToolCreation) {
-    await registerAgentToolsFromManifestPathIfExists(tools, context);
+    await registerAgentToolsFromDirectoryIfExists(tools, context);
   }
 }
 
