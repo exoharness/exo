@@ -21,9 +21,8 @@ delegated to the Rust host runtime so sandbox lifecycle and process execution
 remain host-managed.
 
 `install_agent_tool` writes an agent-created TypeScript tool module into
-`.exo/agent-tools/`, validates it, and updates `.exo/agent-tools/manifest.json`.
-The basic harness refreshes tools before each model round, so an installed tool
-can be used later in the same user turn.
+`.exo/agent-tools/` and validates it. The basic harness refreshes tools before
+each model round, so an installed tool can be used later in the same user turn.
 
 If a tool throws during execution or installation, the registry records a
 `tool_result` error instead of crashing the turn. If a previous process crash
@@ -36,13 +35,23 @@ Library tools are not written by the agent itself and are not part of the core
 `exo` release. They may be written by the user, a team, or an external
 maintainer. They are loaded explicitly by the harness.
 
-A library tool is a TypeScript module with a default export satisfying `Tool`:
+A library tool is a TypeScript module exporting a `Tool`, `ToolModuleEntry`,
+`ToolModule`, or array of those values. The core `Tool` contract is:
 
 - `definition.name` is the model-facing tool name.
 - `definition.parameters` is a strict JSON object schema with
   `additionalProperties: false`.
-- `initializationParameters` validates manifest-time configuration.
+- `initializationParameters` validates module-provided configuration.
 - `initialize(...)` returns a handler with `execute(args, execution)`.
+
+Use a `ToolModuleEntry` when a reusable tool needs configuration values:
+
+```ts
+export default {
+  tool: uppercaseTool,
+  initialization: { prefix: "UPPER: " },
+} satisfies ToolModuleEntry;
+```
 
 Tools should not use `inputSchema`, `call`, or `invoke`; those are not part of
 the `exo` tool contract.
@@ -54,9 +63,8 @@ Agent tools are created by the agent itself. They use the same default-export
 `"agent"` instead of `"library"`.
 
 Agent tools should be treated as less trusted than built-in or library tools.
-The basic harness loads them from `.exo/agent-tools/manifest.json` when agent
-tool creation is enabled. That setting is enabled by default and can be disabled
-per agent.
+The basic harness loads them from `.exo/agent-tools/` when agent tool creation
+is enabled. That setting is enabled by default and can be disabled per agent.
 
 The loader:
 
@@ -66,8 +74,8 @@ The loader:
 - initializes the tool with source `"agent"`
 - registers the resulting `ToolInstance`
 
-No directory scanning is done by default. The manifest is explicit so users and
-harness authors can see which agent-created modules are being loaded.
+Agent tool directory loading scans `.ts` files and ignores `.source.ts` files,
+which keep the original generated source beside the validated wrapper.
 
 ## Events
 
@@ -104,7 +112,8 @@ Tools should use existing exoharness configuration primitives:
 
 - Put credentials in `Secret`.
 - Refer to secrets by id in initialization parameters.
-- Keep non-secret setup values in harness code, config, manifests, or artifacts.
+- Keep non-secret setup values in harness code, config, module exports, or
+  artifacts.
 - Do not put raw secrets in tool definitions, model-visible prompts, or
   `tool_result` events.
 
@@ -114,28 +123,39 @@ exoharness API.
 
 ## Command Line Loading
 
-TypeScript agents can load library tools from manifest files when the agent is
-created or updated:
+TypeScript agents can load library tools from TypeScript tool modules when the
+agent is created or updated:
 
 ```bash
 exo --harness typescript agent create "Tool Demo" \
   --module examples/typescript/basic-harness.ts \
   --model gpt-5.4 \
-  --tool-manifest examples/typescript/tools/uppercase.manifest.json
+  --tool-module examples/typescript/tools/uppercase.ts
 ```
 
-`--tool-manifest` may be passed more than once. Relative `modulePath` values in
-each manifest are resolved relative to that manifest file.
+`--tool-module` may be passed more than once. Each value is a TypeScript module
+path. The module can default-export a `Tool`, `ToolModuleEntry`, `ToolModule`,
+or an array of those values.
+
+Existing TypeScript agents can be updated in place:
+
+```bash
+exo agent update tool-demo \
+  --tool-module examples/typescript/tools/uppercase.ts
+
+exo agent update tool-demo --clear-tool-modules
+```
 
 Agent tool creation is enabled by default. Disable or re-enable it with:
 
 ```bash
-exo agent create "Locked Down" \
+exo --harness typescript agent create "Locked Down" \
+  --module examples/typescript/basic-harness.ts \
   --model gpt-5.4 \
-  --disable-agent-tool-creation
+  --tool-creation disabled
 
-exo agent update demo --disable-agent-tool-creation
-exo agent update demo --enable-agent-tool-creation
+exo agent update demo --tool-creation disabled
+exo agent update demo --tool-creation enabled
 ```
 
 ## Safety Considerations
@@ -169,13 +189,13 @@ state should call sandbox APIs from their handler.
 
 ## Current Status
 
-The generic registry, built-in tool registration, library tool loading, and
-agent tool manifest loading are implemented in the TypeScript harness API.
+The generic registry, built-in tool registration, library tool module loading,
+and agent tool directory loading are implemented in the TypeScript harness API.
 
-The basic TypeScript harness currently opts into `shell`, library tool manifests
-stored on the agent config, and agent-created tools from
-`.exo/agent-tools/manifest.json` when agent tool creation is enabled.
+The basic TypeScript harness currently opts into `shell`, library tool modules
+stored on the agent config, and agent-created tools from `.exo/agent-tools/`
+when agent tool creation is enabled.
 
 There is an example library tool at `examples/typescript/tools/uppercase.ts`.
 It exists to test and demonstrate the registry contract, and can be enabled with
-`examples/typescript/tools/uppercase.manifest.json`.
+`--tool-module examples/typescript/tools/uppercase.ts`.

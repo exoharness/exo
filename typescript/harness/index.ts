@@ -1,3 +1,5 @@
+import type { ToolModuleExport } from "./tool-modules";
+
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
 export interface JsonObject {
@@ -6,9 +8,7 @@ export interface JsonObject {
 
 export * from "./tools";
 export * from "./built-in-tools";
-export * from "./tool-manifest";
-export * from "./scheduler-tools";
-export * from "./adapter-tools";
+export * from "./tool-modules";
 
 export type MessageRole =
   | "system"
@@ -28,11 +28,8 @@ export interface AgentConfig {
   harness: "basic" | "rlm" | "typescript" | "exoclaw";
   typescript?: {
     modulePath: string;
+    toolModulePaths: string[];
   } | null;
-  libraryTools: Array<{
-    modulePath: string;
-    initialization: JsonObject;
-  }>;
   enableAgentToolCreation: boolean;
   sandboxImage?: string | null;
   enableNetworking: boolean;
@@ -325,6 +322,18 @@ export interface Turn {
   readonly conversation: Conversation;
   readonly record: TurnRecord;
   addEvents(data: EventData[]): Promise<AddEventsResult>;
+  writeArtifact(args: {
+    path: string;
+    contents: Uint8Array | string;
+  }): Promise<ArtifactVersion>;
+  writeArtifactText(args: {
+    path: string;
+    text: string;
+  }): Promise<ArtifactVersion>;
+  writeArtifactJson(args: {
+    path: string;
+    value: JsonValue;
+  }): Promise<ArtifactVersion>;
 }
 
 export interface TurnContext {
@@ -352,6 +361,7 @@ export interface TurnContext {
 }
 
 export interface TypeScriptHarness {
+  tools?: ToolModuleExport;
   runTurn(context: TurnContext): Promise<void>;
 }
 

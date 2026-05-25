@@ -144,13 +144,12 @@ async fn turn_events_continue_after_artifact_writes() {
         })
         .await
         .expect("turn");
-    conversation
-        .write_artifact(WriteArtifactRequest {
-            path: "tool-results/example.json".to_string(),
-            contents: br#"{"ok":true}"#.to_vec(),
-        })
-        .await
-        .expect("write artifact");
+    turn.write_artifact(WriteArtifactRequest {
+        path: "tool-results/example.json".to_string(),
+        contents: br#"{"ok":true}"#.to_vec(),
+    })
+    .await
+    .expect("write artifact");
     turn.add_events(vec![EventData::Messages {
         messages: vec![assistant_message("pong")],
         response_id: None,
@@ -158,6 +157,107 @@ async fn turn_events_continue_after_artifact_writes() {
     .await
     .expect("append after artifact write");
     turn.finish().await.expect("finish after artifact write");
+
+    let events = conversation
+        .get_events(Some(EventQuery {
+            cursor: None,
+            direction: Some(EventQueryDirection::Asc),
+            limit: None,
+            session_id: None,
+            turn_id: None,
+            types: Some(vec!["artifact_written".to_string()]),
+        }))
+        .await
+        .expect("artifact event")
+        .events;
+    let artifact_event = events.first().expect("artifact_written event");
+    assert_eq!(artifact_event.session_id, Some(turn.record().session_id));
+    assert_eq!(artifact_event.turn_id, Some(turn.record().id));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stale_turn_artifact_write_reports_unresumable_turn() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
+        .await
+        .expect("harness should initialize");
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let conversation = agent
+        .new_conversation(NewConversationRequest::default())
+        .await
+        .expect("conversation");
+    let turn = conversation
+        .begin_turn(BeginTurnRequest {
+            session_id: None,
+            input: vec![user_message("ping")],
+        })
+        .await
+        .expect("turn");
+
+    conversation
+        .write_artifact(WriteArtifactRequest {
+            path: "outside-turn.txt".to_string(),
+            contents: b"outside".to_vec(),
+        })
+        .await
+        .expect("advance conversation head outside turn");
+    let error = turn
+        .write_artifact(WriteArtifactRequest {
+            path: "tool-results/example.json".to_string(),
+            contents: br#"{"ok":true}"#.to_vec(),
+        })
+        .await
+        .expect_err("stale turn should fail");
+    let message = error.to_string();
+    let events = conversation
+        .get_events(Some(EventQuery {
+            cursor: None,
+            direction: Some(EventQueryDirection::Asc),
+            limit: None,
+            session_id: None,
+            turn_id: None,
+            types: None,
+        }))
+        .await
+        .expect("events")
+        .events;
+    let expected_head_event = events
+        .iter()
+        .filter(|event| event.turn_id == Some(turn.record().id))
+        .next_back()
+        .expect("expected head event");
+    let current_head_event = events.last().expect("current head event");
+    let expected_at = expected_head_event
+        .id
+        .timestamp()
+        .expect("expected head timestamp")
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let current_at = current_head_event
+        .id
+        .timestamp()
+        .expect("current head timestamp")
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    assert!(
+        message.contains("turn is stale and cannot be resumed"),
+        "{message}"
+    );
+    assert!(message.contains(&turn.record().id.to_string()), "{message}");
+    assert!(
+        message.contains(&format!("expected_head_at: {expected_at}")),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!("current_head_at: {current_at}")),
+        "{message}"
+    );
+    assert!(!message.contains(&expected_head_event.id.to_string()), "{message}");
+    assert!(!message.contains(&current_head_event.id.to_string()), "{message}");
 }
 
 #[tokio::test(flavor = "current_thread")]

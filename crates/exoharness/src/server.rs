@@ -365,6 +365,12 @@ impl ExoHarnessServer {
                     result: turn.turn.add_events(data).await?,
                 })
             }
+            Request::TurnWriteArtifact { handle_id, request } => {
+                let turn = self.require_turn(handle_id)?;
+                Ok(Response::ArtifactVersion {
+                    artifact: turn.turn.write_artifact(request).await?,
+                })
+            }
             Request::TurnFinish { handle_id } => {
                 let turn = self
                     .turns

@@ -9,11 +9,11 @@ import {
   createToolRegistry,
   initializeTool,
   registerBuiltInTools,
-  registerAgentToolsFromManifestPathIfExists,
-  registerAgentToolsFromManifest,
-  registerAdapterTools,
-  registerLibraryToolsFromManifest,
-  registerToolsFromManifest,
+  registerAgentTools,
+  registerAgentToolsFromDirectoryIfExists,
+  registerLibraryTools,
+  registerLibraryToolModulePath,
+  registerTools,
   materializeEventsToMessages,
   toolResultMessage,
   toolResultEvent,
@@ -26,8 +26,8 @@ import {
   type ToolResult,
   type TurnContext,
 } from "./index";
-import ircTool from "../../examples/typescript/tools/irc";
-import uppercaseTool from "../../examples/typescript/tools/uppercase";
+import { ircTool } from "../../examples/typescript/tools/irc";
+import { uppercaseTool } from "../../examples/typescript/tools/uppercase";
 
 describe("HarnessToolRegistry", () => {
   it("returns registered tool definitions", () => {
@@ -477,19 +477,15 @@ describe("library tool modules", () => {
 });
 
 describe("agent tool loading", () => {
-  it("loads and registers library tools from a manifest", async () => {
+  it("loads and registers library tools from exported module data", async () => {
     const context = fakeTurnContext();
     const registry = createToolRegistry(context);
 
-    await registerLibraryToolsFromManifest(registry, context, {
-      tools: [
-        {
-          modulePath: uppercaseToolModulePath(),
-          initialization: {
-            prefix: "library: ",
-          },
-        },
-      ],
+    await registerLibraryTools(registry, context, {
+      tool: uppercaseTool,
+      initialization: {
+        prefix: "library: ",
+      },
     });
 
     expect(registry.get("uppercase")?.source).toBe("library");
@@ -512,19 +508,15 @@ describe("agent tool loading", () => {
     ]);
   });
 
-  it("loads and registers agent tools from a manifest", async () => {
+  it("loads and registers agent tools from exported module data", async () => {
     const context = fakeTurnContext();
     const registry = createToolRegistry(context);
 
-    await registerAgentToolsFromManifest(registry, context, {
-      tools: [
-        {
-          modulePath: uppercaseToolModulePath(),
-          initialization: {
-            prefix: "agent: ",
-          },
-        },
-      ],
+    await registerAgentTools(registry, context, {
+      tool: uppercaseTool,
+      initialization: {
+        prefix: "agent: ",
+      },
     });
 
     expect(registry.definitions()).toEqual([uppercaseTool.definition]);
@@ -548,30 +540,30 @@ describe("agent tool loading", () => {
     ]);
   });
 
-  it("loads tools through the generic source-aware manifest path", async () => {
+  it("loads tools through the generic source-aware module path", async () => {
     const context = fakeTurnContext();
     const registry = createToolRegistry(context);
 
-    await registerToolsFromManifest(
+    await registerTools(
       registry,
       context,
-      {
-        tools: [
-          {
-            modulePath: uppercaseToolModulePath(),
-            initialization: {
-              prefix: "generic: ",
-            },
-          },
-        ],
-      },
+      { tool: uppercaseTool, initialization: { prefix: "generic: " } },
       "library",
     );
 
     expect(registry.get("uppercase")?.source).toBe("library");
   });
 
-  it("installs an agent tool and loads it from the default manifest path", async () => {
+  it("loads library tool configuration from a TypeScript module export", async () => {
+    const context = fakeTurnContext();
+    const registry = createToolRegistry(context);
+
+    await registerLibraryToolModulePath(registry, context, ircToolModulePath());
+
+    expect(registry.get("irc_send_message")?.source).toBe("library");
+  });
+
+  it("installs an agent tool and loads it from the default tools directory", async () => {
     const previousCwd = process.cwd();
     const tempdir = await fs.mkdtemp(path.join(os.tmpdir(), "exo-agent-tool-"));
     process.chdir(tempdir);
@@ -604,14 +596,13 @@ describe("agent tool loading", () => {
             ok: true,
             toolName: "reverse_text",
             modulePath: ".exo/agent-tools/reverse-text.ts",
-            manifestPath: ".exo/agent-tools/manifest.json",
             availableNextRound: true,
           },
         ),
       ]);
 
       const registry = createToolRegistry(context);
-      await registerAgentToolsFromManifestPathIfExists(registry, context);
+      await registerAgentToolsFromDirectoryIfExists(registry, context);
 
       expect(registry.get("reverse_text")?.source).toBe("agent");
       await expect(
@@ -637,173 +628,25 @@ describe("agent tool loading", () => {
     }
   });
 
-  it("exposes chat adapter config and message target schemas", () => {
-    const registry = createToolRegistry(fakeTurnContext());
-    registerAdapterTools(registry, ["create_adapter", "send_adapter_message"]);
-
-    const createAdapter = registry.get("create_adapter")?.definition
-      .parameters as JsonObject;
-    const sendMessage = registry.get("send_adapter_message")?.definition
-      .parameters as JsonObject;
-
-    expect(JSON.stringify(createAdapter)).toContain('"whatsapp"');
-    expect(JSON.stringify(createAdapter)).toContain('"signal"');
-    expect(JSON.stringify(createAdapter)).toContain('"workerCommand"');
-    expect(JSON.stringify(createAdapter)).toContain('"signalCliCommand"');
-    expect(JSON.stringify(createAdapter)).not.toContain('"module"');
-    expect(JSON.stringify(sendMessage)).toContain('"target"');
-  });
-
-  it("transforms built-in IRC adapters into worker adapter records", async () => {
-    const executed: JsonObject[] = [];
-    const registry = createToolRegistry(
-      fakeTurnContext({
-        executeTool: async (request) => {
-          executed.push(request.arguments);
-          return { ok: true };
-        },
-      }),
-    );
-    registerAdapterTools(registry, ["create_adapter"]);
-
-    await registry.executePending([
-      {
-        toolCallId: "create_irc",
-        request: {
-          functionName: "create_adapter",
-          arguments: {
-            name: "irc",
-            source: "built_in",
-            config: {
-              type: "irc",
-              server: "irc.example.com",
-              port: 6697,
-              tls: true,
-              nick: "exo",
-              username: "exo",
-              realname: "Exo",
-              channel: "#exo",
-              passwordSecretId: "secret-1",
-              trigger: "mention",
-            },
-          },
-        },
-      },
-    ]);
-
-    expect(executed[0]).toMatchObject({
-      agentId: "agent-id",
-      conversationId: "conversation-id",
-      name: "irc",
-      source: "built_in",
-      config: {
-        type: "worker",
-        adapterType: "irc",
-        workerCommand: [
-          "pnpm",
-          "tsx",
-          "examples/exoclaw/adapters/irc/worker.ts",
-        ],
-        initialization: {
-          server: "irc.example.com",
-          channel: "#exo",
-          trigger: "mention",
-        },
-        capabilities: ["receive", "send_message"],
-        stateDir: null,
-        secretEnv: [{ env: "EXO_IRC_PASSWORD", secretId: "secret-1" }],
-      },
-    });
-  });
-
-  it("transforms library Signal adapters into worker adapter records", async () => {
-    const executed: JsonObject[] = [];
-    const registry = createToolRegistry(
-      fakeTurnContext({
-        executeTool: async (request) => {
-          executed.push(request.arguments);
-          return { ok: true };
-        },
-      }),
-    );
-    registerAdapterTools(registry, ["create_adapter"]);
-
-    await registry.executePending([
-      {
-        toolCallId: "create_signal",
-        request: {
-          functionName: "create_adapter",
-          arguments: {
-            name: "signal",
-            source: "library",
-            config: {
-              type: "signal",
-              account: null,
-              deviceName: "Exoclaw",
-              signalCliCommand: null,
-              configDir: null,
-              trigger: "all_messages",
-              allowedContacts: ["u:friend.01"],
-            },
-          },
-        },
-      },
-    ]);
-
-    expect(executed[0]).toMatchObject({
-      agentId: "agent-id",
-      conversationId: "conversation-id",
-      name: "signal",
-      source: "library",
-      config: {
-        type: "worker",
-        adapterType: "signal",
-        workerCommand: [
-          "pnpm",
-          "tsx",
-          "examples/exoclaw/adapters/signal/worker.ts",
-        ],
-        initialization: {
-          account: null,
-          deviceName: "Exoclaw",
-          signalCliCommand: null,
-          configDir: null,
-          trigger: "all_messages",
-          allowedContacts: ["u:friend.01"],
-        },
-        capabilities: ["receive", "send_message"],
-        stateDir: null,
-        secretEnv: [],
-      },
-    });
-  });
-
   it("rejects agent tool modules without a default Tool export", async () => {
     const registry = createToolRegistry(fakeTurnContext());
 
     await expect(
-      registerAgentToolsFromManifest(registry, fakeTurnContext(), {
-        tools: [
-          {
-            modulePath: "data:text/javascript,export const value = 1;",
-            initialization: {},
-          },
-        ],
-      }),
-    ).rejects.toThrow("agent tool module must default export a Tool");
+      registerAgentTools(registry, fakeTurnContext(), {
+        notATool: true,
+      } as never),
+    ).rejects.toThrow(
+      "agent tool module export must be a Tool, ToolModuleEntry, or ToolModule",
+    );
   });
 
   it("rejects invalid agent tool initialization", async () => {
     const registry = createToolRegistry(fakeTurnContext());
 
     await expect(
-      registerAgentToolsFromManifest(registry, fakeTurnContext(), {
-        tools: [
-          {
-            modulePath: uppercaseToolModulePath(),
-            initialization: {},
-          },
-        ],
+      registerAgentTools(registry, fakeTurnContext(), {
+        tool: uppercaseTool,
+        initialization: {},
       }),
     ).rejects.toThrow("tool initialization.prefix is required");
   });
@@ -872,9 +715,14 @@ function uppercaseToolModulePath(): string {
   ).href;
 }
 
+function ircToolModulePath(): string {
+  return new URL("../../examples/typescript/tools/irc.ts", import.meta.url)
+    .href;
+}
+
 function reverseTextToolSource(): string {
   return `
-import type { JsonObject, Tool, ToolResult } from "@exo/harness";
+import type { JsonObject, Tool, ToolResult } from "@exo/harness/tool";
 
 const reverseTextTool = {
   definition: {
@@ -978,7 +826,6 @@ function fakeTurnContext(
       instructions: [],
       harness: "typescript",
       typescript: null,
-      libraryTools: [],
       enableAgentToolCreation: true,
       sandboxImage: null,
       enableNetworking: false,
@@ -1000,15 +847,8 @@ function fakeTurnContext(
     braintrustParent: null,
     exoharness: {
       current: {
-        agent: {
-          record: {
-            id: "agent-id",
-          },
-        },
+        agent: {},
         conversation: {
-          record: {
-            id: "conversation-id",
-          },
           async writeArtifactText(args: { path: string; text: string }) {
             artifactIndex += 1;
             return {
@@ -1020,7 +860,18 @@ function fakeTurnContext(
             };
           },
         },
-        turn: {},
+        turn: {
+          async writeArtifactText(args: { path: string; text: string }) {
+            artifactIndex += 1;
+            return {
+              artifactId: `artifact-${artifactIndex}`,
+              path: args.path,
+              version: 1,
+              createdAt: "2026-01-01T00:00:00Z",
+              sizeBytes: args.text.length,
+            };
+          },
+        },
       },
     },
     executeTool: options.executeTool ?? (async () => null),

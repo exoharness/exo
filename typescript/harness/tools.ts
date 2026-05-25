@@ -40,10 +40,15 @@ export interface ToolInitializationContext {
 export interface Tool {
   definition: ToolDefinition;
   initializationParameters: JsonValue;
+  initialization?: JsonObject;
   initialize(
     args: JsonObject,
     initialization: ToolInitializationContext,
   ): Promise<ToolHandler> | ToolHandler;
+}
+
+export function defineTool<T extends Tool>(tool: T): T {
+  return tool;
 }
 
 export class HarnessToolRegistry {
@@ -218,11 +223,10 @@ async function writeToolResultArtifact(
   text: string,
   mimeType: string,
 ): Promise<ToolResultArtifactReference> {
-  const artifact =
-    await context.exoharness.current.conversation.writeArtifactText({
-      path: `tool-results/${sanitizePathSegment(args.toolName)}/${sanitizePathSegment(args.toolCallId)}/${fileName}`,
-      text,
-    });
+  const artifact = await context.exoharness.current.turn.writeArtifactText({
+    path: `tool-results/${sanitizePathSegment(args.toolName)}/${sanitizePathSegment(args.toolCallId)}/${fileName}`,
+    text,
+  });
   return artifactReference(artifact, mimeType);
 }
 

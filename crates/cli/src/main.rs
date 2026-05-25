@@ -131,23 +131,14 @@ fn default_sandbox_backend() -> SandboxBackendArg {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
-enum NetworkingMode {
+enum EnabledDisabled {
     Enabled,
     Disabled,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum SandboxScopeArg {
-    Agent,
-    Conversation,
-}
-
-impl From<SandboxScopeArg> for SandboxScope {
-    fn from(value: SandboxScopeArg) -> Self {
-        match value {
-            SandboxScopeArg::Agent => SandboxScope::Agent,
-            SandboxScopeArg::Conversation => SandboxScope::Conversation,
-        }
+impl EnabledDisabled {
+    fn enabled(self) -> bool {
+        matches!(self, Self::Enabled)
     }
 }
 
@@ -205,14 +196,14 @@ enum AgentCommands {
         slug: Option<String>,
         #[arg(long)]
         module: Option<PathBuf>,
-        #[arg(long = "tool-manifest")]
-        tool_manifests: Vec<PathBuf>,
-        #[arg(long)]
-        disable_agent_tool_creation: bool,
+        #[arg(long = "tool-module")]
+        tool_modules: Vec<PathBuf>,
+        #[arg(long, value_enum)]
+        tool_creation: Option<EnabledDisabled>,
         #[arg(long)]
         sandbox_image: Option<String>,
         #[arg(long, value_enum)]
-        networking: Option<NetworkingMode>,
+        networking: Option<EnabledDisabled>,
         #[arg(long)]
         model: String,
         #[arg(long)]
@@ -234,20 +225,18 @@ enum AgentCommands {
         module: Option<PathBuf>,
         #[arg(long)]
         clear_module: bool,
-        #[arg(long = "tool-manifest")]
-        tool_manifests: Vec<PathBuf>,
+        #[arg(long = "tool-module")]
+        tool_modules: Vec<PathBuf>,
         #[arg(long)]
-        clear_tool_manifests: bool,
-        #[arg(long)]
-        enable_agent_tool_creation: bool,
-        #[arg(long)]
-        disable_agent_tool_creation: bool,
+        clear_tool_modules: bool,
+        #[arg(long, value_enum)]
+        tool_creation: Option<EnabledDisabled>,
         #[arg(long)]
         sandbox_image: Option<String>,
         #[arg(long)]
         clear_sandbox_image: bool,
         #[arg(long, value_enum)]
-        networking: Option<NetworkingMode>,
+        networking: Option<EnabledDisabled>,
         #[arg(long)]
         model: Option<String>,
         #[arg(long)]
@@ -309,9 +298,7 @@ enum ConversationCommands {
         #[arg(long)]
         clear_shell_program: bool,
         #[arg(long, value_enum)]
-        networking: Option<NetworkingMode>,
-        #[arg(long, value_enum)]
-        sandbox_scope: Option<SandboxScopeArg>,
+        networking: Option<EnabledDisabled>,
         #[arg(long)]
         model: Option<String>,
         #[arg(long)]
@@ -461,7 +448,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             name: Some(agent_slug),
                             harness: to_agent_harness_kind(harness_kind),
                             typescript: None,
-                            library_tools: Vec::new(),
                             enable_agent_tool_creation: true,
                             sandbox_image: None,
                             enable_networking: false,
@@ -507,8 +493,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 name,
                 slug,
                 module,
-                tool_manifests,
-                disable_agent_tool_creation,
+                tool_modules,
+                tool_creation,
                 sandbox_image,
                 networking,
                 model,
@@ -529,18 +515,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return Err("sandbox image must not be empty".into());
                 }
                 let agent_harness_kind = to_agent_harness_kind(harness_kind);
-                let typescript = build_typescript_harness_config(harness_kind, module.as_deref())?;
-                let library_tools = load_tool_manifests(agent_harness_kind, &tool_manifests)?;
+                let typescript = build_typescript_harness_config(
+                    harness_kind,
+                    module.as_deref(),
+                    &tool_modules,
+                )?;
                 let agent = harness
                     .create_agent(CreateAgentRequest {
                         slug,
                         name: Some(name),
                         harness: agent_harness_kind,
                         typescript,
-                        library_tools,
-                        enable_agent_tool_creation: !disable_agent_tool_creation,
+                        enable_agent_tool_creation: tool_creation
+                            .map(EnabledDisabled::enabled)
+                            .unwrap_or(true),
                         sandbox_image,
-                        enable_networking: matches!(networking, Some(NetworkingMode::Enabled)),
+                        enable_networking: networking.is_some_and(EnabledDisabled::enabled),
                         model,
                         max_output_tokens,
                         max_tool_round_trips,
@@ -562,10 +552,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 set_harness,
                 module,
                 clear_module,
-                tool_manifests,
-                clear_tool_manifests,
-                enable_agent_tool_creation,
-                disable_agent_tool_creation,
+                tool_modules,
+                clear_tool_modules,
+                tool_creation,
                 sandbox_image,
                 clear_sandbox_image,
                 networking,
@@ -582,16 +571,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if clear_module && module.is_some() {
                     return Err("provide either --clear-module or --module, not both".into());
                 }
-                if clear_tool_manifests && !tool_manifests.is_empty() {
+                if clear_tool_modules && !tool_modules.is_empty() {
                     return Err(
-                        "provide either --clear-tool-manifests or --tool-manifest, not both".into(),
+                        "provide either --clear-tool-modules or --tool-module, not both".into(),
                     );
                 }
-                if enable_agent_tool_creation && disable_agent_tool_creation {
-                    return Err(
-                        "provide either --enable-agent-tool-creation or --disable-agent-tool-creation, not both"
-                            .into(),
-                    );
+                if clear_module && !tool_modules.is_empty() {
+                    return Err("provide either --clear-module or --tool-module, not both".into());
                 }
                 if clear_sandbox_image && sandbox_image.is_some() {
                     return Err(
@@ -634,9 +620,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     config.typescript = None;
                     changed = true;
                 } else if let Some(module) = module.as_deref() {
-                    let typescript = Some(resolve_typescript_module_path(module)?);
+                    if config.harness != AgentHarnessKind::TypeScript {
+                        return Err("--module is only valid with TypeScript agents".into());
+                    }
+                    let existing_tool_modules = config
+                        .typescript
+                        .as_ref()
+                        .map(|typescript| typescript.tool_module_paths.clone())
+                        .unwrap_or_default();
+                    let tool_module_paths = if tool_modules.is_empty() {
+                        existing_tool_modules
+                    } else {
+                        resolve_typescript_tool_module_paths(&tool_modules)?
+                    };
+                    let typescript = Some(resolve_typescript_harness_config(
+                        module,
+                        tool_module_paths,
+                    )?);
                     if config.typescript != typescript {
                         config.typescript = typescript;
+                        changed = true;
+                    }
+                } else if clear_tool_modules {
+                    if let Some(typescript) = config.typescript.as_mut()
+                        && !typescript.tool_module_paths.is_empty()
+                    {
+                        typescript.tool_module_paths.clear();
+                        changed = true;
+                    }
+                } else if !tool_modules.is_empty() {
+                    if config.harness != AgentHarnessKind::TypeScript {
+                        return Err("--tool-module is only valid with TypeScript agents".into());
+                    }
+                    let Some(typescript) = config.typescript.as_mut() else {
+                        return Err(
+                            "typescript agents require a module path; pass --module <path>".into(),
+                        );
+                    };
+                    let tool_module_paths = resolve_typescript_tool_module_paths(&tool_modules)?;
+                    if typescript.tool_module_paths != tool_module_paths {
+                        typescript.tool_module_paths = tool_module_paths;
+                        changed = true;
+                    }
+                }
+                if let Some(tool_creation) = tool_creation {
+                    let enable_agent_tool_creation = tool_creation.enabled();
+                    if config.enable_agent_tool_creation != enable_agent_tool_creation {
+                        config.enable_agent_tool_creation = enable_agent_tool_creation;
                         changed = true;
                     }
                 }
@@ -673,7 +703,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 if let Some(networking) = networking {
-                    let enable_networking = matches!(networking, NetworkingMode::Enabled);
+                    let enable_networking = networking.enabled();
                     if config.enable_networking != enable_networking {
                         config.enable_networking = enable_networking;
                         changed = true;
@@ -723,7 +753,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )?;
                     if updated_braintrust.is_none() && !changed {
                         return Err(
-                            "no changes provided; pass --set-harness, --module, --tool-manifest, --enable-agent-tool-creation, --disable-agent-tool-creation, --sandbox-image, --networking, model flags, --clear-braintrust, or Braintrust project flags"
+                            "no changes provided; pass --set-harness, --module, --tool-module, --clear-tool-modules, --tool-creation, --sandbox-image, --networking, model flags, --clear-braintrust, or Braintrust project flags"
                                 .into(),
                         );
                     }
@@ -763,13 +793,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .map(|config| config.module_path.as_str())
                         .unwrap_or("none")
                 );
-                println!("library_tools: {}", config.library_tools.len());
-                for tool in &config.library_tools {
-                    println!("  - {}", tool.module_path);
+                let tool_module_paths = config
+                    .typescript
+                    .as_ref()
+                    .map(|config| config.tool_module_paths.as_slice())
+                    .unwrap_or_default();
+                println!("typescript_tool_modules: {}", tool_module_paths.len());
+                for tool_module_path in tool_module_paths {
+                    println!("  - {}", tool_module_path);
                 }
                 println!(
-                    "enable_agent_tool_creation: {}",
-                    config.enable_agent_tool_creation
+                    "tool_creation: {}",
+                    if config.enable_agent_tool_creation {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
                 );
                 println!(
                     "sandbox_image: {}",
@@ -946,7 +985,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 if let Some(networking) = networking {
-                    config.enable_networking = matches!(networking, NetworkingMode::Enabled);
+                    config.enable_networking = networking.enabled();
                     changed = true;
                 }
 
@@ -1422,98 +1461,43 @@ fn format_harness_kind(kind: AgentHarnessKind) -> &'static str {
 fn build_typescript_harness_config(
     harness_kind: HarnessKind,
     module: Option<&Path>,
+    tool_modules: &[PathBuf],
 ) -> Result<Option<TypeScriptHarnessConfig>, Box<dyn std::error::Error>> {
+    if !matches!(harness_kind, HarnessKind::TypeScript) && !tool_modules.is_empty() {
+        return Err("--tool-module is only valid with --harness typescript".into());
+    }
     match (harness_kind, module) {
-        (HarnessKind::TypeScript | HarnessKind::Exoclaw, Some(module)) => {
-            Ok(Some(resolve_typescript_module_path(module)?))
-        }
-        (HarnessKind::TypeScript | HarnessKind::Exoclaw, None) => {
-            Err("TypeScript and Exoclaw agents require --module <path>".into())
-        }
-        (_, Some(_)) => Err("--module is only valid with --harness typescript or exoclaw".into()),
+        (HarnessKind::TypeScript, Some(module)) => Ok(Some(resolve_typescript_harness_config(
+            module,
+            resolve_typescript_tool_module_paths(tool_modules)?,
+        )?)),
+        (HarnessKind::TypeScript, None) => Err("typescript agents require --module <path>".into()),
+        (_, Some(_)) => Err("--module is only valid with --harness typescript".into()),
         (_, None) => Ok(None),
     }
 }
 
-fn resolve_typescript_module_path(
-    path: &Path,
+fn resolve_typescript_harness_config(
+    module_path: &Path,
+    tool_module_paths: Vec<String>,
 ) -> Result<TypeScriptHarnessConfig, Box<dyn std::error::Error>> {
-    let module_path = std::fs::canonicalize(path)?;
+    let module_path = std::fs::canonicalize(module_path)?;
     Ok(TypeScriptHarnessConfig {
         module_path: module_path.to_string_lossy().into_owned(),
+        tool_module_paths,
     })
 }
 
-#[derive(serde::Deserialize)]
-struct CliToolManifest {
-    tools: Vec<CliToolManifestEntry>,
-}
-
-#[derive(serde::Deserialize)]
-struct CliToolManifestEntry {
-    #[serde(rename = "modulePath", alias = "module_path")]
-    module_path: String,
-    #[serde(default = "empty_json_object")]
-    initialization: serde_json::Value,
-}
-
-fn empty_json_object() -> serde_json::Value {
-    serde_json::Value::Object(serde_json::Map::new())
-}
-
-fn load_tool_manifests(
-    harness_kind: AgentHarnessKind,
+fn resolve_typescript_tool_module_paths(
     paths: &[PathBuf],
-) -> Result<Vec<ToolManifestEntry>, Box<dyn std::error::Error>> {
-    if paths.is_empty() {
-        return Ok(Vec::new());
-    }
-    if !matches!(
-        harness_kind,
-        AgentHarnessKind::TypeScript | AgentHarnessKind::Exoclaw
-    ) {
-        return Err("--tool-manifest is only valid with TypeScript or Exoclaw agents".into());
-    }
-
-    let mut tools = Vec::new();
-    for path in paths {
-        let manifest_path = std::fs::canonicalize(path)?;
-        let manifest_dir = manifest_path
-            .parent()
-            .ok_or_else(|| format!("tool manifest has no parent directory: {}", path.display()))?;
-        let manifest: CliToolManifest =
-            serde_json::from_str(&std::fs::read_to_string(&manifest_path)?)?;
-
-        for entry in manifest.tools {
-            if entry.module_path.trim().is_empty() {
-                return Err(format!(
-                    "tool manifest {} contains an empty modulePath",
-                    manifest_path.display()
-                )
-                .into());
-            }
-            if !entry.initialization.is_object() {
-                return Err(format!(
-                    "tool manifest {} entry {} must use an object initialization value",
-                    manifest_path.display(),
-                    entry.module_path
-                )
-                .into());
-            }
-
-            let module_path = PathBuf::from(&entry.module_path);
-            let resolved_module_path = if module_path.is_absolute() {
-                std::fs::canonicalize(&module_path)?
-            } else {
-                std::fs::canonicalize(manifest_dir.join(module_path))?
-            };
-            tools.push(ToolManifestEntry {
-                module_path: resolved_module_path.to_string_lossy().into_owned(),
-                initialization: entry.initialization,
-            });
-        }
-    }
-    Ok(tools)
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    paths
+        .iter()
+        .map(|path| {
+            let path = std::fs::canonicalize(path)?;
+            Ok(path.to_string_lossy().into_owned())
+        })
+        .collect()
 }
 
 struct RegisteredModel {

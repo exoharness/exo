@@ -190,6 +190,10 @@ pub enum Request {
         handle_id: HandleId,
         data: Vec<EventData>,
     },
+    TurnWriteArtifact {
+        handle_id: HandleId,
+        request: WriteArtifactRequest,
+    },
     TurnFinish {
         handle_id: HandleId,
     },

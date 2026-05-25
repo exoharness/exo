@@ -46,8 +46,8 @@ interface RawAgentConfig {
   harness: "basic" | "rlm" | "typescript" | "type_script" | "exoclaw";
   typescript?: {
     module_path: string;
+    tool_module_paths?: string[];
   } | null;
-  library_tools?: RawToolManifestEntry[];
   enable_agent_tool_creation?: boolean;
   sandbox_image?: string | null;
   enable_networking: boolean;
@@ -360,6 +360,11 @@ type RawExoRequest =
       secret_id: string;
     }
   | { type: "turn_add_events"; handle_id: number; data: EventData[] }
+  | {
+      type: "turn_write_artifact";
+      handle_id: number;
+      request: { path: string; contents: number[] };
+    }
   | { type: "turn_finish"; handle_id: number };
 
 type RawExoResponse =
@@ -783,9 +788,9 @@ function toAgentConfig(raw: RawAgentConfig): AgentConfig {
     typescript: raw.typescript
       ? {
           modulePath: raw.typescript.module_path,
+          toolModulePaths: raw.typescript.tool_module_paths ?? [],
         }
       : null,
-    libraryTools: (raw.library_tools ?? []).map(toToolManifestEntry),
     enableAgentToolCreation: raw.enable_agent_tool_creation ?? true,
     sandboxImage: raw.sandbox_image ?? null,
     enableNetworking: raw.enable_networking,
@@ -1534,6 +1539,37 @@ function createTurn(
         throw new Error(`expected add_events payload, got ${payload.type}`);
       }
       return toAddEventsResult(payload.result);
+    },
+
+    async writeArtifact(args): Promise<ArtifactVersion> {
+      const payload = await client.requestExo({
+        type: "turn_write_artifact",
+        handle_id: raw.handle_id,
+        request: {
+          path: args.path,
+          contents: Array.from(asBytes(args.contents)),
+        },
+      });
+      if (payload.type !== "artifact_version") {
+        throw new Error(
+          `expected artifact_version payload, got ${payload.type}`,
+        );
+      }
+      return toArtifactVersion(payload.artifact);
+    },
+
+    async writeArtifactText(args): Promise<ArtifactVersion> {
+      return turn.writeArtifact({
+        path: args.path,
+        contents: args.text,
+      });
+    },
+
+    async writeArtifactJson(args): Promise<ArtifactVersion> {
+      return turn.writeArtifact({
+        path: args.path,
+        contents: JSON.stringify(args.value, null, 2),
+      });
     },
   };
   return turn;

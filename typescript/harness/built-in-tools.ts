@@ -9,12 +9,7 @@ import type {
   TurnContext,
 } from "./index";
 import type { HarnessToolRegistry, ToolInstance } from "./tools";
-import {
-  DEFAULT_AGENT_TOOL_MANIFEST_PATH,
-  loadAgentTool,
-  type AgentToolManifest,
-  type AgentToolManifestEntry,
-} from "./tool-manifest";
+import { DEFAULT_AGENT_TOOL_DIRECTORY, loadAgentTool } from "./tool-modules";
 
 export type BuiltInToolName = "shell" | "install_agent_tool";
 
@@ -98,7 +93,7 @@ function createInstallAgentToolInstance(): ToolInstance {
     definition: {
       name: "install_agent_tool",
       description:
-        "Install or replace an agent-created TypeScript tool so it can be used in the next model round. The moduleSource must default-export a Tool from @exo/harness. Do not import external npm packages; use Node built-ins, global APIs like fetch, and type-only imports from @exo/harness.",
+        "Install or replace an agent-created TypeScript tool so it can be used in the next model round. The moduleSource must use type-only imports from @exo/harness/tool and default-export a Tool. Do not import external npm packages; use Node built-ins and global APIs like fetch.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -111,7 +106,7 @@ function createInstallAgentToolInstance(): ToolInstance {
           moduleSource: {
             type: "string",
             description:
-              "Complete TypeScript source for a module that default-exports a Tool. Use the shape { definition, initializationParameters, initialize(...) }. Do not use zod, inputSchema, outputSchema validators, or call(...) handlers.",
+              "Complete TypeScript source for a module that default-exports { definition, initializationParameters, initialize(...) } satisfies Tool. Do not use zod, inputSchema, outputSchema validators, call(...) handlers, or runtime imports from @exo/harness/tool.",
           },
           initialization: {
             type: "object",
@@ -130,16 +125,9 @@ function createInstallAgentToolInstance(): ToolInstance {
           ok: { type: "boolean" },
           toolName: { type: "string" },
           modulePath: { type: "string" },
-          manifestPath: { type: "string" },
           availableNextRound: { type: "boolean" },
         },
-        required: [
-          "ok",
-          "toolName",
-          "modulePath",
-          "manifestPath",
-          "availableNextRound",
-        ],
+        required: ["ok", "toolName", "modulePath", "availableNextRound"],
       },
     },
     handler: {
@@ -162,42 +150,51 @@ async function installAgentTool(
   }
   const moduleSource = stringArgument(args, "moduleSource");
   const initialization = objectArgument(args, "initialization");
-  const toolsDirectory = path.dirname(DEFAULT_AGENT_TOOL_MANIFEST_PATH);
-  const manifestPath = DEFAULT_AGENT_TOOL_MANIFEST_PATH;
+  const toolsDirectory = DEFAULT_AGENT_TOOL_DIRECTORY;
   const modulePath = path.join(toolsDirectory, `${name}.ts`);
+  const sourcePath = path.join(toolsDirectory, `${name}.source.ts`);
+  const tempDirectory = path.join(toolsDirectory, ".tmp");
+  const tempId = `${process.pid}.${Date.now()}`;
+  const tempSourcePath = path.join(
+    tempDirectory,
+    `${name}.${tempId}.source.ts`,
+  );
+  const tempModulePath = path.join(tempDirectory, `${name}.${tempId}.ts`);
 
   await fs.mkdir(toolsDirectory, { recursive: true });
-  await fs.writeFile(modulePath, moduleSource, "utf8");
-
-  const tool = await loadAgentTool(context, {
-    modulePath: path.resolve(modulePath),
-    initialization,
-  });
-  if (
-    tool.definition.name === "shell" ||
-    tool.definition.name === "install_agent_tool"
-  ) {
-    throw new Error(
-      `agent tool cannot replace built-in tool: ${tool.definition.name}`,
+  await fs.mkdir(tempDirectory, { recursive: true });
+  let tool: ToolInstance | null = null;
+  try {
+    await fs.writeFile(tempSourcePath, moduleSource, "utf8");
+    await fs.writeFile(
+      tempModulePath,
+      agentToolWrapperSource(
+        `./${path.basename(tempSourcePath)}`,
+        initialization,
+      ),
+      "utf8",
     );
+    tool = await loadAgentTool(context, path.resolve(tempModulePath));
+    if (
+      tool.definition.name === "shell" ||
+      tool.definition.name === "install_agent_tool"
+    ) {
+      throw new Error(
+        `agent tool cannot replace built-in tool: ${tool.definition.name}`,
+      );
+    }
+  } finally {
+    await fs.rm(tempSourcePath, { force: true });
+    await fs.rm(tempModulePath, { force: true });
+  }
+  if (!tool) {
+    throw new Error("agent tool validation did not return a tool");
   }
 
-  const manifest = await readWritableAgentToolManifest(manifestPath);
-  const manifestEntry: AgentToolManifestEntry = {
-    modulePath: `./${name}.ts`,
-    initialization,
-  };
-  const existingIndex = manifest.tools.findIndex(
-    (entry) => entry.modulePath === manifestEntry.modulePath,
-  );
-  if (existingIndex >= 0) {
-    manifest.tools[existingIndex] = manifestEntry;
-  } else {
-    manifest.tools.push(manifestEntry);
-  }
+  await fs.writeFile(sourcePath, moduleSource, "utf8");
   await fs.writeFile(
-    manifestPath,
-    `${JSON.stringify(manifest, null, 2)}\n`,
+    modulePath,
+    agentToolWrapperSource(`./${path.basename(sourcePath)}`, initialization),
     "utf8",
   );
 
@@ -205,57 +202,21 @@ async function installAgentTool(
     ok: true,
     toolName: tool.definition.name,
     modulePath,
-    manifestPath,
     availableNextRound: true,
   };
 }
 
-async function readWritableAgentToolManifest(
-  manifestPath: string,
-): Promise<AgentToolManifest> {
-  try {
-    const value = JSON.parse(
-      await fs.readFile(manifestPath, "utf8"),
-    ) as unknown;
-    if (!isRecord(value) || !Array.isArray(value.tools)) {
-      throw new Error(
-        `agent tool manifest must contain a tools array: ${manifestPath}`,
-      );
-    }
-    return {
-      tools: value.tools.map((entry, index) =>
-        parseWritableManifestEntry(entry, index),
-      ),
-    };
-  } catch (error) {
-    if (isNotFoundError(error)) {
-      return { tools: [] };
-    }
-    throw error;
-  }
-}
+function agentToolWrapperSource(
+  sourceModulePath: string,
+  initialization: JsonObject,
+): string {
+  return `import tool from ${JSON.stringify(sourceModulePath)};
 
-function parseWritableManifestEntry(
-  value: unknown,
-  index: number,
-): AgentToolManifestEntry {
-  if (!isRecord(value)) {
-    throw new Error(`agent tool manifest entry ${index} must be an object`);
-  }
-  if (typeof value.modulePath !== "string" || value.modulePath.length === 0) {
-    throw new Error(
-      `agent tool manifest entry ${index} must have a modulePath`,
-    );
-  }
-  if (!isRecord(value.initialization)) {
-    throw new Error(
-      `agent tool manifest entry ${index} must have an object initialization value`,
-    );
-  }
-  return {
-    modulePath: value.modulePath,
-    initialization: value.initialization,
-  };
+export default {
+  tool,
+  initialization: ${JSON.stringify(initialization, null, 2)},
+};
+`;
 }
 
 function stringArgument(args: JsonObject, name: string): string {
@@ -278,13 +239,4 @@ function objectArgument(args: JsonObject, name: string): JsonObject {
 
 function isRecord(value: unknown): value is JsonObject {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function isNotFoundError(error: unknown): boolean {
-  return (
-    error !== null &&
-    typeof error === "object" &&
-    "code" in error &&
-    (error as { code?: unknown }).code === "ENOENT"
-  );
 }

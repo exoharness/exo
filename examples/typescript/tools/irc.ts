@@ -1,11 +1,17 @@
 // Demo library tool for the TypeScript harness tool system. This example shows
-// how a networked service integration can be packaged as a default-export Tool.
-// It is not exposed by any example harness by default.
+// how a networked service integration can expose typed tool configuration from
+// a TypeScript module. It is not exposed by any example harness by default.
 
 import net from "node:net";
 import tls from "node:tls";
 
-import type { JsonObject, Tool, ToolResult, TurnContext } from "@exo/harness";
+import type {
+  JsonObject,
+  Tool,
+  ToolModule,
+  ToolResult,
+  TurnContext,
+} from "@exo/harness/tool";
 
 interface IrcConfig {
   server: string;
@@ -18,7 +24,7 @@ interface IrcConfig {
   passwordSecretId: string | null;
 }
 
-const ircTool = {
+export const ircTool = {
   definition: {
     name: "irc_send_message",
     description: "Send a message to an IRC channel.",
@@ -100,7 +106,23 @@ const ircTool = {
   },
 } satisfies Tool;
 
-export default ircTool;
+export default {
+  tools: [
+    {
+      tool: ircTool,
+      initialization: {
+        server: "irc.libera.chat",
+        port: 6697,
+        nick: "exo-demo",
+        username: "exo-demo",
+        realname: "Exo Demo",
+        tls: true,
+        dryRun: false,
+        passwordSecretId: null,
+      },
+    },
+  ],
+} satisfies ToolModule;
 
 async function sendIrcMessage(
   context: TurnContext,
