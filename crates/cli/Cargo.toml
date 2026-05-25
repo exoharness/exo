@@ -21,6 +21,7 @@ tokio.workspace = true
 tokio-stream.workspace = true
 
 [dev-dependencies]
+bytes.workspace = true
 exoharness = { path = "../exoharness", features = ["basic-backend"] }
 futures.workspace = true
 tempfile = "3.23.0"
