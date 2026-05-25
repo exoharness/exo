@@ -771,18 +771,29 @@ impl<M> RlmHarness<M> {
 }
 
 impl RlmHarness<RouterModelClient> {
+    pub fn from_exoharness(
+        exoharness: Arc<dyn ExoHarness>,
+        runtime_config: Option<BraintrustRuntimeConfig>,
+        env: HashMap<String, String>,
+    ) -> Self {
+        let model = Arc::new(RouterModelClient::new(env));
+        let runtime = ExecutorHarnessRuntime::new(RlmExecutor::new(model), runtime_config);
+
+        Self {
+            inner: SharedHarness::new(exoharness, runtime),
+        }
+    }
+
     pub async fn from_config(
         exo_config: BasicExoHarnessConfig,
         runtime_config: Option<BraintrustRuntimeConfig>,
         env: HashMap<String, String>,
     ) -> Result<Self> {
-        let exoharness = Arc::new(BasicExoHarness::new(exo_config).await?);
-        let model = Arc::new(RouterModelClient::new(env));
-        let runtime = ExecutorHarnessRuntime::new(RlmExecutor::new(model), runtime_config);
-
-        Ok(Self {
-            inner: SharedHarness::new(exoharness, runtime),
-        })
+        Ok(Self::from_exoharness(
+            Arc::new(BasicExoHarness::new(exo_config).await?),
+            runtime_config,
+            env,
+        ))
     }
 }
 

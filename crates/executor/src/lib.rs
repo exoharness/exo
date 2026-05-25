@@ -33,9 +33,10 @@ pub use executor_types::{
 pub use exoharness::{
     AgentHandle, BasicExoHarness, BasicExoHarnessConfig, Binding, BindingMetadata,
     ConversationHandle, EventData, EventId, EventQuery, EventQueryDirection, ExoHarness,
-    FileSystemMount, FileSystemMountMode, ForkConversationRequest, PutSecretRequest,
-    SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, Secret, SecretBackendChoice, SecretMetadata,
-    SessionId, Uuid7,
+    ExoHarnessHttpServeOptions, FileSystemMount, FileSystemMountMode, ForkConversationRequest,
+    HTTP_EXOHARNESS_TRACING_TARGET, HttpExoHarness, PutSecretRequest, SANDBOX_MAIN_MOUNT_DIR,
+    SandboxBackendChoice, Secret, SecretBackendChoice, SecretMetadata, SessionId, Uuid7,
+    serve_exoharness_http_listener, serve_exoharness_http_listener_with_options,
 };
 pub use harness_basic::BasicHarness;
 pub use harness_config::load_agent_config;

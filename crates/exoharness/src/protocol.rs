@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AddEventsRequest, AddEventsResult, AgentId, AgentRecord, Artifact, ArtifactVersion, Binding,
-    BindingId, BindingMetadata, ConversationId, ConversationRecord, Event, EventData, EventId,
-    EventQuery, ForkConversationRequest, GetEventsResult, NewAgentRequest, NewConversationRequest,
-    PutSecretRequest, ReadArtifactRequest, Secret, SecretId, SecretMetadata, SessionId, TurnRecord,
-    WriteArtifactRequest,
+    AddEventsRequest, AddEventsResult, AgentId, AgentRecord, Artifact, ArtifactVersion,
+    BeginTurnRequest, Binding, BindingId, BindingMetadata, ConversationId, ConversationRecord,
+    Event, EventData, EventId, EventQuery, ForkConversationRequest, GetEventsResult,
+    NewAgentRequest, NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Secret,
+    SecretId, SecretMetadata, SessionId, TurnRecord, WriteArtifactRequest,
 };
 
 pub type HandleId = u64;
@@ -124,6 +124,11 @@ pub enum Request {
         conversation_id: ConversationId,
         session_id: SessionId,
     },
+    ConversationBeginTurn {
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+        request: BeginTurnRequest,
+    },
     ConversationGetEvents {
         agent_id: AgentId,
         conversation_id: ConversationId,
@@ -199,6 +204,55 @@ pub enum Request {
     },
 }
 
+impl Request {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::ListAgents => "list_agents",
+            Self::GetAgent { .. } => "get_agent",
+            Self::NewAgent { .. } => "new_agent",
+            Self::DeleteAgent { .. } => "delete_agent",
+            Self::ListBindings => "list_bindings",
+            Self::PutBinding { .. } => "put_binding",
+            Self::GetBinding { .. } => "get_binding",
+            Self::ListSecrets => "list_secrets",
+            Self::PutSecret { .. } => "put_secret",
+            Self::GetSecret { .. } => "get_secret",
+            Self::ListConversations { .. } => "list_conversations",
+            Self::GetConversation { .. } => "get_conversation",
+            Self::NewConversation { .. } => "new_conversation",
+            Self::DeleteConversation { .. } => "delete_conversation",
+            Self::AgentListArtifacts { .. } => "agent_list_artifacts",
+            Self::AgentReadArtifact { .. } => "agent_read_artifact",
+            Self::AgentWriteArtifact { .. } => "agent_write_artifact",
+            Self::AgentListBindings { .. } => "agent_list_bindings",
+            Self::AgentPutBinding { .. } => "agent_put_binding",
+            Self::AgentGetBinding { .. } => "agent_get_binding",
+            Self::AgentListSecrets { .. } => "agent_list_secrets",
+            Self::AgentPutSecret { .. } => "agent_put_secret",
+            Self::AgentGetSecret { .. } => "agent_get_secret",
+            Self::ConversationStartSession { .. } => "conversation_start_session",
+            Self::ConversationEndSession { .. } => "conversation_end_session",
+            Self::ConversationBeginTurn { .. } => "conversation_begin_turn",
+            Self::ConversationGetEvents { .. } => "conversation_get_events",
+            Self::ConversationGetEvent { .. } => "conversation_get_event",
+            Self::ConversationAddEvents { .. } => "conversation_add_events",
+            Self::ConversationFork { .. } => "conversation_fork",
+            Self::ConversationListArtifacts { .. } => "conversation_list_artifacts",
+            Self::ConversationReadArtifact { .. } => "conversation_read_artifact",
+            Self::ConversationWriteArtifact { .. } => "conversation_write_artifact",
+            Self::ConversationListBindings { .. } => "conversation_list_bindings",
+            Self::ConversationPutBinding { .. } => "conversation_put_binding",
+            Self::ConversationGetBinding { .. } => "conversation_get_binding",
+            Self::ConversationListSecrets { .. } => "conversation_list_secrets",
+            Self::ConversationPutSecret { .. } => "conversation_put_secret",
+            Self::ConversationGetSecret { .. } => "conversation_get_secret",
+            Self::TurnAddEvents { .. } => "turn_add_events",
+            Self::TurnWriteArtifact { .. } => "turn_write_artifact",
+            Self::TurnFinish { .. } => "turn_finish",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
@@ -263,4 +317,32 @@ pub enum Response {
         event_id: EventId,
     },
     Unit,
+}
+
+impl Response {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Agents { .. } => "agents",
+            Self::Agent { .. } => "agent",
+            Self::Bool { .. } => "bool",
+            Self::Conversations { .. } => "conversations",
+            Self::Conversation { .. } => "conversation",
+            Self::Events { .. } => "events",
+            Self::Event { .. } => "event",
+            Self::AddEvents { .. } => "add_events",
+            Self::SessionId { .. } => "session_id",
+            Self::ArtifactVersions { .. } => "artifact_versions",
+            Self::Artifact { .. } => "artifact",
+            Self::ArtifactVersion { .. } => "artifact_version",
+            Self::Bindings { .. } => "bindings",
+            Self::Binding { .. } => "binding",
+            Self::Secrets { .. } => "secrets",
+            Self::Secret { .. } => "secret",
+            Self::BindingId { .. } => "binding_id",
+            Self::SecretId { .. } => "secret_id",
+            Self::Turn { .. } => "turn",
+            Self::EventId { .. } => "event_id",
+            Self::Unit => "unit",
+        }
+    }
 }

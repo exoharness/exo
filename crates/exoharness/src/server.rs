@@ -228,6 +228,21 @@ impl ExoHarnessServer {
                 conversation.end_session(session_id).await?;
                 Ok(Response::Unit)
             }
+            Request::ConversationBeginTurn {
+                agent_id,
+                conversation_id,
+                request,
+            } => {
+                let conversation = self.require_conversation(agent_id, conversation_id).await?;
+                let turn = conversation.begin_turn(request).await?;
+                Ok(Response::Turn {
+                    turn: self.register_turn(
+                        agent_id,
+                        conversation.record().clone(),
+                        Arc::clone(&turn),
+                    ),
+                })
+            }
             Request::ConversationGetEvents {
                 agent_id,
                 conversation_id,

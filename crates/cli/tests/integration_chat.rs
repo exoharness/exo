@@ -124,7 +124,7 @@ fn canned_response_body() -> Value {
 async fn chat_send_round_trips_through_real_sandbox_and_mocked_openai() {
     let backend = SandboxBackend::from_env();
     if !backend.runtime_available() {
-        eprintln!(
+        println!(
             "sandbox backend {:?} not available on this runner, skipping",
             backend
         );

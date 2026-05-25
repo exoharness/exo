@@ -12,21 +12,24 @@ mod secret_tests;
 mod tui;
 
 use std::collections::HashMap;
+use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use executor::{
     AgentHarnessKind, BasicExoHarness, BasicExoHarnessConfig, BasicHarness, Binding,
     BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig, ConversationModelConfig,
     CreateAgentRequest, CreateConversationRequest, EventQuery, EventQueryDirection, ExoHarness,
-    FileSystemMount, FileSystemMountMode, ForkConversationRequest, Harness, HarnessAgent,
-    HarnessConversation, PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR,
-    SandboxBackendChoice, Secret, SecretBackendChoice, SendRequest, TypeScriptHarness,
-    TypeScriptHarnessConfig, Uuid7, load_agent_config,
+    ExoHarnessHttpServeOptions, FileSystemMount, FileSystemMountMode, ForkConversationRequest,
+    HTTP_EXOHARNESS_TRACING_TARGET, Harness, HarnessAgent, HarnessConversation, HttpExoHarness,
+    PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, Secret,
+    SecretBackendChoice, SendRequest, TypeScriptHarness, TypeScriptHarnessConfig, Uuid7,
+    load_agent_config, serve_exoharness_http_listener_with_options,
 };
 use lingua::Message;
 use lingua::universal::{AssistantContent, AssistantContentPart, ToolContentPart, UserContent};
+use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::env::CliEnvironment;
 use tui::run_chat_repl;
@@ -58,6 +61,8 @@ struct Cli {
     braintrust_app_url: Option<String>,
     #[arg(long, global = true, env = "BRAINTRUST_API_URL", hide = true)]
     braintrust_api_url: Option<String>,
+    #[arg(long, global = true, env = "EXO_EXOHARNESS_URL")]
+    exoharness_url: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -171,6 +176,12 @@ enum Commands {
     Model {
         #[command(subcommand)]
         command: ModelCommands,
+    },
+    Serve {
+        #[arg(long, default_value = "127.0.0.1:4766")]
+        bind: SocketAddr,
+        #[arg(short, long, action = ArgAction::Count)]
+        verbose: u8,
     },
 }
 
@@ -396,9 +407,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.braintrust_api_url,
     );
     let env_vars = env.into_vars();
-    let harness_kind = determine_harness_kind(&exo_config, cli.harness, &cli.command).await?;
+    if let Some(config) = serve_config(&cli.command) {
+        serve_exoharness_http(&exo_config, config).await?;
+        return Ok(());
+    }
+
+    let exoharness = instantiate_exoharness(&exo_config, cli.exoharness_url.as_deref()).await?;
+    let harness_kind =
+        determine_harness_kind(exoharness.as_ref(), cli.harness, &cli.command).await?;
     let harness = instantiate_harness(
-        &exo_config,
+        exoharness,
         harness_kind,
         runtime_config.clone(),
         env_vars.clone(),
@@ -1257,6 +1275,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("registered model {} ({})", name, id);
             }
         },
+        Commands::Serve { .. } => {
+            unreachable!("serve commands are handled before harness instantiation")
+        }
     }
 
     harness.flush_tracing().await?;
@@ -1264,7 +1285,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn determine_harness_kind(
-    exo_config: &BasicExoHarnessConfig,
+    exoharness: &dyn ExoHarness,
     override_kind: Option<HarnessKind>,
     command: &Commands,
 ) -> Result<HarnessKind, Box<dyn std::error::Error>> {
@@ -1276,7 +1297,7 @@ async fn determine_harness_kind(
         return Ok(HarnessKind::Basic);
     };
 
-    Ok(infer_agent_harness_kind(exo_config, agent_ref)
+    Ok(infer_agent_harness_kind(exoharness, agent_ref)
         .await?
         .unwrap_or(HarnessKind::Basic))
 }
@@ -1309,15 +1330,71 @@ fn command_agent_ref(command: &Commands) -> Option<&str> {
             }
         },
         Commands::Repl { agent, .. } => Some(agent.as_deref().unwrap_or(DEFAULT_REPL_SLUG)),
-        Commands::Secret { .. } | Commands::Model { .. } => None,
+        Commands::Secret { .. } | Commands::Model { .. } | Commands::Serve { .. } => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ServeConfig {
+    bind: SocketAddr,
+    verbosity: u8,
+}
+
+fn serve_config(command: &Commands) -> Option<ServeConfig> {
+    match command {
+        Commands::Serve { bind, verbose } => Some(ServeConfig {
+            bind: *bind,
+            verbosity: *verbose,
+        }),
+        _ => None,
+    }
+}
+
+async fn serve_exoharness_http(
+    exo_config: &BasicExoHarnessConfig,
+    config: ServeConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    init_serve_tracing(config.verbosity);
+    let exoharness = Arc::new(BasicExoHarness::new(exo_config.clone()).await?);
+    let listener = TcpListener::bind(config.bind)?;
+    let addr = listener.local_addr()?;
+    println!("serving exoharness HTTP on http://{addr}");
+    serve_exoharness_http_listener_with_options(
+        listener,
+        exoharness,
+        ExoHarnessHttpServeOptions {
+            verbosity: config.verbosity,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+fn init_serve_tracing(verbosity: u8) {
+    if verbosity == 0 {
+        return;
+    }
+    let level = if verbosity > 1 {
+        tracing_subscriber::filter::LevelFilter::DEBUG
+    } else {
+        tracing_subscriber::filter::LevelFilter::INFO
+    };
+    let filter = tracing_subscriber::filter::Targets::new()
+        .with_target(HTTP_EXOHARNESS_TRACING_TARGET, level);
+    let layer = tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .without_time()
+        .with_writer(std::io::stderr)
+        .with_filter(filter);
+    match tracing_subscriber::registry().with(layer).try_init() {
+        Ok(()) | Err(_) => {}
     }
 }
 
 async fn infer_agent_harness_kind(
-    exo_config: &BasicExoHarnessConfig,
+    exoharness: &dyn ExoHarness,
     agent_ref: &str,
 ) -> Result<Option<HarnessKind>, Box<dyn std::error::Error>> {
-    let exoharness = BasicExoHarness::new(exo_config.clone()).await?;
     let agent = if let Ok(agent_id) = agent_ref.parse::<Uuid7>() {
         exoharness.get_agent(&agent_id).await?
     } else {
@@ -1335,22 +1412,38 @@ async fn infer_agent_harness_kind(
     Ok(Some(from_agent_harness_kind(config.harness)))
 }
 
-async fn instantiate_harness(
+async fn instantiate_exoharness(
     exo_config: &BasicExoHarnessConfig,
+    http_url: Option<&str>,
+) -> Result<Arc<dyn ExoHarness>, Box<dyn std::error::Error>> {
+    if let Some(http_url) = http_url {
+        return Ok(Arc::new(HttpExoHarness::new(http_url)?));
+    }
+    Ok(Arc::new(BasicExoHarness::new(exo_config.clone()).await?))
+}
+
+async fn instantiate_harness(
+    exoharness: Arc<dyn ExoHarness>,
     kind: HarnessKind,
     runtime_config: Option<BraintrustRuntimeConfig>,
     env_vars: HashMap<String, String>,
 ) -> Result<Arc<dyn Harness>, Box<dyn std::error::Error>> {
     let harness: Arc<dyn Harness> = match kind {
-        HarnessKind::Basic => {
-            Arc::new(BasicHarness::from_config(exo_config.clone(), runtime_config, env_vars).await?)
-        }
-        HarnessKind::Rlm => {
-            Arc::new(RlmHarness::from_config(exo_config.clone(), runtime_config, env_vars).await?)
-        }
-        HarnessKind::TypeScript => Arc::new(
-            TypeScriptHarness::from_config(exo_config.clone(), runtime_config, env_vars).await?,
-        ),
+        HarnessKind::Basic => Arc::new(BasicHarness::from_exoharness(
+            exoharness,
+            runtime_config,
+            env_vars,
+        )),
+        HarnessKind::Rlm => Arc::new(RlmHarness::from_exoharness(
+            exoharness,
+            runtime_config,
+            env_vars,
+        )),
+        HarnessKind::TypeScript => Arc::new(TypeScriptHarness::from_exoharness(
+            exoharness,
+            runtime_config,
+            env_vars,
+        )?),
     };
     Ok(harness)
 }

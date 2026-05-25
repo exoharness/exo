@@ -11,6 +11,7 @@ rust-version = "1.95"
 [workspace.dependencies]
 anyhow = "1.0.100"
 async-trait = "0.1.89"
+actix-web = "4.9.0"
 braintrust-sdk-rust = { git = "https://github.com/braintrustdata/braintrust-sdk-rust", rev = "55dcefd989b6038edb5ef8dfc438384340d5f4ae" }
 bytes = "1.10.1"
 chrono = { version = "0.4.42", features = ["serde"] }
@@ -49,6 +50,8 @@ tokio = { version = "1.52.1", features = [
 ] }
 tokio-stream = "0.1.17"
 tokio-util = { version = "0.7.18", features = ["compat"] }
+tracing = "0.1.44"
+tracing-subscriber = "0.3.20"
 url = "2.5.7"
 uuid = { version = "1.18.1", features = ["serde", "v4", "v7"] }
 

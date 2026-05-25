@@ -3,6 +3,10 @@ mod basic;
 #[cfg(all(test, not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod basic_tests;
 mod error;
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+mod http;
+#[cfg(all(test, not(target_arch = "wasm32"), feature = "basic-backend"))]
+mod http_tests;
 pub mod protocol;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod sandbox;
@@ -18,6 +22,8 @@ mod uuid7;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub use basic::*;
 pub use error::*;
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+pub use http::*;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub use sandbox::*;
 pub use types::*;

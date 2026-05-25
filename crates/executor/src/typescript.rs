@@ -587,14 +587,13 @@ impl<T> TypeScriptHarness<T> {
 }
 
 impl TypeScriptHarness<BasicToolRuntime> {
-    pub async fn from_config(
-        exo_config: BasicExoHarnessConfig,
+    pub fn from_exoharness(
+        exoharness: Arc<dyn ExoHarness>,
         runtime_config: Option<BraintrustRuntimeConfig>,
         env: HashMap<String, String>,
     ) -> Result<Self> {
         let workspace_root = std::env::current_dir()
             .context("failed to resolve current directory for TypeScript harness")?;
-        let exoharness: Arc<dyn ExoHarness> = Arc::new(BasicExoHarness::new(exo_config).await?);
         let tools = Arc::new(BasicToolRuntime);
         let runtime = ExecutorHarnessRuntime::new(
             TypeScriptExecutor::new(Arc::clone(&exoharness), workspace_root, env, tools),
@@ -603,6 +602,18 @@ impl TypeScriptHarness<BasicToolRuntime> {
         Ok(Self {
             inner: SharedHarness::new(exoharness, runtime),
         })
+    }
+
+    pub async fn from_config(
+        exo_config: BasicExoHarnessConfig,
+        runtime_config: Option<BraintrustRuntimeConfig>,
+        env: HashMap<String, String>,
+    ) -> Result<Self> {
+        Self::from_exoharness(
+            Arc::new(BasicExoHarness::new(exo_config).await?),
+            runtime_config,
+            env,
+        )
     }
 }
 
