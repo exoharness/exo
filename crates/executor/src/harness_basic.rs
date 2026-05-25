@@ -33,7 +33,7 @@ impl BasicHarness<RouterModelClient, BasicToolRuntime> {
         env: HashMap<String, String>,
     ) -> Result<Self> {
         let exoharness = Arc::new(BasicExoHarness::new(exo_config).await?);
-        let model = Arc::new(RouterModelClient::new(env)?);
+        let model = Arc::new(RouterModelClient::new(env).await);
         let tools = Arc::new(BasicToolRuntime);
         let runtime = ExecutorHarnessRuntime::new(BasicExecutor::new(model, tools), runtime_config);
         Ok(Self {

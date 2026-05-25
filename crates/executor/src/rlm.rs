@@ -777,7 +777,7 @@ impl RlmHarness<RouterModelClient> {
         env: HashMap<String, String>,
     ) -> Result<Self> {
         let exoharness = Arc::new(BasicExoHarness::new(exo_config).await?);
-        let model = Arc::new(RouterModelClient::new(env)?);
+        let model = Arc::new(RouterModelClient::new(env).await);
         let runtime = ExecutorHarnessRuntime::new(RlmExecutor::new(model), runtime_config);
 
         Ok(Self {

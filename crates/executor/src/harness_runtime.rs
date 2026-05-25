@@ -32,12 +32,11 @@ pub struct RouterModelClient {
 }
 
 impl RouterModelClient {
-    pub fn new(env: HashMap<String, String>) -> Result<Self> {
-        let catalog = load_model_catalog(&env)?;
-        Ok(Self {
+    pub async fn new(env: HashMap<String, String>) -> Self {
+        Self {
             env: Arc::new(env),
-            catalog: Arc::new(catalog),
-        })
+            catalog: shared_model_catalog().await,
+        }
     }
 }
 
@@ -149,16 +148,45 @@ fn optional_env(env: &HashMap<String, String>, key: &str) -> Option<String> {
     env.get(key).cloned().or_else(|| std::env::var(key).ok())
 }
 
-/// Path to a Braintrust-style `model_list.json` registry to resolve model
-/// capabilities (wire format, flavor, context window, ...). When unset, models
-/// are resolved by name via lingua's built-in model-family detection.
-const MODEL_LIST_PATH_ENV: &str = "EXO_MODEL_LIST_PATH";
+/// Public Braintrust model registry, used to resolve model capabilities (wire
+/// format, flavor, context window, ...).
+const MODEL_LIST_URL: &str = "https://raw.githubusercontent.com/braintrustdata/braintrust-proxy/main/packages/proxy/schema/model_list.json";
 
-fn load_model_catalog(env: &HashMap<String, String>) -> Result<ModelCatalog> {
-    match optional_env(env, MODEL_LIST_PATH_ENV) {
-        Some(path) => Ok(ModelCatalog::from_file(&path)?),
-        None => Ok(ModelCatalog::empty()),
-    }
+/// Load the model registry once per process and reuse it afterwards.
+///
+/// The catalog is fetched the first time it is needed. If the fetch fails
+/// (offline, network error, ...) we fall back to an empty catalog, which
+/// resolves models by name via lingua's built-in model-family detection.
+async fn shared_model_catalog() -> Arc<ModelCatalog> {
+    static CATALOG: tokio::sync::OnceCell<Arc<ModelCatalog>> = tokio::sync::OnceCell::const_new();
+    CATALOG
+        .get_or_init(|| async {
+            match fetch_model_catalog().await {
+                Ok(catalog) => Arc::new(catalog),
+                Err(error) => {
+                    eprintln!(
+                        "exo: could not load the model registry from {MODEL_LIST_URL}: {error}; \
+                         falling back to name-based model detection"
+                    );
+                    Arc::new(ModelCatalog::empty())
+                }
+            }
+        })
+        .await
+        .clone()
+}
+
+async fn fetch_model_catalog() -> Result<ModelCatalog> {
+    let body = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?
+        .get(MODEL_LIST_URL)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    Ok(ModelCatalog::from_json_str(&body)?)
 }
 
 /// Resolve the model spec and the wire format to use for a request.
@@ -402,12 +430,6 @@ mod tests {
         };
         let (spec, _) = resolve_model(&ModelCatalog::empty(), &request);
         assert_eq!(spec.max_output_tokens, Some(4096));
-    }
-
-    #[test]
-    fn load_model_catalog_defaults_to_empty_without_env() {
-        let catalog = load_model_catalog(&HashMap::new()).expect("empty env yields empty catalog");
-        assert!(catalog.is_empty());
     }
 
     #[test]
