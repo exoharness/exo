@@ -21,7 +21,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use executor::{
     AgentHarnessKind, BasicExoHarness, BasicExoHarnessConfig, BasicHarness, Binding,
     BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig, ConversationModelConfig,
-    CreateAgentRequest, CreateConversationRequest, EventKind, EventQuery, EventQueryDirection,
+    CreateAgentRequest, CreateConversationRequest, DaytonaConfig, EventKind, EventQuery,
+    EventQueryDirection,
     ExoHarness, FileSystemMount, FileSystemMountMode, ForkConversationRequest, Harness,
     HarnessAgent, HarnessConversation, PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR,
     SandboxBackendChoice, Secret, SecretBackendChoice, SendRequest, TypeScriptHarness,
@@ -180,6 +181,7 @@ enum SandboxBackendArg {
     Docker,
     #[value(name = "local-process")]
     LocalProcess,
+    Daytona,
 }
 
 fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
@@ -193,6 +195,7 @@ fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
         SandboxBackendArg::AppleContainer => SandboxBackendChoice::AppleContainer,
         SandboxBackendArg::Docker => SandboxBackendChoice::Docker,
         SandboxBackendArg::LocalProcess => SandboxBackendChoice::LocalProcess,
+        SandboxBackendArg::Daytona => SandboxBackendChoice::Daytona(DaytonaConfig::from_env()?),
     };
     Ok(BasicExoHarnessConfig {
         root: cli.root.join("exoharness"),
