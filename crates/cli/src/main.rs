@@ -194,8 +194,8 @@ enum AgentCommands {
         slug: Option<String>,
         #[arg(long)]
         module: Option<PathBuf>,
-        #[arg(long = "tool-manifest")]
-        tool_manifests: Vec<PathBuf>,
+        #[arg(long = "tool-module")]
+        tool_modules: Vec<PathBuf>,
         #[arg(long, value_enum)]
         tool_creation: Option<EnabledDisabled>,
         #[arg(long)]
@@ -223,10 +223,10 @@ enum AgentCommands {
         module: Option<PathBuf>,
         #[arg(long)]
         clear_module: bool,
-        #[arg(long = "tool-manifest")]
-        tool_manifests: Vec<PathBuf>,
-        #[arg(long = "clear-tool-manifests")]
-        clear_tool_manifests: bool,
+        #[arg(long = "tool-module")]
+        tool_modules: Vec<PathBuf>,
+        #[arg(long)]
+        clear_tool_modules: bool,
         #[arg(long, value_enum)]
         tool_creation: Option<EnabledDisabled>,
         #[arg(long)]
@@ -489,7 +489,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 name,
                 slug,
                 module,
-                tool_manifests,
+                tool_modules,
                 tool_creation,
                 sandbox_image,
                 networking,
@@ -514,7 +514,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let typescript = build_typescript_harness_config(
                     harness_kind,
                     module.as_deref(),
-                    &tool_manifests,
+                    &tool_modules,
                 )?;
                 let agent = harness
                     .create_agent(CreateAgentRequest {
@@ -548,8 +548,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 set_harness,
                 module,
                 clear_module,
-                tool_manifests,
-                clear_tool_manifests,
+                tool_modules,
+                clear_tool_modules,
                 tool_creation,
                 sandbox_image,
                 clear_sandbox_image,
@@ -567,13 +567,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if clear_module && module.is_some() {
                     return Err("provide either --clear-module or --module, not both".into());
                 }
-                if clear_tool_manifests && !tool_manifests.is_empty() {
+                if clear_tool_modules && !tool_modules.is_empty() {
                     return Err(
-                        "provide either --clear-tool-manifests or --tool-manifest, not both".into(),
+                        "provide either --clear-tool-modules or --tool-module, not both".into(),
                     );
                 }
-                if clear_module && !tool_manifests.is_empty() {
-                    return Err("provide either --clear-module or --tool-manifest, not both".into());
+                if clear_module && !tool_modules.is_empty() {
+                    return Err("provide either --clear-module or --tool-module, not both".into());
                 }
                 if clear_sandbox_image && sandbox_image.is_some() {
                     return Err(
@@ -624,10 +624,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .as_ref()
                         .map(|typescript| typescript.tool_module_paths.clone())
                         .unwrap_or_default();
-                    let tool_module_paths = if tool_manifests.is_empty() {
+                    let tool_module_paths = if tool_modules.is_empty() {
                         existing_tool_modules
                     } else {
-                        resolve_typescript_tool_module_paths(&tool_manifests)?
+                        resolve_typescript_tool_module_paths(&tool_modules)?
                     };
                     let typescript = Some(resolve_typescript_harness_config(
                         module,
@@ -637,23 +637,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         config.typescript = typescript;
                         changed = true;
                     }
-                } else if clear_tool_manifests {
+                } else if clear_tool_modules {
                     if let Some(typescript) = config.typescript.as_mut()
                         && !typescript.tool_module_paths.is_empty()
                     {
                         typescript.tool_module_paths.clear();
                         changed = true;
                     }
-                } else if !tool_manifests.is_empty() {
+                } else if !tool_modules.is_empty() {
                     if config.harness != AgentHarnessKind::TypeScript {
-                        return Err("--tool-manifest is only valid with TypeScript agents".into());
+                        return Err("--tool-module is only valid with TypeScript agents".into());
                     }
                     let Some(typescript) = config.typescript.as_mut() else {
                         return Err(
                             "typescript agents require a module path; pass --module <path>".into(),
                         );
                     };
-                    let tool_module_paths = resolve_typescript_tool_module_paths(&tool_manifests)?;
+                    let tool_module_paths = resolve_typescript_tool_module_paths(&tool_modules)?;
                     if typescript.tool_module_paths != tool_module_paths {
                         typescript.tool_module_paths = tool_module_paths;
                         changed = true;
@@ -728,7 +728,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )?;
                     if updated_braintrust.is_none() && !changed {
                         return Err(
-                            "no changes provided; pass --set-harness, --module, --tool-manifest, --clear-tool-manifests, --tool-creation, --sandbox-image, --networking, model flags, --clear-braintrust, or Braintrust project flags"
+                            "no changes provided; pass --set-harness, --module, --tool-module, --clear-tool-modules, --tool-creation, --sandbox-image, --networking, model flags, --clear-braintrust, or Braintrust project flags"
                                 .into(),
                         );
                     }
@@ -768,7 +768,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .as_ref()
                     .map(|config| config.tool_module_paths.as_slice())
                     .unwrap_or_default();
-                println!("typescript_tool_manifests: {}", tool_module_paths.len());
+                println!("typescript_tool_modules: {}", tool_module_paths.len());
                 for tool_module_path in tool_module_paths {
                     println!("  - {}", tool_module_path);
                 }
@@ -1475,15 +1475,15 @@ fn format_harness_kind(kind: AgentHarnessKind) -> &'static str {
 fn build_typescript_harness_config(
     harness_kind: HarnessKind,
     module: Option<&Path>,
-    tool_manifests: &[PathBuf],
+    tool_modules: &[PathBuf],
 ) -> Result<Option<TypeScriptHarnessConfig>, Box<dyn std::error::Error>> {
-    if !matches!(harness_kind, HarnessKind::TypeScript) && !tool_manifests.is_empty() {
-        return Err("--tool-manifest is only valid with --harness typescript".into());
+    if !matches!(harness_kind, HarnessKind::TypeScript) && !tool_modules.is_empty() {
+        return Err("--tool-module is only valid with --harness typescript".into());
     }
     match (harness_kind, module) {
         (HarnessKind::TypeScript, Some(module)) => Ok(Some(resolve_typescript_harness_config(
             module,
-            resolve_typescript_tool_module_paths(tool_manifests)?,
+            resolve_typescript_tool_module_paths(tool_modules)?,
         )?)),
         (HarnessKind::TypeScript, None) => Err("typescript agents require --module <path>".into()),
         (_, Some(_)) => Err("--module is only valid with --harness typescript".into()),

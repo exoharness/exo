@@ -130,20 +130,20 @@ agent is created or updated:
 exo --harness typescript agent create "Tool Demo" \
   --module examples/typescript/basic-harness.ts \
   --model gpt-5.4 \
-  --tool-manifest examples/typescript/tools/uppercase.ts
+  --tool-module examples/typescript/tools/uppercase.ts
 ```
 
-`--tool-manifest` may be passed more than once. Each value is a TypeScript
-module path. The module can default-export a `Tool`, `ToolModuleEntry`,
-`ToolModule`, or an array of those values.
+`--tool-module` may be passed more than once. Each value is a TypeScript module
+path. The module can default-export a `Tool`, `ToolModuleEntry`, `ToolModule`,
+or an array of those values.
 
 Existing TypeScript agents can be updated in place:
 
 ```bash
 exo agent update tool-demo \
-  --tool-manifest examples/typescript/tools/uppercase.ts
+  --tool-module examples/typescript/tools/uppercase.ts
 
-exo agent update tool-demo --clear-tool-manifests
+exo agent update tool-demo --clear-tool-modules
 ```
 
 Agent tool creation is enabled by default. Disable or re-enable it with:
@@ -198,4 +198,4 @@ when agent tool creation is enabled.
 
 There is an example library tool at `examples/typescript/tools/uppercase.ts`.
 It exists to test and demonstrate the registry contract, and can be enabled with
-`--tool-manifest examples/typescript/tools/uppercase.ts`.
+`--tool-module examples/typescript/tools/uppercase.ts`.
