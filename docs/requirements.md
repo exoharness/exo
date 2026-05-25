@@ -59,6 +59,17 @@ descriptors) and is backed by CRIU on the Docker backend. It needs:
 
   Then `sudo systemctl restart docker`.
 
+- **Passwordless `sudo` for the user running `exo`.** The docker daemon
+  writes CRIU dump files as root (mode 0600), so the snapshot path needs
+  one `sudo chown` to claim them before tarring. Restore stays user-level.
+  Typical dev workstations already have passwordless sudo; for a hardened
+  machine, add a sudoers fragment:
+
+  ```
+  # /etc/sudoers.d/exo-criu  (edit with `sudo visudo -f /etc/sudoers.d/exo-criu`)
+  yourname ALL=(root) NOPASSWD: /usr/bin/chown
+  ```
+
 - **Apple Silicon macOS / `apple-container` backend.** Not yet implemented
   end-to-end. The underlying VZ framework supports `pause` +
   `saveMachineStateTo:`, but Apple's `container` CLI does not yet expose

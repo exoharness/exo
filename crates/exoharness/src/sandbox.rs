@@ -1364,6 +1364,7 @@ fn new_warm_container_name(key: &SandboxKey) -> String {
     format!("exo-{hash:016x}-{}", &generation[..8])
 }
 
+
 /// Capture a docker container's filesystem state as a SnapshotPayload.
 ///
 /// Pipeline:
@@ -1460,17 +1461,15 @@ async fn docker_snapshot_container_checkpoint(
 ) -> Result<SnapshotPayload> {
     docker_require_experimental(container_bin).await?;
 
-    let tmpdir = tempfile::Builder::new()
-        .prefix("exo-checkpoint-")
-        .tempdir()
-        .context("creating tempdir for docker checkpoint")?;
     let checkpoint_name = "exo-snap";
 
+    // Create checkpoint in docker's default location. We use the default
+    // (not --checkpoint-dir) because `docker start --checkpoint` rejects
+    // custom dirs on the restore side; keeping create symmetric avoids
+    // a copy.
     let create_output = Command::new(container_bin)
         .arg("checkpoint")
         .arg("create")
-        .arg("--checkpoint-dir")
-        .arg(tmpdir.path())
         .arg(container_name)
         .arg(checkpoint_name)
         .output()
@@ -1485,29 +1484,92 @@ async fn docker_snapshot_container_checkpoint(
         );
     }
 
-    // The checkpoint dir docker writes to is <tmpdir>/<name>. Tar it up.
-    let checkpoint_path = tmpdir.path().join(checkpoint_name);
-    let tar_output = Command::new("tar")
+    // Read the checkpoint dump out of docker's storage. Files are root-
+    // owned 0600 since the daemon (and CRIU) run as root, so this needs
+    // sudo. We pull the bytes and then clean up the local copy via
+    // `docker checkpoint rm` — exoharness storage is the canonical home,
+    // not the docker daemon.
+    let checkpoint_dir = docker_checkpoint_dir(container_bin, container_name, checkpoint_name).await?;
+    let tar_output = Command::new("sudo")
+        .arg("-n")
+        .arg("tar")
         .arg("-cf")
         .arg("-")
         .arg("-C")
-        .arg(&checkpoint_path)
+        .arg(&checkpoint_dir)
         .arg(".")
         .output()
         .await
-        .context("tarring docker checkpoint directory")?;
+        .context("running `sudo tar` on docker checkpoint directory")?;
     if !tar_output.status.success() {
+        // Best-effort cleanup of the local checkpoint copy.
+        let _ = Command::new(container_bin)
+            .arg("checkpoint")
+            .arg("rm")
+            .arg(container_name)
+            .arg(checkpoint_name)
+            .output()
+            .await;
         bail!(
-            "tarring docker checkpoint failed: {}",
+            "tarring docker checkpoint failed: {}\n\
+             (full-state snapshots need passwordless sudo to read the CRIU \
+             dump that the docker daemon wrote as root — see \
+             docs/requirements.md)",
             render_command_error(&tar_output.stderr)
         );
     }
     let bytes = Bytes::from(tar_output.stdout);
 
+    let rm_output = Command::new(container_bin)
+        .arg("checkpoint")
+        .arg("rm")
+        .arg(container_name)
+        .arg(checkpoint_name)
+        .output()
+        .await;
+    if let Ok(output) = &rm_output
+        && !output.status.success()
+    {
+        eprintln!(
+            "warning: failed to clean up local docker checkpoint {checkpoint_name}: {}",
+            render_command_error(&output.stderr)
+        );
+    }
+
     Ok(SnapshotPayload {
         kind: SnapshotKind::DockerCheckpointTar,
         bytes,
     })
+}
+
+/// Look up the on-host path docker uses for a given container's named
+/// checkpoint. Format is /var/lib/docker/containers/<full-id>/checkpoints/<name>/
+async fn docker_checkpoint_dir(
+    container_bin: &Path,
+    container_name: &str,
+    checkpoint_name: &str,
+) -> Result<PathBuf> {
+    let inspect = Command::new(container_bin)
+        .arg("inspect")
+        .arg("--format")
+        .arg("{{.Id}}")
+        .arg(container_name)
+        .output()
+        .await
+        .with_context(|| format!("running `docker inspect` on {container_name}"))?;
+    if !inspect.status.success() {
+        bail!(
+            "docker inspect {container_name} failed: {}",
+            render_command_error(&inspect.stderr)
+        );
+    }
+    let id = String::from_utf8_lossy(&inspect.stdout).trim().to_string();
+    if id.is_empty() {
+        bail!("docker inspect returned an empty container id for {container_name}");
+    }
+    Ok(PathBuf::from(format!(
+        "/var/lib/docker/containers/{id}/checkpoints/{checkpoint_name}"
+    )))
 }
 
 /// Restore a docker container from a CRIU checkpoint tarball.
@@ -1530,49 +1592,12 @@ async fn docker_restore_container_checkpoint(
 ) -> Result<(String, SandboxRequest)> {
     docker_require_experimental(container_bin).await?;
 
-    let tmpdir = tempfile::Builder::new()
-        .prefix("exo-restore-")
-        .tempdir()
-        .context("creating tempdir for docker checkpoint restore")?;
     let checkpoint_name = "exo-snap";
-    let checkpoint_path = tmpdir.path().join(checkpoint_name);
-    std::fs::create_dir_all(&checkpoint_path)
-        .with_context(|| format!("creating {}", checkpoint_path.display()))?;
 
-    // Untar payload into <tmp>/<checkpoint_name>.
-    use tokio::io::AsyncWriteExt;
-    let mut untar = Command::new("tar")
-        .arg("-xf")
-        .arg("-")
-        .arg("-C")
-        .arg(&checkpoint_path)
-        .stdin(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("spawning tar -xf for checkpoint restore")?;
-    let mut stdin = untar
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow!("failed to acquire tar stdin"))?;
-    stdin
-        .write_all(payload)
-        .await
-        .context("writing checkpoint bytes to tar stdin")?;
-    stdin.shutdown().await.ok();
-    drop(stdin);
-    let untar_output = untar
-        .wait_with_output()
-        .await
-        .context("waiting on tar -xf")?;
-    if !untar_output.status.success() {
-        bail!(
-            "untarring docker checkpoint failed: {}",
-            render_command_error(&untar_output.stderr)
-        );
-    }
-
-    // Create (don't start) the container. Same arg shape as
+    // Create (don't start) the new container. Same arg shape as
     // create_named_warm_sandbox but with `create` instead of `run --detach`.
+    // We need the container to exist before we can drop a checkpoint into
+    // its on-host checkpoints/ directory.
     let name = new_warm_container_name(&request.key);
     let mut create_proc = Command::new(container_bin);
     create_proc
@@ -1613,19 +1638,97 @@ async fn docker_restore_container_checkpoint(
         );
     }
 
-    // Start the container from the checkpoint.
+    // Drop the checkpoint into docker's storage at the canonical path
+    // /var/lib/docker/containers/<new-id>/checkpoints/<name>/. `docker
+    // start --checkpoint` only reads from this default location (it
+    // explicitly rejects --checkpoint-dir on the restore side), so we
+    // have to write directly into it. Needs sudo since the dir tree is
+    // root-owned.
+    let checkpoint_dir = match docker_checkpoint_dir(container_bin, &name, checkpoint_name).await {
+        Ok(dir) => dir,
+        Err(error) => {
+            let _ = Command::new(container_bin)
+                .arg("rm")
+                .arg("-f")
+                .arg(&name)
+                .output()
+                .await;
+            return Err(error);
+        }
+    };
+
+    let mkdir_output = Command::new("sudo")
+        .arg("-n")
+        .arg("mkdir")
+        .arg("-p")
+        .arg(&checkpoint_dir)
+        .output()
+        .await
+        .context("running `sudo mkdir` for docker checkpoint restore")?;
+    if !mkdir_output.status.success() {
+        let _ = Command::new(container_bin)
+            .arg("rm")
+            .arg("-f")
+            .arg(&name)
+            .output()
+            .await;
+        bail!(
+            "sudo mkdir on checkpoint directory failed: {}\n\
+             (full-state restore needs passwordless sudo to drop the CRIU \
+             dump into /var/lib/docker — see docs/requirements.md)",
+            render_command_error(&mkdir_output.stderr)
+        );
+    }
+
+    use tokio::io::AsyncWriteExt;
+    let mut untar = Command::new("sudo")
+        .arg("-n")
+        .arg("tar")
+        .arg("-xf")
+        .arg("-")
+        .arg("-C")
+        .arg(&checkpoint_dir)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawning `sudo tar -xf` for checkpoint restore")?;
+    let mut stdin = untar
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("failed to acquire tar stdin"))?;
+    stdin
+        .write_all(payload)
+        .await
+        .context("writing checkpoint bytes to tar stdin")?;
+    stdin.shutdown().await.ok();
+    drop(stdin);
+    let untar_output = untar
+        .wait_with_output()
+        .await
+        .context("waiting on `sudo tar -xf`")?;
+    if !untar_output.status.success() {
+        let _ = Command::new(container_bin)
+            .arg("rm")
+            .arg("-f")
+            .arg(&name)
+            .output()
+            .await;
+        bail!(
+            "untarring docker checkpoint failed: {}",
+            render_command_error(&untar_output.stderr)
+        );
+    }
+
+    // Start the container from the checkpoint (default location).
     let start_output = Command::new(container_bin)
         .arg("start")
         .arg("--checkpoint")
         .arg(checkpoint_name)
-        .arg("--checkpoint-dir")
-        .arg(tmpdir.path())
         .arg(&name)
         .output()
         .await
         .context("running `docker start --checkpoint`")?;
     if !start_output.status.success() {
-        // Best-effort cleanup of the failed-to-start container.
         let _ = Command::new(container_bin)
             .arg("rm")
             .arg("-f")
