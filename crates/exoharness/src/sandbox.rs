@@ -114,6 +114,12 @@ pub enum SnapshotKind {
     /// `docker save` output: a tar of OCI image layers + manifest, loadable
     /// with `docker load`.
     DockerImageTar,
+    /// Reference to a named snapshot held inside Daytona's own snapshot
+    /// registry. The payload bytes are a small JSON manifest pointing at
+    /// the Daytona snapshot name; the actual filesystem state stays on
+    /// Daytona. Bytes-by-reference, not bytes-by-value — restoring is a
+    /// `POST /sandbox { snapshot: <name> }` call, not a tarball load.
+    DaytonaSnapshot,
 }
 
 #[async_trait]
@@ -198,8 +204,8 @@ const WARM_SANDBOX_KEEPALIVE_ARGV: &[&str] = &["sleep", "infinity"];
 const WARM_SANDBOX_HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(3);
 const WARM_SANDBOX_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const ORPHANED_WARM_SANDBOX_MIN_AGE: Duration = Duration::from_secs(60 * 60);
-const WARM_SANDBOX_KEY_LABEL: &str = "exo.sandbox.key";
-const WARM_SANDBOX_SPEC_HASH_LABEL: &str = "exo.sandbox.spec-hash";
+pub(crate) const WARM_SANDBOX_KEY_LABEL: &str = "exo.sandbox.key";
+pub(crate) const WARM_SANDBOX_SPEC_HASH_LABEL: &str = "exo.sandbox.spec-hash";
 const WARM_SANDBOX_OWNER_PID_LABEL: &str = "exo.sandbox.owner-pid";
 const APPLE_ABSOLUTE_TIME_UNIX_OFFSET_SECONDS: f64 = 978_307_200.0;
 
@@ -534,6 +540,10 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
         }
         match (self.cli, payload.kind) {
             (ContainerCliFlavor::Docker, SnapshotKind::DockerImageTar) => {}
+            (_, SnapshotKind::DaytonaSnapshot) => bail!(
+                "DaytonaSnapshot payloads can only be restored by the Daytona sandbox backend; \
+                 switch to --sandbox-backend daytona to rewind this snapshot"
+            ),
             (ContainerCliFlavor::AppleContainer, _) => bail!(
                 "restore-from-snapshot is not yet implemented for the apple-container backend"
             ),
@@ -1655,7 +1665,7 @@ fn is_already_exists_error(message: &str) -> bool {
     lower.contains("already exists")
 }
 
-fn sandbox_spec_hash(spec: &SandboxSpec) -> String {
+pub(crate) fn sandbox_spec_hash(spec: &SandboxSpec) -> String {
     let mut hasher = DefaultHasher::new();
     spec.hash(&mut hasher);
     format!("{:016x}", hasher.finish())

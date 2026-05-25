@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
+use crate::daytona::DaytonaSandboxBackend;
 use crate::sandbox::{
     CliContainerSandboxBackend, LocalProcessSandboxBackend, ManagedSandboxBackend,
     ManagedSandboxHandle, SANDBOX_MAIN_MOUNT_DIR, SandboxCommand, SandboxKey,
@@ -43,11 +44,12 @@ pub enum SecretBackendChoice {
     Static([u8; 32]),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum SandboxBackendChoice {
     AppleContainer,
     Docker,
     LocalProcess,
+    Daytona(crate::DaytonaConfig),
 }
 
 // TODO: as more knobs land here, swap to a builder pattern.
@@ -82,7 +84,7 @@ impl BasicExoHarness {
         let storage = BasicObjectStore::local_filesystem(&root).await?;
         let secret_cipher =
             build_secret_cipher(secret_backend, root.to_string_lossy().to_string())?;
-        let sandbox_backend = build_sandbox_backend(sandbox_backend);
+        let sandbox_backend = build_sandbox_backend(sandbox_backend)?;
         Ok(Self {
             inner: Arc::new(BasicExoHarnessInner {
                 storage,
@@ -1977,12 +1979,14 @@ fn build_secret_cipher(
     Ok(SecretCipher::new(provider))
 }
 
-fn build_sandbox_backend(choice: SandboxBackendChoice) -> Arc<dyn ManagedSandboxBackend> {
-    match choice {
+fn build_sandbox_backend(choice: SandboxBackendChoice) -> Result<Arc<dyn ManagedSandboxBackend>> {
+    let backend: Arc<dyn ManagedSandboxBackend> = match choice {
         SandboxBackendChoice::AppleContainer => {
             Arc::new(CliContainerSandboxBackend::apple_container())
         }
         SandboxBackendChoice::Docker => Arc::new(CliContainerSandboxBackend::docker()),
         SandboxBackendChoice::LocalProcess => Arc::new(LocalProcessSandboxBackend::new()),
-    }
+        SandboxBackendChoice::Daytona(config) => Arc::new(DaytonaSandboxBackend::new(config)?),
+    };
+    Ok(backend)
 }

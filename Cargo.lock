@@ -1879,6 +1879,7 @@ dependencies = [
  "keyring-core",
  "lingua",
  "object_store",
+ "reqwest",
  "serde",
  "serde_json 1.0.149",
  "tempfile",

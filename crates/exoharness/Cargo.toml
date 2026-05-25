@@ -12,6 +12,7 @@ basic-backend = [
   "dep:keyring",
   "dep:keyring-core",
   "dep:object_store",
+  "dep:reqwest",
   "dep:tokio",
   "dep:tokio-stream",
   "dep:tokio-util",
@@ -28,6 +29,7 @@ keyring = { version = "4.0.0-rc.3", optional = true }
 keyring-core = { version = "0.7.2", optional = true }
 lingua.workspace = true
 object_store = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
