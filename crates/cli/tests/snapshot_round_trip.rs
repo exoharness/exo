@@ -11,12 +11,12 @@
 //!   5. `start_sandbox` with the captured snapshot id — rewind
 //!   6. read the file back: it reads `version 1`, the sibling file is gone
 //!
-//! Linux + Docker only. `#[ignore]`'d so the regular `cargo test` skips it;
-//! CI runs it via `cargo test -- --ignored`. Self-skips when
-//! `EXO_TEST_SANDBOX_BACKEND` is set to anything other than `docker` so the
-//! matrix cells for other backends don't false-fail.
-
-#![cfg(target_os = "linux")]
+//! Backend-agnostic at the source level: docker works the same on Linux and
+//! macOS (Docker Desktop / Colima). `#[ignore]`'d so the regular `cargo test`
+//! skips it; CI runs it via `cargo test -- --ignored`. Self-skips when
+//! `EXO_TEST_SANDBOX_BACKEND` is set to anything other than `docker` (so the
+//! local-process matrix cells don't false-fail), and when `docker info` is
+//! unhappy on the runner.
 
 use std::process::Command;
 
@@ -234,8 +234,10 @@ fn preflight() -> bool {
     }
 
     // The integration workflow runs this test on every (os, sandbox-backend)
-    // matrix cell. Skip cleanly for cells that aren't testing the docker
-    // backend instead of failing them.
+    // matrix cell — including `*/local-process`. Skip cleanly for cells that
+    // aren't testing the docker backend instead of failing them. macOS+docker
+    // cells (Colima via the Intel runner) exercise this test exactly like
+    // Linux+docker cells.
     let backend = std::env::var("EXO_TEST_SANDBOX_BACKEND").unwrap_or_else(|_| "docker".into());
     if backend != "docker" {
         eprintln!(
