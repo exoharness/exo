@@ -157,6 +157,22 @@ There is intentionally no top-level `exo conversation snapshot` subcommand
 today — see "Known limits" for the cross-invocation gap that makes such
 a subcommand useless until it's resolved.
 
+## Executable demo
+
+[`crates/cli/tests/snapshot_round_trip.rs`](../crates/cli/tests/snapshot_round_trip.rs)
+is the canonical, runnable reference for using the snapshot APIs. It drives
+the harness library directly (no LLM, no binary spawn) and exercises the same
+lifecycle this doc describes. Run it manually with:
+
+```
+EXO_TEST_SANDBOX_BACKEND=docker cargo test --package exo \
+    --test snapshot_round_trip -- --ignored --nocapture
+```
+
+The CI integration workflow runs it on push to `main` against each Linux
+matrix cell that supports docker. The test self-skips on cells that don't
+(`local-process`) so they don't false-fail.
+
 ## Extending to another sandbox backend
 
 To add snapshot support for a new backend (say, Apple's `container` CLI
