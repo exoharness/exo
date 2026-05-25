@@ -871,7 +871,18 @@ function fakeTurnContext(
             };
           },
         },
-        turn: {},
+        turn: {
+          async writeArtifactText(args: { path: string; text: string }) {
+            artifactIndex += 1;
+            return {
+              artifactId: `artifact-${artifactIndex}`,
+              path: args.path,
+              version: 1,
+              createdAt: "2026-01-01T00:00:00Z",
+              sizeBytes: args.text.length,
+            };
+          },
+        },
       },
     },
     executeTool: options.executeTool ?? (async () => null),

@@ -97,6 +97,7 @@ pub trait TurnHandle: Send + Sync {
     fn record(&self) -> &TurnRecord;
 
     async fn add_events(&self, data: Vec<EventData>) -> Result<AddEventsResult>;
+    async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion>;
     async fn finish(&self) -> Result<EventId>;
 }
 

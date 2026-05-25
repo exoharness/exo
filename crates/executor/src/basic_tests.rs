@@ -872,6 +872,10 @@ impl TurnHandle for FakeTurnHandle {
         Ok(add_result)
     }
 
+    async fn write_artifact(&self, _request: WriteArtifactRequest) -> Result<ArtifactVersion> {
+        Err(anyhow!("not implemented"))
+    }
+
     async fn finish(&self) -> Result<exoharness::EventId> {
         let event_id = append_event(
             &self.state,

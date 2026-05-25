@@ -322,6 +322,18 @@ export interface Turn {
   readonly conversation: Conversation;
   readonly record: TurnRecord;
   addEvents(data: EventData[]): Promise<AddEventsResult>;
+  writeArtifact(args: {
+    path: string;
+    contents: Uint8Array | string;
+  }): Promise<ArtifactVersion>;
+  writeArtifactText(args: {
+    path: string;
+    text: string;
+  }): Promise<ArtifactVersion>;
+  writeArtifactJson(args: {
+    path: string;
+    value: JsonValue;
+  }): Promise<ArtifactVersion>;
 }
 
 export interface TurnContext {

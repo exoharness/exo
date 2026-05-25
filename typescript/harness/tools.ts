@@ -219,7 +219,7 @@ async function writeToolResultArtifact(
   mimeType: string,
 ): Promise<ToolResultArtifactReference> {
   const artifact =
-    await context.exoharness.current.conversation.writeArtifactText({
+    await context.exoharness.current.turn.writeArtifactText({
       path: `tool-results/${sanitizePathSegment(args.toolName)}/${sanitizePathSegment(args.toolCallId)}/${fileName}`,
       text,
     });
