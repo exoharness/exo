@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use exoharness::{
     ConversationHandle, CreateSandboxRequest, DEFAULT_SANDBOX_IMAGE, EventData, EventKind,
     EventQuery, EventQueryDirection, FileSystemMount, FileSystemMountMode, Result,
-    RunInSandboxRequest, ToolRequest, ToolResult,
+    RunInSandboxRequest, SnapshotId, StartSandboxRequest, ToolRequest, ToolResult,
 };
 use futures::io::AsyncReadExt;
 use serde::{Deserialize, Serialize};
@@ -115,6 +115,14 @@ pub(crate) async fn ensure_shell_sandbox(
         .unwrap_or_else(|| DEFAULT_SANDBOX_IMAGE.to_string());
     let desired_enable_networking = agent_config.enable_networking || config.enable_networking;
 
+    // 3-tier fallback for an existing conversation sandbox:
+    //   Tier 1: resume the same container/sandbox by SandboxKey.
+    //           This is what `run_in_sandbox` -> backend.try_resume now does
+    //           internally when the in-memory handle is missing.
+    //   Tier 2: if Tier 1 failed (container is truly gone — TTL expired,
+    //           server-side auto-delete, manual cleanup), restore from the
+    //           latest snapshot recorded in the conversation log.
+    //   Tier 3: nothing to resume, create fresh.
     if let Some(sandbox) = latest_shell_sandbox(conversation).await? {
         let Some(program) = &config.shell_program else {
             return Ok(sandbox.id);
@@ -127,6 +135,8 @@ pub(crate) async fn ensure_shell_sandbox(
             && sandbox.idle_seconds == 300;
 
         if config_matches {
+            // Tier 1: try a no-op exec; the harness will resume from the
+            // backend on cache miss.
             let healthcheck = conversation
                 .run_in_sandbox(RunInSandboxRequest {
                     id: sandbox.id.clone(),
@@ -137,9 +147,26 @@ pub(crate) async fn ensure_shell_sandbox(
             if healthcheck.is_ok() {
                 return Ok(sandbox.id);
             }
+
+            // Tier 2: container is gone. If we ever took a snapshot of this
+            // sandbox in this conversation, restore from the latest one.
+            if let Some(snapshot_id) =
+                latest_snapshot_for_sandbox(conversation, &sandbox.id).await?
+                && conversation
+                    .start_sandbox(StartSandboxRequest {
+                        id: sandbox.id.clone(),
+                        snapshot_id,
+                        idle_seconds: Some(sandbox.idle_seconds),
+                    })
+                    .await
+                    .is_ok()
+            {
+                return Ok(sandbox.id);
+            }
         }
     }
 
+    // Tier 3: nothing reusable; create fresh.
     conversation
         .create_sandbox(CreateSandboxRequest {
             image: desired_image,
@@ -149,6 +176,34 @@ pub(crate) async fn ensure_shell_sandbox(
             idle_seconds: Some(300),
         })
         .await
+}
+
+async fn latest_snapshot_for_sandbox(
+    conversation: &dyn ConversationHandle,
+    sandbox_id: &str,
+) -> Result<Option<SnapshotId>> {
+    let events = conversation
+        .get_events(Some(EventQuery {
+            cursor: None,
+            direction: Some(EventQueryDirection::Desc),
+            limit: Some(100),
+            session_id: None,
+            turn_id: None,
+            types: Some(vec![EventKind::SANDBOX_SNAPSHOTTED]),
+        }))
+        .await?
+        .events;
+    for event in events {
+        if let EventData::SandboxSnapshotted {
+            sandbox_id: sid,
+            snapshot_id,
+        } = event.data
+            && sid == sandbox_id
+        {
+            return Ok(Some(snapshot_id));
+        }
+    }
+    Ok(None)
 }
 
 fn normalize_mounts(mounts: &[FileSystemMount]) -> Vec<FileSystemMount> {

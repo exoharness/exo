@@ -1140,14 +1140,8 @@ impl ConversationHandle for BasicConversationHandle {
                     // process, but we haven't bound a handle to it yet. Ask the
                     // backend to resume by SandboxKey — that's the moment the
                     // cross-process resume contract actually triggers.
-                    let req =
-                        sandbox_request(self.record.id, &request.id, &sandbox);
-                    let Some(handle) = self
-                        .harness
-                        .inner
-                        .sandbox_backend
-                        .try_resume(req)
-                        .await?
+                    let req = sandbox_request(self.record.id, &request.id, &sandbox);
+                    let Some(handle) = self.harness.inner.sandbox_backend.try_resume(req).await?
                     else {
                         bail!(
                             "sandbox {} no longer exists on the backend; \

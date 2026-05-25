@@ -1463,7 +1463,11 @@ async fn find_docker_resumable(
         .kill_on_drop(true);
     let output = match time::timeout(WARM_SANDBOX_CLEANUP_TIMEOUT, command.output()).await {
         Ok(out) => out?,
-        Err(_) => return Err(anyhow!("docker ps timed out while listing resumable containers")),
+        Err(_) => {
+            return Err(anyhow!(
+                "docker ps timed out while listing resumable containers"
+            ));
+        }
     };
     if !output.status.success() {
         return Err(anyhow!(
@@ -1558,9 +1562,12 @@ async fn find_apple_resumable(
 ) -> Result<Option<ResumableContainerInfo>> {
     // Apple's `container` CLI doesn't expose a label filter; we list
     // everything and match in-process.
-    let output =
-        run_container_admin_command(container_bin, WARM_SANDBOX_CLEANUP_TIMEOUT, ["list", "--format", "json"])
-            .await?;
+    let output = run_container_admin_command(
+        container_bin,
+        WARM_SANDBOX_CLEANUP_TIMEOUT,
+        ["list", "--format", "json"],
+    )
+    .await?;
     if !output.status.success() {
         return Err(anyhow!(
             "container list failed: {}",
@@ -1624,7 +1631,6 @@ async fn start_named_container(
     }
     Ok(())
 }
-
 
 fn is_already_exists_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
