@@ -1,4 +1,4 @@
-// Example library tool used by the harness registry tests and CLI tool-manifest
+// Example library tool used by the harness registry tests and CLI tool-module
 // loading docs.
 
 import type {
