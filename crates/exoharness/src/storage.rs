@@ -28,10 +28,6 @@ impl BasicObjectStore {
         })
     }
 
-    pub(crate) fn new(store: Arc<dyn ObjectStore>) -> Self {
-        Self { store }
-    }
-
     pub(crate) async fn put_json<T: Serialize>(
         &self,
         key: impl AsRef<Path>,

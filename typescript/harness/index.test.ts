@@ -690,7 +690,7 @@ describe("agent tool loading", () => {
     }
   });
 
-  it("exposes WhatsApp adapter config and message target schemas", () => {
+  it("exposes chat adapter config and message target schemas", () => {
     const registry = createToolRegistry(fakeTurnContext());
     registerAdapterTools(registry, ["create_adapter", "send_adapter_message"]);
 
@@ -700,7 +700,9 @@ describe("agent tool loading", () => {
       .parameters as JsonObject;
 
     expect(JSON.stringify(createAdapter)).toContain('"whatsapp"');
+    expect(JSON.stringify(createAdapter)).toContain('"signal"');
     expect(JSON.stringify(createAdapter)).toContain('"workerCommand"');
+    expect(JSON.stringify(createAdapter)).toContain('"signalCliCommand"');
     expect(JSON.stringify(sendMessage)).toContain('"target"');
   });
 
@@ -762,6 +764,68 @@ describe("agent tool loading", () => {
         capabilities: ["receive", "send_message"],
         stateDir: null,
         secretEnv: [{ env: "EXO_IRC_PASSWORD", secretId: "secret-1" }],
+      },
+    });
+  });
+
+  it("transforms built-in Signal adapters into worker adapter records", async () => {
+    const executed: JsonObject[] = [];
+    const registry = createToolRegistry(
+      fakeTurnContext({
+        executeTool: async (request) => {
+          executed.push(request.arguments);
+          return { ok: true };
+        },
+      }),
+    );
+    registerAdapterTools(registry, ["create_adapter"]);
+
+    await registry.executePending([
+      {
+        toolCallId: "create_signal",
+        request: {
+          functionName: "create_adapter",
+          arguments: {
+            name: "signal",
+            source: "built_in",
+            config: {
+              type: "signal",
+              account: null,
+              deviceName: "Exoclaw",
+              signalCliCommand: null,
+              configDir: null,
+              trigger: "all_messages",
+              allowedContacts: ["u:friend.01"],
+            },
+          },
+        },
+      },
+    ]);
+
+    expect(executed[0]).toMatchObject({
+      agentId: "agent-id",
+      conversationId: "conversation-id",
+      name: "signal",
+      source: "built_in",
+      config: {
+        type: "worker",
+        adapterType: "signal",
+        workerCommand: [
+          "pnpm",
+          "tsx",
+          "examples/exoclaw/adapters/signal/worker.ts",
+        ],
+        initialization: {
+          account: null,
+          deviceName: "Exoclaw",
+          signalCliCommand: null,
+          configDir: null,
+          trigger: "all_messages",
+          allowedContacts: ["u:friend.01"],
+        },
+        capabilities: ["receive", "send_message"],
+        stateDir: null,
+        secretEnv: [],
       },
     });
   });

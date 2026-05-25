@@ -54,7 +54,7 @@ function createAdapterTool(): ToolInstance {
     definition: {
       name: "create_adapter",
       description:
-        "Create and enable a long-running Exoclaw adapter for this conversation. Use source 'built_in' with config type 'irc' or 'whatsapp' for built-in adapters. Use source 'library' or 'agent' with config type 'module' for adapter modules.",
+        "Create and enable a long-running Exoclaw adapter for this conversation. Use source 'built_in' with config type 'irc', 'whatsapp', or 'signal' for built-in adapters. Use source 'library' or 'agent' with config type 'module' for adapter modules.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -145,7 +145,7 @@ function sendAdapterMessageTool(): ToolInstance {
   return hostTool({
     name: "send_adapter_message",
     description:
-      "Send an explicit outbound message through an adapter. For IRC this sends PRIVMSG to the adapter channel. For WhatsApp, provide target as the chat id from the inbound message. Only call this when the user or conversation context makes the external side effect appropriate.",
+      "Send an explicit outbound message through an adapter. For IRC this sends PRIVMSG to the adapter channel. For WhatsApp, provide target as the chat id from the inbound message. For Signal, provide a username such as u:example.01, a phone number, UUID, or group id. Only call this when the user or conversation context makes the external side effect appropriate.",
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -162,7 +162,7 @@ function sendAdapterMessageTool(): ToolInstance {
         target: {
           type: ["string", "null"],
           description:
-            "External destination for adapters that need one. Use the target from the inbound wakeup when available; WhatsApp requires a chat id.",
+            "External destination for adapters that need one. Use the target from the inbound wakeup when available; WhatsApp requires a chat id and Signal requires a username/phone/UUID/group id.",
         },
       },
       required: ["adapterId", "text", "target"],
@@ -280,6 +280,59 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
         type: "object",
         additionalProperties: false,
         properties: {
+          type: { type: "string", enum: ["signal"] },
+          account: {
+            type: ["string", "null"],
+            description:
+              "Optional local signal-cli account identifier. Use null to have the worker start signal-cli link and discover the linked account.",
+          },
+          deviceName: {
+            type: ["string", "null"],
+            description:
+              "Optional linked-device name when account is null. Use null for Exoclaw.",
+          },
+          signalCliCommand: {
+            anyOf: [
+              { type: "array", items: { type: "string" } },
+              { type: "null" },
+            ],
+            description:
+              "Optional command argv for signal-cli. Use null for ['signal-cli'].",
+          },
+          configDir: {
+            type: ["string", "null"],
+            description:
+              "Optional signal-cli config directory. Use null for the adapter state directory.",
+          },
+          trigger: {
+            type: "string",
+            enum: ["all_messages", "contacts_only"],
+            description:
+              "Wake policy. Use all_messages for the MVP unless allowedContacts is set.",
+          },
+          allowedContacts: {
+            anyOf: [
+              { type: "array", items: { type: "string" } },
+              { type: "null" },
+            ],
+            description:
+              "Optional list of Signal usernames, phone numbers, UUIDs, or group ids to wake on. Use null to allow all inbound messages.",
+          },
+        },
+        required: [
+          "type",
+          "account",
+          "deviceName",
+          "signalCliCommand",
+          "configDir",
+          "trigger",
+          "allowedContacts",
+        ],
+      },
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: {
           type: { type: "string", enum: ["whatsapp"] },
           authDir: {
             type: ["string", "null"],
@@ -383,6 +436,28 @@ function transformAdapterConfig(config: JsonObject): JsonObject {
         authDir: nullableStringField(config, "authDir"),
         trigger: stringField(config, "trigger"),
         allowedChats: nullableStringArrayField(config, "allowedChats"),
+      },
+      capabilities: ["receive", "send_message"],
+      stateDir: null,
+      secretEnv: [],
+    };
+  }
+  if (type === "signal") {
+    return {
+      type: "worker",
+      adapterType: "signal",
+      workerCommand: [
+        "pnpm",
+        "tsx",
+        "examples/exoclaw/adapters/signal/worker.ts",
+      ],
+      initialization: {
+        account: nullableStringField(config, "account"),
+        deviceName: nullableStringField(config, "deviceName"),
+        signalCliCommand: nullableStringArrayField(config, "signalCliCommand"),
+        configDir: nullableStringField(config, "configDir"),
+        trigger: stringField(config, "trigger"),
+        allowedContacts: nullableStringArrayField(config, "allowedContacts"),
       },
       capabilities: ["receive", "send_message"],
       stateDir: null,

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
 EXO_BIN="${EXO_BIN:-$ROOT_DIR/target/debug/exo}"
 ENV_FILE="${EXO_ENV_FILE:-$ROOT_DIR/.env}"
@@ -23,16 +23,17 @@ PULL_SANDBOX=false
 START_SCHEDULER="${EXO_START_SCHEDULER:-true}"
 START_ADAPTERS="${EXO_START_ADAPTERS:-true}"
 ADAPTER_LIMIT="${EXO_ADAPTER_LIMIT:-50}"
+SETUP_ADAPTER="${EXO_SETUP_ADAPTER:-}"
 INITIAL_PROMPT_FILE="${EXO_INITIAL_PROMPT_FILE:-}"
 
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/exoclaw-repl [options]
-  scripts/exoclaw-repl list
-  scripts/exoclaw-repl delall all
-  scripts/exoclaw-repl fresh
-  scripts/exoclaw-repl setup-sandbox
+  examples/exoclaw/scripts/exoclaw-repl [options]
+  examples/exoclaw/scripts/exoclaw-repl list
+  examples/exoclaw/scripts/exoclaw-repl delall all
+  examples/exoclaw/scripts/exoclaw-repl fresh
+  examples/exoclaw/scripts/exoclaw-repl setup-sandbox
 
 Default behavior creates or reuses an Exoclaw agent and conversation, starts the
 local scheduler and adapter loops, then starts a REPL. It reads .env by default
@@ -56,6 +57,8 @@ Options:
   --no-adapters                Do not start the local adapter runner
   --adapters                   Start the local adapter runner
   --adapter-limit <n>          Max adapters supervised by the runner (default: 50)
+  --setup <adapter>            Send me.md plus adapters/<adapter>/setup-prompt.md
+                                For whatsapp/signal, print pairing QR and pause.
   --initial-prompt-file <path> Send this file as the first message before REPL
   --pull-sandbox               Pull the sandbox image before starting
   --no-sandbox                 Do not require or configure sandbox shell support
@@ -69,7 +72,7 @@ Environment overrides:
   EXO_NETWORKING, EXO_SHELL_PROGRAM, EXO_SANDBOX_SCOPE, EXO_ENV_FILE,
   EXO_BIN, EXO_START_SCHEDULER, EXO_START_ADAPTERS,
   EXO_SCHEDULER_INTERVAL_SECONDS, EXO_ADAPTER_LIMIT,
-  EXO_INITIAL_PROMPT_FILE
+  EXO_SETUP_ADAPTER, EXO_INITIAL_PROMPT_FILE
 EOF
 }
 
@@ -86,6 +89,22 @@ ensure_exo_bin() {
     die "exo binary is not executable: $EXO_BIN"
   fi
   build_exo
+}
+
+ensure_signal_cli() {
+  if [[ "$SETUP_ADAPTER" != "signal" ]]; then
+    return
+  fi
+  if ! command -v signal-cli >/dev/null 2>&1; then
+    die "signal-cli is required for --setup signal. Install it first, for example: brew install signal-cli"
+  fi
+
+  local signal_cli_path
+  signal_cli_path="$(command -v signal-cli)"
+  if command -v file >/dev/null 2>&1 && file "$signal_cli_path" | grep -q "Mach-O"; then
+    echo "Warning: $signal_cli_path appears to be a native signal-cli executable."
+    echo "If outbound sends fail with NETWORK_FAILURE, use the JVM signal-cli distribution instead."
+  fi
 }
 
 build_exo() {
@@ -387,6 +406,7 @@ fresh_start() {
 
 run_repl() {
   ensure_exo_bin
+  ensure_signal_cli
   if [[ "$USE_SANDBOX" == true ]]; then
     if [[ "$PULL_SANDBOX" == true ]]; then
       container_pull_image
@@ -398,26 +418,171 @@ run_repl() {
   ensure_conversation
   ensure_scheduler
   ensure_adapters
-  send_initial_prompt
+  local adapter_log_start_line
+  adapter_log_start_line="$(adapter_log_line_count)"
+  send_startup_prompt
+  show_whatsapp_qr_if_needed "$adapter_log_start_line"
+  show_signal_qr_if_needed "$adapter_log_start_line"
   exec "$EXO_BIN" --env-file-if-exists "$ENV_FILE" chat repl "$AGENT" "$CONVERSATION"
 }
 
-send_initial_prompt() {
-  if [[ -z "$INITIAL_PROMPT_FILE" ]]; then
+adapter_log_line_count() {
+  local log_file
+  log_file="$(adapters_log_file)"
+  if [[ -f "$log_file" ]]; then
+    wc -l <"$log_file" | tr -d '[:space:]'
+  else
+    echo 0
+  fi
+}
+
+startup_prompt_file() {
+  local path="$1"
+  if [[ ! -f "$path" ]]; then
+    die "startup prompt file not found: $path"
+  fi
+  if [[ ! -s "$path" ]]; then
+    die "startup prompt file is empty: $path"
+  fi
+  printf '%s\n' "$path"
+}
+
+adapter_setup_prompt_file() {
+  local adapter="$1"
+  if [[ ! "$adapter" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    die "--setup must be an adapter name, not a path: $adapter"
+  fi
+  startup_prompt_file "$ROOT_DIR/examples/exoclaw/adapters/$adapter/setup-prompt.md"
+}
+
+send_startup_prompt() {
+  if [[ -z "$SETUP_ADAPTER" && -z "$INITIAL_PROMPT_FILE" ]]; then
     return
   fi
-  if [[ ! -f "$INITIAL_PROMPT_FILE" ]]; then
-    die "initial prompt file not found: $INITIAL_PROMPT_FILE"
+
+  local files=()
+  if [[ -n "$SETUP_ADAPTER" ]]; then
+    files+=("$(startup_prompt_file "$ROOT_DIR/examples/exoclaw/prompts/me.md")")
+    files+=("$(adapter_setup_prompt_file "$SETUP_ADAPTER")")
   fi
 
-  local prompt
-  prompt="$(<"$INITIAL_PROMPT_FILE")"
+  if [[ -n "$INITIAL_PROMPT_FILE" ]]; then
+    files+=("$(startup_prompt_file "$INITIAL_PROMPT_FILE")")
+  fi
+
+  local prompt=""
+  local file
+  for file in "${files[@]}"; do
+    prompt+=$'\n\n'
+    prompt+="$(<"$file")"
+  done
+  prompt="${prompt#$'\n\n'}"
   if [[ -z "${prompt//[[:space:]]/}" ]]; then
-    die "initial prompt file is empty: $INITIAL_PROMPT_FILE"
+    die "startup prompt is empty"
   fi
 
-  echo "Sending initial prompt from $INITIAL_PROMPT_FILE..."
+  echo "Sending startup prompt from: ${files[*]}"
   exo chat send "$AGENT" "$CONVERSATION" "$prompt"
+}
+
+show_whatsapp_qr_if_needed() {
+  if [[ "$SETUP_ADAPTER" != "whatsapp" ]]; then
+    return
+  fi
+
+  local start_line="${1:-0}"
+  local log_file
+  log_file="$(adapters_log_file)"
+  echo "Waiting for WhatsApp QR code in $log_file..."
+
+  local attempt qr
+  for attempt in {1..30}; do
+    if [[ -f "$log_file" ]]; then
+      qr="$(awk -v start="$start_line" '
+        NR <= start { next }
+        /\[whatsapp-adapter\] Scan this QR with WhatsApp:/ {
+          capture = 1
+          block = $0 "\n"
+          next
+        }
+        capture {
+          if ($0 ~ /^\[whatsapp-adapter\]/) {
+            capture = 0
+            next
+          }
+          block = block $0 "\n"
+        }
+        END {
+          if (block != "") {
+            printf "%s", block
+          }
+        }
+      ' "$log_file")"
+      if [[ -n "$qr" ]]; then
+        echo
+        printf '%s\n' "$qr"
+        echo "Scan this QR from WhatsApp: Settings > Linked devices > Link a device."
+        echo
+        read -r -p "Press Enter after WhatsApp finishes linking the device..."
+        return
+      fi
+    fi
+    sleep 1
+  done
+
+  echo "No WhatsApp QR code found yet. The adapter may already be paired, or it may still be starting."
+  echo "Watch the adapter log with: tail -f $log_file"
+  read -r -p "Press Enter to continue to the REPL..."
+}
+
+show_signal_qr_if_needed() {
+  if [[ "$SETUP_ADAPTER" != "signal" ]]; then
+    return
+  fi
+
+  local start_line="${1:-0}"
+  local log_file
+  log_file="$(adapters_log_file)"
+  echo "Waiting for Signal linked-device QR code in $log_file..."
+
+  local attempt qr
+  for attempt in {1..30}; do
+    if [[ -f "$log_file" ]]; then
+      qr="$(awk -v start="$start_line" '
+        NR <= start { next }
+        /\[signal-adapter\] Scan this QR with Signal:/ {
+          capture = 1
+          block = $0 "\n"
+          next
+        }
+        capture {
+          if ($0 ~ /^\[signal-adapter\]/) {
+            capture = 0
+            next
+          }
+          block = block $0 "\n"
+        }
+        END {
+          if (block != "") {
+            printf "%s", block
+          }
+        }
+      ' "$log_file")"
+      if [[ -n "$qr" ]]; then
+        echo
+        printf '%s\n' "$qr"
+        echo "Scan this QR from Signal: Settings > Linked devices > Link new device."
+        echo
+        read -r -p "Press Enter after Signal finishes linking the device..."
+        return
+      fi
+    fi
+    sleep 1
+  done
+
+  echo "No Signal QR code found yet. The adapter may already be linked, signal-cli may be missing, or it may still be starting."
+  echo "Watch the adapter log with: tail -f $log_file"
+  read -r -p "Press Enter to continue to the REPL..."
 }
 
 while [[ $# -gt 0 ]]; do
@@ -516,6 +681,11 @@ while [[ $# -gt 0 ]]; do
     --adapter-limit)
       ADAPTER_LIMIT="${2:-}"
       [[ "$ADAPTER_LIMIT" =~ ^[0-9]+$ && "$ADAPTER_LIMIT" -gt 0 ]] || die "--adapter-limit requires a positive integer"
+      shift 2
+      ;;
+    --setup)
+      SETUP_ADAPTER="${2:-}"
+      [[ -n "$SETUP_ADAPTER" ]] || die "--setup requires an adapter name"
       shift 2
       ;;
     --initial-prompt-file)

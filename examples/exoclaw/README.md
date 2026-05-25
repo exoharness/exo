@@ -21,21 +21,47 @@ cooperation, see [adapter-architecture.md](./adapter-architecture.md).
 Start an Exoclaw REPL with the default agent-scoped sandbox:
 
 ```bash
-scripts/exoclaw-repl --pull-sandbox
+examples/exoclaw/scripts/exoclaw-repl --pull-sandbox
 ```
 
 The script also starts local scheduler and adapter runner processes by default.
 Use `--no-scheduler` or `--no-adapters` when you only want the interactive REPL.
-For repeatable setup tests, pass an initial prompt file; the script sends it to
-the conversation before dropping into the REPL:
+For repeatable setup tests, pass `--setup <adapter>`; the script sends
+`examples/exoclaw/prompts/me.md` plus the adapter's `setup-prompt.md` before
+dropping into the REPL:
 
 ```bash
-scripts/exoclaw-repl fresh --pull-sandbox \
-  --initial-prompt-file examples/exoclaw/prompts/irc-test.md
+examples/exoclaw/scripts/exoclaw-repl fresh --pull-sandbox --setup irc
 ```
 
-Edit the nick and channel in `examples/exoclaw/prompts/irc-test.md` before using
-it on a real IRC network.
+Edit `examples/exoclaw/adapters/irc/setup-prompt.md` before using it on a real
+IRC network. Use `--initial-prompt-file <path>` for a custom one-off startup
+prompt.
+
+For WhatsApp setup, use `--setup whatsapp`. The script waits briefly for the
+worker to emit a linked-device QR code and prints it if it appears:
+
+```bash
+examples/exoclaw/scripts/exoclaw-repl fresh --pull-sandbox --setup whatsapp
+```
+
+For Signal setup, install `signal-cli`, set up a Signal account and username on
+your phone, then use `--setup signal`. The script waits briefly for a
+linked-device QR code, prints it if it appears, and pauses while you scan it:
+
+```bash
+brew install signal-cli
+```
+
+Some native `signal-cli` builds can receive messages but fail outbound sends with
+`NETWORK_FAILURE` and a Java error mentioning `IdentityKeyDeserializer`. If that
+happens, install a JRE/JDK and the JVM distribution from the `signal-cli`
+releases, then create the adapter with `signalCliCommand` pointing at its
+`bin/signal-cli` script.
+
+```bash
+examples/exoclaw/scripts/exoclaw-repl fresh --pull-sandbox --setup signal
+```
 
 ## Tools
 
@@ -75,7 +101,7 @@ Adapters are host-owned long-running runtimes for external applications. They
 are intentionally separate from scheduled sandbox commands: adapters own sockets,
 reconnect behavior, inbound message parsing, event history, and conversation
 wake-ups. Agents configure adapters with tools, and the local adapter runner
-started by `scripts/exoclaw-repl` keeps them connected.
+started by `examples/exoclaw/scripts/exoclaw-repl` keeps them connected.
 
 The first built-in adapter is IRC. It runs as a host-supervised Node.js worker
 that connects to a configured server/channel, responds to `PING`, parses
@@ -90,6 +116,13 @@ outbox draining; workers own protocol-specific sockets and parsing. When first
 run, the WhatsApp worker emits a QR pairing event into adapter history and logs;
 after pairing, Baileys auth state is stored under
 `.exo/adapters/whatsapp/<adapter-id>/auth` by default.
+
+The Signal adapter uses `signal-cli` as a linked device. If its `account` config
+is null, the worker starts `signal-cli link`, logs a QR code for the phone's
+linked-device flow, discovers the linked account with `signal-cli listAccounts`,
+then runs `signal-cli -a <account> jsonRpc`. Outbound DM targets should be
+Signal usernames with the `u:` prefix, such as `u:example.01`, unless an inbound
+wakeup provides a more precise target.
 
 Example IRC adapter tool arguments:
 
@@ -128,29 +161,50 @@ Example WhatsApp adapter tool arguments:
 }
 ```
 
+Example Signal adapter tool arguments:
+
+```json
+{
+  "name": "signal-dev",
+  "source": "built_in",
+  "config": {
+    "type": "signal",
+    "account": null,
+    "deviceName": "Exoclaw",
+    "signalCliCommand": null,
+    "configDir": null,
+    "trigger": "all_messages",
+    "allowedContacts": null
+  }
+}
+```
+
 Inbound adapter messages do not automatically send model output back to the
 external service. The agent must explicitly call `send_adapter_message`, which
 keeps external side effects visible in tool history. WhatsApp sends require the
-`target` chat id from the inbound wakeup. IRC sends go to the configured channel;
-using the inbound channel target is fine, but the worker does not require it.
+`target` chat id from the inbound wakeup. Signal sends require a target such as
+`u:example.01`, a phone number, a UUID, or a group id. IRC sends go to the
+configured channel; using the inbound channel target is fine, but the worker does
+not require it.
 
-If an IRC or WhatsApp user asks Exoclaw to schedule recurring work and expects
-future results in the originating app, the agent should put that routing
+If an IRC, WhatsApp, or Signal user asks Exoclaw to schedule recurring work and
+expects future results in the originating app, the agent should put that routing
 instruction in the task's `reportPrompt`, including the `adapterId` and target
 from the wakeup. Scheduler wakeups are normal Exoclaw turns, so they can call
 `send_adapter_message` when the `reportPrompt` says to post the result back.
 
 Adapters use the same source model as tools:
 
-- `built_in`: shipped with Exoclaw, starting with IRC and experimental WhatsApp.
+- `built_in`: shipped with Exoclaw, starting with IRC, experimental WhatsApp,
+  and experimental Signal.
 - `library`: registered from reusable module metadata.
 - `agent`: installed by the agent with `install_agent_adapter`, then validated
   with `build_agent_adapter`.
 
-The host runtime runs built-in IRC and WhatsApp adapters through the same generic
-worker bridge. Module-backed library and agent adapters are persisted and
-build-validated so the source model is in place; richer module execution can be
-layered on the same registry/runtime boundary.
+The host runtime runs built-in IRC, WhatsApp, and Signal adapters through the
+same generic worker bridge. Module-backed library and agent adapters are
+persisted and build-validated so the source model is in place; richer module
+execution can be layered on the same registry/runtime boundary.
 
 ## Sandbox Modes
 
@@ -166,13 +220,13 @@ the cli. The following command will create a REPL with the agent and a
 persistent sandbox that will be durable across conversations
 
 ```bash
-scripts/exoclaw-repl --pull-sandbox
+examples/exoclaw/scripts/exoclaw-repl --pull-sandbox
 ```
 
 If you want a conversation to have its own sandbox, use `sandboxScope: "conversation"`:
 
 ```bash
-scripts/exoclaw-repl --conversation isolated-dev --sandbox-scope conversation
+examples/exoclaw/scripts/exoclaw-repl --conversation isolated-dev --sandbox-scope conversation
 exo --harness exoclaw conversation update exoclaw-agent isolated-dev --sandbox-scope conversation
 ```
 

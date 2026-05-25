@@ -116,7 +116,7 @@ task tools, long-running adapters, and scheduler-aware sandbox policy.
 Start a local Exoclaw REPL with:
 
 ```bash
-scripts/exoclaw-repl
+examples/exoclaw/scripts/exoclaw-repl
 ```
 
 Scheduled tasks can be created, listed, cancelled, and deleted by the agent. The
@@ -127,11 +127,11 @@ corresponding CLI commands are under:
 ```
 
 Adapters connect Exoclaw conversations to external applications. Built-in
-adapters include IRC and an experimental WhatsApp adapter backed by Baileys.
-Adapters keep external connections open in a host-owned runtime, wake the
-configured conversation when the trigger policy matches, and require the agent to
-call `send_adapter_message` for explicit outbound replies. Adapter CLI commands
-are under:
+adapters include IRC, an experimental WhatsApp adapter backed by Baileys, and an
+experimental Signal adapter backed by `signal-cli`. Adapters keep external
+connections open in a host-owned runtime, wake the configured conversation when
+the trigger policy matches, and require the agent to call `send_adapter_message`
+for explicit outbound replies. Adapter CLI commands are under:
 
 ```bash
 ./target/debug/exo --harness exoclaw adapters --help
@@ -150,7 +150,7 @@ agent sandbox, create or update it with `--sandbox-scope conversation`:
 
 ```bash
 ./target/debug/exo --harness exoclaw conversation create exoclaw-agent "Isolated Dev" --sandbox-scope conversation
-scripts/exoclaw-repl --conversation isolated-dev --sandbox-scope conversation
+examples/exoclaw/scripts/exoclaw-repl --conversation isolated-dev --sandbox-scope conversation
 ```
 
 ## Repository Layout

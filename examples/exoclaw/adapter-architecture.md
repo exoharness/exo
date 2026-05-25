@@ -2,8 +2,8 @@
 
 Exoclaw adapters are host-owned long-running integrations between an Exoclaw
 conversation and an external application. The first adapter is IRC, but the
-shape is intended to support Slack, Discord, WhatsApp, IRC networks, custom
-local services, and agent-authored modules.
+shape is intended to support Slack, Discord, WhatsApp, Signal, IRC networks,
+custom local services, and agent-authored modules.
 
 Adapters are deliberately not scheduled sandbox tasks. A scheduled task is a
 periodic command: it starts, runs, writes output, wakes the conversation, and
@@ -33,17 +33,19 @@ The implementation is split across a few small executor and CLI modules:
   IRC connection.
 - `examples/exoclaw/adapters/whatsapp/worker.ts` is the Baileys worker for the
   built-in WhatsApp adapter.
+- `examples/exoclaw/adapters/signal/worker.ts` is the `signal-cli` worker for
+  the built-in Signal adapter.
 - `crates/executor/src/adapter_tools.rs` implements the host-backed tool calls
   used by Exoclaw.
 - `typescript/harness/adapter-tools.ts` exposes the model-facing Exoclaw tools.
 - `crates/cli/src/adapters.rs` provides `exo --harness exoclaw adapters ...`.
-- `scripts/exoclaw-repl` starts the adapter runner next to the scheduler.
+- `examples/exoclaw/scripts/exoclaw-repl` starts the adapter runner next to the scheduler.
 
 At a high level:
 
 ```mermaid
 flowchart LR
-  externalApp["IRC / WhatsApp"] <--> worker["Adapter Worker"]
+  externalApp["IRC / WhatsApp / Signal"] <--> worker["Adapter Worker"]
   worker <--> runtime["Adapter Runtime"]
   runtime --> store["Adapter Store"]
   tools["Adapter Tools"] --> store
@@ -150,7 +152,7 @@ bridge.
 
 ## Worker Protocol
 
-Both IRC and WhatsApp are implemented as Node.js workers. Rust launches each
+IRC, WhatsApp, and Signal are implemented as Node.js workers. Rust launches each
 worker with:
 
 - `EXO_ADAPTER_ID`
@@ -202,6 +204,38 @@ The MVP is intentionally narrow: text messages only, one worker per WhatsApp
 account/session, QR pairing through logs/artifacts, and no media handling or
 message edits yet.
 
+## Signal Worker Example
+
+The Signal adapter follows the same worker bridge but delegates protocol work to
+`signal-cli`:
+
+```mermaid
+flowchart LR
+  runtime["Rust Adapter Runtime"] --> worker["Signal Worker"]
+  worker <--> signalCli["signal-cli jsonRpc"]
+  signalCli <--> signal["Signal"]
+  runtime --> store["Adapter Store"]
+  tools["send_adapter_message"] --> outbox["Adapter Outbox"]
+  outbox --> runtime
+```
+
+The worker is launched with:
+
+```bash
+pnpm tsx examples/exoclaw/adapters/signal/worker.ts
+```
+
+If `account` is not configured, the worker runs `signal-cli link`, prints a
+linked-device QR code to the adapter log, discovers the linked account with
+`signal-cli listAccounts`, then starts `signal-cli -a <account> jsonRpc`. Signal
+CLI state is stored under the worker state dir's `signal-cli` subdirectory unless
+`configDir` is set.
+
+For inbound Signal messages, the runtime writes an artifact with the sender,
+target, text, message id, and metadata, then wakes the conversation. Outbound
+Signal messages require a `target`: use a Signal username with the `u:` prefix,
+a phone number, a UUID, a group id, or the target from an inbound wakeup.
+
 ## Outbound Messages
 
 Adapter sends must be explicit and auditable. When the agent calls
@@ -213,8 +247,9 @@ Adapter sends must be explicit and auditable. When the agent calls
 The long-running adapter runtime drains that outbox once per second and sends
 queued messages to the worker as `send_message` commands. The IRC worker sends
 them as `PRIVMSG` over the already-connected IRC socket. The WhatsApp worker
-sends them through Baileys. WhatsApp messages require an outbox `target` chat id;
-IRC messages do not because the destination channel is fixed in adapter config.
+sends them through Baileys. The Signal worker sends them through `signal-cli`
+JSON-RPC. WhatsApp and Signal messages require an outbox `target`; IRC messages
+do not because the destination channel is fixed in adapter config.
 
 The outbox also decouples conversation turns from socket ownership. The model
 turn can finish after queueing a message; the adapter runtime owns the external
@@ -228,7 +263,7 @@ The adapter runner is started by:
 ./target/debug/exo --harness exoclaw adapters run --watch --limit 50
 ```
 
-`scripts/exoclaw-repl` starts this automatically unless `--no-adapters` is
+`examples/exoclaw/scripts/exoclaw-repl` starts this automatically unless `--no-adapters` is
 provided. It also records a pid file at `.exo/exoclaw-adapters.pid`.
 
 In watch mode, the runtime periodically lists enabled adapters and starts one
@@ -260,7 +295,7 @@ the flow is:
 2. The agent decides to create a scheduled task with `schedule_sandbox_task`.
 3. The task stores normal scheduler state under `.exo/scheduled-tasks`.
 4. The agent includes external routing in the task `reportPrompt`, including the
-   `adapterId` and, for WhatsApp, the `target` chat id.
+   `adapterId` and, for WhatsApp or Signal, the `target`.
 5. The scheduler runner executes the task when it is due.
 6. The scheduler writes a task result artifact and wakes the conversation.
 7. The scheduler wakeup includes the task `reportPrompt`, stdout/stderr preview,
@@ -276,8 +311,9 @@ like:
 
 ```text
 Summarize the headline output and send it back using send_adapter_message with
-adapterId 019e... . For WhatsApp, include target 123@s.whatsapp.net. Keep the
-message under 400 chars.
+adapterId 019e... . For WhatsApp, include target 123@s.whatsapp.net. For Signal,
+include target u:example.01 or the inbound target. Keep the message under 400
+chars.
 ```
 
 This keeps side effects explicit. The scheduler wakes the agent with the result,
@@ -298,13 +334,13 @@ secret and post scheduled task results back to IRC.
 
 Adapters mirror the tool source model:
 
-- `built_in`: adapter implementations shipped with Exoclaw. IRC and experimental
-  WhatsApp are currently built in.
+- `built_in`: adapter implementations shipped with Exoclaw. IRC, experimental
+  WhatsApp, and experimental Signal are currently built in.
 - `library`: reusable adapter modules loaded from manifest metadata.
 - `agent`: adapter modules written or installed by the agent at runtime.
 
-The current runtime runs built-in IRC and WhatsApp adapters as host-supervised
-workers. Module-backed library and agent adapters are persisted and
+The current runtime runs built-in IRC, WhatsApp, and Signal adapters as
+host-supervised workers. Module-backed library and agent adapters are persisted and
 build-validated so the registry boundary is in place; a future module runner can
 implement the same host-owned lifecycle and outbox semantics without changing the
 model-facing tools.
@@ -317,6 +353,8 @@ model-facing tools.
   active for them to reach the external app.
 - WhatsApp `send_adapter_message` calls must include the inbound chat id as
   `target`.
+- Signal `send_adapter_message` calls must include a Signal username, phone
+  number, UUID, group id, or inbound target.
 - If scheduled results do not appear in IRC, check scheduler run records first.
   The adapter may be healthy while the scheduler wakeup is failing.
 - `disable_adapter` is the safe stop operation because it preserves history.
