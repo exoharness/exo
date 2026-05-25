@@ -872,6 +872,10 @@ impl TurnHandle for FakeTurnHandle {
         Ok(add_result)
     }
 
+    async fn write_artifact(&self, _request: WriteArtifactRequest) -> Result<ArtifactVersion> {
+        Err(anyhow!("not implemented"))
+    }
+
     async fn finish(&self) -> Result<exoharness::EventId> {
         let event_id = append_event(
             &self.state,
@@ -990,6 +994,7 @@ fn default_agent_config() -> AgentConfig {
         instructions: Vec::new(),
         harness: crate::AgentHarnessKind::Basic,
         typescript: None,
+        enable_agent_tool_creation: true,
         sandbox_image: None,
         enable_networking: false,
         model: "test-model".to_string(),

@@ -1,8 +1,14 @@
+import type { ToolModuleExport } from "./tool-modules";
+
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
 export interface JsonObject {
   [key: string]: JsonValue;
 }
+
+export * from "./tools";
+export * from "./built-in-tools";
+export * from "./tool-modules";
 
 export type MessageRole =
   | "system"
@@ -22,7 +28,9 @@ export interface AgentConfig {
   harness: "basic" | "rlm" | "typescript";
   typescript?: {
     modulePath: string;
+    toolModulePaths: string[];
   } | null;
+  enableAgentToolCreation: boolean;
   sandboxImage?: string | null;
   enableNetworking: boolean;
   model: string;
@@ -94,6 +102,7 @@ export interface ToolDefinition {
   name: string;
   description: string;
   parameters: JsonValue;
+  outputSchema?: JsonValue;
 }
 
 export interface ToolRequest {
@@ -312,6 +321,18 @@ export interface Turn {
   readonly conversation: Conversation;
   readonly record: TurnRecord;
   addEvents(data: EventData[]): Promise<AddEventsResult>;
+  writeArtifact(args: {
+    path: string;
+    contents: Uint8Array | string;
+  }): Promise<ArtifactVersion>;
+  writeArtifactText(args: {
+    path: string;
+    text: string;
+  }): Promise<ArtifactVersion>;
+  writeArtifactJson(args: {
+    path: string;
+    value: JsonValue;
+  }): Promise<ArtifactVersion>;
 }
 
 export interface TurnContext {
@@ -339,6 +360,7 @@ export interface TurnContext {
 }
 
 export interface TypeScriptHarness {
+  tools?: ToolModuleExport;
   runTurn(context: TurnContext): Promise<void>;
 }
 
@@ -550,10 +572,17 @@ export async function materializeConversationMessages(
 export function materializeEventsToMessages(events: Event[]): Message[] {
   const messages: Message[] = [];
   const toolCallNames = new Map<string, string>();
+  const pendingToolCallIds: string[] = [];
 
   for (const event of events) {
-    extendMaterializedMessages(messages, toolCallNames, event);
+    extendMaterializedMessages(
+      messages,
+      toolCallNames,
+      pendingToolCallIds,
+      event,
+    );
   }
+  flushDanglingToolResults(messages, toolCallNames, pendingToolCallIds);
 
   return messages;
 }
@@ -607,32 +636,6 @@ export function toolResultMessage(
       },
     ],
   };
-}
-
-export function buildShellToolDefinitions(
-  config: ConversationConfig,
-): ToolDefinition[] {
-  if (!config.shellProgram) {
-    return [];
-  }
-
-  return [
-    {
-      name: "shell",
-      description: `Run a shell command using ${config.shellProgram}.`,
-      parameters: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          command: {
-            type: "string",
-            description: "Shell command to execute.",
-          },
-        },
-        required: ["command"],
-      },
-    },
-  ];
 }
 
 export function filterMessages(
@@ -717,9 +720,11 @@ function contentText(content: unknown): string {
 function extendMaterializedMessages(
   messages: Message[],
   toolCallNames: Map<string, string>,
+  pendingToolCallIds: string[],
   event: Event,
 ): void {
   if (isMessagesEvent(event.data)) {
+    flushDanglingToolResults(messages, toolCallNames, pendingToolCallIds);
     messages.push(...event.data.messages);
     return;
   }
@@ -729,6 +734,7 @@ function extendMaterializedMessages(
       event.data.tool_call_id,
       event.data.request.function_name,
     );
+    pendingToolCallIds.push(event.data.tool_call_id);
     return;
   }
 
@@ -737,9 +743,43 @@ function extendMaterializedMessages(
     if (!toolName) {
       return;
     }
+    removePendingToolCall(pendingToolCallIds, event.data.tool_call_id);
     messages.push(
       toolResultMessage(event.data.tool_call_id, toolName, event.data.result),
     );
+  }
+}
+
+function flushDanglingToolResults(
+  messages: Message[],
+  toolCallNames: Map<string, string>,
+  pendingToolCallIds: string[],
+): void {
+  while (pendingToolCallIds.length > 0) {
+    const toolCallId = pendingToolCallIds.shift();
+    if (!toolCallId) {
+      continue;
+    }
+    const toolName = toolCallNames.get(toolCallId);
+    if (!toolName) {
+      continue;
+    }
+    messages.push(
+      toolResultMessage(toolCallId, toolName, {
+        ok: false,
+        error: "tool execution did not complete before the previous turn ended",
+      }),
+    );
+  }
+}
+
+function removePendingToolCall(
+  pendingToolCallIds: string[],
+  toolCallId: string,
+): void {
+  const index = pendingToolCallIds.indexOf(toolCallId);
+  if (index >= 0) {
+    pendingToolCallIds.splice(index, 1);
   }
 }
 

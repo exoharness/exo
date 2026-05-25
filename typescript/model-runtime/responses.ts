@@ -71,6 +71,10 @@ export interface NativeStreamHandlers {
 
 export type TraceParent = Span | string;
 
+export type ToolCallExecutor = (
+  toolCall: PendingToolCall,
+) => Promise<EventData[]>;
+
 export interface NativeTraceOptions {
   parent?: TraceParent;
   roundIndex?: number;
@@ -91,6 +95,7 @@ export interface ResponsesRuntimeLike {
     context: TurnContext,
     toolCall: PendingToolCall,
     roundIndex: number,
+    execute?: ToolCallExecutor,
   ): Promise<EventData[]>;
 }
 
@@ -176,12 +181,14 @@ export class ResponsesRuntime implements ResponsesRuntimeLike {
     context: TurnContext,
     toolCall: PendingToolCall,
     roundIndex: number,
+    execute: ToolCallExecutor = (toolCall) =>
+      context.executePendingTools([toolCall]),
   ): Promise<EventData[]> {
     return tracedUnderParent(
       turnParent,
       async (span) => {
         try {
-          const events = await context.executePendingTools([toolCall]);
+          const events = await execute(toolCall);
           span.log({ output: toolResultTraceOutput(events) });
           return events;
         } catch (error) {

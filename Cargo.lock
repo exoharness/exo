@@ -1855,6 +1855,7 @@ dependencies = [
  "executor",
  "lingua",
  "rustyline",
+ "serde",
  "serde_json 1.0.149",
  "tempfile",
  "tokio",

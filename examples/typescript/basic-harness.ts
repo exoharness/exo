@@ -1,8 +1,14 @@
 import {
-  buildShellToolDefinitions,
+  createToolRegistry,
   defineHarness,
   materializePromptMessages,
+  registerBuiltInTools,
+  registerAgentToolsFromDirectoryIfExists,
+  registerLibraryTools,
+  registerLibraryToolModulePath,
   turnMetadata,
+  type EventData,
+  type Message,
   type TurnContext,
 } from "@exo/harness";
 import {
@@ -16,7 +22,9 @@ import {
 
 import { resolveLlmBinding } from "./shared";
 
-export default defineHarness({
+const harness = defineHarness({
+  tools: [],
+
   async runTurn(context) {
     const modelBinding = await resolveLlmBinding(context);
     const runtime = ResponsesRuntime.fromModelBinding(
@@ -29,13 +37,15 @@ export default defineHarness({
   },
 });
 
+export default harness;
+
 async function runBasicTurnLoop(
   runtime: ResponsesRuntimeLike,
   context: TurnContext,
   turnParent: TraceParent,
   model: string,
 ): Promise<string | null> {
-  const { conversation, turn } = context.exoharness.current;
+  const { conversation } = context.exoharness.current;
   const maxToolRoundTrips = context.agentConfig.maxToolRoundTrips;
   let latestEventId: string | null = null;
 
@@ -48,14 +58,15 @@ async function runBasicTurnLoop(
       return latestEventId;
     }
 
+    const tools = await createBasicToolRegistry(context);
     const messages = await materializePromptMessages(
       conversation,
-      context.agentConfig.instructions,
+      basicHarnessInstructions(context),
     );
     const request: NativeResponsesRequest = {
       model,
       messages,
-      tools: buildShellToolDefinitions(context.conversationConfig),
+      tools: tools.definitions(),
       maxOutputTokens: context.agentConfig.maxOutputTokens,
       metadata: turnMetadata(context),
     };
@@ -79,7 +90,7 @@ async function runBasicTurnLoop(
 
     const events = responseToLinguaEvents(response);
     if (events.length > 0) {
-      latestEventId = (await turn.addEvents(events)).latestEventId;
+      latestEventId = await appendTurnEvents(context, events);
     }
 
     const toolCalls = responseToolCalls(response);
@@ -93,10 +104,61 @@ async function runBasicTurnLoop(
         context,
         toolCall,
         round,
+        (toolCall) => tools.executePending([toolCall]),
       );
       if (toolResultEvents.length > 0) {
-        latestEventId = (await turn.addEvents(toolResultEvents)).latestEventId;
+        latestEventId = await appendTurnEvents(context, toolResultEvents);
       }
     }
   }
+}
+
+async function appendTurnEvents(
+  context: TurnContext,
+  data: EventData[],
+): Promise<string> {
+  const { conversation, turn } = context.exoharness.current;
+  return (
+    await conversation.addEvents({
+      sessionId: turn.record.sessionId,
+      turnId: turn.record.id,
+      data,
+    })
+  ).latestEventId;
+}
+
+function basicHarnessInstructions(context: TurnContext): Message[] {
+  return context.agentConfig.enableAgentToolCreation
+    ? [...context.agentConfig.instructions, agentToolCreationInstruction()]
+    : context.agentConfig.instructions;
+}
+
+function agentToolCreationInstruction(): Message {
+  return {
+    role: "developer",
+    content:
+      "Agent-created tools are supported. When the user asks you to create a reusable tool, call install_agent_tool with a complete TypeScript moduleSource. Do not claim the tool was created unless install_agent_tool returns ok: true. The moduleSource must use type-only imports from @exo/harness/tool and default-export a Tool using { definition, initializationParameters, initialize(...) } satisfies Tool; definition.parameters must be a strict JSON schema object with additionalProperties: false; handlers must implement execute(args, execution), not invoke or call. Do not use zod, inputSchema, external npm packages, or runtime imports from @exo/harness/tool. After install_agent_tool succeeds, the new tool is available in the next model round of the same turn, so use it directly rather than falling back to shell.",
+  };
+}
+
+async function createBasicToolRegistry(context: TurnContext) {
+  const tools = createToolRegistry(context);
+  registerBuiltInTools(tools, context, builtInToolNames(context));
+  await registerLibraryTools(tools, context, harness.tools ?? []);
+  for (const modulePath of context.agentConfig.typescript?.toolModulePaths ??
+    []) {
+    await registerLibraryToolModulePath(tools, context, modulePath);
+  }
+  if (context.agentConfig.enableAgentToolCreation) {
+    await registerAgentToolsFromDirectoryIfExists(tools, context);
+  }
+  return tools;
+}
+
+function builtInToolNames(
+  context: TurnContext,
+): Array<"shell" | "install_agent_tool"> {
+  return context.agentConfig.enableAgentToolCreation
+    ? ["shell", "install_agent_tool"]
+    : ["shell"];
 }

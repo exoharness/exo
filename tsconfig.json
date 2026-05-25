@@ -12,6 +12,7 @@
     "paths": {
       "*": ["./*"],
       "@exo/harness": ["./typescript/harness/index.ts"],
+      "@exo/harness/tool": ["./typescript/harness/tool.ts"],
       "@exo/model-runtime/responses": [
         "./typescript/model-runtime/responses.ts"
       ],

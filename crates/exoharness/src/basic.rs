@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::{self, Display, Formatter};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -455,44 +456,7 @@ impl AgentHandle for BasicAgentHandle {
 
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion> {
         let _guard = self.harness.inner.write_lock.lock().await;
-        let versions =
-            load_artifact_versions(&self.harness.inner.storage, &self.artifacts_dir()).await?;
-        let existing = versions
-            .iter()
-            .filter(|artifact| artifact.path == request.path)
-            .max_by_key(|artifact| artifact.version);
-        let artifact_id = existing
-            .map(|artifact| artifact.artifact_id)
-            .unwrap_or_else(Uuid7::now);
-        let version = existing.map(|artifact| artifact.version + 1).unwrap_or(1);
-        let created_at = Uuid7::now().timestamp().expect("uuid7 timestamp");
-        let artifact_version = ArtifactVersion {
-            artifact_id,
-            path: request.path,
-            version,
-            created_at,
-            size_bytes: request.contents.len() as u64,
-        };
-        let artifact_dir = self.artifacts_dir().join(artifact_id.to_string());
-        self.harness
-            .inner
-            .storage
-            .put_json(
-                artifact_dir.join(format!("{version}.json")),
-                &StoredArtifactMetadata {
-                    version: artifact_version.clone(),
-                },
-            )
-            .await?;
-        self.harness
-            .inner
-            .storage
-            .put_bytes(
-                artifact_dir.join(format!("{version}.bin")),
-                request.contents,
-            )
-            .await?;
-        Ok(artifact_version)
+        write_artifact_version(&self.harness.inner, &self.artifacts_dir(), request).await
     }
 
     async fn read_artifact(&self, request: ReadArtifactRequest) -> Result<Option<Artifact>> {
@@ -646,8 +610,10 @@ impl ConversationHandle for BasicConversationHandle {
             conversation_dir,
             conversation_id: self.record.id,
             record: turn_record,
-            latest_event_id: AsyncMutex::new(Some(add_result.latest_event_id)),
-            finished: AsyncMutex::new(false),
+            state: Mutex::new(BasicTurnState {
+                latest_event_id: Some(add_result.latest_event_id),
+                finished: false,
+            }),
         }))
     }
 
@@ -831,43 +797,8 @@ impl ConversationHandle for BasicConversationHandle {
 
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion> {
         let _guard = self.harness.inner.write_lock.lock().await;
-        let versions =
-            load_artifact_versions(&self.harness.inner.storage, &self.artifacts_dir()).await?;
-        let existing = versions
-            .iter()
-            .filter(|artifact| artifact.path == request.path)
-            .max_by_key(|artifact| artifact.version);
-        let artifact_id = existing
-            .map(|artifact| artifact.artifact_id)
-            .unwrap_or_else(Uuid7::now);
-        let version = existing.map(|artifact| artifact.version + 1).unwrap_or(1);
-        let created_at = Uuid7::now().timestamp().expect("uuid7 timestamp");
-        let artifact_version = ArtifactVersion {
-            artifact_id,
-            path: request.path.clone(),
-            version,
-            created_at,
-            size_bytes: request.contents.len() as u64,
-        };
-        let artifact_dir = self.artifacts_dir().join(artifact_id.to_string());
-        self.harness
-            .inner
-            .storage
-            .put_json(
-                artifact_dir.join(format!("{version}.json")),
-                &StoredArtifactMetadata {
-                    version: artifact_version.clone(),
-                },
-            )
-            .await?;
-        self.harness
-            .inner
-            .storage
-            .put_bytes(
-                artifact_dir.join(format!("{version}.bin")),
-                request.contents,
-            )
-            .await?;
+        let artifact_version =
+            write_artifact_version(&self.harness.inner, &self.artifacts_dir(), request).await?;
         let conversation_dir = self.conversation_dir();
         let mut record = self.load_record().await?;
         append_events_to_conversation(
@@ -878,9 +809,9 @@ impl ConversationHandle for BasicConversationHandle {
             None,
             record.latest_event_id,
             vec![EventData::ArtifactWritten {
-                artifact_id,
+                artifact_id: artifact_version.artifact_id,
                 path: artifact_version.path.clone(),
-                version,
+                version: artifact_version.version,
             }],
             &mut record,
         )
@@ -1369,8 +1300,12 @@ struct BasicTurnHandle {
     conversation_dir: PathBuf,
     conversation_id: ConversationId,
     record: TurnRecord,
-    latest_event_id: AsyncMutex<Option<EventId>>,
-    finished: AsyncMutex<bool>,
+    state: Mutex<BasicTurnState>,
+}
+
+struct BasicTurnState {
+    latest_event_id: Option<EventId>,
+    finished: bool,
 }
 
 #[async_trait]
@@ -1380,8 +1315,12 @@ impl TurnHandle for BasicTurnHandle {
     }
 
     async fn add_events(&self, data: Vec<EventData>) -> Result<AddEventsResult> {
-        let expected_head = *self.latest_event_id.lock().await;
         let _guard = self.harness.inner.write_lock.lock().await;
+        let expected_head = self
+            .state
+            .lock()
+            .expect("turn state poisoned")
+            .latest_event_id;
         let mut record = self
             .harness
             .inner
@@ -1404,22 +1343,76 @@ impl TurnHandle for BasicTurnHandle {
             .storage
             .put_json(self.conversation_dir.join("record.json"), &record)
             .await?;
-        *self.latest_event_id.lock().await = Some(add_result.latest_event_id);
+        self.state
+            .lock()
+            .expect("turn state poisoned")
+            .latest_event_id = Some(add_result.latest_event_id);
         Ok(add_result)
     }
 
-    async fn finish(&self) -> Result<EventId> {
-        let mut finished = self.finished.lock().await;
-        if *finished {
-            let latest = self
-                .latest_event_id
-                .lock()
-                .await
-                .ok_or_else(|| anyhow!("turn has no latest event id"))?;
-            return Ok(latest);
-        }
-        let expected_head = *self.latest_event_id.lock().await;
+    async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion> {
         let _guard = self.harness.inner.write_lock.lock().await;
+        let expected_head = self
+            .state
+            .lock()
+            .expect("turn state poisoned")
+            .latest_event_id;
+        let mut record = self
+            .harness
+            .inner
+            .storage
+            .get_json::<ConversationRecord>(self.conversation_dir.join("record.json"))
+            .await?;
+        ensure_conversation_head(
+            record.latest_event_id,
+            expected_head,
+            Some(self.record.session_id),
+            Some(self.record.id),
+        )?;
+        let artifact_version = write_artifact_version(
+            &self.harness.inner,
+            &self.conversation_dir.join("artifacts"),
+            request,
+        )
+        .await?;
+        let add_result = append_events_to_conversation(
+            &self.harness.inner,
+            &self.conversation_dir,
+            self.conversation_id,
+            Some(self.record.session_id),
+            Some(self.record.id),
+            expected_head,
+            vec![EventData::ArtifactWritten {
+                artifact_id: artifact_version.artifact_id,
+                path: artifact_version.path.clone(),
+                version: artifact_version.version,
+            }],
+            &mut record,
+        )
+        .await?;
+        self.harness
+            .inner
+            .storage
+            .put_json(self.conversation_dir.join("record.json"), &record)
+            .await?;
+        self.state
+            .lock()
+            .expect("turn state poisoned")
+            .latest_event_id = Some(add_result.latest_event_id);
+        Ok(artifact_version)
+    }
+
+    async fn finish(&self) -> Result<EventId> {
+        let _guard = self.harness.inner.write_lock.lock().await;
+        let expected_head = {
+            let state = self.state.lock().expect("turn state poisoned");
+            if state.finished {
+                return state
+                    .latest_event_id
+                    .ok_or_else(|| anyhow!("turn has no latest event id"));
+            }
+            state.latest_event_id
+        };
         let mut record = self
             .harness
             .inner
@@ -1442,10 +1435,11 @@ impl TurnHandle for BasicTurnHandle {
             .storage
             .put_json(self.conversation_dir.join("record.json"), &record)
             .await?;
-        let latest_event_id = add_result.latest_event_id;
-        *self.latest_event_id.lock().await = Some(latest_event_id);
-        *finished = true;
-        Ok(latest_event_id)
+        let latest = add_result.latest_event_id;
+        let mut state = self.state.lock().expect("turn state poisoned");
+        state.latest_event_id = Some(latest);
+        state.finished = true;
+        Ok(latest)
     }
 }
 
@@ -1551,10 +1545,13 @@ async fn append_events_to_conversation(
     if data.is_empty() {
         bail!("cannot append zero events");
     }
-    if let Some(expected_head) = expected_head
-        && record.latest_event_id != Some(expected_head)
-    {
-        bail!("conversation head mismatch");
+    if let Some(expected_head) = expected_head {
+        ensure_conversation_head(
+            record.latest_event_id,
+            Some(expected_head),
+            session_id,
+            turn_id,
+        )?;
     }
     let mut event_ids = Vec::new();
     let mut latest_event_id = None;
@@ -1587,6 +1584,66 @@ async fn append_events_to_conversation(
         event_ids,
         latest_event_id,
     })
+}
+
+fn ensure_conversation_head(
+    current_head: Option<EventId>,
+    expected_head: Option<EventId>,
+    session_id: Option<SessionId>,
+    turn_id: Option<TurnId>,
+) -> Result<()> {
+    if current_head == expected_head {
+        return Ok(());
+    }
+    Err(ConversationHeadMismatch {
+        current_head,
+        expected_head,
+        session_id,
+        turn_id,
+    }
+    .into())
+}
+
+#[derive(Debug, Clone)]
+struct ConversationHeadMismatch {
+    current_head: Option<EventId>,
+    expected_head: Option<EventId>,
+    session_id: Option<SessionId>,
+    turn_id: Option<TurnId>,
+}
+
+impl Display for ConversationHeadMismatch {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let expected = format_event_head_timestamp(self.expected_head);
+        let current = format_event_head_timestamp(self.current_head);
+        if let Some(turn_id) = self.turn_id {
+            let session = self
+                .session_id
+                .map(|session_id| session_id.to_string())
+                .unwrap_or_else(|| "none".to_string());
+            return write!(
+                f,
+                "turn is stale and cannot be resumed: conversation head advanced outside this turn \
+                 (turn_id: {turn_id}, session_id: {session}, expected_head_at: {expected}, \
+                 current_head_at: {current})"
+            );
+        }
+        write!(
+            f,
+            "conversation head mismatch: expected_head_at: {expected}, current_head_at: {current}"
+        )
+    }
+}
+
+impl std::error::Error for ConversationHeadMismatch {}
+
+fn format_event_head_timestamp(head: Option<EventId>) -> String {
+    let Some(id) = head else {
+        return "none".to_string();
+    };
+    id.timestamp()
+        .map(|timestamp| timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn notify_subscribers(inner: &BasicExoHarnessInner, conversation_id: ConversationId, event: Event) {
@@ -1625,6 +1682,48 @@ async fn load_artifact_versions(
         .collect::<Vec<_>>();
     versions.sort_by_key(|artifact| (artifact.artifact_id, artifact.version));
     Ok(versions)
+}
+
+async fn write_artifact_version(
+    inner: &BasicExoHarnessInner,
+    artifacts_dir: &Path,
+    request: WriteArtifactRequest,
+) -> Result<ArtifactVersion> {
+    let versions = load_artifact_versions(&inner.storage, artifacts_dir).await?;
+    let existing = versions
+        .iter()
+        .filter(|artifact| artifact.path == request.path)
+        .max_by_key(|artifact| artifact.version);
+    let artifact_id = existing
+        .map(|artifact| artifact.artifact_id)
+        .unwrap_or_else(Uuid7::now);
+    let version = existing.map(|artifact| artifact.version + 1).unwrap_or(1);
+    let created_at = Uuid7::now().timestamp().expect("uuid7 timestamp");
+    let artifact_version = ArtifactVersion {
+        artifact_id,
+        path: request.path,
+        version,
+        created_at,
+        size_bytes: request.contents.len() as u64,
+    };
+    let artifact_dir = artifacts_dir.join(artifact_id.to_string());
+    inner
+        .storage
+        .put_json(
+            artifact_dir.join(format!("{version}.json")),
+            &StoredArtifactMetadata {
+                version: artifact_version.clone(),
+            },
+        )
+        .await?;
+    inner
+        .storage
+        .put_bytes(
+            artifact_dir.join(format!("{version}.bin")),
+            request.contents,
+        )
+        .await?;
+    Ok(artifact_version)
 }
 
 async fn load_artifact_contents(
