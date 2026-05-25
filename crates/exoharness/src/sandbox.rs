@@ -147,7 +147,7 @@ pub trait ManagedSandboxBackend: Send + Sync {
     ) -> Result<Arc<dyn ManagedSandboxHandle>>;
 }
 
-pub const DEFAULT_SANDBOX_IMAGE: &str = "docker.io/library/debian:bookworm";
+pub const DEFAULT_SANDBOX_IMAGE: &str = "docker.io/library/ubuntu:24.04";
 pub const SANDBOX_HOME_DIR: &str = "/home/exo";
 pub const SANDBOX_MAIN_MOUNT_DIR: &str = "/home/exo/workspace";
 
