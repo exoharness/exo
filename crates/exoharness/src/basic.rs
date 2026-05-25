@@ -1122,15 +1122,49 @@ impl ConversationHandle for BasicConversationHandle {
         if request.command.is_empty() {
             bail!("sandbox command must not be empty");
         }
-        let sandbox_handle = self
-            .harness
-            .inner
-            .running_sandboxes
-            .lock()
-            .await
-            .get(&request.id)
-            .cloned()
-            .ok_or_else(|| anyhow!("sandbox is not active in this process: {}", request.id))?;
+        let sandbox_handle = {
+            let cached = self
+                .harness
+                .inner
+                .running_sandboxes
+                .lock()
+                .await
+                .get(&request.id)
+                .cloned();
+            match cached {
+                Some(handle) => handle,
+                None => {
+                    // The handle isn't in this process's in-memory pool. That's
+                    // expected on the first tool call after exo starts up: the
+                    // conversation remembered the sandbox_id from a prior
+                    // process, but we haven't bound a handle to it yet. Ask the
+                    // backend to resume by SandboxKey — that's the moment the
+                    // cross-process resume contract actually triggers.
+                    let req =
+                        sandbox_request(self.record.id, &request.id, &sandbox);
+                    let Some(handle) = self
+                        .harness
+                        .inner
+                        .sandbox_backend
+                        .try_resume(req)
+                        .await?
+                    else {
+                        bail!(
+                            "sandbox {} no longer exists on the backend; \
+                             create a new one or restore from a snapshot",
+                            request.id
+                        );
+                    };
+                    self.harness
+                        .inner
+                        .running_sandboxes
+                        .lock()
+                        .await
+                        .insert(request.id.clone(), Arc::clone(&handle));
+                    handle
+                }
+            }
+        };
         let parts = sandbox_handle
             .start_process(&SandboxCommand {
                 argv: request.command.clone(),
