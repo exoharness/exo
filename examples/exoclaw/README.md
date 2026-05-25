@@ -88,8 +88,6 @@ And adapter tools:
 - `disable_adapter`
 - `delete_adapter`
 - `send_adapter_message`
-- `install_agent_adapter`
-- `build_agent_adapter`
 
 `disable_adapter` stops future adapter wake-ups while preserving the adapter
 record and event history. `delete_adapter` removes the adapter record and stored
@@ -150,7 +148,7 @@ Example WhatsApp adapter tool arguments:
 ```json
 {
   "name": "whatsapp-dev",
-  "source": "built_in",
+  "source": "library",
   "config": {
     "type": "whatsapp",
     "authDir": null,
@@ -166,7 +164,7 @@ Example Signal adapter tool arguments:
 ```json
 {
   "name": "signal-dev",
-  "source": "built_in",
+  "source": "library",
   "config": {
     "type": "signal",
     "account": null,
@@ -193,18 +191,15 @@ instruction in the task's `reportPrompt`, including the `adapterId` and target
 from the wakeup. Scheduler wakeups are normal Exoclaw turns, so they can call
 `send_adapter_message` when the `reportPrompt` says to post the result back.
 
-Adapters use the same source model as tools:
+Adapters use a small source model:
 
-- `built_in`: shipped with Exoclaw, starting with IRC, experimental WhatsApp,
-  and experimental Signal.
-- `library`: registered from reusable module metadata.
-- `agent`: installed by the agent with `install_agent_adapter`, then validated
-  with `build_agent_adapter`.
+- `built_in`: core adapters shipped as host-native Exoclaw behavior. IRC is
+  currently the only built-in adapter.
+- `library`: reusable adapters shipped with Exoclaw. WhatsApp and Signal are
+  library adapters backed by shipped workers.
 
-The host runtime runs built-in IRC, WhatsApp, and Signal adapters through the
-same generic worker bridge. Module-backed library and agent adapters are
-persisted and build-validated so the source model is in place; richer module
-execution can be layered on the same registry/runtime boundary.
+The host runtime runs built-in IRC plus library WhatsApp and Signal adapters
+through the same generic worker bridge.
 
 ## Sandbox Modes
 

@@ -2,8 +2,8 @@
 
 Exoclaw adapters are host-owned long-running integrations between an Exoclaw
 conversation and an external application. The first adapter is IRC, but the
-shape is intended to support Slack, Discord, WhatsApp, Signal, IRC networks,
-custom local services, and agent-authored modules.
+same worker shape now supports IRC, WhatsApp, and Signal, and is intended to
+support Slack, Discord, IRC networks, and custom local services.
 
 Adapters are deliberately not scheduled sandbox tasks. A scheduled task is a
 periodic command: it starts, runs, writes output, wakes the conversation, and
@@ -16,26 +16,25 @@ be handled by the agent.
 
 The implementation is split across a few small executor and CLI modules:
 
-- `crates/executor/src/adapter_types.rs` defines durable adapter records,
-  source/kind enums, generic worker config, event records, and outbound message
-  records.
-- `crates/executor/src/adapter_store.rs` is the file-backed store under
+- `crates/executor/src/adapter/types.rs` defines durable adapter records,
+  source enums, generic worker config, event records, and outbound message records.
+- `crates/executor/src/adapter/store.rs` is the file-backed store under
   `.exo/adapters`. It stores adapter records, per-adapter event history, and
   the adapter outbox.
-- `crates/executor/src/adapter_runtime.rs` supervises enabled worker adapters,
+- `crates/executor/src/adapter/runtime.rs` supervises enabled worker adapters,
   writes event artifacts, sends conversation wakeups, and queues outbound
   messages.
-- `crates/executor/src/adapter_worker.rs` implements the generic JSONL worker
+- `crates/executor/src/adapter/worker.rs` implements the generic JSONL worker
   bridge used by host-supervised sidecar adapters.
 - `examples/exoclaw/adapters/irc/worker.ts` implements IRC connection behavior:
   TLS/plain TCP, `PASS`/`NICK`/`USER`, `JOIN`, `PING`/`PONG`, `PRIVMSG`
   parsing, trigger matching, and draining outbound messages over the persistent
   IRC connection.
 - `examples/exoclaw/adapters/whatsapp/worker.ts` is the Baileys worker for the
-  built-in WhatsApp adapter.
+  library WhatsApp adapter.
 - `examples/exoclaw/adapters/signal/worker.ts` is the `signal-cli` worker for
-  the built-in Signal adapter.
-- `crates/executor/src/adapter_tools.rs` implements the host-backed tool calls
+  the library Signal adapter.
+- `crates/executor/src/adapter/tools.rs` implements the host-backed tool calls
   used by Exoclaw.
 - `typescript/harness/adapter-tools.ts` exposes the model-facing Exoclaw tools.
 - `crates/cli/src/adapters.rs` provides `exo --harness exoclaw adapters ...`.
@@ -72,8 +71,7 @@ The key record is `AdapterRecord`:
 - `id`: stable adapter id used by tools and scheduler report prompts.
 - `agent_id` and `conversation_id`: the owning Exoclaw agent/conversation.
 - `name`: human-friendly adapter name.
-- `source`: `built_in`, `library`, or `agent`.
-- `kind`: `worker` or `module`.
+- `source`: `built_in` or `library`.
 - `enabled`: disabled adapters preserve history but stop receiving.
 - `config`: generic worker config, including adapter type, command,
   initialization JSON, capabilities, optional state dir, and optional secret
@@ -90,8 +88,6 @@ Exoclaw exposes these adapter tools:
 - `disable_adapter`: stop receiving while preserving history.
 - `delete_adapter`: remove adapter state and event history.
 - `send_adapter_message`: request an explicit outbound send.
-- `install_agent_adapter`: persist agent-created adapter source.
-- `build_agent_adapter`: validate and mark non-built-in adapters buildable.
 
 All adapter tools are conversation-scoped. The TypeScript tool definitions add
 the current `agentId` and `conversationId` before dispatching to Rust, and the
@@ -334,14 +330,15 @@ secret and post scheduled task results back to IRC.
 
 Adapters mirror the tool source model:
 
-- `built_in`: adapter implementations shipped with Exoclaw. IRC, experimental
-  WhatsApp, and experimental Signal are currently built in.
-- `library`: reusable adapter modules loaded from manifest metadata.
+- `built_in`: core adapter implementations shipped as host-native Exoclaw
+  behavior. IRC is currently the only built-in adapter.
+- `library`: reusable adapters shipped with Exoclaw or loaded from manifest
+  metadata. WhatsApp and Signal are library adapters backed by shipped workers.
 - `agent`: adapter modules written or installed by the agent at runtime.
 
-The current runtime runs built-in IRC, WhatsApp, and Signal adapters as
-host-supervised workers. Module-backed library and agent adapters are persisted and
-build-validated so the registry boundary is in place; a future module runner can
+The current runtime runs built-in IRC plus library WhatsApp and Signal adapters
+as host-supervised workers. Module-backed library and agent adapters are persisted
+and build-validated so the registry boundary is in place; a future module runner can
 implement the same host-owned lifecycle and outbox semantics without changing the
 model-facing tools.
 

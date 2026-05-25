@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use tokio::fs;
 
 use super::types::{
-    AdapterBuildStatus, AdapterEventRecord, AdapterEventType, AdapterOutboundMessageRecord,
-    AdapterRecord, NewAdapter, now_ms,
+    AdapterEventRecord, AdapterEventType, AdapterOutboundMessageRecord, AdapterRecord, NewAdapter,
+    now_ms,
 };
 
 #[derive(Debug, Clone)]
@@ -117,22 +117,6 @@ impl AdapterStore {
         remove_file_if_exists(self.adapter_path(adapter_id)).await?;
         remove_dir_if_exists(self.events_dir(adapter_id)).await?;
         remove_dir_if_exists(self.outbox_dir(adapter_id)).await?;
-        Ok(Some(adapter))
-    }
-
-    pub async fn mark_built(
-        &self,
-        adapter_id: &str,
-        status: AdapterBuildStatus,
-        error: Option<String>,
-    ) -> Result<Option<AdapterRecord>> {
-        let Some(mut adapter) = self.get_adapter(adapter_id).await? else {
-            return Ok(None);
-        };
-        adapter.build_status = status;
-        adapter.build_error = error;
-        adapter.updated_at_ms = now_ms();
-        self.put_adapter(&adapter).await?;
         Ok(Some(adapter))
     }
 

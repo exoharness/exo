@@ -2,10 +2,9 @@ use exoharness::{AgentHandle, ConversationHandle, Result, ToolRequest, ToolResul
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::registry::{adapter_definition, validate_adapter_build};
 use super::runtime::send_adapter_message_with_handles;
 use super::store::AdapterStore;
-use super::types::{AdapterBuildStatus, AdapterConfig, AdapterSource, NewAdapter};
+use super::types::{AdapterConfig, AdapterSource, NewAdapter};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,7 +60,6 @@ pub async fn execute_create_adapter_tool(
     Ok(serde_json::json!({
         "ok": true,
         "adapter": adapter,
-        "definition": adapter_definition(&adapter),
     }))
 }
 
@@ -127,34 +125,6 @@ pub async fn execute_delete_adapter_tool(
         "adapterId": args.adapter_id,
         "deleted": true,
         "eventsDeleted": true,
-    }))
-}
-
-pub async fn execute_build_adapter_tool(
-    store: &AdapterStore,
-    request: &ToolRequest,
-) -> Result<ToolResult> {
-    let args =
-        serde_json::from_value::<AdapterIdArguments>(Value::Object(request.arguments.clone()))?;
-    let Some(adapter) = store.get_adapter(&args.adapter_id).await? else {
-        return Ok(not_found());
-    };
-    if adapter.agent_id != args.agent_id || adapter.conversation_id != args.conversation_id {
-        return Ok(not_found());
-    }
-    let result = validate_adapter_build(&adapter);
-    let (status, error) = match result {
-        Ok(()) => (AdapterBuildStatus::Succeeded, None),
-        Err(error) => (AdapterBuildStatus::Failed, Some(error.to_string())),
-    };
-    store
-        .mark_built(&args.adapter_id, status, error.clone())
-        .await?;
-    Ok(serde_json::json!({
-        "ok": error.is_none(),
-        "adapterId": args.adapter_id,
-        "buildStatus": status,
-        "error": error,
     }))
 }
 

@@ -1,9 +1,9 @@
 Set up a Signal adapter for testing.
 
-Create a built-in Signal adapter if one does not already exist for this conversation, then make sure it is ready for the background adapter runner. Use these settings:
+Create a library Signal adapter if one does not already exist for this conversation, then make sure it is ready for the background adapter runner. Use these settings:
 
 - name: `signal-dev`
-- source: `built_in`
+- source: `library`
 - type: `signal`
 - account: `null`
 - deviceName: `Exoclaw`

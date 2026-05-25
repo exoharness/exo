@@ -1,6 +1,3 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-
 import type { JsonObject, ToolDefinition, TurnContext } from "./index";
 import type { HarnessToolRegistry, ToolInstance } from "./tools";
 
@@ -9,12 +6,7 @@ export type AdapterToolName =
   | "list_adapters"
   | "disable_adapter"
   | "delete_adapter"
-  | "send_adapter_message"
-  | "install_agent_adapter"
-  | "build_agent_adapter";
-
-export const DEFAULT_AGENT_ADAPTER_MANIFEST_PATH =
-  ".exo/agent-adapters/manifest.json";
+  | "send_adapter_message";
 
 export function registerAdapterTools(
   registry: HarnessToolRegistry,
@@ -24,8 +16,6 @@ export function registerAdapterTools(
     "disable_adapter",
     "delete_adapter",
     "send_adapter_message",
-    "install_agent_adapter",
-    "build_agent_adapter",
   ],
 ): void {
   const requested = new Set<AdapterToolName>(names);
@@ -43,8 +33,6 @@ function createAdapterToolInstances(): ToolInstance[] {
     disableAdapterTool(),
     deleteAdapterTool(),
     sendAdapterMessageTool(),
-    installAgentAdapterTool(),
-    buildAgentAdapterTool(),
   ];
 }
 
@@ -54,7 +42,7 @@ function createAdapterTool(): ToolInstance {
     definition: {
       name: "create_adapter",
       description:
-        "Create and enable a long-running Exoclaw adapter for this conversation. Use source 'built_in' with config type 'irc', 'whatsapp', or 'signal' for built-in adapters. Use source 'library' or 'agent' with config type 'module' for adapter modules.",
+        "Create and enable a long-running Exoclaw adapter for this conversation. Use source 'built_in' only with config type 'irc'. Use source 'library' with config type 'whatsapp' or 'signal' for shipped library adapters.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -66,7 +54,7 @@ function createAdapterTool(): ToolInstance {
           },
           source: {
             type: "string",
-            enum: ["built_in", "library", "agent"],
+            enum: ["built_in", "library"],
             description: "Adapter source.",
           },
           config: adapterConfigSchema(),
@@ -129,18 +117,6 @@ function deleteAdapterTool(): ToolInstance {
   });
 }
 
-function buildAgentAdapterTool(): ToolInstance {
-  return hostTool({
-    name: "build_agent_adapter",
-    functionName: "build_adapter",
-    description:
-      "Validate and mark an agent or library adapter as buildable before the adapter runtime connects it.",
-    parameters: adapterIdParameters(
-      "Adapter id returned by create_adapter or list_adapters.",
-    ),
-  });
-}
-
 function sendAdapterMessageTool(): ToolInstance {
   return hostTool({
     name: "send_adapter_message",
@@ -168,52 +144,6 @@ function sendAdapterMessageTool(): ToolInstance {
       required: ["adapterId", "text", "target"],
     },
   });
-}
-
-function installAgentAdapterTool(): ToolInstance {
-  return {
-    source: "built_in",
-    definition: {
-      name: "install_agent_adapter",
-      description:
-        "Install or replace an agent-created adapter module. This writes moduleSource under .exo/agent-adapters and returns a modulePath that can be used with create_adapter source 'agent' and config type 'module'.",
-      parameters: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          name: {
-            type: "string",
-            description:
-              "Filesystem-safe adapter module name using letters, numbers, dashes, or underscores.",
-          },
-          moduleSource: {
-            type: "string",
-            description:
-              "Complete TypeScript source for the adapter module. Module-backed host execution is experimental, but the source is persisted and build-validated through build_agent_adapter.",
-          },
-          initialization: {
-            type: "object",
-            additionalProperties: false,
-            properties: {},
-            description:
-              "Initialization JSON for the adapter module. Use an empty object for now; richer module initialization will need a stricter schema.",
-          },
-          capabilities: {
-            type: "array",
-            items: { type: "string" },
-            description:
-              "Declared adapter capabilities, such as receive or send_message.",
-          },
-        },
-        required: ["name", "moduleSource", "initialization", "capabilities"],
-      },
-    },
-    handler: {
-      execute(args) {
-        return installAgentAdapter(args);
-      },
-    },
-  };
 }
 
 function hostTool(args: {
@@ -370,31 +300,29 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
           "workerCommand",
         ],
       },
-      {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          type: { type: "string", enum: ["module"] },
-          modulePath: { type: "string" },
-          initialization: {
-            type: "object",
-            additionalProperties: false,
-            properties: {},
-          },
-          capabilities: { type: "array", items: { type: "string" } },
-        },
-        required: ["type", "modulePath", "initialization", "capabilities"],
-      },
     ],
   } as ToolDefinition["parameters"];
 }
 
 function transformCreateAdapterArguments(args: JsonObject): JsonObject {
   const config = objectField(args, "config");
+  validateAdapterSource(
+    stringField(args, "source"),
+    stringField(config, "type"),
+  );
   return {
     ...args,
     config: transformAdapterConfig(config),
   };
+}
+
+function validateAdapterSource(source: string, type: string): void {
+  if (type === "irc" && source !== "built_in") {
+    throw new Error("IRC adapters must use source 'built_in'");
+  }
+  if ((type === "whatsapp" || type === "signal") && source !== "library") {
+    throw new Error(`${type} adapters must use source 'library'`);
+  }
 }
 
 function transformAdapterConfig(config: JsonObject): JsonObject {
@@ -483,88 +411,6 @@ function adapterIdParameters(
   };
 }
 
-async function installAgentAdapter(args: JsonObject): Promise<JsonObject> {
-  const name = stringArgument(args, "name");
-  if (!/^[A-Za-z0-9_-]+$/.test(name)) {
-    throw new Error(
-      "agent adapter name must contain only letters, numbers, underscores, and dashes",
-    );
-  }
-  const moduleSource = stringArgument(args, "moduleSource");
-  const initialization = objectArgument(args, "initialization");
-  const capabilities = stringArrayArgument(args, "capabilities");
-  const adaptersDirectory = path.dirname(DEFAULT_AGENT_ADAPTER_MANIFEST_PATH);
-  const modulePath = path.join(adaptersDirectory, `${name}.ts`);
-  await fs.mkdir(adaptersDirectory, { recursive: true });
-  await fs.writeFile(modulePath, moduleSource, "utf8");
-
-  const manifest = await readAgentAdapterManifest();
-  const entry = {
-    modulePath: `./${name}.ts`,
-    initialization,
-    capabilities,
-  };
-  const index = manifest.adapters.findIndex(
-    (candidate) => candidate.modulePath === entry.modulePath,
-  );
-  if (index >= 0) {
-    manifest.adapters[index] = entry;
-  } else {
-    manifest.adapters.push(entry);
-  }
-  await fs.writeFile(
-    DEFAULT_AGENT_ADAPTER_MANIFEST_PATH,
-    `${JSON.stringify(manifest, null, 2)}\n`,
-    "utf8",
-  );
-
-  return {
-    ok: true,
-    modulePath: path.resolve(modulePath),
-    manifestPath: DEFAULT_AGENT_ADAPTER_MANIFEST_PATH,
-    initialization,
-    capabilities,
-  };
-}
-
-async function readAgentAdapterManifest(): Promise<{
-  adapters: Array<{
-    modulePath: string;
-    initialization: JsonObject;
-    capabilities: string[];
-  }>;
-}> {
-  try {
-    const value = JSON.parse(
-      await fs.readFile(DEFAULT_AGENT_ADAPTER_MANIFEST_PATH, "utf8"),
-    ) as unknown;
-    if (!isRecord(value) || !Array.isArray(value.adapters)) {
-      throw new Error(
-        `agent adapter manifest must contain an adapters array: ${DEFAULT_AGENT_ADAPTER_MANIFEST_PATH}`,
-      );
-    }
-    return {
-      adapters: value.adapters.map((entry, index) => {
-        if (!isRecord(entry)) {
-          throw new Error(
-            `agent adapter manifest entry ${index} must be an object`,
-          );
-        }
-        return {
-          modulePath: stringField(entry, "modulePath"),
-          initialization: objectField(entry, "initialization"),
-          capabilities: stringArrayField(entry, "capabilities"),
-        };
-      }),
-    };
-  } catch (error) {
-    if (isNotFoundError(error)) {
-      return { adapters: [] };
-    }
-    throw error;
-  }
-}
-
 function withConversationScope(
   context: TurnContext,
   args: JsonObject,
@@ -575,18 +421,6 @@ function withConversationScope(
     agentId: agent.record.id,
     conversationId: conversation.record.id,
   };
-}
-
-function stringArgument(args: JsonObject, name: string): string {
-  return stringField(args, name);
-}
-
-function objectArgument(args: JsonObject, name: string): JsonObject {
-  return objectField(args, name);
-}
-
-function stringArrayArgument(args: JsonObject, name: string): string[] {
-  return stringArrayField(args, name);
 }
 
 function stringField(args: JsonObject, name: string): string {
@@ -634,17 +468,6 @@ function objectField(args: JsonObject, name: string): JsonObject {
   return value;
 }
 
-function stringArrayField(args: JsonObject, name: string): string[] {
-  const value = args[name];
-  if (
-    !Array.isArray(value) ||
-    !value.every((item) => typeof item === "string")
-  ) {
-    throw new Error(`adapter argument ${name} must be an array of strings`);
-  }
-  return value;
-}
-
 function nullableStringArrayField(
   args: JsonObject,
   name: string,
@@ -666,13 +489,4 @@ function nullableStringArrayField(
 
 function isRecord(value: unknown): value is JsonObject {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function isNotFoundError(error: unknown): boolean {
-  return (
-    error !== null &&
-    typeof error === "object" &&
-    "code" in error &&
-    (error as { code?: unknown }).code === "ENOENT"
-  );
 }

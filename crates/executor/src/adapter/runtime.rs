@@ -7,10 +7,7 @@ use exoharness::{AgentHandle, ConversationHandle, Secret, WriteArtifactRequest};
 use serde::Serialize;
 
 use super::store::AdapterStore;
-use super::types::{
-    AdapterBuildStatus, AdapterConfig, AdapterEventType, AdapterRecord, AdapterSource,
-    WorkerAdapterConfig,
-};
+use super::types::{AdapterConfig, AdapterEventType, AdapterRecord, WorkerAdapterConfig};
 use super::worker::{WorkerCommand, WorkerEvent, run_worker_loop};
 use crate::conversation_wakeup::send_conversation_wakeup;
 use crate::{Harness, HarnessAgent, HarnessConversation};
@@ -65,9 +62,6 @@ pub async fn run_adapters_once(
     adapters.truncate(options.limit);
     let mut handled = 0;
     for adapter in adapters {
-        if !adapter_source_ready(&adapter) {
-            continue;
-        }
         if run_adapter_once(Arc::clone(&harness), store, adapter)
             .await
             .is_ok()
@@ -95,7 +89,7 @@ pub async fn run_adapters_watch(
             tokio::spawn(async move {
                 loop {
                     match store.get_adapter(&adapter.id).await {
-                        Ok(Some(current)) if current.enabled && adapter_source_ready(&current) => {}
+                        Ok(Some(current)) if current.enabled => {}
                         Ok(Some(_)) => {
                             tokio::time::sleep(Duration::from_secs(5)).await;
                             continue;
@@ -135,12 +129,7 @@ pub async fn send_adapter_message_with_handles(
     if !adapter.enabled {
         bail!("adapter is disabled: {}", adapter.id);
     }
-    if !adapter_source_ready(adapter) {
-        bail!("adapter has not been built successfully: {}", adapter.id);
-    }
-    let AdapterConfig::Worker(config) = &adapter.config else {
-        bail!("module-backed adapter sending is not available in this runtime yet");
-    };
+    let AdapterConfig::Worker(config) = &adapter.config;
     let artifact = AdapterOutboundArtifact {
         adapter_id: adapter.id.clone(),
         adapter_name: adapter.name.clone(),
@@ -194,9 +183,7 @@ async fn run_adapter_loop(
 ) -> Result<()> {
     let agent = require_agent(harness.as_ref(), &adapter).await?;
     let conversation = require_conversation(agent.as_ref(), &adapter).await?;
-    let AdapterConfig::Worker(config) = &adapter.config else {
-        bail!("module-backed adapters do not have a host runner yet");
-    };
+    let AdapterConfig::Worker(config) = &adapter.config;
     let secret_env = worker_secret_env(agent.exoharness_handle().as_ref(), config).await?;
     run_worker_loop(
         &adapter.id,
@@ -396,14 +383,6 @@ async fn record_worker_lifecycle(
         )
         .await?;
     Ok(())
-}
-
-fn adapter_source_ready(adapter: &AdapterRecord) -> bool {
-    matches!(adapter.source, AdapterSource::BuiltIn)
-        || matches!(
-            adapter.build_status,
-            AdapterBuildStatus::Succeeded | AdapterBuildStatus::NotRequired
-        )
 }
 
 async fn require_agent(

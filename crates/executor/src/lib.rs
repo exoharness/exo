@@ -31,11 +31,9 @@ mod shared;
 mod typescript;
 
 pub use adapter::AdapterStore;
-pub use adapter::validate_adapter_build;
 pub use adapter::{
-    AdapterBuildStatus, AdapterConfig, AdapterEventRecord, AdapterEventType, AdapterKind,
-    AdapterRecord, AdapterSource, ModuleAdapterConfig, NewAdapter, WorkerAdapterConfig,
-    WorkerSecretEnvVar,
+    AdapterConfig, AdapterEventRecord, AdapterEventType, AdapterRecord, AdapterSource, NewAdapter,
+    WorkerAdapterConfig, WorkerSecretEnvVar,
 };
 pub use adapter::{AdapterRunOptions, run_adapters_once, run_adapters_watch};
 pub use braintrust::{BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig};

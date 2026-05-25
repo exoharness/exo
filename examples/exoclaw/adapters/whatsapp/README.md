@@ -1,6 +1,6 @@
 # WhatsApp Adapter
 
-The WhatsApp adapter is an experimental built-in Exoclaw adapter implemented as a TypeScript worker using Baileys. It runs as a linked-device client: WhatsApp remains owned by the phone account, and Exoclaw connects as an additional device after QR pairing.
+The WhatsApp adapter is an experimental Exoclaw library adapter implemented as a TypeScript worker using Baileys. It runs as a linked-device client: WhatsApp remains owned by the phone account, and Exoclaw connects as an additional device after QR pairing.
 
 ## How It Works
 
@@ -18,12 +18,12 @@ examples/exoclaw/scripts/exoclaw-repl fresh --pull-sandbox --setup whatsapp
 
 The script watches `.exo/exoclaw-adapters.log`, prints the QR code if it appears, and pauses while you scan it. Scan from WhatsApp using the linked-device flow.
 
-The setup prompt at `setup-prompt.md` asks Exoclaw to create a built-in adapter similar to:
+The setup prompt at `setup-prompt.md` asks Exoclaw to create a library adapter similar to:
 
 ```json
 {
   "name": "whatsapp-dev",
-  "source": "built_in",
+  "source": "library",
   "config": {
     "type": "whatsapp",
     "authDir": null,
@@ -39,7 +39,7 @@ The setup prompt at `setup-prompt.md` asks Exoclaw to create a built-in adapter 
 - `authDir` controls where Baileys stores linked-device credentials. If omitted, the worker uses `.exo/adapters/whatsapp/<adapter-id>/auth` or the host-provided adapter state directory.
 - `trigger` is `all_messages` or `contacts_only`.
 - `allowedChats` can restrict wakeups to specific WhatsApp chat ids.
-- `workerCommand` is transformed by the Exoclaw tool layer when a custom worker command is needed; leave it `null` for the built-in worker.
+- `workerCommand` is transformed by the Exoclaw tool layer when a custom worker command is needed; leave it `null` for the shipped worker.
 
 ## Quirks And Gotchas
 

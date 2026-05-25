@@ -637,59 +637,6 @@ describe("agent tool loading", () => {
     }
   });
 
-  it("installs an agent adapter and writes the adapter manifest", async () => {
-    const previousCwd = process.cwd();
-    const tempdir = await fs.mkdtemp(
-      path.join(os.tmpdir(), "exo-agent-adapter-"),
-    );
-    process.chdir(tempdir);
-    try {
-      const registry = createToolRegistry(fakeTurnContext());
-      registerAdapterTools(registry, ["install_agent_adapter"]);
-      const moduleSource = "export const definition = { name: 'demo' };\n";
-      const modulePath = path.resolve(".exo/agent-adapters/demo.ts");
-
-      await expect(
-        registry.executePending([
-          {
-            toolCallId: "install_1",
-            request: {
-              functionName: "install_agent_adapter",
-              arguments: {
-                name: "demo",
-                moduleSource,
-                initialization: { channel: "demo" },
-                capabilities: ["receive", "send_message"],
-              },
-            },
-          },
-        ]),
-      ).resolves.toEqual([
-        wrappedToolResultEvent(
-          "install_1",
-          "install_agent_adapter",
-          "built_in",
-          1,
-          {
-            ok: true,
-            modulePath,
-            manifestPath: ".exo/agent-adapters/manifest.json",
-            initialization: { channel: "demo" },
-            capabilities: ["receive", "send_message"],
-          },
-        ),
-      ]);
-
-      await expect(fs.readFile(modulePath, "utf8")).resolves.toBe(moduleSource);
-      await expect(
-        fs.readFile(".exo/agent-adapters/manifest.json", "utf8"),
-      ).resolves.toContain('"modulePath": "./demo.ts"');
-    } finally {
-      process.chdir(previousCwd);
-      await fs.rm(tempdir, { recursive: true, force: true });
-    }
-  });
-
   it("exposes chat adapter config and message target schemas", () => {
     const registry = createToolRegistry(fakeTurnContext());
     registerAdapterTools(registry, ["create_adapter", "send_adapter_message"]);
@@ -703,6 +650,7 @@ describe("agent tool loading", () => {
     expect(JSON.stringify(createAdapter)).toContain('"signal"');
     expect(JSON.stringify(createAdapter)).toContain('"workerCommand"');
     expect(JSON.stringify(createAdapter)).toContain('"signalCliCommand"');
+    expect(JSON.stringify(createAdapter)).not.toContain('"module"');
     expect(JSON.stringify(sendMessage)).toContain('"target"');
   });
 
@@ -768,7 +716,7 @@ describe("agent tool loading", () => {
     });
   });
 
-  it("transforms built-in Signal adapters into worker adapter records", async () => {
+  it("transforms library Signal adapters into worker adapter records", async () => {
     const executed: JsonObject[] = [];
     const registry = createToolRegistry(
       fakeTurnContext({
@@ -787,7 +735,7 @@ describe("agent tool loading", () => {
           functionName: "create_adapter",
           arguments: {
             name: "signal",
-            source: "built_in",
+            source: "library",
             config: {
               type: "signal",
               account: null,
@@ -806,7 +754,7 @@ describe("agent tool loading", () => {
       agentId: "agent-id",
       conversationId: "conversation-id",
       name: "signal",
-      source: "built_in",
+      source: "library",
       config: {
         type: "worker",
         adapterType: "signal",

@@ -1,6 +1,6 @@
 # Signal Adapter
 
-The Signal adapter is an experimental built-in Exoclaw adapter implemented as a TypeScript worker around `signal-cli`. It assumes you already have a real Signal account on a phone, have set a Signal username, and want Exoclaw to run as a linked device.
+The Signal adapter is an experimental Exoclaw library adapter implemented as a TypeScript worker around `signal-cli`. It assumes you already have a real Signal account on a phone, have set a Signal username, and want Exoclaw to run as a linked device.
 
 ## How It Works
 
@@ -33,12 +33,12 @@ examples/exoclaw/scripts/exoclaw-repl fresh --pull-sandbox --setup signal
 
 The script watches `.exo/exoclaw-adapters.log`, prints the linked-device QR code if it appears, and pauses while you scan it from Signal: Settings > Linked devices > Link new device.
 
-The setup prompt at `setup-prompt.md` asks Exoclaw to create a built-in adapter similar to:
+The setup prompt at `setup-prompt.md` asks Exoclaw to create a library adapter similar to:
 
 ```json
 {
   "name": "signal-dev",
-  "source": "built_in",
+  "source": "library",
   "config": {
     "type": "signal",
     "account": null,

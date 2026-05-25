@@ -10,31 +10,12 @@ use serde_json::Value;
 pub enum AdapterSource {
     BuiltIn,
     Library,
-    Agent,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AdapterKind {
-    Worker,
-    Module,
-}
-
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AdapterBuildStatus {
-    #[default]
-    NotRequired,
-    Pending,
-    Succeeded,
-    Failed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AdapterConfig {
     Worker(WorkerAdapterConfig),
-    Module(ModuleAdapterConfig),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -60,29 +41,16 @@ pub struct WorkerSecretEnvVar {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ModuleAdapterConfig {
-    pub module_path: String,
-    #[serde(default)]
-    pub initialization: Value,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AdapterRecord {
     pub id: String,
     pub agent_id: String,
     pub conversation_id: String,
     pub name: String,
     pub source: AdapterSource,
-    pub kind: AdapterKind,
     pub enabled: bool,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
     pub config: AdapterConfig,
-    pub build_status: AdapterBuildStatus,
-    pub build_error: Option<String>,
     pub latest_event_artifact_id: Option<String>,
     pub last_connected_at_ms: Option<u64>,
     pub last_error: Option<String>,
@@ -130,24 +98,16 @@ impl AdapterRecord {
     pub fn new(request: NewAdapter, now_ms: u64) -> Result<Self> {
         validate_adapter_name(&request.name)?;
         request.config.validate()?;
-        let kind = request.config.kind();
-        let build_status = match request.source {
-            AdapterSource::BuiltIn => AdapterBuildStatus::NotRequired,
-            AdapterSource::Library | AdapterSource::Agent => AdapterBuildStatus::Pending,
-        };
         Ok(Self {
             id: Uuid7::now().to_string(),
             agent_id: non_empty("agentId", request.agent_id)?,
             conversation_id: non_empty("conversationId", request.conversation_id)?,
             name: request.name,
             source: request.source,
-            kind,
             enabled: true,
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
             config: request.config,
-            build_status,
-            build_error: None,
             latest_event_artifact_id: None,
             last_connected_at_ms: None,
             last_error: None,
@@ -156,17 +116,9 @@ impl AdapterRecord {
 }
 
 impl AdapterConfig {
-    pub fn kind(&self) -> AdapterKind {
-        match self {
-            Self::Worker(_) => AdapterKind::Worker,
-            Self::Module(_) => AdapterKind::Module,
-        }
-    }
-
     pub fn validate(&self) -> Result<()> {
         match self {
             Self::Worker(config) => config.validate(),
-            Self::Module(config) => config.validate(),
         }
     }
 }
@@ -187,13 +139,6 @@ impl WorkerAdapterConfig {
             non_empty_ref("secretEnv env", &secret.env)?;
             non_empty_ref("secretEnv secretId", &secret.secret_id)?;
         }
-        Ok(())
-    }
-}
-
-impl ModuleAdapterConfig {
-    fn validate(&self) -> Result<()> {
-        non_empty_ref("modulePath", &self.module_path)?;
         Ok(())
     }
 }
