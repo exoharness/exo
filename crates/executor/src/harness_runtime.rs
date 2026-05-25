@@ -28,20 +28,25 @@ type UniversalChunkStream = Pin<Box<dyn Stream<Item = Result<UniversalStreamChun
 #[derive(Debug, Default, Clone)]
 pub struct RouterModelClient {
     env: Arc<HashMap<String, String>>,
+    catalog: Arc<ModelCatalog>,
 }
 
 impl RouterModelClient {
-    pub fn new(env: HashMap<String, String>) -> Self {
-        Self { env: Arc::new(env) }
+    pub fn new(env: HashMap<String, String>) -> Result<Self> {
+        let catalog = load_model_catalog(&env)?;
+        Ok(Self {
+            env: Arc::new(env),
+            catalog: Arc::new(catalog),
+        })
     }
 }
 
 #[async_trait]
 impl ModelClient for RouterModelClient {
     async fn complete(&self, request: ModelRequest) -> Result<ModelResponse> {
-        let format = ProviderFormat::Responses;
+        let (spec, format) = resolve_model(&self.catalog, &request);
         let config = resolve_runtime_config(&request, self.env.as_ref())?;
-        let router = build_router(&request, format, &config)?;
+        let router = build_router(spec, format, &config)?;
         let universal_request = build_universal_request(&request, false)?;
         let payload = serialize_request(format, &universal_request)?;
         let (prepared, _router_metadata) = router
@@ -53,9 +58,9 @@ impl ModelClient for RouterModelClient {
     }
 
     async fn complete_stream(&self, request: ModelRequest) -> Result<Box<dyn ModelResponseStream>> {
-        let format = ProviderFormat::Responses;
+        let (spec, format) = resolve_model(&self.catalog, &request);
         let config = resolve_runtime_config(&request, self.env.as_ref())?;
-        let router = build_router(&request, format, &config)?;
+        let router = build_router(spec, format, &config)?;
         let universal_request = build_universal_request(&request, true)?;
         let payload = serialize_request(format, &universal_request)?;
         let (prepared, _router_metadata) = router
@@ -144,8 +149,86 @@ fn optional_env(env: &HashMap<String, String>, key: &str) -> Option<String> {
     env.get(key).cloned().or_else(|| std::env::var(key).ok())
 }
 
+/// Path to a Braintrust-style `model_list.json` registry to resolve model
+/// capabilities (wire format, flavor, context window, ...). When unset, models
+/// are resolved by name via lingua's built-in model-family detection.
+const MODEL_LIST_PATH_ENV: &str = "EXO_MODEL_LIST_PATH";
+
+fn load_model_catalog(env: &HashMap<String, String>) -> Result<ModelCatalog> {
+    match optional_env(env, MODEL_LIST_PATH_ENV) {
+        Some(path) => Ok(ModelCatalog::from_file(&path)?),
+        None => Ok(ModelCatalog::empty()),
+    }
+}
+
+/// Resolve the model spec and the wire format to use for a request.
+///
+/// The spec comes from the configured registry when the model is known, and
+/// otherwise falls back to a Chat Completions default. Either way the wire
+/// format is finalized through [`wire_format`], which upgrades OpenAI models
+/// that require the Responses API.
+fn resolve_model(catalog: &ModelCatalog, request: &ModelRequest) -> (ModelSpec, ProviderFormat) {
+    let mut spec = catalog
+        .get(&request.model)
+        .map(|spec| (*spec).clone())
+        .unwrap_or_else(|| default_model_spec(&request.model));
+    // Key the spec by the exact requested id so the single-entry catalog in
+    // `build_router` and the `create_request` lookup always agree on the model.
+    spec.model = request.model.clone();
+    let format = wire_format(&spec);
+    spec.format = format;
+    if format == ProviderFormat::Responses {
+        spec.flavor = ModelFlavor::Responses;
+    }
+    if spec.max_output_tokens.is_none() {
+        spec.max_output_tokens = request.max_output_tokens.map(|tokens| tokens as u32);
+    }
+    (spec, format)
+}
+
+/// Spec used for models that are absent from the configured registry.
+///
+/// Defaults to OpenAI Chat Completions, the format spoken by OpenAI and the
+/// broad set of OpenAI-compatible providers (DeepSeek, Together, Groq, vLLM,
+/// Ollama, ...). [`wire_format`] still upgrades it to Responses by name when
+/// required.
+fn default_model_spec(model: &str) -> ModelSpec {
+    ModelSpec {
+        model: model.to_string(),
+        format: ProviderFormat::ChatCompletions,
+        flavor: ModelFlavor::Chat,
+        display_name: None,
+        parent: None,
+        input_cost_per_mil_tokens: None,
+        output_cost_per_mil_tokens: None,
+        input_cache_read_cost_per_mil_tokens: None,
+        multimodal: None,
+        reasoning: None,
+        max_input_tokens: None,
+        max_output_tokens: None,
+        supports_streaming: true,
+        extra: Default::default(),
+        available_providers: Vec::new(),
+    }
+}
+
+/// Finalize the wire format for a spec.
+///
+/// The public model registry encodes OpenAI's Responses-API models (o1-pro,
+/// o3-pro, gpt-5-pro, gpt-5-codex, gpt-5.3+, ...) as Chat Completions and
+/// distinguishes them by name. Upgrade those to the Responses format so
+/// requests reach the correct OpenAI API surface; all other formats pass
+/// through unchanged.
+fn wire_format(spec: &ModelSpec) -> ProviderFormat {
+    if spec.format == ProviderFormat::ChatCompletions && spec.requires_responses_api() {
+        ProviderFormat::Responses
+    } else {
+        spec.format
+    }
+}
+
 fn build_router(
-    request: &ModelRequest,
+    mut spec: ModelSpec,
     format: ProviderFormat,
     config: &ResolvedRuntimeConfig,
 ) -> Result<Router> {
@@ -158,33 +241,16 @@ fn build_router(
         None,
     )?;
 
+    // exo dispatches through a single provider resolved from the binding, so the
+    // catalog points the model at that provider regardless of the registry's own
+    // provider list.
+    spec.available_providers = vec![config.provider_alias.clone()];
+    let model = spec.model.clone();
     let mut catalog = ModelCatalog::empty();
-    catalog.insert(
-        request.model.clone(),
-        ModelSpec {
-            model: request.model.clone(),
-            format,
-            flavor: match format {
-                ProviderFormat::Responses => ModelFlavor::Responses,
-                _ => ModelFlavor::Chat,
-            },
-            display_name: None,
-            parent: None,
-            input_cost_per_mil_tokens: None,
-            output_cost_per_mil_tokens: None,
-            input_cache_read_cost_per_mil_tokens: None,
-            multimodal: None,
-            reasoning: None,
-            max_input_tokens: None,
-            max_output_tokens: request.max_output_tokens.map(|tokens| tokens as u32),
-            supports_streaming: true,
-            extra: Default::default(),
-            available_providers: vec![config.provider_alias.clone()],
-        },
-    );
+    catalog.insert(model, spec);
 
     Router::builder()
-        .with_catalog(std::sync::Arc::new(catalog))
+        .with_catalog(Arc::new(catalog))
         .add_provider_arc(
             config.provider_alias.clone(),
             provider,
@@ -264,6 +330,84 @@ mod tests {
             tools: Vec::new(),
             max_output_tokens: None,
         }
+    }
+
+    fn request_for(model: &str) -> ModelRequest {
+        ModelRequest {
+            model: model.to_string(),
+            ..model_request()
+        }
+    }
+
+    #[test]
+    fn wire_format_upgrades_openai_responses_models() {
+        for model in ["o1-pro", "o3-pro", "gpt-5-pro", "gpt-5-codex", "gpt-5.4"] {
+            assert_eq!(
+                wire_format(&default_model_spec(model)),
+                ProviderFormat::Responses,
+                "{model} should use the Responses API",
+            );
+        }
+    }
+
+    #[test]
+    fn wire_format_keeps_chat_completions_for_compatible_models() {
+        for model in ["gpt-4o", "gpt-5-mini", "deepseek-chat", "deepseek-reasoner"] {
+            assert_eq!(
+                wire_format(&default_model_spec(model)),
+                ProviderFormat::ChatCompletions,
+                "{model} should use Chat Completions",
+            );
+        }
+    }
+
+    #[test]
+    fn wire_format_preserves_non_openai_formats() {
+        let mut spec = default_model_spec("claude-sonnet-4");
+        spec.format = ProviderFormat::Anthropic;
+        assert_eq!(wire_format(&spec), ProviderFormat::Anthropic);
+    }
+
+    #[test]
+    fn resolve_model_defaults_unknown_models_to_chat_completions() {
+        let (spec, format) = resolve_model(&ModelCatalog::empty(), &request_for("deepseek-chat"));
+        assert_eq!(format, ProviderFormat::ChatCompletions);
+        assert_eq!(spec.flavor, ModelFlavor::Chat);
+        assert_eq!(spec.model, "deepseek-chat");
+    }
+
+    #[test]
+    fn resolve_model_resolves_responses_models_by_name() {
+        let (spec, format) = resolve_model(&ModelCatalog::empty(), &request_for("gpt-5.4"));
+        assert_eq!(format, ProviderFormat::Responses);
+        assert_eq!(spec.flavor, ModelFlavor::Responses);
+    }
+
+    #[test]
+    fn resolve_model_uses_registry_format_when_known() {
+        let mut catalog = ModelCatalog::empty();
+        let mut spec = default_model_spec("some-anthropic-model");
+        spec.format = ProviderFormat::Anthropic;
+        catalog.insert("some-anthropic-model".to_string(), spec);
+
+        let (_, format) = resolve_model(&catalog, &request_for("some-anthropic-model"));
+        assert_eq!(format, ProviderFormat::Anthropic);
+    }
+
+    #[test]
+    fn resolve_model_defaults_max_output_tokens_from_request() {
+        let request = ModelRequest {
+            max_output_tokens: Some(4096),
+            ..request_for("deepseek-chat")
+        };
+        let (spec, _) = resolve_model(&ModelCatalog::empty(), &request);
+        assert_eq!(spec.max_output_tokens, Some(4096));
+    }
+
+    #[test]
+    fn load_model_catalog_defaults_to_empty_without_env() {
+        let catalog = load_model_catalog(&HashMap::new()).expect("empty env yields empty catalog");
+        assert!(catalog.is_empty());
     }
 
     #[test]
