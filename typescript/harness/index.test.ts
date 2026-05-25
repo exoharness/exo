@@ -9,10 +9,11 @@ import {
   createToolRegistry,
   initializeTool,
   registerBuiltInTools,
-  registerAgentToolsFromManifestPathIfExists,
-  registerAgentToolsFromManifest,
-  registerLibraryToolsFromManifest,
-  registerToolsFromManifest,
+  registerAgentTools,
+  registerAgentToolsFromDirectoryIfExists,
+  registerLibraryTools,
+  registerLibraryToolModulePath,
+  registerTools,
   materializeEventsToMessages,
   toolResultMessage,
   toolResultEvent,
@@ -25,7 +26,7 @@ import {
   type ToolResult,
   type TurnContext,
 } from "./index";
-import ircTool from "../../examples/typescript/tools/irc";
+import { ircTool } from "../../examples/typescript/tools/irc";
 import uppercaseTool from "../../examples/typescript/tools/uppercase";
 
 describe("HarnessToolRegistry", () => {
@@ -476,19 +477,15 @@ describe("library tool modules", () => {
 });
 
 describe("agent tool loading", () => {
-  it("loads and registers library tools from a manifest", async () => {
+  it("loads and registers library tools from exported module data", async () => {
     const context = fakeTurnContext();
     const registry = createToolRegistry(context);
 
-    await registerLibraryToolsFromManifest(registry, context, {
-      tools: [
-        {
-          modulePath: uppercaseToolModulePath(),
-          initialization: {
-            prefix: "library: ",
-          },
-        },
-      ],
+    await registerLibraryTools(registry, context, {
+      tool: uppercaseTool,
+      initialization: {
+        prefix: "library: ",
+      },
     });
 
     expect(registry.get("uppercase")?.source).toBe("library");
@@ -511,19 +508,15 @@ describe("agent tool loading", () => {
     ]);
   });
 
-  it("loads and registers agent tools from a manifest", async () => {
+  it("loads and registers agent tools from exported module data", async () => {
     const context = fakeTurnContext();
     const registry = createToolRegistry(context);
 
-    await registerAgentToolsFromManifest(registry, context, {
-      tools: [
-        {
-          modulePath: uppercaseToolModulePath(),
-          initialization: {
-            prefix: "agent: ",
-          },
-        },
-      ],
+    await registerAgentTools(registry, context, {
+      tool: uppercaseTool,
+      initialization: {
+        prefix: "agent: ",
+      },
     });
 
     expect(registry.definitions()).toEqual([uppercaseTool.definition]);
@@ -547,30 +540,30 @@ describe("agent tool loading", () => {
     ]);
   });
 
-  it("loads tools through the generic source-aware manifest path", async () => {
+  it("loads tools through the generic source-aware module path", async () => {
     const context = fakeTurnContext();
     const registry = createToolRegistry(context);
 
-    await registerToolsFromManifest(
+    await registerTools(
       registry,
       context,
-      {
-        tools: [
-          {
-            modulePath: uppercaseToolModulePath(),
-            initialization: {
-              prefix: "generic: ",
-            },
-          },
-        ],
-      },
+      { tool: uppercaseTool, initialization: { prefix: "generic: " } },
       "library",
     );
 
     expect(registry.get("uppercase")?.source).toBe("library");
   });
 
-  it("installs an agent tool and loads it from the default manifest path", async () => {
+  it("loads library tool configuration from a TypeScript module export", async () => {
+    const context = fakeTurnContext();
+    const registry = createToolRegistry(context);
+
+    await registerLibraryToolModulePath(registry, context, ircToolModulePath());
+
+    expect(registry.get("irc_send_message")?.source).toBe("library");
+  });
+
+  it("installs an agent tool and loads it from the default tools directory", async () => {
     const previousCwd = process.cwd();
     const tempdir = await fs.mkdtemp(path.join(os.tmpdir(), "exo-agent-tool-"));
     process.chdir(tempdir);
@@ -603,14 +596,13 @@ describe("agent tool loading", () => {
             ok: true,
             toolName: "reverse_text",
             modulePath: ".exo/agent-tools/reverse-text.ts",
-            manifestPath: ".exo/agent-tools/manifest.json",
             availableNextRound: true,
           },
         ),
       ]);
 
       const registry = createToolRegistry(context);
-      await registerAgentToolsFromManifestPathIfExists(registry, context);
+      await registerAgentToolsFromDirectoryIfExists(registry, context);
 
       expect(registry.get("reverse_text")?.source).toBe("agent");
       await expect(
@@ -640,28 +632,21 @@ describe("agent tool loading", () => {
     const registry = createToolRegistry(fakeTurnContext());
 
     await expect(
-      registerAgentToolsFromManifest(registry, fakeTurnContext(), {
-        tools: [
-          {
-            modulePath: "data:text/javascript,export const value = 1;",
-            initialization: {},
-          },
-        ],
-      }),
-    ).rejects.toThrow("agent tool module must default export a Tool");
+      registerAgentTools(registry, fakeTurnContext(), {
+        notATool: true,
+      } as never),
+    ).rejects.toThrow(
+      "agent tool module export must be a Tool, ToolModuleEntry, or ToolModule",
+    );
   });
 
   it("rejects invalid agent tool initialization", async () => {
     const registry = createToolRegistry(fakeTurnContext());
 
     await expect(
-      registerAgentToolsFromManifest(registry, fakeTurnContext(), {
-        tools: [
-          {
-            modulePath: uppercaseToolModulePath(),
-            initialization: {},
-          },
-        ],
+      registerAgentTools(registry, fakeTurnContext(), {
+        tool: uppercaseTool,
+        initialization: {},
       }),
     ).rejects.toThrow("tool initialization.prefix is required");
   });
@@ -730,9 +715,14 @@ function uppercaseToolModulePath(): string {
   ).href;
 }
 
+function ircToolModulePath(): string {
+  return new URL("../../examples/typescript/tools/irc.ts", import.meta.url)
+    .href;
+}
+
 function reverseTextToolSource(): string {
   return `
-import type { JsonObject, Tool, ToolResult } from "@exo/harness";
+import type { JsonObject, Tool, ToolResult } from "@exo/harness/tool";
 
 const reverseTextTool = {
   definition: {
@@ -836,7 +826,6 @@ function fakeTurnContext(
       instructions: [],
       harness: "typescript",
       typescript: null,
-      libraryTools: [],
       enableAgentToolCreation: true,
       sandboxImage: null,
       enableNetworking: false,

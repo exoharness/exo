@@ -62,7 +62,6 @@ pub struct CreateAgentRequest {
     pub name: Option<String>,
     pub harness: AgentHarnessKind,
     pub typescript: Option<TypeScriptHarnessConfig>,
-    pub library_tools: Vec<crate::ToolManifestEntry>,
     pub enable_agent_tool_creation: bool,
     pub sandbox_image: Option<String>,
     pub enable_networking: bool,

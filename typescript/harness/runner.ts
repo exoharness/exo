@@ -47,7 +47,6 @@ interface RawAgentConfig {
   typescript?: {
     module_path: string;
   } | null;
-  library_tools?: RawToolManifestEntry[];
   enable_agent_tool_creation?: boolean;
   sandbox_image?: string | null;
   enable_networking: boolean;
@@ -55,11 +54,6 @@ interface RawAgentConfig {
   max_output_tokens?: number | null;
   max_tool_round_trips?: number | null;
   braintrust?: unknown;
-}
-
-interface RawToolManifestEntry {
-  module_path: string;
-  initialization: JsonObject;
 }
 
 interface RawConversationConfig {
@@ -789,7 +783,6 @@ function toAgentConfig(raw: RawAgentConfig): AgentConfig {
           modulePath: raw.typescript.module_path,
         }
       : null,
-    libraryTools: (raw.library_tools ?? []).map(toToolManifestEntry),
     enableAgentToolCreation: raw.enable_agent_tool_creation ?? true,
     sandboxImage: raw.sandbox_image ?? null,
     enableNetworking: raw.enable_networking,
@@ -797,16 +790,6 @@ function toAgentConfig(raw: RawAgentConfig): AgentConfig {
     maxOutputTokens: raw.max_output_tokens ?? null,
     maxToolRoundTrips: raw.max_tool_round_trips ?? null,
     braintrust: raw.braintrust,
-  };
-}
-
-function toToolManifestEntry(raw: RawToolManifestEntry): {
-  modulePath: string;
-  initialization: JsonObject;
-} {
-  return {
-    modulePath: raw.module_path,
-    initialization: raw.initialization,
   };
 }
 

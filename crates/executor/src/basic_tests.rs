@@ -994,7 +994,6 @@ fn default_agent_config() -> AgentConfig {
         instructions: Vec::new(),
         harness: crate::AgentHarnessKind::Basic,
         typescript: None,
-        library_tools: Vec::new(),
         enable_agent_tool_creation: true,
         sandbox_image: None,
         enable_networking: false,

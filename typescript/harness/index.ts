@@ -6,7 +6,7 @@ export interface JsonObject {
 
 export * from "./tools";
 export * from "./built-in-tools";
-export * from "./tool-manifest";
+export * from "./tool-modules";
 
 export type MessageRole =
   | "system"
@@ -27,10 +27,6 @@ export interface AgentConfig {
   typescript?: {
     modulePath: string;
   } | null;
-  libraryTools: Array<{
-    modulePath: string;
-    initialization: JsonObject;
-  }>;
   enableAgentToolCreation: boolean;
   sandboxImage?: string | null;
   enableNetworking: boolean;

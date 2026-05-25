@@ -1,7 +1,7 @@
 // Example library tool used by the harness registry tests. No example harness
 // exposes this tool to a model yet.
 
-import type { JsonObject, Tool, ToolResult } from "@exo/harness";
+import type { JsonObject, Tool, ToolResult } from "@exo/harness/tool";
 
 interface UppercaseConfig {
   prefix: string;

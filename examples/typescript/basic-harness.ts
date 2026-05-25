@@ -3,8 +3,7 @@ import {
   defineHarness,
   materializePromptMessages,
   registerBuiltInTools,
-  registerAgentToolsFromManifestPathIfExists,
-  registerLibraryToolsFromManifest,
+  registerAgentToolsFromDirectoryIfExists,
   turnMetadata,
   type EventData,
   type Message,
@@ -132,18 +131,15 @@ function agentToolCreationInstruction(): Message {
   return {
     role: "developer",
     content:
-      "Agent-created tools are supported. When the user asks you to create a reusable tool, call install_agent_tool with a complete TypeScript moduleSource. Do not claim the tool was created unless install_agent_tool returns ok: true. The moduleSource must default-export a Tool from @exo/harness using { definition, initializationParameters, initialize(...) }; definition.parameters must be a strict JSON schema object with additionalProperties: false; handlers must implement execute(args, execution), not invoke or call. Do not use zod, inputSchema, or external npm packages. After install_agent_tool succeeds, the new tool is available in the next model round of the same turn, so use it directly rather than falling back to shell.",
+      "Agent-created tools are supported. When the user asks you to create a reusable tool, call install_agent_tool with a complete TypeScript moduleSource. Do not claim the tool was created unless install_agent_tool returns ok: true. The moduleSource must use type-only imports from @exo/harness/tool and default-export a Tool using { definition, initializationParameters, initialize(...) } satisfies Tool; definition.parameters must be a strict JSON schema object with additionalProperties: false; handlers must implement execute(args, execution), not invoke or call. Do not use zod, inputSchema, external npm packages, or runtime imports from @exo/harness/tool. After install_agent_tool succeeds, the new tool is available in the next model round of the same turn, so use it directly rather than falling back to shell.",
   };
 }
 
 async function createBasicToolRegistry(context: TurnContext) {
   const tools = createToolRegistry(context);
   registerBuiltInTools(tools, context, builtInToolNames(context));
-  await registerLibraryToolsFromManifest(tools, context, {
-    tools: context.agentConfig.libraryTools,
-  });
   if (context.agentConfig.enableAgentToolCreation) {
-    await registerAgentToolsFromManifestPathIfExists(tools, context);
+    await registerAgentToolsFromDirectoryIfExists(tools, context);
   }
   return tools;
 }
