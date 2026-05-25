@@ -33,6 +33,7 @@ export type WorkerInboundEvent =
     };
 
 type JsonObject = Record<string, unknown>;
+let stdoutErrorHandlerInstalled = false;
 
 export function adapterConfig(): JsonObject {
   const raw = process.env.EXO_ADAPTER_CONFIG;
@@ -108,9 +109,23 @@ export function numberField(config: JsonObject, name: string): number {
 }
 
 export function writeWorkerEvent(event: WorkerInboundEvent): void {
+  ensureStdoutErrorHandler();
   process.stdout.write(`${JSON.stringify(event)}\n`);
 }
 
 export function isRecord(value: unknown): value is JsonObject {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function ensureStdoutErrorHandler(): void {
+  if (stdoutErrorHandlerInstalled) {
+    return;
+  }
+  stdoutErrorHandlerInstalled = true;
+  process.stdout.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code === "EPIPE") {
+      process.exit(0);
+    }
+    throw error;
+  });
 }

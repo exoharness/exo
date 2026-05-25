@@ -38,6 +38,7 @@ const signal = spawnSignalCli([
   "jsonRpc",
   "--receive-mode=on-connection",
 ]);
+installChildCleanup(signal);
 
 writeWorkerEvent({
   type: "connected",
@@ -308,6 +309,23 @@ function spawnSignalCli(args: string[]): ChildProcessWithoutNullStreams {
       stdio: ["pipe", "pipe", "pipe"],
     },
   );
+}
+
+function installChildCleanup(child: ChildProcessWithoutNullStreams): void {
+  const stopChild = () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill();
+    }
+  };
+  process.once("exit", stopChild);
+  process.once("SIGINT", () => {
+    stopChild();
+    process.exit(130);
+  });
+  process.once("SIGTERM", () => {
+    stopChild();
+    process.exit(143);
+  });
 }
 
 async function runSignalCli(args: string[]): Promise<string> {
