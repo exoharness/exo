@@ -26,9 +26,10 @@ examples/exoclaw/scripts/exoclaw-repl --pull-sandbox
 
 The script also starts local scheduler and adapter runner processes by default.
 Use `--no-scheduler` or `--no-adapters` when you only want the interactive REPL.
-For repeatable setup tests, pass `--setup <adapter>`; the script sends
-`examples/exoclaw/prompts/me.md` plus the adapter's `setup-prompt.md` before
-dropping into the REPL:
+For repeatable setup tests, pass `--setup <adapter>`; the script sends the
+adapter's `setup-prompt.md` before dropping into the REPL. Exoclaw's identity
+prompt is loaded by the harness on every turn from
+`examples/exoclaw/prompts/me.md`.
 
 ```bash
 examples/exoclaw/scripts/exoclaw-repl fresh --pull-sandbox --setup irc

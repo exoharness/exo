@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import {
   defineHarness,
   registerBuiltInTools,
@@ -16,6 +18,11 @@ import {
   defaultBuiltInToolNames,
   runResponsesHarnessTurn,
 } from "../typescript/turn-loop";
+
+const EXOCLAW_IDENTITY_PROMPT = readFileSync(
+  new URL("./prompts/me.md", import.meta.url),
+  "utf8",
+).trim();
 
 export default defineHarness({
   async runTurn(context) {
@@ -48,6 +55,10 @@ function builtInToolNames(context: TurnContext): BuiltInToolName[] {
 function exoclawInstructions(context: TurnContext): Message[] {
   return [
     ...basicHarnessInstructions(context),
+    {
+      role: "developer",
+      content: EXOCLAW_IDENTITY_PROMPT,
+    },
     {
       role: "developer",
       content:

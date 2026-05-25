@@ -57,7 +57,7 @@ Options:
   --no-adapters                Do not start the local adapter runner
   --adapters                   Start the local adapter runner
   --adapter-limit <n>          Max adapters supervised by the runner (default: 50)
-  --setup <adapter>            Send me.md plus adapters/<adapter>/setup-prompt.md
+  --setup <adapter>            Send adapters/<adapter>/setup-prompt.md
                                 For whatsapp/signal, print pairing QR and pause.
   --initial-prompt-file <path> Send this file as the first message before REPL
   --pull-sandbox               Pull the sandbox image before starting
@@ -462,7 +462,6 @@ send_startup_prompt() {
 
   local files=()
   if [[ -n "$SETUP_ADAPTER" ]]; then
-    files+=("$(startup_prompt_file "$ROOT_DIR/examples/exoclaw/prompts/me.md")")
     files+=("$(adapter_setup_prompt_file "$SETUP_ADAPTER")")
   fi
 
