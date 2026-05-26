@@ -708,13 +708,6 @@ function fakeTool(
   };
 }
 
-function uppercaseToolModulePath(): string {
-  return new URL(
-    "../../examples/typescript/tools/uppercase.ts",
-    import.meta.url,
-  ).href;
-}
-
 function ircToolModulePath(): string {
   return new URL("../../examples/typescript/tools/irc.ts", import.meta.url)
     .href;
