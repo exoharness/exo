@@ -78,8 +78,8 @@ async fn try_load() -> anyhow::Result<PricingTable> {
     }
 
     // 3. Try a network fetch.
-    let url = std::env::var("EXO_LITELLM_PRICES_URL")
-        .unwrap_or_else(|_| LITELLM_PRICES_URL.to_string());
+    let url =
+        std::env::var("EXO_LITELLM_PRICES_URL").unwrap_or_else(|_| LITELLM_PRICES_URL.to_string());
     match fetch(&url).await {
         Ok(body) => match PricingTable::from_json_str(&body) {
             Ok(table) => {

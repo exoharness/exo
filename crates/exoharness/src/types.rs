@@ -238,8 +238,11 @@ pub enum EventData {
     Messages {
         messages: Vec<Message>,
         response_id: Option<ResponseId>,
+        // Boxed to keep `EventData` small: `UsageRecord` is ~170 bytes and
+        // most events don't carry it, so inlining it would bloat every
+        // variant (and every enum that embeds `EventData`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        usage: Option<UsageRecord>,
+        usage: Option<Box<UsageRecord>>,
     },
     ToolRequested {
         tool_call_id: ToolCallId,
@@ -497,21 +500,25 @@ mod tests {
         let event = EventData::Messages {
             messages: vec![],
             response_id: None,
-            usage: Some(UsageRecord {
+            usage: Some(Box::new(UsageRecord {
                 model: "claude-sonnet-4-6".to_string(),
                 prompt_tokens: Some(100),
                 completion_tokens: Some(50),
                 cost_usd: Some(0.001),
                 ..Default::default()
-            }),
+            })),
         };
         let value = serde_json::to_value(&event).expect("event should serialize");
         let usage = value.get("usage").expect("usage field present");
-        assert_eq!(usage.get("model").and_then(Value::as_str), Some("claude-sonnet-4-6"));
-        assert_eq!(usage.get("prompt_tokens").and_then(Value::as_i64), Some(100));
-        assert!(
-            (usage.get("cost_usd").and_then(Value::as_f64).unwrap() - 0.001).abs() < 1e-9
+        assert_eq!(
+            usage.get("model").and_then(Value::as_str),
+            Some("claude-sonnet-4-6")
         );
+        assert_eq!(
+            usage.get("prompt_tokens").and_then(Value::as_i64),
+            Some(100)
+        );
+        assert!((usage.get("cost_usd").and_then(Value::as_f64).unwrap() - 0.001).abs() < 1e-9);
         // Round-trip back through the legacy-event parser
         let parsed: EventData = serde_json::from_value(value).expect("round-trip parse");
         assert!(matches!(parsed, EventData::Messages { usage: Some(_), .. }));

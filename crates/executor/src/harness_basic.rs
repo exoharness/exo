@@ -40,10 +40,8 @@ impl<M, T> BasicHarness<M, T> {
         M: ModelClient + 'static,
         T: ToolRuntime + 'static,
     {
-        let runtime = ExecutorHarnessRuntime::new(
-            BasicExecutor::with_pricing(model, tools, pricing),
-            None,
-        );
+        let runtime =
+            ExecutorHarnessRuntime::new(BasicExecutor::with_pricing(model, tools, pricing), None);
         Self {
             inner: SharedHarness::new(exoharness, runtime),
         }

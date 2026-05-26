@@ -196,7 +196,7 @@ async fn usage_record_is_persisted_with_computed_cost() {
             ttft: None,
             duration: None,
         }])),
-        Arc::new(BasicToolRuntime::default()),
+        Arc::new(BasicToolRuntime),
         pricing,
     );
 
@@ -225,6 +225,7 @@ async fn usage_record_is_persisted_with_computed_cost() {
             name: None,
             harness: crate::AgentHarnessKind::Basic,
             typescript: None,
+            enable_agent_tool_creation: true,
             sandbox_image: None,
             enable_networking: false,
             model: "claude-sonnet-4-6".to_string(),
@@ -340,7 +341,7 @@ async fn usage_record_with_anthropic_cache_hits() {
             ttft: None,
             duration: None,
         }])),
-        Arc::new(BasicToolRuntime::default()),
+        Arc::new(BasicToolRuntime),
         pricing,
     );
 
@@ -369,6 +370,7 @@ async fn usage_record_with_anthropic_cache_hits() {
             name: None,
             harness: crate::AgentHarnessKind::Basic,
             typescript: None,
+            enable_agent_tool_creation: true,
             sandbox_image: None,
             enable_networking: false,
             model: "claude-sonnet-4-6".to_string(),
@@ -459,7 +461,7 @@ async fn usage_record_with_openai_inclusive_accounting() {
             ttft: None,
             duration: None,
         }])),
-        Arc::new(BasicToolRuntime::default()),
+        Arc::new(BasicToolRuntime),
         pricing,
     );
 
@@ -488,6 +490,7 @@ async fn usage_record_with_openai_inclusive_accounting() {
             name: None,
             harness: crate::AgentHarnessKind::Basic,
             typescript: None,
+            enable_agent_tool_creation: true,
             sandbox_image: None,
             enable_networking: false,
             model: "gpt-4o-mini".to_string(),
@@ -1222,7 +1225,7 @@ async fn assistant_usage_record(
                 .iter()
                 .any(|m| matches!(m, Message::Assistant { .. })) =>
             {
-                Some(usage)
+                Some(*usage)
             }
             _ => None,
         })

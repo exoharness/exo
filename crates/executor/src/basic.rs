@@ -437,10 +437,7 @@ fn extend_message_history(
     }
 }
 
-fn interpret_model_response(
-    response: ModelResponse,
-    pricing: &PricingTable,
-) -> Vec<EventData> {
+fn interpret_model_response(response: ModelResponse, pricing: &PricingTable) -> Vec<EventData> {
     let mut events = Vec::new();
 
     if !response.messages.is_empty() {
@@ -463,7 +460,10 @@ fn interpret_model_response(
     events
 }
 
-fn build_usage_record(response: &ModelResponse, pricing: &PricingTable) -> Option<UsageRecord> {
+fn build_usage_record(
+    response: &ModelResponse,
+    pricing: &PricingTable,
+) -> Option<Box<UsageRecord>> {
     // Only emit a record when we have *something* worth recording — token usage
     // or timing. Skipping when both are absent keeps event JSON clean for
     // tests/fakes that don't populate metadata.
@@ -505,7 +505,7 @@ fn build_usage_record(response: &ModelResponse, pricing: &PricingTable) -> Optio
         None
     };
 
-    Some(UsageRecord {
+    Some(Box::new(UsageRecord {
         model,
         prompt_tokens,
         completion_tokens,
@@ -516,7 +516,7 @@ fn build_usage_record(response: &ModelResponse, pricing: &PricingTable) -> Optio
         ttft_ms: response.ttft.map(|d| d.as_millis() as u64),
         duration_ms: response.duration.map(|d| d.as_millis() as u64),
         server_duration_ms: None,
-    })
+    }))
 }
 
 #[derive(Debug, Clone)]

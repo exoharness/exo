@@ -126,9 +126,7 @@ impl PricingTable {
         // For cache rates, fall back to the input rate if the provider
         // doesn't publish a separate cached tier.
         let cache_read_rate = entry.cache_read_input_token_cost.unwrap_or(input_rate);
-        let cache_creation_rate = entry
-            .cache_creation_input_token_cost
-            .unwrap_or(input_rate);
+        let cache_creation_rate = entry.cache_creation_input_token_cost.unwrap_or(input_rate);
 
         let prompt = tokens.prompt.unwrap_or(0).max(0) as f64;
         let completion = tokens.completion.unwrap_or(0).max(0) as f64;
