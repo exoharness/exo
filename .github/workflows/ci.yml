@@ -58,6 +58,9 @@ jobs:
       - name: Cache Rust dependencies and build output
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
 
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 

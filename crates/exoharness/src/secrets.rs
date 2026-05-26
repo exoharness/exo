@@ -145,9 +145,8 @@ impl SecretKeyProvider for FileBackedSecretKeyProvider {
             return Ok(*key);
         }
         let key = match std::fs::read(&self.path) {
-            Ok(bytes) => parse_master_key_bytes(&bytes).with_context(|| {
-                format!("reading master key at {}", self.path.display())
-            })?,
+            Ok(bytes) => parse_master_key_bytes(&bytes)
+                .with_context(|| format!("reading master key at {}", self.path.display()))?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let key = random_master_key();
                 write_master_key_file(&self.path, &key)?;
@@ -230,8 +229,11 @@ fn write_master_key_file(path: &Path, key: &[u8; MASTER_KEY_LEN]) -> Result<()> 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating master key directory {}", parent.display()))?;
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(MASTER_KEY_DIR_PERMS))
-            .with_context(|| format!("setting permissions on {}", parent.display()))?;
+        std::fs::set_permissions(
+            parent,
+            std::fs::Permissions::from_mode(MASTER_KEY_DIR_PERMS),
+        )
+        .with_context(|| format!("setting permissions on {}", parent.display()))?;
     }
 
     let tmp_path = path.with_extension("tmp");
@@ -267,4 +269,3 @@ pub(crate) fn default_master_key_path() -> Result<PathBuf> {
     }
     bail!("could not determine config directory: set XDG_CONFIG_HOME or HOME")
 }
-
