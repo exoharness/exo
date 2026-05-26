@@ -2,8 +2,12 @@
 mod basic;
 #[cfg(all(test, not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod basic_tests;
-#[cfg(all(test, not(target_arch = "wasm32"), feature = "basic-backend"))]
-mod contract_tests;
+#[cfg(all(
+    any(test, feature = "contract-tests"),
+    not(target_arch = "wasm32"),
+    feature = "basic-backend"
+))]
+pub mod contract_tests;
 mod error;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod http;

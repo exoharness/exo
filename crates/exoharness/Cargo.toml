@@ -19,6 +19,7 @@ basic-backend = [
   "dep:url",
 ]
 apple-keychain = ["dep:keyring", "dep:keyring-core"]
+contract-tests = []
 
 [dependencies]
 aes-gcm = { version = "0.11.0-rc.3", optional = true }
