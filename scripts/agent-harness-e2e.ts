@@ -529,7 +529,7 @@ function runChat(
   prompt: string,
   options: CommandOptions = {},
 ): string {
-  return runExo(["chat", "send", agent, conversation, prompt], {
+  return runExo(["conversation", "send", agent, conversation, prompt], {
     timeoutMs: options.timeoutMs ?? args.timeoutMs,
   });
 }

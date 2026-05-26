@@ -1,10 +1,10 @@
 use std::borrow::Cow;
-use std::error::Error;
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use anyhow::Result;
 use executor::{
     ConversationHandle, EventData, EventId, EventQuery, EventQueryDirection, ExecutionStreamEvent,
     HarnessConversation, SendRequest, SessionId,
@@ -23,9 +23,7 @@ use crate::{print_message, render_assistant_content};
 const REMOTE_HISTORY_BASE: usize = 1_000_000;
 const REMOTE_HISTORY_PAGE_SIZE: u32 = 32;
 
-pub async fn run_chat_repl(
-    conversation: Arc<dyn HarnessConversation>,
-) -> Result<(), Box<dyn Error>> {
+pub async fn run_chat_repl(conversation: Arc<dyn HarnessConversation>) -> Result<()> {
     let mut repl = ChatRepl::new(conversation)?;
     repl.print_transcript().await?;
     repl.run().await
@@ -345,7 +343,7 @@ struct ChatRepl {
 }
 
 impl ChatRepl {
-    fn new(conversation: Arc<dyn HarnessConversation>) -> Result<Self, Box<dyn Error>> {
+    fn new(conversation: Arc<dyn HarnessConversation>) -> Result<Self> {
         let history = ChatHistory::new(
             conversation.exoharness_handle(),
             conversation.record().latest_event_id,
@@ -359,14 +357,14 @@ impl ChatRepl {
         })
     }
 
-    async fn print_transcript(&self) -> Result<(), Box<dyn Error>> {
+    async fn print_transcript(&self) -> Result<()> {
         for message in self.conversation.messages().await? {
             print_message(&message);
         }
         Ok(())
     }
 
-    async fn run(&mut self) -> Result<(), Box<dyn Error>> {
+    async fn run(&mut self) -> Result<()> {
         loop {
             let prompt = format!("{}> ", self.conversation.record().slug);
             match self.editor.readline(&prompt) {
@@ -405,7 +403,7 @@ impl ChatRepl {
         Ok(())
     }
 
-    async fn send(&mut self, input: &str) -> Result<(), Box<dyn Error>> {
+    async fn send(&mut self, input: &str) -> Result<()> {
         let mut stream = self
             .conversation
             .send_stream(SendRequest {
