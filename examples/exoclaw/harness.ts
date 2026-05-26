@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 import {
   defineHarness,
@@ -23,6 +23,7 @@ const EXOCLAW_IDENTITY_PROMPT = readFileSync(
   new URL("./prompts/me.md", import.meta.url),
   "utf8",
 ).trim();
+const DEFAULT_LOCAL_PROMPT_PATH = ".exo/exoclaw-profile.md";
 
 export default defineHarness({
   async runTurn(context) {
@@ -54,7 +55,7 @@ function builtInToolNames(context: TurnContext): BuiltInToolName[] {
 }
 
 function exoclawInstructions(context: TurnContext): Message[] {
-  return [
+  const instructions: Message[] = [
     ...basicHarnessInstructions(context),
     {
       role: "developer",
@@ -66,4 +67,22 @@ function exoclawInstructions(context: TurnContext): Message[] {
         'This is the Exoclaw long-running agent harness. You can schedule recurring sandbox work with schedule_sandbox_task, inspect active tasks with list_scheduled_tasks, cancel tasks with cancel_scheduled_task, and permanently delete tasks with delete_scheduled_task. You can also create long-running external adapters with create_adapter, inspect them with list_adapters, disable/delete them, and send explicit outbound replies with send_adapter_message. Use cancel_scheduled_task or disable_adapter when history should be preserved; use delete_scheduled_task or delete_adapter when the user asks to remove something entirely. Conversations default to sandboxScope: "agent", so shell commands use this agent\'s shared sandbox unless the conversation was configured with sandboxScope: "conversation". Scheduled tasks default to sandboxMode: "agent". Use sandboxMode: "conversation" when the task should run in this conversation\'s sandbox, and sandboxMode: "task_fresh" when the task should have a separate fresh sandbox that is reused across that task\'s runs. IRC and WhatsApp adapters wake this conversation when their trigger policy matches; do not auto-send model text to external services. Call send_adapter_message only for intentional external replies, using the target value from the inbound wakeup when one is provided. If an adapter message asks you to schedule future work and the future result should appear externally, include the adapterId and target in the scheduled task reportPrompt so the scheduler wakeup can call send_adapter_message.',
     },
   ];
+  const localPrompt = readLocalPrompt();
+  if (localPrompt !== null) {
+    instructions.push({
+      role: "developer",
+      content: localPrompt,
+    });
+  }
+  return instructions;
+}
+
+function readLocalPrompt(): string | null {
+  const path =
+    process.env.EXOCLAW_LOCAL_PROMPT_FILE ?? DEFAULT_LOCAL_PROMPT_PATH;
+  if (!existsSync(path)) {
+    return null;
+  }
+  const contents = readFileSync(path, "utf8").trim();
+  return contents.length === 0 ? null : contents;
 }

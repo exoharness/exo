@@ -32,11 +32,32 @@ For repeatable setup tests, pass `--setup <adapter>`; the script sends the
 adapter's `setup-prompt.md` before dropping into the REPL. `--setup` may be
 passed more than once, or use `--setup-all` for Signal, WhatsApp, and IRC.
 Exoclaw's identity prompt is loaded by the harness on every turn from
-`examples/exoclaw/prompts/me.md`.
+`examples/exoclaw/prompts/me.md`. Keep that prompt generic. For local
+deployment-specific instructions, run `examples/exoclaw/scripts/exoclaw-repl
+setup-profile` or pass `--setup-profile`; the harness also loads
+`.exo/exoclaw-profile.md` when it exists.
 
 ```bash
 examples/exoclaw/scripts/exoclaw-repl fresh --pull-sandbox --setup irc
 ```
+
+## Local Profile
+
+`examples/exoclaw/prompts/me.md` is the committed, generic Exoclaw identity
+prompt. Do not put user-specific names, secrets, account details, phone numbers,
+or local deployment preferences in that file.
+
+Use `.exo/exoclaw-profile.md` for local instructions instead. The harness loads
+it as an additional developer prompt when it exists, and `.exo` is ignored by
+git. To create it interactively:
+
+```bash
+examples/exoclaw/scripts/exoclaw-repl setup-profile
+```
+
+The script asks for the user's name and any extra local instructions. To use a
+different local prompt path, set `EXOCLAW_LOCAL_PROMPT_FILE` or pass
+`--local-prompt-file <path>`.
 
 To reconstruct a full test control agent in one command:
 
@@ -46,6 +67,7 @@ PATH="/opt/homebrew/opt/openjdk/bin:$PATH" \
   --agent spooky \
   --agent-name Spooky \
   --conversation dev \
+  --setup-profile \
   --setup-all
 ```
 

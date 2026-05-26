@@ -18,7 +18,56 @@ sets general operating rules for adapters, scheduled work, setup uncertainty,
 sandbox use, and concise operational replies.
 
 This prompt is included on every Exoclaw model call, including normal REPL
-turns, adapter wakeups, and scheduled task wakeups.
+turns, adapter wakeups, and scheduled task wakeups. It is committed to git and
+must stay generic: do not put a specific user's name, deployment secrets, phone
+numbers, account names, or local preferences here.
+
+### Local Profile Prompt
+
+Default path: `.exo/exoclaw-profile.md`
+
+Override path: `EXOCLAW_LOCAL_PROMPT_FILE`
+
+Created by: `examples/exoclaw/scripts/exoclaw-repl setup-profile` or
+`examples/exoclaw/scripts/exoclaw-repl --setup-profile`
+
+Loaded by: `examples/exoclaw/harness.ts`
+
+Role: `developer`
+
+Purpose: Holds local, deployment-specific details such as the user's name or
+extra operating preferences. This file is additive to the generic identity
+prompt and should stay out of git. The default path lives under `.exo`, which is
+already ignored.
+
+Use this prompt for local identity and deployment details, for example:
+
+- the user's preferred name
+- preferred response style for this machine
+- local adapter/channel conventions that are not generally useful
+- temporary testing instructions for a local Exoclaw instance
+
+Create or update it interactively with:
+
+```bash
+examples/exoclaw/scripts/exoclaw-repl setup-profile
+```
+
+For a fresh Exoclaw build that also prompts for the local profile before setting
+up all adapters:
+
+```bash
+PATH="/opt/homebrew/opt/openjdk/bin:$PATH" \
+  examples/exoclaw/scripts/exoclaw-repl fresh \
+  --agent spooky \
+  --agent-name Spooky \
+  --conversation dev \
+  --setup-profile \
+  --setup-all
+```
+
+If a deployment wants the local prompt somewhere other than `.exo`, set
+`EXOCLAW_LOCAL_PROMPT_FILE` or pass `--local-prompt-file <path>` to the launcher.
 
 ### Harness Operations Prompt
 

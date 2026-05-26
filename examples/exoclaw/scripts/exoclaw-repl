@@ -12,6 +12,7 @@ CONVERSATION="${EXO_CONVERSATION:-dev}"
 CONVERSATION_NAME="${EXO_CONVERSATION_NAME:-Dev}"
 MODULE="${EXO_MODULE:-examples/exoclaw/harness.ts}"
 HARNESS="exoclaw"
+LOCAL_PROMPT_FILE="${EXOCLAW_LOCAL_PROMPT_FILE:-$ROOT_DIR/.exo/exoclaw-profile.md}"
 SANDBOX_IMAGE="${EXO_SANDBOX_IMAGE:-ubuntu:24.04}"
 NETWORKING="${EXO_NETWORKING:-enabled}"
 SHELL_PROGRAM="${EXO_SHELL_PROGRAM:-/bin/bash}"
@@ -24,6 +25,7 @@ START_SCHEDULER="${EXO_START_SCHEDULER:-true}"
 START_ADAPTERS="${EXO_START_ADAPTERS:-true}"
 ADAPTER_LIMIT="${EXO_ADAPTER_LIMIT:-50}"
 CONTROL=false
+SETUP_PROFILE=false
 declare -a CONTROL_PIDS=()
 SETUP_ADAPTER="${EXO_SETUP_ADAPTER:-}"
 declare -a SETUP_ADAPTERS=()
@@ -31,6 +33,7 @@ if [[ -n "$SETUP_ADAPTER" ]]; then
   SETUP_ADAPTERS+=("$SETUP_ADAPTER")
 fi
 INITIAL_PROMPT_FILE="${EXO_INITIAL_PROMPT_FILE:-}"
+export EXOCLAW_LOCAL_PROMPT_FILE="$LOCAL_PROMPT_FILE"
 
 usage() {
   cat <<'EOF'
@@ -39,6 +42,7 @@ Usage:
   examples/exoclaw/scripts/exoclaw-repl list
   examples/exoclaw/scripts/exoclaw-repl delall all
   examples/exoclaw/scripts/exoclaw-repl fresh
+  examples/exoclaw/scripts/exoclaw-repl setup-profile
   examples/exoclaw/scripts/exoclaw-repl setup-sandbox
 
 Default behavior creates or reuses an Exoclaw agent and conversation, starts the
@@ -64,6 +68,8 @@ Options:
   --adapters                   Start the local adapter runner
   --adapter-limit <n>          Max adapters supervised by the runner (default: 50)
   --control                    Show live scheduler and adapter logs beside the REPL
+  --setup-profile              Prompt once and write the ignored local profile prompt
+  --local-prompt-file <path>    Local profile prompt path (default: .exo/exoclaw-profile.md)
   --setup <adapter>            Send adapters/<adapter>/setup-prompt.md.
                                 May be passed more than once.
   --setup-all                  Equivalent to --setup signal --setup whatsapp --setup irc
@@ -79,6 +85,7 @@ Environment overrides:
   EXO_MODEL, EXO_AGENT, EXO_CONVERSATION, EXO_AGENT_NAME,
   EXO_CONVERSATION_NAME, EXO_MODULE, EXO_SANDBOX_IMAGE,
   EXO_NETWORKING, EXO_SHELL_PROGRAM, EXO_SANDBOX_SCOPE, EXO_ENV_FILE,
+  EXOCLAW_LOCAL_PROMPT_FILE,
   EXO_BIN, EXO_START_SCHEDULER, EXO_START_ADAPTERS,
   EXO_SCHEDULER_INTERVAL_SECONDS, EXO_ADAPTER_LIMIT,
   EXO_SETUP_ADAPTER, EXO_INITIAL_PROMPT_FILE
@@ -472,6 +479,43 @@ delete_all_agents_and_conversations() {
   echo "Deleted all agents and conversations."
 }
 
+setup_local_profile() {
+  mkdir -p "$(dirname "$LOCAL_PROMPT_FILE")"
+
+  if [[ -f "$LOCAL_PROMPT_FILE" ]]; then
+    echo "Local Exoclaw profile already exists: $LOCAL_PROMPT_FILE"
+    read -r -p "Overwrite it? [y/N] " overwrite
+    case "$overwrite" in
+      y|Y|yes|YES) ;;
+      *)
+        echo "Keeping existing local profile."
+        return
+        ;;
+    esac
+  fi
+
+  local user_name extra_instructions
+  echo "Creating local Exoclaw profile: $LOCAL_PROMPT_FILE"
+  read -r -p "Your name, or blank to skip: " user_name
+  read -r -p "Additional local instructions, or blank to skip: " extra_instructions
+
+  {
+    echo "# Local Exoclaw Profile"
+    echo
+    echo "This file is local to this machine and should not be committed."
+    if [[ -n "$user_name" ]]; then
+      echo
+      echo "The user's name is $user_name."
+    fi
+    if [[ -n "$extra_instructions" ]]; then
+      echo
+      echo "$extra_instructions"
+    fi
+  } >"$LOCAL_PROMPT_FILE"
+
+  echo "Wrote local profile prompt. The harness will load it from EXOCLAW_LOCAL_PROMPT_FILE."
+}
+
 fresh_start() {
   build_exo
   delete_all_agents_and_conversations
@@ -480,6 +524,9 @@ fresh_start() {
 
 run_repl() {
   ensure_exo_bin
+  if [[ "$SETUP_PROFILE" == true ]]; then
+    setup_local_profile
+  fi
   ensure_signal_cli
   if [[ "$USE_SANDBOX" == true ]]; then
     if [[ "$PULL_SANDBOX" == true ]]; then
@@ -736,6 +783,10 @@ while [[ $# -gt 0 ]]; do
       shift
       COMMAND="fresh"
       ;;
+    setup-profile)
+      shift
+      COMMAND="setup-profile"
+      ;;
     setup-sandbox)
       shift
       COMMAND="setup-sandbox"
@@ -820,6 +871,15 @@ while [[ $# -gt 0 ]]; do
       CONTROL=true
       shift
       ;;
+    --setup-profile)
+      SETUP_PROFILE=true
+      shift
+      ;;
+    --local-prompt-file)
+      LOCAL_PROMPT_FILE="${2:-}"
+      [[ -n "$LOCAL_PROMPT_FILE" ]] || die "--local-prompt-file requires a value"
+      shift 2
+      ;;
     --setup)
       add_setup_adapter "${2:-}"
       shift 2
@@ -863,6 +923,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+export EXOCLAW_LOCAL_PROMPT_FILE="$LOCAL_PROMPT_FILE"
+
 case "$COMMAND" in
   repl)
     run_repl
@@ -875,6 +937,9 @@ case "$COMMAND" in
     ;;
   fresh)
     fresh_start
+    ;;
+  setup-profile)
+    setup_local_profile
     ;;
   setup-sandbox)
     setup_sandbox
