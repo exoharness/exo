@@ -317,7 +317,10 @@ export interface Conversation {
 }
 
 export interface Turn {
-  readonly handleId: number;
+  readonly agentId: string;
+  readonly conversationId: string;
+  readonly sessionId: string;
+  readonly turnId: string;
   readonly conversation: Conversation;
   readonly record: TurnRecord;
   addEvents(data: EventData[]): Promise<AddEventsResult>;

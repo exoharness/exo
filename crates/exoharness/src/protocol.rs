@@ -5,10 +5,8 @@ use crate::{
     BeginTurnRequest, Binding, BindingId, BindingMetadata, ConversationId, ConversationRecord,
     Event, EventData, EventId, EventQuery, ForkConversationRequest, GetEventsResult,
     NewAgentRequest, NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Secret,
-    SecretId, SecretMetadata, SessionId, TurnRecord, WriteArtifactRequest,
+    SecretId, SecretMetadata, SessionId, TurnId, TurnRecord, WriteArtifactRequest,
 };
-
-pub type HandleId = u64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConversationHandleInfo {
@@ -18,7 +16,6 @@ pub struct ConversationHandleInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TurnHandleInfo {
-    pub handle_id: HandleId,
     pub conversation: ConversationHandleInfo,
     pub record: TurnRecord,
 }
@@ -192,15 +189,24 @@ pub enum Request {
         secret_id: SecretId,
     },
     TurnAddEvents {
-        handle_id: HandleId,
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+        session_id: SessionId,
+        turn_id: TurnId,
         data: Vec<EventData>,
     },
     TurnWriteArtifact {
-        handle_id: HandleId,
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+        session_id: SessionId,
+        turn_id: TurnId,
         request: WriteArtifactRequest,
     },
     TurnFinish {
-        handle_id: HandleId,
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+        session_id: SessionId,
+        turn_id: TurnId,
     },
 }
 

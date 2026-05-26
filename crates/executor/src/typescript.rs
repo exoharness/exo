@@ -304,11 +304,10 @@ impl TypeScriptRunnerProcess {
             agent_id: agent.record().id,
             record: conversation.record().clone(),
         };
-        let turn_info = exoharness_server.register_turn(
-            agent.record().id,
-            conversation.record().clone(),
-            Arc::clone(&turn),
-        );
+        let turn_info = TurnHandleInfo {
+            conversation: conversation_info.clone(),
+            record: turn.record().clone(),
+        };
         send_host_message(
             &self.host_tx,
             HostToGuestMessage::Init {

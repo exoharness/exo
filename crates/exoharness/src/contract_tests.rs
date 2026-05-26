@@ -24,6 +24,16 @@ pub async fn supports_agent_and_conversation_crud(harness: Arc<dyn ExoHarness>) 
         })
         .await
         .expect("conversation should be created");
+    let events = conversation
+        .get_events(None)
+        .await
+        .expect("get conversation events")
+        .events;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.data, EventData::ConversationCreated { .. }))
+    );
 
     assert_eq!(harness.list_agents().await.expect("list agents").len(), 1);
     assert_eq!(
@@ -90,11 +100,28 @@ pub async fn begin_turn_tracks_events_through_finish(harness: Arc<dyn ExoHarness
         .expect("get events")
         .events;
 
-    assert!(matches!(events[0].data, EventData::SessionStarted));
-    assert!(matches!(events[1].data, EventData::TurnStarted));
-    assert!(matches!(events[2].data, EventData::Messages { .. }));
-    assert!(matches!(events[3].data, EventData::Messages { .. }));
-    assert!(matches!(events[4].data, EventData::TurnEnded));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.data, EventData::SessionStarted))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.data, EventData::TurnStarted))
+    );
+    assert!(
+        events
+            .iter()
+            .filter(|event| matches!(event.data, EventData::Messages { .. }))
+            .count()
+            >= 2
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.data, EventData::TurnEnded))
+    );
     assert_eq!(events.last().expect("turn ended").id, latest_event_id);
 }
 

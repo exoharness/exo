@@ -9,9 +9,7 @@ use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
 use url::Url;
 
-use crate::protocol::{
-    ClientMessage, ConversationHandleInfo, HandleId, Request, Response, ServerMessage,
-};
+use crate::protocol::{ClientMessage, ConversationHandleInfo, Request, Response, ServerMessage};
 use crate::server::ExoHarnessServer;
 use crate::{
     AddEventsRequest, AddEventsResult, AgentHandle, AgentId, AgentRecord, Artifact,
@@ -595,12 +593,19 @@ impl ConversationHandle for HttpConversationHandle {
         {
             Response::Turn { turn } => Ok(Arc::new(HttpTurnHandle::new(
                 self.harness.clone(),
-                turn.handle_id,
-                self.info(),
+                turn.conversation,
                 turn.record,
             ))),
             response => unexpected_response(response, "turn"),
         }
+    }
+
+    async fn turn_handle(&self, record: TurnRecord) -> Result<Arc<dyn TurnHandle>> {
+        Ok(Arc::new(HttpTurnHandle::new(
+            self.harness.clone(),
+            self.info(),
+            record,
+        )))
     }
 
     async fn get_events(&self, query: Option<EventQuery>) -> Result<GetEventsResult> {
@@ -833,20 +838,21 @@ impl ConversationHandle for HttpConversationHandle {
 
 struct HttpTurnHandle {
     harness: HttpExoHarness,
-    handle_id: HandleId,
+    agent_id: AgentId,
+    conversation_id: ConversationId,
     record: TurnRecord,
 }
 
 impl HttpTurnHandle {
     fn new(
         harness: HttpExoHarness,
-        handle_id: HandleId,
-        _conversation: ConversationHandleInfo,
+        conversation: ConversationHandleInfo,
         record: TurnRecord,
     ) -> Self {
         Self {
             harness,
-            handle_id,
+            agent_id: conversation.agent_id,
+            conversation_id: conversation.record.id,
             record,
         }
     }
@@ -862,7 +868,10 @@ impl TurnHandle for HttpTurnHandle {
         match self
             .harness
             .request(Request::TurnAddEvents {
-                handle_id: self.handle_id,
+                agent_id: self.agent_id,
+                conversation_id: self.conversation_id,
+                session_id: self.record.session_id,
+                turn_id: self.record.id,
                 data,
             })
             .await?
@@ -876,7 +885,10 @@ impl TurnHandle for HttpTurnHandle {
         match self
             .harness
             .request(Request::TurnWriteArtifact {
-                handle_id: self.handle_id,
+                agent_id: self.agent_id,
+                conversation_id: self.conversation_id,
+                session_id: self.record.session_id,
+                turn_id: self.record.id,
                 request,
             })
             .await?
@@ -890,7 +902,10 @@ impl TurnHandle for HttpTurnHandle {
         match self
             .harness
             .request(Request::TurnFinish {
-                handle_id: self.handle_id,
+                agent_id: self.agent_id,
+                conversation_id: self.conversation_id,
+                session_id: self.record.session_id,
+                turn_id: self.record.id,
             })
             .await?
         {

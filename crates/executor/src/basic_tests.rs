@@ -681,6 +681,26 @@ impl ConversationHandle for FakeConversationHandle {
         }))
     }
 
+    async fn turn_handle(&self, record: TurnRecord) -> Result<Arc<dyn TurnHandle>> {
+        let state = self.state.lock().expect("state poisoned");
+        let latest_event_id = state
+            .conversation
+            .events
+            .iter()
+            .filter(|event| event.session_id == Some(record.session_id))
+            .filter(|event| event.turn_id == Some(record.id))
+            .map(|event| event.id)
+            .last();
+        if latest_event_id.is_none() {
+            return Err(anyhow!("turn not found"));
+        }
+        Ok(Arc::new(FakeTurnHandle {
+            state: Arc::clone(&self.state),
+            record,
+            latest_event_id: Mutex::new(latest_event_id),
+        }))
+    }
+
     async fn get_events(&self, query: Option<EventQuery>) -> Result<GetEventsResult> {
         let state = self.state.lock().expect("state poisoned");
         let mut events = state.conversation.events.clone();
@@ -930,6 +950,9 @@ fn append_event(
 
 fn event_type(event: &Event) -> String {
     match &event.data {
+        EventData::ConversationCreated { .. } => "conversation_created".to_string(),
+        EventData::ConversationUpdated { .. } => "conversation_updated".to_string(),
+        EventData::ConversationDeleted => "conversation_deleted".to_string(),
         EventData::ConversationForked { .. } => "conversation_forked".to_string(),
         EventData::SessionStarted => "session_started".to_string(),
         EventData::SessionEnded => "session_ended".to_string(),

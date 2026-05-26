@@ -1,61 +1,21 @@
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use anyhow::anyhow;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 
-use crate::protocol::{
-    ClientMessage, ConversationHandleInfo, HandleId, Request, Response, ServerMessage,
-    TurnHandleInfo,
-};
+use crate::protocol::{ClientMessage, ConversationHandleInfo, Request, Response, ServerMessage};
 use crate::{
-    AgentHandle, AgentId, ConversationHandle, ConversationId, ExoHarness, Result, TurnHandle,
+    AgentHandle, AgentId, ConversationHandle, ConversationId, ExoHarness, Result, SessionId,
+    TurnHandle, TurnId, TurnRecord,
 };
 
 pub struct ExoHarnessServer {
     root: Arc<dyn ExoHarness>,
-    turns: RwLock<HashMap<HandleId, RegisteredTurn>>,
-    next_handle_id: AtomicU64,
-}
-
-struct RegisteredTurn {
-    conversation: ConversationHandleInfo,
-    turn: Arc<dyn TurnHandle>,
 }
 
 impl ExoHarnessServer {
     pub fn new(root: Arc<dyn ExoHarness>) -> Self {
-        Self {
-            root,
-            turns: RwLock::new(HashMap::new()),
-            next_handle_id: AtomicU64::new(1),
-        }
-    }
-
-    pub fn register_turn(
-        &self,
-        agent_id: AgentId,
-        conversation_record: crate::ConversationRecord,
-        turn: Arc<dyn TurnHandle>,
-    ) -> TurnHandleInfo {
-        let handle_id = self.next_handle_id.fetch_add(1, Ordering::Relaxed);
-        let conversation = ConversationHandleInfo {
-            agent_id,
-            record: conversation_record,
-        };
-        self.turns.write().expect("turn registry poisoned").insert(
-            handle_id,
-            RegisteredTurn {
-                conversation: conversation.clone(),
-                turn: Arc::clone(&turn),
-            },
-        );
-        TurnHandleInfo {
-            handle_id,
-            conversation,
-            record: turn.record().clone(),
-        }
+        Self { root }
     }
 
     pub async fn handle_request(&self, request: Request) -> Result<Response> {
@@ -236,11 +196,13 @@ impl ExoHarnessServer {
                 let conversation = self.require_conversation(agent_id, conversation_id).await?;
                 let turn = conversation.begin_turn(request).await?;
                 Ok(Response::Turn {
-                    turn: self.register_turn(
-                        agent_id,
-                        conversation.record().clone(),
-                        Arc::clone(&turn),
-                    ),
+                    turn: crate::protocol::TurnHandleInfo {
+                        conversation: ConversationHandleInfo {
+                            agent_id,
+                            record: conversation.record().clone(),
+                        },
+                        record: turn.record().clone(),
+                    },
                 })
             }
             Request::ConversationGetEvents {
@@ -374,27 +336,45 @@ impl ExoHarnessServer {
                     secret: conversation.get_secret(&secret_id).await?,
                 })
             }
-            Request::TurnAddEvents { handle_id, data } => {
-                let turn = self.require_turn(handle_id)?;
-                Ok(Response::AddEvents {
-                    result: turn.turn.add_events(data).await?,
-                })
-            }
-            Request::TurnWriteArtifact { handle_id, request } => {
-                let turn = self.require_turn(handle_id)?;
-                Ok(Response::ArtifactVersion {
-                    artifact: turn.turn.write_artifact(request).await?,
-                })
-            }
-            Request::TurnFinish { handle_id } => {
+            Request::TurnAddEvents {
+                agent_id,
+                conversation_id,
+                session_id,
+                turn_id,
+                data,
+            } => {
                 let turn = self
-                    .turns
-                    .write()
-                    .expect("turn registry poisoned")
-                    .remove(&handle_id)
-                    .ok_or_else(|| anyhow!("turn handle {handle_id} not found"))?;
+                    .require_turn(agent_id, conversation_id, session_id, turn_id)
+                    .await?;
+                Ok(Response::AddEvents {
+                    result: turn.add_events(data).await?,
+                })
+            }
+            Request::TurnWriteArtifact {
+                agent_id,
+                conversation_id,
+                session_id,
+                turn_id,
+                request,
+            } => {
+                let turn = self
+                    .require_turn(agent_id, conversation_id, session_id, turn_id)
+                    .await?;
+                Ok(Response::ArtifactVersion {
+                    artifact: turn.write_artifact(request).await?,
+                })
+            }
+            Request::TurnFinish {
+                agent_id,
+                conversation_id,
+                session_id,
+                turn_id,
+            } => {
+                let turn = self
+                    .require_turn(agent_id, conversation_id, session_id, turn_id)
+                    .await?;
                 Ok(Response::EventId {
-                    event_id: turn.turn.finish().await?,
+                    event_id: turn.finish().await?,
                 })
             }
         }
@@ -453,14 +433,19 @@ impl ExoHarnessServer {
             .ok_or_else(|| anyhow!("conversation {conversation_id} not found"))
     }
 
-    fn require_turn(&self, handle_id: HandleId) -> Result<RegisteredTurn> {
-        let turns = self.turns.read().expect("turn registry poisoned");
-        let turn = turns
-            .get(&handle_id)
-            .ok_or_else(|| anyhow!("turn handle {handle_id} not found"))?;
-        Ok(RegisteredTurn {
-            conversation: turn.conversation.clone(),
-            turn: Arc::clone(&turn.turn),
-        })
+    async fn require_turn(
+        &self,
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+        session_id: SessionId,
+        turn_id: TurnId,
+    ) -> Result<Arc<dyn TurnHandle>> {
+        self.require_conversation(agent_id, conversation_id)
+            .await?
+            .turn_handle(TurnRecord {
+                id: turn_id,
+                session_id,
+            })
+            .await
     }
 }

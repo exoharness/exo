@@ -160,7 +160,6 @@ interface RawConversationHandleInfo {
 }
 
 interface RawTurnHandleInfo {
-  handle_id: number;
   conversation: RawConversationHandleInfo;
   record: RawTurnRecord;
 }
@@ -353,13 +352,29 @@ type RawExoRequest =
       conversation_id: string;
       secret_id: string;
     }
-  | { type: "turn_add_events"; handle_id: number; data: EventData[] }
+  | {
+      type: "turn_add_events";
+      agent_id: string;
+      conversation_id: string;
+      session_id: string;
+      turn_id: string;
+      data: EventData[];
+    }
   | {
       type: "turn_write_artifact";
-      handle_id: number;
+      agent_id: string;
+      conversation_id: string;
+      session_id: string;
+      turn_id: string;
       request: { path: string; contents: number[] };
     }
-  | { type: "turn_finish"; handle_id: number };
+  | {
+      type: "turn_finish";
+      agent_id: string;
+      conversation_id: string;
+      session_id: string;
+      turn_id: string;
+    };
 
 type RawExoResponse =
   | { type: "agents"; agents: RawAgentRecord[] }
@@ -1507,15 +1522,22 @@ function createTurn(
   raw: RawTurnHandleInfo,
   conversation: Conversation,
 ): Turn {
+  const record = toTurnRecord(raw.record);
   const turn: Turn = {
-    handleId: raw.handle_id,
+    agentId: raw.conversation.agent_id,
+    conversationId: raw.conversation.record.id,
+    sessionId: record.sessionId,
+    turnId: record.id,
     conversation,
-    record: toTurnRecord(raw.record),
+    record,
 
     async addEvents(data): Promise<AddEventsResult> {
       const payload = await client.requestExo({
         type: "turn_add_events",
-        handle_id: raw.handle_id,
+        agent_id: raw.conversation.agent_id,
+        conversation_id: raw.conversation.record.id,
+        session_id: record.sessionId,
+        turn_id: record.id,
         data,
       });
       if (payload.type !== "add_events") {
@@ -1527,7 +1549,10 @@ function createTurn(
     async writeArtifact(args): Promise<ArtifactVersion> {
       const payload = await client.requestExo({
         type: "turn_write_artifact",
-        handle_id: raw.handle_id,
+        agent_id: raw.conversation.agent_id,
+        conversation_id: raw.conversation.record.id,
+        session_id: record.sessionId,
+        turn_id: record.id,
         request: {
           path: args.path,
           contents: Array.from(asBytes(args.contents)),

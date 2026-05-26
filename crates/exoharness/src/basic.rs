@@ -334,6 +334,21 @@ impl AgentHandle for BasicAgentHandle {
             latest_event_id: None,
         };
         let conversation_dir = self.conversations_dir().join(record.id.to_string());
+        let mut record = record;
+        append_events_to_conversation(
+            &self.harness.inner,
+            &conversation_dir,
+            record.id,
+            None,
+            None,
+            None,
+            vec![EventData::ConversationCreated {
+                slug: record.slug.clone(),
+                name: record.name.clone(),
+            }],
+            &mut record,
+        )
+        .await?;
         self.harness
             .inner
             .storage
@@ -358,6 +373,25 @@ impl AgentHandle for BasicAgentHandle {
             .is_empty()
         {
             return Ok(false);
+        }
+        if let Ok(mut record) = self
+            .harness
+            .inner
+            .storage
+            .get_json::<ConversationRecord>(conversation_dir.join("record.json"))
+            .await
+        {
+            append_events_to_conversation(
+                &self.harness.inner,
+                &conversation_dir,
+                record.id,
+                None,
+                None,
+                record.latest_event_id,
+                vec![EventData::ConversationDeleted],
+                &mut record,
+            )
+            .await?;
         }
         self.harness
             .inner
@@ -618,6 +652,37 @@ impl ConversationHandle for BasicConversationHandle {
             state: Mutex::new(BasicTurnState {
                 latest_event_id: Some(add_result.latest_event_id),
                 finished: false,
+            }),
+        }))
+    }
+
+    async fn turn_handle(&self, record: TurnRecord) -> Result<Arc<dyn TurnHandle>> {
+        let events = load_events(&self.harness.inner.storage, &self.events_dir()).await?;
+        let mut latest_event_id = None;
+        let mut finished = false;
+        for event in events
+            .into_iter()
+            .filter(|event| event.session_id == Some(record.session_id))
+            .filter(|event| event.turn_id == Some(record.id))
+        {
+            latest_event_id = Some(event.id);
+            finished = matches!(event.data, EventData::TurnEnded);
+        }
+        if latest_event_id.is_none() {
+            bail!(
+                "turn {} in session {} was not found",
+                record.id,
+                record.session_id
+            );
+        }
+        Ok(Arc::new(BasicTurnHandle {
+            harness: self.harness.clone(),
+            conversation_dir: self.conversation_dir(),
+            conversation_id: self.record.id,
+            record,
+            state: Mutex::new(BasicTurnState {
+                latest_event_id,
+                finished,
             }),
         }))
     }
@@ -1805,6 +1870,9 @@ fn merge_secret_metadata(scopes: Vec<Vec<SecretMetadata>>) -> Vec<SecretMetadata
 
 fn event_type(data: &EventData) -> String {
     match data {
+        EventData::ConversationCreated { .. } => "conversation_created".to_string(),
+        EventData::ConversationUpdated { .. } => "conversation_updated".to_string(),
+        EventData::ConversationDeleted => "conversation_deleted".to_string(),
         EventData::ConversationForked { .. } => "conversation_forked".to_string(),
         EventData::SessionStarted => "session_started".to_string(),
         EventData::SessionEnded => "session_ended".to_string(),

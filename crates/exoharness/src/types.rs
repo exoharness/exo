@@ -65,6 +65,10 @@ pub trait ConversationHandle: Send + Sync {
     async fn start_session(&self) -> Result<SessionId>;
     async fn end_session(&self, id: SessionId) -> Result<()>;
     async fn begin_turn(&self, request: BeginTurnRequest) -> Result<Arc<dyn TurnHandle>>;
+    /// Rebuilds the local TurnHandle facade for an already-created turn.
+    /// The durable identity is the agent, conversation, session, and turn ids;
+    /// this method only bundles those ids back into the trait object API.
+    async fn turn_handle(&self, record: TurnRecord) -> Result<Arc<dyn TurnHandle>>;
 
     async fn get_events(&self, query: Option<EventQuery>) -> Result<GetEventsResult>;
     async fn watch_events(&self, after_exclusive: Bound<EventId>) -> Result<EventStream>;
@@ -197,6 +201,15 @@ pub struct Event {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventData {
+    ConversationCreated {
+        slug: String,
+        name: String,
+    },
+    ConversationUpdated {
+        slug: Option<String>,
+        name: Option<String>,
+    },
+    ConversationDeleted,
     ConversationForked {
         source_conversation_id: ConversationId,
         up_to_inclusive: Option<EventId>,
