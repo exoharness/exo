@@ -690,7 +690,7 @@ impl ConversationHandle for FakeConversationHandle {
             .filter(|event| event.session_id == Some(record.session_id))
             .filter(|event| event.turn_id == Some(record.id))
             .map(|event| event.id)
-            .last();
+            .next_back();
         if latest_event_id.is_none() {
             return Err(anyhow!("turn not found"));
         }

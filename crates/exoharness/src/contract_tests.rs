@@ -5,8 +5,7 @@ use lingua::universal::{AssistantContent, UserContent};
 
 use crate::{
     BeginTurnRequest, Binding, EventData, EventQuery, EventQueryDirection, ExoHarness,
-    ForkConversationRequest, NewAgentRequest, NewConversationRequest, PutSecretRequest, Secret,
-    WriteArtifactRequest,
+    ForkConversationRequest, NewAgentRequest, NewConversationRequest, Uuid7, WriteArtifactRequest,
 };
 
 pub async fn supports_agent_and_conversation_crud(harness: Arc<dyn ExoHarness>) {
@@ -176,7 +175,7 @@ pub async fn turn_events_continue_after_artifact_writes(harness: Arc<dyn ExoHarn
     assert_eq!(artifact_event.turn_id, Some(turn.record().id));
 }
 
-pub async fn conversation_scope_overrides_agent_scope_and_fork_copies_local_state(
+pub async fn conversation_scope_overrides_agent_scope_and_fork_copies_bindings(
     harness: Arc<dyn ExoHarness>,
 ) {
     let agent = harness
@@ -194,50 +193,32 @@ pub async fn conversation_scope_overrides_agent_scope_and_fork_copies_local_stat
         .await
         .expect("conversation");
 
-    let agent_secret_id = agent
-        .put_secret(PutSecretRequest {
-            name: "OPENAI_API_KEY".to_string(),
-            secret: Secret::Key {
-                value: "agent".to_string(),
-            },
-        })
-        .await
-        .expect("agent secret");
     agent
         .put_binding(Binding::Env {
             name: "OPENAI_API_KEY".to_string(),
             env_var: "OPENAI_API_KEY".to_string(),
-            secret_id: agent_secret_id,
+            secret_id: Uuid7::now(),
         })
         .await
         .expect("agent binding");
 
-    let conversation_secret_id = conversation
-        .put_secret(PutSecretRequest {
-            name: "OPENAI_API_KEY".to_string(),
-            secret: Secret::Key {
-                value: "conversation".to_string(),
-            },
-        })
-        .await
-        .expect("conversation secret");
-    conversation
+    let conversation_binding_id = conversation
         .put_binding(Binding::Env {
             name: "OPENAI_API_KEY".to_string(),
             env_var: "OPENAI_API_KEY".to_string(),
-            secret_id: conversation_secret_id,
+            secret_id: Uuid7::now(),
         })
         .await
         .expect("conversation binding");
 
-    let effective_secret = conversation
-        .list_secrets()
+    let effective_binding = conversation
+        .list_bindings()
         .await
-        .expect("list secrets")
+        .expect("list bindings")
         .into_iter()
-        .find(|secret| secret.name == "OPENAI_API_KEY")
-        .expect("effective secret");
-    assert_eq!(effective_secret.id, conversation_secret_id);
+        .find(|binding| binding.name == "OPENAI_API_KEY")
+        .expect("effective binding");
+    assert_eq!(effective_binding.id, conversation_binding_id);
 
     let forked = conversation
         .fork(ForkConversationRequest {
@@ -247,14 +228,14 @@ pub async fn conversation_scope_overrides_agent_scope_and_fork_copies_local_stat
         })
         .await
         .expect("fork");
-    let forked_secret = forked
-        .list_secrets()
+    let forked_binding = forked
+        .list_bindings()
         .await
-        .expect("list forked secrets")
+        .expect("list forked bindings")
         .into_iter()
-        .find(|secret| secret.name == "OPENAI_API_KEY")
-        .expect("forked effective secret");
-    assert_eq!(forked_secret.name, "OPENAI_API_KEY");
+        .find(|binding| binding.name == "OPENAI_API_KEY")
+        .expect("forked effective binding");
+    assert_eq!(forked_binding.name, "OPENAI_API_KEY");
     let events = forked
         .get_events(Some(EventQuery {
             cursor: None,

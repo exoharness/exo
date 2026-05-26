@@ -158,6 +158,7 @@ fn log_http_response(response: &ServerMessage, start: Instant) {
 pub struct HttpExoHarness {
     client: reqwest::Client,
     endpoint: Url,
+    bearer_token: Option<String>,
     next_request_id: Arc<AtomicU64>,
 }
 
@@ -166,8 +167,14 @@ impl HttpExoHarness {
         Ok(Self {
             client: reqwest::Client::new(),
             endpoint: request_endpoint(base_url.as_ref())?,
+            bearer_token: None,
             next_request_id: Arc::new(AtomicU64::new(1)),
         })
+    }
+
+    pub fn with_bearer_token(mut self, bearer_token: String) -> Self {
+        self.bearer_token = Some(bearer_token);
+        self
     }
 
     pub fn endpoint(&self) -> &Url {
@@ -177,10 +184,11 @@ impl HttpExoHarness {
     async fn request(&self, request: Request) -> Result<Response> {
         let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let message = ClientMessage::Request { id, request };
-        let response = self
-            .client
-            .post(self.endpoint.clone())
-            .json(&message)
+        let mut request = self.client.post(self.endpoint.clone()).json(&message);
+        if let Some(bearer_token) = &self.bearer_token {
+            request = request.bearer_auth(bearer_token);
+        }
+        let response = request
             .send()
             .await
             .context("failed to send HTTP exoharness request")?;

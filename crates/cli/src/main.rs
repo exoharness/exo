@@ -64,8 +64,21 @@ struct Cli {
     braintrust_app_url: Option<String>,
     #[arg(long, global = true, env = "BRAINTRUST_API_URL", hide = true)]
     braintrust_api_url: Option<String>,
-    #[arg(long, global = true, env = "EXO_EXOHARNESS_URL")]
+    #[arg(
+        long = "exoharness-url",
+        visible_alias = "url",
+        global = true,
+        env = "EXO_EXOHARNESS_URL"
+    )]
     exoharness_url: Option<String>,
+    #[arg(
+        long = "bearer-env",
+        value_name = "ENV_VAR",
+        help = "Environment variable whose value is sent as the HTTP bearer token",
+        global = true,
+        env = "EXO_BEARER_ENV"
+    )]
+    bearer_env: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -255,7 +268,7 @@ enum Commands {
         #[command(subcommand)]
         command: ModelCommands,
     },
-    /// Manage stored secrets for model and tool bindings.
+    /// Manage local stored secrets.
     Secret {
         #[command(subcommand)]
         command: SecretCommands,
@@ -500,7 +513,16 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let exoharness = instantiate_exoharness(&exo_config, cli.exoharness_url.as_deref()).await?;
+    if cli.bearer_env.is_some() && cli.exoharness_url.is_none() {
+        bail!("--bearer-env requires --url");
+    }
+    let bearer_token = cli
+        .bearer_env
+        .as_deref()
+        .map(|env| env_value_from_arg("--bearer-env", env, &env_vars))
+        .transpose()?;
+    let exoharness =
+        instantiate_exoharness(&exo_config, cli.exoharness_url.as_deref(), bearer_token).await?;
     let harness_kind = determine_harness_kind(
         exoharness.as_ref(),
         harness_selection.as_ref(),
@@ -599,9 +621,35 @@ async fn main() -> Result<()> {
         }
         Commands::Agent { command } => match command {
             AgentCommands::List => {
-                println!("AGENT\tNAME");
-                for agent in harness.list_agents().await? {
-                    println!("{}\t{}", agent.slug, agent.name);
+                let agents = harness.list_agents().await?;
+                let agent_width = agents
+                    .iter()
+                    .map(|agent| agent.slug.len())
+                    .chain(std::iter::once("AGENT".len()))
+                    .max()
+                    .unwrap_or("AGENT".len());
+                let id_width = agents
+                    .iter()
+                    .map(|agent| agent.id.to_string().len())
+                    .chain(std::iter::once("ID".len()))
+                    .max()
+                    .unwrap_or("ID".len());
+                println!(
+                    "{:<agent_width$}  {:<id_width$}  NAME",
+                    "AGENT",
+                    "ID",
+                    agent_width = agent_width,
+                    id_width = id_width
+                );
+                for agent in agents {
+                    println!(
+                        "{:<agent_width$}  {:<id_width$}  {}",
+                        agent.slug,
+                        agent.id,
+                        agent.name,
+                        agent_width = agent_width,
+                        id_width = id_width
+                    );
                 }
             }
             AgentCommands::Create {
@@ -1516,9 +1564,14 @@ async fn infer_agent_harness_kind(
 async fn instantiate_exoharness(
     exo_config: &BasicExoHarnessConfig,
     http_url: Option<&str>,
+    bearer_token: Option<String>,
 ) -> Result<Arc<dyn ExoHarness>> {
     if let Some(http_url) = http_url {
-        return Ok(Arc::new(HttpExoHarness::new(http_url)?));
+        let mut harness = HttpExoHarness::new(http_url)?;
+        if let Some(bearer_token) = bearer_token {
+            harness = harness.with_bearer_token(bearer_token);
+        }
+        return Ok(Arc::new(harness));
     }
     Ok(Arc::new(BasicExoHarness::new(exo_config.clone()).await?))
 }
@@ -2013,9 +2066,17 @@ pub(crate) fn secret_value_from_env_arg(
     env: &str,
     loaded_env: &HashMap<String, String>,
 ) -> Result<String> {
+    env_value_from_arg("--env", env, loaded_env)
+}
+
+fn env_value_from_arg(
+    flag: &str,
+    env: &str,
+    loaded_env: &HashMap<String, String>,
+) -> Result<String> {
     if !is_env_var_name(env) {
         bail!(
-            "invalid --env value; pass an environment variable name such as OPENAI_API_KEY, not the secret value"
+            "invalid {flag} value; pass an environment variable name such as OPENAI_API_KEY, not the secret value"
         );
     }
 
@@ -2023,7 +2084,7 @@ pub(crate) fn secret_value_from_env_arg(
         .get(env)
         .cloned()
         .or_else(|| std::env::var(env).ok())
-        .ok_or_else(|| anyhow!("environment variable passed to --env is not set"))
+        .ok_or_else(|| anyhow!("environment variable passed to {flag} is not set"))
 }
 
 fn is_env_var_name(env: &str) -> bool {
@@ -2172,5 +2233,25 @@ mod create_tests {
                 }
             } if agent == "agent" && conversation == "conv" && prompt == "hello"
         ));
+    }
+
+    #[test]
+    fn exoharness_http_aliases_parse() {
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from([
+            "exo",
+            "--url",
+            "http://localhost:8000/exo/v1/projects/project-id",
+            "--bearer-env",
+            "BRAINTRUST_API_KEY",
+            "agent",
+            "list",
+        ])
+        .expect("HTTP exoharness aliases parse");
+        assert_eq!(
+            cli.exoharness_url.as_deref(),
+            Some("http://localhost:8000/exo/v1/projects/project-id")
+        );
+        assert_eq!(cli.bearer_env.as_deref(), Some("BRAINTRUST_API_KEY"));
     }
 }

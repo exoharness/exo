@@ -60,7 +60,7 @@ async fn basic_backend_contract_conversation_scope_overrides_and_forks() {
             .await
             .expect("harness should initialize"),
     );
-    crate::contract_tests::conversation_scope_overrides_agent_scope_and_fork_copies_local_state(
+    crate::contract_tests::conversation_scope_overrides_agent_scope_and_fork_copies_bindings(
         harness,
     )
     .await;
