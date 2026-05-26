@@ -14,8 +14,10 @@ mod tui;
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 
+use anyhow::{Result, anyhow, bail};
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use executor::{
     AgentHarnessKind, BasicExoHarness, BasicExoHarnessConfig, BasicHarness, Binding,
@@ -36,15 +38,16 @@ use tui::run_chat_repl;
 
 #[derive(Debug, Parser)]
 #[command(name = "exo")]
-#[command(about = "CLI for harness implementations")]
+#[command(about = "CLI for exo agents")]
 #[command(
     after_help = "Runtime options:\n  --braintrust-api-key <BRAINTRUST_API_KEY>\n  --braintrust-app-url <BRAINTRUST_APP_URL>\n  --braintrust-api-url <BRAINTRUST_API_URL>\n\nThese options are accepted globally, including after subcommands, but are hidden from subcommand help to reduce noise."
 )]
 struct Cli {
     #[arg(long, global = true, default_value = ".exo")]
     root: PathBuf,
-    #[arg(long, global = true, value_enum)]
-    harness: Option<HarnessKind>,
+    /// Executor runtime: basic, rlm, typescript, codex, claude-code, cursor, or a TypeScript module path.
+    #[arg(long, global = true, value_name = "HARNESS")]
+    harness: Option<HarnessSelection>,
     #[arg(long, global = true, value_enum, env = "EXO_SECRET_BACKEND")]
     secret_backend: Option<SecretBackendArg>,
     #[arg(long, global = true, value_enum, env = "EXO_SANDBOX_BACKEND")]
@@ -67,12 +70,105 @@ struct Cli {
     command: Commands,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum HarnessKind {
     Basic,
     Rlm,
     #[value(name = "typescript")]
     TypeScript,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HarnessSelection {
+    Kind(HarnessKind),
+    TypeScriptPreset(TypeScriptHarnessPreset),
+    TypeScriptModule(PathBuf),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TypeScriptHarnessPreset {
+    Codex,
+    ClaudeCode,
+    Cursor,
+}
+
+impl HarnessSelection {
+    fn harness_kind(&self) -> HarnessKind {
+        match self {
+            Self::Kind(kind) => *kind,
+            Self::TypeScriptPreset(_) | Self::TypeScriptModule(_) => HarnessKind::TypeScript,
+        }
+    }
+
+    fn default_agent_slug(&self) -> Option<String> {
+        match self {
+            Self::TypeScriptPreset(preset) => Some(preset.agent_slug().to_string()),
+            Self::TypeScriptModule(path) => path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(slugify)
+                .filter(|slug| !slug.is_empty()),
+            Self::Kind(_) => None,
+        }
+    }
+
+    fn default_sandbox_image(&self) -> Option<&'static str> {
+        match self {
+            Self::TypeScriptPreset(preset) => preset.sandbox_image(),
+            Self::Kind(_) | Self::TypeScriptModule(_) => None,
+        }
+    }
+
+    fn default_enable_networking(&self) -> bool {
+        matches!(self, Self::TypeScriptPreset(_))
+    }
+}
+
+impl FromStr for HarnessSelection {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
+            "basic" => Ok(Self::Kind(HarnessKind::Basic)),
+            "rlm" => Ok(Self::Kind(HarnessKind::Rlm)),
+            "typescript" => Ok(Self::Kind(HarnessKind::TypeScript)),
+            "codex" => Ok(Self::TypeScriptPreset(TypeScriptHarnessPreset::Codex)),
+            "claude-code" => Ok(Self::TypeScriptPreset(TypeScriptHarnessPreset::ClaudeCode)),
+            "cursor" | "cursor-sdk" => Ok(Self::TypeScriptPreset(TypeScriptHarnessPreset::Cursor)),
+            value if looks_like_typescript_module_path(value) => {
+                Ok(Self::TypeScriptModule(PathBuf::from(value)))
+            }
+            _ => Err(format!(
+                "unknown harness `{raw}`; expected basic, rlm, typescript, codex, claude-code, cursor, or a TypeScript module path"
+            )),
+        }
+    }
+}
+
+impl TypeScriptHarnessPreset {
+    fn agent_slug(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::ClaudeCode => "claude-code",
+            Self::Cursor => "cursor",
+        }
+    }
+
+    fn module_path(self) -> &'static Path {
+        match self {
+            Self::Codex => Path::new("examples/typescript/codex-harness.ts"),
+            Self::ClaudeCode => Path::new("examples/typescript/claude-code-harness.ts"),
+            Self::Cursor => Path::new("examples/typescript/cursor-sdk-harness.ts"),
+        }
+    }
+
+    fn sandbox_image(self) -> Option<&'static str> {
+        match self {
+            Self::Codex => Some("exo-codex-sandbox:latest"),
+            Self::ClaudeCode => Some("exo-claude-code-sandbox:latest"),
+            Self::Cursor => Some("exo-cursor-sdk-sandbox:latest"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -91,7 +187,7 @@ enum SandboxBackendArg {
     LocalProcess,
 }
 
-fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig, Box<dyn std::error::Error>> {
+fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
     let secret_backend = match cli.secret_backend.unwrap_or_else(default_secret_backend) {
         SecretBackendArg::AppleKeychain => SecretBackendChoice::AppleKeychain,
         SecretBackendArg::File => SecretBackendChoice::File {
@@ -144,38 +240,37 @@ impl EnabledDisabled {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Start a chat REPL using a registered model, creating a default agent and
-    /// conversation if they don't exist yet.
-    Repl {
-        /// Model binding to use (defaults to the first registered model).
-        #[arg(long)]
-        model: Option<String>,
-        /// Agent slug to use or create (default: "repl").
-        #[arg(long)]
-        agent: Option<String>,
-        /// Conversation slug to use or create (default: "repl").
-        #[arg(long)]
-        conversation: Option<String>,
-    },
+    /// Manage agents and their executor configuration.
     Agent {
         #[command(subcommand)]
         command: AgentCommands,
     },
+    /// Manage conversations, mounts, events, and one-shot sends.
     Conversation {
         #[command(subcommand)]
         command: ConversationCommands,
     },
-    Chat {
+    /// Register and list model bindings.
+    Model {
         #[command(subcommand)]
-        command: ChatCommands,
+        command: ModelCommands,
     },
+    /// Manage stored secrets for model and tool bindings.
     Secret {
         #[command(subcommand)]
         command: SecretCommands,
     },
-    Model {
-        #[command(subcommand)]
-        command: ModelCommands,
+    /// Start an interactive REPL, creating a default agent and conversation when needed.
+    Repl {
+        /// Model binding to use (defaults to the first registered model).
+        #[arg(long)]
+        model: Option<String>,
+        /// Agent slug to use or create (default: "repl", or the harness preset name).
+        #[arg(long)]
+        agent: Option<String>,
+        /// Conversation slug to use or create (default: a fresh generated slug).
+        #[arg(long)]
+        conversation: Option<String>,
     },
     Serve {
         #[arg(long, default_value = "127.0.0.1:4766")]
@@ -328,6 +423,11 @@ enum ConversationCommands {
         #[arg(long)]
         turn_id: Option<String>,
     },
+    Send {
+        agent: String,
+        conversation: String,
+        prompt: String,
+    },
     Delete {
         agent: String,
         conversation: String,
@@ -383,21 +483,8 @@ enum ConversationMountCommands {
     },
 }
 
-#[derive(Debug, Subcommand)]
-enum ChatCommands {
-    Send {
-        agent: String,
-        conversation: String,
-        prompt: String,
-    },
-    Repl {
-        agent: String,
-        conversation: String,
-    },
-}
-
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<()> {
     let cli = Cli::parse();
     let exo_config = build_exo_config(&cli)?;
     let env = CliEnvironment::load(cli.env_file_if_exists.as_deref(), cli.env_file.as_deref())?;
@@ -407,14 +494,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.braintrust_api_url,
     );
     let env_vars = env.into_vars();
+    let harness_selection = cli.harness.clone();
     if let Some(config) = serve_config(&cli.command) {
         serve_exoharness_http(&exo_config, config).await?;
         return Ok(());
     }
 
     let exoharness = instantiate_exoharness(&exo_config, cli.exoharness_url.as_deref()).await?;
-    let harness_kind =
-        determine_harness_kind(exoharness.as_ref(), cli.harness, &cli.command).await?;
+    let harness_kind = determine_harness_kind(
+        exoharness.as_ref(),
+        harness_selection.as_ref(),
+        &cli.command,
+    )
+    .await?;
     let harness = instantiate_harness(
         exoharness,
         harness_kind,
@@ -429,24 +521,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             agent,
             conversation,
         } => {
-            let agent_slug = agent.unwrap_or_else(|| DEFAULT_REPL_SLUG.to_string());
+            let agent_slug =
+                agent.unwrap_or_else(|| default_repl_agent_slug(harness_selection.as_ref()));
             // Without --conversation, start a fresh session each run (the usual CLI
             // behavior); pass --conversation <slug> to resume or target a specific one.
             let conversation_slug = conversation.unwrap_or_else(generate_fun_slug);
 
             let agent = match harness.get_agent(&agent_slug).await? {
-                Some(agent) => agent,
+                Some(agent) => {
+                    if let Some(selection) = harness_selection.as_ref() {
+                        ensure_agent_matches_harness_selection(agent.as_ref(), selection).await?;
+                    }
+                    agent
+                }
                 None => {
                     let model = ensure_repl_model(harness.as_ref(), model).await?;
+                    let typescript = if matches!(
+                        harness_selection.as_ref(),
+                        Some(HarnessSelection::Kind(HarnessKind::TypeScript))
+                    ) {
+                        None
+                    } else {
+                        build_typescript_harness_config(harness_selection.as_ref(), None, &[])?
+                    };
+                    if matches!(harness_kind, HarnessKind::TypeScript) && typescript.is_none() {
+                        bail!(
+                            "repl --harness typescript needs an existing TypeScript agent; use --harness codex, --harness claude-code, --harness cursor, or --harness <module.ts> to create one"
+                        );
+                    }
                     harness
                         .create_agent(CreateAgentRequest {
                             slug: agent_slug.clone(),
                             name: Some(agent_slug),
                             harness: to_agent_harness_kind(harness_kind),
-                            typescript: None,
+                            typescript,
                             enable_agent_tool_creation: true,
-                            sandbox_image: None,
-                            enable_networking: false,
+                            sandbox_image: harness_selection
+                                .as_ref()
+                                .and_then(HarnessSelection::default_sandbox_image)
+                                .map(str::to_string),
+                            enable_networking: harness_selection
+                                .as_ref()
+                                .is_some_and(HarnessSelection::default_enable_networking),
                             model,
                             max_output_tokens: None,
                             max_tool_round_trips: None,
@@ -465,10 +581,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             name: Some(conversation_slug),
                         })
                         .await?;
-                    // The default REPL is a plain chat: drop the shell tool so no
-                    // sandbox is provisioned. Use a regular conversation for tools.
+                    // The default non-TypeScript REPL is a plain chat: drop the
+                    // shell tool so no sandbox is provisioned. TypeScript
+                    // harnesses decide their own tool and sandbox behavior.
                     let mut config = conversation.config().await?;
-                    if config.shell_program.is_some() {
+                    if !matches!(harness_kind, HarnessKind::TypeScript)
+                        && config.shell_program.is_some()
+                    {
                         config.shell_program = None;
                         conversation.put_config(config).await?;
                     }
@@ -502,20 +621,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             } => {
                 let slug = slug.unwrap_or_else(|| slugify(&name));
                 if slug.is_empty() {
-                    return Err("agent slug resolved to an empty value".into());
+                    bail!("agent slug resolved to an empty value");
                 }
                 if sandbox_image
                     .as_ref()
                     .is_some_and(|image| image.trim().is_empty())
                 {
-                    return Err("sandbox image must not be empty".into());
+                    bail!("sandbox image must not be empty");
                 }
                 let agent_harness_kind = to_agent_harness_kind(harness_kind);
                 let typescript = build_typescript_harness_config(
-                    harness_kind,
+                    harness_selection.as_ref(),
                     module.as_deref(),
                     &tool_modules,
                 )?;
+                let sandbox_image = sandbox_image.or_else(|| {
+                    harness_selection
+                        .as_ref()
+                        .and_then(HarnessSelection::default_sandbox_image)
+                        .map(str::to_string)
+                });
+                let enable_networking =
+                    networking.map(EnabledDisabled::enabled).unwrap_or_else(|| {
+                        harness_selection
+                            .as_ref()
+                            .is_some_and(HarnessSelection::default_enable_networking)
+                    });
                 let agent = harness
                     .create_agent(CreateAgentRequest {
                         slug,
@@ -526,7 +657,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .map(EnabledDisabled::enabled)
                             .unwrap_or(true),
                         sandbox_image,
-                        enable_networking: networking.is_some_and(EnabledDisabled::enabled),
+                        enable_networking,
                         model,
                         max_output_tokens,
                         max_tool_round_trips,
@@ -565,31 +696,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 braintrust_project_id,
             } => {
                 if clear_module && module.is_some() {
-                    return Err("provide either --clear-module or --module, not both".into());
+                    bail!("provide either --clear-module or --module, not both");
                 }
                 if clear_tool_modules && !tool_modules.is_empty() {
-                    return Err(
-                        "provide either --clear-tool-modules or --tool-module, not both".into(),
-                    );
+                    bail!("provide either --clear-tool-modules or --tool-module, not both");
                 }
                 if clear_module && !tool_modules.is_empty() {
-                    return Err("provide either --clear-module or --tool-module, not both".into());
+                    bail!("provide either --clear-module or --tool-module, not both");
                 }
                 if clear_sandbox_image && sandbox_image.is_some() {
-                    return Err(
-                        "provide either --clear-sandbox-image or --sandbox-image, not both".into(),
-                    );
+                    bail!("provide either --clear-sandbox-image or --sandbox-image, not both");
                 }
                 if clear_max_output_tokens && max_output_tokens.is_some() {
-                    return Err(
+                    bail!(
                         "provide either --clear-max-output-tokens or --max-output-tokens, not both"
-                            .into(),
                     );
                 }
                 if clear_max_tool_round_trips && max_tool_round_trips.is_some() {
-                    return Err(
+                    bail!(
                         "provide either --clear-max-tool-round-trips or --max-tool-round-trips, not both"
-                            .into(),
                     );
                 }
                 if clear_braintrust
@@ -597,9 +722,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         || braintrust_project.is_some()
                         || braintrust_project_id.is_some())
                 {
-                    return Err(
+                    bail!(
                         "provide either --clear-braintrust or Braintrust project flags, not both"
-                            .into(),
                     );
                 }
                 let agent = must_get_agent(harness.as_ref(), &agent).await?;
@@ -617,7 +741,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     changed = true;
                 } else if let Some(module) = module.as_deref() {
                     if config.harness != AgentHarnessKind::TypeScript {
-                        return Err("--module is only valid with TypeScript agents".into());
+                        bail!("--module is only valid with TypeScript agents");
                     }
                     let existing_tool_modules = config
                         .typescript
@@ -646,12 +770,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 } else if !tool_modules.is_empty() {
                     if config.harness != AgentHarnessKind::TypeScript {
-                        return Err("--tool-module is only valid with TypeScript agents".into());
+                        bail!("--tool-module is only valid with TypeScript agents");
                     }
                     let Some(typescript) = config.typescript.as_mut() else {
-                        return Err(
-                            "typescript agents require a module path; pass --module <path>".into(),
-                        );
+                        bail!("typescript agents require a module path; pass --module <path>");
                     };
                     let tool_module_paths = resolve_typescript_tool_module_paths(&tool_modules)?;
                     if typescript.tool_module_paths != tool_module_paths {
@@ -671,7 +793,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     changed = true;
                 } else if let Some(sandbox_image) = sandbox_image {
                     if sandbox_image.trim().is_empty() {
-                        return Err("sandbox image must not be empty".into());
+                        bail!("sandbox image must not be empty");
                     }
                     config.sandbox_image = Some(sandbox_image);
                     changed = true;
@@ -687,7 +809,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if let Some(model) = model {
                     if model.trim().is_empty() {
-                        return Err("model must not be empty".into());
+                        bail!("model must not be empty");
                     }
                     if config.model != model {
                         config.model = model;
@@ -727,9 +849,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         braintrust_project_id,
                     )?;
                     if updated_braintrust.is_none() && !changed {
-                        return Err(
+                        bail!(
                             "no changes provided; pass --set-harness, --module, --tool-module, --clear-tool-modules, --tool-creation, --sandbox-image, --networking, model flags, --clear-braintrust, or Braintrust project flags"
-                                .into(),
                         );
                     }
                     if updated_braintrust.is_some() {
@@ -738,12 +859,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 if !changed {
-                    return Err("no changes provided".into());
+                    bail!("no changes provided");
                 }
                 if config.harness == AgentHarnessKind::TypeScript && config.typescript.is_none() {
-                    return Err(
-                        "typescript agents require a module path; pass --module <path>".into(),
-                    );
+                    bail!("typescript agents require a module path; pass --module <path>");
                 }
                 agent.put_config(config).await?;
                 println!("updated agent {}", agent.record().slug);
@@ -807,7 +926,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             AgentCommands::Delete { agent } => {
                 if !harness.delete_agent(&agent).await? {
-                    return Err(format!("agent not found: {agent}").into());
+                    bail!("agent not found: {agent}");
                 }
                 println!("deleted agent {}", agent);
             }
@@ -834,7 +953,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .unwrap_or_else(generate_fun_slug)
                 });
                 if slug.is_empty() {
-                    return Err("conversation slug resolved to an empty value".into());
+                    bail!("conversation slug resolved to an empty value");
                 }
                 let conversation = agent
                     .create_conversation(CreateConversationRequest {
@@ -852,7 +971,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     println!(
                         "start chatting with it via `{}`",
-                        chat_repl_command(
+                        repl_command(
                             agent.record().slug.as_str(),
                             conversation.record().slug.as_str(),
                         )
@@ -887,13 +1006,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .get_conversation(&forked.record().slug)
                         .await?
                         .ok_or_else(|| {
-                            format!("forked conversation not found: {}", forked.record().slug)
+                            anyhow!("forked conversation not found: {}", forked.record().slug)
                         })?;
                     run_chat_repl(conversation).await?;
                 } else {
                     println!(
                         "start chatting with it via `{}`",
-                        chat_repl_command(agent.as_str(), forked.record().slug.as_str())
+                        repl_command(agent.as_str(), forked.record().slug.as_str())
                     );
                 }
             }
@@ -909,22 +1028,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 clear_model_override,
             } => {
                 if clear_shell_program && shell_program.is_some() {
-                    return Err(
-                        "provide either --clear-shell-program or --shell-program, not both".into(),
-                    );
+                    bail!("provide either --clear-shell-program or --shell-program, not both");
                 }
                 if clear_model_override
                     && (model.is_some() || max_output_tokens.is_some() || clear_max_output_tokens)
                 {
-                    return Err(
+                    bail!(
                         "provide either --clear-model-override or model override flags, not both"
-                            .into(),
                     );
                 }
                 if clear_max_output_tokens && max_output_tokens.is_some() {
-                    return Err(
+                    bail!(
                         "provide either --clear-max-output-tokens or --max-output-tokens, not both"
-                            .into(),
                     );
                 }
 
@@ -932,7 +1047,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let conversation = agent_handle
                     .get_conversation(&conversation)
                     .await?
-                    .ok_or_else(|| format!("conversation not found: {}", conversation))?;
+                    .ok_or_else(|| anyhow!("conversation not found: {}", conversation))?;
                 let mut config = conversation.config().await?;
                 let mut changed = false;
 
@@ -941,7 +1056,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     changed = true;
                 } else if let Some(shell_program) = shell_program {
                     if shell_program.trim().is_empty() {
-                        return Err("shell program must not be empty".into());
+                        bail!("shell program must not be empty");
                     }
                     config.shell_program = Some(shell_program);
                     changed = true;
@@ -969,7 +1084,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     if let Some(model) = model {
                         if model.trim().is_empty() {
-                            return Err("model must not be empty".into());
+                            bail!("model must not be empty");
                         }
                         model_override.model = model;
                     }
@@ -986,7 +1101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 if !changed {
-                    return Err("no changes provided".into());
+                    bail!("no changes provided");
                 }
 
                 conversation.put_config(config).await?;
@@ -1066,7 +1181,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let before = config.mounts.len();
                     config.mounts.retain(|mount| mount.mount_path != mount_path);
                     if config.mounts.len() == before {
-                        return Err(format!("mount not found: {mount_path}").into());
+                        bail!("mount not found: {mount_path}");
                     }
                     conversation.put_config(config).await?;
                     println!(
@@ -1085,7 +1200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let conversation = agent_handle
                     .get_conversation(&conversation)
                     .await?
-                    .ok_or_else(|| format!("conversation not found: {}", conversation))?;
+                    .ok_or_else(|| anyhow!("conversation not found: {}", conversation))?;
                 let config = conversation.config().await?;
                 let model_override = conversation.model_override().await?;
                 let messages = conversation.messages().await?;
@@ -1168,19 +1283,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .await?;
                 println!("{}", serde_json::to_string_pretty(&result)?);
             }
-            ConversationCommands::Delete {
-                agent,
-                conversation,
-            } => {
-                let agent = must_get_agent(harness.as_ref(), &agent).await?;
-                if !agent.delete_conversation(&conversation).await? {
-                    return Err(format!("conversation not found: {conversation}").into());
-                }
-                println!("deleted conversation {}", conversation);
-            }
-        },
-        Commands::Chat { command } => match command {
-            ChatCommands::Send {
+            ConversationCommands::Send {
                 agent,
                 conversation,
                 prompt,
@@ -1202,13 +1305,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     print_message(message);
                 }
             }
-            ChatCommands::Repl {
+            ConversationCommands::Delete {
                 agent,
                 conversation,
             } => {
-                let conversation =
-                    must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
-                run_chat_repl(conversation).await?;
+                let agent = must_get_agent(harness.as_ref(), &agent).await?;
+                if !agent.delete_conversation(&conversation).await? {
+                    bail!("conversation not found: {conversation}");
+                }
+                println!("deleted conversation {}", conversation);
             }
         },
         Commands::Secret { command } => match command {
@@ -1226,9 +1331,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     (Some(env), None) => secret_value_from_env_arg(&env, &env_vars)?,
                     (None, Some(value)) => value,
                     (Some(_), Some(_)) => {
-                        return Err("provide either --env or --value, not both".into());
+                        bail!("provide either --env or --value, not both");
                     }
-                    (None, None) => return Err("provide --env or --value".into()),
+                    (None, None) => bail!("provide --env or --value"),
                 };
                 let id = harness
                     .exoharness_handle()
@@ -1261,7 +1366,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             } => {
                 let secret_id = find_secret_id(harness.exoharness_handle().as_ref(), &secret)
                     .await?
-                    .ok_or_else(|| format!("secret not found: {secret}"))?;
+                    .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
                 let upstream_model = model.unwrap_or_else(|| name.clone());
                 let id = harness
                     .exoharness_handle()
@@ -1286,11 +1391,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn determine_harness_kind(
     exoharness: &dyn ExoHarness,
-    override_kind: Option<HarnessKind>,
+    selection: Option<&HarnessSelection>,
     command: &Commands,
-) -> Result<HarnessKind, Box<dyn std::error::Error>> {
-    if let Some(kind) = override_kind {
-        return Ok(kind);
+) -> Result<HarnessKind> {
+    if let Some(selection) = selection {
+        return Ok(selection.harness_kind());
     }
 
     let Some(agent_ref) = command_agent_ref(command) else {
@@ -1317,17 +1422,13 @@ fn command_agent_ref(command: &Commands) -> Option<&str> {
             | ConversationCommands::Update { agent, .. }
             | ConversationCommands::Show { agent, .. }
             | ConversationCommands::Events { agent, .. }
+            | ConversationCommands::Send { agent, .. }
             | ConversationCommands::Delete { agent, .. } => Some(agent.as_str()),
             ConversationCommands::Mount { command } => match command {
                 ConversationMountCommands::List { agent, .. }
                 | ConversationMountCommands::Add { agent, .. }
                 | ConversationMountCommands::Remove { agent, .. } => Some(agent.as_str()),
             },
-        },
-        Commands::Chat { command } => match command {
-            ChatCommands::Send { agent, .. } | ChatCommands::Repl { agent, .. } => {
-                Some(agent.as_str())
-            }
         },
         Commands::Repl { agent, .. } => Some(agent.as_deref().unwrap_or(DEFAULT_REPL_SLUG)),
         Commands::Secret { .. } | Commands::Model { .. } | Commands::Serve { .. } => None,
@@ -1353,7 +1454,7 @@ fn serve_config(command: &Commands) -> Option<ServeConfig> {
 async fn serve_exoharness_http(
     exo_config: &BasicExoHarnessConfig,
     config: ServeConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     init_serve_tracing(config.verbosity);
     let exoharness = Arc::new(BasicExoHarness::new(exo_config.clone()).await?);
     let listener = TcpListener::bind(config.bind)?;
@@ -1394,7 +1495,7 @@ fn init_serve_tracing(verbosity: u8) {
 async fn infer_agent_harness_kind(
     exoharness: &dyn ExoHarness,
     agent_ref: &str,
-) -> Result<Option<HarnessKind>, Box<dyn std::error::Error>> {
+) -> Result<Option<HarnessKind>> {
     let agent = if let Ok(agent_id) = agent_ref.parse::<Uuid7>() {
         exoharness.get_agent(&agent_id).await?
     } else {
@@ -1415,7 +1516,7 @@ async fn infer_agent_harness_kind(
 async fn instantiate_exoharness(
     exo_config: &BasicExoHarnessConfig,
     http_url: Option<&str>,
-) -> Result<Arc<dyn ExoHarness>, Box<dyn std::error::Error>> {
+) -> Result<Arc<dyn ExoHarness>> {
     if let Some(http_url) = http_url {
         return Ok(Arc::new(HttpExoHarness::new(http_url)?));
     }
@@ -1427,7 +1528,7 @@ async fn instantiate_harness(
     kind: HarnessKind,
     runtime_config: Option<BraintrustRuntimeConfig>,
     env_vars: HashMap<String, String>,
-) -> Result<Arc<dyn Harness>, Box<dyn std::error::Error>> {
+) -> Result<Arc<dyn Harness>> {
     let harness: Arc<dyn Harness> = match kind {
         HarnessKind::Basic => Arc::new(BasicHarness::from_exoharness(
             exoharness,
@@ -1473,28 +1574,106 @@ fn format_harness_kind(kind: AgentHarnessKind) -> &'static str {
 }
 
 fn build_typescript_harness_config(
-    harness_kind: HarnessKind,
+    selection: Option<&HarnessSelection>,
     module: Option<&Path>,
     tool_modules: &[PathBuf],
-) -> Result<Option<TypeScriptHarnessConfig>, Box<dyn std::error::Error>> {
+) -> Result<Option<TypeScriptHarnessConfig>> {
+    let harness_kind = selection
+        .map(HarnessSelection::harness_kind)
+        .unwrap_or(HarnessKind::Basic);
     if !matches!(harness_kind, HarnessKind::TypeScript) && !tool_modules.is_empty() {
-        return Err("--tool-module is only valid with --harness typescript".into());
+        bail!("--tool-module is only valid with --harness typescript");
     }
-    match (harness_kind, module) {
-        (HarnessKind::TypeScript, Some(module)) => Ok(Some(resolve_typescript_harness_config(
+    match (selection, harness_kind, module) {
+        (Some(HarnessSelection::TypeScriptPreset(_)), _, Some(_))
+        | (Some(HarnessSelection::TypeScriptModule(_)), _, Some(_)) => Err(anyhow!(
+            "--module cannot be combined with a TypeScript module selected by --harness"
+        )),
+        (Some(HarnessSelection::TypeScriptPreset(preset)), _, None) => {
+            Ok(Some(resolve_typescript_harness_config(
+                preset.module_path(),
+                resolve_typescript_tool_module_paths(tool_modules)?,
+            )?))
+        }
+        (Some(HarnessSelection::TypeScriptModule(module)), _, None) => {
+            Ok(Some(resolve_typescript_harness_config(
+                module,
+                resolve_typescript_tool_module_paths(tool_modules)?,
+            )?))
+        }
+        (_, HarnessKind::TypeScript, Some(module)) => Ok(Some(resolve_typescript_harness_config(
             module,
             resolve_typescript_tool_module_paths(tool_modules)?,
         )?)),
-        (HarnessKind::TypeScript, None) => Err("typescript agents require --module <path>".into()),
-        (_, Some(_)) => Err("--module is only valid with --harness typescript".into()),
-        (_, None) => Ok(None),
+        (_, HarnessKind::TypeScript, None) => Err(anyhow!(
+            "typescript agents require --module <path>, or use --harness codex, --harness claude-code, --harness cursor, or --harness <module.ts>"
+        )),
+        (_, _, Some(_)) => Err(anyhow!("--module is only valid with --harness typescript")),
+        (_, _, None) => Ok(None),
     }
+}
+
+fn default_repl_agent_slug(selection: Option<&HarnessSelection>) -> String {
+    selection
+        .and_then(HarnessSelection::default_agent_slug)
+        .unwrap_or_else(|| DEFAULT_REPL_SLUG.to_string())
+}
+
+async fn ensure_agent_matches_harness_selection(
+    agent: &dyn HarnessAgent,
+    selection: &HarnessSelection,
+) -> Result<()> {
+    let config = agent.config().await?;
+    let expected = to_agent_harness_kind(selection.harness_kind());
+    if config.harness != expected {
+        bail!(
+            "agent {} is configured for {}; --harness {} requires {}",
+            agent.record().slug,
+            format_harness_kind(config.harness),
+            format_harness_selection(selection),
+            format_harness_kind(expected)
+        );
+    }
+
+    if matches!(selection.harness_kind(), HarnessKind::TypeScript) && config.typescript.is_none() {
+        bail!(
+            "agent {} is configured for TypeScript but has no module path",
+            agent.record().slug
+        );
+    }
+
+    let expected_typescript = match selection {
+        HarnessSelection::TypeScriptPreset(_) | HarnessSelection::TypeScriptModule(_) => {
+            build_typescript_harness_config(Some(selection), None, &[])?
+        }
+        HarnessSelection::Kind(_) => None,
+    };
+    if let Some(expected_typescript) = expected_typescript {
+        let Some(actual_typescript) = config.typescript.as_ref() else {
+            bail!(
+                "agent {} is missing TypeScript module {}",
+                agent.record().slug,
+                expected_typescript.module_path
+            );
+        };
+        if actual_typescript.module_path != expected_typescript.module_path {
+            bail!(
+                "agent {} uses TypeScript module {}; --harness {} resolved to {}",
+                agent.record().slug,
+                actual_typescript.module_path,
+                format_harness_selection(selection),
+                expected_typescript.module_path
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn resolve_typescript_harness_config(
     module_path: &Path,
     tool_module_paths: Vec<String>,
-) -> Result<TypeScriptHarnessConfig, Box<dyn std::error::Error>> {
+) -> Result<TypeScriptHarnessConfig> {
     let module_path = std::fs::canonicalize(module_path)?;
     Ok(TypeScriptHarnessConfig {
         module_path: module_path.to_string_lossy().into_owned(),
@@ -1502,9 +1681,32 @@ fn resolve_typescript_harness_config(
     })
 }
 
-fn resolve_typescript_tool_module_paths(
-    paths: &[PathBuf],
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+fn looks_like_typescript_module_path(value: &str) -> bool {
+    let path = Path::new(value);
+    value.contains(std::path::MAIN_SEPARATOR)
+        || path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| matches!(extension, "ts" | "tsx" | "js" | "mjs" | "cjs"))
+}
+
+fn format_harness_selection(selection: &HarnessSelection) -> String {
+    match selection {
+        HarnessSelection::Kind(kind) => match kind {
+            HarnessKind::Basic => "basic".to_string(),
+            HarnessKind::Rlm => "rlm".to_string(),
+            HarnessKind::TypeScript => "typescript".to_string(),
+        },
+        HarnessSelection::TypeScriptPreset(preset) => match preset {
+            TypeScriptHarnessPreset::Codex => "codex".to_string(),
+            TypeScriptHarnessPreset::ClaudeCode => "claude-code".to_string(),
+            TypeScriptHarnessPreset::Cursor => "cursor".to_string(),
+        },
+        HarnessSelection::TypeScriptModule(path) => path.display().to_string(),
+    }
+}
+
+fn resolve_typescript_tool_module_paths(paths: &[PathBuf]) -> Result<Vec<String>> {
     paths
         .iter()
         .map(|path| {
@@ -1521,9 +1723,7 @@ struct RegisteredModel {
     base_url: Option<String>,
 }
 
-async fn list_model_bindings(
-    exoharness: &dyn ExoHarness,
-) -> Result<Vec<RegisteredModel>, Box<dyn std::error::Error>> {
+async fn list_model_bindings(exoharness: &dyn ExoHarness) -> Result<Vec<RegisteredModel>> {
     let secrets = exoharness.list_secrets().await?;
     let mut models = Vec::new();
     for metadata in exoharness.list_bindings().await? {
@@ -1557,10 +1757,7 @@ const DEFAULT_REPL_SLUG: &str = "repl";
 /// Resolves the model binding a quickstart REPL agent should use. Registering a
 /// model is left to `exo secret set` / `exo model register`, so the substrate
 /// never reads credentials from the environment on its own.
-async fn ensure_repl_model(
-    harness: &dyn Harness,
-    requested: Option<String>,
-) -> Result<String, Box<dyn std::error::Error>> {
+async fn ensure_repl_model(harness: &dyn Harness, requested: Option<String>) -> Result<String> {
     let registered: Vec<String> = list_model_bindings(harness.exoharness_handle().as_ref())
         .await?
         .into_iter()
@@ -1571,31 +1768,25 @@ async fn ensure_repl_model(
 
 /// Picks the model an explicit request names, falling back to the first
 /// registered binding. Errors with setup guidance when neither is available.
-fn pick_repl_model(
-    registered: &[String],
-    requested: Option<String>,
-) -> Result<String, Box<dyn std::error::Error>> {
+fn pick_repl_model(registered: &[String], requested: Option<String>) -> Result<String> {
     if let Some(requested) = requested {
         if registered.iter().any(|name| name == &requested) {
             return Ok(requested);
         }
-        return Err(format!(
+        bail!(
             "model is not registered: {requested}; register it with `exo model register {requested} --secret <secret>`"
-        )
-        .into());
+        );
     }
     registered.first().cloned().ok_or_else(|| {
-        "no model is registered; set one up first:\n  \
-         exo secret set openai --env OPENAI_API_KEY\n  \
-         exo model register gpt-5.5 --secret openai"
-            .into()
+        anyhow!(
+            "no model is registered; set one up first:\n  \
+             exo secret set openai --env OPENAI_API_KEY\n  \
+             exo model register gpt-5.5 --secret openai"
+        )
     })
 }
 
-async fn find_secret_id(
-    exoharness: &dyn ExoHarness,
-    name: &str,
-) -> Result<Option<Uuid7>, Box<dyn std::error::Error>> {
+async fn find_secret_id(exoharness: &dyn ExoHarness, name: &str) -> Result<Option<Uuid7>> {
     Ok(exoharness
         .list_secrets()
         .await?
@@ -1608,11 +1799,11 @@ fn build_braintrust_tracing_config(
     org_name: Option<String>,
     project_name: Option<String>,
     project_id: Option<String>,
-) -> Result<Option<BraintrustTracingConfig>, String> {
+) -> Result<Option<BraintrustTracingConfig>> {
     match (project_name, project_id) {
-        (Some(_), Some(_)) => Err(
-            "provide either --braintrust-project or --braintrust-project-id, not both".to_string(),
-        ),
+        (Some(_), Some(_)) => Err(anyhow!(
+            "provide either --braintrust-project or --braintrust-project-id, not both"
+        )),
         (Some(project_name), None) => Ok(Some(BraintrustTracingConfig {
             org_name,
             project: BraintrustProject::Name(project_name),
@@ -1641,38 +1832,34 @@ fn format_braintrust_tracing_config(config: Option<&BraintrustTracingConfig>) ->
     }
 }
 
-fn parse_optional_uuid7(
-    value: Option<&str>,
-    field: &str,
-) -> Result<Option<Uuid7>, Box<dyn std::error::Error>> {
+fn parse_optional_uuid7(value: Option<&str>, field: &str) -> Result<Option<Uuid7>> {
     match value {
         Some(value) => Ok(Some(
             value
                 .parse::<Uuid7>()
-                .map_err(|error| format!("invalid {field}: {error}"))?,
+                .map_err(|error| anyhow!("invalid {field}: {error}"))?,
         )),
         None => Ok(None),
     }
 }
 
-fn canonicalize_directory(path: &PathBuf) -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn canonicalize_directory(path: &PathBuf) -> Result<PathBuf> {
     let canonical = std::fs::canonicalize(path)?;
     if !canonical.is_dir() {
-        return Err(format!(
+        bail!(
             "mount host path is not a directory: {}",
             canonical.display()
-        )
-        .into());
+        );
     }
     Ok(canonical)
 }
 
-fn validate_mount_path(mount_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn validate_mount_path(mount_path: &str) -> Result<()> {
     if mount_path.trim().is_empty() {
-        return Err("mount path must not be empty".into());
+        bail!("mount path must not be empty");
     }
     if !mount_path.starts_with('/') {
-        return Err("mount path must be absolute".into());
+        bail!("mount path must be absolute");
     }
     Ok(())
 }
@@ -1717,26 +1904,23 @@ fn print_mounts(mounts: &[FileSystemMount]) {
     }
 }
 
-async fn must_get_agent(
-    harness: &dyn Harness,
-    agent_ref: &str,
-) -> Result<Arc<dyn HarnessAgent>, Box<dyn std::error::Error>> {
+async fn must_get_agent(harness: &dyn Harness, agent_ref: &str) -> Result<Arc<dyn HarnessAgent>> {
     harness
         .get_agent(agent_ref)
         .await?
-        .ok_or_else(|| format!("agent not found: {agent_ref}").into())
+        .ok_or_else(|| anyhow!("agent not found: {agent_ref}"))
 }
 
 async fn must_get_conversation(
     harness: &dyn Harness,
     agent_ref: &str,
     conversation_ref: &str,
-) -> Result<Arc<dyn HarnessConversation>, Box<dyn std::error::Error>> {
+) -> Result<Arc<dyn HarnessConversation>> {
     let agent = must_get_agent(harness, agent_ref).await?;
     agent
         .get_conversation(conversation_ref)
         .await?
-        .ok_or_else(|| format!("conversation not found: {conversation_ref}").into())
+        .ok_or_else(|| anyhow!("conversation not found: {conversation_ref}"))
 }
 
 pub(crate) fn print_message(message: &Message) {
@@ -1799,8 +1983,8 @@ pub(crate) fn render_assistant_content(content: &AssistantContent) -> String {
     }
 }
 
-fn chat_repl_command(agent_slug: &str, conversation_slug: &str) -> String {
-    format!("exo chat repl {agent_slug} {conversation_slug}")
+fn repl_command(agent_slug: &str, conversation_slug: &str) -> String {
+    format!("exo repl --agent {agent_slug} --conversation {conversation_slug}")
 }
 
 fn slugify(input: &str) -> String {
@@ -1828,11 +2012,10 @@ fn slugify(input: &str) -> String {
 pub(crate) fn secret_value_from_env_arg(
     env: &str,
     loaded_env: &HashMap<String, String>,
-) -> Result<String, String> {
+) -> Result<String> {
     if !is_env_var_name(env) {
-        return Err(
+        bail!(
             "invalid --env value; pass an environment variable name such as OPENAI_API_KEY, not the secret value"
-                .to_string(),
         );
     }
 
@@ -1840,7 +2023,7 @@ pub(crate) fn secret_value_from_env_arg(
         .get(env)
         .cloned()
         .or_else(|| std::env::var(env).ok())
-        .ok_or_else(|| "environment variable passed to --env is not set".to_string())
+        .ok_or_else(|| anyhow!("environment variable passed to --env is not set"))
 }
 
 fn is_env_var_name(env: &str) -> bool {
@@ -1881,13 +2064,13 @@ pub(crate) fn generate_fun_slug_from_uuid(uuid: Uuid7) -> String {
 
 #[cfg(test)]
 mod create_tests {
-    use super::chat_repl_command;
+    use super::repl_command;
 
     #[test]
-    fn chat_repl_command_uses_agent_and_conversation_slugs() {
+    fn repl_command_uses_agent_and_conversation_slugs() {
         assert_eq!(
-            chat_repl_command("rlm", "aster-lantern-47db"),
-            "exo chat repl rlm aster-lantern-47db"
+            repl_command("rlm", "aster-lantern-47db"),
+            "exo repl --agent rlm --conversation aster-lantern-47db"
         );
     }
 
@@ -1913,6 +2096,81 @@ mod create_tests {
         assert!(matches!(
             cli.command,
             super::Commands::Repl { model: Some(model), .. } if model == "gpt-5.4"
+        ));
+    }
+
+    #[test]
+    fn repl_command_accepts_preset_harness_after_subcommand() {
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from(["exo", "repl", "--harness", "codex"])
+            .expect("repl parses with a preset harness");
+        assert!(matches!(
+            cli.harness,
+            Some(super::HarnessSelection::TypeScriptPreset(
+                super::TypeScriptHarnessPreset::Codex
+            ))
+        ));
+    }
+
+    #[test]
+    fn repl_command_accepts_preset_harness_and_conversation() {
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from([
+            "exo",
+            "repl",
+            "--harness",
+            "codex",
+            "--conversation",
+            "existing",
+        ])
+        .expect("repl parses with a preset harness and conversation");
+        assert!(matches!(
+            cli.command,
+            super::Commands::Repl {
+                agent: None,
+                conversation: Some(conversation),
+                ..
+            } if conversation == "existing"
+        ));
+    }
+
+    #[test]
+    fn preset_harness_defaults_repl_agent_slug() {
+        assert_eq!(
+            super::default_repl_agent_slug(Some(&super::HarnessSelection::TypeScriptPreset(
+                super::TypeScriptHarnessPreset::Codex,
+            ))),
+            "codex"
+        );
+    }
+
+    #[test]
+    fn repl_command_accepts_module_path_harness_after_subcommand() {
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from(["exo", "repl", "--harness", "./my-harness.ts"])
+            .expect("repl parses with a TypeScript module path");
+        assert!(matches!(
+            cli.harness,
+            Some(super::HarnessSelection::TypeScriptModule(path))
+                if path == std::path::PathBuf::from("./my-harness.ts")
+        ));
+    }
+
+    #[test]
+    fn conversation_send_command_parses() {
+        use clap::Parser;
+        let cli =
+            super::Cli::try_parse_from(["exo", "conversation", "send", "agent", "conv", "hello"])
+                .expect("conversation send parses");
+        assert!(matches!(
+            cli.command,
+            super::Commands::Conversation {
+                command: super::ConversationCommands::Send {
+                    agent,
+                    conversation,
+                    prompt,
+                }
+            } if agent == "agent" && conversation == "conv" && prompt == "hello"
         ));
     }
 }

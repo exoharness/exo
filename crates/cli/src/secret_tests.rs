@@ -8,6 +8,7 @@ fn env_secret_error_does_not_echo_shell_expanded_secret() {
 
     let error = secret_value_from_env_arg(expanded_secret, &HashMap::new())
         .expect_err("secret should be rejected");
+    let error = error.to_string();
 
     assert!(!error.contains(expanded_secret));
     assert!(error.contains("not the secret value"));
@@ -19,6 +20,7 @@ fn unset_env_secret_error_does_not_echo_env_name() {
 
     let error =
         secret_value_from_env_arg(env_name, &HashMap::new()).expect_err("env var should be unset");
+    let error = error.to_string();
 
     assert!(!error.contains(env_name));
     assert!(error.contains("--env"));

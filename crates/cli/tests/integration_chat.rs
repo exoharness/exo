@@ -63,12 +63,7 @@ fn exo_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_exo"))
 }
 
-fn run_exo(
-    args: &[&str],
-    root: &str,
-    xdg: &str,
-    backend: SandboxBackend,
-) -> std::process::Output {
+fn run_exo(args: &[&str], root: &str, xdg: &str, backend: SandboxBackend) -> std::process::Output {
     let output = Command::new(exo_bin())
         .args(["--root", root])
         .args(["--secret-backend", "file"])
@@ -121,7 +116,7 @@ fn canned_response_body() -> Value {
 
 #[tokio::test]
 #[ignore = "spawns real exo binary + real sandbox + wiremock; run with cargo test -- --ignored"]
-async fn chat_send_round_trips_through_real_sandbox_and_mocked_openai() {
+async fn conversation_send_round_trips_through_real_sandbox_and_mocked_openai() {
     let backend = SandboxBackend::from_env();
     if !backend.runtime_available() {
         println!(
@@ -185,7 +180,7 @@ async fn chat_send_round_trips_through_real_sandbox_and_mocked_openai() {
     );
 
     let output = run_exo(
-        &["chat", "send", "test-agent", "first", "hello there"],
+        &["conversation", "send", "test-agent", "first", "hello there"],
         &root,
         &xdg,
         backend,
@@ -202,7 +197,8 @@ async fn chat_send_round_trips_through_real_sandbox_and_mocked_openai() {
         .filter(|r| r.url.path() == "/responses")
         .count();
     assert_eq!(
-        responses_calls, 1,
+        responses_calls,
+        1,
         "expected exactly one POST /responses; got {responses_calls} (all paths: {:?})",
         recorded
             .iter()

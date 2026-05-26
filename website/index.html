@@ -10,7 +10,7 @@
     />
     <meta
       name="description"
-      content="exo is a small harness for durable agents. It separates trusted state and resources from swappable executor logic."
+      content="exo is a minimal system for building agents. It separates trusted state, resources, and security from agent-specific logic."
     />
 
     <style>
@@ -804,9 +804,9 @@
       <header>
         <h1><span class="md"># </span>exo</h1>
         <p class="lede">
-          exo is a harness for durable agents. It keeps state, secrets,
-          artifacts, and sandboxes in a trusted exoharness; prompts, model
-          calls, tool loops, and memory policy stay in a swappable executor.
+          exo is a minimal system for building agents. It separates trusted
+          infrastructure for state, resources, and security from agent-specific
+          logic that can evolve, stop, resume, and rewind across runs.
         </p>
         <p class="quote">
           <span class="md">&gt;</span>
@@ -841,7 +841,7 @@
           <span class="md">```</span>exo/live
         </div>
         <div class="live-console tool-exo" data-live>
-          <div class="tabs" role="tablist" aria-label="Harness runtime">
+          <div class="tabs" role="tablist" aria-label="Agent runtime">
             <button
               class="tab"
               type="button"
@@ -1047,8 +1047,8 @@
             <li>
               <span class="md">-</span>
               <span
-                ><span class="term">harness</span>: an executor running on an
-                exoharness.</span
+                ><span class="term">agent</span>: durable identity and history
+                interpreted by an executor.</span
               >
             </li>
           </ul>

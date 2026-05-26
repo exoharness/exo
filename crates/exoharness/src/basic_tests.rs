@@ -256,8 +256,14 @@ async fn stale_turn_artifact_write_reports_unresumable_turn() {
         message.contains(&format!("current_head_at: {current_at}")),
         "{message}"
     );
-    assert!(!message.contains(&expected_head_event.id.to_string()), "{message}");
-    assert!(!message.contains(&current_head_event.id.to_string()), "{message}");
+    assert!(
+        !message.contains(&expected_head_event.id.to_string()),
+        "{message}"
+    );
+    assert!(
+        !message.contains(&current_head_event.id.to_string()),
+        "{message}"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -78,7 +78,7 @@ For explicit control over agents, conversations, or a shell-enabled sandbox:
 ```bash
 ./target/debug/exo agent create --model gpt-5.5 "Sandbox Example"
 ./target/debug/exo conversation create sandbox-example "Local Dev"
-./target/debug/exo chat repl sandbox-example local-dev
+./target/debug/exo repl --agent sandbox-example --conversation local-dev
 ```
 
 The CLI stores state under `.exo` by default. Pass `--root <path>` to use a
