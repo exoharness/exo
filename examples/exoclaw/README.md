@@ -26,13 +26,27 @@ examples/exoclaw/scripts/exoclaw-repl --pull-sandbox
 
 The script also starts local scheduler and adapter runner processes by default.
 Use `--no-scheduler` or `--no-adapters` when you only want the interactive REPL.
+Use `--control` for a local debugging console that streams scheduler and adapter
+logs into the same terminal while the REPL is running.
 For repeatable setup tests, pass `--setup <adapter>`; the script sends the
-adapter's `setup-prompt.md` before dropping into the REPL. Exoclaw's identity
-prompt is loaded by the harness on every turn from
+adapter's `setup-prompt.md` before dropping into the REPL. `--setup` may be
+passed more than once, or use `--setup-all` for Signal, WhatsApp, and IRC.
+Exoclaw's identity prompt is loaded by the harness on every turn from
 `examples/exoclaw/prompts/me.md`.
 
 ```bash
 examples/exoclaw/scripts/exoclaw-repl fresh --pull-sandbox --setup irc
+```
+
+To reconstruct a full test control agent in one command:
+
+```bash
+PATH="/opt/homebrew/opt/openjdk/bin:$PATH" \
+  examples/exoclaw/scripts/exoclaw-repl fresh \
+  --agent spooky \
+  --agent-name Spooky \
+  --conversation dev \
+  --setup-all
 ```
 
 Edit `examples/exoclaw/adapters/irc/setup-prompt.md` before using it on a real

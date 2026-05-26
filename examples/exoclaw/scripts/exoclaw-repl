@@ -23,7 +23,13 @@ PULL_SANDBOX=false
 START_SCHEDULER="${EXO_START_SCHEDULER:-true}"
 START_ADAPTERS="${EXO_START_ADAPTERS:-true}"
 ADAPTER_LIMIT="${EXO_ADAPTER_LIMIT:-50}"
+CONTROL=false
+declare -a CONTROL_PIDS=()
 SETUP_ADAPTER="${EXO_SETUP_ADAPTER:-}"
+declare -a SETUP_ADAPTERS=()
+if [[ -n "$SETUP_ADAPTER" ]]; then
+  SETUP_ADAPTERS+=("$SETUP_ADAPTER")
+fi
 INITIAL_PROMPT_FILE="${EXO_INITIAL_PROMPT_FILE:-}"
 
 usage() {
@@ -57,7 +63,10 @@ Options:
   --no-adapters                Do not start the local adapter runner
   --adapters                   Start the local adapter runner
   --adapter-limit <n>          Max adapters supervised by the runner (default: 50)
-  --setup <adapter>            Send adapters/<adapter>/setup-prompt.md
+  --control                    Show live scheduler and adapter logs beside the REPL
+  --setup <adapter>            Send adapters/<adapter>/setup-prompt.md.
+                                May be passed more than once.
+  --setup-all                  Equivalent to --setup signal --setup whatsapp --setup irc
                                 For whatsapp/signal, print pairing QR and pause.
   --initial-prompt-file <path> Send this file as the first message before REPL
   --pull-sandbox               Pull the sandbox image before starting
@@ -81,6 +90,27 @@ die() {
   exit 1
 }
 
+terminate_process_tree() {
+  local pid="$1"
+  kill_process_tree TERM "$pid"
+  sleep 1
+  kill_process_tree KILL "$pid"
+}
+
+kill_process_tree() {
+  local signal="$1"
+  local pid="$2"
+  local child
+  [[ "$pid" =~ ^[0-9]+$ ]] || return
+  if command -v pgrep >/dev/null 2>&1; then
+    while IFS= read -r child; do
+      [[ -n "$child" ]] || continue
+      kill_process_tree "$signal" "$child"
+    done < <(pgrep -P "$pid" 2>/dev/null || true)
+  fi
+  kill "-$signal" "$pid" >/dev/null 2>&1 || true
+}
+
 ensure_exo_bin() {
   if [[ -x "$EXO_BIN" ]]; then
     return
@@ -92,7 +122,7 @@ ensure_exo_bin() {
 }
 
 ensure_signal_cli() {
-  if [[ "$SETUP_ADAPTER" != "signal" ]]; then
+  if ! setup_requested "signal"; then
     return
   fi
   if ! command -v signal-cli >/dev/null 2>&1; then
@@ -105,6 +135,32 @@ ensure_signal_cli() {
     echo "Warning: $signal_cli_path appears to be a native signal-cli executable."
     echo "If outbound sends fail with NETWORK_FAILURE, use the JVM signal-cli distribution instead."
   fi
+}
+
+setup_requested() {
+  local adapter="$1"
+  local requested
+  if [[ "${#SETUP_ADAPTERS[@]}" -eq 0 ]]; then
+    return 1
+  fi
+  for requested in "${SETUP_ADAPTERS[@]}"; do
+    if [[ "$requested" == "$adapter" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+add_setup_adapter() {
+  local adapter="$1"
+  [[ -n "$adapter" ]] || die "--setup requires an adapter name"
+  if [[ ! "$adapter" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    die "--setup must be an adapter name, not a path: $adapter"
+  fi
+  if setup_requested "$adapter"; then
+    return
+  fi
+  SETUP_ADAPTERS+=("$adapter")
 }
 
 build_exo() {
@@ -141,7 +197,7 @@ scheduler_process_running() {
   kill -0 "$pid" >/dev/null 2>&1 || return 1
   if [[ "$EXO_BIN" -nt "$pid_file" ]]; then
     echo "Restarting scheduler because $EXO_BIN is newer..."
-    kill "$pid" >/dev/null 2>&1 || true
+    terminate_process_tree "$pid"
     return 1
   fi
   command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
@@ -157,11 +213,29 @@ adapters_process_running() {
   kill -0 "$pid" >/dev/null 2>&1 || return 1
   if [[ "$EXO_BIN" -nt "$pid_file" ]]; then
     echo "Restarting adapter runner because $EXO_BIN is newer..."
-    kill "$pid" >/dev/null 2>&1 || true
+    terminate_process_tree "$pid"
+    return 1
+  fi
+  if adapter_source_newer_than "$pid_file"; then
+    echo "Restarting adapter runner because adapter code changed..."
+    terminate_process_tree "$pid"
     return 1
   fi
   command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
   [[ "$command_line" == *"adapters run --watch"* ]]
+}
+
+adapter_source_newer_than() {
+  local target="$1"
+  local path
+  for path in \
+    "$ROOT_DIR/examples/exoclaw/adapters/protocol.ts" \
+    "$ROOT_DIR/examples/exoclaw/adapters"/*/worker.ts; do
+    if [[ -e "$path" && "$path" -nt "$target" ]]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 ensure_scheduler() {
@@ -337,7 +411,7 @@ stop_scheduler() {
     pid="$(<"$pid_file")"
     if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" >/dev/null 2>&1; then
       echo "Stopping Exoclaw scheduler..."
-      kill "$pid" >/dev/null 2>&1 || true
+      terminate_process_tree "$pid"
     fi
   fi
   pkill -f "exo .*schedule run --watch" >/dev/null 2>&1 || true
@@ -351,7 +425,7 @@ stop_adapters() {
     pid="$(<"$pid_file")"
     if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" >/dev/null 2>&1; then
       echo "Stopping Exoclaw adapter runner..."
-      kill "$pid" >/dev/null 2>&1 || true
+      terminate_process_tree "$pid"
     fi
   fi
   pkill -f "exo .*adapters run --watch" >/dev/null 2>&1 || true
@@ -416,14 +490,20 @@ run_repl() {
   fi
   ensure_agent
   ensure_conversation
+  local scheduler_log_start_line
+  scheduler_log_start_line="$(scheduler_log_line_count)"
   ensure_scheduler
-  ensure_adapters
   local adapter_log_start_line
   adapter_log_start_line="$(adapter_log_line_count)"
   send_startup_prompt
-  show_whatsapp_qr_if_needed "$adapter_log_start_line"
+  ensure_adapters
   show_signal_qr_if_needed "$adapter_log_start_line"
-  exec "$EXO_BIN" --env-file-if-exists "$ENV_FILE" chat repl "$AGENT" "$CONVERSATION"
+  show_whatsapp_qr_if_needed "$adapter_log_start_line"
+  if [[ "$CONTROL" == true ]]; then
+    run_control_repl "$scheduler_log_start_line" "$adapter_log_start_line"
+  else
+    exec "$EXO_BIN" --env-file-if-exists "$ENV_FILE" chat repl "$AGENT" "$CONVERSATION"
+  fi
 }
 
 adapter_log_line_count() {
@@ -434,6 +514,53 @@ adapter_log_line_count() {
   else
     echo 0
   fi
+}
+
+scheduler_log_line_count() {
+  local log_file
+  log_file="$(scheduler_log_file)"
+  if [[ -f "$log_file" ]]; then
+    wc -l <"$log_file" | tr -d '[:space:]'
+  else
+    echo 0
+  fi
+}
+
+run_control_repl() {
+  local scheduler_start_line="$1"
+  local adapter_start_line="$2"
+
+  cleanup_control_logs() {
+    local pid
+    for pid in "${CONTROL_PIDS[@]:-}"; do
+      kill "$pid" >/dev/null 2>&1 || true
+    done
+  }
+  trap cleanup_control_logs EXIT INT TERM
+
+  echo "Control console enabled. Streaming scheduler and adapter logs into this REPL."
+  if [[ "$START_SCHEDULER" == true ]]; then
+    start_control_log_tail "scheduler" "$(scheduler_log_file)" "$scheduler_start_line"
+  fi
+  if [[ "$START_ADAPTERS" == true ]]; then
+    start_control_log_tail "adapters" "$(adapters_log_file)" "$adapter_start_line"
+  fi
+
+  "$EXO_BIN" --env-file-if-exists "$ENV_FILE" chat repl "$AGENT" "$CONVERSATION"
+}
+
+start_control_log_tail() {
+  local label="$1"
+  local log_file="$2"
+  local start_line="$3"
+  local tail_start=$((start_line + 1))
+
+  mkdir -p "$(dirname "$log_file")"
+  touch "$log_file"
+  echo "[$label] tailing $log_file"
+  tail -n +"$tail_start" -F "$log_file" 2>/dev/null \
+    | awk -v label="$label" '{ print "[" label "] " $0; fflush(); }' &
+  CONTROL_PIDS+=("$!")
 }
 
 startup_prompt_file() {
@@ -456,19 +583,22 @@ adapter_setup_prompt_file() {
 }
 
 send_startup_prompt() {
-  if [[ -z "$SETUP_ADAPTER" && -z "$INITIAL_PROMPT_FILE" ]]; then
+  if [[ "${#SETUP_ADAPTERS[@]}" -eq 0 && -z "$INITIAL_PROMPT_FILE" ]]; then
     return
   fi
 
-  local files=()
-  if [[ -n "$SETUP_ADAPTER" ]]; then
-    files+=("$(adapter_setup_prompt_file "$SETUP_ADAPTER")")
-  fi
+  local adapter
+  for adapter in "${SETUP_ADAPTERS[@]}"; do
+    send_prompt_from_files "$(adapter_setup_prompt_file "$adapter")"
+  done
 
   if [[ -n "$INITIAL_PROMPT_FILE" ]]; then
-    files+=("$(startup_prompt_file "$INITIAL_PROMPT_FILE")")
+    send_prompt_from_files "$(startup_prompt_file "$INITIAL_PROMPT_FILE")"
   fi
+}
 
+send_prompt_from_files() {
+  local files=("$@")
   local prompt=""
   local file
   for file in "${files[@]}"; do
@@ -485,7 +615,7 @@ send_startup_prompt() {
 }
 
 show_whatsapp_qr_if_needed() {
-  if [[ "$SETUP_ADAPTER" != "whatsapp" ]]; then
+  if ! setup_requested "whatsapp"; then
     return
   fi
 
@@ -505,7 +635,7 @@ show_whatsapp_qr_if_needed() {
           next
         }
         capture {
-          if ($0 ~ /^\[whatsapp-adapter\]/) {
+          if ($0 ~ /^\[[^]]+-adapter\]/) {
             capture = 0
             next
           }
@@ -535,7 +665,7 @@ show_whatsapp_qr_if_needed() {
 }
 
 show_signal_qr_if_needed() {
-  if [[ "$SETUP_ADAPTER" != "signal" ]]; then
+  if ! setup_requested "signal"; then
     return
   fi
 
@@ -555,7 +685,7 @@ show_signal_qr_if_needed() {
           next
         }
         capture {
-          if ($0 ~ /^\[signal-adapter\]/) {
+          if ($0 ~ /^\[[^]]+-adapter\]/) {
             capture = 0
             next
           }
@@ -682,10 +812,19 @@ while [[ $# -gt 0 ]]; do
       [[ "$ADAPTER_LIMIT" =~ ^[0-9]+$ && "$ADAPTER_LIMIT" -gt 0 ]] || die "--adapter-limit requires a positive integer"
       shift 2
       ;;
+    --control)
+      CONTROL=true
+      shift
+      ;;
     --setup)
-      SETUP_ADAPTER="${2:-}"
-      [[ -n "$SETUP_ADAPTER" ]] || die "--setup requires an adapter name"
+      add_setup_adapter "${2:-}"
       shift 2
+      ;;
+    --setup-all)
+      add_setup_adapter "signal"
+      add_setup_adapter "whatsapp"
+      add_setup_adapter "irc"
+      shift
       ;;
     --initial-prompt-file)
       INITIAL_PROMPT_FILE="${2:-}"

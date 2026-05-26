@@ -183,7 +183,12 @@ async function sendSignalMessage(target: string, text: string): Promise<void> {
   const params = looksLikeGroupId(target)
     ? { groupId: target, message: text }
     : { recipient: [normalizeRecipient(target)], message: text };
-  const result = await jsonRpcRequest("send", params);
+  writeWorkerEvent({
+    type: "lifecycle",
+    name: "send_starting",
+    metadata: { target, params },
+  });
+  const result = await jsonRpcRequest("send", params, 30_000);
   writeWorkerEvent({
     type: "lifecycle",
     name: "send_result",
@@ -194,13 +199,33 @@ async function sendSignalMessage(target: string, text: string): Promise<void> {
 function jsonRpcRequest(
   method: string,
   params: Record<string, unknown>,
+  timeoutMs = 30_000,
 ): Promise<unknown> {
   const id = String(nextRequestId++);
   const request = { jsonrpc: "2.0", method, params, id };
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
+    const timeout = setTimeout(() => {
+      pending.delete(id);
+      killSignalCliProcess(signal);
+      reject(
+        new Error(
+          `signal-cli JSON-RPC ${method} timed out after ${timeoutMs}ms`,
+        ),
+      );
+    }, timeoutMs);
+    pending.set(id, {
+      resolve: (value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      reject: (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      },
+    });
     signal.stdin.write(`${JSON.stringify(request)}\n`, (error) => {
       if (error) {
+        clearTimeout(timeout);
         pending.delete(id);
         reject(error);
       }
@@ -209,7 +234,19 @@ function jsonRpcRequest(
 }
 
 async function discoverOrLinkAccount(): Promise<string> {
-  const existingAccounts = await listAccounts();
+  const localAccounts = await localAccountsFromConfig();
+  if (localAccounts.length > 0) {
+    const existing = localAccounts[0];
+    writeWorkerEvent({
+      type: "lifecycle",
+      name: "account_discovered",
+      metadata: { account: existing, source: "config" },
+    });
+    return existing;
+  }
+  const existingAccounts = await listAccountsOrEmpty(
+    "account_discovery_failed",
+  );
   if (existingAccounts.length > 0) {
     const existing = existingAccounts[0];
     writeWorkerEvent({
@@ -261,8 +298,20 @@ async function linkAndDiscoverAccount(): Promise<string> {
   if (exitCode !== 0) {
     throw new Error(`signal-cli link failed with exit code ${exitCode}`);
   }
-  const accounts = await listAccounts();
+  const accounts = await localAccountsFromConfig();
   if (accounts.length === 0) {
+    const signalCliAccounts = await listAccountsOrEmpty(
+      "post_link_account_discovery_failed",
+    );
+    if (signalCliAccounts.length > 0) {
+      const discovered = signalCliAccounts[0];
+      writeWorkerEvent({
+        type: "lifecycle",
+        name: "linked",
+        metadata: { account: discovered, source: "signal-cli" },
+      });
+      return discovered;
+    }
     throw new Error(
       "signal-cli link completed, but no local accounts were found",
     );
@@ -271,9 +320,50 @@ async function linkAndDiscoverAccount(): Promise<string> {
   writeWorkerEvent({
     type: "lifecycle",
     name: "linked",
-    metadata: { account: discovered },
+    metadata: { account: discovered, source: "config" },
   });
   return discovered;
+}
+
+async function listAccountsOrEmpty(errorEvent: string): Promise<string[]> {
+  try {
+    return await listAccounts();
+  } catch (error) {
+    writeWorkerEvent({
+      type: "lifecycle",
+      name: errorEvent,
+      metadata: {
+        message: error instanceof Error ? error.message : String(error),
+      },
+    });
+    return [];
+  }
+}
+
+async function localAccountsFromConfig(): Promise<string[]> {
+  const accountsPath = `${configDir}/data/accounts.json`;
+  let contents: string;
+  try {
+    contents = await fs.readFile(accountsPath, "utf8");
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "ENOENT")) {
+      return [];
+    }
+    throw error;
+  }
+
+  const parsed = JSON.parse(contents) as unknown;
+  if (!isRecord(parsed) || !Array.isArray(parsed.accounts)) {
+    return [];
+  }
+  return parsed.accounts
+    .map((account) => {
+      if (!isRecord(account)) {
+        return null;
+      }
+      return stringOrNull(account.number) ?? stringOrNull(account.uuid);
+    })
+    .filter((account) => account !== null);
 }
 
 async function listAccounts(): Promise<string[]> {
@@ -306,6 +396,7 @@ function spawnSignalCli(args: string[]): ChildProcessWithoutNullStreams {
     signalCliCommand[0],
     [...signalCliCommand.slice(1), "--config", configDir, ...args],
     {
+      detached: process.platform !== "win32",
       stdio: ["pipe", "pipe", "pipe"],
     },
   );
@@ -313,9 +404,7 @@ function spawnSignalCli(args: string[]): ChildProcessWithoutNullStreams {
 
 function installChildCleanup(child: ChildProcessWithoutNullStreams): void {
   const stopChild = () => {
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill();
-    }
+    killSignalCliProcess(child);
   };
   process.once("exit", stopChild);
   process.once("SIGINT", () => {
@@ -328,6 +417,21 @@ function installChildCleanup(child: ChildProcessWithoutNullStreams): void {
   });
 }
 
+function killSignalCliProcess(child: ChildProcessWithoutNullStreams): void {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+  if (process.platform !== "win32" && child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, "SIGTERM");
+      return;
+    } catch {
+      // Fall back to killing the direct child below.
+    }
+  }
+  child.kill();
+}
+
 async function runSignalCli(args: string[]): Promise<string> {
   const child = spawnSignalCli(args);
   let stdout = "";
@@ -338,7 +442,7 @@ async function runSignalCli(args: string[]): Promise<string> {
   child.stderr.on("data", (chunk) => {
     stderr += chunk.toString();
   });
-  const code = await waitForExit(child);
+  const code = await waitForExitWithTimeout(child, args, 30_000);
   if (code !== 0) {
     throw new Error(`signal-cli ${args.join(" ")} failed: ${stderr.trim()}`);
   }
@@ -354,10 +458,38 @@ function waitForExit(
   });
 }
 
+async function waitForExitWithTimeout(
+  child: ChildProcessWithoutNullStreams,
+  args: string[],
+  timeoutMs: number,
+): Promise<number | null> {
+  let timeout: NodeJS.Timeout | null = null;
+  try {
+    return await Promise.race([
+      waitForExit(child),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          killSignalCliProcess(child);
+          reject(
+            new Error(
+              `signal-cli ${args.join(" ")} timed out after ${timeoutMs}ms`,
+            ),
+          );
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout !== null) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
 function normalizeRecipient(target: string): string {
   if (
     target.startsWith("u:") ||
     target.startsWith("+") ||
+    target.startsWith("ACI:") ||
     target.startsWith("PNI:") ||
     /^[0-9a-fA-F-]{32,36}$/.test(target)
   ) {
@@ -424,4 +556,12 @@ function numberOrStringOrNull(value: unknown): string | null {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isNodeErrorWithCode(error: unknown, code: string): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as { code?: unknown }).code === code
+  );
 }

@@ -4,11 +4,11 @@ The Signal adapter is an experimental Exoclaw library adapter implemented as a T
 
 ## How It Works
 
-The host adapter runner starts `worker.ts` and passes adapter configuration through `EXO_ADAPTER_CONFIG`. The worker stores `signal-cli` state on disk, discovers or links a local account, starts `signal-cli jsonRpc --receive-mode=on-connection`, emits JSONL events on stdout, and receives outbound send commands on stdin.
+The host adapter runner starts `worker.ts` and passes adapter configuration through `EXO_ADAPTER_CONFIG`. The worker stores `signal-cli` state on disk, discovers or links a local account, starts `signal-cli jsonRpc --receive-mode=on-connection` for inbound messages, emits JSONL events on stdout, and receives outbound send commands on stdin.
 
 If `account` is `null`, the worker first runs `signal-cli listAccounts`. If an account already exists in the configured state directory, it reuses it. Otherwise it runs `signal-cli link -n <deviceName>`, prints a QR code, waits for linking to complete, discovers the account, and then starts JSON-RPC receive mode.
 
-Incoming Signal messages become Exoclaw adapter message events. Outbound `send_adapter_message` calls use JSON-RPC `send` with either a recipient or a group id, depending on the target format.
+Incoming Signal messages become Exoclaw adapter message events. Outbound `send_adapter_message` calls send through the same `signal-cli jsonRpc` process with either a recipient or a group id, depending on the target format.
 
 ## Setup
 

@@ -18,7 +18,7 @@ pub enum WorkerCommand {
     },
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WorkerEvent {
     Connected {
@@ -73,6 +73,7 @@ where
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true)
         .spawn()
         .context("failed to spawn adapter worker")?;
     let mut stdin = child
@@ -97,6 +98,12 @@ where
                 };
                 let event = serde_json::from_str::<WorkerEvent>(&line)
                     .with_context(|| format!("failed to parse adapter worker event: {line}"))?;
+                eprintln!(
+                    "adapter_worker_event adapter_type={} payload={}",
+                    config.adapter_type,
+                    serde_json::to_string(&event)
+                        .unwrap_or_else(|_| "<unserializable event>".to_string())
+                );
                 on_event(event).await?;
             }
             result = send_pending_commands(&mut stdin, &mut take_outbound_messages) => {

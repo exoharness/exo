@@ -3,8 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
-use exoharness::{AgentHandle, ConversationHandle, Secret, WriteArtifactRequest};
-use serde::Serialize;
+use exoharness::{AgentHandle, ConversationHandle, Secret};
 
 use super::store::AdapterStore;
 use super::types::{AdapterConfig, AdapterEventType, AdapterRecord, WorkerAdapterConfig};
@@ -21,36 +20,6 @@ impl Default for AdapterRunOptions {
     fn default() -> Self {
         Self { limit: 10 }
     }
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct AdapterInboundArtifact {
-    adapter_id: String,
-    adapter_name: String,
-    adapter_type: String,
-    target: String,
-    sender: Option<String>,
-    text: String,
-    message_id: Option<String>,
-    metadata: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct AdapterOutboundArtifact {
-    adapter_id: String,
-    adapter_name: String,
-    adapter_type: String,
-    target: Option<String>,
-    text: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct AdapterLifecycleArtifact {
-    adapter_id: String,
-    adapter_name: String,
-    adapter_type: String,
-    event_type: String,
-    payload: serde_json::Value,
 }
 
 pub async fn run_adapters_once(
@@ -100,6 +69,10 @@ pub async fn run_adapters_watch(
                     if let Err(error) =
                         run_adapter_loop(Arc::clone(&harness), &store, adapter.clone()).await
                     {
+                        eprintln!(
+                            "adapter {} runtime error: {error}; restarting in 5s",
+                            adapter.id
+                        );
                         let _ = store.mark_error(&adapter.id, error.to_string()).await;
                         let _ = store
                             .record_event(
@@ -120,7 +93,7 @@ pub async fn run_adapters_watch(
 
 pub async fn send_adapter_message_with_handles(
     _agent: &dyn AgentHandle,
-    conversation: &dyn ConversationHandle,
+    _conversation: &dyn ConversationHandle,
     store: &AdapterStore,
     adapter: &AdapterRecord,
     text: &str,
@@ -130,29 +103,24 @@ pub async fn send_adapter_message_with_handles(
         bail!("adapter is disabled: {}", adapter.id);
     }
     let AdapterConfig::Worker(config) = &adapter.config;
-    let artifact = AdapterOutboundArtifact {
-        adapter_id: adapter.id.clone(),
-        adapter_name: adapter.name.clone(),
-        adapter_type: config.adapter_type.clone(),
-        target: target.map(ToOwned::to_owned),
-        text: text.to_string(),
-    };
-    let artifact_version = conversation
-        .write_artifact(WriteArtifactRequest {
-            path: format!(
-                "adapters/{}/outbound-{}.json",
-                adapter.name,
-                crate::Uuid7::now()
-            ),
-            contents: serde_json::to_vec_pretty(&artifact)?,
-        })
-        .await?;
+    // Note: we intentionally do not write a conversation artifact here.
+    // This tool is invoked from inside an active agent turn, and writing to
+    // the conversation outside the turn handle advances the conversation
+    // head, which makes the active turn stale and crashes the adapter
+    // worker. The outbound message is durably queued in the AdapterStore
+    // outbox, and the event below records it for audit.
     store
         .record_event(
             adapter.id.clone(),
             AdapterEventType::Outbound,
-            format!("queued {} adapter message", config.adapter_type),
-            Some(artifact_version.artifact_id.to_string()),
+            format!(
+                "queued {} adapter message{}",
+                config.adapter_type,
+                target
+                    .map(|t| format!(" to {t}"))
+                    .unwrap_or_default(),
+            ),
+            None,
         )
         .await?;
     store
@@ -289,30 +257,15 @@ async fn handle_worker_message(
     target: String,
     sender: Option<String>,
     text: String,
-    message_id: Option<String>,
-    metadata: serde_json::Value,
+    _message_id: Option<String>,
+    _metadata: serde_json::Value,
 ) -> Result<()> {
-    let artifact = AdapterInboundArtifact {
-        adapter_id: adapter.id.clone(),
-        adapter_name: adapter.name.clone(),
-        adapter_type: config.adapter_type.clone(),
-        target: target.clone(),
-        sender: sender.clone(),
-        text: text.clone(),
-        message_id,
-        metadata,
-    };
-    let artifact_version = conversation
-        .exoharness_handle()
-        .write_artifact(WriteArtifactRequest {
-            path: format!(
-                "adapters/{}/inbound-{}.json",
-                adapter.name,
-                crate::Uuid7::now()
-            ),
-            contents: serde_json::to_vec_pretty(&artifact)?,
-        })
-        .await?;
+    // Note: we intentionally do not write a conversation artifact here.
+    // The wakeup turn below begins immediately, and any artifact writes
+    // through the conversation handle (rather than the active turn) advance
+    // the conversation head and could race with concurrent turns. The full
+    // inbound text is delivered to the agent via the wakeup prompt and the
+    // event is recorded in the AdapterStore for audit.
     store
         .record_event(
             adapter.id.clone(),
@@ -323,7 +276,7 @@ async fn handle_worker_message(
                 sender.as_deref().unwrap_or("unknown"),
                 target
             ),
-            Some(artifact_version.artifact_id.to_string()),
+            None,
         )
         .await?;
     send_conversation_wakeup(
@@ -345,31 +298,15 @@ async fn handle_worker_message(
 
 async fn record_worker_lifecycle(
     store: &AdapterStore,
-    conversation: &dyn HarnessConversation,
+    _conversation: &dyn HarnessConversation,
     adapter: &AdapterRecord,
     config: &WorkerAdapterConfig,
     event_type: &str,
-    payload: serde_json::Value,
+    _payload: serde_json::Value,
 ) -> Result<()> {
-    let artifact = AdapterLifecycleArtifact {
-        adapter_id: adapter.id.clone(),
-        adapter_name: adapter.name.clone(),
-        adapter_type: config.adapter_type.clone(),
-        event_type: event_type.to_string(),
-        payload,
-    };
-    let artifact_version = conversation
-        .exoharness_handle()
-        .write_artifact(WriteArtifactRequest {
-            path: format!(
-                "adapters/{}/{}-{}.json",
-                adapter.name,
-                event_type,
-                crate::Uuid7::now()
-            ),
-            contents: serde_json::to_vec_pretty(&artifact)?,
-        })
-        .await?;
+    // Note: lifecycle events are recorded only in the AdapterStore. Writing
+    // them to the conversation as artifacts can advance the head outside of
+    // any active turn and corrupt the agent's turn state.
     store
         .record_event(
             adapter.id.clone(),
@@ -379,7 +316,7 @@ async fn record_worker_lifecycle(
                 _ => AdapterEventType::Inbound,
             },
             format!("{} worker {event_type}", config.adapter_type),
-            Some(artifact_version.artifact_id.to_string()),
+            None,
         )
         .await?;
     Ok(())

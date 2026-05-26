@@ -110,14 +110,7 @@ async function appendTurnEvents(
   context: TurnContext,
   data: EventData[],
 ): Promise<string> {
-  const { conversation, turn } = context.exoharness.current;
-  return (
-    await conversation.addEvents({
-      sessionId: turn.record.sessionId,
-      turnId: turn.record.id,
-      data,
-    })
-  ).latestEventId;
+  return (await context.exoharness.current.turn.addEvents(data)).latestEventId;
 }
 
 function basicHarnessInstructions(context: TurnContext): Message[] {
