@@ -78,7 +78,7 @@ For explicit control over agents, conversations, or a shell-enabled sandbox:
 ```bash
 ./target/debug/exo agent create --model gpt-5.5 "Sandbox Example"
 ./target/debug/exo conversation create sandbox-example "Local Dev"
-./target/debug/exo chat repl sandbox-example local-dev
+./target/debug/exo repl --agent sandbox-example --conversation local-dev
 ```
 
 The CLI stores state under `.exo` by default. Pass `--root <path>` to use a
@@ -173,10 +173,17 @@ pnpm check
 cargo test --workspace --all-targets
 ```
 
-The repository includes a pre-commit hook installer:
+The repository includes a Git hook installer:
 
 ```bash
 pnpm prepare
+```
+
+The installed pre-commit hook formats staged Rust files with `rustfmt` and
+runs the TypeScript checks. The pre-push hook runs:
+
+```bash
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 ## License

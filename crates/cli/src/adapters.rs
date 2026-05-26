@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::{fs, process::Command};
 
+use anyhow::{Result, bail};
 use clap::Subcommand;
 use executor::{AdapterRunOptions, AdapterStore, Harness, run_adapters_once, run_adapters_watch};
 
@@ -29,7 +30,7 @@ pub async fn handle_adapter_command(
     root: &Path,
     harness: Arc<dyn Harness>,
     command: AdapterCommands,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let store = AdapterStore::new(root.join("adapters"));
     match command {
         AdapterCommands::List { include_disabled } => {
@@ -60,14 +61,14 @@ pub async fn handle_adapter_command(
             if store.disable_adapter(&adapter_id).await?.is_some() {
                 println!("disabled adapter {}", adapter_id);
             } else {
-                return Err(format!("adapter not found: {adapter_id}").into());
+                bail!("adapter not found: {adapter_id}");
             }
         }
         AdapterCommands::Delete { adapter_id } => {
             if store.delete_adapter(&adapter_id).await?.is_some() {
                 println!("deleted adapter {}", adapter_id);
             } else {
-                return Err(format!("adapter not found: {adapter_id}").into());
+                bail!("adapter not found: {adapter_id}");
             }
         }
     }
@@ -79,7 +80,7 @@ struct AdapterRunnerLock {
 }
 
 impl AdapterRunnerLock {
-    fn acquire(root: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+    fn acquire(root: &Path) -> Result<Self> {
         let path = root.join("exoclaw-adapters.lock");
         let pid = std::process::id().to_string();
         match fs::OpenOptions::new()
@@ -95,11 +96,10 @@ impl AdapterRunnerLock {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 let existing_pid = fs::read_to_string(&path).unwrap_or_default();
                 if process_is_running(existing_pid.trim()) {
-                    return Err(format!(
+                    bail!(
                         "adapter runner already appears to be running with pid {}",
                         existing_pid.trim()
-                    )
-                    .into());
+                    );
                 }
                 fs::remove_file(&path)?;
                 Self::acquire(root)

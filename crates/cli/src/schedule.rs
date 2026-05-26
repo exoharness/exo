@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::{Result, bail};
 use clap::Subcommand;
 use executor::{Harness, SchedulerRunOptions, SchedulerStore, run_due_tasks};
 
@@ -31,7 +32,7 @@ pub async fn handle_schedule_command(
     root: &Path,
     harness: Arc<dyn Harness>,
     command: ScheduleCommands,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let store = SchedulerStore::new(root.join("scheduled-tasks"));
     match command {
         ScheduleCommands::List { include_disabled } => {
@@ -76,7 +77,7 @@ pub async fn handle_schedule_command(
                 stop_task_owned_sandbox(harness.as_ref(), &task).await?;
                 println!("cancelled scheduled task {}", task_id);
             } else {
-                return Err(format!("scheduled task not found: {task_id}").into());
+                bail!("scheduled task not found: {task_id}");
             }
         }
         ScheduleCommands::Delete { task_id } => {
@@ -84,7 +85,7 @@ pub async fn handle_schedule_command(
                 stop_task_owned_sandbox(harness.as_ref(), &task).await?;
                 println!("deleted scheduled task {}", task_id);
             } else {
-                return Err(format!("scheduled task not found: {task_id}").into());
+                bail!("scheduled task not found: {task_id}");
             }
         }
     }
@@ -94,7 +95,7 @@ pub async fn handle_schedule_command(
 async fn stop_task_owned_sandbox(
     harness: &dyn Harness,
     task: &executor::ScheduledTaskRecord,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let Some(sandbox_id) = task.task_sandbox_id.clone() else {
         return Ok(());
     };

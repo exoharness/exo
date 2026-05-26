@@ -40,7 +40,7 @@ async fn creates_agents_and_conversations_with_persisted_config() {
     let harness = BasicHarness::new(
         exoharness,
         Arc::new(FakeModelClient::default()),
-        Arc::new(BasicToolRuntime::default()),
+        Arc::new(BasicToolRuntime),
     );
     register_test_models(harness.exoharness_handle().as_ref()).await;
 
@@ -111,7 +111,7 @@ async fn send_persists_messages_through_harness() {
             tool_calls: Vec::new(),
             usage: None,
         }])),
-        Arc::new(BasicToolRuntime::default()),
+        Arc::new(BasicToolRuntime),
     );
     register_test_models(harness.exoharness_handle().as_ref()).await;
 
@@ -166,7 +166,7 @@ async fn close_session_appends_session_ended_event() {
             tool_calls: Vec::new(),
             usage: None,
         }])),
-        Arc::new(BasicToolRuntime::default()),
+        Arc::new(BasicToolRuntime),
     );
     register_test_models(harness.exoharness_handle().as_ref()).await;
 
@@ -247,11 +247,7 @@ async fn updating_agent_config_refreshes_executor_cache() {
             usage: None,
         },
     ]));
-    let harness = BasicHarness::new(
-        exoharness,
-        Arc::clone(&model),
-        Arc::new(BasicToolRuntime::default()),
-    );
+    let harness = BasicHarness::new(exoharness, Arc::clone(&model), Arc::new(BasicToolRuntime));
     register_test_models(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness
@@ -424,7 +420,7 @@ async fn harness_exposes_raw_exoharness_handles() {
     let harness = BasicHarness::new(
         exoharness,
         Arc::new(FakeModelClient::default()),
-        Arc::new(BasicToolRuntime::default()),
+        Arc::new(BasicToolRuntime),
     );
     register_test_models(harness.exoharness_handle().as_ref()).await;
 
@@ -633,11 +629,7 @@ async fn conversation_model_override_changes_effective_model() {
             usage: None,
         },
     ]));
-    let harness = BasicHarness::new(
-        exoharness,
-        Arc::clone(&model),
-        Arc::new(BasicToolRuntime::default()),
-    );
+    let harness = BasicHarness::new(exoharness, Arc::clone(&model), Arc::new(BasicToolRuntime));
     register_test_models(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness

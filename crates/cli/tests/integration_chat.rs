@@ -116,7 +116,7 @@ fn canned_response_body() -> Value {
 
 #[tokio::test]
 #[ignore = "spawns real exo binary + real sandbox + wiremock; run with cargo test -- --ignored"]
-async fn chat_send_round_trips_through_real_sandbox_and_mocked_openai() {
+async fn conversation_send_round_trips_through_real_sandbox_and_mocked_openai() {
     let backend = SandboxBackend::from_env();
     if !backend.runtime_available() {
         eprintln!(
@@ -180,7 +180,7 @@ async fn chat_send_round_trips_through_real_sandbox_and_mocked_openai() {
     );
 
     let output = run_exo(
-        &["chat", "send", "test-agent", "first", "hello there"],
+        &["conversation", "send", "test-agent", "first", "hello there"],
         &root,
         &xdg,
         backend,

@@ -71,8 +71,7 @@ where
             false,
         )
         .await;
-    let latest_event_id =
-        finalize_turn(turn, run(turn_trace.as_ref().map(|trace| &**trace)).await).await;
+    let latest_event_id = finalize_turn(turn, run(turn_trace.as_deref()).await).await;
 
     finish_turn_trace(turn_trace, &latest_event_id).await;
 
@@ -115,16 +114,13 @@ where
                 true,
             )
             .await;
-        let send_result = finalize_turn(
-            turn.as_ref(),
-            run(turn_trace.as_ref().map(|trace| &**trace), &event_tx).await,
-        )
-        .await
-        .map(|latest_event_id| SendResult {
-            session_id,
-            turn_id,
-            latest_event_id,
-        });
+        let send_result = finalize_turn(turn.as_ref(), run(turn_trace.as_deref(), &event_tx).await)
+            .await
+            .map(|latest_event_id| SendResult {
+                session_id,
+                turn_id,
+                latest_event_id,
+            });
 
         if let Some(turn_trace) = turn_trace {
             match &send_result {

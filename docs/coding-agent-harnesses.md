@@ -14,6 +14,9 @@ cargo build -p exo
 The examples below use `./target/debug/exo`. If you have the binary on your
 `PATH`, you can use `exo` instead.
 
+The `codex`, `claude-code`, and `cursor` harness presets select the matching
+TypeScript module, sandbox image, and networking defaults.
+
 For `secret set`, `--env` takes the variable name literally. For example, use
 `--env OPENAI_API_KEY`, not `--env $OPENAI_API_KEY`.
 
@@ -56,15 +59,12 @@ container build \
 Create the agent and start a conversation:
 
 ```bash
-./target/debug/exo --harness typescript agent create "TS Codex" \
-  --module examples/typescript/codex-harness.ts \
-  --model gpt-5.4 \
-  --sandbox-image exo-codex-sandbox:latest \
-  --networking enabled
+./target/debug/exo --harness codex agent create "TS Codex" \
+  --model gpt-5.4
 
 ./target/debug/exo conversation create ts-codex
 ./target/debug/exo conversation mount add ts-codex <conversation> "$PWD" /workspace --rw
-./target/debug/exo chat repl ts-codex <conversation>
+./target/debug/exo repl --agent ts-codex --conversation <conversation>
 ```
 
 ## Claude Code
@@ -88,15 +88,12 @@ container build \
 Create the agent and start a conversation:
 
 ```bash
-./target/debug/exo --harness typescript agent create "TS Claude Code" \
-  --module examples/typescript/claude-code-harness.ts \
-  --model claude-sonnet-4-6 \
-  --sandbox-image exo-claude-code-sandbox:latest \
-  --networking enabled
+./target/debug/exo --harness claude-code agent create "TS Claude Code" \
+  --model claude-sonnet-4-6
 
 ./target/debug/exo conversation create ts-claude-code
 ./target/debug/exo conversation mount add ts-claude-code <conversation> "$PWD" /workspace --rw
-./target/debug/exo chat repl ts-claude-code <conversation>
+./target/debug/exo repl --agent ts-claude-code --conversation <conversation>
 ```
 
 ## Cursor
@@ -121,15 +118,12 @@ container build \
 Create the agent and start a conversation:
 
 ```bash
-./target/debug/exo --harness typescript agent create "TS Cursor" \
-  --module examples/typescript/cursor-sdk-harness.ts \
-  --model auto \
-  --sandbox-image exo-cursor-sdk-sandbox:latest \
-  --networking enabled
+./target/debug/exo --harness cursor agent create "TS Cursor" \
+  --model auto
 
 ./target/debug/exo conversation create ts-cursor
 ./target/debug/exo conversation mount add ts-cursor <conversation> "$PWD" /workspace --rw
-./target/debug/exo chat repl ts-cursor <conversation>
+./target/debug/exo repl --agent ts-cursor --conversation <conversation>
 ```
 
 ## Live E2E

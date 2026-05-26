@@ -9,8 +9,8 @@
     "e2e:agent-harnesses": "tsx scripts/agent-harness-e2e.ts",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
-    "lint": "oxlint .",
-    "lint:fix": "oxlint --fix .",
+    "lint": "oxlint --deny-warnings .",
+    "lint:fix": "oxlint --fix --deny-warnings .",
     "prepare": "node scripts/setup-hooks.mjs",
     "test": "vitest run",
     "typecheck": "tsgo --noEmit -p tsconfig.json"
