@@ -12,7 +12,7 @@ boa_engine = "0.20.0"
 braintrust-llm-router.workspace = true
 braintrust-sdk-rust.workspace = true
 bytes.workspace = true
-exoharness = { path = "../exoharness", features = ["basic-backend"] }
+exoharness = { path = "../exoharness", features = ["apple-keychain", "basic-backend"] }
 futures.workspace = true
 lingua.workspace = true
 reqwest.workspace = true

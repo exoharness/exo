@@ -18,9 +18,11 @@ use crate::sandbox::{
     SandboxLifecycleConfig, SandboxMount, SandboxMountAccess, SandboxNetworkPolicy, SandboxRequest,
     SandboxSpec,
 };
+#[cfg(feature = "apple-keychain")]
+use crate::secrets::AppleKeychainSecretKeyProvider;
 use crate::secrets::{
-    AppleKeychainSecretKeyProvider, EncryptedSecret, FileBackedSecretKeyProvider, SecretCipher,
-    SecretKeyProvider, StaticSecretKeyProvider, default_master_key_path,
+    EncryptedSecret, FileBackedSecretKeyProvider, SecretCipher, SecretKeyProvider,
+    StaticSecretKeyProvider, default_master_key_path,
 };
 use crate::storage::BasicObjectStore;
 use crate::{
@@ -36,8 +38,11 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub enum SecretBackendChoice {
+    #[cfg(feature = "apple-keychain")]
     AppleKeychain,
-    File { path: Option<PathBuf> },
+    File {
+        path: Option<PathBuf>,
+    },
     Static([u8; 32]),
 }
 
@@ -49,7 +54,7 @@ pub enum SandboxBackendChoice {
 }
 
 // TODO: as more knobs land here, swap to a builder pattern.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BasicExoHarnessConfig {
     pub root: PathBuf,
     pub secret_backend: SecretBackendChoice,
@@ -1874,7 +1879,11 @@ fn build_secret_cipher(
     choice: SecretBackendChoice,
     keychain_account: String,
 ) -> Result<SecretCipher> {
+    #[cfg(not(feature = "apple-keychain"))]
+    drop(keychain_account);
+
     let provider: Arc<dyn SecretKeyProvider> = match choice {
+        #[cfg(feature = "apple-keychain")]
         SecretBackendChoice::AppleKeychain => {
             Arc::new(AppleKeychainSecretKeyProvider::new(keychain_account))
         }

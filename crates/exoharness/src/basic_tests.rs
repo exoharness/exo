@@ -22,101 +22,48 @@ fn local_test_config(root: impl Into<std::path::PathBuf>) -> BasicExoHarnessConf
 #[tokio::test(flavor = "current_thread")]
 async fn basic_backend_supports_agent_and_conversation_crud() {
     let tempdir = TempDir::new().expect("tempdir");
-    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
-        .await
-        .expect("harness should initialize");
-
-    let agent = harness
-        .new_agent(NewAgentRequest {
-            slug: "agent".to_string(),
-            name: "Agent".to_string(),
-        })
-        .await
-        .expect("agent should be created");
-    let conversation = agent
-        .new_conversation(NewConversationRequest {
-            slug: Some("conversation".to_string()),
-            name: Some("Conversation".to_string()),
-        })
-        .await
-        .expect("conversation should be created");
-
-    assert_eq!(harness.list_agents().await.expect("list agents").len(), 1);
-    assert_eq!(
-        agent
-            .list_conversations()
+    let harness: std::sync::Arc<dyn ExoHarness> = std::sync::Arc::new(
+        BasicExoHarness::new(local_test_config(tempdir.path()))
             .await
-            .expect("list conversations")
-            .len(),
-        1
+            .expect("harness should initialize"),
     );
-
-    assert!(
-        agent
-            .delete_conversation(&conversation.record().id)
-            .await
-            .expect("delete conversation")
-    );
-    assert!(
-        harness
-            .delete_agent(&agent.record().id)
-            .await
-            .expect("delete agent")
-    );
+    crate::contract_tests::supports_agent_and_conversation_crud(harness).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn begin_turn_tracks_events_through_finish() {
+async fn basic_backend_contract_begin_turn_tracks_events_through_finish() {
     let tempdir = TempDir::new().expect("tempdir");
-    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
-        .await
-        .expect("harness should initialize");
-    let agent = harness
-        .new_agent(NewAgentRequest {
-            slug: "agent".to_string(),
-            name: "Agent".to_string(),
-        })
-        .await
-        .expect("agent");
-    let conversation = agent
-        .new_conversation(NewConversationRequest::default())
-        .await
-        .expect("conversation");
+    let harness: std::sync::Arc<dyn ExoHarness> = std::sync::Arc::new(
+        BasicExoHarness::new(local_test_config(tempdir.path()))
+            .await
+            .expect("harness should initialize"),
+    );
+    crate::contract_tests::begin_turn_tracks_events_through_finish(harness).await;
+}
 
-    let turn = conversation
-        .begin_turn(BeginTurnRequest {
-            session_id: None,
-            input: vec![user_message("ping")],
-        })
-        .await
-        .expect("turn");
-    turn.add_events(vec![EventData::Messages {
-        messages: vec![assistant_message("pong")],
-        response_id: None,
-    }])
-    .await
-    .expect("append assistant message");
-    let latest_event_id = turn.finish().await.expect("finish turn");
+#[tokio::test(flavor = "current_thread")]
+async fn basic_backend_contract_turn_events_continue_after_artifact_writes() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness: std::sync::Arc<dyn ExoHarness> = std::sync::Arc::new(
+        BasicExoHarness::new(local_test_config(tempdir.path()))
+            .await
+            .expect("harness should initialize"),
+    );
+    crate::contract_tests::turn_events_continue_after_artifact_writes(harness).await;
+}
 
-    let events = conversation
-        .get_events(Some(EventQuery {
-            cursor: None,
-            direction: Some(EventQueryDirection::Asc),
-            limit: None,
-            session_id: None,
-            turn_id: Some(turn.record().id),
-            types: None,
-        }))
-        .await
-        .expect("get events")
-        .events;
-
-    assert!(matches!(events[0].data, EventData::SessionStarted));
-    assert!(matches!(events[1].data, EventData::TurnStarted));
-    assert!(matches!(events[2].data, EventData::Messages { .. }));
-    assert!(matches!(events[3].data, EventData::Messages { .. }));
-    assert!(matches!(events[4].data, EventData::TurnEnded));
-    assert_eq!(events.last().expect("turn ended").id, latest_event_id);
+#[tokio::test(flavor = "current_thread")]
+async fn basic_backend_contract_conversation_scope_overrides_and_forks() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness: std::sync::Arc<dyn ExoHarness> = std::sync::Arc::new(
+        BasicExoHarness::new(local_test_config(tempdir.path()))
+            .await
+            .expect("harness should initialize"),
+    );
+    crate::contract_tests::conversation_scope_overrides_agent_scope_and_fork_copies_local_state(
+        harness,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "current_thread")]

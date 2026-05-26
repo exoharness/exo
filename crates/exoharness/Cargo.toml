@@ -10,8 +10,6 @@ default = []
 basic-backend = [
   "dep:aes-gcm",
   "dep:actix-web",
-  "dep:keyring",
-  "dep:keyring-core",
   "dep:object_store",
   "dep:reqwest",
   "dep:tokio",
@@ -20,6 +18,7 @@ basic-backend = [
   "dep:tracing",
   "dep:url",
 ]
+apple-keychain = ["dep:keyring", "dep:keyring-core"]
 
 [dependencies]
 aes-gcm = { version = "0.11.0-rc.3", optional = true }

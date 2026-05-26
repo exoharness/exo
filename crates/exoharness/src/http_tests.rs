@@ -1,14 +1,11 @@
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
 
-use lingua::Message;
-use lingua::universal::{AssistantContent, UserContent};
 use tempfile::TempDir;
 
 use crate::{
-    BasicExoHarness, BasicExoHarnessConfig, BeginTurnRequest, EventData, EventQuery,
-    EventQueryDirection, ExoHarness, HttpExoHarness, NewAgentRequest, NewConversationRequest,
-    SandboxBackendChoice, SecretBackendChoice, serve_exoharness_http_listener,
+    BasicExoHarness, BasicExoHarnessConfig, ExoHarness, HttpExoHarness, SandboxBackendChoice,
+    SecretBackendChoice, serve_exoharness_http_listener,
 };
 
 fn local_test_config(root: impl Into<std::path::PathBuf>) -> BasicExoHarnessConfig {
@@ -19,8 +16,19 @@ fn local_test_config(root: impl Into<std::path::PathBuf>) -> BasicExoHarnessConf
     }
 }
 
-#[actix_web::test]
-async fn http_exoharness_runs_basic_backend_requests() {
+struct HttpHarnessFixture {
+    harness: Arc<dyn ExoHarness>,
+    server: actix_web::rt::task::JoinHandle<crate::Result<()>>,
+    _tempdir: TempDir,
+}
+
+impl Drop for HttpHarnessFixture {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+async fn http_harness() -> HttpHarnessFixture {
     let tempdir = TempDir::new().expect("tempdir");
     let basic = BasicExoHarness::new(local_test_config(tempdir.path()))
         .await
@@ -28,64 +36,41 @@ async fn http_exoharness_runs_basic_backend_requests() {
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("listener");
     let addr = listener.local_addr().expect("local addr");
     let server = actix_web::rt::spawn(serve_exoharness_http_listener(listener, Arc::new(basic)));
+    let harness: Arc<dyn ExoHarness> =
+        Arc::new(HttpExoHarness::new(format!("http://{addr}")).expect("http harness"));
 
-    let harness = HttpExoHarness::new(format!("http://{addr}")).expect("http harness");
-    let agent = harness
-        .new_agent(NewAgentRequest {
-            slug: "agent".to_string(),
-            name: "Agent".to_string(),
-        })
-        .await
-        .expect("agent");
-    let conversation = agent
-        .new_conversation(NewConversationRequest {
-            slug: Some("conversation".to_string()),
-            name: Some("Conversation".to_string()),
-        })
-        .await
-        .expect("conversation");
-    let turn = conversation
-        .begin_turn(BeginTurnRequest {
-            session_id: None,
-            input: vec![user_message("ping")],
-        })
-        .await
-        .expect("turn");
-    turn.add_events(vec![EventData::Messages {
-        messages: vec![assistant_message("pong")],
-        response_id: None,
-    }])
-    .await
-    .expect("add events");
-    let latest_event_id = turn.finish().await.expect("finish");
-    let events = conversation
-        .get_events(Some(EventQuery {
-            cursor: None,
-            direction: Some(EventQueryDirection::Asc),
-            limit: None,
-            session_id: None,
-            turn_id: Some(turn.record().id),
-            types: None,
-        }))
-        .await
-        .expect("events")
-        .events;
-
-    assert_eq!(events.last().expect("last event").id, latest_event_id);
-    assert_eq!(harness.list_agents().await.expect("agents").len(), 1);
-
-    server.abort();
-}
-
-fn user_message(text: &str) -> Message {
-    Message::User {
-        content: UserContent::String(text.to_string()),
+    HttpHarnessFixture {
+        harness,
+        server,
+        _tempdir: tempdir,
     }
 }
 
-fn assistant_message(text: &str) -> Message {
-    Message::Assistant {
-        content: AssistantContent::String(text.to_string()),
-        id: None,
-    }
+#[actix_web::test]
+async fn http_exoharness_supports_agent_and_conversation_crud() {
+    let fixture = http_harness().await;
+    crate::contract_tests::supports_agent_and_conversation_crud(Arc::clone(&fixture.harness)).await;
+}
+
+#[actix_web::test]
+async fn http_exoharness_begin_turn_tracks_events_through_finish() {
+    let fixture = http_harness().await;
+    crate::contract_tests::begin_turn_tracks_events_through_finish(Arc::clone(&fixture.harness))
+        .await;
+}
+
+#[actix_web::test]
+async fn http_exoharness_turn_events_continue_after_artifact_writes() {
+    let fixture = http_harness().await;
+    crate::contract_tests::turn_events_continue_after_artifact_writes(Arc::clone(&fixture.harness))
+        .await;
+}
+
+#[actix_web::test]
+async fn http_exoharness_conversation_scope_overrides_and_forks() {
+    let fixture = http_harness().await;
+    crate::contract_tests::conversation_scope_overrides_agent_scope_and_fork_copies_local_state(
+        Arc::clone(&fixture.harness),
+    )
+    .await;
 }
