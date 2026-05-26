@@ -176,8 +176,7 @@ async fn stale_turn_artifact_write_reports_unresumable_turn() {
         .events;
     let expected_head_event = events
         .iter()
-        .filter(|event| event.turn_id == Some(turn.record().id))
-        .next_back()
+        .rfind(|event| event.turn_id == Some(turn.record().id))
         .expect("expected head event");
     let current_head_event = events.last().expect("current head event");
     let expected_at = expected_head_event

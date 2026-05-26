@@ -119,14 +119,16 @@ where
             runner
                 .execute_turn(
                     self,
-                    agent,
-                    conversation,
-                    turn,
-                    agent_config,
-                    conversation_config,
-                    prepared,
-                    stream_mode,
-                    turn_trace,
+                    TypeScriptTurn {
+                        agent,
+                        conversation,
+                        turn,
+                        agent_config,
+                        conversation_config,
+                        prepared,
+                        stream_mode,
+                        turn_trace,
+                    },
                 )
                 .await
         };
@@ -211,6 +213,17 @@ struct RunningSandboxProcess {
     wait_task: JoinHandle<()>,
 }
 
+struct TypeScriptTurn<'a> {
+    agent: &'a dyn AgentHandle,
+    conversation: &'a dyn ConversationHandle,
+    turn: Arc<dyn TurnHandle>,
+    agent_config: &'a AgentConfig,
+    conversation_config: &'a ConversationConfig,
+    prepared: &'a SendRequest,
+    stream_mode: ExecutorStreamMode<'a>,
+    turn_trace: Option<&'a dyn TurnExecutionTrace>,
+}
+
 impl TypeScriptRunnerProcess {
     fn start(
         workspace_root: &Path,
@@ -287,18 +300,21 @@ impl TypeScriptRunnerProcess {
     async fn execute_turn<T>(
         &mut self,
         executor: &TypeScriptExecutor<T>,
-        agent: &dyn AgentHandle,
-        conversation: &dyn ConversationHandle,
-        turn: Arc<dyn TurnHandle>,
-        agent_config: &AgentConfig,
-        conversation_config: &ConversationConfig,
-        prepared: &SendRequest,
-        stream_mode: ExecutorStreamMode<'_>,
-        turn_trace: Option<&dyn TurnExecutionTrace>,
+        turn: TypeScriptTurn<'_>,
     ) -> Result<()>
     where
         T: ToolRuntime + 'static,
     {
+        let TypeScriptTurn {
+            agent,
+            conversation,
+            turn,
+            agent_config,
+            conversation_config,
+            prepared,
+            stream_mode,
+            turn_trace,
+        } = turn;
         let exoharness_server = ExoHarnessServer::new(Arc::clone(&executor.root));
         let conversation_info = ConversationHandleInfo {
             agent_id: agent.record().id,
@@ -311,7 +327,7 @@ impl TypeScriptRunnerProcess {
         send_host_message(
             &self.host_tx,
             HostToGuestMessage::Init {
-                payload: TypeScriptInitPayload {
+                payload: Box::new(TypeScriptInitPayload {
                     agent: agent.record().clone(),
                     conversation: conversation_info,
                     turn: turn_info,
@@ -320,7 +336,7 @@ impl TypeScriptRunnerProcess {
                     request: prepared.clone(),
                     streaming: matches!(stream_mode, ExecutorStreamMode::Enabled(_)),
                     braintrust_parent: turn_trace.and_then(TurnExecutionTrace::export_parent),
-                },
+                }),
             },
         )?;
 
@@ -475,7 +491,7 @@ impl TypeScriptRunnerProcess {
                     send_host_message(
                         &self.host_tx,
                         HostToGuestMessage::RuntimeEvent {
-                            event: RuntimeEvent::SandboxProcessExit {
+                            event: RuntimeEvent::Exit {
                                 process_id,
                                 exit_code: None,
                             },
@@ -631,7 +647,7 @@ where
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum HostToGuestMessage {
     Init {
-        payload: TypeScriptInitPayload,
+        payload: Box<TypeScriptInitPayload>,
     },
     Shutdown,
     RuntimeResponse {
@@ -734,21 +750,21 @@ enum SandboxProcessStream {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type")]
 enum RuntimeEvent {
-    SandboxProcessOutput {
+    #[serde(rename = "sandbox_process_output")]
+    Output {
         process_id: u64,
         stream: SandboxProcessStream,
         data: String,
     },
-    SandboxProcessExit {
+    #[serde(rename = "sandbox_process_exit")]
+    Exit {
         process_id: u64,
         exit_code: Option<i32>,
     },
-    SandboxProcessError {
-        process_id: u64,
-        message: String,
-    },
+    #[serde(rename = "sandbox_process_error")]
+    Error { process_id: u64, message: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -814,7 +830,7 @@ fn spawn_sandbox_output_task(
                     if send_host_message(
                         &sender,
                         HostToGuestMessage::RuntimeEvent {
-                            event: RuntimeEvent::SandboxProcessOutput {
+                            event: RuntimeEvent::Output {
                                 process_id,
                                 stream,
                                 data,
@@ -830,7 +846,7 @@ fn spawn_sandbox_output_task(
                     if send_host_message(
                         &sender,
                         HostToGuestMessage::RuntimeEvent {
-                            event: RuntimeEvent::SandboxProcessError {
+                            event: RuntimeEvent::Error {
                                 process_id,
                                 message: error.to_string(),
                             },
@@ -854,17 +870,17 @@ fn spawn_sandbox_wait_task(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let event = match wait.await {
-            Ok(exit_code) => RuntimeEvent::SandboxProcessExit {
+            Ok(exit_code) => RuntimeEvent::Exit {
                 process_id,
                 exit_code: Some(exit_code),
             },
-            Err(error) => RuntimeEvent::SandboxProcessError {
+            Err(error) => RuntimeEvent::Error {
                 process_id,
                 message: error.to_string(),
             },
         };
         if send_host_message(&sender, HostToGuestMessage::RuntimeEvent { event }).is_err() {
-            return;
+            // The runner has gone away, so there is no receiver for this event.
         }
     })
 }
