@@ -2056,7 +2056,7 @@ mod create_tests {
         assert!(matches!(
             cli.harness,
             Some(super::HarnessSelection::TypeScriptModule(path))
-                if path == std::path::PathBuf::from("./my-harness.ts")
+                if path.as_path() == std::path::Path::new("./my-harness.ts")
         ));
     }
 

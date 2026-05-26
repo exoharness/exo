@@ -459,12 +459,12 @@ impl ChatRepl {
 
         if printed_assistant {
             println!();
-        } else if let Some(last_message) = self.conversation.messages().await?.last().cloned() {
-            if let Message::Assistant { content, .. } = last_message {
-                let rendered = render_assistant_content(&content);
-                if !rendered.is_empty() {
-                    println!("assistant: {}", rendered);
-                }
+        } else if let Some(last_message) = self.conversation.messages().await?.last().cloned()
+            && let Message::Assistant { content, .. } = last_message
+        {
+            let rendered = render_assistant_content(&content);
+            if !rendered.is_empty() {
+                println!("assistant: {}", rendered);
             }
         }
         println!();

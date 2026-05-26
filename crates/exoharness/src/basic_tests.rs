@@ -229,8 +229,7 @@ async fn stale_turn_artifact_write_reports_unresumable_turn() {
         .events;
     let expected_head_event = events
         .iter()
-        .filter(|event| event.turn_id == Some(turn.record().id))
-        .next_back()
+        .rfind(|event| event.turn_id == Some(turn.record().id))
         .expect("expected head event");
     let current_head_event = events.last().expect("current head event");
     let expected_at = expected_head_event
@@ -256,8 +255,14 @@ async fn stale_turn_artifact_write_reports_unresumable_turn() {
         message.contains(&format!("current_head_at: {current_at}")),
         "{message}"
     );
-    assert!(!message.contains(&expected_head_event.id.to_string()), "{message}");
-    assert!(!message.contains(&current_head_event.id.to_string()), "{message}");
+    assert!(
+        !message.contains(&expected_head_event.id.to_string()),
+        "{message}"
+    );
+    assert!(
+        !message.contains(&current_head_event.id.to_string()),
+        "{message}"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
