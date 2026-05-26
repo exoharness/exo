@@ -69,32 +69,64 @@ async fn try_load() -> anyhow::Result<PricingTable> {
         None => (None, false),
     };
 
-    // 2. Fresh cache → use as-is.
+    // 2. Fresh cache → use as-is. A corrupt cache is treated as "no
+    //    pricing data" (empty table), never a hard error: a truncated or
+    //    garbage cache file must not poison the process, and we'd rather
+    //    leave cost unset than fill in wrong numbers.
     if let (true, Some(content)) = (cache_is_fresh, &cached_content) {
-        return PricingTable::from_json_str(content);
+        return Ok(parse_cache_or_empty(content));
     }
 
     // 3. Try a network fetch.
     let url = std::env::var("EXO_LITELLM_PRICES_URL")
         .unwrap_or_else(|_| LITELLM_PRICES_URL.to_string());
     match fetch(&url).await {
-        Ok(body) => {
-            if let Some(cache) = &cache {
-                write_cache(cache, &body).await;
+        Ok(body) => match PricingTable::from_json_str(&body) {
+            Ok(table) => {
+                // Only cache a body we could actually parse — never persist
+                // garbage (e.g. an HTML error page returned with 200).
+                if let Some(cache) = &cache {
+                    write_cache(cache, &body).await;
+                }
+                Ok(table)
             }
-            PricingTable::from_json_str(&body)
-        }
+            Err(err) => {
+                eprintln!(
+                    "[exo] fetched LiteLLM pricing is unparseable ({err}); \
+                     per-message cost will be unavailable"
+                );
+                Ok(PricingTable::empty())
+            }
+        },
         Err(fetch_err) => {
-            // 4. Stale cache is better than no cache.
+            // 4. Stale cache is better than no cache — same corrupt-safe
+            //    handling as the fresh path.
             if let Some(content) = cached_content {
                 eprintln!(
                     "[exo] LiteLLM pricing fetch failed ({fetch_err}); \
                      using stale cache"
                 );
-                return PricingTable::from_json_str(&content);
+                return Ok(parse_cache_or_empty(&content));
             }
             // 5. Nothing usable.
             Err(fetch_err)
+        }
+    }
+}
+
+/// Parse a cached pricing document, degrading a corrupt/unparseable cache
+/// to an empty table (every cost computation returns `None`) rather than
+/// surfacing an error. Cost data is best-effort; a bad cache should never
+/// take down a turn.
+fn parse_cache_or_empty(content: &str) -> PricingTable {
+    match PricingTable::from_json_str(content) {
+        Ok(table) => table,
+        Err(err) => {
+            eprintln!(
+                "[exo] cached LiteLLM pricing is unparseable ({err}); \
+                 per-message cost will be unavailable until the cache refreshes"
+            );
+            PricingTable::empty()
         }
     }
 }
@@ -180,5 +212,20 @@ mod tests {
         assert!(!table.is_empty());
         let entry = table.lookup("claude-sonnet-4-6").expect("entry");
         assert_eq!(entry.litellm_provider.as_deref(), Some("anthropic"));
+    }
+
+    #[test]
+    fn corrupt_cache_degrades_to_empty_table() {
+        // A truncated/garbage cache must not error or fill in wrong numbers —
+        // it degrades to an empty table so cost_usd ends up None.
+        let table = parse_cache_or_empty("{ this is not valid json ");
+        assert!(table.is_empty());
+    }
+
+    #[test]
+    fn valid_cache_parses_to_populated_table() {
+        let table = parse_cache_or_empty(FIXTURE_JSON);
+        assert!(!table.is_empty());
+        assert!(table.lookup("claude-sonnet-4-6").is_some());
     }
 }
