@@ -125,10 +125,17 @@ pnpm check
 cargo test --workspace --all-targets
 ```
 
-The repository includes a pre-commit hook installer:
+The repository includes a Git hook installer:
 
 ```bash
 pnpm prepare
+```
+
+The installed pre-commit hook formats staged Rust files with `rustfmt` and
+runs the TypeScript checks. The pre-push hook runs:
+
+```bash
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 ## License

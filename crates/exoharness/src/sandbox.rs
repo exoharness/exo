@@ -438,9 +438,13 @@ impl ManagedSandboxHandle for WarmSandboxHandle {
     }
 
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {
-        let name =
-            ensure_warm_sandbox_ready(&self.container_bin, self.cli, &self.request, &self.warm_sandboxes)
-                .await?;
+        let name = ensure_warm_sandbox_ready(
+            &self.container_bin,
+            self.cli,
+            &self.request,
+            &self.warm_sandboxes,
+        )
+        .await?;
         touch_warm_sandbox(&self.warm_sandboxes, &self.request.key).await;
         let output = exec_warm(&self.container_bin, &name, &self.request.spec, command).await;
         touch_warm_sandbox(&self.warm_sandboxes, &self.request.key).await;
@@ -448,9 +452,13 @@ impl ManagedSandboxHandle for WarmSandboxHandle {
     }
 
     async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts> {
-        let name =
-            ensure_warm_sandbox_ready(&self.container_bin, self.cli, &self.request, &self.warm_sandboxes)
-                .await?;
+        let name = ensure_warm_sandbox_ready(
+            &self.container_bin,
+            self.cli,
+            &self.request,
+            &self.warm_sandboxes,
+        )
+        .await?;
         touch_warm_sandbox(&self.warm_sandboxes, &self.request.key).await;
         start_warm_process(&self.container_bin, &name, &self.request.spec, command).await
     }
@@ -1071,11 +1079,7 @@ fn owner_pid_is_alive(pid: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-fn cleanup_named_container_blocking(
-    container_bin: &Path,
-    cli: ContainerCliFlavor,
-    name: &str,
-) {
+fn cleanup_named_container_blocking(container_bin: &Path, cli: ContainerCliFlavor, name: &str) {
     match cli {
         ContainerCliFlavor::AppleContainer => {
             run_container_admin_command_blocking(container_bin, ["stop", name]);

@@ -46,10 +46,10 @@ pub(crate) async fn resolve_agent_handle(
     exoharness: &dyn ExoHarness,
     agent_ref: &str,
 ) -> Result<Option<Arc<dyn AgentHandle>>> {
-    if let Some(agent_id) = parse_uuid7(agent_ref) {
-        if let Some(agent) = exoharness.get_agent(&agent_id).await? {
-            return Ok(Some(agent));
-        }
+    if let Some(agent_id) = parse_uuid7(agent_ref)
+        && let Some(agent) = exoharness.get_agent(&agent_id).await?
+    {
+        return Ok(Some(agent));
     }
 
     let agents = exoharness.list_agents().await?;
@@ -62,10 +62,10 @@ pub(crate) async fn resolve_conversation_handle(
     agent: &dyn AgentHandle,
     conversation_ref: &str,
 ) -> Result<Option<Arc<dyn ConversationHandle>>> {
-    if let Some(conversation_id) = parse_uuid7(conversation_ref) {
-        if let Some(conversation) = agent.get_conversation(&conversation_id).await? {
-            return Ok(Some(conversation));
-        }
+    if let Some(conversation_id) = parse_uuid7(conversation_ref)
+        && let Some(conversation) = agent.get_conversation(&conversation_id).await?
+    {
+        return Ok(Some(conversation));
     }
 
     let conversations = agent.list_conversations().await?;
