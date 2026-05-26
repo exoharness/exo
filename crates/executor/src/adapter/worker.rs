@@ -6,7 +6,7 @@ use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 
-use super::types::WorkerAdapterConfig;
+use super::types::AdapterConfig;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -53,7 +53,7 @@ pub enum WorkerEvent {
 
 pub async fn run_worker_loop<F, Fut, G, OutFut>(
     adapter_id: &str,
-    config: &WorkerAdapterConfig,
+    config: &AdapterConfig,
     secret_env: Vec<(String, String)>,
     mut on_event: F,
     mut take_outbound_messages: G,
@@ -115,7 +115,7 @@ where
 
 fn worker_command(
     adapter_id: &str,
-    config: &WorkerAdapterConfig,
+    config: &AdapterConfig,
     secret_env: Vec<(String, String)>,
 ) -> Command {
     let args = &config.worker_command;
@@ -134,7 +134,7 @@ fn worker_command(
     command
 }
 
-fn state_dir(adapter_id: &str, config: &WorkerAdapterConfig) -> String {
+fn state_dir(adapter_id: &str, config: &AdapterConfig) -> String {
     config.state_dir.clone().unwrap_or_else(|| {
         Path::new(".exo")
             .join("adapters")

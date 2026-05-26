@@ -6,13 +6,13 @@ import {
   registerAgentToolsFromDirectoryIfExists,
   registerLibraryToolModulePath,
   registerAdapterTools,
-  registerSchedulerTools,
   type BuiltInToolName,
   type HarnessToolRegistry,
   type Message,
   type TurnContext,
 } from "@exo/harness";
 
+import { registerSchedulerTools } from "./scheduler-tools";
 import {
   basicHarnessInstructions,
   defaultBuiltInToolNames,

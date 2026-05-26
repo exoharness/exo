@@ -330,7 +330,6 @@ function transformAdapterConfig(config: JsonObject): JsonObject {
   if (type === "irc") {
     const passwordSecretId = nullableStringField(config, "passwordSecretId");
     return {
-      type: "worker",
       adapterType: "irc",
       workerCommand: ["pnpm", "tsx", "examples/exoclaw/adapters/irc/worker.ts"],
       initialization: {
@@ -343,7 +342,6 @@ function transformAdapterConfig(config: JsonObject): JsonObject {
         channel: stringField(config, "channel"),
         trigger: stringField(config, "trigger"),
       },
-      capabilities: ["receive", "send_message"],
       stateDir: null,
       secretEnv:
         passwordSecretId === null
@@ -353,7 +351,6 @@ function transformAdapterConfig(config: JsonObject): JsonObject {
   }
   if (type === "whatsapp") {
     return {
-      type: "worker",
       adapterType: "whatsapp",
       workerCommand: [
         "pnpm",
@@ -365,14 +362,12 @@ function transformAdapterConfig(config: JsonObject): JsonObject {
         trigger: stringField(config, "trigger"),
         allowedChats: nullableStringArrayField(config, "allowedChats"),
       },
-      capabilities: ["receive", "send_message"],
       stateDir: null,
       secretEnv: [],
     };
   }
   if (type === "signal") {
     return {
-      type: "worker",
       adapterType: "signal",
       workerCommand: [
         "pnpm",
@@ -387,7 +382,6 @@ function transformAdapterConfig(config: JsonObject): JsonObject {
         trigger: stringField(config, "trigger"),
         allowedContacts: nullableStringArrayField(config, "allowedContacts"),
       },
-      capabilities: ["receive", "send_message"],
       stateDir: null,
       secretEnv: [],
     };

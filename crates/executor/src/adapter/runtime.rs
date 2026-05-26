@@ -6,7 +6,7 @@ use anyhow::{Result, anyhow, bail};
 use exoharness::{AgentHandle, ConversationHandle, Secret};
 
 use super::store::AdapterStore;
-use super::types::{AdapterConfig, AdapterEventType, AdapterRecord, WorkerAdapterConfig};
+use super::types::{AdapterConfig, AdapterEventType, AdapterRecord};
 use super::worker::{WorkerCommand, WorkerEvent, run_worker_loop};
 use crate::conversation_wakeup::send_conversation_wakeup;
 use crate::{Harness, HarnessAgent, HarnessConversation};
@@ -20,25 +20,6 @@ impl Default for AdapterRunOptions {
     fn default() -> Self {
         Self { limit: 10 }
     }
-}
-
-pub async fn run_adapters_once(
-    harness: Arc<dyn Harness>,
-    store: &AdapterStore,
-    options: AdapterRunOptions,
-) -> Result<usize> {
-    let mut adapters = store.enabled_adapters().await?;
-    adapters.truncate(options.limit);
-    let mut handled = 0;
-    for adapter in adapters {
-        if run_adapter_once(Arc::clone(&harness), store, adapter)
-            .await
-            .is_ok()
-        {
-            handled += 1;
-        }
-    }
-    Ok(handled)
 }
 
 pub async fn run_adapters_watch(
@@ -79,7 +60,6 @@ pub async fn run_adapters_watch(
                                 adapter.id.clone(),
                                 AdapterEventType::Error,
                                 error.to_string(),
-                                None,
                             )
                             .await;
                     }
@@ -102,7 +82,6 @@ pub async fn send_adapter_message_with_handles(
     if !adapter.enabled {
         bail!("adapter is disabled: {}", adapter.id);
     }
-    let AdapterConfig::Worker(config) = &adapter.config;
     // Note: we intentionally do not write a conversation artifact here.
     // This tool is invoked from inside an active agent turn, and writing to
     // the conversation outside the turn handle advances the conversation
@@ -115,12 +94,9 @@ pub async fn send_adapter_message_with_handles(
             AdapterEventType::Outbound,
             format!(
                 "queued {} adapter message{}",
-                config.adapter_type,
-                target
-                    .map(|t| format!(" to {t}"))
-                    .unwrap_or_default(),
+                adapter.config.adapter_type,
+                target.map(|t| format!(" to {t}")).unwrap_or_default(),
             ),
-            None,
         )
         .await?;
     store
@@ -133,17 +109,6 @@ pub async fn send_adapter_message_with_handles(
     Ok(())
 }
 
-async fn run_adapter_once(
-    _harness: Arc<dyn Harness>,
-    _store: &AdapterStore,
-    adapter: AdapterRecord,
-) -> Result<()> {
-    bail!(
-        "adapter `{}` requires the adapter watch runner",
-        adapter.name
-    )
-}
-
 async fn run_adapter_loop(
     harness: Arc<dyn Harness>,
     store: &AdapterStore,
@@ -151,7 +116,7 @@ async fn run_adapter_loop(
 ) -> Result<()> {
     let agent = require_agent(harness.as_ref(), &adapter).await?;
     let conversation = require_conversation(agent.as_ref(), &adapter).await?;
-    let AdapterConfig::Worker(config) = &adapter.config;
+    let config = &adapter.config;
     let secret_env = worker_secret_env(agent.exoharness_handle().as_ref(), config).await?;
     run_worker_loop(
         &adapter.id,
@@ -189,7 +154,7 @@ async fn handle_worker_event(
     store: &AdapterStore,
     conversation: &dyn HarnessConversation,
     adapter: &AdapterRecord,
-    config: &WorkerAdapterConfig,
+    config: &AdapterConfig,
     event: WorkerEvent,
 ) -> Result<()> {
     match event {
@@ -231,7 +196,7 @@ async fn handle_worker_event(
         WorkerEvent::Error { message } => {
             store.mark_error(&adapter.id, message.clone()).await?;
             store
-                .record_event(adapter.id.clone(), AdapterEventType::Error, message, None)
+                .record_event(adapter.id.clone(), AdapterEventType::Error, message)
                 .await?;
             Ok(())
         }
@@ -253,7 +218,7 @@ async fn handle_worker_message(
     store: &AdapterStore,
     conversation: &dyn HarnessConversation,
     adapter: &AdapterRecord,
-    config: &WorkerAdapterConfig,
+    config: &AdapterConfig,
     target: String,
     sender: Option<String>,
     text: String,
@@ -276,7 +241,6 @@ async fn handle_worker_message(
                 sender.as_deref().unwrap_or("unknown"),
                 target
             ),
-            None,
         )
         .await?;
     send_conversation_wakeup(
@@ -300,7 +264,7 @@ async fn record_worker_lifecycle(
     store: &AdapterStore,
     _conversation: &dyn HarnessConversation,
     adapter: &AdapterRecord,
-    config: &WorkerAdapterConfig,
+    config: &AdapterConfig,
     event_type: &str,
     _payload: serde_json::Value,
 ) -> Result<()> {
@@ -316,7 +280,6 @@ async fn record_worker_lifecycle(
                 _ => AdapterEventType::Inbound,
             },
             format!("{} worker {event_type}", config.adapter_type),
-            None,
         )
         .await?;
     Ok(())
@@ -349,7 +312,7 @@ async fn require_conversation(
 
 async fn worker_secret_env(
     agent: &dyn AgentHandle,
-    config: &WorkerAdapterConfig,
+    config: &AdapterConfig,
 ) -> Result<Vec<(String, String)>> {
     let mut env = Vec::new();
     for secret_env in &config.secret_env {

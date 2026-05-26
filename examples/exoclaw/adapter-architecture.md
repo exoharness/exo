@@ -73,11 +73,9 @@ The key record is `AdapterRecord`:
 - `name`: human-friendly adapter name.
 - `source`: `built_in` or `library`.
 - `enabled`: disabled adapters preserve history but stop receiving.
-- `config`: generic worker config, including adapter type, command,
-  initialization JSON, capabilities, optional state dir, and optional secret
-  environment bindings.
-- `latest_event_artifact_id`, `last_connected_at_ms`, `last_error`: runtime
-  status fields.
+- `config`: worker config, including adapter type, command, initialization JSON,
+  optional state dir, and optional secret environment bindings.
+- `last_connected_at_ms`, `last_error`: runtime status fields.
 
 ## Tool Surface
 
@@ -256,14 +254,14 @@ connection and sends when it is ready.
 The adapter runner is started by:
 
 ```bash
-./target/debug/exo --harness exoclaw adapters run --watch --limit 50
+./target/debug/exo --harness exoclaw adapters run --limit 50
 ```
 
 `examples/exoclaw/scripts/exoclaw-repl` starts this automatically unless `--no-adapters` is
 provided. It also records a pid file at `.exo/exoclaw-adapters.pid`.
 
-In watch mode, the runtime periodically lists enabled adapters and starts one
-supervision task per adapter. Each supervision task:
+The runtime periodically lists enabled adapters and starts one supervision task
+per adapter. Each supervision task:
 
 1. Loads the latest adapter record.
 2. Skips disabled or not-yet-built adapters.

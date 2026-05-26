@@ -4,7 +4,7 @@ use std::{fs, process::Command};
 
 use anyhow::{Result, bail};
 use clap::Subcommand;
-use executor::{AdapterRunOptions, AdapterStore, Harness, run_adapters_once, run_adapters_watch};
+use executor::{AdapterRunOptions, AdapterStore, Harness, run_adapters_watch};
 
 #[derive(Debug, Subcommand)]
 pub enum AdapterCommands {
@@ -13,8 +13,6 @@ pub enum AdapterCommands {
         include_disabled: bool,
     },
     Run {
-        #[arg(long)]
-        watch: bool,
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
@@ -47,15 +45,9 @@ pub async fn handle_adapter_command(
                 );
             }
         }
-        AdapterCommands::Run { watch, limit } => {
-            if watch {
-                let _lock = AdapterRunnerLock::acquire(root)?;
-                run_adapters_watch(harness, store, AdapterRunOptions { limit }).await?;
-            } else {
-                let handled =
-                    run_adapters_once(harness, &store, AdapterRunOptions { limit }).await?;
-                println!("handled {handled} adapter event(s)");
-            }
+        AdapterCommands::Run { limit } => {
+            let _lock = AdapterRunnerLock::acquire(root)?;
+            run_adapters_watch(harness, store, AdapterRunOptions { limit }).await?;
         }
         AdapterCommands::Disable { adapter_id } => {
             if store.disable_adapter(&adapter_id).await?.is_some() {

@@ -201,7 +201,7 @@ scheduler_process_running() {
     return 1
   fi
   command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-  [[ "$command_line" == *"schedule run --watch"* ]]
+  [[ "$command_line" == *"exoclaw scheduler run --watch"* ]]
 }
 
 adapters_process_running() {
@@ -222,7 +222,7 @@ adapters_process_running() {
     return 1
   fi
   command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-  [[ "$command_line" == *"adapters run --watch"* ]]
+  [[ "$command_line" == *"adapters run"* ]]
 }
 
 adapter_source_newer_than() {
@@ -252,7 +252,7 @@ ensure_scheduler() {
   log_file="$(scheduler_log_file)"
   echo "Starting scheduler loop..."
   nohup "$EXO_BIN" --env-file-if-exists "$ENV_FILE" --harness "$HARNESS" \
-    schedule run --watch --interval-seconds "$SCHEDULER_INTERVAL_SECONDS" \
+    exoclaw scheduler run --watch --interval-seconds "$SCHEDULER_INTERVAL_SECONDS" \
     >>"$log_file" 2>&1 &
   echo "$!" >"$pid_file"
   echo "Scheduler log: $log_file"
@@ -272,7 +272,7 @@ ensure_adapters() {
   log_file="$(adapters_log_file)"
   echo "Starting adapter runner..."
   nohup "$EXO_BIN" --env-file-if-exists "$ENV_FILE" --harness "$HARNESS" \
-    adapters run --watch --limit "$ADAPTER_LIMIT" \
+    adapters run --limit "$ADAPTER_LIMIT" \
     >>"$log_file" 2>&1 &
   echo "$!" >"$pid_file"
   echo "Adapter log: $log_file"
@@ -414,7 +414,7 @@ stop_scheduler() {
       terminate_process_tree "$pid"
     fi
   fi
-  pkill -f "exo .*schedule run --watch" >/dev/null 2>&1 || true
+  pkill -f "exo .*exoclaw scheduler run --watch" >/dev/null 2>&1 || true
   rm -f "$pid_file"
 }
 
@@ -428,7 +428,7 @@ stop_adapters() {
       terminate_process_tree "$pid"
     fi
   fi
-  pkill -f "exo .*adapters run --watch" >/dev/null 2>&1 || true
+  pkill -f "exo .*adapters run" >/dev/null 2>&1 || true
   pkill -f "tsx examples/exoclaw/adapters/.*/worker.ts" >/dev/null 2>&1 || true
   rm -f "$pid_file"
 }

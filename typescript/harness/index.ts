@@ -9,7 +9,6 @@ export interface JsonObject {
 export * from "./tools";
 export * from "./built-in-tools";
 export * from "./tool-modules";
-export * from "./scheduler-tools";
 export * from "./adapter-tools";
 
 export type MessageRole =

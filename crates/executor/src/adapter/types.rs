@@ -13,20 +13,12 @@ pub enum AdapterSource {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum AdapterConfig {
-    Worker(WorkerAdapterConfig),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkerAdapterConfig {
+pub struct AdapterConfig {
     pub adapter_type: String,
     pub worker_command: Vec<String>,
     #[serde(default)]
     pub initialization: Value,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
     #[serde(default)]
     pub state_dir: Option<String>,
     #[serde(default)]
@@ -51,7 +43,6 @@ pub struct AdapterRecord {
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
     pub config: AdapterConfig,
-    pub latest_event_artifact_id: Option<String>,
     pub last_connected_at_ms: Option<u64>,
     pub last_error: Option<String>,
 }
@@ -71,7 +62,6 @@ pub struct AdapterEventRecord {
     pub adapter_id: String,
     pub event_type: AdapterEventType,
     pub created_at_ms: u64,
-    pub artifact_id: Option<String>,
     pub summary: String,
 }
 
@@ -108,7 +98,6 @@ impl AdapterRecord {
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
             config: request.config,
-            latest_event_artifact_id: None,
             last_connected_at_ms: None,
             last_error: None,
         })
@@ -117,14 +106,6 @@ impl AdapterRecord {
 
 impl AdapterConfig {
     pub fn validate(&self) -> Result<()> {
-        match self {
-            Self::Worker(config) => config.validate(),
-        }
-    }
-}
-
-impl WorkerAdapterConfig {
-    fn validate(&self) -> Result<()> {
         non_empty_ref("adapterType", &self.adapter_type)?;
         if self.worker_command.is_empty() {
             bail!("worker adapter workerCommand must not be empty");
@@ -148,7 +129,6 @@ impl AdapterEventRecord {
         adapter_id: String,
         event_type: AdapterEventType,
         summary: String,
-        artifact_id: Option<String>,
         now_ms: u64,
     ) -> Result<Self> {
         Ok(Self {
@@ -156,7 +136,6 @@ impl AdapterEventRecord {
             adapter_id: non_empty("adapterId", adapter_id)?,
             event_type,
             created_at_ms: now_ms,
-            artifact_id,
             summary,
         })
     }

@@ -33,9 +33,9 @@ mod typescript;
 pub use adapter::AdapterStore;
 pub use adapter::{
     AdapterConfig, AdapterEventRecord, AdapterEventType, AdapterRecord, AdapterSource, NewAdapter,
-    WorkerAdapterConfig, WorkerSecretEnvVar,
+    WorkerSecretEnvVar,
 };
-pub use adapter::{AdapterRunOptions, run_adapters_once, run_adapters_watch};
+pub use adapter::{AdapterRunOptions, run_adapters_watch};
 pub use braintrust::{BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig};
 pub use conversation_wakeup::send_conversation_wakeup;
 pub use executor_types::{

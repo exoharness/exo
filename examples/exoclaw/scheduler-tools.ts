@@ -1,5 +1,10 @@
-import type { JsonObject, ToolDefinition, TurnContext } from "./index";
-import type { HarnessToolRegistry, ToolInstance } from "./tools";
+import type {
+  HarnessToolRegistry,
+  JsonObject,
+  ToolDefinition,
+  ToolInstance,
+  TurnContext,
+} from "@exo/harness";
 
 export type SchedulerToolName =
   | "schedule_sandbox_task"
@@ -84,7 +89,7 @@ function createScheduleSandboxTaskTool(): ToolInstance {
           reportPrompt: {
             type: "string",
             description:
-              "Instructions for how to report each completed run back to the user. If the task was requested from an adapter and future results should go back there, include the adapter id and target and tell the agent to call send_adapter_message.",
+              "Instructions for how to report each completed run back to the user.",
           },
           maxOutputBytes: {
             type: ["number", "null"],

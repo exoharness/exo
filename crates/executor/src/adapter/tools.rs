@@ -187,11 +187,9 @@ mod tests {
                     "name": "irc",
                     "source": "built_in",
                     "config": {
-                        "type": "worker",
                         "adapterType": "irc",
                         "workerCommand": ["node", "irc.js"],
                         "initialization": {},
-                        "capabilities": ["receive", "send_message"],
                         "stateDir": null,
                         "secretEnv": []
                     }

@@ -2,13 +2,13 @@ mod adapters;
 mod env;
 #[cfg(test)]
 mod env_tests;
+mod exoclaw;
 #[cfg(test)]
 mod mount_tests;
 #[cfg(test)]
 mod naming_tests;
 #[cfg(test)]
 mod repl_tests;
-mod schedule;
 #[cfg(test)]
 mod secret_tests;
 mod tui;
@@ -288,9 +288,10 @@ enum Commands {
         #[arg(long)]
         conversation: Option<String>,
     },
-    Schedule {
+    /// Exoclaw-specific local runtime helpers.
+    Exoclaw {
         #[command(subcommand)]
-        command: schedule::ScheduleCommands,
+        command: exoclaw::ExoclawCommands,
     },
     Adapters {
         #[command(subcommand)]
@@ -532,8 +533,8 @@ async fn main() -> Result<()> {
         Commands::Adapters { command } => {
             adapters::handle_adapter_command(&cli.root, Arc::clone(&harness), command).await?;
         }
-        Commands::Schedule { command } => {
-            schedule::handle_schedule_command(&cli.root, Arc::clone(&harness), command).await?;
+        Commands::Exoclaw { command } => {
+            exoclaw::handle_exoclaw_command(&cli.root, Arc::clone(&harness), command).await?;
         }
         Commands::Repl {
             model,
@@ -1440,6 +1441,9 @@ async fn determine_harness_kind(
     if let Some(selection) = selection {
         return Ok(selection.harness_kind());
     }
+    if matches!(command, Commands::Exoclaw { .. }) {
+        return Ok(HarnessKind::Exoclaw);
+    }
 
     let Some(agent_ref) = command_agent_ref(command) else {
         return Ok(HarnessKind::Basic);
@@ -1476,7 +1480,7 @@ fn command_agent_ref(command: &Commands) -> Option<&str> {
         Commands::Repl { agent, .. } => Some(agent.as_deref().unwrap_or(DEFAULT_REPL_SLUG)),
         Commands::Secret { .. }
         | Commands::Model { .. }
-        | Commands::Schedule { .. }
+        | Commands::Exoclaw { .. }
         | Commands::Adapters { .. } => None,
     }
 }

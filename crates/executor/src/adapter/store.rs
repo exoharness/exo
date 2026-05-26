@@ -158,18 +158,10 @@ impl AdapterStore {
         adapter_id: String,
         event_type: AdapterEventType,
         summary: String,
-        artifact_id: Option<String>,
     ) -> Result<AdapterEventRecord> {
-        let event = AdapterEventRecord::new(
-            adapter_id.clone(),
-            event_type,
-            summary,
-            artifact_id.clone(),
-            now_ms(),
-        )?;
+        let event = AdapterEventRecord::new(adapter_id.clone(), event_type, summary, now_ms())?;
         self.put_event(&event).await?;
         if let Some(mut adapter) = self.get_adapter(&adapter_id).await? {
-            adapter.latest_event_artifact_id = artifact_id;
             adapter.updated_at_ms = now_ms();
             self.put_adapter(&adapter).await?;
         }
@@ -278,9 +270,7 @@ async fn remove_dir_if_exists(path: PathBuf) -> Result<()> {
 mod tests {
     use tempfile::TempDir;
 
-    use super::super::types::{
-        AdapterConfig, AdapterEventType, AdapterSource, WorkerAdapterConfig,
-    };
+    use super::super::types::{AdapterConfig, AdapterEventType, AdapterSource};
 
     use super::*;
 
@@ -294,14 +284,13 @@ mod tests {
                 conversation_id: "conversation".to_string(),
                 name: "irc".to_string(),
                 source: AdapterSource::BuiltIn,
-                config: AdapterConfig::Worker(WorkerAdapterConfig {
+                config: AdapterConfig {
                     adapter_type: "irc".to_string(),
                     worker_command: vec!["node".to_string(), "irc.js".to_string()],
                     initialization: serde_json::json!({}),
-                    capabilities: vec!["receive".to_string(), "send_message".to_string()],
                     state_dir: None,
                     secret_env: Vec::new(),
-                }),
+                },
             })
             .await
             .unwrap();
@@ -312,7 +301,6 @@ mod tests {
                 adapter.id.clone(),
                 AdapterEventType::Connected,
                 "connected".to_string(),
-                None,
             )
             .await
             .unwrap();
