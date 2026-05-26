@@ -502,7 +502,9 @@ run_repl() {
   if [[ "$CONTROL" == true ]]; then
     run_control_repl "$scheduler_log_start_line" "$adapter_log_start_line"
   else
-    exec "$EXO_BIN" --env-file-if-exists "$ENV_FILE" chat repl "$AGENT" "$CONVERSATION"
+    exec "$EXO_BIN" --env-file-if-exists "$ENV_FILE" repl \
+      --agent "$AGENT" \
+      --conversation "$CONVERSATION"
   fi
 }
 
@@ -546,7 +548,9 @@ run_control_repl() {
     start_control_log_tail "adapters" "$(adapters_log_file)" "$adapter_start_line"
   fi
 
-  "$EXO_BIN" --env-file-if-exists "$ENV_FILE" chat repl "$AGENT" "$CONVERSATION"
+  "$EXO_BIN" --env-file-if-exists "$ENV_FILE" repl \
+    --agent "$AGENT" \
+    --conversation "$CONVERSATION"
 }
 
 start_control_log_tail() {
@@ -611,7 +615,7 @@ send_prompt_from_files() {
   fi
 
   echo "Sending startup prompt from: ${files[*]}"
-  exo chat send "$AGENT" "$CONVERSATION" "$prompt"
+  exo conversation send "$AGENT" "$CONVERSATION" "$prompt"
 }
 
 show_whatsapp_qr_if_needed() {
