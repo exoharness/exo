@@ -53,7 +53,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
-          components: clippy
+          components: clippy,rustfmt
 
       - name: Cache Rust dependencies and build output
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
