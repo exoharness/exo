@@ -1340,7 +1340,6 @@ impl TurnHandle for BasicTurnHandle {
             .storage
             .get_json::<ConversationRecord>(self.conversation_dir.join("record.json"))
             .await?;
-        let expected_head = record.latest_event_id;
         let add_result = append_events_to_conversation(
             &self.harness.inner,
             &self.conversation_dir,
@@ -1433,7 +1432,6 @@ impl TurnHandle for BasicTurnHandle {
             .storage
             .get_json::<ConversationRecord>(self.conversation_dir.join("record.json"))
             .await?;
-        let expected_head = record.latest_event_id;
         let add_result = append_events_to_conversation(
             &self.harness.inner,
             &self.conversation_dir,

@@ -328,11 +328,7 @@ async fn send_executes_shell_tool_when_enabled() {
             usage: None,
         },
     ]));
-    let harness = BasicHarness::new(
-        exoharness,
-        Arc::clone(&model),
-        Arc::new(BasicToolRuntime::default()),
-    );
+    let harness = BasicHarness::new(exoharness, Arc::clone(&model), Arc::new(BasicToolRuntime));
     register_test_models(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness
@@ -501,7 +497,7 @@ async fn updating_mounts_recreates_conversation_sandbox() {
             usage: None,
         },
     ]));
-    let harness = BasicHarness::new(exoharness, model, Arc::new(BasicToolRuntime::default()));
+    let harness = BasicHarness::new(exoharness, model, Arc::new(BasicToolRuntime));
     register_test_models(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness
