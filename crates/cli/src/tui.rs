@@ -10,7 +10,7 @@ use executor::{
     HarnessConversation, SendRequest, SessionId,
 };
 use lingua::universal::{UserContent, UserContentPart};
-use lingua::{Message, UniversalStreamChunk};
+use lingua::{Message, UniversalStreamChunk, UniversalUsage};
 use rustyline::error::ReadlineError;
 use rustyline::history::{History, MemHistory, SearchDirection, SearchResult};
 use rustyline::{Cmd, Config, Editor, KeyCode, KeyEvent, Modifiers};
@@ -516,20 +516,26 @@ fn print_ttft(ttft: Duration) {
 }
 
 /// Running totals over the `UsageRecord`s attached to a conversation's
-/// model responses. `priced_calls` tracks how many of `calls` carried a
-/// `cost_usd` — so a partial total (some models missing from the price
-/// table) can be reported honestly rather than silently undercounting.
-#[derive(Debug, Default, PartialEq)]
+/// model responses. Token counts accumulate into lingua's `UniversalUsage`
+/// so the field list stays sourced from one place as usage definitions
+/// evolve. `priced_calls` tracks how many of `calls` carried a `cost_usd`,
+/// so a partial total (some models missing from the price table) can be
+/// reported honestly rather than silently undercounting.
+#[derive(Debug, Default)]
 struct UsageSummary {
+    usage: UniversalUsage,
     calls: u64,
     priced_calls: u64,
-    prompt_tokens: i64,
-    completion_tokens: i64,
-    cached_tokens: i64,
-    cache_creation_tokens: i64,
-    reasoning_tokens: i64,
     cost_usd: f64,
     duration_ms: u64,
+}
+
+/// Add two optional token counts, keeping `None` only when both are absent.
+fn add_tokens(acc: Option<i64>, next: Option<i64>) -> Option<i64> {
+    match (acc, next) {
+        (None, None) => None,
+        _ => Some(acc.unwrap_or(0) + next.unwrap_or(0)),
+    }
 }
 
 fn summarize_usage<'a>(events: impl IntoIterator<Item = &'a EventData>) -> UsageSummary {
@@ -542,11 +548,18 @@ fn summarize_usage<'a>(events: impl IntoIterator<Item = &'a EventData>) -> Usage
             continue;
         };
         summary.calls += 1;
-        summary.prompt_tokens += usage.prompt_tokens.unwrap_or(0);
-        summary.completion_tokens += usage.completion_tokens.unwrap_or(0);
-        summary.cached_tokens += usage.prompt_cached_tokens.unwrap_or(0);
-        summary.cache_creation_tokens += usage.prompt_cache_creation_tokens.unwrap_or(0);
-        summary.reasoning_tokens += usage.completion_reasoning_tokens.unwrap_or(0);
+        let acc = &mut summary.usage;
+        acc.prompt_tokens = add_tokens(acc.prompt_tokens, usage.prompt_tokens);
+        acc.completion_tokens = add_tokens(acc.completion_tokens, usage.completion_tokens);
+        acc.prompt_cached_tokens = add_tokens(acc.prompt_cached_tokens, usage.prompt_cached_tokens);
+        acc.prompt_cache_creation_tokens = add_tokens(
+            acc.prompt_cache_creation_tokens,
+            usage.prompt_cache_creation_tokens,
+        );
+        acc.completion_reasoning_tokens = add_tokens(
+            acc.completion_reasoning_tokens,
+            usage.completion_reasoning_tokens,
+        );
         summary.duration_ms += usage.duration_ms.unwrap_or(0);
         if let Some(cost) = usage.cost_usd {
             summary.cost_usd += cost;
@@ -561,27 +574,28 @@ fn render_usage(summary: &UsageSummary) -> String {
         return "No model usage recorded for this conversation yet.\n".to_string();
     }
 
-    let mut input = format!("{} tokens", with_commas(summary.prompt_tokens));
+    let usage = &summary.usage;
+    let mut input = format!("{} tokens", with_commas(usage.prompt_tokens.unwrap_or(0)));
     let mut input_extras = Vec::new();
-    if summary.cached_tokens > 0 {
-        input_extras.push(format!("{} cached", with_commas(summary.cached_tokens)));
+    let cached = usage.prompt_cached_tokens.unwrap_or(0);
+    if cached > 0 {
+        input_extras.push(format!("{} cached", with_commas(cached)));
     }
-    if summary.cache_creation_tokens > 0 {
-        input_extras.push(format!(
-            "{} cache-write",
-            with_commas(summary.cache_creation_tokens)
-        ));
+    let cache_creation = usage.prompt_cache_creation_tokens.unwrap_or(0);
+    if cache_creation > 0 {
+        input_extras.push(format!("{} cache-write", with_commas(cache_creation)));
     }
     if !input_extras.is_empty() {
         input.push_str(&format!(" ({})", input_extras.join(", ")));
     }
 
-    let mut output = format!("{} tokens", with_commas(summary.completion_tokens));
-    if summary.reasoning_tokens > 0 {
-        output.push_str(&format!(
-            " ({} reasoning)",
-            with_commas(summary.reasoning_tokens)
-        ));
+    let mut output = format!(
+        "{} tokens",
+        with_commas(usage.completion_tokens.unwrap_or(0))
+    );
+    let reasoning = usage.completion_reasoning_tokens.unwrap_or(0);
+    if reasoning > 0 {
+        output.push_str(&format!(" ({} reasoning)", with_commas(reasoning)));
     }
 
     let mut lines = vec![
@@ -589,7 +603,7 @@ fn render_usage(summary: &UsageSummary) -> String {
         format!("  model calls : {}", summary.calls),
         format!("  input       : {input}"),
         format!("  output      : {output}"),
-        format!("  cost        : ${:.4}", summary.cost_usd),
+        format!("  cost        : {}", format_cost(summary.cost_usd)),
         format!(
             "  model time  : {:.1}s",
             summary.duration_ms as f64 / 1000.0
@@ -604,6 +618,21 @@ fn render_usage(summary: &UsageSummary) -> String {
     }
     lines.push(String::new());
     lines.join("\n")
+}
+
+/// Format a USD cost. Four decimals at or above $0.0001; below that, extend
+/// precision just far enough to show the first significant digit, so a tiny
+/// cached-call total like $0.00000724 renders as `$0.000007` rather than
+/// rounding to a misleading `$0.0000`.
+fn format_cost(cost: f64) -> String {
+    if cost <= 0.0 {
+        return "$0.0000".to_string();
+    }
+    if cost >= 0.0001 {
+        return format!("${cost:.4}");
+    }
+    let decimals = ((-cost.log10()).floor() as usize + 1).min(12);
+    format!("${:.*}", decimals, cost)
 }
 
 /// Format an integer with thousands separators, e.g. `14500` -> `14,500`.
@@ -693,8 +722,8 @@ fn render_user_content_for_history(content: &UserContent) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        render_tool_call, render_tool_result, render_usage, render_user_content_for_history,
-        summarize_usage, with_commas,
+        format_cost, render_tool_call, render_tool_result, render_usage,
+        render_user_content_for_history, summarize_usage, with_commas,
     };
     use executor::{EventData, UsageRecord};
     use lingua::universal::UserContent;
@@ -739,9 +768,9 @@ mod tests {
 
         assert_eq!(summary.calls, 2);
         assert_eq!(summary.priced_calls, 2);
-        assert_eq!(summary.prompt_tokens, 1_800);
-        assert_eq!(summary.completion_tokens, 800);
-        assert_eq!(summary.cached_tokens, 200);
+        assert_eq!(summary.usage.prompt_tokens, Some(1_800));
+        assert_eq!(summary.usage.completion_tokens, Some(800));
+        assert_eq!(summary.usage.prompt_cached_tokens, Some(200));
         assert_eq!(summary.duration_ms, 2_000);
         assert!((summary.cost_usd - 0.0144).abs() < 1e-9);
     }
@@ -772,6 +801,23 @@ mod tests {
         let summary = summarize_usage(std::iter::empty());
         assert_eq!(summary.calls, 0);
         assert!(render_usage(&summary).contains("No model usage recorded"));
+    }
+
+    #[test]
+    fn format_cost_uses_four_decimals_at_or_above_a_tenth_milli_dollar() {
+        assert_eq!(format_cost(0.0), "$0.0000");
+        assert_eq!(format_cost(0.0105), "$0.0105");
+        assert_eq!(format_cost(0.012521), "$0.0125");
+        assert_eq!(format_cost(0.0002001), "$0.0002");
+        assert_eq!(format_cost(0.0001), "$0.0001");
+    }
+
+    #[test]
+    fn format_cost_extends_precision_for_tiny_totals() {
+        // below $0.0001, show just enough decimals to reveal the first digit
+        assert_eq!(format_cost(0.00000724), "$0.000007");
+        assert_eq!(format_cost(0.00005), "$0.00005");
+        assert_eq!(format_cost(0.0000004), "$0.0000004");
     }
 
     #[test]
