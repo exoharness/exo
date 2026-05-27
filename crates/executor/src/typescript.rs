@@ -173,7 +173,7 @@ where
         &self,
         _agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
-        _agent_config: &AgentConfig,
+        agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
         request: RuntimeRequest,
     ) -> Result<RuntimeResponsePayload> {
@@ -181,7 +181,7 @@ where
             RuntimeRequest::ExecuteTool { request } => Ok(RuntimeResponsePayload::ToolResult {
                 result: self
                     .tools
-                    .execute(conversation, conversation_config, &request)
+                    .execute(conversation, agent_config, conversation_config, &request)
                     .await?,
             }),
             RuntimeRequest::StartSandboxProcess { .. }

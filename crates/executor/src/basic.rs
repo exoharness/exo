@@ -143,6 +143,7 @@ where
             let tool_results = self
                 .execute_tool_round(
                     conversation,
+                    agent_config,
                     conversation_config,
                     tool_requests,
                     round as usize,
@@ -244,6 +245,7 @@ where
     async fn execute_tool_round(
         &self,
         conversation: &dyn ConversationHandle,
+        agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
         tool_requests: Vec<ExecutableToolRequest>,
         round: usize,
@@ -274,7 +276,12 @@ where
             };
             let result = match self
                 .tools
-                .execute(conversation, conversation_config, &tool_request.request)
+                .execute(
+                    conversation,
+                    agent_config,
+                    conversation_config,
+                    &tool_request.request,
+                )
                 .await
             {
                 Ok(response) => response,

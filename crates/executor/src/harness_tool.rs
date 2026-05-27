@@ -16,24 +16,22 @@ pub struct BasicToolRuntime;
 impl ToolRuntime for BasicToolRuntime {
     async fn prepare_conversation(
         &self,
-        conversation: &dyn ConversationHandle,
-        agent_config: &AgentConfig,
-        config: &ConversationConfig,
+        _conversation: &dyn ConversationHandle,
+        _agent_config: &AgentConfig,
+        _config: &ConversationConfig,
     ) -> Result<()> {
-        if config.shell_program.is_some() {
-            ensure_shell_sandbox(conversation, agent_config, config).await?;
-        }
         Ok(())
     }
 
     async fn execute(
         &self,
         conversation: &dyn ConversationHandle,
+        agent_config: &AgentConfig,
         config: &ConversationConfig,
         request: &ToolRequest,
     ) -> Result<ToolResult> {
         match request.function_name.as_str() {
-            "shell" => execute_shell_tool(conversation, config, request).await,
+            "shell" => execute_shell_tool(conversation, agent_config, config, request).await,
             other => Err(anyhow::anyhow!(
                 "tool execution is not configured for {other}"
             )),
@@ -55,6 +53,7 @@ struct ShellToolResult {
 
 async fn execute_shell_tool(
     conversation: &dyn ConversationHandle,
+    agent_config: &AgentConfig,
     config: &ConversationConfig,
     request: &ToolRequest,
 ) -> Result<ToolResult> {
@@ -64,10 +63,7 @@ async fn execute_shell_tool(
         .shell_program
         .clone()
         .ok_or_else(|| anyhow::anyhow!("shell tool is not enabled for this conversation"))?;
-    let sandbox_id = latest_shell_sandbox(conversation)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("shell sandbox is not available for this conversation"))?
-        .id;
+    let sandbox_id = ensure_shell_sandbox(conversation, agent_config, config).await?;
     let process = conversation
         .run_in_sandbox(RunInSandboxRequest {
             id: sandbox_id,

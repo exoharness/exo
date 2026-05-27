@@ -442,6 +442,7 @@ impl ToolRuntime for FakeToolRuntime {
     async fn execute(
         &self,
         _conversation: &dyn ConversationHandle,
+        _agent_config: &AgentConfig,
         _config: &ConversationConfig,
         _request: &ToolRequest,
     ) -> Result<ToolResult> {

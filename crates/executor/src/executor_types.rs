@@ -118,6 +118,7 @@ pub trait ToolRuntime: Send + Sync {
     async fn execute(
         &self,
         conversation: &dyn ConversationHandle,
+        agent_config: &AgentConfig,
         config: &ConversationConfig,
         request: &ToolRequest,
     ) -> Result<ToolResult>;

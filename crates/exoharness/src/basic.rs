@@ -1386,17 +1386,13 @@ impl TurnHandle for BasicTurnHandle {
 
     async fn add_events(&self, data: Vec<EventData>) -> Result<AddEventsResult> {
         let _guard = self.harness.inner.write_lock.lock().await;
-        let expected_head = self
-            .state
-            .lock()
-            .expect("turn state poisoned")
-            .latest_event_id;
         let mut record = self
             .harness
             .inner
             .storage
             .get_json::<ConversationRecord>(self.conversation_dir.join("record.json"))
             .await?;
+        let expected_head = record.latest_event_id;
         let add_result = append_events_to_conversation(
             &self.harness.inner,
             &self.conversation_dir,
@@ -1474,21 +1470,21 @@ impl TurnHandle for BasicTurnHandle {
 
     async fn finish(&self) -> Result<EventId> {
         let _guard = self.harness.inner.write_lock.lock().await;
-        let expected_head = {
+        {
             let state = self.state.lock().expect("turn state poisoned");
             if state.finished {
                 return state
                     .latest_event_id
                     .ok_or_else(|| anyhow!("turn has no latest event id"));
             }
-            state.latest_event_id
-        };
+        }
         let mut record = self
             .harness
             .inner
             .storage
             .get_json::<ConversationRecord>(self.conversation_dir.join("record.json"))
             .await?;
+        let expected_head = record.latest_event_id;
         let add_result = append_events_to_conversation(
             &self.harness.inner,
             &self.conversation_dir,

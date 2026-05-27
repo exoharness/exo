@@ -12,6 +12,7 @@ mod secret_tests;
 mod tui;
 
 use std::collections::HashMap;
+use std::io::{self, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -20,17 +21,19 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow, bail};
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use executor::{
-    AgentHarnessKind, BasicExoHarness, BasicExoHarnessConfig, BasicHarness, Binding,
-    BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig, ConversationModelConfig,
-    CreateAgentRequest, CreateConversationRequest, EventQuery, EventQueryDirection, ExoHarness,
-    ExoHarnessHttpServeOptions, FileSystemMount, FileSystemMountMode, ForkConversationRequest,
-    HTTP_EXOHARNESS_TRACING_TARGET, Harness, HarnessAgent, HarnessConversation, HttpExoHarness,
-    PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, Secret,
-    SecretBackendChoice, SendRequest, TypeScriptHarness, TypeScriptHarnessConfig, Uuid7,
-    load_agent_config, serve_exoharness_http_listener_with_options,
+    AgentHarnessKind, BasicExoHarness, BasicExoHarnessConfig, BasicHarness, BasicToolRuntime,
+    Binding, BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig,
+    ConversationModelConfig, CreateAgentRequest, CreateConversationRequest, EventQuery,
+    EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions, FileSystemMount,
+    FileSystemMountMode, ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET, Harness,
+    HarnessAgent, HarnessConversation, HttpExoHarness, PutSecretRequest, RlmHarness,
+    SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, Secret, SecretBackendChoice, SendRequest,
+    ToolRequest, ToolRuntime, TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, load_agent_config,
+    serve_exoharness_http_listener_with_options,
 };
 use lingua::Message;
 use lingua::universal::{AssistantContent, AssistantContentPart, ToolContentPart, UserContent};
+use serde::Deserialize;
 use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::env::CliEnvironment;
@@ -416,6 +419,10 @@ enum ConversationCommands {
         #[command(subcommand)]
         command: ConversationMountCommands,
     },
+    Sandbox {
+        #[command(subcommand)]
+        command: ConversationSandboxCommands,
+    },
     Show {
         agent: String,
         conversation: String,
@@ -444,6 +451,15 @@ enum ConversationCommands {
     Delete {
         agent: String,
         conversation: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConversationSandboxCommands {
+    Run {
+        agent: String,
+        conversation: String,
+        command: String,
     },
 }
 
@@ -623,7 +639,7 @@ async fn main() -> Result<()> {
                 }
             };
 
-            run_chat_repl(conversation).await?;
+            run_chat_repl(Arc::clone(&agent), conversation).await?;
         }
         Commands::Agent { command } => match command {
             AgentCommands::List => {
@@ -1021,7 +1037,7 @@ async fn main() -> Result<()> {
                     conversation.record().id
                 );
                 if repl {
-                    run_chat_repl(conversation).await?;
+                    run_chat_repl(Arc::clone(&agent), conversation).await?;
                 } else {
                     println!(
                         "start chatting with it via `{}`",
@@ -1062,7 +1078,7 @@ async fn main() -> Result<()> {
                         .ok_or_else(|| {
                             anyhow!("forked conversation not found: {}", forked.record().slug)
                         })?;
-                    run_chat_repl(conversation).await?;
+                    run_chat_repl(agent, conversation).await?;
                 } else {
                     println!(
                         "start chatting with it via `{}`",
@@ -1243,6 +1259,30 @@ async fn main() -> Result<()> {
                         mount_path,
                         conversation.record().slug
                     );
+                }
+            },
+            ConversationCommands::Sandbox { command } => match command {
+                ConversationSandboxCommands::Run {
+                    agent,
+                    conversation,
+                    command,
+                } => {
+                    let agent_handle = must_get_agent(harness.as_ref(), &agent).await?;
+                    let conversation = agent_handle
+                        .get_conversation(&conversation)
+                        .await?
+                        .ok_or_else(|| anyhow!("conversation not found: {}", conversation))?;
+                    let output = run_sandbox_shell_command(
+                        agent_handle.as_ref(),
+                        conversation.as_ref(),
+                        command,
+                    )
+                    .await?;
+                    io::stdout().write_all(output.stdout.as_bytes())?;
+                    io::stderr().write_all(output.stderr.as_bytes())?;
+                    if output.exit_code != 0 {
+                        bail!("sandbox command exited with status {}", output.exit_code);
+                    }
                 }
             },
             ConversationCommands::Show {
@@ -1518,6 +1558,9 @@ fn command_agent_ref(command: &Commands) -> Option<&str> {
                 ConversationMountCommands::List { agent, .. }
                 | ConversationMountCommands::Add { agent, .. }
                 | ConversationMountCommands::Remove { agent, .. } => Some(agent.as_str()),
+            },
+            ConversationCommands::Sandbox { command } => match command {
+                ConversationSandboxCommands::Run { agent, .. } => Some(agent.as_str()),
             },
         },
         Commands::Repl { agent, .. } => Some(agent.as_deref().unwrap_or(DEFAULT_REPL_SLUG)),
@@ -2050,6 +2093,46 @@ async fn must_get_conversation(
         .ok_or_else(|| anyhow!("conversation not found: {conversation_ref}"))
 }
 
+#[derive(Debug, Deserialize)]
+struct SandboxShellOutput {
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+}
+
+async fn run_sandbox_shell_command(
+    agent: &dyn HarnessAgent,
+    conversation: &dyn HarnessConversation,
+    command: String,
+) -> Result<SandboxShellOutput> {
+    let agent_config = agent.config().await?;
+    let config = conversation.config().await?;
+    if config.shell_program.is_none() {
+        bail!(
+            "shell sandbox is not enabled for this conversation; run `exo conversation update {} {} --shell-program /bin/bash`",
+            agent.record().slug,
+            conversation.record().slug
+        );
+    }
+    let conversation_handle = conversation.exoharness_handle();
+    let runtime = BasicToolRuntime;
+
+    let mut arguments = serde_json::Map::new();
+    arguments.insert("command".to_string(), serde_json::Value::String(command));
+    let result = runtime
+        .execute(
+            conversation_handle.as_ref(),
+            &agent_config,
+            &config,
+            &ToolRequest {
+                function_name: "shell".to_string(),
+                arguments,
+            },
+        )
+        .await?;
+    Ok(serde_json::from_value(result)?)
+}
+
 pub(crate) fn print_message(message: &Message) {
     match message {
         Message::User { content } => {
@@ -2306,6 +2389,33 @@ mod create_tests {
                     prompt,
                 }
             } if agent == "agent" && conversation == "conv" && prompt == "hello"
+        ));
+    }
+
+    #[test]
+    fn conversation_sandbox_run_command_parses() {
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from([
+            "exo",
+            "conversation",
+            "sandbox",
+            "run",
+            "agent",
+            "conv",
+            "pwd && git status",
+        ])
+        .expect("conversation sandbox run parses");
+        assert!(matches!(
+            cli.command,
+            super::Commands::Conversation {
+                command: super::ConversationCommands::Sandbox {
+                    command: super::ConversationSandboxCommands::Run {
+                        agent,
+                        conversation,
+                        command,
+                    },
+                }
+            } if agent == "agent" && conversation == "conv" && command == "pwd && git status"
         ));
     }
 

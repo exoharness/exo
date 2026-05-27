@@ -148,6 +148,24 @@ async fn send_persists_messages_through_harness() {
     assert_eq!(messages.len(), 2);
     assert!(matches!(messages[0], Message::User { .. }));
     assert!(matches!(messages[1], Message::Assistant { .. }));
+
+    let sandbox_events = conversation
+        .exoharness_handle()
+        .get_events(Some(EventQuery {
+            cursor: None,
+            direction: Some(EventQueryDirection::Asc),
+            limit: None,
+            session_id: None,
+            turn_id: None,
+            types: Some(vec!["sandbox_created".to_string()]),
+        }))
+        .await
+        .expect("sandbox events should load")
+        .events;
+    assert!(
+        sandbox_events.is_empty(),
+        "plain chat should not provision a sandbox"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -486,8 +504,32 @@ async fn updating_mounts_recreates_shell_sandbox() {
     let model = Arc::new(FakeModelClient::new(vec![
         ModelResponse {
             response_id: Some(Uuid7::now()),
+            messages: Vec::new(),
+            tool_calls: vec![PendingToolCall {
+                tool_call_id: "call-1".to_string(),
+                request: ToolRequest {
+                    function_name: "shell".to_string(),
+                    arguments: shell_command_arguments("printf first"),
+                },
+            }],
+            usage: None,
+        },
+        ModelResponse {
+            response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("done-1")],
             tool_calls: Vec::new(),
+            usage: None,
+        },
+        ModelResponse {
+            response_id: Some(Uuid7::now()),
+            messages: Vec::new(),
+            tool_calls: vec![PendingToolCall {
+                tool_call_id: "call-2".to_string(),
+                request: ToolRequest {
+                    function_name: "shell".to_string(),
+                    arguments: shell_command_arguments("printf second"),
+                },
+            }],
             usage: None,
         },
         ModelResponse {
