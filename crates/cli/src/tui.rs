@@ -364,6 +364,24 @@ impl ChatRepl {
         Ok(())
     }
 
+    async fn print_usage(&self) -> Result<()> {
+        let result = self
+            .conversation
+            .exoharness_handle()
+            .get_events(Some(EventQuery {
+                cursor: None,
+                direction: Some(EventQueryDirection::Asc),
+                limit: None,
+                session_id: None,
+                turn_id: None,
+                types: Some(vec!["messages".to_string()]),
+            }))
+            .await?;
+        let summary = summarize_usage(result.events.iter().map(|event| &event.data));
+        print!("{}", render_usage(&summary));
+        Ok(())
+    }
+
     async fn run(&mut self) -> Result<()> {
         loop {
             let prompt = format!("{}> ", self.conversation.record().slug);
@@ -378,6 +396,10 @@ impl ChatRepl {
                     }
                     if trimmed == "/history" {
                         self.print_transcript().await?;
+                        continue;
+                    }
+                    if trimmed == "/usage" || trimmed == "/cost" {
+                        self.print_usage().await?;
                         continue;
                     }
 
@@ -493,6 +515,115 @@ fn print_ttft(ttft: Duration) {
     }
 }
 
+/// Running totals over the `UsageRecord`s attached to a conversation's
+/// model responses. `priced_calls` tracks how many of `calls` carried a
+/// `cost_usd` — so a partial total (some models missing from the price
+/// table) can be reported honestly rather than silently undercounting.
+#[derive(Debug, Default, PartialEq)]
+struct UsageSummary {
+    calls: u64,
+    priced_calls: u64,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    cached_tokens: i64,
+    cache_creation_tokens: i64,
+    reasoning_tokens: i64,
+    cost_usd: f64,
+    duration_ms: u64,
+}
+
+fn summarize_usage<'a>(events: impl IntoIterator<Item = &'a EventData>) -> UsageSummary {
+    let mut summary = UsageSummary::default();
+    for data in events {
+        let EventData::Messages {
+            usage: Some(usage), ..
+        } = data
+        else {
+            continue;
+        };
+        summary.calls += 1;
+        summary.prompt_tokens += usage.prompt_tokens.unwrap_or(0);
+        summary.completion_tokens += usage.completion_tokens.unwrap_or(0);
+        summary.cached_tokens += usage.prompt_cached_tokens.unwrap_or(0);
+        summary.cache_creation_tokens += usage.prompt_cache_creation_tokens.unwrap_or(0);
+        summary.reasoning_tokens += usage.completion_reasoning_tokens.unwrap_or(0);
+        summary.duration_ms += usage.duration_ms.unwrap_or(0);
+        if let Some(cost) = usage.cost_usd {
+            summary.cost_usd += cost;
+            summary.priced_calls += 1;
+        }
+    }
+    summary
+}
+
+fn render_usage(summary: &UsageSummary) -> String {
+    if summary.calls == 0 {
+        return "No model usage recorded for this conversation yet.\n".to_string();
+    }
+
+    let mut input = format!("{} tokens", with_commas(summary.prompt_tokens));
+    let mut input_extras = Vec::new();
+    if summary.cached_tokens > 0 {
+        input_extras.push(format!("{} cached", with_commas(summary.cached_tokens)));
+    }
+    if summary.cache_creation_tokens > 0 {
+        input_extras.push(format!(
+            "{} cache-write",
+            with_commas(summary.cache_creation_tokens)
+        ));
+    }
+    if !input_extras.is_empty() {
+        input.push_str(&format!(" ({})", input_extras.join(", ")));
+    }
+
+    let mut output = format!("{} tokens", with_commas(summary.completion_tokens));
+    if summary.reasoning_tokens > 0 {
+        output.push_str(&format!(
+            " ({} reasoning)",
+            with_commas(summary.reasoning_tokens)
+        ));
+    }
+
+    let mut lines = vec![
+        "usage (this conversation):".to_string(),
+        format!("  model calls : {}", summary.calls),
+        format!("  input       : {input}"),
+        format!("  output      : {output}"),
+        format!("  cost        : ${:.4}", summary.cost_usd),
+        format!(
+            "  model time  : {:.1}s",
+            summary.duration_ms as f64 / 1000.0
+        ),
+    ];
+    if summary.priced_calls < summary.calls {
+        let unpriced = summary.calls - summary.priced_calls;
+        lines.push(format!(
+            "  note        : {unpriced} of {} call(s) had no price in the table; cost is a partial total",
+            summary.calls
+        ));
+    }
+    lines.push(String::new());
+    lines.join("\n")
+}
+
+/// Format an integer with thousands separators, e.g. `14500` -> `14,500`.
+fn with_commas(value: i64) -> String {
+    let negative = value < 0;
+    let digits = value.unsigned_abs().to_string();
+    let mut grouped = String::new();
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(ch);
+    }
+    if negative {
+        format!("-{grouped}")
+    } else {
+        grouped
+    }
+}
+
 fn render_tool_call(tool_name: &str, arguments: &Map<String, Value>) -> String {
     let mut lines = vec![format!("tool call {tool_name}")];
     append_object_fields(&mut lines, arguments, "  ");
@@ -561,9 +692,97 @@ fn render_user_content_for_history(content: &UserContent) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_tool_call, render_tool_result, render_user_content_for_history};
+    use super::{
+        render_tool_call, render_tool_result, render_usage, render_user_content_for_history,
+        summarize_usage, with_commas,
+    };
+    use executor::{EventData, UsageRecord};
     use lingua::universal::UserContent;
     use serde_json::{Map, Value};
+
+    fn usage_event(
+        prompt: Option<i64>,
+        completion: Option<i64>,
+        cached: Option<i64>,
+        cost_usd: Option<f64>,
+        duration_ms: Option<u64>,
+    ) -> EventData {
+        EventData::Messages {
+            messages: vec![],
+            response_id: None,
+            usage: Some(Box::new(UsageRecord {
+                model: "claude-sonnet-4-6".to_string(),
+                prompt_tokens: prompt,
+                completion_tokens: completion,
+                prompt_cached_tokens: cached,
+                cost_usd,
+                duration_ms,
+                ..Default::default()
+            })),
+        }
+    }
+
+    #[test]
+    fn summarize_usage_aggregates_priced_calls_and_skips_usageless_events() {
+        let events = [
+            // A user-input Messages event carries no usage and must be ignored.
+            EventData::Messages {
+                messages: vec![],
+                response_id: None,
+                usage: None,
+            },
+            usage_event(Some(1_000), Some(500), Some(200), Some(0.0105), Some(1_200)),
+            usage_event(Some(800), Some(300), None, Some(0.0039), Some(800)),
+        ];
+
+        let summary = summarize_usage(events.iter());
+
+        assert_eq!(summary.calls, 2);
+        assert_eq!(summary.priced_calls, 2);
+        assert_eq!(summary.prompt_tokens, 1_800);
+        assert_eq!(summary.completion_tokens, 800);
+        assert_eq!(summary.cached_tokens, 200);
+        assert_eq!(summary.duration_ms, 2_000);
+        assert!((summary.cost_usd - 0.0144).abs() < 1e-9);
+    }
+
+    #[test]
+    fn summarize_usage_counts_unpriced_calls_separately() {
+        let events = [
+            usage_event(Some(1_000), Some(500), None, Some(0.01), Some(1_000)),
+            // An unknown model leaves cost_usd None: counted as a call, not a priced one.
+            usage_event(Some(500), Some(200), None, None, Some(500)),
+        ];
+
+        let summary = summarize_usage(events.iter());
+
+        assert_eq!(summary.calls, 2);
+        assert_eq!(summary.priced_calls, 1);
+        assert!((summary.cost_usd - 0.01).abs() < 1e-9);
+
+        let rendered = render_usage(&summary);
+        assert!(
+            rendered.contains("1 of 2 call(s) had no price"),
+            "expected partial-total note, got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn render_usage_reports_empty_conversation() {
+        let summary = summarize_usage(std::iter::empty());
+        assert_eq!(summary.calls, 0);
+        assert!(render_usage(&summary).contains("No model usage recorded"));
+    }
+
+    #[test]
+    fn with_commas_groups_thousands() {
+        assert_eq!(with_commas(0), "0");
+        assert_eq!(with_commas(999), "999");
+        assert_eq!(with_commas(1_000), "1,000");
+        assert_eq!(with_commas(14_500), "14,500");
+        assert_eq!(with_commas(1_234_567), "1,234,567");
+        assert_eq!(with_commas(-2_500), "-2,500");
+    }
 
     #[test]
     fn renders_multiline_tool_call_arguments_as_indented_block() {

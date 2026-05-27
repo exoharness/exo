@@ -36,7 +36,7 @@ pub use exoharness::{
     ConversationHandle, EventData, EventId, EventQuery, EventQueryDirection, ExoHarness,
     FileSystemMount, FileSystemMountMode, ForkConversationRequest, PutSecretRequest,
     SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, Secret, SecretBackendChoice, SecretMetadata,
-    SessionId, Uuid7,
+    SessionId, UsageRecord, Uuid7,
 };
 pub use harness_basic::BasicHarness;
 pub use harness_config::load_agent_config;
