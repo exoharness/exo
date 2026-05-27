@@ -36,6 +36,12 @@ static PRICING_TABLE: OnceCell<Arc<PricingTable>> = OnceCell::const_new();
 ///
 /// Never panics; on any load failure returns an empty table (cost
 /// computation will yield `None`, tokens are still persisted).
+///
+/// Note: the table is loaded once per process and held for its lifetime.
+/// The 24h cache TTL is only re-evaluated at that first load, so a
+/// short-lived CLI run picks up fresh-ish pricing each invocation. For a
+/// long-running process this snapshot can go stale — if exo ever runs as a
+/// long-lived service, this should refresh the pricing every 24 hours.
 pub async fn get_pricing_table() -> Arc<PricingTable> {
     PRICING_TABLE
         .get_or_init(|| async {

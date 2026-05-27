@@ -133,7 +133,7 @@ pub struct ModelRequest {
     pub max_output_tokens: Option<i64>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelResponse {
     pub response_id: Option<ResponseId>,
     pub messages: Vec<Message>,
