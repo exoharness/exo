@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
 EXO_BIN="${EXO_BIN:-$ROOT_DIR/target/debug/exo}"
+SCHEDULER_BIN="${EXOCLAW_SCHEDULER_BIN:-$ROOT_DIR/target/debug/exoclaw-scheduler-runner}"
 ENV_FILE="${EXO_ENV_FILE:-$ROOT_DIR/.env}"
 MODEL="${EXO_MODEL:-gpt-5.4}"
 AGENT="${EXO_AGENT:-exoclaw-agent}"
@@ -79,6 +80,7 @@ Options:
   --no-sandbox                 Do not require or configure sandbox shell support
   --env-file <path>            Env file to read if present (default: .env)
   --exo-bin <path>             exo binary path (default: ./target/debug/exo)
+  --scheduler-bin <path>       Scheduler runner path (default: ./target/debug/exoclaw-scheduler-runner)
   --help                       Show this help
 
 Environment overrides:
@@ -87,7 +89,7 @@ Environment overrides:
   EXO_NETWORKING, EXO_SHELL_PROGRAM, EXO_SANDBOX_SCOPE, EXO_ENV_FILE,
   EXOCLAW_LOCAL_PROMPT_FILE,
   EXO_BIN, EXO_START_SCHEDULER, EXO_START_ADAPTERS,
-  EXO_SCHEDULER_INTERVAL_SECONDS, EXO_ADAPTER_LIMIT,
+  EXOCLAW_SCHEDULER_BIN, EXO_SCHEDULER_INTERVAL_SECONDS, EXO_ADAPTER_LIMIT,
   EXO_SETUP_ADAPTER, EXO_INITIAL_PROMPT_FILE
 EOF
 }
@@ -126,6 +128,16 @@ ensure_exo_bin() {
     die "exo binary is not executable: $EXO_BIN"
   fi
   build_exo
+}
+
+ensure_scheduler_bin() {
+  if [[ -x "$SCHEDULER_BIN" ]] && ! scheduler_source_newer_than "$SCHEDULER_BIN"; then
+    return
+  fi
+  if [[ "$SCHEDULER_BIN" != "$ROOT_DIR/target/debug/exoclaw-scheduler-runner" ]]; then
+    die "scheduler runner is not executable: $SCHEDULER_BIN"
+  fi
+  build_exoclaw_scheduler
 }
 
 ensure_signal_cli() {
@@ -175,6 +187,26 @@ build_exo() {
   (cd "$ROOT_DIR" && CARGO_TARGET_DIR=target cargo build -p exo --ignore-rust-version)
 }
 
+build_exoclaw_scheduler() {
+  echo "Building Exoclaw scheduler runner..."
+  (cd "$ROOT_DIR" && CARGO_TARGET_DIR=target cargo build \
+    --manifest-path examples/exoclaw/scheduler-runner/Cargo.toml \
+    --ignore-rust-version)
+}
+
+scheduler_source_newer_than() {
+  local target="$1"
+  local path
+  for path in \
+    "$ROOT_DIR/examples/exoclaw/scheduler-runner/Cargo.toml" \
+    "$ROOT_DIR/examples/exoclaw/scheduler-runner/src"/*.rs; do
+    if [[ -e "$path" && "$path" -nt "$target" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 exo() {
   "$EXO_BIN" --env-file-if-exists "$ENV_FILE" "$@"
 }
@@ -202,13 +234,13 @@ scheduler_process_running() {
   pid="$(<"$pid_file")"
   [[ "$pid" =~ ^[0-9]+$ ]] || return 1
   kill -0 "$pid" >/dev/null 2>&1 || return 1
-  if [[ "$EXO_BIN" -nt "$pid_file" ]]; then
-    echo "Restarting scheduler because $EXO_BIN is newer..."
+  if [[ "$SCHEDULER_BIN" -nt "$pid_file" ]]; then
+    echo "Restarting scheduler because $SCHEDULER_BIN is newer..."
     terminate_process_tree "$pid"
     return 1
   fi
   command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-  [[ "$command_line" == *"exoclaw scheduler run --watch"* ]]
+  [[ "$command_line" == *"exoclaw-scheduler-runner"*"run --watch"* ]]
 }
 
 adapters_process_running() {
@@ -249,6 +281,7 @@ ensure_scheduler() {
   if [[ "$START_SCHEDULER" != true ]]; then
     return
   fi
+  ensure_scheduler_bin
   if scheduler_process_running; then
     return
   fi
@@ -258,8 +291,8 @@ ensure_scheduler() {
   pid_file="$(scheduler_pid_file)"
   log_file="$(scheduler_log_file)"
   echo "Starting scheduler loop..."
-  nohup "$EXO_BIN" --env-file-if-exists "$ENV_FILE" --harness "$HARNESS" \
-    exoclaw scheduler run --watch --interval-seconds "$SCHEDULER_INTERVAL_SECONDS" \
+  nohup "$SCHEDULER_BIN" --env-file-if-exists "$ENV_FILE" \
+    run --watch --interval-seconds "$SCHEDULER_INTERVAL_SECONDS" \
     >>"$log_file" 2>&1 &
   echo "$!" >"$pid_file"
   echo "Scheduler log: $log_file"
@@ -421,7 +454,7 @@ stop_scheduler() {
       terminate_process_tree "$pid"
     fi
   fi
-  pkill -f "exo .*exoclaw scheduler run --watch" >/dev/null 2>&1 || true
+  pkill -f "exoclaw-scheduler-runner .*run --watch" >/dev/null 2>&1 || true
   rm -f "$pid_file"
 }
 
@@ -911,6 +944,11 @@ while [[ $# -gt 0 ]]; do
     --exo-bin)
       EXO_BIN="${2:-}"
       [[ -n "$EXO_BIN" ]] || die "--exo-bin requires a value"
+      shift 2
+      ;;
+    --scheduler-bin)
+      SCHEDULER_BIN="${2:-}"
+      [[ -n "$SCHEDULER_BIN" ]] || die "--scheduler-bin requires a value"
       shift 2
       ;;
     --help|-h)

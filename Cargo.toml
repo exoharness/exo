@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/cli", "crates/exoharness", "crates/executor"]
+members = [
+  "crates/cli",
+  "crates/exoharness",
+  "crates/executor",
+  "examples/exoclaw/scheduler-runner",
+]
 resolver = "2"
 
 [workspace.package]

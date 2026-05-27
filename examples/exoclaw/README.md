@@ -25,9 +25,12 @@ examples/exoclaw/scripts/exoclaw-repl --pull-sandbox
 ```
 
 The script also starts local scheduler and adapter runner processes by default.
-Use `--no-scheduler` or `--no-adapters` when you only want the interactive REPL.
-Use `--control` for a local debugging console that streams scheduler and adapter
-logs into the same terminal while the REPL is running.
+The scheduler loop is an example-local Rust runner in
+`examples/exoclaw/scheduler-runner`, so the shared `exo` CLI does not need an
+Exoclaw-specific scheduler subcommand. Use `--no-scheduler` or `--no-adapters`
+when you only want the interactive REPL. Use `--control` for a local debugging
+console that streams scheduler and adapter logs into the same terminal while the
+REPL is running.
 For repeatable setup tests, pass `--setup <adapter>`; the script sends the
 adapter's `setup-prompt.md` before dropping into the REPL. `--setup` may be
 passed more than once, or use `--setup-all` for Signal, WhatsApp, and IRC.

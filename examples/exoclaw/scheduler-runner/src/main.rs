@@ -1,0 +1,203 @@
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{Result, anyhow};
+use clap::{Parser, Subcommand};
+use executor::{
+    BasicExoHarnessConfig, BraintrustRuntimeConfig, ExoclawToolRuntime, Harness,
+    SandboxBackendChoice, SchedulerRunOptions, SchedulerStore, SecretBackendChoice,
+    TypeScriptHarness, run_due_tasks,
+};
+
+#[derive(Debug, Parser)]
+#[command(name = "exoclaw-scheduler-runner")]
+#[command(about = "Example-local scheduler runner for Exoclaw")]
+struct Cli {
+    #[arg(long, global = true, default_value = ".exo")]
+    root: PathBuf,
+    #[arg(long, global = true)]
+    env_file_if_exists: Option<PathBuf>,
+    #[arg(long, global = true)]
+    env_file: Option<PathBuf>,
+    #[arg(long, global = true, env = "BRAINTRUST_API_KEY", hide = true)]
+    braintrust_api_key: Option<String>,
+    #[arg(long, global = true, env = "BRAINTRUST_APP_URL", hide = true)]
+    braintrust_app_url: Option<String>,
+    #[arg(long, global = true, env = "BRAINTRUST_API_URL", hide = true)]
+    braintrust_api_url: Option<String>,
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    Run {
+        #[arg(long)]
+        watch: bool,
+        #[arg(long, default_value_t = 60)]
+        interval_seconds: u64,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let env = load_env(cli.env_file_if_exists.as_deref(), cli.env_file.as_deref())?;
+    let runtime_config = braintrust_runtime_config(
+        &env,
+        cli.braintrust_api_key,
+        cli.braintrust_app_url,
+        cli.braintrust_api_url,
+    );
+    let harness = exoclaw_harness(&cli.root, runtime_config, env).await?;
+
+    match cli.command {
+        Commands::Run {
+            watch,
+            interval_seconds,
+            limit,
+        } => {
+            let store = SchedulerStore::new(cli.root.join("scheduled-tasks"));
+            loop {
+                let runs =
+                    run_due_tasks(Arc::clone(&harness), &store, SchedulerRunOptions { limit })
+                        .await?;
+                for run in runs {
+                    println!(
+                        "{}\t{}\texit={}\terror={}",
+                        run.task_id,
+                        run.id,
+                        run.exit_code
+                            .map(|code| code.to_string())
+                            .unwrap_or_else(|| "none".to_string()),
+                        run.error.unwrap_or_else(|| "none".to_string())
+                    );
+                }
+                if !watch {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(interval_seconds)).await;
+            }
+        }
+    }
+
+    harness.flush_tracing().await?;
+    Ok(())
+}
+
+async fn exoclaw_harness(
+    root: &Path,
+    runtime_config: Option<BraintrustRuntimeConfig>,
+    env: HashMap<String, String>,
+) -> Result<Arc<dyn Harness>> {
+    let exo_config = BasicExoHarnessConfig {
+        root: root.join("exoharness"),
+        secret_backend: default_secret_backend(),
+        sandbox_backend: default_sandbox_backend(),
+    };
+    Ok(Arc::new(
+        TypeScriptHarness::<ExoclawToolRuntime>::exoclaw_from_root(
+            root,
+            exo_config,
+            runtime_config,
+            env,
+        )
+        .await?,
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn default_secret_backend() -> SecretBackendChoice {
+    SecretBackendChoice::AppleKeychain
+}
+
+#[cfg(not(target_os = "macos"))]
+fn default_secret_backend() -> SecretBackendChoice {
+    SecretBackendChoice::File { path: None }
+}
+
+#[cfg(target_os = "macos")]
+fn default_sandbox_backend() -> SandboxBackendChoice {
+    SandboxBackendChoice::AppleContainer
+}
+
+#[cfg(not(target_os = "macos"))]
+fn default_sandbox_backend() -> SandboxBackendChoice {
+    SandboxBackendChoice::Docker
+}
+
+fn load_env(
+    env_file_if_exists: Option<&Path>,
+    env_file: Option<&Path>,
+) -> Result<HashMap<String, String>> {
+    let mut vars = HashMap::new();
+    if let Some(path) = env_file_if_exists
+        && path.exists()
+    {
+        vars.extend(parse_env_file(path)?);
+    }
+    if let Some(path) = env_file {
+        vars.extend(parse_env_file(path)?);
+    }
+    Ok(vars)
+}
+
+fn parse_env_file(path: &Path) -> Result<HashMap<String, String>> {
+    let contents = fs::read_to_string(path)?;
+    let mut vars = HashMap::new();
+    for (index, raw_line) in contents.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(anyhow!(
+                "invalid env file line {} in {}",
+                index + 1,
+                path.display()
+            ));
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(anyhow!(
+                "invalid empty env key on line {} in {}",
+                index + 1,
+                path.display()
+            ));
+        }
+        vars.insert(key.to_string(), strip_quotes(value.trim()).to_string());
+    }
+    Ok(vars)
+}
+
+fn strip_quotes(value: &str) -> &str {
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        let first = bytes[0];
+        let last = bytes[value.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return &value[1..value.len() - 1];
+        }
+    }
+    value
+}
+
+fn braintrust_runtime_config(
+    env: &HashMap<String, String>,
+    api_key: Option<String>,
+    app_url: Option<String>,
+    api_url: Option<String>,
+) -> Option<BraintrustRuntimeConfig> {
+    let api_key = api_key.or_else(|| env.get("BRAINTRUST_API_KEY").cloned())?;
+    Some(BraintrustRuntimeConfig {
+        api_key,
+        app_url: app_url.or_else(|| env.get("BRAINTRUST_APP_URL").cloned()),
+        api_url: api_url.or_else(|| env.get("BRAINTRUST_API_URL").cloned()),
+    })
+}

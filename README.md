@@ -109,49 +109,10 @@ For the coding-agent setup commands, see
 
 ## Exoclaw Long-Running Harness
 
-Exoclaw is the TypeScript harness example for long-running local agents. It uses
-the same TypeScript runner path as the minimal harness, but opts into scheduled
-task tools, long-running adapters, and scheduler-aware sandbox policy.
-
-Start a local Exoclaw REPL with:
-
-```bash
-examples/exoclaw/scripts/exoclaw-repl
-```
-
-Scheduled tasks can be created, listed, cancelled, and deleted by the agent. The
-corresponding CLI commands are under:
-
-```bash
-./target/debug/exo --harness exoclaw schedule --help
-```
-
-Adapters connect Exoclaw conversations to external applications. Built-in
-adapters include IRC, an experimental WhatsApp adapter backed by Baileys, and an
-experimental Signal adapter backed by `signal-cli`. Adapters keep external
-connections open in a host-owned runtime, wake the configured conversation when
-the trigger policy matches, and require the agent to call `send_adapter_message`
-for explicit outbound replies. Adapter CLI commands are under:
-
-```bash
-./target/debug/exo --harness exoclaw adapters --help
-```
-
-By default, Exoclaw uses an agent-scoped sandbox for shell commands and scheduled
-tasks, so setup done through the REPL is shared by future tasks and conversations
-for that agent while the warm sandbox is alive, including across normal REPL
-restarts. Conversation-scoped and task-scoped sandboxes are available for
-isolation. The sandbox filesystem is not yet durable across warm container
-cleanup; use a prepared image or task `setupCommand` for dependencies that must
-survive host/container cleanup.
-
-To make a conversation use its own sandbox for shell commands instead of the
-agent sandbox, create or update it with `--sandbox-scope conversation`:
-
-```bash
-./target/debug/exo --harness exoclaw conversation create exoclaw-agent "Isolated Dev" --sandbox-scope conversation
-examples/exoclaw/scripts/exoclaw-repl --conversation isolated-dev --sandbox-scope conversation
-```
+Exoclaw is a long-running claw-type agent built on exoharness. It supports
+scheduled tasks, and a full adapter system including support for WhatsApp,
+Signal, and IRC. See [examples/exoclaw/README.md](./examples/exoclaw/README.md)
+for setup, operation, and debugging commands.
 
 ## Repository Layout
 

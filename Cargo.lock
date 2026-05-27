@@ -1864,6 +1864,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "exoclaw-scheduler-runner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "executor",
+ "tokio",
+]
+
+[[package]]
 name = "exoharness"
 version = "0.1.0"
 dependencies = [
