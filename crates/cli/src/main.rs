@@ -511,6 +511,20 @@ async fn main() -> Result<()> {
                     if let Some(selection) = harness_selection.as_ref() {
                         ensure_agent_matches_harness_selection(agent.as_ref(), selection).await?;
                     }
+                    // Honor an explicit --model on an already-existing agent
+                    // instead of silently ignoring it (#30). Update the stored
+                    // model and tell the user; a no-op when it already matches.
+                    if let Some(requested) = model {
+                        let resolved = ensure_repl_model(harness.as_ref(), Some(requested)).await?;
+                        let mut config = agent.config().await?;
+                        if config.model != resolved {
+                            let previous = std::mem::replace(&mut config.model, resolved.clone());
+                            agent.put_config(config).await?;
+                            println!(
+                                "updated agent '{agent_slug}' model: {previous} -> {resolved}"
+                            );
+                        }
+                    }
                     agent
                 }
                 None => {
