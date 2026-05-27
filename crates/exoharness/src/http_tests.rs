@@ -1,11 +1,12 @@
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
 
+use futures::io::AsyncReadExt;
 use tempfile::TempDir;
 
 use crate::{
-    BasicExoHarness, BasicExoHarnessConfig, ExoHarness, HttpExoHarness, SandboxBackendChoice,
-    SecretBackendChoice, serve_exoharness_http_listener,
+    BasicExoHarness, BasicExoHarnessConfig, CreateSandboxRequest, ExoHarness, HttpExoHarness,
+    RunInSandboxRequest, SandboxBackendChoice, SecretBackendChoice, serve_exoharness_http_listener,
 };
 
 fn local_test_config(root: impl Into<std::path::PathBuf>) -> BasicExoHarnessConfig {
@@ -73,4 +74,49 @@ async fn http_exoharness_conversation_scope_overrides_and_forks() {
         Arc::clone(&fixture.harness),
     )
     .await;
+}
+
+#[actix_web::test]
+async fn http_exoharness_runs_noninteractive_sandbox_commands() {
+    let fixture = http_harness().await;
+    let agent = fixture
+        .harness
+        .new_agent(crate::NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let conversation = agent
+        .new_conversation(crate::NewConversationRequest::default())
+        .await
+        .expect("conversation");
+    let sandbox_id = conversation
+        .create_sandbox(CreateSandboxRequest {
+            image: "local".to_string(),
+            default_workdir: Some("/".to_string()),
+            file_system_mounts: None,
+            enable_networking: Some(true),
+            idle_seconds: Some(60),
+        })
+        .await
+        .expect("sandbox");
+    let process = conversation
+        .run_in_sandbox(RunInSandboxRequest {
+            id: sandbox_id,
+            command: vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                "printf hello".to_string(),
+            ],
+            env: Default::default(),
+        })
+        .await
+        .expect("sandbox command");
+    let parts = process.into_parts();
+    let mut stdout = parts.stdout;
+    let mut output = Vec::new();
+    stdout.read_to_end(&mut output).await.expect("stdout");
+    assert_eq!(output, b"hello");
+    assert_eq!(parts.wait.await.expect("exit"), 0);
 }

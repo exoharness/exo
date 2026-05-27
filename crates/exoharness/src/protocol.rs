@@ -3,9 +3,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     AddEventsRequest, AddEventsResult, AgentId, AgentRecord, Artifact, ArtifactVersion,
     BeginTurnRequest, Binding, BindingId, BindingMetadata, ConversationId, ConversationRecord,
-    Event, EventData, EventId, EventQuery, ForkConversationRequest, GetEventsResult,
-    NewAgentRequest, NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Secret,
-    SecretId, SecretMetadata, SessionId, TurnId, TurnRecord, WriteArtifactRequest,
+    CreateSandboxRequest, Event, EventData, EventId, EventQuery, ForkConversationRequest,
+    GetEventsResult, NewAgentRequest, NewConversationRequest, PutSecretRequest,
+    ReadArtifactRequest, RunInSandboxRequest, SandboxId, Secret, SecretId, SecretMetadata,
+    SessionId, SnapshotId, StartSandboxRequest, TurnId, TurnRecord, WriteArtifactRequest,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -160,6 +161,31 @@ pub enum Request {
         conversation_id: ConversationId,
         request: WriteArtifactRequest,
     },
+    ConversationCreateSandbox {
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+        request: CreateSandboxRequest,
+    },
+    ConversationSnapshotSandbox {
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+        sandbox_id: SandboxId,
+    },
+    ConversationStartSandbox {
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+        request: StartSandboxRequest,
+    },
+    ConversationStopSandbox {
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+        sandbox_id: SandboxId,
+    },
+    ConversationRunInSandbox {
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+        request: RunInSandboxRequest,
+    },
     ConversationListBindings {
         agent_id: AgentId,
         conversation_id: ConversationId,
@@ -246,6 +272,11 @@ impl Request {
             Self::ConversationListArtifacts { .. } => "conversation_list_artifacts",
             Self::ConversationReadArtifact { .. } => "conversation_read_artifact",
             Self::ConversationWriteArtifact { .. } => "conversation_write_artifact",
+            Self::ConversationCreateSandbox { .. } => "conversation_create_sandbox",
+            Self::ConversationSnapshotSandbox { .. } => "conversation_snapshot_sandbox",
+            Self::ConversationStartSandbox { .. } => "conversation_start_sandbox",
+            Self::ConversationStopSandbox { .. } => "conversation_stop_sandbox",
+            Self::ConversationRunInSandbox { .. } => "conversation_run_in_sandbox",
             Self::ConversationListBindings { .. } => "conversation_list_bindings",
             Self::ConversationPutBinding { .. } => "conversation_put_binding",
             Self::ConversationGetBinding { .. } => "conversation_get_binding",
@@ -298,6 +329,17 @@ pub enum Response {
     ArtifactVersion {
         artifact: ArtifactVersion,
     },
+    SandboxId {
+        sandbox_id: SandboxId,
+    },
+    SnapshotId {
+        snapshot_id: SnapshotId,
+    },
+    SandboxProcessOutput {
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        exit_code: i32,
+    },
     Bindings {
         bindings: Vec<BindingMetadata>,
     },
@@ -340,6 +382,9 @@ impl Response {
             Self::ArtifactVersions { .. } => "artifact_versions",
             Self::Artifact { .. } => "artifact",
             Self::ArtifactVersion { .. } => "artifact_version",
+            Self::SandboxId { .. } => "sandbox_id",
+            Self::SnapshotId { .. } => "snapshot_id",
+            Self::SandboxProcessOutput { .. } => "sandbox_process_output",
             Self::Bindings { .. } => "bindings",
             Self::Binding { .. } => "binding",
             Self::Secrets { .. } => "secrets",

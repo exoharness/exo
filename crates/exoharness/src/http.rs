@@ -7,6 +7,7 @@ use std::time::Instant;
 use actix_web::{App, HttpResponse, HttpServer, Responder, web};
 use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
+use futures::io::Cursor;
 use url::Url;
 
 use crate::protocol::{ClientMessage, ConversationHandleInfo, Request, Response, ServerMessage};
@@ -17,8 +18,8 @@ use crate::{
     ConversationId, ConversationRecord, CreateSandboxRequest, Event, EventData, EventId,
     EventQuery, EventStream, ExoHarness, ForkConversationRequest, GetEventsResult, NewAgentRequest,
     NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result, RunInSandboxRequest,
-    SandboxId, SandboxProcess, Secret, SecretId, SecretMetadata, SessionId, SnapshotId,
-    StartSandboxRequest, TurnHandle, TurnRecord, WriteArtifactRequest,
+    SandboxId, SandboxProcess, SandboxProcessParts, Secret, SecretId, SecretMetadata, SessionId,
+    SnapshotId, StartSandboxRequest, TurnHandle, TurnRecord, WriteArtifactRequest,
 };
 
 pub const HTTP_EXOHARNESS_REQUEST_PATH: &str = "/v1/requests";
@@ -732,27 +733,90 @@ impl ConversationHandle for HttpConversationHandle {
         }
     }
 
-    async fn create_sandbox(&self, _request: CreateSandboxRequest) -> Result<SandboxId> {
-        unsupported("create_sandbox")
+    async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
+        match self
+            .harness
+            .request(Request::ConversationCreateSandbox {
+                agent_id: self.agent_id,
+                conversation_id: self.record.id,
+                request,
+            })
+            .await?
+        {
+            Response::SandboxId { sandbox_id } => Ok(sandbox_id),
+            response => unexpected_response(response, "sandbox_id"),
+        }
     }
 
-    async fn snapshot_sandbox(&self, _id: SandboxId) -> Result<SnapshotId> {
-        unsupported("snapshot_sandbox")
+    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
+        match self
+            .harness
+            .request(Request::ConversationSnapshotSandbox {
+                agent_id: self.agent_id,
+                conversation_id: self.record.id,
+                sandbox_id: id,
+            })
+            .await?
+        {
+            Response::SnapshotId { snapshot_id } => Ok(snapshot_id),
+            response => unexpected_response(response, "snapshot_id"),
+        }
     }
 
-    async fn start_sandbox(&self, _request: StartSandboxRequest) -> Result<()> {
-        unsupported("start_sandbox")
+    async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
+        match self
+            .harness
+            .request(Request::ConversationStartSandbox {
+                agent_id: self.agent_id,
+                conversation_id: self.record.id,
+                request,
+            })
+            .await?
+        {
+            Response::Unit => Ok(()),
+            response => unexpected_response(response, "unit"),
+        }
     }
 
-    async fn stop_sandbox(&self, _id: SandboxId) -> Result<()> {
-        unsupported("stop_sandbox")
+    async fn stop_sandbox(&self, id: SandboxId) -> Result<()> {
+        match self
+            .harness
+            .request(Request::ConversationStopSandbox {
+                agent_id: self.agent_id,
+                conversation_id: self.record.id,
+                sandbox_id: id,
+            })
+            .await?
+        {
+            Response::Unit => Ok(()),
+            response => unexpected_response(response, "unit"),
+        }
     }
 
     async fn run_in_sandbox(
         &self,
-        _request: RunInSandboxRequest,
+        request: RunInSandboxRequest,
     ) -> Result<Box<dyn SandboxProcess>> {
-        unsupported("run_in_sandbox")
+        match self
+            .harness
+            .request(Request::ConversationRunInSandbox {
+                agent_id: self.agent_id,
+                conversation_id: self.record.id,
+                request,
+            })
+            .await?
+        {
+            Response::SandboxProcessOutput {
+                stdout,
+                stderr,
+                exit_code,
+            } => Ok(Box::new(CompletedSandboxProcess {
+                stdout,
+                stderr,
+                exit_code,
+            })),
+            response => unexpected_response(response, "sandbox_process_output"),
+        }
     }
 
     async fn list_bindings(&self) -> Result<Vec<BindingMetadata>> {
@@ -919,6 +983,28 @@ impl TurnHandle for HttpTurnHandle {
         {
             Response::EventId { event_id } => Ok(event_id),
             response => unexpected_response(response, "event_id"),
+        }
+    }
+}
+
+struct CompletedSandboxProcess {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    exit_code: i32,
+}
+
+impl SandboxProcess for CompletedSandboxProcess {
+    fn into_parts(self: Box<Self>) -> SandboxProcessParts {
+        let CompletedSandboxProcess {
+            stdout,
+            stderr,
+            exit_code,
+        } = *self;
+        SandboxProcessParts {
+            stdout: Box::pin(Cursor::new(stdout)),
+            stderr: Box::pin(Cursor::new(stderr)),
+            stdin: Box::pin(Cursor::new(Vec::new())),
+            wait: Box::pin(async move { Ok(exit_code) }),
         }
     }
 }
