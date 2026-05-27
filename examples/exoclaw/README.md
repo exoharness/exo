@@ -1,54 +1,31 @@
 # Exoclaw Harness
 
-Exoclaw is the long-running agent harness example. It builds on the minimal
-TypeScript harness turn loop, but opts into heavier runtime features:
+Exoclaw is a persistent agent built on exoclaw designed to be helpful wherever
+there is a task to do from a computer. It supports task scheuling, a full
+sandbox where it can install its own tools and integrations, and right now
+supports WhatsApp, Signal, and IRC out of the box.
 
-- scheduled sandbox tasks
-- long-running adapters for external applications
-- live conversation wake-ups
-- sticky agent sandbox policy
-- optional `sandboxScope: "conversation"` conversation-scoped shell sandboxes
-- optional `sandboxMode: "conversation"` scheduled tasks
-- optional `sandboxMode: "task_fresh"` task-owned sandboxes
-
-Use Exoclaw when the agent should keep working over time. Use
-`examples/typescript/basic-harness.ts` for a minimal TypeScript harness without
-scheduler tools.
-
-For a deeper explanation of the adapter runtime, IRC example, and scheduler
-cooperation, see [adapter-architecture.md](./adapter-architecture.md).
-
-Start an Exoclaw REPL with the default agent-scoped sandbox:
+Exoclaw includes a helper script to start up all the subservices (task
+scheduling and adapters). To get started, simply run:
 
 ```bash
-examples/exoclaw/scripts/exoclaw-repl --pull-sandbox
+  examples/exoclaw/scripts/exoclaw-repl fresh \
+  --pull-sandbox \
+  --agent exoclaw \
+  --agent-name "exoclaw" \
+  --conversation dev \
+  --setup-all \
+  --setup-profile
 ```
 
-The script also starts local scheduler and adapter runner processes by default.
-The scheduler loop is an example-local Rust runner in
-`examples/exoclaw/scheduler-runner`, so the shared `exo` CLI does not need an
-Exoclaw-specific scheduler subcommand. Use `--no-scheduler` or `--no-adapters`
-when you only want the interactive REPL. Use `--control` for a local debugging
-console that streams scheduler and adapter logs into the same terminal while the
-REPL is running.
-For repeatable setup tests, pass `--setup <adapter>`; the script sends the
-adapter's `setup-prompt.md` before dropping into the REPL. `--setup` may be
-passed more than once, or use `--setup-all` for Signal, WhatsApp, and IRC.
-Exoclaw's identity prompt is loaded by the harness on every turn from
-`examples/exoclaw/prompts/me.md`. Keep that prompt generic. For local
-deployment-specific instructions, run `examples/exoclaw/scripts/exoclaw-repl
-setup-profile` or pass `--setup-profile`; the harness also loads
-`.exo/exoclaw-profile.md` when it exists.
+Or for a minimal start (just REPL, pull sandbox):
+`examples/exoclaw/scripts/exoclaw-repl --pull-sandbox`
 
-```bash
-examples/exoclaw/scripts/exoclaw-repl fresh --pull-sandbox --setup irc
-```
-
-## Local Profile
+## Setting up the identity
 
 `examples/exoclaw/prompts/me.md` is the committed, generic Exoclaw identity
-prompt. Do not put user-specific names, secrets, account details, phone numbers,
-or local deployment preferences in that file.
+prompt. It's best to keep this high level, and not specific to any given
+instance or the local deployment environment.
 
 Use `.exo/exoclaw-profile.md` for local instructions instead. The harness loads
 it as an additional developer prompt when it exists, and `.exo` is ignored by
@@ -61,47 +38,6 @@ examples/exoclaw/scripts/exoclaw-repl setup-profile
 The script asks for the user's name and any extra local instructions. To use a
 different local prompt path, set `EXOCLAW_LOCAL_PROMPT_FILE` or pass
 `--local-prompt-file <path>`.
-
-To reconstruct a full test control agent in one command:
-
-```bash
-PATH="/opt/homebrew/opt/openjdk/bin:$PATH" \
-  examples/exoclaw/scripts/exoclaw-repl fresh \
-  --agent spooky \
-  --agent-name Spooky \
-  --conversation dev \
-  --setup-profile \
-  --setup-all
-```
-
-Edit `examples/exoclaw/adapters/irc/setup-prompt.md` before using it on a real
-IRC network. Use `--initial-prompt-file <path>` for a custom one-off startup
-prompt.
-
-For WhatsApp setup, use `--setup whatsapp`. The script waits briefly for the
-worker to emit a linked-device QR code and prints it if it appears:
-
-```bash
-examples/exoclaw/scripts/exoclaw-repl fresh --pull-sandbox --setup whatsapp
-```
-
-For Signal setup, install `signal-cli`, set up a Signal account and username on
-your phone, then use `--setup signal`. The script waits briefly for a
-linked-device QR code, prints it if it appears, and pauses while you scan it:
-
-```bash
-brew install signal-cli
-```
-
-Some native `signal-cli` builds can receive messages but fail outbound sends with
-`NETWORK_FAILURE` and a Java error mentioning `IdentityKeyDeserializer`. If that
-happens, install a JRE/JDK and the JVM distribution from the `signal-cli`
-releases, then create the adapter with `signalCliCommand` pointing at its
-`bin/signal-cli` script.
-
-```bash
-examples/exoclaw/scripts/exoclaw-repl fresh --pull-sandbox --setup signal
-```
 
 ## Tools
 
@@ -141,12 +77,53 @@ reconnect behavior, inbound message parsing, event history, and conversation
 wake-ups. Agents configure adapters with tools, and the local adapter runner
 started by `examples/exoclaw/scripts/exoclaw-repl` keeps them connected.
 
+Exoclaw ships with three adapters: IRC, WhatsApp, and Signal. The easiest way to
+use them is to have the script send all three setup prompts before opening the
+REPL:
+
+```bash
+examples/exoclaw/scripts/exoclaw-repl --setup-all
+```
+
+For a fresh control agent with a local profile prompt and all adapters:
+
+```bash
+PATH="/opt/homebrew/opt/openjdk/bin:$PATH" \
+  examples/exoclaw/scripts/exoclaw-repl fresh \
+  --agent spooky \
+  --agent-name Spooky \
+  --conversation dev \
+  --setup-profile \
+  --setup-all
+```
+
+This will:
+
+- Prompt you for any needed adapter configuration (such as nicknames, channel/server info for IRC, or pairing for WhatsApp/Signal).
+- Write adapter configuration to `.exo/adapters/`.
+- Start the background adapter runner so the agent can receive and react to external messages in real time.
+
+The adapter runner starts by default. Use `--no-adapters` to skip it, or
+`--adapters` to force it on when an environment override disabled it.
+
+You can list configured adapters with:
+
+```bash
+target/debug/exo --harness exoclaw adapters list
+```
+
+See the sections below for more details on individual adapter configuration.
+
+### IRC
+
 The first built-in adapter is IRC. It runs as a host-supervised Node.js worker
 that connects to a configured server/channel, responds to `PING`, parses
 `PRIVMSG`, and wakes the conversation when the trigger policy matches. The
 recommended trigger is `mention`, which only wakes the conversation when a
 channel message mentions the adapter nick. `all_messages` is available for
 quieter channels.
+
+### WhatsApp
 
 Exoclaw also includes an experimental WhatsApp adapter using Baileys. The Rust
 adapter runtime owns supervision, durable events, conversation wakeups, and
@@ -155,91 +132,14 @@ run, the WhatsApp worker emits a QR pairing event into adapter history and logs;
 after pairing, Baileys auth state is stored under
 `.exo/adapters/whatsapp/<adapter-id>/auth` by default.
 
+### Signal
+
 The Signal adapter uses `signal-cli` as a linked device. If its `account` config
 is null, the worker starts `signal-cli link`, logs a QR code for the phone's
 linked-device flow, discovers the linked account with `signal-cli listAccounts`,
 then runs `signal-cli -a <account> jsonRpc`. Outbound DM targets should be
 Signal usernames with the `u:` prefix, such as `u:example.01`, unless an inbound
 wakeup provides a more precise target.
-
-Example IRC adapter tool arguments:
-
-```json
-{
-  "name": "libera-exo",
-  "source": "built_in",
-  "config": {
-    "type": "irc",
-    "server": "irc.libera.chat",
-    "port": 6697,
-    "tls": true,
-    "nick": "exo-bot",
-    "username": "exo-bot",
-    "realname": "Exoclaw Bot",
-    "channel": "#example",
-    "passwordSecretId": null,
-    "trigger": "mention"
-  }
-}
-```
-
-Example WhatsApp adapter tool arguments:
-
-```json
-{
-  "name": "whatsapp-dev",
-  "source": "library",
-  "config": {
-    "type": "whatsapp",
-    "authDir": null,
-    "trigger": "all_messages",
-    "allowedChats": null,
-    "workerCommand": null
-  }
-}
-```
-
-Example Signal adapter tool arguments:
-
-```json
-{
-  "name": "signal-dev",
-  "source": "library",
-  "config": {
-    "type": "signal",
-    "account": null,
-    "deviceName": "Exoclaw",
-    "signalCliCommand": null,
-    "configDir": null,
-    "trigger": "all_messages",
-    "allowedContacts": null
-  }
-}
-```
-
-Inbound adapter messages do not automatically send model output back to the
-external service. The agent must explicitly call `send_adapter_message`, which
-keeps external side effects visible in tool history. WhatsApp sends require the
-`target` chat id from the inbound wakeup. Signal sends require a target such as
-`u:example.01`, a phone number, a UUID, or a group id. IRC sends go to the
-configured channel; using the inbound channel target is fine, but the worker does
-not require it.
-
-If an IRC, WhatsApp, or Signal user asks Exoclaw to schedule recurring work and
-expects future results in the originating app, the agent should put that routing
-instruction in the task's `reportPrompt`, including the `adapterId` and target
-from the wakeup. Scheduler wakeups are normal Exoclaw turns, so they can call
-`send_adapter_message` when the `reportPrompt` says to post the result back.
-
-Adapters use a small source model:
-
-- `built_in`: core adapters shipped as host-native Exoclaw behavior. IRC is
-  currently the only built-in adapter.
-- `library`: reusable adapters shipped with Exoclaw. WhatsApp and Signal are
-  library adapters backed by shipped workers.
-
-The host runtime runs built-in IRC plus library WhatsApp and Signal adapters
-through the same generic worker bridge.
 
 ## Sandbox Modes
 

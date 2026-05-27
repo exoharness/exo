@@ -43,6 +43,7 @@ Usage:
   examples/exoclaw/scripts/exoclaw-repl list
   examples/exoclaw/scripts/exoclaw-repl delall all
   examples/exoclaw/scripts/exoclaw-repl fresh
+  examples/exoclaw/scripts/exoclaw-repl stop-all
   examples/exoclaw/scripts/exoclaw-repl setup-profile
   examples/exoclaw/scripts/exoclaw-repl setup-sandbox
 
@@ -473,6 +474,12 @@ stop_adapters() {
   rm -f "$pid_file"
 }
 
+stop_all_processes() {
+  stop_scheduler
+  stop_adapters
+  echo "Stopped Exoclaw scheduler and adapter runners. State in .exo was preserved."
+}
+
 delete_adapter_state() {
   stop_adapters
   rm -rf "$ROOT_DIR/.exo/adapters"
@@ -816,6 +823,11 @@ while [[ $# -gt 0 ]]; do
       shift
       COMMAND="fresh"
       ;;
+    stop-all|stop)
+      shift
+      [[ $# -eq 0 ]] || die "stop-all does not accept additional arguments"
+      COMMAND="stop-all"
+      ;;
     setup-profile)
       shift
       COMMAND="setup-profile"
@@ -975,6 +987,9 @@ case "$COMMAND" in
     ;;
   fresh)
     fresh_start
+    ;;
+  stop-all)
+    stop_all_processes
     ;;
   setup-profile)
     setup_local_profile
