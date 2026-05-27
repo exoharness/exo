@@ -12,22 +12,9 @@ Incoming Signal messages become Exoclaw adapter message events. Outbound `send_a
 
 ## Setup
 
-Install the JVM `signal-cli` distribution and Java. The native `signal-cli` binary can receive messages but has failed outbound sends in testing.
+Install the JVM `signal-cli` distribution and Java, then make sure the `signal-cli` script and Java are available to the adapter worker. Run setup with:
 
 ```bash
-brew install openjdk
-```
-
-The current local setup expects the JVM script at:
-
-```text
-/Users/martin/.local/bin/signal-cli-jvm
-```
-
-Run the setup with Java on `PATH`:
-
-```bash
-PATH="/opt/homebrew/opt/openjdk/bin:$PATH" \
 examples/exoclaw/scripts/exoclaw-repl fresh --pull-sandbox --setup signal
 ```
 
@@ -43,7 +30,7 @@ The setup prompt at `setup-prompt.md` asks Exoclaw to create a library adapter s
     "type": "signal",
     "account": null,
     "deviceName": "Exoclaw",
-    "signalCliCommand": ["/Users/martin/.local/bin/signal-cli-jvm"],
+    "signalCliCommand": null,
     "configDir": null,
     "trigger": "all_messages",
     "allowedContacts": null
@@ -55,10 +42,41 @@ The setup prompt at `setup-prompt.md` asks Exoclaw to create a library adapter s
 
 - `account` is the local Signal account identifier for `signal-cli -a`. Use `null` for first-time setup or automatic account discovery.
 - `deviceName` is shown in Signal's linked-device list during pairing.
-- `signalCliCommand` is the command array used to run `signal-cli`. Use `["/Users/martin/.local/bin/signal-cli-jvm"]` for the tested JVM script, or `null` to use `signal-cli` from `PATH`.
+- `signalCliCommand` is the command array used to run `signal-cli`. Use `null` to use `signal-cli` from `PATH`, or set an absolute path for a local JVM script.
 - `configDir` controls where `signal-cli` stores linked-device state. If omitted, the worker uses `.exo/adapters/signal/<adapter-id>/signal-cli` or the host-provided adapter state directory.
 - `trigger` is `all_messages` or `contacts_only`.
 - `allowedContacts` can restrict wakeups to specific sender identifiers.
+
+## Installing On Mac
+
+Install Java with Homebrew:
+
+```bash
+brew install openjdk
+```
+
+The native/Homebrew `signal-cli` binary may receive messages but fail outbound sends with `NETWORK_FAILURE` and an error mentioning `IdentityKeyDeserializer has no default (no arg) constructor`. Use the JVM `signal-cli` distribution for Exoclaw instead.
+
+One tested local setup uses a wrapper or symlink at:
+
+```text
+/Users/martin/.local/bin/signal-cli-jvm
+```
+
+With that setup, set `signalCliCommand` to:
+
+```json
+["/Users/martin/.local/bin/signal-cli-jvm"]
+```
+
+Java must be visible on `PATH` for the JVM script. On Homebrew macOS, prefix Exoclaw commands with:
+
+```bash
+PATH="/opt/homebrew/opt/openjdk/bin:$PATH" \
+examples/exoclaw/scripts/exoclaw-repl fresh --pull-sandbox --setup signal
+```
+
+You can also add `/opt/homebrew/opt/openjdk/bin` to your shell profile.
 
 ## Targets
 
@@ -73,8 +91,6 @@ Long opaque non-recipient strings are treated as group ids.
 
 ## Quirks And Gotchas
 
-- The Homebrew/native `signal-cli` binary may fail outbound sends with `NETWORK_FAILURE` and an error mentioning `IdentityKeyDeserializer has no default (no arg) constructor`. Use the JVM distribution instead.
-- Java must be visible on `PATH` for the JVM `signal-cli` script. On Homebrew macOS, prefix commands with `PATH="/opt/homebrew/opt/openjdk/bin:$PATH"` or add that path to your shell profile.
 - If linking succeeds but later setup keeps asking for QR codes, check that the same `configDir` is being reused.
 - Signal group support depends on targets surfaced by incoming group messages. Prefer replying to the inbound target instead of inventing group ids.
 - QR codes, account ids, phone numbers, and message routing metadata may appear in `.exo/exoclaw-adapters.log`; treat that log as sensitive local state.
