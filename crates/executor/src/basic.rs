@@ -556,6 +556,9 @@ async fn build_model_request(
         messages,
         tools: build_tool_definitions(conversation_config),
         max_output_tokens: agent_config.max_output_tokens,
+        // Per-conversation cache key so each turn's request reuses the
+        // growing shared prefix (system prompt + tools + prior history).
+        prompt_cache_key: Some(conversation.record().id.to_string()),
     })
 }
 

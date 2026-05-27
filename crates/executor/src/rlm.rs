@@ -111,6 +111,9 @@ where
                 messages: history.clone(),
                 tools: build_rlm_tool_definitions(),
                 max_output_tokens: agent_config.max_output_tokens,
+                // RLM's prompt-cache strategy is out of scope here (#24 targets
+                // the basic chat path); leave it to provider defaults.
+                prompt_cache_key: None,
             };
             let llm_trace = match turn_trace {
                 Some(turn_trace) => turn_trace.start_llm_round(&request, round as usize).await,
@@ -390,6 +393,7 @@ where
                 messages,
                 tools: Vec::new(),
                 max_output_tokens: agent_config.max_output_tokens,
+                prompt_cache_key: None,
             })
             .await?;
 

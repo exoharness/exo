@@ -131,6 +131,11 @@ pub struct ModelRequest {
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDefinition>,
     pub max_output_tokens: Option<i64>,
+    /// Stable label used to route prompt-cache hits (OpenAI Responses API
+    /// `prompt_cache_key`). Per-conversation, so each turn reuses the
+    /// growing shared prefix. `None` leaves caching to provider defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

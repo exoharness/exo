@@ -198,7 +198,7 @@ fn build_router(
 fn build_universal_request(request: &ModelRequest, stream: bool) -> Result<UniversalRequest> {
     let tools = build_universal_tools(&request.tools)?;
     let has_tools = !tools.is_empty();
-    let params = UniversalParams {
+    let mut params = UniversalParams {
         token_budget: request.max_output_tokens.map(TokenBudget::OutputTokens),
         tools: if tools.is_empty() { None } else { Some(tools) },
         tool_choice: has_tools.then_some(ToolChoiceConfig {
@@ -209,6 +209,21 @@ fn build_universal_request(request: &ModelRequest, stream: bool) -> Result<Unive
         stream: Some(stream),
         ..Default::default()
     };
+
+    // Route prompt-cache hits via a stable `prompt_cache_key` on the OpenAI
+    // Responses API (#24). Without it, the Responses endpoint sees ~0% cache
+    // hit rate at low request volume. Carried through lingua's per-format
+    // extras passthrough.
+    if let Some(cache_key) = &request.prompt_cache_key {
+        let mut responses_extras = lingua_json::Map::new();
+        responses_extras.insert(
+            "prompt_cache_key".to_string(),
+            lingua_json::Value::String(cache_key.clone()),
+        );
+        params
+            .extras
+            .insert(ProviderFormat::Responses, responses_extras);
+    }
 
     Ok(UniversalRequest {
         model: Some(request.model.clone()),
@@ -263,6 +278,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             max_output_tokens: None,
+            prompt_cache_key: None,
         }
     }
 
@@ -275,6 +291,29 @@ mod tests {
 
         assert_eq!(payload.stream, Some(true));
         assert!(payload.stream_options.is_none());
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SerializedResponsesCacheKey {
+        prompt_cache_key: Option<String>,
+    }
+
+    #[test]
+    fn responses_request_includes_prompt_cache_key_when_set() {
+        let mut request = model_request();
+        request.prompt_cache_key = Some("conv-abc123".to_string());
+        let universal = build_universal_request(&request, true).unwrap();
+        let serialized = serialize_request(ProviderFormat::Responses, &universal).unwrap();
+        let payload: SerializedResponsesCacheKey = lingua_json::from_slice(&serialized).unwrap();
+        assert_eq!(payload.prompt_cache_key.as_deref(), Some("conv-abc123"));
+    }
+
+    #[test]
+    fn responses_request_omits_prompt_cache_key_when_unset() {
+        let universal = build_universal_request(&model_request(), true).unwrap();
+        let serialized = serialize_request(ProviderFormat::Responses, &universal).unwrap();
+        let payload: SerializedResponsesCacheKey = lingua_json::from_slice(&serialized).unwrap();
+        assert!(payload.prompt_cache_key.is_none());
     }
 
     #[test]
