@@ -554,6 +554,12 @@ async fn main() -> Result<()> {
                     if let Some(selection) = harness_selection.as_ref() {
                         ensure_agent_matches_harness_selection(agent.as_ref(), selection).await?;
                     }
+                    ensure_existing_repl_agent_model(
+                        harness.as_ref(),
+                        agent.as_ref(),
+                        model.clone(),
+                    )
+                    .await?;
                     agent
                 }
                 None => {
@@ -1395,14 +1401,50 @@ async fn main() -> Result<()> {
         },
         Commands::Model { command } => match command {
             ModelCommands::List => {
-                println!("MODEL\tUPSTREAM_MODEL\tSECRET\tBASE_URL");
-                for model in list_model_bindings(harness.exoharness_handle().as_ref()).await? {
+                let models = list_model_bindings(harness.exoharness_handle().as_ref()).await?;
+                let model_width = models
+                    .iter()
+                    .map(|model| model.name.len())
+                    .chain(std::iter::once("MODEL".len()))
+                    .max()
+                    .unwrap_or("MODEL".len());
+                let upstream_width = models
+                    .iter()
+                    .map(|model| model.model.len())
+                    .chain(std::iter::once("UPSTREAM_MODEL".len()))
+                    .max()
+                    .unwrap_or("UPSTREAM_MODEL".len());
+                let secret_width = models
+                    .iter()
+                    .map(|model| {
+                        model
+                            .secret_name
+                            .as_ref()
+                            .map(|secret| secret.len())
+                            .unwrap_or("none".len())
+                    })
+                    .chain(std::iter::once("SECRET".len()))
+                    .max()
+                    .unwrap_or("SECRET".len());
+                println!(
+                    "{:<model_width$}  {:<upstream_width$}  {:<secret_width$}  BASE_URL",
+                    "MODEL",
+                    "UPSTREAM_MODEL",
+                    "SECRET",
+                    model_width = model_width,
+                    upstream_width = upstream_width,
+                    secret_width = secret_width
+                );
+                for model in models {
                     println!(
-                        "{}\t{}\t{}\t{}",
+                        "{:<model_width$}  {:<upstream_width$}  {:<secret_width$}  {}",
                         model.name,
                         model.model,
                         model.secret_name.unwrap_or_else(|| "none".to_string()),
-                        model.base_url.unwrap_or_else(|| "default".to_string())
+                        model.base_url.unwrap_or_else(|| "default".to_string()),
+                        model_width = model_width,
+                        upstream_width = upstream_width,
+                        secret_width = secret_width
                     );
                 }
             }
@@ -1802,7 +1844,18 @@ async fn list_model_bindings(exoharness: &dyn ExoHarness) -> Result<Vec<Register
             base_url,
         });
     }
-    Ok(models)
+    let mut deduped = Vec::<RegisteredModel>::new();
+    for model in models {
+        if let Some(existing) = deduped
+            .iter_mut()
+            .find(|existing| existing.name == model.name)
+        {
+            *existing = model;
+        } else {
+            deduped.push(model);
+        }
+    }
+    Ok(deduped)
 }
 
 const DEFAULT_REPL_SLUG: &str = "repl";
@@ -1817,6 +1870,27 @@ async fn ensure_repl_model(harness: &dyn Harness, requested: Option<String>) -> 
         .map(|binding| binding.name)
         .collect();
     pick_repl_model(&registered, requested)
+}
+
+async fn ensure_existing_repl_agent_model(
+    harness: &dyn Harness,
+    agent: &dyn HarnessAgent,
+    requested: Option<String>,
+) -> Result<()> {
+    let mut config = agent.config().await?;
+    if !repl_agent_model_needs_update(&config.model, requested.as_deref()) {
+        return Ok(());
+    }
+    let model = ensure_repl_model(harness, requested).await?;
+    if config.model == model {
+        return Ok(());
+    }
+    config.model = model;
+    agent.put_config(config).await
+}
+
+fn repl_agent_model_needs_update(current: &str, requested: Option<&str>) -> bool {
+    requested.is_some() || current.trim().is_empty()
 }
 
 /// Picks the model an explicit request names, falling back to the first
