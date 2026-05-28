@@ -112,13 +112,6 @@ jobs:
           container system status
 
       - name: Run integration tests
-        # List each integration-test target explicitly. Each scenario lives
-        # in its own file under crates/cli/tests/ and self-skips when its
-        # required backend isn't available on the current matrix cell.
-        # Adding a new scenario in a future PR means appending another
-        # `--test <name>` flag here.
-        run: |
-          cargo test --package exo \
-            --test integration_chat \
-            --test snapshot_round_trip \
-            -- --ignored
+        # `--tests` auto-picks-up new test files; each self-skips on
+        # cells that don't have its required backend.
+        run: cargo test --package exo --tests -- --ignored

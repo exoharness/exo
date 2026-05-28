@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use executor::{
-    ConversationHandle, EventData, EventId, EventQuery, EventQueryDirection, ExecutionStreamEvent,
-    HarnessConversation, SandboxId, SendRequest, SessionId, SnapshotId, StartSandboxRequest,
+    ConversationHandle, EventData, EventId, EventKind, EventQuery, EventQueryDirection,
+    ExecutionStreamEvent, HarnessConversation, SandboxId, SendRequest, SessionId, SnapshotId,
+    StartSandboxRequest,
 };
 use lingua::universal::{UserContent, UserContentPart};
 use lingua::{Message, UniversalStreamChunk};
@@ -373,26 +374,28 @@ impl ChatRepl {
                     if trimmed.is_empty() {
                         continue;
                     }
-                    if trimmed == "/quit" || trimmed == "/exit" {
-                        break;
-                    }
-                    if trimmed == "/history" {
-                        self.print_transcript().await?;
-                        continue;
-                    }
-                    if trimmed == "/help" {
-                        print_help();
-                        continue;
-                    }
-                    if trimmed == "/snapshot" {
-                        match self.snapshot_current_sandbox().await {
+                    match trimmed {
+                        "/quit" | "/exit" => break,
+                        "/history" => self.print_transcript().await?,
+                        "/help" => print_help(),
+                        "/snapshot" => match self.snapshot_sandbox(None).await {
                             Ok(snapshot_id) => println!("snapshot {snapshot_id}"),
                             Err(error) => println!("snapshot failed: {error:#}"),
+                        },
+                        other if let Some(arg) = other.strip_prefix("/snapshot ") => {
+                            let arg = arg.trim();
+                            if arg.is_empty() {
+                                println!("usage: /snapshot [<sandbox-id>]");
+                            } else if arg.contains(char::is_whitespace) {
+                                println!("/snapshot takes at most one sandbox id; got: {arg:?}");
+                            } else {
+                                match self.snapshot_sandbox(Some(arg.to_string())).await {
+                                    Ok(snapshot_id) => println!("snapshot {snapshot_id}"),
+                                    Err(error) => println!("snapshot failed: {error:#}"),
+                                }
+                            }
                         }
-                        continue;
-                    }
-                    if trimmed == "/snapshots" {
-                        match self.list_snapshots().await {
+                        "/snapshots" => match self.list_snapshots().await {
                             Ok(snapshots) if snapshots.is_empty() => {
                                 println!("no snapshots yet for this conversation");
                             }
@@ -403,24 +406,25 @@ impl ChatRepl {
                                 }
                             }
                             Err(error) => println!("listing snapshots failed: {error:#}"),
+                        },
+                        other if let Some(arg) = other.strip_prefix("/rewind ") => {
+                            let arg = arg.trim();
+                            if arg.is_empty() {
+                                println!("usage: /rewind <snapshot-id>");
+                            } else if arg.contains(char::is_whitespace) {
+                                println!("/rewind takes exactly one snapshot id; got: {arg:?}");
+                            } else {
+                                match self.rewind_to_snapshot(arg).await {
+                                    Ok(()) => println!("rewound to snapshot {arg}"),
+                                    Err(error) => println!("rewind failed: {error:#}"),
+                                }
+                            }
                         }
-                        continue;
+                        _ => {
+                            self.editor.add_history_entry(line.as_str())?;
+                            self.send(trimmed).await?;
+                        }
                     }
-                    if let Some(arg) = trimmed.strip_prefix("/rewind ") {
-                        let snapshot_id_str = arg.trim();
-                        if snapshot_id_str.is_empty() {
-                            println!("usage: /rewind <snapshot-id>");
-                            continue;
-                        }
-                        match self.rewind_to_snapshot(snapshot_id_str).await {
-                            Ok(()) => println!("rewound to snapshot {snapshot_id_str}"),
-                            Err(error) => println!("rewind failed: {error:#}"),
-                        }
-                        continue;
-                    }
-
-                    self.editor.add_history_entry(line.as_str())?;
-                    self.send(trimmed).await?;
                 }
                 Err(ReadlineError::Interrupted) => {
                     println!();
@@ -441,15 +445,15 @@ impl ChatRepl {
         Ok(())
     }
 
-    /// Find the most recent `SandboxCreated` event and snapshot that sandbox.
-    /// The conversation's active sandbox must have been created (or started)
-    /// in *this* REPL session — running_sandboxes is a per-process map.
-    async fn snapshot_current_sandbox(&self) -> Result<SnapshotId> {
-        let sandbox_id = latest_sandbox_id(self.conversation.as_ref())
-            .await?
-            .ok_or_else(|| {
-                anyhow::anyhow!("no sandbox has been created in this conversation yet")
-            })?;
+    async fn snapshot_sandbox(&self, explicit_id: Option<SandboxId>) -> Result<SnapshotId> {
+        let sandbox_id = match explicit_id {
+            Some(id) => id,
+            None => latest_sandbox_id(self.conversation.as_ref())
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("no sandbox has been created in this conversation yet")
+                })?,
+        };
         let id = self
             .conversation
             .exoharness_handle()
@@ -645,7 +649,8 @@ fn print_help() {
     println!("repl commands:");
     println!("  /quit | /exit        exit the repl");
     println!("  /history             reprint the conversation transcript");
-    println!("  /snapshot            snapshot this conversation's running sandbox");
+    println!("  /snapshot [<id>]     snapshot a sandbox in this conversation");
+    println!("                       (defaults to the latest one if no id is given)");
     println!("  /snapshots           list snapshots taken in this conversation");
     println!("  /rewind <id>         restore the sandbox to a previous snapshot");
     println!("  /help                show this message");
@@ -654,26 +659,29 @@ fn print_help() {
 /// Walk the conversation's event log to find the latest `SandboxCreated`
 /// event, returning the sandbox id. Returns `None` if no sandbox has been
 /// created yet (e.g. nothing has been chatted with).
-async fn latest_sandbox_id(
-    conversation: &dyn HarnessConversation,
-) -> Result<Option<SandboxId>> {
+async fn latest_sandbox_id(conversation: &dyn HarnessConversation) -> Result<Option<SandboxId>> {
     let result = conversation
         .exoharness_handle()
         .get_events(Some(EventQuery {
             cursor: None,
             direction: Some(EventQueryDirection::Desc),
-            limit: Some(50),
+            limit: Some(1),
             session_id: None,
             turn_id: None,
-            types: Some(vec!["sandbox_created".to_string()]),
+            types: Some(vec![EventKind::SANDBOX_CREATED]),
         }))
         .await?;
-    for event in result.events {
-        if let EventData::SandboxCreated { sandbox_id, .. } = event.data {
-            return Ok(Some(sandbox_id));
-        }
+    let Some(event) = result.events.into_iter().next() else {
+        return Ok(None);
+    };
+    match event.data {
+        EventData::SandboxCreated { sandbox_id, .. } => Ok(Some(sandbox_id)),
+        other => anyhow::bail!(
+            "type-filtered query for {} returned unexpected variant {}",
+            EventKind::SANDBOX_CREATED.as_str(),
+            other.kind().as_str(),
+        ),
     }
-    Ok(None)
 }
 
 /// All snapshots taken in the conversation, oldest-first. Each tuple is
@@ -692,17 +700,23 @@ async fn list_snapshots(
                 limit: Some(100),
                 session_id: None,
                 turn_id: None,
-                types: Some(vec!["sandbox_snapshotted".to_string()]),
+                types: Some(vec![EventKind::SANDBOX_SNAPSHOTTED]),
             }))
             .await?;
         let events_empty = result.events.is_empty();
         for event in result.events {
-            if let EventData::SandboxSnapshotted {
-                sandbox_id,
-                snapshot_id,
-            } = event.data
-            {
-                out.push((snapshot_id, sandbox_id));
+            match event.data {
+                EventData::SandboxSnapshotted {
+                    sandbox_id,
+                    snapshot_id,
+                } => out.push((snapshot_id, sandbox_id)),
+                other => {
+                    anyhow::bail!(
+                        "type-filtered query for {} returned unexpected variant {}",
+                        EventKind::SANDBOX_SNAPSHOTTED.as_str(),
+                        other.kind().as_str(),
+                    );
+                }
             }
         }
         if events_empty || result.cursor.is_none() {

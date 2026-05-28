@@ -3,7 +3,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use exoharness::{
-    AddEventsRequest, AgentHandle, Binding, ConversationHandle, EventData, EventQuery,
+    AddEventsRequest, AgentHandle, Binding, ConversationHandle, EventData, EventKind, EventQuery,
     EventQueryDirection, ExoHarness, Result, Secret, ToolCallId, Uuid7,
 };
 use lingua::Message;
@@ -138,7 +138,9 @@ pub(crate) async fn get_conversation_model_override(
             limit: Some(1),
             session_id: None,
             turn_id: None,
-            types: Some(vec![CONVERSATION_MODEL_CONFIG_EVENT_TYPE.to_string()]),
+            types: Some(vec![EventKind::custom(
+                CONVERSATION_MODEL_CONFIG_EVENT_TYPE,
+            )]),
         }))
         .await?
         .events;

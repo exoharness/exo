@@ -6,7 +6,7 @@ use tokio::fs;
 
 use crate::{
     Artifact, ArtifactVersion, BasicExoHarness, BasicExoHarnessConfig, BeginTurnRequest, Binding,
-    CreateSandboxRequest, EventData, EventQuery, EventQueryDirection, ExoHarness,
+    CreateSandboxRequest, EventData, EventKind, EventQuery, EventQueryDirection, ExoHarness,
     ForkConversationRequest, NewAgentRequest, NewConversationRequest, PutSecretRequest,
     RunInSandboxRequest, SandboxBackendChoice, Secret, SecretBackendChoice, WriteArtifactRequest,
 };
@@ -165,7 +165,7 @@ async fn turn_events_continue_after_artifact_writes() {
             limit: None,
             session_id: None,
             turn_id: None,
-            types: Some(vec!["artifact_written".to_string()]),
+            types: Some(vec![EventKind::ARTIFACT_WRITTEN]),
         }))
         .await
         .expect("artifact event")

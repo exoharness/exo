@@ -102,8 +102,7 @@ async fn filesystem_snapshot_and_rewind_round_trip() {
     // the assertions document the layout without hard-coding the
     // (test-generated) agent/conversation UUIDs.
     let snapshot_dir = find_single_subdir(
-        &find_single_subdir(&root_dir.path().join("agents"))
-            .join("conversations"),
+        &find_single_subdir(&root_dir.path().join("agents")).join("conversations"),
     )
     .join("snapshots")
     .join(snapshot_id.to_string());
@@ -138,7 +137,11 @@ async fn filesystem_snapshot_and_rewind_round_trip() {
     assert_eq!(rc, 0);
 
     let (_, stdout, _) = exec_shell(conversation.as_ref(), &sandbox_id, "cat /tmp/demo.txt").await;
-    assert_eq!(stdout.trim(), "version 2", "before rewind, file should be v2");
+    assert_eq!(
+        stdout.trim(),
+        "version 2",
+        "before rewind, file should be v2"
+    );
 
     let (rc, _, _) = exec_shell(
         conversation.as_ref(),
@@ -172,10 +175,7 @@ async fn filesystem_snapshot_and_rewind_round_trip() {
         "test -f /tmp/post-snapshot.txt",
     )
     .await;
-    assert_ne!(
-        rc, 0,
-        "after rewind, the post-snapshot file should be gone"
-    );
+    assert_ne!(rc, 0, "after rewind, the post-snapshot file should be gone");
 
     // ───── Cleanup ─────
     //
