@@ -511,10 +511,22 @@ async fn main() -> Result<()> {
                     if let Some(selection) = harness_selection.as_ref() {
                         ensure_agent_matches_harness_selection(agent.as_ref(), selection).await?;
                     }
+                    if let Some(ref requested_model) = model {
+                        let config = agent.config().await?;
+                        if config.model != *requested_model {
+                            eprintln!(
+                                "warning: agent '{}' uses model '{}'; \
+                                 --model {} will override it for this session only",
+                                agent.record().slug,
+                                config.model,
+                                requested_model
+                            );
+                        }
+                    }
                     agent
                 }
                 None => {
-                    let model = ensure_repl_model(harness.as_ref(), model).await?;
+                    let model = ensure_repl_model(harness.as_ref(), model.clone()).await?;
                     let typescript = if matches!(
                         harness_selection.as_ref(),
                         Some(HarnessSelection::Kind(HarnessKind::TypeScript))
@@ -574,6 +586,15 @@ async fn main() -> Result<()> {
                 }
             };
 
+            if let Some(model_name) = model {
+                let validated = ensure_repl_model(harness.as_ref(), Some(model_name)).await?;
+                conversation
+                    .put_model_override(Some(ConversationModelConfig {
+                        model: validated,
+                        max_output_tokens: None,
+                    }))
+                    .await?;
+            }
             run_chat_repl(conversation).await?;
         }
         Commands::Agent { command } => match command {
