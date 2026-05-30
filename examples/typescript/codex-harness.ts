@@ -146,10 +146,9 @@ class CodexWarmSession {
       onServerRequest: (request: CodexServerRequest) =>
         session?.handleServerRequest(request),
     };
-    const server =
-      process.reused && warmRecord
-        ? await CodexAppServer.attachToSandbox(options)
-        : await CodexAppServer.startInSandbox(options);
+    const server = process.reused
+      ? await CodexAppServer.attachToSandbox(options)
+      : await CodexAppServer.startInSandbox(options);
     session = new CodexWarmSession(
       server,
       process,

@@ -345,8 +345,8 @@ enum AgentCommands {
     },
     Update {
         agent: String,
-        #[arg(long)]
-        set_harness: Option<HarnessKind>,
+        #[arg(long, value_name = "HARNESS")]
+        set_harness: Option<HarnessSelection>,
         #[arg(long)]
         module: Option<PathBuf>,
         #[arg(long)]
@@ -645,23 +645,12 @@ async fn main() -> Result<()> {
             let conversation = match agent.get_conversation(&conversation_slug).await? {
                 Some(conversation) => conversation,
                 None => {
-                    let conversation = agent
+                    agent
                         .create_conversation(CreateConversationRequest {
                             slug: Some(conversation_slug.clone()),
                             name: Some(conversation_slug),
                         })
-                        .await?;
-                    // The default non-TypeScript REPL is a plain chat: drop the
-                    // shell tool so no sandbox is provisioned. TypeScript
-                    // harnesses decide their own tool and sandbox behavior.
-                    let mut config = conversation.config().await?;
-                    if !matches!(harness_kind, HarnessKind::TypeScript)
-                        && config.shell_program.is_some()
-                    {
-                        config.shell_program = None;
-                        conversation.put_config(config).await?;
-                    }
-                    conversation
+                        .await?
                 }
             };
 
@@ -830,14 +819,30 @@ async fn main() -> Result<()> {
                 let agent = must_get_agent(harness.as_ref(), &agent).await?;
                 let mut config = agent.config().await?;
                 let mut changed = false;
-                if let Some(set_harness) = set_harness {
-                    let new_harness = to_agent_harness_kind(set_harness);
+                if let Some(set_harness) = set_harness.as_ref() {
+                    if clear_module {
+                        bail!("provide either --set-harness or --clear-module, not both");
+                    }
+                    let new_harness = to_agent_harness_kind(set_harness.harness_kind());
                     if config.harness != new_harness {
                         config.harness = new_harness;
                         changed = true;
                     }
+                    let typescript = build_typescript_harness_config(
+                        Some(set_harness),
+                        module.as_deref(),
+                        &tool_modules,
+                    )?;
+                    if config.typescript != typescript {
+                        config.typescript = typescript;
+                        changed = true;
+                    }
                 }
-                if clear_module {
+                if set_harness.is_some() {
+                    if clear_tool_modules {
+                        bail!("provide either --set-harness or --clear-tool-modules, not both");
+                    }
+                } else if clear_module {
                     config.typescript = None;
                     changed = true;
                 } else if let Some(module) = module.as_deref() {
@@ -2385,6 +2390,31 @@ mod create_tests {
             Some(super::HarnessSelection::TypeScriptPreset(
                 super::TypeScriptHarnessPreset::Codex
             ))
+        ));
+    }
+
+    #[test]
+    fn agent_update_accepts_preset_set_harness() {
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from([
+            "exo",
+            "agent",
+            "update",
+            "teleport2",
+            "--set-harness",
+            "codex",
+        ])
+        .expect("agent update parses with a preset harness");
+        assert!(matches!(
+            cli.command,
+            super::Commands::Agent {
+                command: super::AgentCommands::Update {
+                    set_harness: Some(super::HarnessSelection::TypeScriptPreset(
+                        super::TypeScriptHarnessPreset::Codex
+                    )),
+                    ..
+                }
+            }
         ));
     }
 
