@@ -333,7 +333,7 @@ impl LocalSandboxConversation {
     }
 
     fn local_create_request(&self, mut request: CreateSandboxRequest) -> CreateSandboxRequest {
-        request.provider = SandboxProvider::Managed;
+        request.provider = SandboxProvider::Local;
         request
     }
 

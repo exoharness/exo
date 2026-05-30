@@ -205,14 +205,14 @@ enum SandboxBackendArg {
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum SandboxProviderArg {
-    Managed,
+    Daytona,
     Local,
 }
 
 impl From<SandboxProviderArg> for SandboxProvider {
     fn from(value: SandboxProviderArg) -> Self {
         match value {
-            SandboxProviderArg::Managed => Self::Managed,
+            SandboxProviderArg::Daytona => Self::Daytona,
             SandboxProviderArg::Local => Self::Local,
         }
     }
@@ -556,6 +556,12 @@ async fn main() -> Result<()> {
         .as_deref()
         .map(|env| env_value_from_arg("--bearer-env", env, &env_vars))
         .transpose()?;
+    let using_remote_exoharness = cli.exoharness_url.is_some();
+    let default_sandbox_provider = if using_remote_exoharness {
+        SandboxProvider::Daytona
+    } else {
+        SandboxProvider::Local
+    };
     let exoharness =
         instantiate_exoharness(&exo_config, cli.exoharness_url.as_deref(), bearer_token).await?;
     let harness_kind = determine_harness_kind(
@@ -623,7 +629,7 @@ async fn main() -> Result<()> {
                                 .as_ref()
                                 .and_then(HarnessSelection::default_sandbox_image)
                                 .map(str::to_string),
-                            sandbox_provider: Default::default(),
+                            sandbox_provider: default_sandbox_provider,
                             enable_networking: harness_selection
                                 .as_ref()
                                 .is_some_and(HarnessSelection::default_enable_networking),
@@ -750,7 +756,7 @@ async fn main() -> Result<()> {
                         sandbox_image,
                         sandbox_provider: sandbox_provider
                             .map(SandboxProvider::from)
-                            .unwrap_or_default(),
+                            .unwrap_or(default_sandbox_provider),
                         enable_networking,
                         model,
                         max_output_tokens,
@@ -1758,7 +1764,7 @@ fn format_harness_kind(kind: AgentHarnessKind) -> &'static str {
 
 fn format_sandbox_provider(provider: SandboxProvider) -> &'static str {
     match provider {
-        SandboxProvider::Managed => "managed",
+        SandboxProvider::Daytona => "daytona",
         SandboxProvider::Local => "local",
     }
 }

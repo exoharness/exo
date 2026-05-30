@@ -7,16 +7,17 @@ use std::time::Duration;
 use anyhow::{Context as AnyhowContext, anyhow, bail};
 use async_trait::async_trait;
 use exoharness::{
-    AgentHandle, BasicExoHarness, BasicExoHarnessConfig, BoxAsyncRead, BoxAsyncWrite,
-    ConversationHandle, ExoHarness, Result, RunInSandboxRequest, ToolArguments, ToolRequest,
-    ToolResult, TurnHandle,
+    AddEventsRequest, AgentHandle, AgentId, BasicExoHarness, BasicExoHarnessConfig,
+    CancelSandboxProcessRequest, CloseSandboxProcessInputRequest, ConversationHandle,
+    ConversationId, EventData, EventQuery, EventQueryDirection, ExoHarness, Result, SandboxId,
+    SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessId, SandboxProcessLifecycle,
+    SandboxProcessMode, SandboxProcessStdin, StartSandboxProcessRequest, ToolArguments,
+    ToolRequest, ToolResult, TurnHandle, WriteSandboxProcessInputRequest,
     protocol::{
         ConversationHandleInfo, Request as ExoRequest, Response as ExoResponse, TurnHandleInfo,
     },
     server::ExoHarnessServer,
 };
-use futures::future::BoxFuture;
-use futures::io::{AsyncReadExt as FuturesAsyncReadExt, AsyncWriteExt as FuturesAsyncWriteExt};
 use lingua::UniversalStreamChunk;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter, Lines};
@@ -207,10 +208,18 @@ struct TypeScriptRunnerProcess {
 }
 
 struct RunningSandboxProcess {
-    stdin: Option<BoxAsyncWrite>,
-    stdout_task: JoinHandle<()>,
-    stderr_task: JoinHandle<()>,
-    wait_task: JoinHandle<()>,
+    sandbox_id: SandboxId,
+    process_id: SandboxProcessId,
+    event_task: JoinHandle<()>,
+}
+
+const TYPESCRIPT_SANDBOX_PROCESS_REUSE_EVENT: &str = "typescript_sandbox_process_reuse";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TypeScriptSandboxProcessReuseEvent {
+    reuse_key: String,
+    sandbox_id: SandboxId,
+    process_id: SandboxProcessId,
 }
 
 struct TypeScriptTurn<'a> {
@@ -452,42 +461,60 @@ impl TypeScriptRunnerProcess {
                     )
                     .await
             }
-            RuntimeRequest::StartSandboxProcess { command, env } => {
+            RuntimeRequest::StartSandboxProcess {
+                command,
+                env,
+                reuse_key,
+            } => {
                 self.start_sandbox_process(
+                    executor,
+                    agent,
                     conversation,
                     agent_config,
                     conversation_config,
                     command,
                     env,
+                    reuse_key,
                 )
                 .await
             }
             RuntimeRequest::WriteSandboxProcessStdin { process_id, data } => {
                 let process = self
                     .sandbox_processes
-                    .get_mut(&process_id)
+                    .get(&process_id)
                     .ok_or_else(|| anyhow!("sandbox process is not active: {process_id}"))?;
-                let stdin = process
-                    .stdin
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("sandbox process stdin is closed: {process_id}"))?;
-                FuturesAsyncWriteExt::write_all(stdin, data.as_bytes()).await?;
-                FuturesAsyncWriteExt::flush(stdin).await?;
+                conversation
+                    .write_sandbox_process_input(WriteSandboxProcessInputRequest {
+                        sandbox_id: process.sandbox_id.clone(),
+                        process_id: process.process_id.clone(),
+                        data: data.into_bytes(),
+                    })
+                    .await?;
                 Ok(RuntimeResponsePayload::Unit)
             }
             RuntimeRequest::CloseSandboxProcessStdin { process_id } => {
                 let process = self
                     .sandbox_processes
-                    .get_mut(&process_id)
+                    .get(&process_id)
                     .ok_or_else(|| anyhow!("sandbox process is not active: {process_id}"))?;
-                process.stdin.take();
+                conversation
+                    .close_sandbox_process_input(CloseSandboxProcessInputRequest {
+                        sandbox_id: process.sandbox_id.clone(),
+                        process_id: process.process_id.clone(),
+                    })
+                    .await?;
                 Ok(RuntimeResponsePayload::Unit)
             }
             RuntimeRequest::CloseSandboxProcess { process_id } => {
                 if let Some(process) = self.sandbox_processes.remove(&process_id) {
-                    process.stdout_task.abort();
-                    process.stderr_task.abort();
-                    process.wait_task.abort();
+                    process.event_task.abort();
+                    conversation
+                        .cancel_sandbox_process(CancelSandboxProcessRequest {
+                            sandbox_id: process.sandbox_id,
+                            process_id: process.process_id,
+                            signal: None,
+                        })
+                        .await?;
                     send_host_message(
                         &self.host_tx,
                         HostToGuestMessage::RuntimeEvent {
@@ -503,52 +530,94 @@ impl TypeScriptRunnerProcess {
         }
     }
 
-    async fn start_sandbox_process(
+    async fn start_sandbox_process<T>(
         &mut self,
+        executor: &TypeScriptExecutor<T>,
+        agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
         command: Vec<String>,
         env: HashMap<String, String>,
-    ) -> Result<RuntimeResponsePayload> {
+        reuse_key: Option<String>,
+    ) -> Result<RuntimeResponsePayload>
+    where
+        T: ToolRuntime + 'static,
+    {
         let sandbox_id =
             ensure_shell_sandbox(conversation, agent_config, conversation_config).await?;
-        let process = conversation
-            .run_in_sandbox(RunInSandboxRequest {
-                id: sandbox_id,
-                command,
-                env,
-            })
-            .await?;
-        let parts = process.into_parts();
+        let reusable_process = match reuse_key.as_deref() {
+            Some(reuse_key) => {
+                reusable_sandbox_process(conversation, reuse_key, &sandbox_id).await?
+            }
+            None => None,
+        };
+        let (sandbox_process_id, reused, cursor) = match reusable_process {
+            Some(process) => process,
+            None => {
+                let process = conversation
+                    .start_sandbox_process(StartSandboxProcessRequest {
+                        sandbox_id: sandbox_id.clone(),
+                        command,
+                        env,
+                        cwd: None,
+                        mode: SandboxProcessMode::Exec,
+                        stdin: SandboxProcessStdin::Open,
+                        output: Default::default(),
+                        lifecycle: SandboxProcessLifecycle::Attached,
+                    })
+                    .await?;
+                if let Some(reuse_key) = reuse_key {
+                    conversation
+                        .add_events(AddEventsRequest {
+                            session_id: None,
+                            turn_id: None,
+                            expected_head: None,
+                            data: vec![EventData::Custom {
+                                event_type: TYPESCRIPT_SANDBOX_PROCESS_REUSE_EVENT.to_string(),
+                                payload: serde_json::to_value(
+                                    TypeScriptSandboxProcessReuseEvent {
+                                        reuse_key,
+                                        sandbox_id: process.sandbox_id.clone(),
+                                        process_id: process.id.clone(),
+                                    },
+                                )?,
+                            }],
+                        })
+                        .await?;
+                }
+                (process.id, false, None)
+            }
+        };
         let process_id = self.next_sandbox_process_id;
         self.next_sandbox_process_id += 1;
-
-        let stdout_task = spawn_sandbox_output_task(
+        let process_conversation = executor
+            .conversation_handle(agent.record().id, conversation.record().id)
+            .await?;
+        let event_task = spawn_sandbox_process_event_task(
             self.host_tx.clone(),
+            process_conversation,
             process_id,
-            SandboxProcessStream::Stdout,
-            parts.stdout,
+            sandbox_id.clone(),
+            sandbox_process_id.clone(),
+            cursor,
         );
-        let stderr_task = spawn_sandbox_output_task(
-            self.host_tx.clone(),
-            process_id,
-            SandboxProcessStream::Stderr,
-            parts.stderr,
-        );
-        let wait_task = spawn_sandbox_wait_task(self.host_tx.clone(), process_id, parts.wait);
 
         self.sandbox_processes.insert(
             process_id,
             RunningSandboxProcess {
-                stdin: Some(parts.stdin),
-                stdout_task,
-                stderr_task,
-                wait_task,
+                sandbox_id: sandbox_id.clone(),
+                process_id: sandbox_process_id.clone(),
+                event_task,
             },
         );
 
-        Ok(RuntimeResponsePayload::SandboxProcessStarted { process_id })
+        Ok(RuntimeResponsePayload::SandboxProcessStarted {
+            process_id,
+            sandbox_id,
+            sandbox_process_id,
+            reused,
+        })
     }
 
     async fn exited_error(&mut self, status: ExitStatus) -> anyhow::Error {
@@ -574,6 +643,79 @@ impl TypeScriptRunnerProcess {
             Ok(Err(error)) => format!("failed to read TypeScript harness stderr: {error}"),
             Err(error) => format!("TypeScript harness stderr task panicked: {error}"),
         }
+    }
+}
+
+async fn reusable_sandbox_process(
+    conversation: &dyn ConversationHandle,
+    reuse_key: &str,
+    desired_sandbox_id: &SandboxId,
+) -> Result<Option<(SandboxProcessId, bool, Option<u64>)>> {
+    let events = conversation
+        .get_events(Some(EventQuery {
+            cursor: None,
+            direction: Some(EventQueryDirection::Desc),
+            limit: Some(100),
+            session_id: None,
+            turn_id: None,
+            types: Some(vec![TYPESCRIPT_SANDBOX_PROCESS_REUSE_EVENT.to_string()]),
+        }))
+        .await?
+        .events;
+
+    for event in events {
+        let EventData::Custom {
+            event_type,
+            payload,
+        } = event.data
+        else {
+            continue;
+        };
+        if event_type != TYPESCRIPT_SANDBOX_PROCESS_REUSE_EVENT {
+            continue;
+        }
+        let candidate: TypeScriptSandboxProcessReuseEvent = serde_json::from_value(payload)?;
+        if candidate.reuse_key != reuse_key || candidate.sandbox_id != *desired_sandbox_id {
+            continue;
+        }
+        let status = conversation
+            .get_sandbox_process_events(SandboxProcessEventQuery {
+                sandbox_id: candidate.sandbox_id.clone(),
+                process_id: candidate.process_id.clone(),
+                after: None,
+                limit: Some(1000),
+                follow: Some(false),
+            })
+            .await;
+        let Ok(status) = status else {
+            continue;
+        };
+        if status.status.is_running() {
+            return Ok(Some((candidate.process_id, true, status.cursor)));
+        }
+    }
+
+    Ok(None)
+}
+
+impl<T> TypeScriptExecutor<T>
+where
+    T: ToolRuntime + 'static,
+{
+    async fn conversation_handle(
+        &self,
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+    ) -> Result<Arc<dyn ConversationHandle>> {
+        let agent = self
+            .root
+            .get_agent(&agent_id)
+            .await?
+            .ok_or_else(|| anyhow!("agent disappeared while running TypeScript harness"))?;
+        agent
+            .get_conversation(&conversation_id)
+            .await?
+            .ok_or_else(|| anyhow!("conversation disappeared while running TypeScript harness"))
     }
 }
 
@@ -709,6 +851,7 @@ enum RuntimeRequest {
     StartSandboxProcess {
         command: Vec<String>,
         env: HashMap<String, String>,
+        reuse_key: Option<String>,
     },
     WriteSandboxProcessStdin {
         process_id: u64,
@@ -737,8 +880,15 @@ impl RuntimeRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum RuntimeResponsePayload {
-    ToolResult { result: ToolResult },
-    SandboxProcessStarted { process_id: u64 },
+    ToolResult {
+        result: ToolResult,
+    },
+    SandboxProcessStarted {
+        process_id: u64,
+        sandbox_id: SandboxId,
+        sandbox_process_id: SandboxProcessId,
+        reused: bool,
+    },
     Unit,
 }
 
@@ -814,34 +964,28 @@ fn to_execution_stream_event(event: TypeScriptStreamEvent) -> ExecutionStreamEve
     }
 }
 
-fn spawn_sandbox_output_task(
+fn spawn_sandbox_process_event_task(
     sender: mpsc::UnboundedSender<HostToGuestMessage>,
+    conversation: Arc<dyn ConversationHandle>,
     process_id: u64,
-    stream: SandboxProcessStream,
-    mut reader: BoxAsyncRead,
+    sandbox_id: SandboxId,
+    sandbox_process_id: SandboxProcessId,
+    mut cursor: Option<u64>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut buffer = vec![0; 8192];
         loop {
-            match FuturesAsyncReadExt::read(&mut reader, &mut buffer).await {
-                Ok(0) => return,
-                Ok(length) => {
-                    let data = String::from_utf8_lossy(&buffer[..length]).into_owned();
-                    if send_host_message(
-                        &sender,
-                        HostToGuestMessage::RuntimeEvent {
-                            event: RuntimeEvent::Output {
-                                process_id,
-                                stream,
-                                data,
-                            },
-                        },
-                    )
-                    .is_err()
-                    {
-                        return;
-                    }
-                }
+            let result = conversation
+                .get_sandbox_process_events(SandboxProcessEventQuery {
+                    sandbox_id: sandbox_id.clone(),
+                    process_id: sandbox_process_id.clone(),
+                    after: cursor,
+                    limit: Some(100),
+                    follow: Some(true),
+                })
+                .await;
+
+            let result = match result {
+                Ok(result) => result,
                 Err(error) => {
                     if send_host_message(
                         &sender,
@@ -858,31 +1002,93 @@ fn spawn_sandbox_output_task(
                     }
                     return;
                 }
+            };
+
+            let mut emitted_terminal = false;
+            for event in result.events {
+                cursor = Some(event.cursor());
+                let runtime_event = sandbox_process_event_to_runtime_event(process_id, event);
+                emitted_terminal |= matches!(
+                    runtime_event,
+                    RuntimeEvent::Exit { .. } | RuntimeEvent::Error { .. }
+                );
+                if send_host_message(
+                    &sender,
+                    HostToGuestMessage::RuntimeEvent {
+                        event: runtime_event,
+                    },
+                )
+                .is_err()
+                {
+                    return;
+                }
             }
+            if emitted_terminal {
+                return;
+            }
+
+            if !result.status.is_running() {
+                let runtime_event = match result.status {
+                    exoharness::SandboxProcessStatus::Running => continue,
+                    exoharness::SandboxProcessStatus::Exited { exit_code } => RuntimeEvent::Exit {
+                        process_id,
+                        exit_code: Some(exit_code),
+                    },
+                    exoharness::SandboxProcessStatus::Failed { message } => RuntimeEvent::Error {
+                        process_id,
+                        message,
+                    },
+                    exoharness::SandboxProcessStatus::Cancelled => RuntimeEvent::Exit {
+                        process_id,
+                        exit_code: None,
+                    },
+                };
+                if send_host_message(
+                    &sender,
+                    HostToGuestMessage::RuntimeEvent {
+                        event: runtime_event,
+                    },
+                )
+                .is_err()
+                {
+                    return;
+                }
+                return;
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
 }
 
-fn spawn_sandbox_wait_task(
-    sender: mpsc::UnboundedSender<HostToGuestMessage>,
+fn sandbox_process_event_to_runtime_event(
     process_id: u64,
-    wait: BoxFuture<'static, Result<i32>>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let event = match wait.await {
-            Ok(exit_code) => RuntimeEvent::Exit {
-                process_id,
-                exit_code: Some(exit_code),
-            },
-            Err(error) => RuntimeEvent::Error {
-                process_id,
-                message: error.to_string(),
-            },
-        };
-        if send_host_message(&sender, HostToGuestMessage::RuntimeEvent { event }).is_err() {
-            // The runner has gone away, so there is no receiver for this event.
-        }
-    })
+    event: SandboxProcessEvent,
+) -> RuntimeEvent {
+    match event {
+        SandboxProcessEvent::Stdout { data, .. } => RuntimeEvent::Output {
+            process_id,
+            stream: SandboxProcessStream::Stdout,
+            data: String::from_utf8_lossy(&data).into_owned(),
+        },
+        SandboxProcessEvent::Stderr { data, .. } => RuntimeEvent::Output {
+            process_id,
+            stream: SandboxProcessStream::Stderr,
+            data: String::from_utf8_lossy(&data).into_owned(),
+        },
+        SandboxProcessEvent::Exit { exit_code, .. } => RuntimeEvent::Exit {
+            process_id,
+            exit_code: Some(exit_code),
+        },
+        SandboxProcessEvent::Error { message, .. } => RuntimeEvent::Error {
+            process_id,
+            message,
+        },
+        SandboxProcessEvent::Cancelled { .. } => RuntimeEvent::Exit {
+            process_id,
+            exit_code: None,
+        },
+    }
 }
 
 fn send_host_message(

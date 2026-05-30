@@ -14,6 +14,7 @@ import {
   type JsonValue,
   type Message,
   type PendingToolCall,
+  type SandboxProcess,
   type TurnContext,
 } from "@exo/harness";
 import {
@@ -58,6 +59,7 @@ const EXO_SHELL_DYNAMIC_TOOL = "exo_shell";
 const CODEX_PRIOR_MESSAGE_MAX_CHARS = 8_000;
 const CODEX_PRIOR_TOOL_RESULT_MAX_CHARS = 4_000;
 const CODEX_PRIOR_HISTORY_MAX_CHARS = 24_000;
+const CODEX_WARM_SESSION_EVENT = "codex_warm_session";
 
 interface CodexTokenUsage {
   inputTokens?: number;
@@ -96,39 +98,64 @@ interface PriorResponseItemCandidate {
   truncated: boolean;
 }
 
+interface CodexWarmSessionRecord {
+  sessionKey: string;
+  sandboxId: string | null;
+  sandboxProcessId: string | null;
+  threadId: string;
+}
+
 class CodexWarmSession {
-  threadId: string | null = null;
+  threadId: string | null;
   private current: CodexWarmTurnScope | null;
 
   private constructor(
     readonly server: CodexAppServer,
+    readonly process: SandboxProcess,
     initialScope: CodexWarmTurnScope,
+    threadId: string | null,
   ) {
     this.current = initialScope;
+    this.threadId = threadId;
   }
 
   static async start(
     scope: CodexWarmTurnScope,
     modelBinding: ResolvedLlmBinding,
+    sessionKey: string,
   ): Promise<CodexWarmSession> {
     let session: CodexWarmSession | null = null;
     const pendingProtocol: CodexProtocolLogEntry[] = [];
     const process = await scope.context.startSandboxProcess({
       command: codexSandboxCommand(scope.context),
       env: codexSandboxEnv(modelBinding),
+      reuseKey: sessionKey,
     });
-    const server = await CodexAppServer.startInSandbox({
+    const warmRecord = process.reused
+      ? await latestCodexWarmSession(scope.context, sessionKey, process)
+      : null;
+    const options = {
       process,
-      onProtocolMessage: (entry) => {
+      onProtocolMessage: (entry: CodexProtocolLogEntry) => {
         if (session) {
           session.recordProtocol(entry);
         } else {
           pendingProtocol.push(entry);
         }
       },
-      onServerRequest: (request) => session?.handleServerRequest(request),
-    });
-    session = new CodexWarmSession(server, scope);
+      onServerRequest: (request: CodexServerRequest) =>
+        session?.handleServerRequest(request),
+    };
+    const server =
+      process.reused && warmRecord
+        ? await CodexAppServer.attachToSandbox(options)
+        : await CodexAppServer.startInSandbox(options);
+    session = new CodexWarmSession(
+      server,
+      process,
+      scope,
+      process.reused ? (warmRecord?.threadId ?? null) : null,
+    );
     for (const entry of pendingProtocol) {
       session.recordProtocol(entry);
     }
@@ -205,7 +232,7 @@ async function runCodexTurn(
     },
     () =>
       codexSessions.get(sessionKey, () =>
-        CodexWarmSession.start(scope, modelBinding),
+        CodexWarmSession.start(scope, modelBinding, sessionKey),
       ),
   );
   session.setTurnScope(scope);
@@ -235,6 +262,12 @@ async function runCodexTurn(
         () => startCodexThread(session.server, context, modelBinding),
       ));
     session.threadId = threadId;
+    await recordCodexWarmSession(
+      context,
+      sessionKey,
+      session.process,
+      threadId,
+    );
 
     const priorInjection = threadReused
       ? emptyPriorResponseItems()
@@ -490,6 +523,77 @@ async function startCodexThread(
     throw new Error("codex thread/start response did not include thread.id");
   }
   return thread.id;
+}
+
+async function latestCodexWarmSession(
+  context: TurnContext,
+  sessionKey: string,
+  process: SandboxProcess,
+): Promise<CodexWarmSessionRecord | null> {
+  const result = await context.exoharness.current.conversation.getEvents({
+    direction: "desc",
+    limit: 100,
+    types: [CODEX_WARM_SESSION_EVENT],
+  });
+  for (const event of result.events) {
+    const record = codexWarmSessionRecord(event.data);
+    if (
+      record?.sessionKey === sessionKey &&
+      (!process.sandboxId || record.sandboxId === process.sandboxId) &&
+      (!process.sandboxProcessId ||
+        record.sandboxProcessId === process.sandboxProcessId)
+    ) {
+      return record;
+    }
+  }
+  return null;
+}
+
+async function recordCodexWarmSession(
+  context: TurnContext,
+  sessionKey: string,
+  process: SandboxProcess,
+  threadId: string,
+): Promise<void> {
+  await appendCustomEvent(
+    context.exoharness.current.turn,
+    CODEX_WARM_SESSION_EVENT,
+    {
+      sessionKey,
+      sandboxId: process.sandboxId ?? null,
+      sandboxProcessId: process.sandboxProcessId ?? null,
+      threadId,
+    },
+  );
+}
+
+function codexWarmSessionRecord(
+  data: EventData,
+): CodexWarmSessionRecord | null {
+  if (data.type !== "custom" || data.event_type !== CODEX_WARM_SESSION_EVENT) {
+    return null;
+  }
+  const payload = data.payload;
+  if (!isRecord(payload)) {
+    return null;
+  }
+  const sessionKey = payload.sessionKey;
+  const threadId = payload.threadId;
+  if (typeof sessionKey !== "string" || typeof threadId !== "string") {
+    return null;
+  }
+  const sandboxId =
+    typeof payload.sandboxId === "string" ? payload.sandboxId : null;
+  const sandboxProcessId =
+    typeof payload.sandboxProcessId === "string"
+      ? payload.sandboxProcessId
+      : null;
+  return {
+    sessionKey,
+    sandboxId,
+    sandboxProcessId,
+    threadId,
+  };
 }
 
 async function handleCodexServerRequest(

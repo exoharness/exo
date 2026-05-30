@@ -125,6 +125,20 @@ export class CodexAppServer {
   static async startInSandbox(
     options: CodexAppServerSandboxOptions,
   ): Promise<CodexAppServer> {
+    const server = CodexAppServer.createSandboxServer(options);
+    await server.initialize();
+    return server;
+  }
+
+  static async attachToSandbox(
+    options: CodexAppServerSandboxOptions,
+  ): Promise<CodexAppServer> {
+    return CodexAppServer.createSandboxServer(options);
+  }
+
+  private static createSandboxServer(
+    options: CodexAppServerSandboxOptions,
+  ): CodexAppServer {
     const server = new CodexAppServer(
       {
         stdout: readableStreamChunks(options.process.stdout),
@@ -151,7 +165,6 @@ export class CodexAppServer {
       .catch((error: unknown) => {
         server.fail(error instanceof Error ? error : new Error(String(error)));
       });
-    await server.initialize();
     return server;
   }
 

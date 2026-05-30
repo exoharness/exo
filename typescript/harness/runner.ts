@@ -50,7 +50,7 @@ interface RawAgentConfig {
   } | null;
   enable_agent_tool_creation?: boolean;
   sandbox_image?: string | null;
-  sandbox_provider?: "managed" | "local";
+  sandbox_provider?: "daytona" | "local";
   enable_networking: boolean;
   model: string;
   max_output_tokens?: number | null;
@@ -201,6 +201,7 @@ type RawRuntimeRequest =
       type: "start_sandbox_process";
       command: string[];
       env: Record<string, string>;
+      reuse_key?: string | null;
     }
   | { type: "write_sandbox_process_stdin"; process_id: number; data: string }
   | { type: "close_sandbox_process_stdin"; process_id: number }
@@ -208,7 +209,13 @@ type RawRuntimeRequest =
 
 type RawRuntimeResponsePayload =
   | { type: "tool_result"; result: ToolResult }
-  | { type: "sandbox_process_started"; process_id: number }
+  | {
+      type: "sandbox_process_started";
+      process_id: number;
+      sandbox_id?: string | null;
+      sandbox_process_id?: string | null;
+      reused?: boolean | null;
+    }
   | { type: "unit" };
 
 type RawSandboxProcessStream = "stdout" | "stderr";
@@ -541,13 +548,20 @@ class ProtocolClient {
       type: "start_sandbox_process",
       command: request.command,
       env: request.env ?? {},
+      reuse_key: request.reuseKey ?? null,
     });
     if (payload.type !== "sandbox_process_started") {
       throw new Error(
         `expected sandbox_process_started payload, got ${payload.type}`,
       );
     }
-    const process = new SandboxProcessHandle(this, payload.process_id);
+    const process = new SandboxProcessHandle(
+      this,
+      payload.process_id,
+      payload.sandbox_id ?? undefined,
+      payload.sandbox_process_id ?? undefined,
+      payload.reused === true,
+    );
     this.sandboxProcesses.set(payload.process_id, process);
     return process;
   }
@@ -700,6 +714,7 @@ class ProtocolClient {
 }
 
 class SandboxProcessHandle implements SandboxProcess {
+  readonly reused: boolean;
   readonly stdout: ReadableStream<string>;
   readonly stderr: ReadableStream<string>;
   private stdoutController: ReadableStreamDefaultController<string> | null =
@@ -714,7 +729,11 @@ class SandboxProcessHandle implements SandboxProcess {
   constructor(
     private readonly client: ProtocolClient,
     private readonly processId: number,
+    readonly sandboxId?: string,
+    readonly sandboxProcessId?: string,
+    reused = false,
   ) {
+    this.reused = reused;
     this.stdout = new ReadableStream<string>({
       start: (controller) => {
         this.stdoutController = controller;
@@ -803,7 +822,7 @@ function toAgentConfig(raw: RawAgentConfig): AgentConfig {
       : null,
     enableAgentToolCreation: raw.enable_agent_tool_creation ?? true,
     sandboxImage: raw.sandbox_image ?? null,
-    sandboxProvider: raw.sandbox_provider ?? "managed",
+    sandboxProvider: raw.sandbox_provider ?? "daytona",
     enableNetworking: raw.enable_networking,
     model: raw.model,
     maxOutputTokens: raw.max_output_tokens ?? null,

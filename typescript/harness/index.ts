@@ -32,7 +32,7 @@ export interface AgentConfig {
   } | null;
   enableAgentToolCreation: boolean;
   sandboxImage?: string | null;
-  sandboxProvider: "managed" | "local";
+  sandboxProvider: "daytona" | "local";
   enableNetworking: boolean;
   model: string;
   maxOutputTokens?: number | null;
@@ -114,9 +114,13 @@ export interface ToolRequest {
 export interface SandboxProcessStartRequest {
   command: string[];
   env?: Record<string, string>;
+  reuseKey?: string;
 }
 
 export interface SandboxProcess {
+  readonly sandboxId?: string;
+  readonly sandboxProcessId?: string;
+  readonly reused: boolean;
   readonly stdout: ReadableStream<string>;
   readonly stderr: ReadableStream<string>;
   writeStdin(data: string): Promise<void>;
