@@ -2,6 +2,16 @@ export type WorkerOutboundCommand = {
   type: "send_message";
   target?: string | null;
   text: string;
+  attachments: AdapterAttachment[];
+};
+
+export type AdapterAttachment = {
+  kind: "image" | "video" | "audio" | "document";
+  path?: string | null;
+  url?: string | null;
+  data?: string | null;
+  mimeType?: string | null;
+  fileName?: string | null;
 };
 
 export type WorkerInboundEvent =
@@ -65,7 +75,64 @@ export function parseWorkerCommand(value: unknown): WorkerOutboundCommand {
     type: "send_message",
     target: value.target ?? null,
     text: value.text,
+    attachments: parseAttachments(value.attachments),
   };
+}
+
+function parseAttachments(value: unknown): AdapterAttachment[] {
+  if (value === undefined || value === null) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new Error("send_message attachments must be null or an array");
+  }
+  return value.map((item) => {
+    if (!isRecord(item)) {
+      throw new Error("send_message attachment must be an object");
+    }
+    if (
+      item.kind !== "image" &&
+      item.kind !== "video" &&
+      item.kind !== "audio" &&
+      item.kind !== "document"
+    ) {
+      throw new Error(
+        "send_message attachment kind must be image, video, audio, or document",
+      );
+    }
+    const path = nullableStringValue(item.path, "attachment path");
+    const url = nullableStringValue(item.url, "attachment url");
+    const data = nullableStringValue(item.data, "attachment data");
+    const sourceCount = [path, url, data].filter(
+      (source) => source !== null,
+    ).length;
+    if (sourceCount !== 1) {
+      throw new Error(
+        "send_message attachment must specify exactly one of path, url, or data",
+      );
+    }
+    if (url !== null && !url.startsWith("https://")) {
+      throw new Error("send_message attachment url must use https");
+    }
+    return {
+      kind: item.kind,
+      path,
+      url,
+      data,
+      mimeType: nullableStringValue(item.mimeType, "attachment mimeType"),
+      fileName: nullableStringValue(item.fileName, "attachment fileName"),
+    };
+  });
+}
+
+function nullableStringValue(value: unknown, name: string): string | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`${name} must be null or a non-empty string`);
+  }
+  return value;
 }
 
 export function stringField(config: JsonObject, name: string): string {

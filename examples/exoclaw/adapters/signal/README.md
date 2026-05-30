@@ -89,6 +89,26 @@ Signal outbound sends require a target. Use the `target` from the inbound wakeup
 
 Long opaque non-recipient strings are treated as group ids.
 
+## Rich Outbound Content
+
+The Signal worker supports outbound attachments through `signal-cli` JSON-RPC. Use the shared `attachments` field on `send_adapter_message`.
+
+For sandbox-generated files, prefer `sandboxPath`; the host tool stages the file and passes a local path to `signal-cli`:
+
+```json
+{
+  "kind": "image",
+  "path": null,
+  "url": null,
+  "data": null,
+  "sandboxPath": "/tmp/exoclaw_media/image.png",
+  "mimeType": "image/png",
+  "fileName": "image.png"
+}
+```
+
+Signal attachments can also use HTTPS `url`, host-visible `path`, or small inline `data` payloads. The host tool downloads HTTPS URLs into `.exo/adapters/media` before passing them to `signal-cli`.
+
 ## Quirks And Gotchas
 
 - If linking succeeds but later setup keeps asking for QR codes, check that the same `configDir` is being reused.

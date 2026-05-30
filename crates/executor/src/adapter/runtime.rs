@@ -6,7 +6,7 @@ use anyhow::{Result, anyhow, bail};
 use exoharness::{AgentHandle, ConversationHandle, Secret};
 
 use super::store::AdapterStore;
-use super::types::{AdapterConfig, AdapterEventType, AdapterRecord};
+use super::types::{AdapterAttachment, AdapterConfig, AdapterEventType, AdapterRecord};
 use super::worker::{WorkerCommand, WorkerEvent, run_worker_loop};
 use crate::conversation_wakeup::send_conversation_wakeup;
 use crate::{Harness, HarnessAgent, HarnessConversation};
@@ -78,9 +78,19 @@ pub async fn send_adapter_message_with_handles(
     adapter: &AdapterRecord,
     text: &str,
     target: Option<&str>,
+    attachments: Vec<AdapterAttachment>,
 ) -> Result<()> {
     if !adapter.enabled {
         bail!("adapter is disabled: {}", adapter.id);
+    }
+    if !attachments.is_empty()
+        && adapter.config.adapter_type != "whatsapp"
+        && adapter.config.adapter_type != "signal"
+    {
+        bail!(
+            "adapter {} does not support rich attachments",
+            adapter.config.adapter_type
+        );
     }
     // Note: we intentionally do not write a conversation artifact here.
     // This tool is invoked from inside an active agent turn, and writing to
@@ -104,6 +114,7 @@ pub async fn send_adapter_message_with_handles(
             adapter.id.clone(),
             text.to_string(),
             target.map(ToOwned::to_owned),
+            attachments,
         )
         .await?;
     Ok(())
@@ -142,6 +153,7 @@ async fn run_adapter_loop(
                     .map(|message| WorkerCommand::SendMessage {
                         target: message.target,
                         text: message.text,
+                        attachments: message.attachments,
                     })
                     .collect())
             }

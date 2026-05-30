@@ -11,6 +11,7 @@ import type { ILogger } from "@whiskeysockets/baileys/lib/Utils/logger.js";
 import qrcodeTerminal from "qrcode-terminal";
 
 import {
+  type AdapterAttachment,
   adapterConfig,
   optionalStringField,
   parseWorkerCommand,
@@ -125,13 +126,153 @@ for await (const line of input) {
     if (!command.target) {
       throw new Error("WhatsApp send_message requires a target chat id");
     }
-    await socket.sendMessage(command.target, { text: command.text });
+    if (command.attachments.length === 0) {
+      await socket.sendMessage(command.target, { text: command.text });
+    } else {
+      let captionUsed = false;
+      const textBeforeMedia = command.attachments.every(
+        (attachment) => !attachmentSupportsCaption(attachment),
+      );
+      if (textBeforeMedia) {
+        await socket.sendMessage(command.target, { text: command.text });
+        captionUsed = true;
+      }
+      for (const attachment of command.attachments) {
+        const caption: string | null =
+          !captionUsed && attachmentSupportsCaption(attachment)
+            ? command.text
+            : null;
+        captionUsed ||= caption !== null;
+        await sendAttachment(command.target, attachment, caption);
+      }
+      if (!captionUsed) {
+        await socket.sendMessage(command.target, { text: command.text });
+      }
+    }
   } catch (error) {
     writeWorkerEvent({
       type: "error",
       message: error instanceof Error ? error.message : String(error),
     });
   }
+}
+
+function attachmentSupportsCaption(attachment: AdapterAttachment): boolean {
+  return (
+    attachment.kind === "image" ||
+    attachment.kind === "video" ||
+    attachment.kind === "document"
+  );
+}
+
+async function sendAttachment(
+  target: string,
+  attachment: AdapterAttachment,
+  caption: string | null,
+): Promise<void> {
+  try {
+    await socket.sendMessage(
+      target,
+      whatsappAttachmentContent(attachment, caption),
+    );
+  } catch (error) {
+    if (attachment.kind !== "audio") {
+      throw error;
+    }
+    await socket.sendMessage(target, audioDocumentContent(attachment));
+  }
+}
+
+type WhatsAppMessageContent = Parameters<typeof socket.sendMessage>[1];
+
+function whatsappAttachmentContent(
+  attachment: AdapterAttachment,
+  caption: string | null,
+): WhatsAppMessageContent {
+  const media = mediaSource(attachment);
+  switch (attachment.kind) {
+    case "image":
+      return {
+        image: media,
+        caption: caption ?? undefined,
+      } as WhatsAppMessageContent;
+    case "video":
+      return {
+        video: media,
+        caption: caption ?? undefined,
+      } as WhatsAppMessageContent;
+    case "audio":
+      return {
+        audio: media,
+        mimetype: whatsappAudioMimeType(attachment),
+        ptt: isOpusAudio(attachment),
+      } as WhatsAppMessageContent;
+    case "document":
+      if (!attachment.mimeType) {
+        throw new Error("WhatsApp document attachment requires mimeType");
+      }
+      if (!attachment.fileName) {
+        throw new Error("WhatsApp document attachment requires fileName");
+      }
+      return {
+        document: media,
+        mimetype: attachment.mimeType,
+        fileName: attachment.fileName,
+        caption: caption ?? undefined,
+      } as WhatsAppMessageContent;
+  }
+}
+
+function audioDocumentContent(
+  attachment: AdapterAttachment,
+): WhatsAppMessageContent {
+  return {
+    document: mediaSource(attachment),
+    mimetype: attachment.mimeType ?? "application/octet-stream",
+    fileName: attachment.fileName ?? "audio",
+  } as WhatsAppMessageContent;
+}
+
+function whatsappAudioMimeType(
+  attachment: AdapterAttachment,
+): string | undefined {
+  if (isOpusAudio(attachment)) {
+    return "audio/ogg; codecs=opus";
+  }
+  return attachment.mimeType ?? undefined;
+}
+
+function isOpusAudio(attachment: AdapterAttachment): boolean {
+  const mimeType = attachment.mimeType?.toLowerCase() ?? "";
+  const fileName = attachment.fileName?.toLowerCase() ?? "";
+  const source = (attachment.path ?? attachment.url ?? "").toLowerCase();
+  return (
+    mimeType.includes("opus") ||
+    mimeType === "audio/ogg" ||
+    fileName.endsWith(".ogg") ||
+    fileName.endsWith(".opus") ||
+    source.endsWith(".ogg") ||
+    source.endsWith(".opus")
+  );
+}
+
+function mediaSource(attachment: AdapterAttachment): { url: string } | Buffer {
+  const source = attachment.path ?? attachment.url;
+  if (source) {
+    return { url: source };
+  }
+  if (attachment.data) {
+    return Buffer.from(base64Payload(attachment.data), "base64");
+  }
+  throw new Error("WhatsApp attachment requires path, url, or data");
+}
+
+function base64Payload(data: string): string {
+  const dataUrlSeparator = data.indexOf(",");
+  if (data.startsWith("data:") && dataUrlSeparator !== -1) {
+    return data.slice(dataUrlSeparator + 1);
+  }
+  return data;
 }
 
 function inboundMessage(message: WAMessage) {

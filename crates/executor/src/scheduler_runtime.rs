@@ -106,10 +106,23 @@ pub async fn run_task(
     };
 
     task.mark_completed(&run, result_artifact_id, finished_at_ms)?;
+    if run
+        .error
+        .as_deref()
+        .is_some_and(is_missing_task_owner_error)
+    {
+        task.enabled = false;
+        task.updated_at_ms = finished_at_ms;
+    }
     run.task_id = task.id.clone();
     store.put_run(&run).await?;
     store.put_task(&task).await?;
     Ok(run)
+}
+
+fn is_missing_task_owner_error(error: &str) -> bool {
+    error.starts_with("scheduled task agent does not exist:")
+        || error.starts_with("scheduled task conversation does not exist:")
 }
 
 struct TaskOutput {

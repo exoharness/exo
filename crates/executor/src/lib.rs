@@ -32,8 +32,8 @@ mod typescript;
 
 pub use adapter::AdapterStore;
 pub use adapter::{
-    AdapterConfig, AdapterEventRecord, AdapterEventType, AdapterRecord, AdapterSource, NewAdapter,
-    WorkerSecretEnvVar,
+    AdapterAttachment, AdapterAttachmentKind, AdapterConfig, AdapterEventRecord, AdapterEventType,
+    AdapterRecord, AdapterSource, NewAdapter, WorkerSecretEnvVar,
 };
 pub use adapter::{AdapterRunOptions, run_adapters_watch};
 pub use braintrust::{BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig};

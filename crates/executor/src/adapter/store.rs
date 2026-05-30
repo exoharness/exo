@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use tokio::fs;
 
 use super::types::{
-    AdapterEventRecord, AdapterEventType, AdapterOutboundMessageRecord, AdapterRecord, NewAdapter,
-    now_ms,
+    AdapterAttachment, AdapterEventRecord, AdapterEventType, AdapterOutboundMessageRecord,
+    AdapterRecord, NewAdapter, now_ms,
 };
 
 #[derive(Debug, Clone)]
@@ -173,8 +173,10 @@ impl AdapterStore {
         adapter_id: String,
         text: String,
         target: Option<String>,
+        attachments: Vec<AdapterAttachment>,
     ) -> Result<AdapterOutboundMessageRecord> {
-        let message = AdapterOutboundMessageRecord::new(adapter_id, text, target, now_ms())?;
+        let message =
+            AdapterOutboundMessageRecord::new(adapter_id, text, target, attachments, now_ms())?;
         fs::create_dir_all(self.outbox_dir(&message.adapter_id)).await?;
         let path = self.outbox_path(&message.adapter_id, &message.id);
         fs::write(&path, serde_json::to_vec_pretty(&message)?)
@@ -270,7 +272,9 @@ async fn remove_dir_if_exists(path: PathBuf) -> Result<()> {
 mod tests {
     use tempfile::TempDir;
 
-    use super::super::types::{AdapterConfig, AdapterEventType, AdapterSource};
+    use super::super::types::{
+        AdapterAttachment, AdapterAttachmentKind, AdapterConfig, AdapterEventType, AdapterSource,
+    };
 
     use super::*;
 
@@ -333,14 +337,28 @@ mod tests {
                 "adapter".to_string(),
                 "hello".to_string(),
                 Some("123@s.whatsapp.net".to_string()),
+                vec![AdapterAttachment {
+                    kind: AdapterAttachmentKind::Image,
+                    path: Some(".exo/generated/chart.png".to_string()),
+                    url: None,
+                    data: None,
+                    sandbox_path: None,
+                    mime_type: Some("image/png".to_string()),
+                    file_name: None,
+                }],
             )
             .await
             .unwrap();
 
         assert_eq!(message.target.as_deref(), Some("123@s.whatsapp.net"));
+        assert_eq!(message.attachments.len(), 1);
         let messages = store.take_outbound_messages("adapter").await.unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].target.as_deref(), Some("123@s.whatsapp.net"));
+        assert_eq!(
+            messages[0].attachments[0].path.as_deref(),
+            Some(".exo/generated/chart.png")
+        );
         assert!(
             store
                 .take_outbound_messages("adapter")

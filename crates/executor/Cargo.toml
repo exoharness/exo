@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+base64 = "0.22.1"
 boa_engine = "0.20.0"
 braintrust-llm-router.workspace = true
 braintrust-sdk-rust.workspace = true

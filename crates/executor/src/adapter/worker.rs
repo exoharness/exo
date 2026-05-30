@@ -6,7 +6,7 @@ use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 
-use super::types::AdapterConfig;
+use super::types::{AdapterAttachment, AdapterConfig};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -15,6 +15,8 @@ pub enum WorkerCommand {
         #[serde(default)]
         target: Option<String>,
         text: String,
+        #[serde(default)]
+        attachments: Vec<AdapterAttachment>,
     },
 }
 

@@ -235,7 +235,7 @@ a phone number, a UUID, a group id, or the target from an inbound wakeup.
 Adapter sends must be explicit and auditable. When the agent calls
 `send_adapter_message`, the tool does two things:
 
-1. Writes an outbound artifact and event for history.
+1. Writes an outbound event for history.
 2. Writes an `AdapterOutboundMessageRecord` into the adapter outbox.
 
 The long-running adapter runtime drains that outbox once per second and sends
@@ -244,6 +244,16 @@ them as `PRIVMSG` over the already-connected IRC socket. The WhatsApp worker
 sends them through Baileys. The Signal worker sends them through `signal-cli`
 JSON-RPC. WhatsApp and Signal messages require an outbox `target`; IRC messages
 do not because the destination channel is fixed in adapter config.
+
+WhatsApp and Signal also support outbound rich attachments on `send_adapter_message`.
+Attachments specify exactly one host-visible local `path`, HTTPS `url`, base64
+`data` payload, or `sandboxPath` and a `kind` of `image`, `video`, `audio`, or
+`document`. Use `sandboxPath` for files created inside the agent sandbox; the
+host tool copies the file into `.exo/adapters/media` before queueing the
+outbound send. Signal URL attachments are also staged because `signal-cli`
+requires a local file path or data URI. Image, video, and document WhatsApp
+attachments use the message text as the first caption-capable media caption.
+Documents also require `mimeType` and `fileName`.
 
 The outbox also decouples conversation turns from socket ownership. The model
 turn can finish after queueing a message; the adapter runtime owns the external

@@ -5,6 +5,7 @@ import readline from "node:readline/promises";
 import qrcodeTerminal from "qrcode-terminal";
 
 import {
+  type AdapterAttachment,
   adapterConfig,
   optionalStringField,
   parseWorkerCommand,
@@ -106,7 +107,7 @@ for await (const line of input) {
         "Signal send_message requires a target username, uuid, phone number, or group id",
       );
     }
-    await sendSignalMessage(command.target, command.text);
+    await sendSignalMessage(command.target, command.text, command.attachments);
   } catch (error) {
     writeWorkerEvent({
       type: "error",
@@ -179,10 +180,19 @@ function inboundMessage(params: Record<string, unknown>) {
   };
 }
 
-async function sendSignalMessage(target: string, text: string): Promise<void> {
+async function sendSignalMessage(
+  target: string,
+  text: string,
+  attachments: AdapterAttachment[],
+): Promise<void> {
+  const attachmentParams = signalAttachments(attachments);
   const params = looksLikeGroupId(target)
-    ? { groupId: target, message: text }
-    : { recipient: [normalizeRecipient(target)], message: text };
+    ? { groupId: target, message: text, ...attachmentParams }
+    : {
+        recipient: [normalizeRecipient(target)],
+        message: text,
+        ...attachmentParams,
+      };
   writeWorkerEvent({
     type: "lifecycle",
     name: "send_starting",
@@ -194,6 +204,43 @@ async function sendSignalMessage(target: string, text: string): Promise<void> {
     name: "send_result",
     metadata: { target, params, result },
   });
+}
+
+function signalAttachments(attachments: AdapterAttachment[]): {
+  attachments?: string[];
+} {
+  if (attachments.length === 0) {
+    return {};
+  }
+  return {
+    attachments: attachments.map(signalAttachmentSource),
+  };
+}
+
+function signalAttachmentSource(attachment: AdapterAttachment): string {
+  if (attachment.path) {
+    return attachment.path;
+  }
+  if (attachment.data) {
+    return signalDataUri(attachment);
+  }
+  if (attachment.url) {
+    throw new Error(
+      "Signal attachment URL should have been staged by the host tool before reaching the worker",
+    );
+  }
+  throw new Error("Signal attachment requires staged path or data");
+}
+
+function signalDataUri(attachment: AdapterAttachment): string {
+  if (attachment.data?.startsWith("data:")) {
+    return attachment.data;
+  }
+  const mimeType = attachment.mimeType ?? "application/octet-stream";
+  const fileName = attachment.fileName
+    ? `;filename=${encodeURIComponent(attachment.fileName)}`
+    : "";
+  return `data:${mimeType}${fileName};base64,${attachment.data}`;
 }
 
 function jsonRpcRequest(

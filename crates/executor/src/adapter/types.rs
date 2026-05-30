@@ -33,6 +33,33 @@ pub struct WorkerSecretEnvVar {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdapterAttachment {
+    pub kind: AdapterAttachmentKind,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub data: Option<String>,
+    #[serde(default)]
+    pub sandbox_path: Option<String>,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub file_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdapterAttachmentKind {
+    Image,
+    Video,
+    Audio,
+    Document,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AdapterRecord {
     pub id: String,
     pub agent_id: String,
@@ -73,6 +100,8 @@ pub struct AdapterOutboundMessageRecord {
     pub text: String,
     #[serde(default)]
     pub target: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<AdapterAttachment>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -146,10 +175,14 @@ impl AdapterOutboundMessageRecord {
         adapter_id: String,
         text: String,
         target: Option<String>,
+        attachments: Vec<AdapterAttachment>,
         now_ms: u64,
     ) -> Result<Self> {
         if let Some(target) = &target {
             non_empty_ref("target", target)?;
+        }
+        for attachment in &attachments {
+            attachment.validate()?;
         }
         Ok(Self {
             id: Uuid7::now().to_string(),
@@ -157,7 +190,42 @@ impl AdapterOutboundMessageRecord {
             created_at_ms: now_ms,
             text: non_empty("text", text)?,
             target,
+            attachments,
         })
+    }
+}
+
+impl AdapterAttachment {
+    pub fn validate(&self) -> Result<()> {
+        let source_count = usize::from(self.path.is_some())
+            + usize::from(self.url.is_some())
+            + usize::from(self.data.is_some())
+            + usize::from(self.sandbox_path.is_some());
+        if source_count != 1 {
+            bail!("attachment must specify exactly one of path, url, data, or sandboxPath");
+        }
+        if let Some(path) = &self.path {
+            non_empty_ref("attachment path", path)?;
+        }
+        if let Some(url) = &self.url {
+            non_empty_ref("attachment url", url)?;
+            if !url.starts_with("https://") {
+                bail!("attachment url must use https");
+            }
+        }
+        if let Some(data) = &self.data {
+            non_empty_ref("attachment data", data)?;
+        }
+        if let Some(sandbox_path) = &self.sandbox_path {
+            non_empty_ref("attachment sandboxPath", sandbox_path)?;
+        }
+        if let Some(mime_type) = &self.mime_type {
+            non_empty_ref("attachment mimeType", mime_type)?;
+        }
+        if let Some(file_name) = &self.file_name {
+            non_empty_ref("attachment fileName", file_name)?;
+        }
+        Ok(())
     }
 }
 

@@ -130,8 +130,15 @@ impl ToolRuntime for ExoclawToolRuntime {
                 execute_delete_adapter_tool(conversation, &self.adapter_store, request).await
             }
             "send_adapter_message" => {
-                execute_send_adapter_message_tool(agent, conversation, &self.adapter_store, request)
-                    .await
+                execute_send_adapter_message_tool(
+                    agent,
+                    conversation,
+                    agent_config,
+                    config,
+                    &self.adapter_store,
+                    request,
+                )
+                .await
             }
             other => Err(anyhow::anyhow!(
                 "tool execution is not configured for {other}"
