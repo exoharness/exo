@@ -32,6 +32,7 @@ export interface AgentConfig {
   } | null;
   enableAgentToolCreation: boolean;
   sandboxImage?: string | null;
+  sandboxProvider: "managed" | "local";
   enableNetworking: boolean;
   model: string;
   maxOutputTokens?: number | null;

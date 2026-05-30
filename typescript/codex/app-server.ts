@@ -51,11 +51,15 @@ interface CodexAppServerTransport {
 }
 
 interface PendingRequest {
+  method: string;
   resolve: (value: JsonValue) => void;
   reject: (error: Error) => void;
 }
 
 type ProtocolMessage = Record<string, unknown>;
+type ProtocolParseResult =
+  | { type: "message"; message: ProtocolMessage }
+  | { type: "incomplete" };
 
 export class CodexAppServer {
   private readonly transport: CodexAppServerTransport;
@@ -173,7 +177,7 @@ export class CodexAppServer {
     this.nextId += 1;
     const message = { method, id, params };
     const response = new Promise<JsonValue>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      this.pending.set(id, { method, resolve, reject });
     });
     await this.write(message);
     return (await response) as T;
@@ -201,27 +205,19 @@ export class CodexAppServer {
 
   private async readLoop(): Promise<void> {
     try {
+      let pendingLine = "";
       for await (const line of linesFromChunks(this.transport.stdout)) {
-        const message = parseProtocolMessage(line);
-        await this.record("server_to_client", message);
-        if (isResponse(message)) {
-          this.handleResponse(message);
-        } else if (isServerRequest(message)) {
-          const request = {
-            method: message.method,
-            params: toJsonOrNull(message.params),
-          };
-          this.notifications.push(request);
-          await this.write({
-            id: message.id,
-            result: await this.serverRequestResult(request),
-          });
-        } else if (isNotification(message)) {
-          this.notifications.push({
-            method: message.method,
-            params: toJsonOrNull(message.params),
-          });
+        const candidate = `${pendingLine}${line}`;
+        const parsed = tryParseProtocolMessage(candidate);
+        if (parsed.type === "incomplete") {
+          pendingLine = candidate;
+          continue;
         }
+        pendingLine = "";
+        await this.handleProtocolMessage(parsed.message);
+      }
+      if (pendingLine.trim().length > 0) {
+        await this.handleProtocolMessage(parseProtocolMessage(pendingLine));
       }
       this.finish();
     } catch (error) {
@@ -255,6 +251,39 @@ export class CodexAppServer {
     } else {
       pending.resolve(toJsonOrNull(message.result));
     }
+  }
+
+  private async handleProtocolMessage(message: ProtocolMessage): Promise<void> {
+    if (this.isEchoedClientRequest(message)) {
+      return;
+    }
+    await this.record("server_to_client", message);
+    if (isResponse(message)) {
+      this.handleResponse(message);
+    } else if (isServerRequest(message)) {
+      const request = {
+        method: message.method,
+        params: toJsonOrNull(message.params),
+      };
+      this.notifications.push(request);
+      await this.write({
+        id: message.id,
+        result: await this.serverRequestResult(request),
+      });
+    } else if (isNotification(message)) {
+      this.notifications.push({
+        method: message.method,
+        params: toJsonOrNull(message.params),
+      });
+    }
+  }
+
+  private isEchoedClientRequest(message: ProtocolMessage): boolean {
+    if (!("id" in message) || typeof message.method !== "string") {
+      return false;
+    }
+    const pending = this.pending.get(Number(message.id));
+    return pending?.method === message.method;
   }
 
   private async serverRequestResult(
@@ -387,6 +416,27 @@ function parseProtocolMessage(line: string): ProtocolMessage {
     throw new Error(`invalid codex app-server message: ${line}`);
   }
   return parsed;
+}
+
+function tryParseProtocolMessage(line: string): ProtocolParseResult {
+  try {
+    return { type: "message", message: parseProtocolMessage(line) };
+  } catch (error) {
+    if (isIncompleteJsonParseError(error)) {
+      return { type: "incomplete" };
+    }
+    throw error;
+  }
+}
+
+function isIncompleteJsonParseError(error: unknown): boolean {
+  if (!(error instanceof SyntaxError)) {
+    return false;
+  }
+  return (
+    error.message.includes("Unterminated string") ||
+    error.message.includes("Unexpected end of JSON input")
+  );
 }
 
 function isResponse(message: ProtocolMessage): boolean {

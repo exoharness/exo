@@ -84,6 +84,30 @@ pub trait ConversationHandle: Send + Sync {
     async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId>;
     async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()>;
     async fn stop_sandbox(&self, id: SandboxId) -> Result<()>;
+    async fn start_sandbox_process(
+        &self,
+        request: StartSandboxProcessRequest,
+    ) -> Result<SandboxProcessRecord>;
+    async fn write_sandbox_process_input(
+        &self,
+        request: WriteSandboxProcessInputRequest,
+    ) -> Result<()>;
+    async fn close_sandbox_process_input(
+        &self,
+        request: CloseSandboxProcessInputRequest,
+    ) -> Result<()>;
+    async fn get_sandbox_process_events(
+        &self,
+        query: SandboxProcessEventQuery,
+    ) -> Result<GetSandboxProcessEventsResult>;
+    async fn wait_sandbox_process(
+        &self,
+        request: WaitSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus>;
+    async fn cancel_sandbox_process(
+        &self,
+        request: CancelSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus>;
     async fn run_in_sandbox(&self, request: RunInSandboxRequest)
     -> Result<Box<dyn SandboxProcess>>;
 
@@ -238,6 +262,8 @@ pub enum EventData {
     },
     SandboxCreated {
         sandbox_id: SandboxId,
+        #[serde(default)]
+        provider: SandboxProvider,
         image: String,
         default_workdir: String,
         file_system_mounts: Vec<FileSystemMount>,
@@ -313,11 +339,21 @@ pub struct FileSystemMount {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreateSandboxRequest {
+    #[serde(default)]
+    pub provider: SandboxProvider,
     pub image: String,
     pub default_workdir: Option<String>,
     pub file_system_mounts: Option<Vec<FileSystemMount>>,
     pub enable_networking: Option<bool>,
     pub idle_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxProvider {
+    #[default]
+    Managed,
+    Local,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -333,6 +369,141 @@ pub struct RunInSandboxRequest {
     pub command: Vec<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StartSandboxProcessRequest {
+    pub sandbox_id: SandboxId,
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub mode: SandboxProcessMode,
+    #[serde(default)]
+    pub stdin: SandboxProcessStdin,
+    #[serde(default)]
+    pub output: SandboxProcessOutput,
+    #[serde(default)]
+    pub lifecycle: SandboxProcessLifecycle,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxProcessMode {
+    #[default]
+    Exec,
+    Pty,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxProcessStdin {
+    None,
+    #[default]
+    Open,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxProcessOutput {
+    Buffered,
+    #[default]
+    Stream,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxProcessLifecycle {
+    #[default]
+    Attached,
+    Detached,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SandboxProcessRecord {
+    pub id: SandboxProcessId,
+    pub sandbox_id: SandboxId,
+    pub status: SandboxProcessStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SandboxProcessStatus {
+    Running,
+    Exited { exit_code: i32 },
+    Failed { message: String },
+    Cancelled,
+}
+
+impl SandboxProcessStatus {
+    pub fn is_running(&self) -> bool {
+        matches!(self, Self::Running)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SandboxProcessEventQuery {
+    pub sandbox_id: SandboxId,
+    pub process_id: SandboxProcessId,
+    pub after: Option<u64>,
+    pub limit: Option<u32>,
+    pub follow: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GetSandboxProcessEventsResult {
+    pub events: Vec<SandboxProcessEvent>,
+    pub cursor: Option<u64>,
+    pub status: SandboxProcessStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SandboxProcessEvent {
+    Stdout { cursor: u64, data: Vec<u8> },
+    Stderr { cursor: u64, data: Vec<u8> },
+    Exit { cursor: u64, exit_code: i32 },
+    Error { cursor: u64, message: String },
+    Cancelled { cursor: u64 },
+}
+
+impl SandboxProcessEvent {
+    pub fn cursor(&self) -> u64 {
+        match self {
+            Self::Stdout { cursor, .. }
+            | Self::Stderr { cursor, .. }
+            | Self::Exit { cursor, .. }
+            | Self::Error { cursor, .. }
+            | Self::Cancelled { cursor } => *cursor,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WriteSandboxProcessInputRequest {
+    pub sandbox_id: SandboxId,
+    pub process_id: SandboxProcessId,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloseSandboxProcessInputRequest {
+    pub sandbox_id: SandboxId,
+    pub process_id: SandboxProcessId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WaitSandboxProcessRequest {
+    pub sandbox_id: SandboxId,
+    pub process_id: SandboxProcessId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CancelSandboxProcessRequest {
+    pub sandbox_id: SandboxId,
+    pub process_id: SandboxProcessId,
+    pub signal: Option<String>,
 }
 
 #[async_trait]
@@ -426,6 +597,7 @@ pub type ResponseId = Uuid7;
 pub type ToolCallId = String;
 pub type ArtifactId = Uuid7;
 pub type SandboxId = String;
+pub type SandboxProcessId = String;
 pub type SnapshotId = Uuid7;
 pub type BindingId = Uuid7;
 pub type SecretId = Uuid7;

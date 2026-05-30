@@ -6,9 +6,12 @@ use tokio::fs;
 
 use crate::{
     Artifact, ArtifactVersion, BasicExoHarness, BasicExoHarnessConfig, BeginTurnRequest, Binding,
-    CreateSandboxRequest, EventData, EventQuery, EventQueryDirection, ExoHarness,
-    ForkConversationRequest, NewAgentRequest, NewConversationRequest, PutSecretRequest,
-    RunInSandboxRequest, SandboxBackendChoice, Secret, SecretBackendChoice, WriteArtifactRequest,
+    CloseSandboxProcessInputRequest, CreateSandboxRequest, EventData, EventQuery,
+    EventQueryDirection, ExoHarness, ForkConversationRequest, NewAgentRequest,
+    NewConversationRequest, PutSecretRequest, RunInSandboxRequest, SandboxBackendChoice,
+    SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessStatus, SandboxProcessStdin,
+    Secret, SecretBackendChoice, StartSandboxProcessRequest, WaitSandboxProcessRequest,
+    WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
 fn local_test_config(root: impl Into<std::path::PathBuf>) -> BasicExoHarnessConfig {
@@ -503,6 +506,7 @@ async fn basic_backend_runs_commands_in_created_sandbox() {
 
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
+            provider: Default::default(),
             image: "basic-local-process".to_string(),
             default_workdir: Some(tempdir.path().display().to_string()),
             file_system_mounts: None,
@@ -539,6 +543,95 @@ async fn basic_backend_runs_commands_in_created_sandbox() {
     assert_eq!(String::from_utf8_lossy(&stdout_bytes), "hello");
     assert_eq!(String::from_utf8_lossy(&stderr_bytes), "");
     assert_eq!(wait_result.expect("process should exit"), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn basic_backend_exposes_process_events_and_input() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
+        .await
+        .expect("harness should initialize");
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let conversation = agent
+        .new_conversation(NewConversationRequest::default())
+        .await
+        .expect("conversation");
+    let sandbox_id = conversation
+        .create_sandbox(CreateSandboxRequest {
+            provider: Default::default(),
+            image: "basic-local-process".to_string(),
+            default_workdir: Some(tempdir.path().display().to_string()),
+            file_system_mounts: None,
+            enable_networking: Some(true),
+            idle_seconds: Some(60),
+        })
+        .await
+        .expect("sandbox should be created");
+    let process = conversation
+        .start_sandbox_process(StartSandboxProcessRequest {
+            sandbox_id: sandbox_id.clone(),
+            command: vec!["/bin/sh".to_string(), "-lc".to_string(), "cat".to_string()],
+            env: Default::default(),
+            cwd: None,
+            mode: Default::default(),
+            stdin: SandboxProcessStdin::Open,
+            output: Default::default(),
+            lifecycle: Default::default(),
+        })
+        .await
+        .expect("process should start");
+
+    conversation
+        .write_sandbox_process_input(WriteSandboxProcessInputRequest {
+            sandbox_id: sandbox_id.clone(),
+            process_id: process.id.clone(),
+            data: b"hello process api".to_vec(),
+        })
+        .await
+        .expect("stdin should write");
+    conversation
+        .close_sandbox_process_input(CloseSandboxProcessInputRequest {
+            sandbox_id: sandbox_id.clone(),
+            process_id: process.id.clone(),
+        })
+        .await
+        .expect("stdin should close");
+
+    let status = conversation
+        .wait_sandbox_process(WaitSandboxProcessRequest {
+            sandbox_id: sandbox_id.clone(),
+            process_id: process.id.clone(),
+        })
+        .await
+        .expect("process should wait");
+    assert_eq!(status, SandboxProcessStatus::Exited { exit_code: 0 });
+
+    let events = conversation
+        .get_sandbox_process_events(SandboxProcessEventQuery {
+            sandbox_id,
+            process_id: process.id,
+            after: None,
+            limit: None,
+            follow: None,
+        })
+        .await
+        .expect("process events should read");
+    assert_eq!(events.status, SandboxProcessStatus::Exited { exit_code: 0 });
+    assert!(events.events.iter().any(|event| matches!(
+        event,
+        SandboxProcessEvent::Stdout { data, .. }
+            if String::from_utf8_lossy(data).contains("hello process api")
+    )));
+    assert!(matches!(
+        events.events.last(),
+        Some(SandboxProcessEvent::Exit { exit_code: 0, .. })
+    ));
 }
 
 fn user_message(text: &str) -> Message {

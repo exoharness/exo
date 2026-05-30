@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use exoharness::{
     ConversationHandle, CreateSandboxRequest, DEFAULT_SANDBOX_IMAGE, EventData, EventQuery,
     EventQueryDirection, FileSystemMount, FileSystemMountMode, Result, RunInSandboxRequest,
-    ToolRequest, ToolResult,
+    SandboxProvider, ToolRequest, ToolResult,
 };
 use futures::io::AsyncReadExt;
 use serde::{Deserialize, Serialize};
@@ -111,7 +111,8 @@ pub(crate) async fn ensure_shell_sandbox(
         .unwrap_or_else(|| DEFAULT_SANDBOX_IMAGE.to_string());
     let desired_enable_networking = agent_config.enable_networking || config.enable_networking;
 
-    if let Some(sandbox) = latest_shell_sandbox(conversation).await? {
+    if let Some(sandbox) = latest_shell_sandbox(conversation, agent_config.sandbox_provider).await?
+    {
         let Some(program) = &config.shell_program else {
             return Ok(sandbox.id);
         };
@@ -138,6 +139,7 @@ pub(crate) async fn ensure_shell_sandbox(
 
     conversation
         .create_sandbox(CreateSandboxRequest {
+            provider: agent_config.sandbox_provider,
             image: desired_image,
             default_workdir: Some(desired_default_workdir),
             file_system_mounts: Some(desired_mounts),
@@ -174,6 +176,7 @@ struct ShellSandboxInfo {
 
 async fn latest_shell_sandbox(
     conversation: &dyn ConversationHandle,
+    desired_provider: SandboxProvider,
 ) -> Result<Option<ShellSandboxInfo>> {
     let events = conversation
         .get_events(Some(EventQuery {
@@ -190,6 +193,7 @@ async fn latest_shell_sandbox(
     for event in events {
         if let EventData::SandboxCreated {
             sandbox_id,
+            provider,
             image,
             default_workdir,
             file_system_mounts,
@@ -197,6 +201,9 @@ async fn latest_shell_sandbox(
             idle_seconds,
         } = event.data
         {
+            if provider != desired_provider {
+                continue;
+            }
             return Ok(Some(ShellSandboxInfo {
                 id: sandbox_id,
                 image,

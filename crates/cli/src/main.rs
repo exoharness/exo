@@ -26,10 +26,10 @@ use executor::{
     ConversationModelConfig, CreateAgentRequest, CreateConversationRequest, EventQuery,
     EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions, FileSystemMount,
     FileSystemMountMode, ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET, Harness,
-    HarnessAgent, HarnessConversation, HttpExoHarness, PutSecretRequest, RlmHarness,
-    SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, Secret, SecretBackendChoice, SendRequest,
-    ToolRequest, ToolRuntime, TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, load_agent_config,
-    serve_exoharness_http_listener_with_options,
+    HarnessAgent, HarnessConversation, HttpExoHarness, LocalSandboxExoHarness, PutSecretRequest,
+    RlmHarness, SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxProvider, Secret,
+    SecretBackendChoice, SendRequest, ToolRequest, ToolRuntime, TypeScriptHarness,
+    TypeScriptHarnessConfig, Uuid7, load_agent_config, serve_exoharness_http_listener_with_options,
 };
 use lingua::Message;
 use lingua::universal::{AssistantContent, AssistantContentPart, ToolContentPart, UserContent};
@@ -203,6 +203,21 @@ enum SandboxBackendArg {
     LocalProcess,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SandboxProviderArg {
+    Managed,
+    Local,
+}
+
+impl From<SandboxProviderArg> for SandboxProvider {
+    fn from(value: SandboxProviderArg) -> Self {
+        match value {
+            SandboxProviderArg::Managed => Self::Managed,
+            SandboxProviderArg::Local => Self::Local,
+        }
+    }
+}
+
 fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
     let secret_backend = match cli.secret_backend.unwrap_or_else(default_secret_backend) {
         SecretBackendArg::AppleKeychain => SecretBackendChoice::AppleKeychain,
@@ -312,6 +327,8 @@ enum AgentCommands {
         #[arg(long)]
         sandbox_image: Option<String>,
         #[arg(long, value_enum)]
+        sandbox_provider: Option<SandboxProviderArg>,
+        #[arg(long, value_enum)]
         networking: Option<EnabledDisabled>,
         #[arg(long)]
         model: String,
@@ -344,6 +361,8 @@ enum AgentCommands {
         sandbox_image: Option<String>,
         #[arg(long)]
         clear_sandbox_image: bool,
+        #[arg(long, value_enum)]
+        sandbox_provider: Option<SandboxProviderArg>,
         #[arg(long, value_enum)]
         networking: Option<EnabledDisabled>,
         #[arg(long)]
@@ -604,6 +623,7 @@ async fn main() -> Result<()> {
                                 .as_ref()
                                 .and_then(HarnessSelection::default_sandbox_image)
                                 .map(str::to_string),
+                            sandbox_provider: Default::default(),
                             enable_networking: harness_selection
                                 .as_ref()
                                 .is_some_and(HarnessSelection::default_enable_networking),
@@ -681,6 +701,7 @@ async fn main() -> Result<()> {
                 tool_modules,
                 tool_creation,
                 sandbox_image,
+                sandbox_provider,
                 networking,
                 model,
                 max_output_tokens,
@@ -727,6 +748,9 @@ async fn main() -> Result<()> {
                             .map(EnabledDisabled::enabled)
                             .unwrap_or(true),
                         sandbox_image,
+                        sandbox_provider: sandbox_provider
+                            .map(SandboxProvider::from)
+                            .unwrap_or_default(),
                         enable_networking,
                         model,
                         max_output_tokens,
@@ -754,6 +778,7 @@ async fn main() -> Result<()> {
                 tool_creation,
                 sandbox_image,
                 clear_sandbox_image,
+                sandbox_provider,
                 networking,
                 model,
                 max_output_tokens,
@@ -869,6 +894,14 @@ async fn main() -> Result<()> {
                     changed = true;
                 }
 
+                if let Some(sandbox_provider) = sandbox_provider {
+                    let sandbox_provider = SandboxProvider::from(sandbox_provider);
+                    if config.sandbox_provider != sandbox_provider {
+                        config.sandbox_provider = sandbox_provider;
+                        changed = true;
+                    }
+                }
+
                 if let Some(networking) = networking {
                     let enable_networking = networking.enabled();
                     if config.enable_networking != enable_networking {
@@ -972,6 +1005,10 @@ async fn main() -> Result<()> {
                 println!(
                     "sandbox_image: {}",
                     config.sandbox_image.as_deref().unwrap_or("default")
+                );
+                println!(
+                    "sandbox_provider: {}",
+                    format_sandbox_provider(config.sandbox_provider)
                 );
                 println!("enable_networking: {}", config.enable_networking);
                 println!("model: {}", config.model);
@@ -1331,6 +1368,10 @@ async fn main() -> Result<()> {
                     agent_config.sandbox_image.as_deref().unwrap_or("default")
                 );
                 println!(
+                    "effective_sandbox_provider: {}",
+                    format_sandbox_provider(agent_config.sandbox_provider)
+                );
+                println!(
                     "model_override: {}",
                     model_override
                         .as_ref()
@@ -1656,7 +1697,11 @@ async fn instantiate_exoharness(
         if let Some(bearer_token) = bearer_token {
             harness = harness.with_bearer_token(bearer_token);
         }
-        return Ok(Arc::new(harness));
+        let remote: Arc<dyn ExoHarness> = Arc::new(harness);
+        let local: Arc<dyn ExoHarness> = Arc::new(BasicExoHarness::new(exo_config.clone()).await?);
+        return Ok(Arc::new(LocalSandboxExoHarness::new_with_force_local(
+            remote, local, false,
+        )));
     }
     Ok(Arc::new(BasicExoHarness::new(exo_config.clone()).await?))
 }
@@ -1708,6 +1753,13 @@ fn format_harness_kind(kind: AgentHarnessKind) -> &'static str {
         AgentHarnessKind::Basic => "basic",
         AgentHarnessKind::Rlm => "rlm",
         AgentHarnessKind::TypeScript => "typescript",
+    }
+}
+
+fn format_sandbox_provider(provider: SandboxProvider) -> &'static str {
+    match provider {
+        SandboxProvider::Managed => "managed",
+        SandboxProvider::Local => "local",
     }
 }
 

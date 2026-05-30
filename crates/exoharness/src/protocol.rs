@@ -2,11 +2,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AddEventsRequest, AddEventsResult, AgentId, AgentRecord, Artifact, ArtifactVersion,
-    BeginTurnRequest, Binding, BindingId, BindingMetadata, ConversationId, ConversationRecord,
-    CreateSandboxRequest, Event, EventData, EventId, EventQuery, ForkConversationRequest,
-    GetEventsResult, NewAgentRequest, NewConversationRequest, PutSecretRequest,
-    ReadArtifactRequest, RunInSandboxRequest, SandboxId, Secret, SecretId, SecretMetadata,
-    SessionId, SnapshotId, StartSandboxRequest, TurnId, TurnRecord, WriteArtifactRequest,
+    BeginTurnRequest, Binding, BindingId, BindingMetadata, CancelSandboxProcessRequest,
+    CloseSandboxProcessInputRequest, ConversationId, ConversationRecord, CreateSandboxRequest,
+    Event, EventData, EventId, EventQuery, ForkConversationRequest, GetEventsResult,
+    GetSandboxProcessEventsResult, NewAgentRequest, NewConversationRequest, PutSecretRequest,
+    ReadArtifactRequest, RunInSandboxRequest, SandboxId, SandboxProcessEventQuery,
+    SandboxProcessRecord, SandboxProcessStatus, Secret, SecretId, SecretMetadata, SessionId,
+    SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnId, TurnRecord,
+    WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -181,6 +184,36 @@ pub enum Request {
         conversation_id: ConversationId,
         sandbox_id: SandboxId,
     },
+    ConversationStartSandboxProcess {
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+        request: StartSandboxProcessRequest,
+    },
+    ConversationWriteSandboxProcessInput {
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+        request: WriteSandboxProcessInputRequest,
+    },
+    ConversationCloseSandboxProcessInput {
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+        request: CloseSandboxProcessInputRequest,
+    },
+    ConversationGetSandboxProcessEvents {
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+        query: SandboxProcessEventQuery,
+    },
+    ConversationWaitSandboxProcess {
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+        request: WaitSandboxProcessRequest,
+    },
+    ConversationCancelSandboxProcess {
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+        request: CancelSandboxProcessRequest,
+    },
     ConversationRunInSandbox {
         agent_id: AgentId,
         conversation_id: ConversationId,
@@ -276,6 +309,18 @@ impl Request {
             Self::ConversationSnapshotSandbox { .. } => "conversation_snapshot_sandbox",
             Self::ConversationStartSandbox { .. } => "conversation_start_sandbox",
             Self::ConversationStopSandbox { .. } => "conversation_stop_sandbox",
+            Self::ConversationStartSandboxProcess { .. } => "conversation_start_sandbox_process",
+            Self::ConversationWriteSandboxProcessInput { .. } => {
+                "conversation_write_sandbox_process_input"
+            }
+            Self::ConversationCloseSandboxProcessInput { .. } => {
+                "conversation_close_sandbox_process_input"
+            }
+            Self::ConversationGetSandboxProcessEvents { .. } => {
+                "conversation_get_sandbox_process_events"
+            }
+            Self::ConversationWaitSandboxProcess { .. } => "conversation_wait_sandbox_process",
+            Self::ConversationCancelSandboxProcess { .. } => "conversation_cancel_sandbox_process",
             Self::ConversationRunInSandbox { .. } => "conversation_run_in_sandbox",
             Self::ConversationListBindings { .. } => "conversation_list_bindings",
             Self::ConversationPutBinding { .. } => "conversation_put_binding",
@@ -335,6 +380,15 @@ pub enum Response {
     SnapshotId {
         snapshot_id: SnapshotId,
     },
+    SandboxProcess {
+        process: SandboxProcessRecord,
+    },
+    SandboxProcessEvents {
+        result: GetSandboxProcessEventsResult,
+    },
+    SandboxProcessStatus {
+        status: SandboxProcessStatus,
+    },
     SandboxProcessOutput {
         stdout: Vec<u8>,
         stderr: Vec<u8>,
@@ -384,6 +438,9 @@ impl Response {
             Self::ArtifactVersion { .. } => "artifact_version",
             Self::SandboxId { .. } => "sandbox_id",
             Self::SnapshotId { .. } => "snapshot_id",
+            Self::SandboxProcess { .. } => "sandbox_process",
+            Self::SandboxProcessEvents { .. } => "sandbox_process_events",
+            Self::SandboxProcessStatus { .. } => "sandbox_process_status",
             Self::SandboxProcessOutput { .. } => "sandbox_process_output",
             Self::Bindings { .. } => "bindings",
             Self::Binding { .. } => "binding",

@@ -17,6 +17,7 @@ mod harness_js_repl;
 mod harness_runtime;
 mod harness_tool;
 mod harness_types;
+mod local_sandbox;
 mod rlm;
 #[cfg(test)]
 mod rlm_tests;
@@ -35,8 +36,8 @@ pub use exoharness::{
     ConversationHandle, DEFAULT_SANDBOX_IMAGE, EventData, EventId, EventQuery, EventQueryDirection,
     ExoHarness, ExoHarnessHttpServeOptions, FileSystemMount, FileSystemMountMode,
     ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET, HttpExoHarness, PutSecretRequest,
-    SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, Secret, SecretBackendChoice, SecretMetadata,
-    SessionId, ToolRequest, Uuid7, serve_exoharness_http_listener,
+    SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxProvider, Secret, SecretBackendChoice,
+    SecretMetadata, SessionId, ToolRequest, Uuid7, serve_exoharness_http_listener,
     serve_exoharness_http_listener_with_options,
 };
 pub use harness_basic::BasicHarness;
@@ -45,6 +46,7 @@ pub use harness_tool::BasicToolRuntime;
 pub use harness_types::{
     CreateAgentRequest, CreateConversationRequest, Harness, HarnessAgent, HarnessConversation,
 };
+pub use local_sandbox::LocalSandboxExoHarness;
 pub use rlm::RlmHarness;
 pub use typescript::TypeScriptHarness;
 

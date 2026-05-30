@@ -126,6 +126,7 @@ where
             typescript: request.typescript,
             enable_agent_tool_creation: request.enable_agent_tool_creation,
             sandbox_image: request.sandbox_image,
+            sandbox_provider: request.sandbox_provider,
             enable_networking: request.enable_networking,
             model: request.model,
             max_output_tokens: request.max_output_tokens,

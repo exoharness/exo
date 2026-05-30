@@ -7,19 +7,26 @@ use std::time::Instant;
 use actix_web::{App, HttpResponse, HttpServer, Responder, web};
 use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
-use futures::io::Cursor;
+use tokio::io::{AsyncReadExt as TokioAsyncReadExt, AsyncWriteExt as TokioAsyncWriteExt};
+use tokio::sync::oneshot;
+use tokio::time::{self, Duration};
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use url::Url;
 
 use crate::protocol::{ClientMessage, ConversationHandleInfo, Request, Response, ServerMessage};
 use crate::server::ExoHarnessServer;
 use crate::{
     AddEventsRequest, AddEventsResult, AgentHandle, AgentId, AgentRecord, Artifact,
-    ArtifactVersion, BeginTurnRequest, Binding, BindingId, BindingMetadata, ConversationHandle,
+    ArtifactVersion, BeginTurnRequest, Binding, BindingId, BindingMetadata,
+    CancelSandboxProcessRequest, CloseSandboxProcessInputRequest, ConversationHandle,
     ConversationId, ConversationRecord, CreateSandboxRequest, Event, EventData, EventId,
-    EventQuery, EventStream, ExoHarness, ForkConversationRequest, GetEventsResult, NewAgentRequest,
-    NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result, RunInSandboxRequest,
-    SandboxId, SandboxProcess, SandboxProcessParts, Secret, SecretId, SecretMetadata, SessionId,
-    SnapshotId, StartSandboxRequest, TurnHandle, TurnRecord, WriteArtifactRequest,
+    EventQuery, EventStream, ExoHarness, ForkConversationRequest, GetEventsResult,
+    GetSandboxProcessEventsResult, NewAgentRequest, NewConversationRequest, PutSecretRequest,
+    ReadArtifactRequest, Result, RunInSandboxRequest, SandboxId, SandboxProcess,
+    SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessId, SandboxProcessParts,
+    SandboxProcessRecord, SandboxProcessStatus, Secret, SecretId, SecretMetadata, SessionId,
+    SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnHandle, TurnRecord,
+    WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
 pub const HTTP_EXOHARNESS_REQUEST_PATH: &str = "/v1/requests";
@@ -793,30 +800,165 @@ impl ConversationHandle for HttpConversationHandle {
         }
     }
 
-    async fn run_in_sandbox(
+    async fn start_sandbox_process(
         &self,
-        request: RunInSandboxRequest,
-    ) -> Result<Box<dyn SandboxProcess>> {
+        request: StartSandboxProcessRequest,
+    ) -> Result<SandboxProcessRecord> {
         match self
             .harness
-            .request(Request::ConversationRunInSandbox {
+            .request(Request::ConversationStartSandboxProcess {
                 agent_id: self.agent_id,
                 conversation_id: self.record.id,
                 request,
             })
             .await?
         {
-            Response::SandboxProcessOutput {
-                stdout,
-                stderr,
-                exit_code,
-            } => Ok(Box::new(CompletedSandboxProcess {
-                stdout,
-                stderr,
-                exit_code,
-            })),
-            response => unexpected_response(response, "sandbox_process_output"),
+            Response::SandboxProcess { process } => Ok(process),
+            response => unexpected_response(response, "sandbox_process"),
         }
+    }
+
+    async fn write_sandbox_process_input(
+        &self,
+        request: WriteSandboxProcessInputRequest,
+    ) -> Result<()> {
+        match self
+            .harness
+            .request(Request::ConversationWriteSandboxProcessInput {
+                agent_id: self.agent_id,
+                conversation_id: self.record.id,
+                request,
+            })
+            .await?
+        {
+            Response::Unit => Ok(()),
+            response => unexpected_response(response, "unit"),
+        }
+    }
+
+    async fn close_sandbox_process_input(
+        &self,
+        request: CloseSandboxProcessInputRequest,
+    ) -> Result<()> {
+        match self
+            .harness
+            .request(Request::ConversationCloseSandboxProcessInput {
+                agent_id: self.agent_id,
+                conversation_id: self.record.id,
+                request,
+            })
+            .await?
+        {
+            Response::Unit => Ok(()),
+            response => unexpected_response(response, "unit"),
+        }
+    }
+
+    async fn get_sandbox_process_events(
+        &self,
+        query: SandboxProcessEventQuery,
+    ) -> Result<GetSandboxProcessEventsResult> {
+        match self
+            .harness
+            .request(Request::ConversationGetSandboxProcessEvents {
+                agent_id: self.agent_id,
+                conversation_id: self.record.id,
+                query,
+            })
+            .await?
+        {
+            Response::SandboxProcessEvents { result } => Ok(result),
+            response => unexpected_response(response, "sandbox_process_events"),
+        }
+    }
+
+    async fn wait_sandbox_process(
+        &self,
+        request: WaitSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus> {
+        match self
+            .harness
+            .request(Request::ConversationWaitSandboxProcess {
+                agent_id: self.agent_id,
+                conversation_id: self.record.id,
+                request,
+            })
+            .await?
+        {
+            Response::SandboxProcessStatus { status } => Ok(status),
+            response => unexpected_response(response, "sandbox_process_status"),
+        }
+    }
+
+    async fn cancel_sandbox_process(
+        &self,
+        request: CancelSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus> {
+        match self
+            .harness
+            .request(Request::ConversationCancelSandboxProcess {
+                agent_id: self.agent_id,
+                conversation_id: self.record.id,
+                request,
+            })
+            .await?
+        {
+            Response::SandboxProcessStatus { status } => Ok(status),
+            response => unexpected_response(response, "sandbox_process_status"),
+        }
+    }
+
+    async fn run_in_sandbox(
+        &self,
+        request: RunInSandboxRequest,
+    ) -> Result<Box<dyn SandboxProcess>> {
+        let sandbox_id = request.id;
+        let process = self
+            .start_sandbox_process(StartSandboxProcessRequest {
+                sandbox_id: sandbox_id.clone(),
+                command: request.command,
+                env: request.env,
+                cwd: None,
+                mode: Default::default(),
+                stdin: Default::default(),
+                output: Default::default(),
+                lifecycle: Default::default(),
+            })
+            .await?;
+        let (stdout_reader, stdout_writer) = tokio::io::duplex(64 * 1024);
+        let (stderr_reader, stderr_writer) = tokio::io::duplex(64 * 1024);
+        let (stdin_reader, stdin_writer) = tokio::io::duplex(64 * 1024);
+        let (wait_tx, wait_rx) = oneshot::channel();
+        spawn_http_sandbox_process_event_poller(
+            self.harness.clone(),
+            self.agent_id,
+            self.record.id,
+            sandbox_id.clone(),
+            process.id.clone(),
+            stdout_writer,
+            stderr_writer,
+            wait_tx,
+        );
+        spawn_http_sandbox_process_stdin_forwarder(
+            self.harness.clone(),
+            self.agent_id,
+            self.record.id,
+            sandbox_id,
+            process.id,
+            stdin_reader,
+        );
+        Ok(Box::new(LiveHttpSandboxProcess {
+            parts: Some(SandboxProcessParts {
+                stdout: Box::pin(stdout_reader.compat()),
+                stderr: Box::pin(stderr_reader.compat()),
+                stdin: Box::pin(stdin_writer.compat_write()),
+                wait: Box::pin(async move {
+                    wait_rx
+                        .await
+                        .unwrap_or_else(|_| Err(anyhow!("HTTP sandbox process poller stopped")))
+                }),
+            }),
+        }))
     }
 
     async fn list_bindings(&self) -> Result<Vec<BindingMetadata>> {
@@ -987,24 +1129,194 @@ impl TurnHandle for HttpTurnHandle {
     }
 }
 
-struct CompletedSandboxProcess {
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    exit_code: i32,
+struct LiveHttpSandboxProcess {
+    parts: Option<SandboxProcessParts>,
 }
 
-impl SandboxProcess for CompletedSandboxProcess {
-    fn into_parts(self: Box<Self>) -> SandboxProcessParts {
-        let CompletedSandboxProcess {
-            stdout,
-            stderr,
-            exit_code,
-        } = *self;
-        SandboxProcessParts {
-            stdout: Box::pin(Cursor::new(stdout)),
-            stderr: Box::pin(Cursor::new(stderr)),
-            stdin: Box::pin(Cursor::new(Vec::new())),
-            wait: Box::pin(async move { Ok(exit_code) }),
+impl SandboxProcess for LiveHttpSandboxProcess {
+    fn into_parts(mut self: Box<Self>) -> SandboxProcessParts {
+        self.parts
+            .take()
+            .expect("live HTTP sandbox process parts already consumed")
+    }
+}
+
+fn spawn_http_sandbox_process_event_poller(
+    harness: HttpExoHarness,
+    agent_id: AgentId,
+    conversation_id: ConversationId,
+    sandbox_id: SandboxId,
+    process_id: SandboxProcessId,
+    mut stdout: tokio::io::DuplexStream,
+    mut stderr: tokio::io::DuplexStream,
+    wait_tx: oneshot::Sender<Result<i32>>,
+) {
+    tokio::spawn(async move {
+        let mut cursor = None;
+        let mut wait_tx = Some(wait_tx);
+        loop {
+            let response = harness
+                .request(Request::ConversationGetSandboxProcessEvents {
+                    agent_id,
+                    conversation_id,
+                    query: SandboxProcessEventQuery {
+                        sandbox_id: sandbox_id.clone(),
+                        process_id: process_id.clone(),
+                        after: cursor,
+                        limit: None,
+                        follow: None,
+                    },
+                })
+                .await;
+            let result = match response {
+                Ok(Response::SandboxProcessEvents { result }) => result,
+                Ok(response) => {
+                    send_http_sandbox_process_wait_result(
+                        &mut wait_tx,
+                        Err(anyhow!(
+                            "expected sandbox_process_events response, got {}",
+                            response.kind()
+                        )),
+                    );
+                    return;
+                }
+                Err(error) => {
+                    send_http_sandbox_process_wait_result(&mut wait_tx, Err(error));
+                    return;
+                }
+            };
+
+            for event in result.events {
+                cursor = Some(event.cursor());
+                match event {
+                    SandboxProcessEvent::Stdout { data, .. } => {
+                        if let Err(error) = stdout.write_all(&data).await {
+                            send_http_sandbox_process_wait_result(&mut wait_tx, Err(error.into()));
+                            return;
+                        }
+                    }
+                    SandboxProcessEvent::Stderr { data, .. } => {
+                        if let Err(error) = stderr.write_all(&data).await {
+                            send_http_sandbox_process_wait_result(&mut wait_tx, Err(error.into()));
+                            return;
+                        }
+                    }
+                    SandboxProcessEvent::Exit { exit_code, .. } => {
+                        send_http_sandbox_process_wait_result(&mut wait_tx, Ok(exit_code));
+                        return;
+                    }
+                    SandboxProcessEvent::Error { message, .. } => {
+                        send_http_sandbox_process_wait_result(&mut wait_tx, Err(anyhow!(message)));
+                        return;
+                    }
+                    SandboxProcessEvent::Cancelled { .. } => {
+                        send_http_sandbox_process_wait_result(
+                            &mut wait_tx,
+                            Err(anyhow!("sandbox process was cancelled")),
+                        );
+                        return;
+                    }
+                }
+            }
+
+            match result.status {
+                SandboxProcessStatus::Running => {
+                    time::sleep(Duration::from_millis(50)).await;
+                }
+                SandboxProcessStatus::Exited { exit_code } => {
+                    send_http_sandbox_process_wait_result(&mut wait_tx, Ok(exit_code));
+                    return;
+                }
+                SandboxProcessStatus::Failed { message } => {
+                    send_http_sandbox_process_wait_result(&mut wait_tx, Err(anyhow!(message)));
+                    return;
+                }
+                SandboxProcessStatus::Cancelled => {
+                    send_http_sandbox_process_wait_result(
+                        &mut wait_tx,
+                        Err(anyhow!("sandbox process was cancelled")),
+                    );
+                    return;
+                }
+            }
+        }
+    });
+}
+
+fn spawn_http_sandbox_process_stdin_forwarder(
+    harness: HttpExoHarness,
+    agent_id: AgentId,
+    conversation_id: ConversationId,
+    sandbox_id: SandboxId,
+    process_id: SandboxProcessId,
+    mut stdin: tokio::io::DuplexStream,
+) {
+    tokio::spawn(async move {
+        let mut buffer = vec![0; 8192];
+        loop {
+            match stdin.read(&mut buffer).await {
+                Ok(0) => {
+                    let response = harness
+                        .request(Request::ConversationCloseSandboxProcessInput {
+                            agent_id,
+                            conversation_id,
+                            request: CloseSandboxProcessInputRequest {
+                                sandbox_id: sandbox_id.clone(),
+                                process_id: process_id.clone(),
+                            },
+                        })
+                        .await;
+                    if let Err(error) = response {
+                        tracing::warn!(
+                            target: HTTP_EXOHARNESS_TRACING_TARGET,
+                            error = %error,
+                            "failed to close HTTP sandbox process stdin"
+                        );
+                    }
+                    return;
+                }
+                Ok(length) => {
+                    let response = harness
+                        .request(Request::ConversationWriteSandboxProcessInput {
+                            agent_id,
+                            conversation_id,
+                            request: WriteSandboxProcessInputRequest {
+                                sandbox_id: sandbox_id.clone(),
+                                process_id: process_id.clone(),
+                                data: buffer[..length].to_vec(),
+                            },
+                        })
+                        .await;
+                    if let Err(error) = response {
+                        tracing::warn!(
+                            target: HTTP_EXOHARNESS_TRACING_TARGET,
+                            error = %error,
+                            "failed to write HTTP sandbox process stdin"
+                        );
+                        return;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: HTTP_EXOHARNESS_TRACING_TARGET,
+                        error = %error,
+                        "failed to read HTTP sandbox process stdin pipe"
+                    );
+                    return;
+                }
+            }
+        }
+    });
+}
+
+fn send_http_sandbox_process_wait_result(
+    sender: &mut Option<oneshot::Sender<Result<i32>>>,
+    result: Result<i32>,
+) {
+    if let Some(sender) = sender.take() {
+        match sender.send(result) {
+            Ok(()) => {}
+            Err(_result) => {}
         }
     }
 }

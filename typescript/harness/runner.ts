@@ -50,6 +50,7 @@ interface RawAgentConfig {
   } | null;
   enable_agent_tool_creation?: boolean;
   sandbox_image?: string | null;
+  sandbox_provider?: "managed" | "local";
   enable_networking: boolean;
   model: string;
   max_output_tokens?: number | null;
@@ -802,6 +803,7 @@ function toAgentConfig(raw: RawAgentConfig): AgentConfig {
       : null,
     enableAgentToolCreation: raw.enable_agent_tool_creation ?? true,
     sandboxImage: raw.sandbox_image ?? null,
+    sandboxProvider: raw.sandbox_provider ?? "managed",
     enableNetworking: raw.enable_networking,
     model: raw.model,
     maxOutputTokens: raw.max_output_tokens ?? null,
@@ -1634,7 +1636,15 @@ function createTurnContext(
             arguments: toolCall.request.arguments,
           });
         }
-        const result = await context.executeTool(toolCall.request);
+        let result: ToolResult;
+        try {
+          result = await context.executeTool(toolCall.request);
+        } catch (error) {
+          result = {
+            ok: false,
+            error: runnerErrorMessage(error),
+          };
+        }
         if (streaming) {
           await context.stream.toolResult({
             toolCallId: toolCall.toolCallId,
@@ -1709,6 +1719,10 @@ function resolveHarnessModule(
     );
   }
   return candidate as TypeScriptHarness;
+}
+
+function runnerErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function main(): Promise<void> {

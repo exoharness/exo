@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use exoharness::{
-    ConversationHandle, EventId, FileSystemMount, ResponseId, Result, SessionId, ToolArguments,
-    ToolCallId, ToolRequest, ToolResult, TurnId,
+    ConversationHandle, EventId, FileSystemMount, ResponseId, Result, SandboxProvider, SessionId,
+    ToolArguments, ToolCallId, ToolRequest, ToolResult, TurnId,
 };
 use lingua::{Message, UniversalStreamChunk, UniversalUsage};
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,8 @@ pub struct AgentConfig {
     pub enable_agent_tool_creation: bool,
     #[serde(default)]
     pub sandbox_image: Option<String>,
+    #[serde(default)]
+    pub sandbox_provider: SandboxProvider,
     #[serde(default)]
     pub enable_networking: bool,
     pub model: String,

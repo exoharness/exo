@@ -389,14 +389,19 @@ impl ChatRepl {
                         self.print_transcript().await?;
                         continue;
                     }
-                    if trimmed == "/shell" {
+                    if trimmed == "/shell" || trimmed == "/sandbox" {
                         println!("usage: /shell <command>");
+                        println!("alias: /sandbox <command>");
                         continue;
                     }
-                    if let Some(command) = trimmed.strip_prefix("/shell ") {
+                    if let Some(command) = trimmed
+                        .strip_prefix("/shell ")
+                        .or_else(|| trimmed.strip_prefix("/sandbox "))
+                    {
                         let command = command.trim();
                         if command.is_empty() {
                             println!("usage: /shell <command>");
+                            println!("alias: /sandbox <command>");
                             continue;
                         }
                         self.editor.add_history_entry(line.as_str())?;

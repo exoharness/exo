@@ -55,6 +55,9 @@ const CODEX_SHELL_TOOL = "codex.shell";
 const CODEX_WEB_SEARCH_TOOL = "codex.web_search";
 const EXO_SHELL_TOOL = "shell";
 const EXO_SHELL_DYNAMIC_TOOL = "exo_shell";
+const CODEX_PRIOR_MESSAGE_MAX_CHARS = 8_000;
+const CODEX_PRIOR_TOOL_RESULT_MAX_CHARS = 4_000;
+const CODEX_PRIOR_HISTORY_MAX_CHARS = 24_000;
 
 interface CodexTokenUsage {
   inputTokens?: number;
@@ -77,6 +80,20 @@ interface CodexWarmTurnScope {
   context: TurnContext;
   protocolLog: CodexProtocolEventBuffer;
   turnParent: TraceParent;
+}
+
+interface PriorResponseItems {
+  items: JsonValue[];
+  sourceMessageCount: number;
+  droppedMessageCount: number;
+  truncatedMessageCount: number;
+  textChars: number;
+}
+
+interface PriorResponseItemCandidate {
+  item: JsonValue;
+  textChars: number;
+  truncated: boolean;
 }
 
 class CodexWarmSession {
@@ -219,11 +236,12 @@ async function runCodexTurn(
       ));
     session.threadId = threadId;
 
-    const priorItems = threadReused
-      ? []
+    const priorInjection = threadReused
+      ? emptyPriorResponseItems()
       : messagesToResponseItems(
           await materializePriorConversationMessages(context),
         );
+    const priorItems = priorInjection.items;
     if (priorItems.length > 0) {
       await traceCodexTask(
         turnParent,
@@ -231,6 +249,10 @@ async function runCodexTurn(
         {
           thread_id: threadId,
           item_count: priorItems.length,
+          source_message_count: priorInjection.sourceMessageCount,
+          dropped_message_count: priorInjection.droppedMessageCount,
+          truncated_message_count: priorInjection.truncatedMessageCount,
+          text_chars: priorInjection.textChars,
         },
         () =>
           session.server.request("thread/inject_items", {
@@ -606,12 +628,15 @@ async function handleCodexNotification(
       const completedTurn = asRecord(params.turn);
       const status = completedTurn.status;
       if (status === "failed") {
-        throw new Error(codexTurnError(completedTurn));
+        const message = codexTurnError(completedTurn);
+        await streamCodexStatus(context, traceState, `error: ${message}`);
+        throw new Error(message);
       }
       return "completed";
     }
     case "error": {
       const params = asRecord(notification.params);
+      const message = codexNotificationError(params);
       await appendCustomEvent(
         turn,
         params.willRetry === true ? "codex_retrying" : "codex_error",
@@ -621,9 +646,11 @@ async function handleCodexNotification(
         throw new Error(codexSandboxNetworkingError(context));
       }
       if (params.willRetry === true) {
+        await streamCodexStatus(context, traceState, `retrying: ${message}`);
         return "running";
       }
-      throw new Error(codexNotificationError(params));
+      await streamCodexStatus(context, traceState, `error: ${message}`);
+      throw new Error(message);
     }
     default:
       return "running";
@@ -752,26 +779,98 @@ function toolResultFromCodexItem(item: Record<string, unknown>): JsonValue {
   });
 }
 
-function messagesToResponseItems(messages: Message[]): JsonValue[] {
-  return messages
+function emptyPriorResponseItems(): PriorResponseItems {
+  return {
+    items: [],
+    sourceMessageCount: 0,
+    droppedMessageCount: 0,
+    truncatedMessageCount: 0,
+    textChars: 0,
+  };
+}
+
+function messagesToResponseItems(messages: Message[]): PriorResponseItems {
+  const candidates = messages
     .filter(
       (message) => message.role !== "system" && message.role !== "developer",
     )
-    .map((message) => {
-      const text = messageText(message);
-      if (message.role === "assistant") {
-        return toJsonValue({
-          type: "message",
-          role: "assistant",
-          content: [{ type: "output_text", text }],
-        });
-      }
-      return toJsonValue({
+    .map(priorMessageToResponseItemCandidate);
+  const selected: PriorResponseItemCandidate[] = [];
+  let textChars = 0;
+  let droppedMessageCount = 0;
+
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const candidate = candidates[index];
+    if (
+      selected.length > 0 &&
+      textChars + candidate.textChars > CODEX_PRIOR_HISTORY_MAX_CHARS
+    ) {
+      droppedMessageCount += 1;
+      continue;
+    }
+    selected.push(candidate);
+    textChars += candidate.textChars;
+  }
+
+  selected.reverse();
+  return {
+    items: selected.map((candidate) => candidate.item),
+    sourceMessageCount: candidates.length,
+    droppedMessageCount,
+    truncatedMessageCount: candidates.filter((candidate) => candidate.truncated)
+      .length,
+    textChars,
+  };
+}
+
+function priorMessageToResponseItemCandidate(
+  message: Message,
+): PriorResponseItemCandidate {
+  const { text, truncated } = truncatePriorMessageText(
+    messageText(message),
+    priorMessageMaxChars(message),
+  );
+  if (message.role === "assistant") {
+    return {
+      item: toJsonValue({
         type: "message",
-        role: "user",
-        content: [{ type: "input_text", text }],
-      });
-    });
+        role: "assistant",
+        content: [{ type: "output_text", text }],
+      }),
+      textChars: text.length,
+      truncated,
+    };
+  }
+  return {
+    item: toJsonValue({
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text }],
+    }),
+    textChars: text.length,
+    truncated,
+  };
+}
+
+function priorMessageMaxChars(message: Message): number {
+  return message.role === "tool"
+    ? CODEX_PRIOR_TOOL_RESULT_MAX_CHARS
+    : CODEX_PRIOR_MESSAGE_MAX_CHARS;
+}
+
+function truncatePriorMessageText(
+  text: string,
+  maxChars: number,
+): { text: string; truncated: boolean } {
+  if (text.length <= maxChars) {
+    return { text, truncated: false };
+  }
+  const omittedChars = text.length - maxChars;
+  const suffix = `\n\n[truncated ${omittedChars} characters from prior conversation history]`;
+  return {
+    text: `${text.slice(0, Math.max(0, maxChars - suffix.length))}${suffix}`,
+    truncated: true,
+  };
 }
 
 function messagesToUserInput(messages: Message[]): JsonValue[] {
@@ -872,10 +971,12 @@ function codexEffectiveNetworking(context: TurnContext): boolean {
 function codexSandboxCommand(context: TurnContext): string[] {
   const shell = context.conversationConfig.shellProgram ?? "/bin/bash";
   const command = [
-    'if [ -n "${OPENAI_API_KEY:-}" ] && [ ! -f "${CODEX_HOME:-/home/exo/.codex}/auth.json" ]; then',
-    'printf "%s" "$OPENAI_API_KEY" | codex login --with-api-key >/dev/null;',
+    "set -e;",
+    'mkdir -p "${HOME:-/tmp/exo-home}" "${CODEX_HOME:-/tmp/exo-codex-home}" >/dev/null 2>/tmp/codex-setup.stderr;',
+    'if [ -n "${OPENAI_API_KEY:-}" ] && [ ! -f "${CODEX_HOME:-/tmp/exo-codex-home}/auth.json" ]; then',
+    'printf "%s" "$OPENAI_API_KEY" | codex login --with-api-key >/dev/null 2>/tmp/codex-login.stderr;',
     "fi;",
-    "exec codex app-server --listen stdio://",
+    "exec codex app-server --listen stdio:// 2>/tmp/codex-app-server.stderr",
   ].join(" ");
   return [shell, "-lc", command];
 }
@@ -894,8 +995,8 @@ function codexSandboxEnv(
           "OPENAI_PROJECT",
         ].includes(key) || key.startsWith("CODEX_"),
     ),
-    CODEX_HOME: "/home/exo/.codex",
-    HOME: "/home/exo",
+    CODEX_HOME: "/tmp/exo-codex-home",
+    HOME: "/tmp/exo-home",
   };
   if (modelBinding.apiKey) {
     env.OPENAI_API_KEY = modelBinding.apiKey;
@@ -983,6 +1084,18 @@ function codexNotificationError(params: Record<string, unknown>): string {
       ? ` (${error.additionalDetails})`
       : "";
   return `${message}${details}`;
+}
+
+async function streamCodexStatus(
+  context: TurnContext,
+  traceState: CodexTurnTraceState,
+  message: string,
+): Promise<void> {
+  const ttftMs = markFirstTextDelta(traceState);
+  if (ttftMs !== null) {
+    await context.stream.firstChunk(ttftMs);
+  }
+  await context.stream.text(`[codex] ${message}\n`);
 }
 
 function updateTraceStateFromNotification(

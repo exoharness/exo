@@ -317,6 +317,64 @@ impl ExoHarnessServer {
                 conversation.stop_sandbox(sandbox_id).await?;
                 Ok(Response::Unit)
             }
+            Request::ConversationStartSandboxProcess {
+                agent_id,
+                conversation_id,
+                request,
+            } => {
+                let conversation = self.require_conversation(agent_id, conversation_id).await?;
+                Ok(Response::SandboxProcess {
+                    process: conversation.start_sandbox_process(request).await?,
+                })
+            }
+            Request::ConversationWriteSandboxProcessInput {
+                agent_id,
+                conversation_id,
+                request,
+            } => {
+                let conversation = self.require_conversation(agent_id, conversation_id).await?;
+                conversation.write_sandbox_process_input(request).await?;
+                Ok(Response::Unit)
+            }
+            Request::ConversationCloseSandboxProcessInput {
+                agent_id,
+                conversation_id,
+                request,
+            } => {
+                let conversation = self.require_conversation(agent_id, conversation_id).await?;
+                conversation.close_sandbox_process_input(request).await?;
+                Ok(Response::Unit)
+            }
+            Request::ConversationGetSandboxProcessEvents {
+                agent_id,
+                conversation_id,
+                query,
+            } => {
+                let conversation = self.require_conversation(agent_id, conversation_id).await?;
+                Ok(Response::SandboxProcessEvents {
+                    result: conversation.get_sandbox_process_events(query).await?,
+                })
+            }
+            Request::ConversationWaitSandboxProcess {
+                agent_id,
+                conversation_id,
+                request,
+            } => {
+                let conversation = self.require_conversation(agent_id, conversation_id).await?;
+                Ok(Response::SandboxProcessStatus {
+                    status: conversation.wait_sandbox_process(request).await?,
+                })
+            }
+            Request::ConversationCancelSandboxProcess {
+                agent_id,
+                conversation_id,
+                request,
+            } => {
+                let conversation = self.require_conversation(agent_id, conversation_id).await?;
+                Ok(Response::SandboxProcessStatus {
+                    status: conversation.cancel_sandbox_process(request).await?,
+                })
+            }
             Request::ConversationRunInSandbox {
                 agent_id,
                 conversation_id,

@@ -6,7 +6,9 @@ use tempfile::TempDir;
 
 use crate::{
     BasicExoHarness, BasicExoHarnessConfig, CreateSandboxRequest, ExoHarness, HttpExoHarness,
-    RunInSandboxRequest, SandboxBackendChoice, SecretBackendChoice, serve_exoharness_http_listener,
+    RunInSandboxRequest, SandboxBackendChoice, SandboxProcessEvent, SandboxProcessEventQuery,
+    SandboxProcessStatus, SandboxProcessStdin, SecretBackendChoice, StartSandboxProcessRequest,
+    WaitSandboxProcessRequest, WriteSandboxProcessInputRequest, serve_exoharness_http_listener,
 };
 
 fn local_test_config(root: impl Into<std::path::PathBuf>) -> BasicExoHarnessConfig {
@@ -93,6 +95,7 @@ async fn http_exoharness_runs_noninteractive_sandbox_commands() {
         .expect("conversation");
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
+            provider: Default::default(),
             image: "local".to_string(),
             default_workdir: Some("/".to_string()),
             file_system_mounts: None,
@@ -119,4 +122,88 @@ async fn http_exoharness_runs_noninteractive_sandbox_commands() {
     stdout.read_to_end(&mut output).await.expect("stdout");
     assert_eq!(output, b"hello");
     assert_eq!(parts.wait.await.expect("exit"), 0);
+}
+
+#[actix_web::test]
+async fn http_exoharness_supports_sandbox_process_events() {
+    let fixture = http_harness().await;
+    let agent = fixture
+        .harness
+        .new_agent(crate::NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let conversation = agent
+        .new_conversation(crate::NewConversationRequest::default())
+        .await
+        .expect("conversation");
+    let sandbox_id = conversation
+        .create_sandbox(CreateSandboxRequest {
+            provider: Default::default(),
+            image: "local".to_string(),
+            default_workdir: Some("/".to_string()),
+            file_system_mounts: None,
+            enable_networking: Some(true),
+            idle_seconds: Some(60),
+        })
+        .await
+        .expect("sandbox");
+    let process = conversation
+        .start_sandbox_process(StartSandboxProcessRequest {
+            sandbox_id: sandbox_id.clone(),
+            command: vec!["/bin/sh".to_string(), "-lc".to_string(), "cat".to_string()],
+            env: Default::default(),
+            cwd: None,
+            mode: Default::default(),
+            stdin: SandboxProcessStdin::Open,
+            output: Default::default(),
+            lifecycle: Default::default(),
+        })
+        .await
+        .expect("process");
+    conversation
+        .write_sandbox_process_input(WriteSandboxProcessInputRequest {
+            sandbox_id: sandbox_id.clone(),
+            process_id: process.id.clone(),
+            data: b"hello http process".to_vec(),
+        })
+        .await
+        .expect("stdin write");
+    conversation
+        .close_sandbox_process_input(crate::CloseSandboxProcessInputRequest {
+            sandbox_id: sandbox_id.clone(),
+            process_id: process.id.clone(),
+        })
+        .await
+        .expect("stdin close");
+    let status = conversation
+        .wait_sandbox_process(WaitSandboxProcessRequest {
+            sandbox_id: sandbox_id.clone(),
+            process_id: process.id.clone(),
+        })
+        .await
+        .expect("wait");
+    assert_eq!(status, SandboxProcessStatus::Exited { exit_code: 0 });
+
+    let events = conversation
+        .get_sandbox_process_events(SandboxProcessEventQuery {
+            sandbox_id,
+            process_id: process.id,
+            after: None,
+            limit: None,
+            follow: None,
+        })
+        .await
+        .expect("events");
+    assert!(events.events.iter().any(|event| matches!(
+        event,
+        SandboxProcessEvent::Stdout { data, .. }
+            if String::from_utf8_lossy(data).contains("hello http process")
+    )));
+    assert!(matches!(
+        events.events.last(),
+        Some(SandboxProcessEvent::Exit { exit_code: 0, .. })
+    ));
 }

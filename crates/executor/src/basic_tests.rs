@@ -10,16 +10,17 @@ use exoharness::{
     ConversationId, ConversationRecord, CreateSandboxRequest, Event, EventData, EventQuery,
     EventQueryDirection, EventStream, ExoHarness, ForkConversationRequest, GetEventsResult,
     NewAgentRequest, NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result,
-    RunInSandboxRequest, SandboxId, SandboxProcess, SandboxProcessParts, Secret, SecretMetadata,
-    SecretType, SessionId, SnapshotId, StartSandboxRequest, ToolRequest, ToolResult, TurnHandle,
-    TurnId, TurnRecord, Uuid7, WriteArtifactRequest,
+    RunInSandboxRequest, SandboxId, SandboxProcess, SandboxProcessEventQuery, SandboxProcessParts,
+    SandboxProcessRecord, SandboxProcessStatus, Secret, SecretMetadata, SecretType, SessionId,
+    SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, ToolRequest, ToolResult,
+    TurnHandle, TurnId, TurnRecord, Uuid7, WriteArtifactRequest,
 };
 use futures::FutureExt;
 use futures::io::Cursor;
 use futures::stream;
 use lingua::universal::{AssistantContent, UserContent};
 use lingua::{Message, UniversalStreamChunk};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
@@ -205,6 +206,115 @@ async fn send_executes_tool_round_trip() {
             EventData::Messages { messages, .. } => messages
                 .iter()
                 .any(|message| matches!(message, Message::Assistant { .. })),
+            _ => false,
+        }
+    }));
+
+    let requests = model.observed_requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| matches!(message, Message::Tool { .. }))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn send_records_tool_result_when_tool_execution_fails() {
+    let agent_id = Uuid7::now();
+    let conversation_id = Uuid7::now();
+    let exoharness = Arc::new(FakeExoHarness::new(agent_id, conversation_id));
+    let agent = exoharness
+        .get_agent(&agent_id)
+        .await
+        .expect("get agent should succeed")
+        .expect("agent should exist");
+    let conversation = agent
+        .get_conversation(&conversation_id)
+        .await
+        .expect("get conversation should succeed")
+        .expect("conversation should exist");
+    let tool_call_id = "call-1".to_string();
+    let model = Arc::new(FakeModelClient::new(vec![
+        ModelResponse {
+            response_id: Some(Uuid7::now()),
+            messages: vec![],
+            tool_calls: vec![PendingToolCall {
+                tool_call_id: tool_call_id.clone(),
+                request: ToolRequest {
+                    function_name: "shell".to_string(),
+                    arguments: Map::new(),
+                },
+            }],
+            usage: None,
+        },
+        ModelResponse {
+            response_id: Some(Uuid7::now()),
+            messages: vec![assistant_message("recovered")],
+            tool_calls: vec![],
+            usage: None,
+        },
+    ]));
+    let executor = BasicExecutor::new(
+        Arc::clone(&model),
+        Arc::new(FailingToolRuntime {
+            message: "sandbox quota exceeded".to_string(),
+        }),
+    );
+    let turn = conversation
+        .begin_turn(BeginTurnRequest {
+            session_id: None,
+            input: vec![user_message("run it")],
+        })
+        .await
+        .expect("begin turn should succeed");
+
+    HarnessExecutor::execute_turn(
+        &executor,
+        agent.as_ref(),
+        conversation.as_ref(),
+        Arc::clone(&turn),
+        &default_agent_config(),
+        &ConversationConfig {
+            enable_networking: true,
+            shell_program: Some("bash".to_string()),
+            mounts: Vec::new(),
+        },
+        &(),
+        ExecutorStreamMode::Disabled,
+        None,
+    )
+    .await
+    .expect("execute turn should recover from tool failure");
+    turn.finish().await.expect("turn should finish");
+
+    let events = conversation
+        .get_events(Some(EventQuery {
+            cursor: None,
+            direction: Some(EventQueryDirection::Asc),
+            limit: None,
+            session_id: None,
+            turn_id: None,
+            types: None,
+        }))
+        .await
+        .expect("get events should succeed")
+        .events;
+
+    assert!(events.iter().any(|event| {
+        match &event.data {
+            EventData::ToolResult {
+                tool_call_id: event_tool_call_id,
+                result,
+            } => {
+                event_tool_call_id == &tool_call_id
+                    && result
+                        == &json!({
+                            "ok": false,
+                            "error": "sandbox quota exceeded",
+                        })
+            }
             _ => false,
         }
     }));
@@ -434,6 +544,23 @@ impl FakeToolRuntime {
         Self {
             result: Mutex::new(Some(result)),
         }
+    }
+}
+
+struct FailingToolRuntime {
+    message: String,
+}
+
+#[async_trait]
+impl ToolRuntime for FailingToolRuntime {
+    async fn execute(
+        &self,
+        _conversation: &dyn ConversationHandle,
+        _agent_config: &AgentConfig,
+        _config: &ConversationConfig,
+        _request: &ToolRequest,
+    ) -> Result<ToolResult> {
+        Err(anyhow!(self.message.clone()))
     }
 }
 
@@ -820,6 +947,48 @@ impl ConversationHandle for FakeConversationHandle {
         Err(anyhow!("not implemented"))
     }
 
+    async fn start_sandbox_process(
+        &self,
+        _request: StartSandboxProcessRequest,
+    ) -> Result<SandboxProcessRecord> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn write_sandbox_process_input(
+        &self,
+        _request: exoharness::WriteSandboxProcessInputRequest,
+    ) -> Result<()> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn close_sandbox_process_input(
+        &self,
+        _request: exoharness::CloseSandboxProcessInputRequest,
+    ) -> Result<()> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn get_sandbox_process_events(
+        &self,
+        _query: SandboxProcessEventQuery,
+    ) -> Result<exoharness::GetSandboxProcessEventsResult> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn wait_sandbox_process(
+        &self,
+        _request: exoharness::WaitSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn cancel_sandbox_process(
+        &self,
+        _request: exoharness::CancelSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus> {
+        Err(anyhow!("not implemented"))
+    }
+
     async fn run_in_sandbox(
         &self,
         _request: RunInSandboxRequest,
@@ -1020,6 +1189,7 @@ fn default_agent_config() -> AgentConfig {
         typescript: None,
         enable_agent_tool_creation: true,
         sandbox_image: None,
+        sandbox_provider: Default::default(),
         enable_networking: false,
         model: "test-model".to_string(),
         max_output_tokens: None,

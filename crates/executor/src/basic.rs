@@ -266,7 +266,7 @@ where
                 );
             }
 
-            let tool_trace = match turn_trace {
+            let mut tool_trace = match turn_trace {
                 Some(turn_trace) => {
                     turn_trace
                         .start_tool_call(&tool_request.request, round)
@@ -274,7 +274,7 @@ where
                 }
                 None => None,
             };
-            let result = match self
+            let (result, tool_succeeded) = match self
                 .tools
                 .execute(
                     conversation,
@@ -284,15 +284,21 @@ where
                 )
                 .await
             {
-                Ok(response) => response,
+                Ok(response) => (response, true),
                 Err(error) => {
-                    if let Some(tool_trace) = tool_trace {
+                    if let Some(tool_trace) = tool_trace.take() {
                         tool_trace.finish_error(&error).await;
                     }
-                    return Err(error);
+                    (
+                        json!({
+                            "ok": false,
+                            "error": error.to_string(),
+                        }),
+                        false,
+                    )
                 }
             };
-            if let Some(tool_trace) = tool_trace {
+            if tool_succeeded && let Some(tool_trace) = tool_trace.take() {
                 tool_trace.finish_success(&result).await;
             }
             if let ExecutorStreamMode::Enabled(event_tx) = stream_mode {
@@ -365,15 +371,21 @@ fn extend_message_history(
     tool_call_names: &mut HashMap<ToolCallId, String>,
     events: &[exoharness::Event],
 ) {
+    let mut pending_tool_call_ids = Vec::new();
+
     for event in events {
         match &event.data {
-            EventData::Messages { messages, .. } => history.extend(messages.clone()),
+            EventData::Messages { messages, .. } => {
+                flush_dangling_tool_results(history, tool_call_names, &mut pending_tool_call_ids);
+                history.extend(messages.clone());
+            }
             EventData::ToolRequested {
                 tool_call_id,
                 request,
                 ..
             } => {
                 tool_call_names.insert(tool_call_id.clone(), request.function_name.clone());
+                pending_tool_call_ids.push(tool_call_id.clone());
             }
             EventData::ToolResult {
                 tool_call_id,
@@ -382,6 +394,7 @@ fn extend_message_history(
                 let Some(tool_name) = tool_call_names.get(tool_call_id) else {
                     continue;
                 };
+                remove_pending_tool_call(&mut pending_tool_call_ids, tool_call_id);
                 history.push(Message::Tool {
                     content: vec![ToolContentPart::ToolResult(ToolResultContentPart {
                         tool_call_id: tool_call_id.clone(),
@@ -393,6 +406,38 @@ fn extend_message_history(
             }
             _ => {}
         }
+    }
+}
+
+fn flush_dangling_tool_results(
+    history: &mut Vec<Message>,
+    tool_call_names: &HashMap<ToolCallId, String>,
+    pending_tool_call_ids: &mut Vec<ToolCallId>,
+) {
+    for tool_call_id in std::mem::take(pending_tool_call_ids) {
+        let Some(tool_name) = tool_call_names.get(&tool_call_id) else {
+            continue;
+        };
+        history.push(Message::Tool {
+            content: vec![ToolContentPart::ToolResult(ToolResultContentPart {
+                tool_call_id,
+                tool_name: tool_name.clone(),
+                output: to_lingua_value(json!({
+                    "ok": false,
+                    "error": "tool execution did not complete before the previous turn ended",
+                })),
+                provider_options: None,
+            })],
+        });
+    }
+}
+
+fn remove_pending_tool_call(pending_tool_call_ids: &mut Vec<ToolCallId>, tool_call_id: &str) {
+    if let Some(index) = pending_tool_call_ids
+        .iter()
+        .position(|pending| pending == tool_call_id)
+    {
+        pending_tool_call_ids.remove(index);
     }
 }
 
