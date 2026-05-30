@@ -1136,6 +1136,9 @@ fn event_type(event: &Event) -> String {
         EventData::SandboxStarted { .. } => "sandbox_started".to_string(),
         EventData::SandboxStopped { .. } => "sandbox_stopped".to_string(),
         EventData::SandboxSnapshotted { .. } => "sandbox_snapshotted".to_string(),
+        EventData::SandboxProcessStarted { .. } => "sandbox_process_started".to_string(),
+        EventData::SandboxProcessStateUpdated { .. } => "sandbox_process_state_updated".to_string(),
+        EventData::SandboxProcessEvent { .. } => "sandbox_process_event".to_string(),
         EventData::Custom { event_type, .. } => event_type.clone(),
     }
 }

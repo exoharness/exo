@@ -451,7 +451,7 @@ impl ConversationHandle for LocalSandboxConversation {
             .await?
             .start_sandbox(StartSandboxRequest {
                 id: local_id,
-                snapshot_id: request.snapshot_id.clone(),
+                snapshot_id: request.snapshot_id,
                 idle_seconds: request.idle_seconds,
             })
             .await?;
