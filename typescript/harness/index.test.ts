@@ -303,7 +303,6 @@ describe("shell built-in tool", () => {
   it("builds the existing shell tool definition shape", () => {
     expect(
       buildShellToolDefinitions({
-        enableNetworking: false,
         shellProgram: "/bin/bash",
         mounts: [],
       }),
@@ -329,7 +328,6 @@ describe("shell built-in tool", () => {
   it("omits the shell definition when shell is disabled", () => {
     expect(
       buildShellToolDefinitions({
-        enableNetworking: false,
         shellProgram: null,
         mounts: [],
       }),
@@ -352,7 +350,6 @@ describe("shell built-in tool", () => {
       },
     });
     const shell = createShellToolInstance({
-      enableNetworking: false,
       shellProgram: "/bin/bash",
       mounts: [],
     });
@@ -382,7 +379,6 @@ describe("shell built-in tool", () => {
   it("registers requested built-in tools", () => {
     const context = fakeTurnContext({
       conversationConfig: {
-        enableNetworking: false,
         shellProgram: "/bin/bash",
         mounts: [],
       },
@@ -828,7 +824,6 @@ function fakeTurnContext(
       braintrust: null,
     },
     conversationConfig: options.conversationConfig ?? {
-      enableNetworking: false,
       shellProgram: null,
       mounts: [],
     },

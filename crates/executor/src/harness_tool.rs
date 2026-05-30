@@ -105,14 +105,14 @@ pub(crate) async fn ensure_shell_sandbox(
         .map(|mount| mount.mount_path.clone())
         .unwrap_or_else(|| "/".to_string());
     let desired_mounts = normalize_mounts(&config.mounts);
-    let desired_image = agent_config
-        .sandbox_image
-        .clone()
+    let desired_image = config
+        .effective_sandbox_image(agent_config)
+        .map(str::to_string)
         .unwrap_or_else(|| DEFAULT_SANDBOX_IMAGE.to_string());
-    let desired_enable_networking = agent_config.enable_networking || config.enable_networking;
+    let desired_provider = config.effective_sandbox_provider(agent_config);
+    let desired_enable_networking = agent_config.enable_networking;
 
-    if let Some(sandbox) = latest_shell_sandbox(conversation, agent_config.sandbox_provider).await?
-    {
+    if let Some(sandbox) = latest_shell_sandbox(conversation, desired_provider).await? {
         let Some(program) = &config.shell_program else {
             return Ok(sandbox.id);
         };
@@ -139,7 +139,7 @@ pub(crate) async fn ensure_shell_sandbox(
 
     conversation
         .create_sandbox(CreateSandboxRequest {
-            provider: agent_config.sandbox_provider,
+            provider: desired_provider,
             image: desired_image,
             default_workdir: Some(desired_default_workdir),
             file_system_mounts: Some(desired_mounts),

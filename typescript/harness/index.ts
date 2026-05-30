@@ -87,7 +87,8 @@ export interface SecretMetadata {
 }
 
 export interface ConversationConfig {
-  enableNetworking: boolean;
+  sandboxImage?: string | null;
+  sandboxProvider?: "daytona" | "local" | null;
   shellProgram?: string | null;
   mounts: FileSystemMount[];
 }

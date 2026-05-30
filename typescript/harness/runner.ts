@@ -59,7 +59,8 @@ interface RawAgentConfig {
 }
 
 interface RawConversationConfig {
-  enable_networking: boolean;
+  sandbox_image?: string | null;
+  sandbox_provider?: "daytona" | "local" | null;
   shell_program?: string | null;
   mounts: Array<{
     host_path: string;
@@ -833,7 +834,8 @@ function toAgentConfig(raw: RawAgentConfig): AgentConfig {
 
 function toConversationConfig(raw: RawConversationConfig): ConversationConfig {
   return {
-    enableNetworking: raw.enable_networking,
+    sandboxImage: raw.sandbox_image ?? null,
+    sandboxProvider: raw.sandbox_provider ?? null,
     shellProgram: raw.shell_program ?? null,
     mounts: raw.mounts.map(toFileSystemMount),
   };

@@ -423,8 +423,14 @@ enum ConversationCommands {
         shell_program: Option<String>,
         #[arg(long)]
         clear_shell_program: bool,
+        #[arg(long)]
+        sandbox_image: Option<String>,
+        #[arg(long)]
+        clear_sandbox_image: bool,
         #[arg(long, value_enum)]
-        networking: Option<EnabledDisabled>,
+        sandbox_provider: Option<SandboxProviderArg>,
+        #[arg(long)]
+        clear_sandbox_provider: bool,
         #[arg(long)]
         model: Option<String>,
         #[arg(long)]
@@ -1139,7 +1145,10 @@ async fn main() -> Result<()> {
                 conversation,
                 shell_program,
                 clear_shell_program,
-                networking,
+                sandbox_image,
+                clear_sandbox_image,
+                sandbox_provider,
+                clear_sandbox_provider,
                 model,
                 max_output_tokens,
                 clear_max_output_tokens,
@@ -1147,6 +1156,14 @@ async fn main() -> Result<()> {
             } => {
                 if clear_shell_program && shell_program.is_some() {
                     bail!("provide either --clear-shell-program or --shell-program, not both");
+                }
+                if clear_sandbox_image && sandbox_image.is_some() {
+                    bail!("provide either --clear-sandbox-image or --sandbox-image, not both");
+                }
+                if clear_sandbox_provider && sandbox_provider.is_some() {
+                    bail!(
+                        "provide either --clear-sandbox-provider or --sandbox-provider, not both"
+                    );
                 }
                 if clear_model_override
                     && (model.is_some() || max_output_tokens.is_some() || clear_max_output_tokens)
@@ -1180,8 +1197,22 @@ async fn main() -> Result<()> {
                     changed = true;
                 }
 
-                if let Some(networking) = networking {
-                    config.enable_networking = networking.enabled();
+                if clear_sandbox_image {
+                    config.sandbox_image = None;
+                    changed = true;
+                } else if let Some(sandbox_image) = sandbox_image {
+                    if sandbox_image.trim().is_empty() {
+                        bail!("sandbox image must not be empty");
+                    }
+                    config.sandbox_image = Some(sandbox_image);
+                    changed = true;
+                }
+
+                if clear_sandbox_provider {
+                    config.sandbox_provider = None;
+                    changed = true;
+                } else if let Some(sandbox_provider) = sandbox_provider {
+                    config.sandbox_provider = Some(SandboxProvider::from(sandbox_provider));
                     changed = true;
                 }
 
@@ -1365,22 +1396,30 @@ async fn main() -> Result<()> {
                         .unwrap_or_else(|| "none".to_string())
                 );
                 println!("message_count: {}", messages.len());
-                println!("enable_networking: {}", config.enable_networking);
-                println!(
-                    "effective_enable_networking: {}",
-                    agent_config.enable_networking || config.enable_networking
-                );
                 println!(
                     "shell_program: {}",
-                    config.shell_program.unwrap_or_else(|| "none".to_string())
+                    config.shell_program.as_deref().unwrap_or("none")
+                );
+                println!(
+                    "sandbox_image: {}",
+                    config.sandbox_image.as_deref().unwrap_or("inherit")
                 );
                 println!(
                     "effective_sandbox_image: {}",
-                    agent_config.sandbox_image.as_deref().unwrap_or("default")
+                    config
+                        .effective_sandbox_image(&agent_config)
+                        .unwrap_or("default")
+                );
+                println!(
+                    "sandbox_provider: {}",
+                    config
+                        .sandbox_provider
+                        .map(format_sandbox_provider)
+                        .unwrap_or("inherit")
                 );
                 println!(
                     "effective_sandbox_provider: {}",
-                    format_sandbox_provider(agent_config.sandbox_provider)
+                    format_sandbox_provider(config.effective_sandbox_provider(&agent_config))
                 );
                 println!(
                     "model_override: {}",

@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use exoharness::{
     BasicExoHarness, BasicExoHarnessConfig, Binding, EventData, EventQuery, EventQueryDirection,
     ExoHarness, FileSystemMount, FileSystemMountMode, PutSecretRequest, Result,
-    SandboxBackendChoice, Secret, SecretBackendChoice, ToolRequest, Uuid7,
+    SandboxBackendChoice, SandboxProvider, Secret, SecretBackendChoice, ToolRequest, Uuid7,
 };
 
 fn local_test_config(root: impl Into<std::path::PathBuf>) -> BasicExoHarnessConfig {
@@ -360,7 +360,7 @@ async fn send_executes_shell_tool_when_enabled() {
             harness: crate::AgentHarnessKind::Basic,
             typescript: None,
             enable_agent_tool_creation: true,
-            sandbox_image: None,
+            sandbox_image: Some("agent-image".to_string()),
             sandbox_provider: Default::default(),
             enable_networking: true,
             model: "gpt-5.4".to_string(),
@@ -380,6 +380,8 @@ async fn send_executes_shell_tool_when_enabled() {
         .await
         .expect("conversation config should load");
     conversation_config.shell_program = Some("/bin/sh".to_string());
+    conversation_config.sandbox_image = Some("conversation-image".to_string());
+    conversation_config.sandbox_provider = Some(SandboxProvider::Local);
     conversation
         .put_config(conversation_config)
         .await
@@ -422,9 +424,11 @@ async fn send_executes_shell_tool_when_enabled() {
     assert!(matches!(
         &sandbox_events[0].data,
         EventData::SandboxCreated {
+            provider: SandboxProvider::Local,
+            image,
             enable_networking: true,
             ..
-        }
+        } if image == "conversation-image"
     ));
 }
 

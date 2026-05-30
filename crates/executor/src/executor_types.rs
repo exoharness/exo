@@ -59,7 +59,10 @@ pub fn default_enable_agent_tool_creation() -> bool {
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct ConversationConfig {
-    pub enable_networking: bool,
+    #[serde(default)]
+    pub sandbox_image: Option<String>,
+    #[serde(default)]
+    pub sandbox_provider: Option<SandboxProvider>,
     pub shell_program: Option<String>,
     #[serde(default)]
     pub mounts: Vec<FileSystemMount>,
@@ -87,10 +90,24 @@ impl fmt::Display for ConversationModelConfig {
 impl Default for ConversationConfig {
     fn default() -> Self {
         Self {
-            enable_networking: false,
+            sandbox_image: None,
+            sandbox_provider: None,
             shell_program: Some("/bin/bash".to_string()),
             mounts: Vec::new(),
         }
+    }
+}
+
+impl ConversationConfig {
+    pub fn effective_sandbox_image<'a>(&'a self, agent_config: &'a AgentConfig) -> Option<&'a str> {
+        self.sandbox_image
+            .as_deref()
+            .or(agent_config.sandbox_image.as_deref())
+    }
+
+    pub fn effective_sandbox_provider(&self, agent_config: &AgentConfig) -> SandboxProvider {
+        self.sandbox_provider
+            .unwrap_or(agent_config.sandbox_provider)
     }
 }
 

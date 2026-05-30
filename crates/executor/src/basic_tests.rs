@@ -151,9 +151,9 @@ async fn send_executes_tool_round_trip() {
     );
     let agent_config = default_agent_config();
     let conversation_config = ConversationConfig {
-        enable_networking: true,
         shell_program: Some("bash".to_string()),
         mounts: Vec::new(),
+        ..Default::default()
     };
     let turn = conversation
         .begin_turn(BeginTurnRequest {
@@ -277,9 +277,9 @@ async fn send_records_tool_result_when_tool_execution_fails() {
         Arc::clone(&turn),
         &default_agent_config(),
         &ConversationConfig {
-            enable_networking: true,
             shell_program: Some("bash".to_string()),
             mounts: Vec::new(),
+            ..Default::default()
         },
         &(),
         ExecutorStreamMode::Disabled,
