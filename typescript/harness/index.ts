@@ -61,11 +61,12 @@ export type Binding =
       secretId?: string | null;
     };
 
-export interface BindingMetadata {
+export interface BindingRecord {
   id: string;
   type: "env" | "mcp" | "llm";
   name: string;
   createdAt: string;
+  binding: Binding;
 }
 
 export type Secret =
@@ -258,7 +259,7 @@ export interface Agent {
     path: string;
     value: JsonValue;
   }): Promise<ArtifactVersion>;
-  listBindings(): Promise<BindingMetadata[]>;
+  listBindings(): Promise<BindingRecord[]>;
   getBinding(id: string): Promise<Binding | null>;
   listSecrets(): Promise<SecretMetadata[]>;
   getSecret(id: string): Promise<Secret | null>;
@@ -270,7 +271,7 @@ export interface ExoHarness {
   getAgent(id: string): Promise<Agent | null>;
   newAgent(request: { slug: string; name: string }): Promise<Agent>;
   deleteAgent(id: string): Promise<boolean>;
-  listBindings(): Promise<BindingMetadata[]>;
+  listBindings(): Promise<BindingRecord[]>;
   getBinding(id: string): Promise<Binding | null>;
   listSecrets(): Promise<SecretMetadata[]>;
   getSecret(id: string): Promise<Secret | null>;
@@ -316,7 +317,7 @@ export interface Conversation {
     path: string;
     value: JsonValue;
   }): Promise<ArtifactVersion>;
-  listBindings(): Promise<BindingMetadata[]>;
+  listBindings(): Promise<BindingRecord[]>;
   getBinding(id: string): Promise<Binding | null>;
   listSecrets(): Promise<SecretMetadata[]>;
   getSecret(id: string): Promise<Secret | null>;

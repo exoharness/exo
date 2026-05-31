@@ -230,16 +230,19 @@ where
                 name: request.name,
             })
             .await?;
-        let mut conversation_config = ConversationConfig::default();
-        conversation_config.sandbox_image = request.sandbox_image.or(agent_config.sandbox_image);
-        conversation_config.sandbox_provider = Some(
-            request
-                .sandbox_provider
-                .unwrap_or(agent_config.sandbox_provider),
-        );
-        if let Some(shell_program) = request.shell_program {
-            conversation_config.shell_program = Some(shell_program);
-        }
+        let default_conversation_config = ConversationConfig::default();
+        let conversation_config = ConversationConfig {
+            sandbox_image: request.sandbox_image.or(agent_config.sandbox_image),
+            sandbox_provider: Some(
+                request
+                    .sandbox_provider
+                    .unwrap_or(agent_config.sandbox_provider),
+            ),
+            shell_program: request
+                .shell_program
+                .or(default_conversation_config.shell_program),
+            mounts: default_conversation_config.mounts,
+        };
         self.runtime
             .put_conversation_config(conversation.as_ref(), conversation_config)
             .await?;

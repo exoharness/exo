@@ -21,7 +21,7 @@ pub trait ExoHarness: Send + Sync {
     async fn new_agent(&self, request: NewAgentRequest) -> Result<Arc<dyn AgentHandle>>;
     async fn delete_agent(&self, id: &AgentId) -> Result<bool>;
 
-    async fn list_bindings(&self) -> Result<Vec<BindingMetadata>>;
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>>;
     async fn put_binding(&self, binding: Binding) -> Result<BindingId>;
     async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>>;
 
@@ -45,7 +45,7 @@ pub trait AgentHandle: Send + Sync {
     ) -> Result<Arc<dyn ConversationHandle>>;
     async fn delete_conversation(&self, id: &ConversationId) -> Result<bool>;
 
-    async fn list_bindings(&self) -> Result<Vec<BindingMetadata>>;
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>>;
     async fn put_binding(&self, binding: Binding) -> Result<BindingId>;
     async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>>;
 
@@ -111,7 +111,7 @@ pub trait ConversationHandle: Send + Sync {
     async fn run_in_sandbox(&self, request: RunInSandboxRequest)
     -> Result<Box<dyn SandboxProcess>>;
 
-    async fn list_bindings(&self) -> Result<Vec<BindingMetadata>>;
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>>;
     async fn put_binding(&self, binding: Binding) -> Result<BindingId>;
     async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>>;
 
@@ -550,13 +550,12 @@ pub struct SandboxProcessParts {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BindingMetadata {
+pub struct BindingRecord {
     pub id: BindingId,
     pub r#type: BindingType,
     pub name: String,
     pub created_at: DateTimeUtc,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub binding: Option<Binding>,
+    pub binding: Binding,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -645,7 +644,7 @@ crate::impl_has_uuid7_id!(AgentRecord, id);
 crate::impl_has_uuid7_id!(ConversationRecord, id);
 crate::impl_has_uuid7_id!(TurnRecord, id);
 crate::impl_has_uuid7_id!(Event, id);
-crate::impl_has_uuid7_id!(BindingMetadata, id);
+crate::impl_has_uuid7_id!(BindingRecord, id);
 crate::impl_has_uuid7_id!(SecretMetadata, id);
 
 #[cfg(test)]

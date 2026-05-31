@@ -17,7 +17,7 @@ use crate::protocol::{ClientMessage, ConversationHandleInfo, Request, Response, 
 use crate::server::ExoHarnessServer;
 use crate::{
     AddEventsRequest, AddEventsResult, AgentHandle, AgentId, AgentRecord, Artifact,
-    ArtifactVersion, BeginTurnRequest, Binding, BindingId, BindingMetadata,
+    ArtifactVersion, BeginTurnRequest, Binding, BindingId, BindingRecord,
     CancelSandboxProcessRequest, CloseSandboxProcessInputRequest, ConversationHandle,
     ConversationId, ConversationRecord, CreateSandboxRequest, Event, EventData, EventId,
     EventQuery, EventStream, ExoHarness, ForkConversationRequest, GetEventsResult,
@@ -270,7 +270,7 @@ impl ExoHarness for HttpExoHarness {
         }
     }
 
-    async fn list_bindings(&self) -> Result<Vec<BindingMetadata>> {
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
         match self.request(Request::ListBindings).await? {
             Response::Bindings { bindings } => Ok(bindings),
             response => unexpected_response(response, "bindings"),
@@ -415,7 +415,7 @@ impl AgentHandle for HttpAgentHandle {
         }
     }
 
-    async fn list_bindings(&self) -> Result<Vec<BindingMetadata>> {
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
         match self
             .harness
             .request(Request::AgentListBindings {
@@ -961,7 +961,7 @@ impl ConversationHandle for HttpConversationHandle {
         }))
     }
 
-    async fn list_bindings(&self) -> Result<Vec<BindingMetadata>> {
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
         match self
             .harness
             .request(Request::ConversationListBindings {

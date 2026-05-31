@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AddEventsRequest, AddEventsResult, AgentId, AgentRecord, Artifact, ArtifactVersion,
-    BeginTurnRequest, Binding, BindingId, BindingMetadata, CancelSandboxProcessRequest,
+    BeginTurnRequest, Binding, BindingId, BindingRecord, CancelSandboxProcessRequest,
     CloseSandboxProcessInputRequest, ConversationId, ConversationRecord, CreateSandboxRequest,
     Event, EventData, EventId, EventQuery, ForkConversationRequest, GetEventsResult,
     GetSandboxProcessEventsResult, NewAgentRequest, NewConversationRequest, PutSecretRequest,
@@ -395,7 +395,7 @@ pub enum Response {
         exit_code: i32,
     },
     Bindings {
-        bindings: Vec<BindingMetadata>,
+        bindings: Vec<BindingRecord>,
     },
     Binding {
         binding: Option<Binding>,

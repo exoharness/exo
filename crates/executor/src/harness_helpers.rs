@@ -194,7 +194,7 @@ pub(crate) async fn resolve_model_binding(
     conversation: &dyn ConversationHandle,
     name: &str,
 ) -> Result<ResolvedModelBinding> {
-    let binding_metadata = conversation
+    let binding_record = conversation
         .list_bindings()
         .await?
         .into_iter()
@@ -204,16 +204,12 @@ pub(crate) async fn resolve_model_binding(
                 "model is not registered: {name}; run `exo model register {name} --secret <secret>`"
             )
         })?;
-    let binding = conversation
-        .get_binding(&binding_metadata.id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("registered model binding disappeared: {name}"))?;
     let Binding::Llm {
         model,
         base_url,
         secret_id,
         ..
-    } = binding
+    } = binding_record.binding
     else {
         return Err(anyhow::anyhow!("binding is not a model: {name}"));
     };

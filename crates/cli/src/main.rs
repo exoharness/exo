@@ -1983,16 +1983,12 @@ async fn list_model_bindings(exoharness: &dyn ExoHarness) -> Result<Vec<Register
     let secrets = exoharness.list_secrets().await?;
     let mut models = Vec::new();
     for metadata in exoharness.list_bindings().await? {
-        let binding = match metadata.binding {
-            Some(binding) => Some(binding),
-            None => exoharness.get_binding(&metadata.id).await?,
-        };
-        let Some(Binding::Llm {
+        let Binding::Llm {
             name,
             model,
             base_url,
             secret_id,
-        }) = binding
+        } = metadata.binding
         else {
             continue;
         };

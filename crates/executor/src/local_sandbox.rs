@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use exoharness::{
     AddEventsRequest, AddEventsResult, AgentHandle, AgentId, Artifact, ArtifactVersion, Binding,
-    BindingId, BindingMetadata, CancelSandboxProcessRequest, CloseSandboxProcessInputRequest,
+    BindingId, BindingRecord, CancelSandboxProcessRequest, CloseSandboxProcessInputRequest,
     ConversationHandle, ConversationId, CreateSandboxRequest, Event, EventData, EventId,
     EventStream, ExoHarness, ForkConversationRequest, GetEventsResult, NewAgentRequest,
     NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result, RunInSandboxRequest,
@@ -91,7 +91,7 @@ impl ExoHarness for LocalSandboxExoHarness {
         self.state.remote.delete_agent(id).await
     }
 
-    async fn list_bindings(&self) -> Result<Vec<BindingMetadata>> {
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
         self.state.remote.list_bindings().await
     }
 
@@ -164,7 +164,7 @@ impl AgentHandle for LocalSandboxAgent {
         self.remote.delete_conversation(id).await
     }
 
-    async fn list_bindings(&self) -> Result<Vec<BindingMetadata>> {
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
         self.remote.list_bindings().await
     }
 
@@ -583,7 +583,7 @@ impl ConversationHandle for LocalSandboxConversation {
             .await
     }
 
-    async fn list_bindings(&self) -> Result<Vec<BindingMetadata>> {
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
         self.remote.list_bindings().await
     }
 

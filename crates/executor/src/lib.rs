@@ -32,7 +32,7 @@ pub use executor_types::{
     TypeScriptHarnessConfig,
 };
 pub use exoharness::{
-    AgentHandle, BasicExoHarness, BasicExoHarnessConfig, Binding, BindingMetadata,
+    AgentHandle, BasicExoHarness, BasicExoHarnessConfig, Binding, BindingRecord,
     ConversationHandle, DEFAULT_SANDBOX_IMAGE, EventData, EventId, EventQuery, EventQueryDirection,
     ExoHarness, ExoHarnessHttpServeOptions, FileSystemMount, FileSystemMountMode,
     ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET, HttpExoHarness, PutSecretRequest,

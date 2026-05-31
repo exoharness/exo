@@ -6,7 +6,7 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use exoharness::{
     AddEventsRequest, AddEventsResult, AgentHandle, AgentId, AgentRecord, Artifact,
-    ArtifactVersion, BeginTurnRequest, Binding, BindingMetadata, BindingType, ConversationHandle,
+    ArtifactVersion, BeginTurnRequest, Binding, BindingRecord, BindingType, ConversationHandle,
     ConversationId, ConversationRecord, CreateSandboxRequest, Event, EventData, EventQuery,
     EventQueryDirection, EventStream, ExoHarness, ForkConversationRequest, GetEventsResult,
     NewAgentRequest, NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result,
@@ -644,8 +644,8 @@ impl ExoHarness for FakeExoHarness {
         Err(anyhow!("not implemented"))
     }
 
-    async fn list_bindings(&self) -> Result<Vec<BindingMetadata>> {
-        Ok(vec![test_model_binding_metadata()])
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
+        Ok(vec![test_model_binding_record()])
     }
 
     async fn put_binding(&self, _binding: Binding) -> Result<exoharness::BindingId> {
@@ -715,8 +715,8 @@ impl AgentHandle for FakeAgentHandle {
         Err(anyhow!("not implemented"))
     }
 
-    async fn list_bindings(&self) -> Result<Vec<BindingMetadata>> {
-        Ok(vec![test_model_binding_metadata()])
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
+        Ok(vec![test_model_binding_record()])
     }
 
     async fn put_binding(&self, _binding: Binding) -> Result<exoharness::BindingId> {
@@ -996,8 +996,8 @@ impl ConversationHandle for FakeConversationHandle {
         Ok(Box::new(FakeSandboxProcess))
     }
 
-    async fn list_bindings(&self) -> Result<Vec<BindingMetadata>> {
-        Ok(vec![test_model_binding_metadata()])
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
+        Ok(vec![test_model_binding_record()])
     }
 
     async fn put_binding(&self, _binding: Binding) -> Result<exoharness::BindingId> {
@@ -1156,14 +1156,14 @@ fn assistant_message(text: &str) -> Message {
     }
 }
 
-fn test_model_binding_metadata() -> BindingMetadata {
+fn test_model_binding_record() -> BindingRecord {
     let id = Uuid7::now();
-    BindingMetadata {
+    BindingRecord {
         id,
         r#type: BindingType::Llm,
         name: "test-model".to_string(),
         created_at: id.timestamp().expect("uuid7 timestamp"),
-        binding: None,
+        binding: test_model_binding(),
     }
 }
 

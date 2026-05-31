@@ -30,7 +30,7 @@ use crate::secrets::{
 use crate::storage::BasicObjectStore;
 use crate::{
     AddEventsRequest, AddEventsResult, AgentHandle, AgentId, AgentRecord, Artifact,
-    ArtifactVersion, BeginTurnRequest, Binding, BindingId, BindingMetadata, BindingType,
+    ArtifactVersion, BeginTurnRequest, Binding, BindingId, BindingRecord, BindingType,
     BoxAsyncRead, BoxAsyncWrite, CancelSandboxProcessRequest, CloseSandboxProcessInputRequest,
     ConversationHandle, ConversationId, ConversationRecord, CreateSandboxRequest, Event, EventData,
     EventId, EventQuery, EventQueryDirection, EventStream, ExoHarness, FileSystemMount,
@@ -230,23 +230,14 @@ impl ExoHarness for BasicExoHarness {
         Ok(true)
     }
 
-    async fn list_bindings(&self) -> Result<Vec<BindingMetadata>> {
-        list_binding_metadata(&self.inner.storage, &self.bindings_dir()).await
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
+        list_binding_records(&self.inner.storage, &self.bindings_dir()).await
     }
 
     async fn put_binding(&self, binding: Binding) -> Result<BindingId> {
         let _guard = self.inner.write_lock.lock().await;
         let id = Uuid7::now();
-        let record = StoredBinding {
-            metadata: BindingMetadata {
-                id,
-                r#type: binding_type(&binding),
-                name: binding_name(&binding).to_string(),
-                created_at: id.timestamp().expect("uuid7 timestamp"),
-                binding: None,
-            },
-            binding,
-        };
+        let record = stored_binding(id, binding);
         self.inner
             .storage
             .put_json(self.bindings_dir().join(format!("{id}.json")), &record)
@@ -261,7 +252,7 @@ impl ExoHarness for BasicExoHarness {
             .storage
             .get_json_if_exists::<StoredBinding>(&path)
             .await?
-            .map(|record| record.binding))
+            .map(|record| record.record.binding))
     }
 
     async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
@@ -442,27 +433,17 @@ impl AgentHandle for BasicAgentHandle {
         Ok(true)
     }
 
-    async fn list_bindings(&self) -> Result<Vec<BindingMetadata>> {
-        Ok(merge_binding_metadata(vec![
-            list_binding_metadata(&self.harness.inner.storage, &self.harness.bindings_dir())
-                .await?,
-            list_binding_metadata(&self.harness.inner.storage, &self.bindings_dir()).await?,
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
+        Ok(merge_binding_records(vec![
+            list_binding_records(&self.harness.inner.storage, &self.harness.bindings_dir()).await?,
+            list_binding_records(&self.harness.inner.storage, &self.bindings_dir()).await?,
         ]))
     }
 
     async fn put_binding(&self, binding: Binding) -> Result<BindingId> {
         let _guard = self.harness.inner.write_lock.lock().await;
         let id = Uuid7::now();
-        let record = StoredBinding {
-            metadata: BindingMetadata {
-                id,
-                r#type: binding_type(&binding),
-                name: binding_name(&binding).to_string(),
-                created_at: id.timestamp().expect("uuid7 timestamp"),
-                binding: None,
-            },
-            binding,
-        };
+        let record = stored_binding(id, binding);
         self.harness
             .inner
             .storage
@@ -480,7 +461,7 @@ impl AgentHandle for BasicAgentHandle {
             .get_json_if_exists::<StoredBinding>(&path)
             .await?
         {
-            return Ok(Some(record.binding));
+            return Ok(Some(record.record.binding));
         }
         self.harness.get_binding(id).await
     }
@@ -1396,32 +1377,22 @@ impl ConversationHandle for BasicConversationHandle {
         Ok(Box::new(LiveSandboxProcess::new(parts)))
     }
 
-    async fn list_bindings(&self) -> Result<Vec<BindingMetadata>> {
-        Ok(merge_binding_metadata(vec![
-            list_binding_metadata(&self.harness.inner.storage, &self.harness.bindings_dir())
-                .await?,
-            list_binding_metadata(
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
+        Ok(merge_binding_records(vec![
+            list_binding_records(&self.harness.inner.storage, &self.harness.bindings_dir()).await?,
+            list_binding_records(
                 &self.harness.inner.storage,
                 &agent_bindings_dir(&self.harness, self.agent_id),
             )
             .await?,
-            list_binding_metadata(&self.harness.inner.storage, &self.bindings_dir()).await?,
+            list_binding_records(&self.harness.inner.storage, &self.bindings_dir()).await?,
         ]))
     }
 
     async fn put_binding(&self, binding: Binding) -> Result<BindingId> {
         let _guard = self.harness.inner.write_lock.lock().await;
         let id = Uuid7::now();
-        let record = StoredBinding {
-            metadata: BindingMetadata {
-                id,
-                r#type: binding_type(&binding),
-                name: binding_name(&binding).to_string(),
-                created_at: id.timestamp().expect("uuid7 timestamp"),
-                binding: None,
-            },
-            binding,
-        };
+        let record = stored_binding(id, binding);
         self.harness
             .inner
             .storage
@@ -1439,7 +1410,7 @@ impl ConversationHandle for BasicConversationHandle {
             .get_json_if_exists::<StoredBinding>(&local_path)
             .await?
         {
-            return Ok(Some(record.binding));
+            return Ok(Some(record.record.binding));
         }
         let agent_path =
             agent_bindings_dir(&self.harness, self.agent_id).join(format!("{id}.json"));
@@ -1450,7 +1421,7 @@ impl ConversationHandle for BasicConversationHandle {
             .get_json_if_exists::<StoredBinding>(&agent_path)
             .await?
         {
-            return Ok(Some(record.binding));
+            return Ok(Some(record.record.binding));
         }
         self.harness.get_binding(id).await
     }
@@ -1769,8 +1740,7 @@ impl TurnHandle for BasicTurnHandle {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredBinding {
-    metadata: BindingMetadata,
-    binding: Binding,
+    record: BindingRecord,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2208,21 +2178,30 @@ async fn load_artifact_contents(
     Ok(legacy_artifact.contents)
 }
 
-async fn list_binding_metadata(
+async fn list_binding_records(
     storage: &BasicObjectStore,
     bindings_dir: &Path,
-) -> Result<Vec<BindingMetadata>> {
+) -> Result<Vec<BindingRecord>> {
     let mut bindings = storage
         .list_json_matching_suffix::<StoredBinding>(bindings_dir, ".json")
         .await?
         .into_iter()
-        .map(|stored| BindingMetadata {
-            binding: Some(stored.binding),
-            ..stored.metadata
-        })
+        .map(|stored| stored.record)
         .collect::<Vec<_>>();
     bindings.sort_by_key(|metadata| metadata.id);
     Ok(bindings)
+}
+
+fn stored_binding(id: BindingId, binding: Binding) -> StoredBinding {
+    StoredBinding {
+        record: BindingRecord {
+            id,
+            r#type: binding_type(&binding),
+            name: binding_name(&binding).to_string(),
+            created_at: id.timestamp().expect("uuid7 timestamp"),
+            binding,
+        },
+    }
 }
 
 async fn list_secret_metadata(
@@ -2239,8 +2218,8 @@ async fn list_secret_metadata(
     Ok(secrets)
 }
 
-fn merge_binding_metadata(scopes: Vec<Vec<BindingMetadata>>) -> Vec<BindingMetadata> {
-    let mut effective = HashMap::<String, BindingMetadata>::new();
+fn merge_binding_records(scopes: Vec<Vec<BindingRecord>>) -> Vec<BindingRecord> {
+    let mut effective = HashMap::<String, BindingRecord>::new();
     for bindings in scopes {
         for binding in bindings {
             effective.insert(binding.name.clone(), binding);

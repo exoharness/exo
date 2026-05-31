@@ -12,7 +12,7 @@ import {
   type Artifact,
   type ArtifactVersion,
   type Binding,
-  type BindingMetadata,
+  type BindingRecord,
   type Conversation,
   type ConversationConfig,
   type ConversationRecord,
@@ -131,11 +131,12 @@ type RawBinding =
       secret_id?: string | null;
     };
 
-interface RawBindingMetadata {
+interface RawBindingRecord {
   id: string;
   type: "env" | "mcp" | "llm";
   name: string;
   created_at: string;
+  binding: RawBinding;
 }
 
 type RawSecret =
@@ -398,7 +399,7 @@ type RawExoResponse =
   | { type: "artifact_versions"; artifacts: RawArtifactVersion[] }
   | { type: "artifact"; artifact: RawArtifact | null }
   | { type: "artifact_version"; artifact: RawArtifactVersion }
-  | { type: "bindings"; bindings: RawBindingMetadata[] }
+  | { type: "bindings"; bindings: RawBindingRecord[] }
   | { type: "binding"; binding: RawBinding | null }
   | { type: "secrets"; secrets: RawSecretMetadata[] }
   | { type: "secret"; secret: RawSecret | null }
@@ -907,12 +908,13 @@ function toArtifact(raw: RawArtifact): Artifact {
   };
 }
 
-function toBindingMetadata(raw: RawBindingMetadata): BindingMetadata {
+function toBindingRecord(raw: RawBindingRecord): BindingRecord {
   return {
     id: raw.id,
     type: raw.type,
     name: raw.name,
     createdAt: raw.created_at,
+    binding: toBinding(raw.binding),
   };
 }
 
@@ -1192,7 +1194,7 @@ function createAgent(client: ProtocolClient, raw: RawAgentRecord): Agent {
       });
     },
 
-    async listBindings(): Promise<BindingMetadata[]> {
+    async listBindings(): Promise<BindingRecord[]> {
       const payload = await client.requestExo({
         type: "agent_list_bindings",
         agent_id: record.id,
@@ -1200,7 +1202,7 @@ function createAgent(client: ProtocolClient, raw: RawAgentRecord): Agent {
       if (payload.type !== "bindings") {
         throw new Error(`expected bindings payload, got ${payload.type}`);
       }
-      return payload.bindings.map(toBindingMetadata);
+      return payload.bindings.map(toBindingRecord);
     },
 
     async getBinding(id: string): Promise<Binding | null> {
@@ -1289,12 +1291,12 @@ function createExoHarness(
       return payload.value;
     },
 
-    async listBindings(): Promise<BindingMetadata[]> {
+    async listBindings(): Promise<BindingRecord[]> {
       const payload = await client.requestExo({ type: "list_bindings" });
       if (payload.type !== "bindings") {
         throw new Error(`expected bindings payload, got ${payload.type}`);
       }
-      return payload.bindings.map(toBindingMetadata);
+      return payload.bindings.map(toBindingRecord);
     },
 
     async getBinding(id: string): Promise<Binding | null> {
@@ -1487,7 +1489,7 @@ function createConversation(
       });
     },
 
-    async listBindings(): Promise<BindingMetadata[]> {
+    async listBindings(): Promise<BindingRecord[]> {
       const payload = await client.requestExo({
         type: "conversation_list_bindings",
         agent_id: raw.agent_id,
@@ -1496,7 +1498,7 @@ function createConversation(
       if (payload.type !== "bindings") {
         throw new Error(`expected bindings payload, got ${payload.type}`);
       }
-      return payload.bindings.map(toBindingMetadata);
+      return payload.bindings.map(toBindingRecord);
     },
 
     async getBinding(id: string): Promise<Binding | null> {
