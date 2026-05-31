@@ -19,7 +19,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
-use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use executor::{
     AgentHarnessKind, BasicExoHarness, BasicExoHarnessConfig, BasicHarness, BasicToolRuntime,
     Binding, BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig,
@@ -399,12 +399,8 @@ enum ConversationCommands {
         name: Option<String>,
         #[arg(long)]
         slug: Option<String>,
-        #[arg(long)]
-        sandbox_image: Option<String>,
-        #[arg(long, value_enum)]
-        sandbox_provider: Option<SandboxProviderArg>,
-        #[arg(long)]
-        shell_program: Option<String>,
+        #[command(flatten)]
+        sandbox_runtime: ConversationSandboxRuntimeArgs,
         #[arg(long)]
         repl: bool,
     },
@@ -422,18 +418,8 @@ enum ConversationCommands {
     Update {
         agent: String,
         conversation: String,
-        #[arg(long)]
-        shell_program: Option<String>,
-        #[arg(long)]
-        clear_shell_program: bool,
-        #[arg(long)]
-        sandbox_image: Option<String>,
-        #[arg(long)]
-        clear_sandbox_image: bool,
-        #[arg(long, value_enum)]
-        sandbox_provider: Option<SandboxProviderArg>,
-        #[arg(long)]
-        clear_sandbox_provider: bool,
+        #[command(flatten)]
+        sandbox_runtime: ConversationSandboxRuntimeUpdateArgs,
         #[arg(long)]
         model: Option<String>,
         #[arg(long)]
@@ -515,6 +501,90 @@ enum ModelCommands {
         #[arg(long)]
         base_url: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Default, Args)]
+struct ConversationSandboxRuntimeArgs {
+    #[arg(long)]
+    sandbox_image: Option<String>,
+    #[arg(long, value_enum)]
+    sandbox_provider: Option<SandboxProviderArg>,
+    #[arg(long)]
+    shell_program: Option<String>,
+}
+
+impl ConversationSandboxRuntimeArgs {
+    fn validate(&self) -> Result<()> {
+        if self
+            .sandbox_image
+            .as_ref()
+            .is_some_and(|image| image.trim().is_empty())
+        {
+            bail!("sandbox image must not be empty");
+        }
+        if self
+            .shell_program
+            .as_ref()
+            .is_some_and(|program| program.trim().is_empty())
+        {
+            bail!("shell program must not be empty");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default, Args)]
+struct ConversationSandboxRuntimeUpdateArgs {
+    #[command(flatten)]
+    runtime: ConversationSandboxRuntimeArgs,
+    #[arg(long)]
+    clear_shell_program: bool,
+    #[arg(long)]
+    clear_sandbox_image: bool,
+    #[arg(long)]
+    clear_sandbox_provider: bool,
+}
+
+impl ConversationSandboxRuntimeUpdateArgs {
+    fn apply(self, config: &mut executor::ConversationConfig) -> Result<bool> {
+        if self.clear_shell_program && self.runtime.shell_program.is_some() {
+            bail!("provide either --clear-shell-program or --shell-program, not both");
+        }
+        if self.clear_sandbox_image && self.runtime.sandbox_image.is_some() {
+            bail!("provide either --clear-sandbox-image or --sandbox-image, not both");
+        }
+        if self.clear_sandbox_provider && self.runtime.sandbox_provider.is_some() {
+            bail!("provide either --clear-sandbox-provider or --sandbox-provider, not both");
+        }
+        self.runtime.validate()?;
+
+        let mut changed = false;
+        if self.clear_shell_program {
+            config.shell_program = None;
+            changed = true;
+        } else if let Some(shell_program) = self.runtime.shell_program {
+            config.shell_program = Some(shell_program);
+            changed = true;
+        }
+
+        if self.clear_sandbox_image {
+            config.sandbox_image = None;
+            changed = true;
+        } else if let Some(sandbox_image) = self.runtime.sandbox_image {
+            config.sandbox_image = Some(sandbox_image);
+            changed = true;
+        }
+
+        if self.clear_sandbox_provider {
+            config.sandbox_provider = None;
+            changed = true;
+        } else if let Some(sandbox_provider) = self.runtime.sandbox_provider {
+            config.sandbox_provider = Some(SandboxProvider::from(sandbox_provider));
+            changed = true;
+        }
+
+        Ok(changed)
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -1071,23 +1141,10 @@ async fn main() -> Result<()> {
                 agent,
                 name,
                 slug,
-                sandbox_image,
-                sandbox_provider,
-                shell_program,
+                sandbox_runtime,
                 repl,
             } => {
-                if sandbox_image
-                    .as_ref()
-                    .is_some_and(|image| image.trim().is_empty())
-                {
-                    bail!("sandbox image must not be empty");
-                }
-                if shell_program
-                    .as_ref()
-                    .is_some_and(|program| program.trim().is_empty())
-                {
-                    bail!("shell program must not be empty");
-                }
+                sandbox_runtime.validate()?;
                 let agent = must_get_agent(harness.as_ref(), &agent).await?;
                 let slug = slug.unwrap_or_else(|| {
                     name.as_deref()
@@ -1102,9 +1159,11 @@ async fn main() -> Result<()> {
                     .create_conversation(CreateConversationRequest {
                         slug: Some(slug),
                         name,
-                        sandbox_image,
-                        sandbox_provider: sandbox_provider.map(SandboxProvider::from),
-                        shell_program,
+                        sandbox_image: sandbox_runtime.sandbox_image,
+                        sandbox_provider: sandbox_runtime
+                            .sandbox_provider
+                            .map(SandboxProvider::from),
+                        shell_program: sandbox_runtime.shell_program,
                     })
                     .await?;
                 println!(
@@ -1165,28 +1224,12 @@ async fn main() -> Result<()> {
             ConversationCommands::Update {
                 agent,
                 conversation,
-                shell_program,
-                clear_shell_program,
-                sandbox_image,
-                clear_sandbox_image,
-                sandbox_provider,
-                clear_sandbox_provider,
+                sandbox_runtime,
                 model,
                 max_output_tokens,
                 clear_max_output_tokens,
                 clear_model_override,
             } => {
-                if clear_shell_program && shell_program.is_some() {
-                    bail!("provide either --clear-shell-program or --shell-program, not both");
-                }
-                if clear_sandbox_image && sandbox_image.is_some() {
-                    bail!("provide either --clear-sandbox-image or --sandbox-image, not both");
-                }
-                if clear_sandbox_provider && sandbox_provider.is_some() {
-                    bail!(
-                        "provide either --clear-sandbox-provider or --sandbox-provider, not both"
-                    );
-                }
                 if clear_model_override
                     && (model.is_some() || max_output_tokens.is_some() || clear_max_output_tokens)
                 {
@@ -1206,37 +1249,7 @@ async fn main() -> Result<()> {
                     .await?
                     .ok_or_else(|| anyhow!("conversation not found: {}", conversation))?;
                 let mut config = conversation.config().await?;
-                let mut changed = false;
-
-                if clear_shell_program {
-                    config.shell_program = None;
-                    changed = true;
-                } else if let Some(shell_program) = shell_program {
-                    if shell_program.trim().is_empty() {
-                        bail!("shell program must not be empty");
-                    }
-                    config.shell_program = Some(shell_program);
-                    changed = true;
-                }
-
-                if clear_sandbox_image {
-                    config.sandbox_image = None;
-                    changed = true;
-                } else if let Some(sandbox_image) = sandbox_image {
-                    if sandbox_image.trim().is_empty() {
-                        bail!("sandbox image must not be empty");
-                    }
-                    config.sandbox_image = Some(sandbox_image);
-                    changed = true;
-                }
-
-                if clear_sandbox_provider {
-                    config.sandbox_provider = None;
-                    changed = true;
-                } else if let Some(sandbox_provider) = sandbox_provider {
-                    config.sandbox_provider = Some(SandboxProvider::from(sandbox_provider));
-                    changed = true;
-                }
+                let mut changed = sandbox_runtime.apply(&mut config)?;
 
                 let updated_model_override = if clear_model_override {
                     changed = true;
