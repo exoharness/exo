@@ -220,13 +220,14 @@ async function runCodexTurn(
   const protocolLog = new CodexProtocolEventBuffer(context);
   const scope: CodexWarmTurnScope = { context, protocolLog, turnParent };
   const sessionKey = codexWarmSessionKey(context, modelBinding);
+  const sandboxRuntime = codexSandboxRuntimeKey(context);
   const { resource: session, reused: appServerReused } = await traceCodexTask(
     turnParent,
     "codex_app_server_ready",
     {
       cwd: codexAppServerCwd(context),
       sandbox_process: true,
-      sandbox_command: codexSandboxCommand(context),
+      sandbox_runtime: sandboxRuntime,
       warm_session_key: sessionKey,
     },
     () =>
@@ -1124,6 +1125,41 @@ function codexAppServerCwd(context: TurnContext): string {
   return sandboxCwd(context);
 }
 
+function codexEffectiveSandboxProvider(
+  context: TurnContext,
+): TurnContext["agentConfig"]["sandboxProvider"] {
+  return (
+    context.conversationConfig.sandboxProvider ??
+    context.agentConfig.sandboxProvider
+  );
+}
+
+function codexEffectiveSandboxImage(context: TurnContext): string | null {
+  return (
+    context.conversationConfig.sandboxImage ??
+    context.agentConfig.sandboxImage ??
+    null
+  );
+}
+
+function codexSandboxRuntimeKey(context: TurnContext): JsonValue {
+  return {
+    provider: codexEffectiveSandboxProvider(context),
+    image: codexEffectiveSandboxImage(context),
+    enable_networking: codexEffectiveNetworking(context),
+    cwd: codexAppServerCwd(context),
+    shell_program: context.conversationConfig.shellProgram ?? "/bin/bash",
+    mounts: context.conversationConfig.mounts.map((mount) => ({
+      host_path: mount.hostPath,
+      mount_path: mount.mountPath,
+      mode: mount.mode,
+      internal: mount.internal ?? false,
+    })),
+    command: codexSandboxCommand(context),
+    external_sandbox: useCodexExternalSandbox(),
+  };
+}
+
 function codexWarmSessionKey(
   context: TurnContext,
   modelBinding: ResolvedLlmBinding,
@@ -1134,9 +1170,7 @@ function codexWarmSessionKey(
     model_binding: modelBinding.name,
     model: modelBinding.model,
     base_url: modelBinding.baseUrl ?? null,
-    cwd: codexAppServerCwd(context),
-    command: codexSandboxCommand(context),
-    external_sandbox: useCodexExternalSandbox(),
+    sandbox_runtime: codexSandboxRuntimeKey(context),
   });
 }
 
