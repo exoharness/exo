@@ -555,6 +555,8 @@ pub struct BindingMetadata {
     pub r#type: BindingType,
     pub name: String,
     pub created_at: DateTimeUtc,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<Binding>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

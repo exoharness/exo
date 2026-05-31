@@ -34,6 +34,7 @@ use executor::{
 use lingua::Message;
 use lingua::universal::{AssistantContent, AssistantContentPart, ToolContentPart, UserContent};
 use serde::Deserialize;
+use tabwriter::TabWriter;
 use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::env::CliEnvironment;
@@ -739,35 +740,13 @@ async fn main() -> Result<()> {
         Commands::Agent { command } => match command {
             AgentCommands::List => {
                 let agents = harness.list_agents().await?;
-                let agent_width = agents
-                    .iter()
-                    .map(|agent| agent.slug.len())
-                    .chain(std::iter::once("AGENT".len()))
-                    .max()
-                    .unwrap_or("AGENT".len());
-                let id_width = agents
-                    .iter()
-                    .map(|agent| agent.id.to_string().len())
-                    .chain(std::iter::once("ID".len()))
-                    .max()
-                    .unwrap_or("ID".len());
-                println!(
-                    "{:<agent_width$}  {:<id_width$}  NAME",
-                    "AGENT",
-                    "ID",
-                    agent_width = agent_width,
-                    id_width = id_width
-                );
-                for agent in agents {
-                    println!(
-                        "{:<agent_width$}  {:<id_width$}  {}",
-                        agent.slug,
-                        agent.id,
-                        agent.name,
-                        agent_width = agent_width,
-                        id_width = id_width
-                    );
-                }
+                print_table(
+                    &["AGENT", "ID", "NAME"],
+                    agents
+                        .into_iter()
+                        .map(|agent| vec![agent.slug, agent.id.to_string(), agent.name])
+                        .collect(),
+                )?;
             }
             AgentCommands::Create {
                 name,
@@ -1132,10 +1111,14 @@ async fn main() -> Result<()> {
         Commands::Conversation { command } => match command {
             ConversationCommands::List { agent } => {
                 let agent = must_get_agent(harness.as_ref(), &agent).await?;
-                println!("CONVERSATION\tNAME");
-                for conversation in agent.list_conversations().await? {
-                    println!("{}\t{}", conversation.slug, conversation.name);
-                }
+                let conversations = agent.list_conversations().await?;
+                print_table(
+                    &["CONVERSATION", "NAME"],
+                    conversations
+                        .into_iter()
+                        .map(|conversation| vec![conversation.slug, conversation.name])
+                        .collect(),
+                )?;
             }
             ConversationCommands::Create {
                 agent,
@@ -1538,13 +1521,20 @@ async fn main() -> Result<()> {
         },
         Commands::Secret { command } => match command {
             SecretCommands::List => {
-                println!("SECRET\tTYPE\tCREATED_AT");
-                for secret in harness.exoharness_handle().list_secrets().await? {
-                    println!(
-                        "{}\t{:?}\t{}",
-                        secret.name, secret.r#type, secret.created_at
-                    );
-                }
+                let secrets = harness.exoharness_handle().list_secrets().await?;
+                print_table(
+                    &["SECRET", "TYPE", "CREATED_AT"],
+                    secrets
+                        .into_iter()
+                        .map(|secret| {
+                            vec![
+                                secret.name,
+                                format!("{:?}", secret.r#type),
+                                secret.created_at.to_string(),
+                            ]
+                        })
+                        .collect(),
+                )?;
             }
             SecretCommands::Set { name, env, value } => {
                 let value = match (env, value) {
@@ -1568,51 +1558,20 @@ async fn main() -> Result<()> {
         Commands::Model { command } => match command {
             ModelCommands::List => {
                 let models = list_model_bindings(harness.exoharness_handle().as_ref()).await?;
-                let model_width = models
-                    .iter()
-                    .map(|model| model.name.len())
-                    .chain(std::iter::once("MODEL".len()))
-                    .max()
-                    .unwrap_or("MODEL".len());
-                let upstream_width = models
-                    .iter()
-                    .map(|model| model.model.len())
-                    .chain(std::iter::once("UPSTREAM_MODEL".len()))
-                    .max()
-                    .unwrap_or("UPSTREAM_MODEL".len());
-                let secret_width = models
-                    .iter()
-                    .map(|model| {
-                        model
-                            .secret_name
-                            .as_ref()
-                            .map(|secret| secret.len())
-                            .unwrap_or("none".len())
-                    })
-                    .chain(std::iter::once("SECRET".len()))
-                    .max()
-                    .unwrap_or("SECRET".len());
-                println!(
-                    "{:<model_width$}  {:<upstream_width$}  {:<secret_width$}  BASE_URL",
-                    "MODEL",
-                    "UPSTREAM_MODEL",
-                    "SECRET",
-                    model_width = model_width,
-                    upstream_width = upstream_width,
-                    secret_width = secret_width
-                );
-                for model in models {
-                    println!(
-                        "{:<model_width$}  {:<upstream_width$}  {:<secret_width$}  {}",
-                        model.name,
-                        model.model,
-                        model.secret_name.unwrap_or_else(|| "none".to_string()),
-                        model.base_url.unwrap_or_else(|| "default".to_string()),
-                        model_width = model_width,
-                        upstream_width = upstream_width,
-                        secret_width = secret_width
-                    );
-                }
+                print_table(
+                    &["MODEL", "UPSTREAM_MODEL", "SECRET", "BASE_URL"],
+                    models
+                        .into_iter()
+                        .map(|model| {
+                            vec![
+                                model.name,
+                                model.model,
+                                model.secret_name.unwrap_or_else(|| "none".to_string()),
+                                model.base_url.unwrap_or_else(|| "default".to_string()),
+                            ]
+                        })
+                        .collect(),
+                )?;
             }
             ModelCommands::Register {
                 name,
@@ -1992,6 +1951,27 @@ fn resolve_typescript_tool_module_paths(paths: &[PathBuf]) -> Result<Vec<String>
         .collect()
 }
 
+fn print_table(headers: &[&str], rows: Vec<Vec<String>>) -> Result<()> {
+    let stdout = io::stdout();
+    let mut writer = TabWriter::new(stdout.lock()).padding(2);
+    write_table_row(&mut writer, headers)?;
+    for row in rows {
+        write_table_row(&mut writer, &row)?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_table_row<T: AsRef<str>, W: Write>(writer: &mut W, values: &[T]) -> io::Result<()> {
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            write!(writer, "\t")?;
+        }
+        write!(writer, "{}", value.as_ref())?;
+    }
+    writeln!(writer)
+}
+
 struct RegisteredModel {
     name: String,
     model: String,
@@ -2003,12 +1983,16 @@ async fn list_model_bindings(exoharness: &dyn ExoHarness) -> Result<Vec<Register
     let secrets = exoharness.list_secrets().await?;
     let mut models = Vec::new();
     for metadata in exoharness.list_bindings().await? {
+        let binding = match metadata.binding {
+            Some(binding) => Some(binding),
+            None => exoharness.get_binding(&metadata.id).await?,
+        };
         let Some(Binding::Llm {
             name,
             model,
             base_url,
             secret_id,
-        }) = exoharness.get_binding(&metadata.id).await?
+        }) = binding
         else {
             continue;
         };

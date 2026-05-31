@@ -243,6 +243,7 @@ impl ExoHarness for BasicExoHarness {
                 r#type: binding_type(&binding),
                 name: binding_name(&binding).to_string(),
                 created_at: id.timestamp().expect("uuid7 timestamp"),
+                binding: None,
             },
             binding,
         };
@@ -458,6 +459,7 @@ impl AgentHandle for BasicAgentHandle {
                 r#type: binding_type(&binding),
                 name: binding_name(&binding).to_string(),
                 created_at: id.timestamp().expect("uuid7 timestamp"),
+                binding: None,
             },
             binding,
         };
@@ -1416,6 +1418,7 @@ impl ConversationHandle for BasicConversationHandle {
                 r#type: binding_type(&binding),
                 name: binding_name(&binding).to_string(),
                 created_at: id.timestamp().expect("uuid7 timestamp"),
+                binding: None,
             },
             binding,
         };
@@ -2213,7 +2216,10 @@ async fn list_binding_metadata(
         .list_json_matching_suffix::<StoredBinding>(bindings_dir, ".json")
         .await?
         .into_iter()
-        .map(|binding| binding.metadata)
+        .map(|stored| BindingMetadata {
+            binding: Some(stored.binding),
+            ..stored.metadata
+        })
         .collect::<Vec<_>>();
     bindings.sort_by_key(|metadata| metadata.id);
     Ok(bindings)

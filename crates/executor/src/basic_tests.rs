@@ -1163,6 +1163,7 @@ fn test_model_binding_metadata() -> BindingMetadata {
         r#type: BindingType::Llm,
         name: "test-model".to_string(),
         created_at: id.timestamp().expect("uuid7 timestamp"),
+        binding: None,
     }
 }
 

@@ -39,6 +39,7 @@ sqlx = { version = "0.8.6", default-features = false, features = [
   "postgres",
   "macros",
 ] }
+tabwriter = "1.4.1"
 thiserror = "2.0.17"
 tokio = { version = "1.52.1", features = [
   "io-std",
