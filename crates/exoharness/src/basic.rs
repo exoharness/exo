@@ -38,9 +38,9 @@ use crate::{
     NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result, RunInSandboxRequest,
     SandboxId, SandboxProcess, SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessId,
     SandboxProcessMode, SandboxProcessParts, SandboxProcessRecord, SandboxProcessStatus,
-    SandboxProcessStdin, Secret, SecretId, SecretMetadata, SecretType, SessionId, SnapshotId,
-    StartSandboxProcessRequest, StartSandboxRequest, TurnHandle, TurnId, TurnRecord, Uuid7,
-    WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
+    SandboxProcessStdin, SandboxProvider, Secret, SecretId, SecretMetadata, SecretType, SessionId,
+    SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnHandle, TurnId, TurnRecord,
+    Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
 #[derive(Debug, Clone)]
@@ -78,9 +78,38 @@ struct BasicExoHarnessInner {
     write_lock: AsyncMutex<()>,
     subscribers: Mutex<HashMap<ConversationId, Vec<mpsc::UnboundedSender<Result<Event>>>>>,
     sandbox_backend: Arc<dyn ManagedSandboxBackend>,
+    sandbox_backend_choice: SandboxBackendChoice,
     running_sandboxes: AsyncMutex<HashMap<SandboxId, Arc<dyn ManagedSandboxHandle>>>,
     running_processes: AsyncMutex<HashMap<SandboxProcessId, Arc<RunningSandboxProcess>>>,
     secret_cipher: SecretCipher,
+}
+
+impl BasicExoHarnessInner {
+    fn sandbox_backend_for_provider(
+        &self,
+        provider: SandboxProvider,
+    ) -> Arc<dyn ManagedSandboxBackend> {
+        if matches!(
+            (self.sandbox_backend_choice, provider),
+            (SandboxBackendChoice::LocalProcess, _)
+                | (
+                    SandboxBackendChoice::AppleContainer,
+                    SandboxProvider::AppleContainer
+                )
+                | (SandboxBackendChoice::Docker, SandboxProvider::Docker)
+                | (_, SandboxProvider::Daytona)
+        ) {
+            return Arc::clone(&self.sandbox_backend);
+        }
+
+        match provider {
+            SandboxProvider::AppleContainer => {
+                Arc::new(CliContainerSandboxBackend::apple_container())
+            }
+            SandboxProvider::Docker => Arc::new(CliContainerSandboxBackend::docker()),
+            SandboxProvider::Daytona => Arc::clone(&self.sandbox_backend),
+        }
+    }
 }
 
 impl BasicExoHarness {
@@ -93,6 +122,7 @@ impl BasicExoHarness {
         let storage = BasicObjectStore::local_filesystem(&root).await?;
         let secret_cipher =
             build_secret_cipher(secret_backend, root.to_string_lossy().to_string())?;
+        let sandbox_backend_choice = sandbox_backend;
         let sandbox_backend = build_sandbox_backend(sandbox_backend);
         Ok(Self {
             inner: Arc::new(BasicExoHarnessInner {
@@ -100,6 +130,7 @@ impl BasicExoHarness {
                 write_lock: AsyncMutex::new(()),
                 subscribers: Mutex::new(HashMap::new()),
                 sandbox_backend,
+                sandbox_backend_choice,
                 running_sandboxes: AsyncMutex::new(HashMap::new()),
                 running_processes: AsyncMutex::new(HashMap::new()),
                 secret_cipher,
@@ -610,7 +641,7 @@ impl BasicConversationHandle {
         let handle = self
             .harness
             .inner
-            .sandbox_backend
+            .sandbox_backend_for_provider(sandbox.provider)
             .acquire(sandbox_request(self.record.id, sandbox_id, sandbox))
             .await?;
         self.harness
@@ -972,6 +1003,7 @@ impl ConversationHandle for BasicConversationHandle {
         let conversation_dir = self.conversation_dir();
         let metadata = StoredSandbox {
             id: sandbox_id.clone(),
+            provider: request.provider,
             image: request.image.clone(),
             default_workdir: request.default_workdir.clone(),
             file_system_mounts: request.file_system_mounts.clone().unwrap_or_default(),
@@ -983,7 +1015,7 @@ impl ConversationHandle for BasicConversationHandle {
         let sandbox_handle = self
             .harness
             .inner
-            .sandbox_backend
+            .sandbox_backend_for_provider(metadata.provider)
             .acquire(sandbox_request(self.record.id, &sandbox_id, &metadata))
             .await?;
         self.harness
@@ -1088,7 +1120,7 @@ impl ConversationHandle for BasicConversationHandle {
         let sandbox_handle = self
             .harness
             .inner
-            .sandbox_backend
+            .sandbox_backend_for_provider(sandbox.provider)
             .acquire(sandbox_request(self.record.id, &request.id, &sandbox))
             .await?;
         self.harness
@@ -1753,6 +1785,8 @@ struct StoredArtifactMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredSandbox {
     id: SandboxId,
+    #[serde(default)]
+    provider: SandboxProvider,
     image: String,
     default_workdir: Option<String>,
     file_system_mounts: Vec<FileSystemMount>,

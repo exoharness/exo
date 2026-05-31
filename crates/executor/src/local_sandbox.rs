@@ -10,9 +10,9 @@ use exoharness::{
     EventStream, ExoHarness, ForkConversationRequest, GetEventsResult, NewAgentRequest,
     NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result, RunInSandboxRequest,
     SandboxId, SandboxProcess, SandboxProcessEventQuery, SandboxProcessRecord,
-    SandboxProcessStatus, SandboxProvider, Secret, SecretId, SecretMetadata, SnapshotId,
-    StartSandboxProcessRequest, StartSandboxRequest, TurnHandle, TurnRecord,
-    WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
+    SandboxProcessStatus, Secret, SecretId, SecretMetadata, SnapshotId, StartSandboxProcessRequest,
+    StartSandboxRequest, TurnHandle, TurnRecord, WaitSandboxProcessRequest, WriteArtifactRequest,
+    WriteSandboxProcessInputRequest,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -263,7 +263,7 @@ impl LocalSandboxConversation {
     }
 
     fn wants_local_sandbox(&self, request: &CreateSandboxRequest) -> bool {
-        self.state.force_local || request.provider == SandboxProvider::Local
+        self.state.force_local || request.provider.is_local()
     }
 
     async fn local_sandbox_id(&self, sandbox_id: &SandboxId) -> Result<Option<SandboxId>> {
@@ -330,11 +330,6 @@ impl LocalSandboxConversation {
             })
             .await?;
         Ok(())
-    }
-
-    fn local_create_request(&self, mut request: CreateSandboxRequest) -> CreateSandboxRequest {
-        request.provider = SandboxProvider::Local;
-        request
     }
 
     async fn append_remote_sandbox_events(&self, data: Vec<EventData>) -> Result<()> {
@@ -413,13 +408,11 @@ impl ConversationHandle for LocalSandboxConversation {
             return self.remote.create_sandbox(request).await;
         }
 
-        let mut remote_request = request.clone();
-        remote_request.provider = SandboxProvider::Local;
-        let remote_id = self.remote.create_sandbox(remote_request).await?;
+        let remote_id = self.remote.create_sandbox(request.clone()).await?;
         let local_id = self
             .local_conversation()
             .await?
-            .create_sandbox(self.local_create_request(request))
+            .create_sandbox(request)
             .await?;
         self.map_local_sandbox(remote_id.clone(), local_id).await?;
         Ok(remote_id)

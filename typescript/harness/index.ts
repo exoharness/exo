@@ -32,7 +32,7 @@ export interface AgentConfig {
   } | null;
   enableAgentToolCreation: boolean;
   sandboxImage?: string | null;
-  sandboxProvider: "daytona" | "local";
+  sandboxProvider: "daytona" | "apple_container" | "docker";
   enableNetworking: boolean;
   model: string;
   maxOutputTokens?: number | null;
@@ -88,7 +88,7 @@ export interface SecretMetadata {
 
 export interface ConversationConfig {
   sandboxImage?: string | null;
-  sandboxProvider?: "daytona" | "local" | null;
+  sandboxProvider?: "daytona" | "apple_container" | "docker" | null;
   shellProgram?: string | null;
   mounts: FileSystemMount[];
 }

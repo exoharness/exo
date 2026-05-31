@@ -1,10 +1,10 @@
 //! Integration test exercising the real `exo` binary against:
-//!   - a real sandbox backend (docker / apple-container / local-process), and
+//!   - a real sandbox provider (docker / apple-container), and
 //!   - a wiremock-backed fake OpenAI Responses endpoint.
 //!
 //! `#[ignore]`'d so `cargo test` skips it by default; the integration workflow
-//! runs `cargo test --workspace -- --ignored` and selects the backend via the
-//! `EXO_TEST_SANDBOX_BACKEND` env var (defaults to `docker`). The secret
+//! runs `cargo test --workspace -- --ignored` and selects the provider via the
+//! `EXO_TEST_SANDBOX_PROVIDER` env var (defaults to `docker`). The secret
 //! backend is always `file`, with the master key materialised inside a
 //! per-test tempdir via `XDG_CONFIG_HOME`.
 
@@ -17,20 +17,18 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SandboxBackend {
+enum SandboxProvider {
     Docker,
     AppleContainer,
-    LocalProcess,
 }
 
-impl SandboxBackend {
+impl SandboxProvider {
     fn from_env() -> Self {
-        let raw = std::env::var("EXO_TEST_SANDBOX_BACKEND").unwrap_or_else(|_| "docker".into());
+        let raw = std::env::var("EXO_TEST_SANDBOX_PROVIDER").unwrap_or_else(|_| "docker".into());
         match raw.as_str() {
             "docker" => Self::Docker,
             "apple-container" => Self::AppleContainer,
-            "local-process" => Self::LocalProcess,
-            other => panic!("unknown EXO_TEST_SANDBOX_BACKEND={other}"),
+            other => panic!("unknown EXO_TEST_SANDBOX_PROVIDER={other}"),
         }
     }
 
@@ -38,7 +36,6 @@ impl SandboxBackend {
         match self {
             Self::Docker => "docker",
             Self::AppleContainer => "apple-container",
-            Self::LocalProcess => "local-process",
         }
     }
 
@@ -54,7 +51,6 @@ impl SandboxBackend {
                 .output()
                 .map(|o| o.status.success())
                 .unwrap_or(false),
-            Self::LocalProcess => true,
         }
     }
 }
@@ -63,11 +59,10 @@ fn exo_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_exo"))
 }
 
-fn run_exo(args: &[&str], root: &str, xdg: &str, backend: SandboxBackend) -> std::process::Output {
+fn run_exo(args: &[&str], root: &str, xdg: &str) -> std::process::Output {
     let output = Command::new(exo_bin())
         .args(["--root", root])
         .args(["--secret-backend", "file"])
-        .args(["--sandbox-backend", backend.cli_arg()])
         .args(args)
         .env("XDG_CONFIG_HOME", xdg)
         .env("OPENAI_API_KEY", "sk-test-key")
@@ -117,11 +112,11 @@ fn canned_response_body() -> Value {
 #[tokio::test]
 #[ignore = "spawns real exo binary + real sandbox + wiremock; run with cargo test -- --ignored"]
 async fn conversation_send_round_trips_through_real_sandbox_and_mocked_openai() {
-    let backend = SandboxBackend::from_env();
-    if !backend.runtime_available() {
+    let provider = SandboxProvider::from_env();
+    if !provider.runtime_available() {
         println!(
-            "sandbox backend {:?} not available on this runner, skipping",
-            backend
+            "sandbox provider {:?} not available on this runner, skipping",
+            provider
         );
         return;
     }
@@ -142,7 +137,6 @@ async fn conversation_send_round_trips_through_real_sandbox_and_mocked_openai() 
         &["secret", "set", "test-key", "--env", "OPENAI_API_KEY"],
         &root,
         &xdg,
-        backend,
     );
     run_exo(
         &[
@@ -156,7 +150,6 @@ async fn conversation_send_round_trips_through_real_sandbox_and_mocked_openai() 
         ],
         &root,
         &xdg,
-        backend,
     );
     run_exo(
         &[
@@ -166,24 +159,23 @@ async fn conversation_send_round_trips_through_real_sandbox_and_mocked_openai() 
             "test-agent",
             "--model",
             "gpt-test",
+            "--sandbox-provider",
+            provider.cli_arg(),
             "Integration Test Agent",
         ],
         &root,
         &xdg,
-        backend,
     );
     run_exo(
         &["conversation", "create", "test-agent", "first"],
         &root,
         &xdg,
-        backend,
     );
 
     let output = run_exo(
         &["conversation", "send", "test-agent", "first", "hello there"],
         &root,
         &xdg,
-        backend,
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -250,7 +242,7 @@ async fn conversation_send_round_trips_through_real_sandbox_and_mocked_openai() 
         events_dir.display()
     );
 
-    if backend == SandboxBackend::Docker {
+    if provider == SandboxProvider::Docker {
         let leftover_containers = Command::new("docker")
             .args([
                 "ps",

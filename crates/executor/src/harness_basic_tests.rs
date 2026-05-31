@@ -381,7 +381,7 @@ async fn send_executes_shell_tool_when_enabled() {
         .expect("conversation config should load");
     conversation_config.shell_program = Some("/bin/sh".to_string());
     conversation_config.sandbox_image = Some("conversation-image".to_string());
-    conversation_config.sandbox_provider = Some(SandboxProvider::Local);
+    conversation_config.sandbox_provider = Some(SandboxProvider::AppleContainer);
     conversation
         .put_config(conversation_config)
         .await
@@ -424,7 +424,7 @@ async fn send_executes_shell_tool_when_enabled() {
     assert!(matches!(
         &sandbox_events[0].data,
         EventData::SandboxCreated {
-            provider: SandboxProvider::Local,
+            provider: SandboxProvider::AppleContainer,
             image,
             enable_networking: true,
             ..

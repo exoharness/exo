@@ -376,7 +376,14 @@ pub struct CreateSandboxRequest {
 pub enum SandboxProvider {
     #[default]
     Daytona,
-    Local,
+    AppleContainer,
+    Docker,
+}
+
+impl SandboxProvider {
+    pub fn is_local(self) -> bool {
+        matches!(self, Self::AppleContainer | Self::Docker)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

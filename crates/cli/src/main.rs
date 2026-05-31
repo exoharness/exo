@@ -53,8 +53,6 @@ struct Cli {
     harness: Option<HarnessSelection>,
     #[arg(long, global = true, value_enum, env = "EXO_SECRET_BACKEND")]
     secret_backend: Option<SecretBackendArg>,
-    #[arg(long, global = true, value_enum, env = "EXO_SANDBOX_BACKEND")]
-    sandbox_backend: Option<SandboxBackendArg>,
     #[arg(long, global = true, env = "EXO_MASTER_KEY_PATH")]
     master_key_path: Option<PathBuf>,
     #[arg(long, global = true)]
@@ -195,25 +193,19 @@ enum SecretBackendArg {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
-enum SandboxBackendArg {
+enum SandboxProviderArg {
+    Daytona,
     #[value(name = "apple-container")]
     AppleContainer,
     Docker,
-    #[value(name = "local-process")]
-    LocalProcess,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum SandboxProviderArg {
-    Daytona,
-    Local,
 }
 
 impl From<SandboxProviderArg> for SandboxProvider {
     fn from(value: SandboxProviderArg) -> Self {
         match value {
             SandboxProviderArg::Daytona => Self::Daytona,
-            SandboxProviderArg::Local => Self::Local,
+            SandboxProviderArg::AppleContainer => Self::AppleContainer,
+            SandboxProviderArg::Docker => Self::Docker,
         }
     }
 }
@@ -225,15 +217,10 @@ fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
             path: cli.master_key_path.clone(),
         },
     };
-    let sandbox_backend = match cli.sandbox_backend.unwrap_or_else(default_sandbox_backend) {
-        SandboxBackendArg::AppleContainer => SandboxBackendChoice::AppleContainer,
-        SandboxBackendArg::Docker => SandboxBackendChoice::Docker,
-        SandboxBackendArg::LocalProcess => SandboxBackendChoice::LocalProcess,
-    };
     Ok(BasicExoHarnessConfig {
         root: cli.root.join("exoharness"),
         secret_backend,
-        sandbox_backend,
+        sandbox_backend: default_sandbox_backend(),
     })
 }
 
@@ -248,13 +235,23 @@ fn default_secret_backend() -> SecretBackendArg {
 }
 
 #[cfg(target_os = "macos")]
-fn default_sandbox_backend() -> SandboxBackendArg {
-    SandboxBackendArg::AppleContainer
+fn default_sandbox_backend() -> SandboxBackendChoice {
+    SandboxBackendChoice::AppleContainer
 }
 
 #[cfg(not(target_os = "macos"))]
-fn default_sandbox_backend() -> SandboxBackendArg {
-    SandboxBackendArg::Docker
+fn default_sandbox_backend() -> SandboxBackendChoice {
+    SandboxBackendChoice::Docker
+}
+
+#[cfg(target_os = "macos")]
+fn default_local_sandbox_provider() -> SandboxProvider {
+    SandboxProvider::AppleContainer
+}
+
+#[cfg(not(target_os = "macos"))]
+fn default_local_sandbox_provider() -> SandboxProvider {
+    SandboxProvider::Docker
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -566,7 +563,7 @@ async fn main() -> Result<()> {
     let default_sandbox_provider = if using_remote_exoharness {
         SandboxProvider::Daytona
     } else {
-        SandboxProvider::Local
+        default_local_sandbox_provider()
     };
     let exoharness =
         instantiate_exoharness(&exo_config, cli.exoharness_url.as_deref(), bearer_token).await?;
@@ -1809,7 +1806,8 @@ fn format_harness_kind(kind: AgentHarnessKind) -> &'static str {
 fn format_sandbox_provider(provider: SandboxProvider) -> &'static str {
     match provider {
         SandboxProvider::Daytona => "daytona",
-        SandboxProvider::Local => "local",
+        SandboxProvider::AppleContainer => "apple-container",
+        SandboxProvider::Docker => "docker",
     }
 }
 
