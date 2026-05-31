@@ -376,6 +376,7 @@ pub struct CreateSandboxRequest {
 pub enum SandboxProvider {
     #[default]
     Daytona,
+    #[serde(alias = "local")]
     AppleContainer,
     Docker,
 }
