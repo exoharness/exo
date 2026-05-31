@@ -400,6 +400,12 @@ enum ConversationCommands {
         #[arg(long)]
         slug: Option<String>,
         #[arg(long)]
+        sandbox_image: Option<String>,
+        #[arg(long, value_enum)]
+        sandbox_provider: Option<SandboxProviderArg>,
+        #[arg(long)]
+        shell_program: Option<String>,
+        #[arg(long)]
         repl: bool,
     },
     Fork {
@@ -652,6 +658,7 @@ async fn main() -> Result<()> {
                         .create_conversation(CreateConversationRequest {
                             slug: Some(conversation_slug.clone()),
                             name: Some(conversation_slug),
+                            ..Default::default()
                         })
                         .await?
                 }
@@ -1064,8 +1071,23 @@ async fn main() -> Result<()> {
                 agent,
                 name,
                 slug,
+                sandbox_image,
+                sandbox_provider,
+                shell_program,
                 repl,
             } => {
+                if sandbox_image
+                    .as_ref()
+                    .is_some_and(|image| image.trim().is_empty())
+                {
+                    bail!("sandbox image must not be empty");
+                }
+                if shell_program
+                    .as_ref()
+                    .is_some_and(|program| program.trim().is_empty())
+                {
+                    bail!("shell program must not be empty");
+                }
                 let agent = must_get_agent(harness.as_ref(), &agent).await?;
                 let slug = slug.unwrap_or_else(|| {
                     name.as_deref()
@@ -1080,6 +1102,9 @@ async fn main() -> Result<()> {
                     .create_conversation(CreateConversationRequest {
                         slug: Some(slug),
                         name,
+                        sandbox_image,
+                        sandbox_provider: sandbox_provider.map(SandboxProvider::from),
+                        shell_program,
                     })
                     .await?;
                 println!(

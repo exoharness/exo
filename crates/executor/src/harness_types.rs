@@ -78,4 +78,7 @@ pub struct CreateAgentRequest {
 pub struct CreateConversationRequest {
     pub slug: Option<String>,
     pub name: Option<String>,
+    pub sandbox_image: Option<String>,
+    pub sandbox_provider: Option<SandboxProvider>,
+    pub shell_program: Option<String>,
 }

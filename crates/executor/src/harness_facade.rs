@@ -222,6 +222,7 @@ where
         &self,
         request: CreateConversationRequest,
     ) -> Result<Arc<dyn HarnessConversation>> {
+        let agent_config = self.config().await?;
         let conversation = self
             .agent
             .new_conversation(NewConversationRequest {
@@ -229,8 +230,18 @@ where
                 name: request.name,
             })
             .await?;
+        let mut conversation_config = ConversationConfig::default();
+        conversation_config.sandbox_image = request.sandbox_image.or(agent_config.sandbox_image);
+        conversation_config.sandbox_provider = Some(
+            request
+                .sandbox_provider
+                .unwrap_or(agent_config.sandbox_provider),
+        );
+        if let Some(shell_program) = request.shell_program {
+            conversation_config.shell_program = Some(shell_program);
+        }
         self.runtime
-            .put_conversation_config(conversation.as_ref(), ConversationConfig::default())
+            .put_conversation_config(conversation.as_ref(), conversation_config)
             .await?;
         Ok(Arc::new(SharedHarnessConversation {
             agent: Arc::clone(&self.agent),

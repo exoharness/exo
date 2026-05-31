@@ -51,8 +51,8 @@ async fn creates_agents_and_conversations_with_persisted_config() {
             harness: crate::AgentHarnessKind::Basic,
             typescript: None,
             enable_agent_tool_creation: true,
-            sandbox_image: None,
-            sandbox_provider: Default::default(),
+            sandbox_image: Some("agent-image".to_string()),
+            sandbox_provider: SandboxProvider::Docker,
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: Some(512),
@@ -65,6 +65,7 @@ async fn creates_agents_and_conversations_with_persisted_config() {
         .create_conversation(CreateConversationRequest {
             slug: Some("session".to_string()),
             name: Some("Session".to_string()),
+            ..Default::default()
         })
         .await
         .expect("conversation should be created");
@@ -85,13 +86,21 @@ async fn creates_agents_and_conversations_with_persisted_config() {
         stored_agent.config().await.expect("agent config").model,
         "gpt-5.4"
     );
+    let stored_conversation_config = stored_conversation
+        .config()
+        .await
+        .expect("conversation config");
     assert_eq!(
-        stored_conversation
-            .config()
-            .await
-            .expect("conversation config")
-            .shell_program,
+        stored_conversation_config.shell_program,
         Some("/bin/bash".to_string())
+    );
+    assert_eq!(
+        stored_conversation_config.sandbox_image,
+        Some("agent-image".to_string())
+    );
+    assert_eq!(
+        stored_conversation_config.sandbox_provider,
+        Some(SandboxProvider::Docker)
     );
     assert_eq!(conversation.record().slug, "session");
 }
