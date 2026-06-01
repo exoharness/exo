@@ -120,6 +120,9 @@ pub enum SnapshotKind {
     /// Daytona. Bytes-by-reference, not bytes-by-value — restoring is a
     /// `POST /sandbox { snapshot: <name> }` call, not a tarball load.
     DaytonaSnapshot,
+    /// Reference to an E2B snapshot template id. Payload bytes are a small JSON
+    /// manifest; restoring is `POST /sandboxes { templateID: <snapshot_id> }`.
+    E2bSnapshot,
 }
 
 #[async_trait]
@@ -543,6 +546,10 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
             (_, SnapshotKind::DaytonaSnapshot) => bail!(
                 "DaytonaSnapshot payloads can only be restored by the Daytona sandbox backend; \
                  switch to --sandbox-backend daytona to rewind this snapshot"
+            ),
+            (_, SnapshotKind::E2bSnapshot) => bail!(
+                "E2bSnapshot payloads can only be restored by the E2B sandbox backend; \
+                 switch to --sandbox-backend e2b to rewind this snapshot"
             ),
             (ContainerCliFlavor::AppleContainer, _) => bail!(
                 "restore-from-snapshot is not yet implemented for the apple-container backend"
