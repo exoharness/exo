@@ -190,7 +190,10 @@ async fn try_resume_finds_running_sandbox_without_starting() {
         .try_resume(request)
         .await
         .expect("try_resume should not error");
-    assert!(handle.is_some(), "try_resume should find the running sandbox");
+    assert!(
+        handle.is_some(),
+        "try_resume should find the running sandbox"
+    );
 
     // Crucially: no POST /sandbox/sb-running/start should have happened.
     let requests = server.received_requests().await.unwrap_or_default();
@@ -282,10 +285,7 @@ async fn try_resume_filters_by_label_as_single_json_query_param() {
 
     let requests = server.received_requests().await.unwrap_or_default();
     let url = &requests[0].url;
-    let label_params: Vec<_> = url
-        .query_pairs()
-        .filter(|(k, _)| k == "labels")
-        .collect();
+    let label_params: Vec<_> = url.query_pairs().filter(|(k, _)| k == "labels").collect();
     assert_eq!(
         label_params.len(),
         1,
@@ -489,11 +489,7 @@ async fn acquire_from_snapshot_rejects_wrong_kind() {
     // No API call should have happened — we rejected the payload before
     // hitting the network.
     let requests = server.received_requests().await.unwrap_or_default();
-    assert_eq!(
-        requests.len(),
-        0,
-        "kind-mismatch must not reach the API"
-    );
+    assert_eq!(requests.len(), 0, "kind-mismatch must not reach the API");
 }
 
 // ─────────────────────── exec (toolbox URL) ───────────────────────
