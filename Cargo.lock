@@ -1854,6 +1854,8 @@ dependencies = [
  "anyhow",
  "clap",
  "executor",
+ "exoharness",
+ "futures",
  "lingua",
  "rustyline",
  "serde",

@@ -23,11 +23,11 @@ use clap::{Parser, Subcommand, ValueEnum};
 use executor::{
     AgentHarnessKind, BasicExoHarness, BasicExoHarnessConfig, BasicHarness, Binding,
     BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig, ConversationModelConfig,
-    CreateAgentRequest, CreateConversationRequest, EventQuery, EventQueryDirection, ExoHarness,
-    ExoclawToolRuntime, FileSystemMount, FileSystemMountMode, ForkConversationRequest, Harness,
-    HarnessAgent, HarnessConversation, PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR,
-    SandboxBackendChoice, SandboxScope, Secret, SecretBackendChoice, TypeScriptHarness,
-    TypeScriptHarnessConfig, Uuid7, effective_sandbox_scope, load_agent_config,
+    CreateAgentRequest, CreateConversationRequest, EventKind, EventQuery, EventQueryDirection,
+    ExoHarness, ExoclawToolRuntime, FileSystemMount, FileSystemMountMode, ForkConversationRequest,
+    Harness, HarnessAgent, HarnessConversation, PutSecretRequest, RlmHarness,
+    SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxScope, Secret, SecretBackendChoice,
+    TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, effective_sandbox_scope, load_agent_config,
     send_conversation_wakeup,
 };
 use lingua::Message;
@@ -1324,7 +1324,13 @@ async fn main() -> Result<()> {
                         limit,
                         session_id: parse_optional_uuid7(session_id.as_deref(), "session_id")?,
                         turn_id: parse_optional_uuid7(turn_id.as_deref(), "turn_id")?,
-                        types: if types.is_empty() { None } else { Some(types) },
+                        types: if types.is_empty() {
+                            None
+                        } else {
+                            // User-supplied strings; `EventKind::custom` matches
+                            // both known kinds (by name) and Custom events.
+                            Some(types.into_iter().map(EventKind::custom).collect())
+                        },
                     }))
                     .await?;
                 println!("{}", serde_json::to_string_pretty(&result)?);

@@ -7,9 +7,9 @@ use crate::{
 use anyhow::anyhow;
 use async_trait::async_trait;
 use exoharness::{
-    BasicExoHarness, BasicExoHarnessConfig, Binding, EventData, EventQuery, EventQueryDirection,
-    ExoHarness, FileSystemMount, FileSystemMountMode, PutSecretRequest, Result,
-    SandboxBackendChoice, Secret, SecretBackendChoice, ToolRequest, Uuid7,
+    BasicExoHarness, BasicExoHarnessConfig, Binding, EventData, EventKind, EventQuery,
+    EventQueryDirection, ExoHarness, FileSystemMount, FileSystemMountMode, PutSecretRequest,
+    Result, SandboxBackendChoice, Secret, SecretBackendChoice, ToolRequest, Uuid7,
 };
 
 fn local_test_config(root: impl Into<std::path::PathBuf>) -> BasicExoHarnessConfig {
@@ -391,7 +391,7 @@ async fn send_executes_shell_tool_when_enabled() {
             limit: None,
             session_id: None,
             turn_id: None,
-            types: Some(vec!["sandbox_created".to_string()]),
+            types: Some(vec![EventKind::SANDBOX_CREATED]),
         }))
         .await
         .expect("sandbox events should load")
@@ -547,7 +547,7 @@ async fn updating_mounts_recreates_conversation_sandbox() {
             limit: None,
             session_id: None,
             turn_id: None,
-            types: Some(vec!["sandbox_created".to_string()]),
+            types: Some(vec![EventKind::SANDBOX_CREATED]),
         }))
         .await
         .expect("get sandbox events")
@@ -589,7 +589,7 @@ async fn updating_mounts_recreates_conversation_sandbox() {
             limit: None,
             session_id: None,
             turn_id: None,
-            types: Some(vec!["sandbox_created".to_string()]),
+            types: Some(vec![EventKind::SANDBOX_CREATED]),
         }))
         .await
         .expect("get sandbox events after mount change")

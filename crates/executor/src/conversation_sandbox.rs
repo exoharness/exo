@@ -1,7 +1,7 @@
 use crate::{AgentConfig, ConversationConfig};
 use exoharness::{
-    ConversationHandle, CreateSandboxRequest, DEFAULT_SANDBOX_IMAGE, EventData, EventQuery,
-    EventQueryDirection, FileSystemMount, FileSystemMountMode, Result,
+    ConversationHandle, CreateSandboxRequest, DEFAULT_SANDBOX_IMAGE, EventData, EventKind,
+    EventQuery, EventQueryDirection, FileSystemMount, FileSystemMountMode, Result,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,7 +76,7 @@ pub(crate) async fn conversation_sandboxes(
             limit: None,
             session_id: None,
             turn_id: None,
-            types: Some(vec!["sandbox_created".to_string()]),
+            types: Some(vec![EventKind::SANDBOX_CREATED]),
         }))
         .await?
         .events;

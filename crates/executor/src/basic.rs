@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use exoharness::{
-    AgentHandle, ConversationHandle, ConversationId, EventData, EventId, EventQuery,
+    AgentHandle, ConversationHandle, ConversationId, EventData, EventId, EventKind, EventQuery,
     EventQueryDirection, Result, ToolCallId, ToolRequest, TurnHandle,
 };
 use lingua::Message;
@@ -70,9 +70,9 @@ where
                 session_id: None,
                 turn_id: None,
                 types: Some(vec![
-                    "messages".to_string(),
-                    "tool_requested".to_string(),
-                    "tool_result".to_string(),
+                    EventKind::MESSAGES,
+                    EventKind::TOOL_REQUESTED,
+                    EventKind::TOOL_RESULT,
                 ]),
             }))
             .await?;
