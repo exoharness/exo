@@ -1,17 +1,29 @@
-use futures::io::{AsyncReadExt, AsyncWriteExt};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::Duration;
+
+use anyhow::bail;
+use async_trait::async_trait;
+use futures::future::BoxFuture;
+use futures::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, Cursor};
 use lingua::Message;
 use lingua::universal::{AssistantContent, UserContent};
 use tempfile::TempDir;
 use tokio::fs;
+use tokio::sync::{Mutex as AsyncMutex, oneshot};
+use tokio::time::{sleep, timeout};
 
 use crate::{
     Artifact, ArtifactVersion, BasicExoHarness, BasicExoHarnessConfig, BeginTurnRequest, Binding,
-    CloseSandboxProcessInputRequest, CreateSandboxRequest, EventData, EventQuery,
-    EventQueryDirection, ExoHarness, ForkConversationRequest, NewAgentRequest,
-    NewConversationRequest, PutSecretRequest, RunInSandboxRequest, SandboxBackendChoice,
-    SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessStatus, SandboxProcessStdin,
-    Secret, SecretBackendChoice, StartSandboxProcessRequest, WaitSandboxProcessRequest,
-    WriteArtifactRequest, WriteSandboxProcessInputRequest,
+    BoxAsyncRead, BoxAsyncWrite, CloseSandboxProcessInputRequest, CreateSandboxRequest, EventData,
+    EventQuery, EventQueryDirection, ExoHarness, ForkConversationRequest, ManagedSandboxBackend,
+    ManagedSandboxHandle, NewAgentRequest, NewConversationRequest, PutSecretRequest,
+    RunInSandboxRequest, SandboxBackendChoice, SandboxCommand, SandboxCommandOutput,
+    SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessParts, SandboxProcessStatus,
+    SandboxProcessStdin, SandboxRequest, Secret, SecretBackendChoice, StartSandboxProcessRequest,
+    WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
 fn local_test_config(root: impl Into<std::path::PathBuf>) -> BasicExoHarnessConfig {
@@ -632,6 +644,266 @@ async fn basic_backend_exposes_process_events_and_input() {
         events.events.last(),
         Some(SandboxProcessEvent::Exit { exit_code: 0, .. })
     ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sandbox_process_terminal_event_waits_for_output_drain() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new_with_sandbox_backend(
+        local_test_config(tempdir.path()),
+        Arc::new(TestSandboxBackend::new(TestProcessSpec {
+            stdout: Box::pin(DelayedRead::new(
+                Duration::from_millis(50),
+                b"late stdout".to_vec(),
+            )),
+            stderr: Box::pin(Cursor::new(Vec::new())),
+            stdin: Box::pin(Cursor::new(Vec::new())),
+            wait: Box::pin(async { Ok(0) }),
+        })),
+    )
+    .await
+    .expect("harness should initialize");
+    let conversation = test_conversation(&harness).await;
+    let sandbox_id = test_sandbox(&conversation).await;
+    let process = conversation
+        .start_sandbox_process(StartSandboxProcessRequest {
+            sandbox_id: sandbox_id.clone(),
+            command: vec!["test".to_string()],
+            env: Default::default(),
+            cwd: None,
+            mode: Default::default(),
+            stdin: SandboxProcessStdin::None,
+            output: Default::default(),
+            lifecycle: Default::default(),
+        })
+        .await
+        .expect("process should start");
+
+    let status = timeout(
+        Duration::from_secs(1),
+        conversation.wait_sandbox_process(WaitSandboxProcessRequest {
+            sandbox_id: sandbox_id.clone(),
+            process_id: process.id.clone(),
+        }),
+    )
+    .await
+    .expect("wait should not hang")
+    .expect("wait should succeed");
+    assert_eq!(status, SandboxProcessStatus::Exited { exit_code: 0 });
+
+    let events = conversation
+        .get_sandbox_process_events(SandboxProcessEventQuery {
+            sandbox_id,
+            process_id: process.id,
+            after: None,
+            limit: None,
+            follow: None,
+        })
+        .await
+        .expect("events should read");
+    assert_eq!(
+        events
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                SandboxProcessEvent::Stdout { data, .. } => {
+                    Some(String::from_utf8_lossy(data).to_string())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec!["late stdout".to_string()]
+    );
+    assert!(matches!(
+        events.events.last(),
+        Some(SandboxProcessEvent::Exit { exit_code: 0, .. })
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn wait_sandbox_process_returns_after_concurrent_completion() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let (finish_tx, finish_rx) = oneshot::channel();
+    let harness = BasicExoHarness::new_with_sandbox_backend(
+        local_test_config(tempdir.path()),
+        Arc::new(TestSandboxBackend::new(TestProcessSpec {
+            stdout: Box::pin(Cursor::new(Vec::new())),
+            stderr: Box::pin(Cursor::new(Vec::new())),
+            stdin: Box::pin(Cursor::new(Vec::new())),
+            wait: Box::pin(async move {
+                finish_rx.await.expect("finish signal should send");
+                Ok(0)
+            }),
+        })),
+    )
+    .await
+    .expect("harness should initialize");
+    let conversation = test_conversation(&harness).await;
+    let sandbox_id = test_sandbox(&conversation).await;
+    let process = conversation
+        .start_sandbox_process(StartSandboxProcessRequest {
+            sandbox_id: sandbox_id.clone(),
+            command: vec!["test".to_string()],
+            env: Default::default(),
+            cwd: None,
+            mode: Default::default(),
+            stdin: SandboxProcessStdin::None,
+            output: Default::default(),
+            lifecycle: Default::default(),
+        })
+        .await
+        .expect("process should start");
+
+    let wait_conversation = Arc::clone(&conversation);
+    let wait_task = tokio::spawn(async move {
+        wait_conversation
+            .wait_sandbox_process(WaitSandboxProcessRequest {
+                sandbox_id,
+                process_id: process.id,
+            })
+            .await
+    });
+    tokio::task::yield_now().await;
+    finish_tx
+        .send(())
+        .expect("finish signal should be received");
+    let status = timeout(Duration::from_secs(1), wait_task)
+        .await
+        .expect("wait should not hang")
+        .expect("wait task should not panic")
+        .expect("wait should succeed");
+    assert_eq!(status, SandboxProcessStatus::Exited { exit_code: 0 });
+}
+
+async fn test_conversation(harness: &BasicExoHarness) -> Arc<dyn crate::ConversationHandle> {
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    agent
+        .new_conversation(NewConversationRequest::default())
+        .await
+        .expect("conversation")
+}
+
+async fn test_sandbox(conversation: &Arc<dyn crate::ConversationHandle>) -> String {
+    conversation
+        .create_sandbox(CreateSandboxRequest {
+            provider: Default::default(),
+            image: "test-sandbox".to_string(),
+            default_workdir: Some("/".to_string()),
+            file_system_mounts: None,
+            enable_networking: Some(true),
+            idle_seconds: Some(60),
+        })
+        .await
+        .expect("sandbox should be created")
+}
+
+struct TestSandboxBackend {
+    process: Arc<AsyncMutex<Option<TestProcessSpec>>>,
+}
+
+impl TestSandboxBackend {
+    fn new(process: TestProcessSpec) -> Self {
+        Self {
+            process: Arc::new(AsyncMutex::new(Some(process))),
+        }
+    }
+}
+
+#[async_trait]
+impl ManagedSandboxBackend for TestSandboxBackend {
+    async fn acquire(
+        &self,
+        _request: SandboxRequest,
+    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+        Ok(Arc::new(TestSandboxHandle {
+            process: Arc::clone(&self.process),
+        }))
+    }
+}
+
+struct TestSandboxHandle {
+    process: Arc<AsyncMutex<Option<TestProcessSpec>>>,
+}
+
+#[async_trait]
+impl ManagedSandboxHandle for TestSandboxHandle {
+    fn id(&self) -> &str {
+        "test-sandbox"
+    }
+
+    async fn exec(&self, _command: &SandboxCommand) -> crate::Result<SandboxCommandOutput> {
+        bail!("test sandbox handle only supports start_process")
+    }
+
+    async fn start_process(&self, _command: &SandboxCommand) -> crate::Result<SandboxProcessParts> {
+        let process = self
+            .process
+            .lock()
+            .await
+            .take()
+            .expect("test process should only start once");
+        Ok(SandboxProcessParts {
+            stdout: process.stdout,
+            stderr: process.stderr,
+            stdin: process.stdin,
+            wait: process.wait,
+        })
+    }
+
+    async fn stop(&self) -> crate::Result<()> {
+        Ok(())
+    }
+}
+
+struct TestProcessSpec {
+    stdout: BoxAsyncRead,
+    stderr: BoxAsyncRead,
+    stdin: BoxAsyncWrite,
+    wait: BoxFuture<'static, crate::Result<i32>>,
+}
+
+struct DelayedRead {
+    sleep: Option<Pin<Box<tokio::time::Sleep>>>,
+    data: Vec<u8>,
+    offset: usize,
+}
+
+impl DelayedRead {
+    fn new(delay: Duration, data: Vec<u8>) -> Self {
+        Self {
+            sleep: Some(Box::pin(sleep(delay))),
+            data,
+            offset: 0,
+        }
+    }
+}
+
+impl AsyncRead for DelayedRead {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
+        if let Some(sleep) = self.sleep.as_mut() {
+            if sleep.as_mut().poll(cx).is_pending() {
+                return Poll::Pending;
+            }
+            self.sleep = None;
+        }
+        if self.offset >= self.data.len() {
+            return Poll::Ready(Ok(0));
+        }
+        let length = buffer.len().min(self.data.len() - self.offset);
+        buffer[..length].copy_from_slice(&self.data[self.offset..self.offset + length]);
+        self.offset += length;
+        Poll::Ready(Ok(length))
+    }
 }
 
 fn user_message(text: &str) -> Message {

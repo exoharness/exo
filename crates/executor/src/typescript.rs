@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
@@ -9,9 +10,10 @@ use async_trait::async_trait;
 use exoharness::{
     AddEventsRequest, AgentHandle, AgentId, BasicExoHarness, BasicExoHarnessConfig,
     CancelSandboxProcessRequest, CloseSandboxProcessInputRequest, ConversationHandle,
-    ConversationId, EventData, EventQuery, EventQueryDirection, ExoHarness, Result, SandboxId,
-    SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessId, SandboxProcessLifecycle,
-    SandboxProcessMode, SandboxProcessStdin, StartSandboxProcessRequest, ToolArguments,
+    ConversationId, EventData, EventQuery, EventQueryDirection, ExoHarness,
+    GetSandboxProcessEventsResult, Result, SandboxId, SandboxProcessEvent,
+    SandboxProcessEventQuery, SandboxProcessId, SandboxProcessLifecycle, SandboxProcessMode,
+    SandboxProcessStatus, SandboxProcessStdin, StartSandboxProcessRequest, ToolArguments,
     ToolRequest, ToolResult, TurnHandle, WriteSandboxProcessInputRequest,
     protocol::{
         ConversationHandleInfo, Request as ExoRequest, Response as ExoResponse, TurnHandleInfo,
@@ -678,15 +680,12 @@ async fn reusable_sandbox_process(
         if candidate.reuse_key != reuse_key || candidate.sandbox_id != *desired_sandbox_id {
             continue;
         }
-        let status = conversation
-            .get_sandbox_process_events(SandboxProcessEventQuery {
-                sandbox_id: candidate.sandbox_id.clone(),
-                process_id: candidate.process_id.clone(),
-                after: None,
-                limit: Some(1000),
-                follow: Some(false),
-            })
-            .await;
+        let status = latest_sandbox_process_event_cursor(
+            conversation,
+            candidate.sandbox_id.clone(),
+            candidate.process_id.clone(),
+        )
+        .await;
         let Ok(status) = status else {
             continue;
         };
@@ -696,6 +695,59 @@ async fn reusable_sandbox_process(
     }
 
     Ok(None)
+}
+
+async fn latest_sandbox_process_event_cursor(
+    conversation: &dyn ConversationHandle,
+    sandbox_id: SandboxId,
+    process_id: SandboxProcessId,
+) -> Result<GetLatestSandboxProcessCursorResult> {
+    latest_sandbox_process_event_cursor_from_fetch(|after| {
+        let sandbox_id = sandbox_id.clone();
+        let process_id = process_id.clone();
+        async move {
+            conversation
+                .get_sandbox_process_events(SandboxProcessEventQuery {
+                    sandbox_id,
+                    process_id,
+                    after,
+                    limit: Some(1000),
+                    follow: Some(false),
+                })
+                .await
+        }
+    })
+    .await
+}
+
+async fn latest_sandbox_process_event_cursor_from_fetch<F, Fut>(
+    mut fetch_page: F,
+) -> Result<GetLatestSandboxProcessCursorResult>
+where
+    F: FnMut(Option<u64>) -> Fut,
+    Fut: Future<Output = Result<GetSandboxProcessEventsResult>>,
+{
+    let mut after = None;
+    loop {
+        let previous_after = after;
+        let page = fetch_page(after).await?;
+        let event_count = page.events.len();
+        after = page.cursor.or(after);
+        if !page.status.is_running() || event_count < 1000 {
+            return Ok(GetLatestSandboxProcessCursorResult {
+                cursor: after,
+                status: page.status,
+            });
+        }
+        if after == previous_after {
+            bail!("sandbox process event pagination did not advance");
+        }
+    }
+}
+
+struct GetLatestSandboxProcessCursorResult {
+    cursor: Option<u64>,
+    status: SandboxProcessStatus,
 }
 
 impl<T> TypeScriptExecutor<T>
@@ -1122,4 +1174,64 @@ fn format_error_chain(error: &anyhow::Error, context: std::fmt::Arguments<'_>) -
         message.push_str(&cause.to_string());
     }
     message
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::sync::Mutex as StdMutex;
+
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn latest_sandbox_process_event_cursor_pages_to_latest_cursor() {
+        let pages = Arc::new(StdMutex::new(VecDeque::from([
+            GetSandboxProcessEventsResult {
+                events: (1..=1000)
+                    .map(|cursor| SandboxProcessEvent::Stdout {
+                        cursor,
+                        data: Vec::new(),
+                    })
+                    .collect(),
+                cursor: Some(1000),
+                status: SandboxProcessStatus::Running,
+            },
+            GetSandboxProcessEventsResult {
+                events: vec![SandboxProcessEvent::Stdout {
+                    cursor: 1001,
+                    data: Vec::new(),
+                }],
+                cursor: Some(1001),
+                status: SandboxProcessStatus::Running,
+            },
+        ])));
+        let requested_after = Arc::new(StdMutex::new(Vec::new()));
+
+        let result = latest_sandbox_process_event_cursor_from_fetch({
+            let pages = Arc::clone(&pages);
+            let requested_after = Arc::clone(&requested_after);
+            move |after| {
+                requested_after
+                    .lock()
+                    .expect("requested_after lock")
+                    .push(after);
+                let page = pages
+                    .lock()
+                    .expect("pages lock")
+                    .pop_front()
+                    .expect("expected a page");
+                async move { Ok(page) }
+            }
+        })
+        .await
+        .expect("cursor lookup should succeed");
+
+        assert_eq!(result.cursor, Some(1001));
+        assert_eq!(result.status, SandboxProcessStatus::Running);
+        assert_eq!(
+            *requested_after.lock().expect("requested_after lock"),
+            vec![None, Some(1000)]
+        );
+        assert!(pages.lock().expect("pages lock").is_empty());
+    }
 }

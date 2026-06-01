@@ -119,11 +119,40 @@ impl BasicExoHarness {
             secret_backend,
             sandbox_backend,
         } = config;
+        let sandbox_backend_choice = sandbox_backend;
+        let sandbox_backend = build_sandbox_backend(sandbox_backend);
+        Self::new_with_backend(
+            root,
+            secret_backend,
+            sandbox_backend_choice,
+            sandbox_backend,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn new_with_sandbox_backend(
+        config: BasicExoHarnessConfig,
+        sandbox_backend: Arc<dyn ManagedSandboxBackend>,
+    ) -> Result<Self> {
+        Self::new_with_backend(
+            config.root,
+            config.secret_backend,
+            config.sandbox_backend,
+            sandbox_backend,
+        )
+        .await
+    }
+
+    async fn new_with_backend(
+        root: PathBuf,
+        secret_backend: SecretBackendChoice,
+        sandbox_backend_choice: SandboxBackendChoice,
+        sandbox_backend: Arc<dyn ManagedSandboxBackend>,
+    ) -> Result<Self> {
         let storage = BasicObjectStore::local_filesystem(&root).await?;
         let secret_cipher =
             build_secret_cipher(secret_backend, root.to_string_lossy().to_string())?;
-        let sandbox_backend_choice = sandbox_backend;
-        let sandbox_backend = build_sandbox_backend(sandbox_backend);
         Ok(Self {
             inner: Arc::new(BasicExoHarnessInner {
                 storage,
@@ -1224,6 +1253,8 @@ impl ConversationHandle for BasicConversationHandle {
             stdin: AsyncMutex::new(stdin),
             events: AsyncMutex::new(Vec::new()),
             status: AsyncMutex::new(SandboxProcessStatus::Running),
+            open_output_streams: AsyncMutex::new(2),
+            output_drained: Notify::new(),
             tasks: AsyncMutex::new(None),
             notify: Notify::new(),
         });
@@ -1325,13 +1356,7 @@ impl ConversationHandle for BasicConversationHandle {
         let process = self
             .require_sandbox_process(&request.sandbox_id, &request.process_id)
             .await?;
-        loop {
-            let status = sandbox_process_status(&process).await;
-            if !status.is_running() {
-                return Ok(status);
-            }
-            process.notify.notified().await;
-        }
+        Ok(wait_for_sandbox_process_terminal_status(&process).await)
     }
 
     async fn cancel_sandbox_process(
@@ -1347,8 +1372,8 @@ impl ConversationHandle for BasicConversationHandle {
             tasks.stderr.abort();
             tasks.wait.abort();
         }
-        set_sandbox_process_status(&process, SandboxProcessStatus::Cancelled).await;
         push_sandbox_process_event(&process, SandboxProcessEventPayload::Cancelled).await;
+        set_sandbox_process_status(&process, SandboxProcessStatus::Cancelled).await;
         Ok(SandboxProcessStatus::Cancelled)
     }
 
@@ -1774,6 +1799,8 @@ struct RunningSandboxProcess {
     stdin: AsyncMutex<Option<BoxAsyncWrite>>,
     events: AsyncMutex<Vec<SandboxProcessEvent>>,
     status: AsyncMutex<SandboxProcessStatus>,
+    open_output_streams: AsyncMutex<u8>,
+    output_drained: Notify,
     tasks: AsyncMutex<Option<RunningSandboxProcessTasks>>,
     notify: Notify,
 }
@@ -1797,7 +1824,10 @@ async fn record_sandbox_process_output(
     let mut buffer = vec![0; 8192];
     loop {
         match reader.read(&mut buffer).await {
-            Ok(0) => return,
+            Ok(0) => {
+                mark_sandbox_process_output_closed(&process).await;
+                return;
+            }
             Ok(length) => {
                 let data = buffer[..length].to_vec();
                 match stream {
@@ -1818,18 +1848,15 @@ async fn record_sandbox_process_output(
                 }
             }
             Err(error) => {
-                set_sandbox_process_status(
-                    &process,
-                    SandboxProcessStatus::Failed {
-                        message: error.to_string(),
-                    },
-                )
-                .await;
+                let message = error.to_string();
                 push_sandbox_process_event(
                     &process,
-                    SandboxProcessEventPayload::Error(error.to_string()),
+                    SandboxProcessEventPayload::Error(message.clone()),
                 )
                 .await;
+                set_sandbox_process_status(&process, SandboxProcessStatus::Failed { message })
+                    .await;
+                mark_sandbox_process_output_closed(&process).await;
                 return;
             }
         }
@@ -1840,25 +1867,55 @@ async fn record_sandbox_process_exit(
     process: Arc<RunningSandboxProcess>,
     wait: BoxFuture<'static, Result<i32>>,
 ) {
-    match wait.await {
+    let terminal = wait.await;
+    wait_for_sandbox_process_output_drained(&process).await;
+    if !sandbox_process_status(&process).await.is_running() {
+        return;
+    }
+    match terminal {
         Ok(exit_code) => {
-            set_sandbox_process_status(&process, SandboxProcessStatus::Exited { exit_code }).await;
             push_sandbox_process_event(&process, SandboxProcessEventPayload::Exit(exit_code)).await;
+            set_sandbox_process_status(&process, SandboxProcessStatus::Exited { exit_code }).await;
         }
         Err(error) => {
+            let message = error.to_string();
+            push_sandbox_process_event(
+                &process,
+                SandboxProcessEventPayload::Error(message.clone()),
+            )
+            .await;
             set_sandbox_process_status(
                 &process,
                 SandboxProcessStatus::Failed {
-                    message: error.to_string(),
+                    message: message.clone(),
                 },
             )
             .await;
-            push_sandbox_process_event(
-                &process,
-                SandboxProcessEventPayload::Error(error.to_string()),
-            )
-            .await;
         }
+    }
+}
+
+async fn mark_sandbox_process_output_closed(process: &Arc<RunningSandboxProcess>) {
+    let mut open_output_streams = process.open_output_streams.lock().await;
+    if *open_output_streams > 0 {
+        *open_output_streams -= 1;
+    }
+    let drained = *open_output_streams == 0;
+    drop(open_output_streams);
+    if drained {
+        process.output_drained.notify_waiters();
+    }
+}
+
+async fn wait_for_sandbox_process_output_drained(process: &Arc<RunningSandboxProcess>) {
+    loop {
+        let notified = process.output_drained.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if *process.open_output_streams.lock().await == 0 {
+            return;
+        }
+        notified.await;
     }
 }
 
@@ -1903,6 +1960,21 @@ async fn set_sandbox_process_status(
 
 async fn sandbox_process_status(process: &Arc<RunningSandboxProcess>) -> SandboxProcessStatus {
     process.status.lock().await.clone()
+}
+
+async fn wait_for_sandbox_process_terminal_status(
+    process: &Arc<RunningSandboxProcess>,
+) -> SandboxProcessStatus {
+    loop {
+        let notified = process.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let status = sandbox_process_status(process).await;
+        if !status.is_running() {
+            return status;
+        }
+        notified.await;
+    }
 }
 
 struct LiveSandboxProcess {
