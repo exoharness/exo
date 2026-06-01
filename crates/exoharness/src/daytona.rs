@@ -49,10 +49,11 @@ pub struct DaytonaConfig {
 
 impl DaytonaConfig {
     pub fn from_env() -> Result<Self> {
-        let api_key = std::env::var("DAYTONA_API_KEY")
-            .map_err(|_| anyhow!("DAYTONA_API_KEY is not set; required for the Daytona sandbox backend"))?;
-        let api_url =
-            std::env::var("DAYTONA_API_URL").unwrap_or_else(|_| DEFAULT_DAYTONA_API_URL.to_string());
+        let api_key = std::env::var("DAYTONA_API_KEY").map_err(|_| {
+            anyhow!("DAYTONA_API_KEY is not set; required for the Daytona sandbox backend")
+        })?;
+        let api_url = std::env::var("DAYTONA_API_URL")
+            .unwrap_or_else(|_| DEFAULT_DAYTONA_API_URL.to_string());
         let toolbox_url = std::env::var("DAYTONA_TOOLBOX_URL")
             .unwrap_or_else(|_| DEFAULT_DAYTONA_TOOLBOX_URL.to_string());
         let target = std::env::var("DAYTONA_TARGET").ok();
@@ -116,10 +117,6 @@ impl DaytonaSandboxBackend {
         format!("{}{}", self.api_url, path)
     }
 
-    fn toolbox_endpoint(&self, path: &str) -> String {
-        format!("{}{}", self.toolbox_url, path)
-    }
-
     async fn find_sandbox_by_labels(
         &self,
         key_label: &str,
@@ -162,12 +159,15 @@ impl DaytonaSandboxBackend {
     ) -> Result<DaytonaSandbox> {
         let mut labels = HashMap::new();
         labels.insert(WARM_SANDBOX_KEY_LABEL.to_string(), request.key.to_string());
-        labels.insert(WARM_SANDBOX_SPEC_HASH_LABEL.to_string(), spec_hash.to_string());
+        labels.insert(
+            WARM_SANDBOX_SPEC_HASH_LABEL.to_string(),
+            spec_hash.to_string(),
+        );
 
         let auto_stop_minutes = request
             .lifecycle
             .idle_ttl
-            .map(|ttl| idle_ttl_to_minutes(ttl))
+            .map(idle_ttl_to_minutes)
             // 0 disables auto-stop in Daytona; we don't want that — pick a
             // conservative default that matches Daytona's own (15 min).
             .unwrap_or(15);
@@ -221,7 +221,6 @@ impl DaytonaSandboxBackend {
         }
         Ok(())
     }
-
 }
 
 #[async_trait]
@@ -280,8 +279,8 @@ impl ManagedSandboxBackend for DaytonaSandboxBackend {
                 payload.kind
             );
         }
-        let manifest: DaytonaSnapshotManifest = serde_json::from_slice(&payload.bytes)
-            .context("decoding DaytonaSnapshot manifest")?;
+        let manifest: DaytonaSnapshotManifest =
+            serde_json::from_slice(&payload.bytes).context("decoding DaytonaSnapshot manifest")?;
         let spec_hash = sandbox_spec_hash(&request.spec);
         let sandbox = self
             .create_sandbox(&request, &spec_hash, Some(&manifest.snapshot_name))
@@ -353,19 +352,13 @@ impl ManagedSandboxHandle for DaytonaSandboxHandle {
         // command synchronously, then hand the caller a SandboxProcessParts
         // whose stdout/stderr/wait are already populated. stdin goes to a
         // sink — Daytona's exec doesn't accept piped input on this endpoint.
-        let output = exec_in_sandbox(
-            &self.backend,
-            &self.sandbox_id,
-            &self.request.spec,
-            command,
-        )
-        .await?;
+        let output =
+            exec_in_sandbox(&self.backend, &self.sandbox_id, &self.request.spec, command).await?;
         let exit_code = output.exit_code.unwrap_or(0);
         let stdout = Cursor::new(output.stdout.into_bytes());
         let stderr = Cursor::new(output.stderr.into_bytes());
         let stdin = futures::io::sink();
-        let wait: BoxFuture<'static, crate::Result<i32>> =
-            Box::pin(async move { Ok(exit_code) });
+        let wait: BoxFuture<'static, crate::Result<i32>> = Box::pin(async move { Ok(exit_code) });
         Ok(crate::SandboxProcessParts {
             stdout: Box::pin(stdout),
             stderr: Box::pin(stderr),
@@ -480,8 +473,7 @@ async fn save_as_snapshot_via_backend(
         snapshot_name,
         base_image,
     };
-    let bytes = serde_json::to_vec(&manifest)
-        .context("serializing Daytona snapshot manifest")?;
+    let bytes = serde_json::to_vec(&manifest).context("serializing Daytona snapshot manifest")?;
     Ok(SnapshotPayload {
         kind: SnapshotKind::DaytonaSnapshot,
         bytes: Bytes::from(bytes),
@@ -527,9 +519,9 @@ fn render_shell_command(argv: &[String]) -> String {
 
 fn shell_quote(arg: &str) -> String {
     if !arg.is_empty()
-        && arg
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '=' | ','))
+        && arg.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '=' | ',')
+        })
     {
         return arg.to_string();
     }
