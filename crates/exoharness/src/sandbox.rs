@@ -8,8 +8,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::future::BoxFuture;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::time;
@@ -94,6 +95,27 @@ pub struct SandboxCommandOutput {
     pub cwd: String,
 }
 
+/// Opaque blob produced by `ManagedSandboxHandle::snapshot` and consumed by
+/// `ManagedSandboxBackend::acquire_from_snapshot`. The `kind` tag is the
+/// contract: a snapshot produced by one backend can only be restored by a
+/// backend that knows how to interpret that kind.
+#[derive(Debug, Clone)]
+pub struct SnapshotPayload {
+    pub kind: SnapshotKind,
+    pub bytes: Bytes,
+}
+
+/// Tag identifying the on-disk format of a snapshot payload. Backends both
+/// produce and consume a specific kind; the conversation layer just hands the
+/// bytes back to the same backend type that produced them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotKind {
+    /// `docker save` output: a tar of OCI image layers + manifest, loadable
+    /// with `docker load`.
+    DockerImageTar,
+}
+
 #[async_trait]
 pub trait ManagedSandboxHandle: Send + Sync {
     fn id(&self) -> &str;
@@ -103,14 +125,29 @@ pub trait ManagedSandboxHandle: Send + Sync {
     async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts>;
 
     async fn stop(&self) -> Result<()>;
+
+    /// Capture the sandbox's current state as an opaque blob. Returns an
+    /// error if this backend doesn't (yet) support snapshotting.
+    async fn snapshot(&self) -> Result<SnapshotPayload>;
 }
 
 #[async_trait]
 pub trait ManagedSandboxBackend: Send + Sync {
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>>;
+
+    /// Acquire a sandbox initialised from a previously-captured snapshot.
+    /// The request is honoured for mounts, network, lifecycle, etc., but the
+    /// container's filesystem is sourced from the payload instead of
+    /// `request.spec.image`. Returns an error if this backend can't restore
+    /// the supplied `payload.kind`.
+    async fn acquire_from_snapshot(
+        &self,
+        request: SandboxRequest,
+        payload: SnapshotPayload,
+    ) -> Result<Arc<dyn ManagedSandboxHandle>>;
 }
 
-pub const DEFAULT_SANDBOX_IMAGE: &str = "docker.io/library/debian:bookworm";
+pub const DEFAULT_SANDBOX_IMAGE: &str = "docker.io/library/ubuntu:24.04";
 pub const SANDBOX_HOME_DIR: &str = "/home/exo";
 pub const SANDBOX_MAIN_MOUNT_DIR: &str = "/home/exo/workspace";
 
@@ -384,6 +421,62 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
             warm_sandboxes: Arc::clone(&self.warm_sandboxes),
         }))
     }
+
+    async fn acquire_from_snapshot(
+        &self,
+        request: SandboxRequest,
+        payload: SnapshotPayload,
+    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
+        if request.lifecycle.idle_ttl.is_none() {
+            bail!("restore-from-snapshot requires a warm sandbox lifecycle (idle_ttl must be set)");
+        }
+        match (self.cli, payload.kind) {
+            (ContainerCliFlavor::Docker, SnapshotKind::DockerImageTar) => {}
+            (ContainerCliFlavor::AppleContainer, _) => bail!(
+                "restore-from-snapshot is not yet implemented for the apple-container backend"
+            ),
+        }
+
+        let image_tag = docker_load_image(&self.container_bin, &payload.bytes).await?;
+
+        // Build a fresh request that points at the loaded image. Mounts,
+        // network policy, lifecycle, and key are all preserved from the
+        // original request so the restored sandbox is otherwise identical.
+        let mut request = self.prepare_request(request).await?;
+        request.spec.image = image_tag;
+
+        // Evict any pre-existing warm container for this key — we want a
+        // fresh container booted from the restored image, not a reuse of
+        // whatever was running before.
+        let replaced = {
+            let mut warm_sandboxes = self.warm_sandboxes.lock().await;
+            warm_sandboxes.remove(&request.key)
+        };
+        if let Some(entry) = replaced {
+            schedule_cleanup_named_container(self.container_bin.clone(), self.cli, entry.name);
+        }
+
+        let name = create_unique_warm_sandbox(&self.container_bin, &request).await?;
+        {
+            let mut warm_sandboxes = self.warm_sandboxes.lock().await;
+            warm_sandboxes.insert(
+                request.key.clone(),
+                WarmSandboxEntry {
+                    name: name.clone(),
+                    request: request.clone(),
+                    last_used_at: Instant::now(),
+                },
+            );
+        }
+
+        Ok(Arc::new(WarmSandboxHandle {
+            id: format!("warm:{}", request.key),
+            cli: self.cli,
+            container_bin: self.container_bin.clone(),
+            request,
+            warm_sandboxes: Arc::clone(&self.warm_sandboxes),
+        }))
+    }
 }
 
 struct OneShotSandboxHandle {
@@ -420,6 +513,12 @@ impl ManagedSandboxHandle for OneShotSandboxHandle {
 
     async fn stop(&self) -> Result<()> {
         Ok(())
+    }
+
+    async fn snapshot(&self) -> Result<SnapshotPayload> {
+        bail!(
+            "snapshot is not supported for one-shot sandboxes (set a positive idle_ttl to enable warm sandbox + snapshotting)"
+        )
     }
 }
 
@@ -475,6 +574,33 @@ impl ManagedSandboxHandle for WarmSandboxHandle {
             Ok(())
         }
     }
+
+    async fn snapshot(&self) -> Result<SnapshotPayload> {
+        match self.cli {
+            ContainerCliFlavor::Docker => {
+                let name = ensure_warm_sandbox_ready(
+                    &self.container_bin,
+                    self.cli,
+                    &self.request,
+                    &self.warm_sandboxes,
+                )
+                .await?;
+                touch_warm_sandbox(&self.warm_sandboxes, &self.request.key).await;
+                docker_snapshot_container(&self.container_bin, &name).await
+            }
+            // The Apple `container` CLI exposes `container image save` and a
+            // `container commit`-style flow on its roadmap but neither is in
+            // the released versions we target today. When it lands, the path
+            // will mirror docker_snapshot_container: produce a single tarball
+            // and tag it with a new SnapshotKind variant (e.g.
+            // AppleContainerImageTar). Until then, fail explicitly so callers
+            // know to choose Docker for snapshot-using flows.
+            ContainerCliFlavor::AppleContainer => bail!(
+                "snapshot is not yet implemented for the apple-container backend; \
+                 use --sandbox-backend docker for snapshot-using flows"
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -493,6 +619,14 @@ impl ManagedSandboxBackend for LocalProcessSandboxBackend {
             id: format!("local:{}", request.key),
             request,
         }))
+    }
+
+    async fn acquire_from_snapshot(
+        &self,
+        _request: SandboxRequest,
+        _payload: SnapshotPayload,
+    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
+        bail!("restore-from-snapshot is not supported by the local-process sandbox backend")
     }
 }
 
@@ -545,6 +679,15 @@ impl ManagedSandboxHandle for LocalProcessSandboxHandle {
 
     async fn stop(&self) -> Result<()> {
         Ok(())
+    }
+
+    async fn snapshot(&self) -> Result<SnapshotPayload> {
+        // The local-process backend runs commands directly on the host; there
+        // is no container filesystem to capture. A meaningful implementation
+        // would tar up the writable mounts, but the semantics differ enough
+        // from container snapshots (no isolated filesystem, no rollback of
+        // host-side state) that we don't pretend to support it.
+        bail!("snapshot is not supported by the local-process sandbox backend")
     }
 }
 
@@ -1175,4 +1318,134 @@ fn new_warm_container_name(key: &SandboxKey) -> String {
     let hash = hasher.finish();
     let generation = Uuid::new_v4().simple().to_string();
     format!("exo-{hash:016x}-{}", &generation[..8])
+}
+
+/// Capture a docker container's filesystem state as a SnapshotPayload.
+///
+/// Pipeline:
+///   docker commit -p <container>  exo-snap-<uuid>     // image from container fs
+///   docker save exo-snap-<uuid>                       // tarball on stdout
+///   docker image rm exo-snap-<uuid>                   // local image no longer needed
+///
+/// `commit -p` pauses the container during commit to ensure a consistent
+/// filesystem capture (no half-written files).
+async fn docker_snapshot_container(
+    container_bin: &Path,
+    container_name: &str,
+) -> Result<SnapshotPayload> {
+    let snap_tag = format!("exo-snap-{}", Uuid::new_v4().simple());
+
+    let commit_output = Command::new(container_bin)
+        .arg("commit")
+        .arg("-p")
+        .arg(container_name)
+        .arg(&snap_tag)
+        .output()
+        .await
+        .with_context(|| format!("running `docker commit` for {container_name}"))?;
+    if !commit_output.status.success() {
+        bail!(
+            "docker commit {container_name} {snap_tag} failed: {}",
+            render_command_error(&commit_output.stderr)
+        );
+    }
+
+    let save_output = Command::new(container_bin)
+        .arg("save")
+        .arg(&snap_tag)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .with_context(|| format!("running `docker save {snap_tag}`"))?;
+    if !save_output.status.success() {
+        // Best-effort cleanup of the tag we just created.
+        let _ = Command::new(container_bin)
+            .arg("image")
+            .arg("rm")
+            .arg(&snap_tag)
+            .output()
+            .await;
+        bail!(
+            "docker save {snap_tag} failed: {}",
+            render_command_error(&save_output.stderr)
+        );
+    }
+    let bytes = Bytes::from(save_output.stdout);
+
+    // Remove the local image tag now that the bytes are captured — the
+    // canonical store of the snapshot is exoharness, not the docker daemon.
+    let rm_output = Command::new(container_bin)
+        .arg("image")
+        .arg("rm")
+        .arg(&snap_tag)
+        .output()
+        .await;
+    if let Ok(output) = &rm_output
+        && !output.status.success()
+    {
+        eprintln!(
+            "warning: failed to remove ephemeral snapshot image {snap_tag}: {}",
+            render_command_error(&output.stderr)
+        );
+    }
+
+    Ok(SnapshotPayload {
+        kind: SnapshotKind::DockerImageTar,
+        bytes,
+    })
+}
+
+/// Load a docker-save tarball back into the local docker daemon and return
+/// the image reference docker assigned to it. The reference is what
+/// subsequent `docker run` invocations use to start a container from this
+/// snapshot's state.
+async fn docker_load_image(container_bin: &Path, payload: &Bytes) -> Result<String> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut child = Command::new(container_bin)
+        .arg("load")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawning `docker load`")?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("docker load: failed to acquire stdin"))?;
+    stdin
+        .write_all(payload)
+        .await
+        .context("writing snapshot bytes to `docker load` stdin")?;
+    stdin.shutdown().await.ok();
+    drop(stdin);
+
+    let output = child
+        .wait_with_output()
+        .await
+        .context("waiting on `docker load`")?;
+    if !output.status.success() {
+        bail!(
+            "docker load failed: {}",
+            render_command_error(&output.stderr)
+        );
+    }
+
+    // docker load prints lines like:
+    //   Loaded image: <ref>
+    //   Loaded image ID: sha256:<digest>
+    // Prefer the named-tag line; fall back to image-ID.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Some(rest) = line.strip_prefix("Loaded image: ") {
+            return Ok(rest.trim().to_string());
+        }
+    }
+    for line in stdout.lines() {
+        if let Some(rest) = line.strip_prefix("Loaded image ID: ") {
+            return Ok(rest.trim().to_string());
+        }
+    }
+    bail!("docker load completed but no image reference found in output: {stdout}")
 }

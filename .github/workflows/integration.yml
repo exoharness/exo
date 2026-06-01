@@ -112,7 +112,6 @@ jobs:
           container system status
 
       - name: Run integration tests
-        # Narrow to the one integration target — unit tests are already
-        # covered by the rust-tests job in ci.yml, no need to recompile or
-        # rerun them here.
-        run: cargo test --package exo --test integration_chat -- --ignored
+        # `--tests` auto-picks-up new test files; each self-skips on
+        # cells that don't have its required backend.
+        run: cargo test --package exo --tests -- --ignored

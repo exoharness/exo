@@ -6,6 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
+use bytes::Bytes;
+use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use futures::stream::{self, BoxStream};
 use serde::{Deserialize, Serialize};
@@ -16,7 +18,7 @@ use crate::sandbox::{
     CliContainerSandboxBackend, LocalProcessSandboxBackend, ManagedSandboxBackend,
     ManagedSandboxHandle, SANDBOX_MAIN_MOUNT_DIR, SandboxCommand, SandboxKey,
     SandboxLifecycleConfig, SandboxMount, SandboxMountAccess, SandboxNetworkPolicy, SandboxRequest,
-    SandboxSpec,
+    SandboxSpec, SnapshotKind, SnapshotPayload,
 };
 use crate::secrets::{
     AppleKeychainSecretKeyProvider, EncryptedSecret, FileBackedSecretKeyProvider, SecretCipher,
@@ -627,7 +629,7 @@ impl ConversationHandle for BasicConversationHandle {
                 events.retain(|event| event.turn_id == Some(turn_id));
             }
             if let Some(types) = query.types {
-                events.retain(|event| types.iter().any(|ty| event_type(&event.data) == *ty));
+                events.retain(|event| types.contains(&event.data.kind()));
             }
             match query.direction.unwrap_or(EventQueryDirection::Asc) {
                 EventQueryDirection::Asc => {
@@ -921,9 +923,38 @@ impl ConversationHandle for BasicConversationHandle {
     }
 
     async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
+        // Capture the payload *before* taking the write lock — backends may
+        // need to talk to docker / pause the container, which can be slow.
+        // The lock is then only held for the metadata persistence below.
+        let handle = self
+            .harness
+            .inner
+            .running_sandboxes
+            .lock()
+            .await
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| anyhow!("sandbox {id} is not running; start it before snapshotting"))?;
+        let payload = handle.snapshot().await?;
+
         let _guard = self.harness.inner.write_lock.lock().await;
         let mut sandbox = self.load_sandbox(&id).await?;
         let snapshot_id = Uuid7::now();
+
+        let manifest = StoredSnapshotManifest {
+            snapshot_id,
+            sandbox_id: id.clone(),
+            kind: payload.kind,
+            created_at: Utc::now(),
+            payload_size_bytes: payload.bytes.len() as u64,
+        };
+        let snapshot_dir = self.snapshot_dir(&snapshot_id);
+        let storage = &self.harness.inner.storage;
+        tokio::try_join!(
+            storage.put_bytes(snapshot_dir.join("payload.bin"), payload.bytes.to_vec()),
+            storage.put_json(snapshot_dir.join("manifest.json"), &manifest),
+        )?;
+
         sandbox.latest_snapshot_id = Some(snapshot_id);
         self.harness
             .inner
@@ -954,6 +985,27 @@ impl ConversationHandle for BasicConversationHandle {
     }
 
     async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
+        // Load the snapshot payload before acquiring the write lock — it can
+        // be many MB and we don't want to block writers while we read.
+        let snapshot_dir = self.snapshot_dir(&request.snapshot_id);
+        let storage = &self.harness.inner.storage;
+        let (manifest_result, payload_result) = tokio::join!(
+            storage.get_json::<StoredSnapshotManifest>(snapshot_dir.join("manifest.json")),
+            storage.get_bytes(snapshot_dir.join("payload.bin")),
+        );
+        let manifest = manifest_result.with_context(|| {
+            format!(
+                "loading snapshot manifest for {} (have you taken a snapshot?)",
+                request.snapshot_id
+            )
+        })?;
+        let payload_bytes = payload_result
+            .with_context(|| format!("loading snapshot payload for {}", request.snapshot_id))?;
+        let payload = SnapshotPayload {
+            kind: manifest.kind,
+            bytes: Bytes::from(payload_bytes),
+        };
+
         let _guard = self.harness.inner.write_lock.lock().await;
         let mut sandbox = self.load_sandbox(&request.id).await?;
         sandbox.running = true;
@@ -975,7 +1027,10 @@ impl ConversationHandle for BasicConversationHandle {
             .harness
             .inner
             .sandbox_backend
-            .acquire(sandbox_request(self.record.id, &request.id, &sandbox))
+            .acquire_from_snapshot(
+                sandbox_request(self.record.id, &request.id, &sandbox),
+                payload,
+            )
             .await?;
         self.harness
             .inner
@@ -1249,6 +1304,14 @@ impl BasicConversationHandle {
         self.conversation_dir().join("sandboxes")
     }
 
+    fn snapshots_dir(&self) -> PathBuf {
+        self.conversation_dir().join("snapshots")
+    }
+
+    fn snapshot_dir(&self, snapshot_id: &SnapshotId) -> PathBuf {
+        self.snapshots_dir().join(snapshot_id.to_string())
+    }
+
     async fn load_record(&self) -> Result<ConversationRecord> {
         self.harness
             .inner
@@ -1471,6 +1534,21 @@ struct StoredSandbox {
     idle_seconds: u64,
     running: bool,
     latest_snapshot_id: Option<SnapshotId>,
+}
+
+/// Sidecar JSON describing a snapshot payload.
+///
+/// Lives at `{conversation_dir}/snapshots/{snapshot_id}/manifest.json` alongside
+/// the payload blob at `payload.bin`. The `kind` controls how the payload is
+/// interpreted on restore — only a backend that recognises that kind can
+/// reconstruct a sandbox from it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredSnapshotManifest {
+    snapshot_id: SnapshotId,
+    sandbox_id: SandboxId,
+    kind: SnapshotKind,
+    created_at: DateTime<Utc>,
+    payload_size_bytes: u64,
 }
 
 struct LiveSandboxProcess {
@@ -1796,25 +1874,6 @@ fn merge_secret_metadata(scopes: Vec<Vec<SecretMetadata>>) -> Vec<SecretMetadata
     let mut secrets = effective.into_values().collect::<Vec<_>>();
     secrets.sort_by_key(|metadata| metadata.id);
     secrets
-}
-
-fn event_type(data: &EventData) -> String {
-    match data {
-        EventData::ConversationForked { .. } => "conversation_forked".to_string(),
-        EventData::SessionStarted => "session_started".to_string(),
-        EventData::SessionEnded => "session_ended".to_string(),
-        EventData::TurnStarted => "turn_started".to_string(),
-        EventData::TurnEnded => "turn_ended".to_string(),
-        EventData::Messages { .. } => "messages".to_string(),
-        EventData::ToolRequested { .. } => "tool_requested".to_string(),
-        EventData::ToolResult { .. } => "tool_result".to_string(),
-        EventData::ArtifactWritten { .. } => "artifact_written".to_string(),
-        EventData::SandboxCreated { .. } => "sandbox_created".to_string(),
-        EventData::SandboxStarted { .. } => "sandbox_started".to_string(),
-        EventData::SandboxStopped { .. } => "sandbox_stopped".to_string(),
-        EventData::SandboxSnapshotted { .. } => "sandbox_snapshotted".to_string(),
-        EventData::Custom { event_type, .. } => event_type.clone(),
-    }
 }
 
 fn binding_type(binding: &Binding) -> BindingType {
