@@ -1439,6 +1439,24 @@ async fn find_resumable_container(
     }
 }
 
+/// One row of `docker ps --format '{{json .}}'`.
+#[derive(Debug, Deserialize)]
+struct DockerPsItem {
+    #[serde(rename = "Names")]
+    names: String,
+    /// `"k1=v1,k2=v2"`; parse with [`parse_docker_labels`].
+    #[serde(rename = "Labels")]
+    labels: String,
+    #[serde(rename = "State")]
+    state: String,
+    #[serde(rename = "CreatedAt")]
+    created_at: String,
+}
+
+fn parse_docker_labels(raw: &str) -> HashMap<&str, &str> {
+    raw.split(',').filter_map(|kv| kv.split_once('=')).collect()
+}
+
 async fn find_docker_resumable(
     container_bin: &Path,
     key: &str,
@@ -1449,9 +1467,6 @@ async fn find_docker_resumable(
     // pick the most recent if there are duplicates (concurrent races)
     // and reap any whose spec hash has drifted.
     let key_filter = format!("label={WARM_SANDBOX_KEY_LABEL}={key}");
-    let format_arg = format!(
-        "{{{{.Names}}}}\t{{{{.Label \"{WARM_SANDBOX_SPEC_HASH_LABEL}\"}}}}\t{{{{.State}}}}\t{{{{.CreatedAt}}}}"
-    );
     let mut command = Command::new(container_bin);
     command
         .arg("ps")
@@ -1459,7 +1474,7 @@ async fn find_docker_resumable(
         .arg("--filter")
         .arg(&key_filter)
         .arg("--format")
-        .arg(&format_arg)
+        .arg("{{json .}}")
         .kill_on_drop(true);
     let output = match time::timeout(WARM_SANDBOX_CLEANUP_TIMEOUT, command.output()).await {
         Ok(out) => out?,
@@ -1476,20 +1491,23 @@ async fn find_docker_resumable(
         ));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = std::str::from_utf8(&output.stdout).context("docker ps output is not utf-8")?;
     let mut matches: Vec<(String, String, String)> = Vec::new();
     let mut stale_names: Vec<String> = Vec::new();
     for line in stdout.lines() {
-        let mut parts = line.splitn(4, '\t');
-        let (Some(name), Some(hash), Some(state), Some(created)) =
-            (parts.next(), parts.next(), parts.next(), parts.next())
-        else {
+        if line.is_empty() {
             continue;
-        };
+        }
+        let item: DockerPsItem = serde_json::from_str(line)
+            .with_context(|| format!("decoding docker ps json line: {line}"))?;
+        let hash = parse_docker_labels(&item.labels)
+            .get(WARM_SANDBOX_SPEC_HASH_LABEL)
+            .copied()
+            .unwrap_or("");
         if hash == spec_hash {
-            matches.push((name.to_string(), state.to_string(), created.to_string()));
+            matches.push((item.names, item.state, item.created_at));
         } else {
-            stale_names.push(name.to_string());
+            stale_names.push(item.names);
         }
     }
     for name in stale_names {
@@ -1787,4 +1805,18 @@ async fn docker_load_image(container_bin: &Path, payload: &Bytes) -> Result<Stri
         }
     }
     bail!("docker load completed but no image reference found in output: {stdout}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_docker_labels_handles_empty_and_multi() {
+        assert!(!parse_docker_labels("").contains_key("anything"));
+        let labels =
+            parse_docker_labels("exo.sandbox.key=conversation:c1:s1,exo.sandbox.spec-hash=abc123");
+        assert_eq!(labels.get("exo.sandbox.key"), Some(&"conversation:c1:s1"));
+        assert_eq!(labels.get("exo.sandbox.spec-hash"), Some(&"abc123"));
+    }
 }

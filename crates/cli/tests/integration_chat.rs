@@ -287,22 +287,27 @@ fn list_exo_containers_for_conversation(conv_dir: &std::path::Path) -> Vec<Strin
             "--filter",
             "label=exo.sandbox.key",
             "--format",
-            "{{.ID}}\t{{.Label \"exo.sandbox.key\"}}",
+            "{{json .}}",
         ])
         .output()
         .expect("docker ps");
     String::from_utf8_lossy(&output.stdout)
         .lines()
+        .filter(|line| !line.is_empty())
         .filter_map(|line| {
-            let mut parts = line.splitn(2, '\t');
-            let id = parts.next()?.trim().to_string();
-            let key = parts.next()?.trim();
-            (key.starts_with(&key_prefix)).then_some(id)
+            let row: Value = serde_json::from_str(line).expect("docker ps row is json");
+            let id = row.get("ID")?.as_str()?.to_string();
+            let labels = row.get("Labels")?.as_str()?;
+            let key = labels
+                .split(',')
+                .filter_map(|kv| kv.split_once('='))
+                .find_map(|(k, v)| (k == "exo.sandbox.key").then_some(v))?;
+            key.starts_with(&key_prefix).then_some(id)
         })
         .collect()
 }
 
-/// Resume scenario: two separate `chat send` invocations against the same
+/// Resume scenario: two separate `conversation send` invocations against the same
 /// conversation must hit the *same* underlying docker container. Validates
 /// that PR-#21's Tier 1 (try_resume) wires through end-to-end on Docker.
 #[tokio::test]
@@ -376,7 +381,13 @@ async fn cross_process_send_resumes_the_same_sandbox_container() {
 
     // First send: provisions the warm sandbox.
     run_exo(
-        &["chat", "send", "test-agent", "first", "first message"],
+        &[
+            "conversation",
+            "send",
+            "test-agent",
+            "first",
+            "first message",
+        ],
         &root,
         &xdg,
         backend,
@@ -386,7 +397,13 @@ async fn cross_process_send_resumes_the_same_sandbox_container() {
     // Tier 1 — try_resume against the labelled container — instead of
     // creating a new one.
     run_exo(
-        &["chat", "send", "test-agent", "first", "second message"],
+        &[
+            "conversation",
+            "send",
+            "test-agent",
+            "first",
+            "second message",
+        ],
         &root,
         &xdg,
         backend,

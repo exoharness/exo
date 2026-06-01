@@ -660,28 +660,17 @@ fn print_help() {
 /// event, returning the sandbox id. Returns `None` if no sandbox has been
 /// created yet (e.g. nothing has been chatted with).
 async fn latest_sandbox_id(conversation: &dyn HarnessConversation) -> Result<Option<SandboxId>> {
-    let result = conversation
-        .exoharness_handle()
-        .get_events(Some(EventQuery {
-            cursor: None,
-            direction: Some(EventQueryDirection::Desc),
-            limit: Some(1),
-            session_id: None,
-            turn_id: None,
-            types: Some(vec![EventKind::SANDBOX_CREATED]),
-        }))
-        .await?;
-    let Some(event) = result.events.into_iter().next() else {
-        return Ok(None);
-    };
-    match event.data {
-        EventData::SandboxCreated { sandbox_id, .. } => Ok(Some(sandbox_id)),
-        other => anyhow::bail!(
-            "type-filtered query for {} returned unexpected variant {}",
-            EventKind::SANDBOX_CREATED.as_str(),
-            other.kind().as_str(),
-        ),
-    }
+    executor::first_matching_event(
+        conversation.exoharness_handle().as_ref(),
+        EventKind::SANDBOX_CREATED,
+        EventQueryDirection::Desc,
+        1,
+        |data| match data {
+            EventData::SandboxCreated { sandbox_id, .. } => Some(sandbox_id),
+            _ => None,
+        },
+    )
+    .await
 }
 
 /// All snapshots taken in the conversation, oldest-first. Each tuple is

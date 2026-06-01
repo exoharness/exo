@@ -2,8 +2,8 @@ use crate::{AgentConfig, ConversationConfig, ToolRuntime};
 use async_trait::async_trait;
 use exoharness::{
     ConversationHandle, CreateSandboxRequest, DEFAULT_SANDBOX_IMAGE, EventData, EventKind,
-    EventQuery, EventQueryDirection, FileSystemMount, FileSystemMountMode, Result,
-    RunInSandboxRequest, SnapshotId, StartSandboxRequest, ToolRequest, ToolResult,
+    EventQueryDirection, FileSystemMount, FileSystemMountMode, Result, RunInSandboxRequest,
+    SnapshotId, StartSandboxRequest, ToolRequest, ToolResult,
 };
 use futures::io::AsyncReadExt;
 use serde::{Deserialize, Serialize};
@@ -182,28 +182,20 @@ async fn latest_snapshot_for_sandbox(
     conversation: &dyn ConversationHandle,
     sandbox_id: &str,
 ) -> Result<Option<SnapshotId>> {
-    let events = conversation
-        .get_events(Some(EventQuery {
-            cursor: None,
-            direction: Some(EventQueryDirection::Desc),
-            limit: Some(100),
-            session_id: None,
-            turn_id: None,
-            types: Some(vec![EventKind::SANDBOX_SNAPSHOTTED]),
-        }))
-        .await?
-        .events;
-    for event in events {
-        if let EventData::SandboxSnapshotted {
-            sandbox_id: sid,
-            snapshot_id,
-        } = event.data
-            && sid == sandbox_id
-        {
-            return Ok(Some(snapshot_id));
-        }
-    }
-    Ok(None)
+    exoharness::first_matching_event(
+        conversation,
+        EventKind::SANDBOX_SNAPSHOTTED,
+        EventQueryDirection::Desc,
+        100,
+        |data| match data {
+            EventData::SandboxSnapshotted {
+                sandbox_id: sid,
+                snapshot_id,
+            } if sid == sandbox_id => Some(snapshot_id),
+            _ => None,
+        },
+    )
+    .await
 }
 
 fn normalize_mounts(mounts: &[FileSystemMount]) -> Vec<FileSystemMount> {
@@ -234,41 +226,29 @@ struct ShellSandboxInfo {
 async fn latest_shell_sandbox(
     conversation: &dyn ConversationHandle,
 ) -> Result<Option<ShellSandboxInfo>> {
-    let events = conversation
-        .get_events(Some(EventQuery {
-            cursor: None,
-            direction: Some(EventQueryDirection::Desc),
-            limit: Some(50),
-            session_id: None,
-            turn_id: None,
-            types: Some(vec![EventKind::SANDBOX_CREATED]),
-        }))
-        .await?
-        .events;
-
-    let Some(event) = events.into_iter().next() else {
-        return Ok(None);
-    };
-    match event.data {
-        EventData::SandboxCreated {
-            sandbox_id,
-            image,
-            default_workdir,
-            file_system_mounts,
-            enable_networking,
-            idle_seconds,
-        } => Ok(Some(ShellSandboxInfo {
-            id: sandbox_id,
-            image,
-            default_workdir,
-            file_system_mounts,
-            enable_networking,
-            idle_seconds,
-        })),
-        other => Err(anyhow::anyhow!(
-            "type-filtered query for {} returned unexpected variant {}",
-            EventKind::SANDBOX_CREATED.as_str(),
-            other.kind().as_str(),
-        )),
-    }
+    exoharness::first_matching_event(
+        conversation,
+        EventKind::SANDBOX_CREATED,
+        EventQueryDirection::Desc,
+        1,
+        |data| match data {
+            EventData::SandboxCreated {
+                sandbox_id,
+                image,
+                default_workdir,
+                file_system_mounts,
+                enable_networking,
+                idle_seconds,
+            } => Some(ShellSandboxInfo {
+                id: sandbox_id,
+                image,
+                default_workdir,
+                file_system_mounts,
+                enable_networking,
+                idle_seconds,
+            }),
+            _ => None,
+        },
+    )
+    .await
 }
