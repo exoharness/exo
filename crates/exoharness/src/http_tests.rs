@@ -79,6 +79,15 @@ async fn http_exoharness_conversation_scope_overrides_and_forks() {
 }
 
 #[actix_web::test]
+#[ignore = "set EXO_CONTRACT_TEST_URL and optional EXO_CONTRACT_TEST_BEARER or EXO_CONTRACT_TEST_BEARER_ENV"]
+async fn hosted_http_exoharness_core_contract() {
+    let harness = hosted_harness_from_env();
+    crate::contract_tests::supports_agent_and_conversation_crud(Arc::clone(&harness)).await;
+    crate::contract_tests::begin_turn_tracks_events_through_finish(Arc::clone(&harness)).await;
+    crate::contract_tests::turn_events_continue_after_artifact_writes(Arc::clone(&harness)).await;
+}
+
+#[actix_web::test]
 async fn http_exoharness_runs_noninteractive_sandbox_commands() {
     let fixture = http_harness().await;
     let agent = fixture
@@ -206,4 +215,19 @@ async fn http_exoharness_supports_sandbox_process_events() {
         events.events.last(),
         Some(SandboxProcessEvent::Exit { exit_code: 0, .. })
     ));
+}
+
+fn hosted_harness_from_env() -> Arc<dyn ExoHarness> {
+    let url = std::env::var("EXO_CONTRACT_TEST_URL")
+        .expect("EXO_CONTRACT_TEST_URL must point at an ExoHarness HTTP endpoint");
+    let mut harness = HttpExoHarness::new(url).expect("hosted http harness");
+    if let Ok(token) = std::env::var("EXO_CONTRACT_TEST_BEARER") {
+        harness = harness.with_bearer_token(token);
+    } else if let Ok(env_name) = std::env::var("EXO_CONTRACT_TEST_BEARER_ENV") {
+        let token = std::env::var(&env_name).unwrap_or_else(|_| {
+            panic!("EXO_CONTRACT_TEST_BEARER_ENV references unset environment variable {env_name}")
+        });
+        harness = harness.with_bearer_token(token);
+    }
+    Arc::new(harness)
 }

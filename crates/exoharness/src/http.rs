@@ -29,7 +29,7 @@ use crate::{
     WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
-pub const HTTP_EXOHARNESS_REQUEST_PATH: &str = "/v1/requests";
+pub const HTTP_EXOHARNESS_REQUEST_PATH: &str = "/request";
 pub const HTTP_EXOHARNESS_TRACING_TARGET: &str = "exo::exoharness_http";
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1329,7 +1329,11 @@ fn request_endpoint(base_url: &str) -> Result<Url> {
     }
     url.set_query(None);
     url.set_fragment(None);
-    if url.path().trim_end_matches('/') == HTTP_EXOHARNESS_REQUEST_PATH {
+    if url
+        .path()
+        .trim_end_matches('/')
+        .ends_with(HTTP_EXOHARNESS_REQUEST_PATH)
+    {
         return Ok(url);
     }
     let normalized_path = match url.path().trim_end_matches('/') {

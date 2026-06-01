@@ -9,16 +9,18 @@ use crate::{
 };
 
 pub async fn supports_agent_and_conversation_crud(harness: Arc<dyn ExoHarness>) {
+    let agent_slug = unique_slug("agent");
+    let conversation_slug = unique_slug("conversation");
     let agent = harness
         .new_agent(NewAgentRequest {
-            slug: "agent".to_string(),
+            slug: agent_slug,
             name: "Agent".to_string(),
         })
         .await
         .expect("agent should be created");
     let conversation = agent
         .new_conversation(NewConversationRequest {
-            slug: Some("conversation".to_string()),
+            slug: Some(conversation_slug),
             name: Some("Conversation".to_string()),
         })
         .await
@@ -34,14 +36,21 @@ pub async fn supports_agent_and_conversation_crud(harness: Arc<dyn ExoHarness>) 
             .any(|event| matches!(event.data, EventData::ConversationCreated { .. }))
     );
 
-    assert_eq!(harness.list_agents().await.expect("list agents").len(), 1);
-    assert_eq!(
+    assert!(
+        harness
+            .list_agents()
+            .await
+            .expect("list agents")
+            .iter()
+            .any(|candidate| candidate.record().id == agent.record().id)
+    );
+    assert!(
         agent
             .list_conversations()
             .await
             .expect("list conversations")
-            .len(),
-        1
+            .iter()
+            .any(|candidate| candidate.record().id == conversation.record().id)
     );
 
     assert!(
@@ -61,7 +70,7 @@ pub async fn supports_agent_and_conversation_crud(harness: Arc<dyn ExoHarness>) 
 pub async fn begin_turn_tracks_events_through_finish(harness: Arc<dyn ExoHarness>) {
     let agent = harness
         .new_agent(NewAgentRequest {
-            slug: "agent".to_string(),
+            slug: unique_slug("agent"),
             name: "Agent".to_string(),
         })
         .await
@@ -127,7 +136,7 @@ pub async fn begin_turn_tracks_events_through_finish(harness: Arc<dyn ExoHarness
 pub async fn turn_events_continue_after_artifact_writes(harness: Arc<dyn ExoHarness>) {
     let agent = harness
         .new_agent(NewAgentRequest {
-            slug: "agent".to_string(),
+            slug: unique_slug("agent"),
             name: "Agent".to_string(),
         })
         .await
@@ -180,14 +189,14 @@ pub async fn conversation_scope_overrides_agent_scope_and_fork_copies_bindings(
 ) {
     let agent = harness
         .new_agent(NewAgentRequest {
-            slug: "agent".to_string(),
+            slug: unique_slug("agent"),
             name: "Agent".to_string(),
         })
         .await
         .expect("agent");
     let conversation = agent
         .new_conversation(NewConversationRequest {
-            slug: Some("base".to_string()),
+            slug: Some(unique_slug("base")),
             name: Some("Base".to_string()),
         })
         .await
@@ -223,7 +232,7 @@ pub async fn conversation_scope_overrides_agent_scope_and_fork_copies_bindings(
     let forked = conversation
         .fork(ForkConversationRequest {
             up_to_inclusive: None,
-            slug: Some("fork".to_string()),
+            slug: Some(unique_slug("fork")),
             name: Some("Fork".to_string()),
         })
         .await
@@ -266,4 +275,8 @@ fn assistant_message(text: &str) -> Message {
         id: None,
         content: AssistantContent::String(text.to_string()),
     }
+}
+
+fn unique_slug(prefix: &str) -> String {
+    format!("{prefix}-{}", Uuid7::now())
 }
