@@ -15,24 +15,17 @@ use tokio::fs;
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use tokio::time::{sleep, timeout};
 
+use crate::test_support::local_test_config;
 use crate::{
-    Artifact, ArtifactVersion, BasicExoHarness, BasicExoHarnessConfig, BeginTurnRequest, Binding,
-    BoxAsyncRead, BoxAsyncWrite, CloseSandboxProcessInputRequest, CreateSandboxRequest, EventData,
-    EventQuery, EventQueryDirection, ExoHarness, ForkConversationRequest, ManagedSandboxBackend,
+    Artifact, ArtifactVersion, BasicExoHarness, BeginTurnRequest, Binding, BoxAsyncRead,
+    BoxAsyncWrite, CloseSandboxProcessInputRequest, CreateSandboxRequest, EventData, EventQuery,
+    EventQueryDirection, ExoHarness, ForkConversationRequest, ManagedSandboxBackend,
     ManagedSandboxHandle, NewAgentRequest, NewConversationRequest, PutSecretRequest,
-    RunInSandboxRequest, SandboxBackendChoice, SandboxCommand, SandboxCommandOutput,
-    SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessParts, SandboxProcessStatus,
-    SandboxProcessStdin, SandboxRequest, Secret, SecretBackendChoice, StartSandboxProcessRequest,
-    WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
+    RunInSandboxRequest, SandboxCommand, SandboxCommandOutput, SandboxProcessEvent,
+    SandboxProcessEventQuery, SandboxProcessParts, SandboxProcessStatus, SandboxProcessStdin,
+    SandboxRequest, Secret, StartSandboxProcessRequest, WaitSandboxProcessRequest,
+    WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
-
-fn local_test_config(root: impl Into<std::path::PathBuf>) -> BasicExoHarnessConfig {
-    BasicExoHarnessConfig {
-        root: root.into(),
-        secret_backend: SecretBackendChoice::Static([7u8; 32]),
-        sandbox_backend: SandboxBackendChoice::LocalProcess,
-    }
-}
 
 #[tokio::test(flavor = "current_thread")]
 async fn basic_backend_supports_agent_and_conversation_crud() {

@@ -640,30 +640,20 @@ impl ConversationHandle for LocalSandboxConversation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use exoharness::{
-        BasicExoHarness, BasicExoHarnessConfig, EventQuery, EventQueryDirection,
-        SandboxBackendChoice, SandboxProvider, SecretBackendChoice,
-    };
+    use crate::test_support::local_test_config;
+    use exoharness::{BasicExoHarness, EventQuery, EventQueryDirection, SandboxProvider};
     use tempfile::TempDir;
-
-    fn test_config(root: impl Into<std::path::PathBuf>) -> BasicExoHarnessConfig {
-        BasicExoHarnessConfig {
-            root: root.into(),
-            secret_backend: SecretBackendChoice::Static([7u8; 32]),
-            sandbox_backend: SandboxBackendChoice::LocalProcess,
-        }
-    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn local_sandbox_creation_only_records_remote_events() {
         let tempdir = TempDir::new().expect("tempdir should exist");
         let remote = Arc::new(
-            BasicExoHarness::new(test_config(tempdir.path().join("remote")))
+            BasicExoHarness::new(local_test_config(tempdir.path().join("remote")))
                 .await
                 .expect("remote harness should initialize"),
         );
         let local = Arc::new(
-            BasicExoHarness::new(test_config(tempdir.path().join("local")))
+            BasicExoHarness::new(local_test_config(tempdir.path().join("local")))
                 .await
                 .expect("local harness should initialize"),
         );

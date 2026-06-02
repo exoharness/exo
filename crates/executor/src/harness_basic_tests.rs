@@ -7,23 +7,16 @@ use crate::{
 use anyhow::anyhow;
 use async_trait::async_trait;
 use exoharness::{
-    BasicExoHarness, BasicExoHarnessConfig, Binding, EventData, EventQuery, EventQueryDirection,
-    ExoHarness, FileSystemMount, FileSystemMountMode, PutSecretRequest, Result,
-    SandboxBackendChoice, SandboxProvider, Secret, SecretBackendChoice, ToolRequest, Uuid7,
+    BasicExoHarness, Binding, EventData, EventQuery, EventQueryDirection, ExoHarness,
+    FileSystemMount, FileSystemMountMode, PutSecretRequest, Result, SandboxProvider, Secret,
+    ToolRequest, Uuid7,
 };
-
-fn local_test_config(root: impl Into<std::path::PathBuf>) -> BasicExoHarnessConfig {
-    BasicExoHarnessConfig {
-        root: root.into(),
-        secret_backend: SecretBackendChoice::Static([7u8; 32]),
-        sandbox_backend: SandboxBackendChoice::LocalProcess,
-    }
-}
 use lingua::universal::{AssistantContent, UserContent};
 use lingua::{Message, UniversalStreamChunk};
 use serde_json::{Map, Value};
 use tempfile::TempDir;
 
+use crate::test_support::local_test_config;
 use crate::{
     BasicHarness, BasicToolRuntime, ConversationModelConfig, CreateAgentRequest,
     CreateConversationRequest, Harness, harness_tool::ensure_shell_sandbox,

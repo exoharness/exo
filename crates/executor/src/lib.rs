@@ -22,6 +22,8 @@ mod rlm;
 #[cfg(test)]
 mod rlm_tests;
 mod shared;
+#[cfg(test)]
+mod test_support;
 mod typescript;
 
 pub use braintrust::{BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig};

@@ -6,10 +6,10 @@ use crate::{
     CloseSandboxProcessInputRequest, ConversationId, ConversationRecord, CreateSandboxRequest,
     Event, EventData, EventId, EventQuery, ForkConversationRequest, GetEventsResult,
     GetSandboxProcessEventsResult, NewAgentRequest, NewConversationRequest, PutSecretRequest,
-    ReadArtifactRequest, RunInSandboxRequest, SandboxId, SandboxProcessEventQuery,
-    SandboxProcessRecord, SandboxProcessStatus, Secret, SecretId, SecretMetadata, SessionId,
-    SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnId, TurnRecord,
-    WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
+    ReadArtifactRequest, SandboxId, SandboxProcessEventQuery, SandboxProcessRecord,
+    SandboxProcessStatus, Secret, SecretId, SecretMetadata, SessionId, SnapshotId,
+    StartSandboxProcessRequest, StartSandboxRequest, TurnId, TurnRecord, WaitSandboxProcessRequest,
+    WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -214,11 +214,6 @@ pub enum Request {
         conversation_id: ConversationId,
         request: CancelSandboxProcessRequest,
     },
-    ConversationRunInSandbox {
-        agent_id: AgentId,
-        conversation_id: ConversationId,
-        request: RunInSandboxRequest,
-    },
     ConversationListBindings {
         agent_id: AgentId,
         conversation_id: ConversationId,
@@ -321,7 +316,6 @@ impl Request {
             }
             Self::ConversationWaitSandboxProcess { .. } => "conversation_wait_sandbox_process",
             Self::ConversationCancelSandboxProcess { .. } => "conversation_cancel_sandbox_process",
-            Self::ConversationRunInSandbox { .. } => "conversation_run_in_sandbox",
             Self::ConversationListBindings { .. } => "conversation_list_bindings",
             Self::ConversationPutBinding { .. } => "conversation_put_binding",
             Self::ConversationGetBinding { .. } => "conversation_get_binding",
@@ -389,11 +383,6 @@ pub enum Response {
     SandboxProcessStatus {
         status: SandboxProcessStatus,
     },
-    SandboxProcessOutput {
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        exit_code: i32,
-    },
     Bindings {
         bindings: Vec<BindingRecord>,
     },
@@ -441,7 +430,6 @@ impl Response {
             Self::SandboxProcess { .. } => "sandbox_process",
             Self::SandboxProcessEvents { .. } => "sandbox_process_events",
             Self::SandboxProcessStatus { .. } => "sandbox_process_status",
-            Self::SandboxProcessOutput { .. } => "sandbox_process_output",
             Self::Bindings { .. } => "bindings",
             Self::Binding { .. } => "binding",
             Self::Secrets { .. } => "secrets",

@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::anyhow;
-use futures::io::AsyncReadExt;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 
 use crate::protocol::{ClientMessage, ConversationHandleInfo, Request, Response, ServerMessage};
@@ -373,32 +372,6 @@ impl ExoHarnessServer {
                 let conversation = self.require_conversation(agent_id, conversation_id).await?;
                 Ok(Response::SandboxProcessStatus {
                     status: conversation.cancel_sandbox_process(request).await?,
-                })
-            }
-            Request::ConversationRunInSandbox {
-                agent_id,
-                conversation_id,
-                request,
-            } => {
-                let conversation = self.require_conversation(agent_id, conversation_id).await?;
-                let process = conversation.run_in_sandbox(request).await?;
-                let parts = process.into_parts();
-                drop(parts.stdin);
-                let mut stdout = parts.stdout;
-                let mut stderr = parts.stderr;
-                let mut stdout_bytes = Vec::new();
-                let mut stderr_bytes = Vec::new();
-                let (stdout_result, stderr_result, wait_result) = tokio::join!(
-                    stdout.read_to_end(&mut stdout_bytes),
-                    stderr.read_to_end(&mut stderr_bytes),
-                    parts.wait,
-                );
-                stdout_result?;
-                stderr_result?;
-                Ok(Response::SandboxProcessOutput {
-                    stdout: stdout_bytes,
-                    stderr: stderr_bytes,
-                    exit_code: wait_result?,
                 })
             }
             Request::ConversationListBindings {
