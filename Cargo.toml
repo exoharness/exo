@@ -10,6 +10,7 @@ rust-version = "1.95"
 
 [workspace.dependencies]
 anyhow = "1.0.100"
+base64 = "0.22.1"
 async-trait = "0.1.89"
 braintrust-sdk-rust = { git = "https://github.com/braintrustdata/braintrust-sdk-rust", rev = "55dcefd989b6038edb5ef8dfc438384340d5f4ae" }
 bytes = "1.10.1"
