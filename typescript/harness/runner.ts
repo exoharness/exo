@@ -12,7 +12,7 @@ import {
   type Artifact,
   type ArtifactVersion,
   type Binding,
-  type BindingMetadata,
+  type BindingRecord,
   type Conversation,
   type ConversationConfig,
   type ConversationRecord,
@@ -50,6 +50,7 @@ interface RawAgentConfig {
   } | null;
   enable_agent_tool_creation?: boolean;
   sandbox_image?: string | null;
+  sandbox_provider?: "daytona" | "apple_container" | "docker" | "local_process";
   enable_networking: boolean;
   model: string;
   max_output_tokens?: number | null;
@@ -58,7 +59,13 @@ interface RawAgentConfig {
 }
 
 interface RawConversationConfig {
-  enable_networking: boolean;
+  sandbox_image?: string | null;
+  sandbox_provider?:
+    | "daytona"
+    | "apple_container"
+    | "docker"
+    | "local_process"
+    | null;
   shell_program?: string | null;
   mounts: Array<{
     host_path: string;
@@ -129,11 +136,12 @@ type RawBinding =
       secret_id?: string | null;
     };
 
-interface RawBindingMetadata {
+interface RawBindingRecord {
   id: string;
   type: "env" | "mcp" | "llm";
   name: string;
   created_at: string;
+  binding: RawBinding;
 }
 
 type RawSecret =
@@ -160,7 +168,6 @@ interface RawConversationHandleInfo {
 }
 
 interface RawTurnHandleInfo {
-  handle_id: number;
   conversation: RawConversationHandleInfo;
   record: RawTurnRecord;
 }
@@ -201,6 +208,7 @@ type RawRuntimeRequest =
       type: "start_sandbox_process";
       command: string[];
       env: Record<string, string>;
+      reuse_key?: string | null;
     }
   | { type: "write_sandbox_process_stdin"; process_id: number; data: string }
   | { type: "close_sandbox_process_stdin"; process_id: number }
@@ -208,7 +216,13 @@ type RawRuntimeRequest =
 
 type RawRuntimeResponsePayload =
   | { type: "tool_result"; result: ToolResult }
-  | { type: "sandbox_process_started"; process_id: number }
+  | {
+      type: "sandbox_process_started";
+      process_id: number;
+      sandbox_id?: string | null;
+      sandbox_process_id?: string | null;
+      reused?: boolean | null;
+    }
   | { type: "unit" };
 
 type RawSandboxProcessStream = "stdout" | "stderr";
@@ -353,13 +367,29 @@ type RawExoRequest =
       conversation_id: string;
       secret_id: string;
     }
-  | { type: "turn_add_events"; handle_id: number; data: EventData[] }
+  | {
+      type: "turn_add_events";
+      agent_id: string;
+      conversation_id: string;
+      session_id: string;
+      turn_id: string;
+      data: EventData[];
+    }
   | {
       type: "turn_write_artifact";
-      handle_id: number;
+      agent_id: string;
+      conversation_id: string;
+      session_id: string;
+      turn_id: string;
       request: { path: string; contents: number[] };
     }
-  | { type: "turn_finish"; handle_id: number };
+  | {
+      type: "turn_finish";
+      agent_id: string;
+      conversation_id: string;
+      session_id: string;
+      turn_id: string;
+    };
 
 type RawExoResponse =
   | { type: "agents"; agents: RawAgentRecord[] }
@@ -374,7 +404,7 @@ type RawExoResponse =
   | { type: "artifact_versions"; artifacts: RawArtifactVersion[] }
   | { type: "artifact"; artifact: RawArtifact | null }
   | { type: "artifact_version"; artifact: RawArtifactVersion }
-  | { type: "bindings"; bindings: RawBindingMetadata[] }
+  | { type: "bindings"; bindings: RawBindingRecord[] }
   | { type: "binding"; binding: RawBinding | null }
   | { type: "secrets"; secrets: RawSecretMetadata[] }
   | { type: "secret"; secret: RawSecret | null }
@@ -525,13 +555,20 @@ class ProtocolClient {
       type: "start_sandbox_process",
       command: request.command,
       env: request.env ?? {},
+      reuse_key: request.reuseKey ?? null,
     });
     if (payload.type !== "sandbox_process_started") {
       throw new Error(
         `expected sandbox_process_started payload, got ${payload.type}`,
       );
     }
-    const process = new SandboxProcessHandle(this, payload.process_id);
+    const process = new SandboxProcessHandle(
+      this,
+      payload.process_id,
+      payload.sandbox_id ?? undefined,
+      payload.sandbox_process_id ?? undefined,
+      payload.reused === true,
+    );
     this.sandboxProcesses.set(payload.process_id, process);
     return process;
   }
@@ -684,6 +721,7 @@ class ProtocolClient {
 }
 
 class SandboxProcessHandle implements SandboxProcess {
+  readonly reused: boolean;
   readonly stdout: ReadableStream<string>;
   readonly stderr: ReadableStream<string>;
   private stdoutController: ReadableStreamDefaultController<string> | null =
@@ -698,7 +736,11 @@ class SandboxProcessHandle implements SandboxProcess {
   constructor(
     private readonly client: ProtocolClient,
     private readonly processId: number,
+    readonly sandboxId?: string,
+    readonly sandboxProcessId?: string,
+    reused = false,
   ) {
+    this.reused = reused;
     this.stdout = new ReadableStream<string>({
       start: (controller) => {
         this.stdoutController = controller;
@@ -787,6 +829,7 @@ function toAgentConfig(raw: RawAgentConfig): AgentConfig {
       : null,
     enableAgentToolCreation: raw.enable_agent_tool_creation ?? true,
     sandboxImage: raw.sandbox_image ?? null,
+    sandboxProvider: raw.sandbox_provider ?? "daytona",
     enableNetworking: raw.enable_networking,
     model: raw.model,
     maxOutputTokens: raw.max_output_tokens ?? null,
@@ -797,7 +840,8 @@ function toAgentConfig(raw: RawAgentConfig): AgentConfig {
 
 function toConversationConfig(raw: RawConversationConfig): ConversationConfig {
   return {
-    enableNetworking: raw.enable_networking,
+    sandboxImage: raw.sandbox_image ?? null,
+    sandboxProvider: raw.sandbox_provider ?? null,
     shellProgram: raw.shell_program ?? null,
     mounts: raw.mounts.map(toFileSystemMount),
   };
@@ -869,12 +913,13 @@ function toArtifact(raw: RawArtifact): Artifact {
   };
 }
 
-function toBindingMetadata(raw: RawBindingMetadata): BindingMetadata {
+function toBindingRecord(raw: RawBindingRecord): BindingRecord {
   return {
     id: raw.id,
     type: raw.type,
     name: raw.name,
     createdAt: raw.created_at,
+    binding: toBinding(raw.binding),
   };
 }
 
@@ -1154,7 +1199,7 @@ function createAgent(client: ProtocolClient, raw: RawAgentRecord): Agent {
       });
     },
 
-    async listBindings(): Promise<BindingMetadata[]> {
+    async listBindings(): Promise<BindingRecord[]> {
       const payload = await client.requestExo({
         type: "agent_list_bindings",
         agent_id: record.id,
@@ -1162,7 +1207,7 @@ function createAgent(client: ProtocolClient, raw: RawAgentRecord): Agent {
       if (payload.type !== "bindings") {
         throw new Error(`expected bindings payload, got ${payload.type}`);
       }
-      return payload.bindings.map(toBindingMetadata);
+      return payload.bindings.map(toBindingRecord);
     },
 
     async getBinding(id: string): Promise<Binding | null> {
@@ -1251,12 +1296,12 @@ function createExoHarness(
       return payload.value;
     },
 
-    async listBindings(): Promise<BindingMetadata[]> {
+    async listBindings(): Promise<BindingRecord[]> {
       const payload = await client.requestExo({ type: "list_bindings" });
       if (payload.type !== "bindings") {
         throw new Error(`expected bindings payload, got ${payload.type}`);
       }
-      return payload.bindings.map(toBindingMetadata);
+      return payload.bindings.map(toBindingRecord);
     },
 
     async getBinding(id: string): Promise<Binding | null> {
@@ -1449,7 +1494,7 @@ function createConversation(
       });
     },
 
-    async listBindings(): Promise<BindingMetadata[]> {
+    async listBindings(): Promise<BindingRecord[]> {
       const payload = await client.requestExo({
         type: "conversation_list_bindings",
         agent_id: raw.agent_id,
@@ -1458,7 +1503,7 @@ function createConversation(
       if (payload.type !== "bindings") {
         throw new Error(`expected bindings payload, got ${payload.type}`);
       }
-      return payload.bindings.map(toBindingMetadata);
+      return payload.bindings.map(toBindingRecord);
     },
 
     async getBinding(id: string): Promise<Binding | null> {
@@ -1507,15 +1552,22 @@ function createTurn(
   raw: RawTurnHandleInfo,
   conversation: Conversation,
 ): Turn {
+  const record = toTurnRecord(raw.record);
   const turn: Turn = {
-    handleId: raw.handle_id,
+    agentId: raw.conversation.agent_id,
+    conversationId: raw.conversation.record.id,
+    sessionId: record.sessionId,
+    turnId: record.id,
     conversation,
-    record: toTurnRecord(raw.record),
+    record,
 
     async addEvents(data): Promise<AddEventsResult> {
       const payload = await client.requestExo({
         type: "turn_add_events",
-        handle_id: raw.handle_id,
+        agent_id: raw.conversation.agent_id,
+        conversation_id: raw.conversation.record.id,
+        session_id: record.sessionId,
+        turn_id: record.id,
         data,
       });
       if (payload.type !== "add_events") {
@@ -1527,7 +1579,10 @@ function createTurn(
     async writeArtifact(args): Promise<ArtifactVersion> {
       const payload = await client.requestExo({
         type: "turn_write_artifact",
-        handle_id: raw.handle_id,
+        agent_id: raw.conversation.agent_id,
+        conversation_id: raw.conversation.record.id,
+        session_id: record.sessionId,
+        turn_id: record.id,
         request: {
           path: args.path,
           contents: Array.from(asBytes(args.contents)),
@@ -1609,7 +1664,15 @@ function createTurnContext(
             arguments: toolCall.request.arguments,
           });
         }
-        const result = await context.executeTool(toolCall.request);
+        let result: ToolResult;
+        try {
+          result = await context.executeTool(toolCall.request);
+        } catch (error) {
+          result = {
+            ok: false,
+            error: runnerErrorMessage(error),
+          };
+        }
         if (streaming) {
           await context.stream.toolResult({
             toolCallId: toolCall.toolCallId,
@@ -1684,6 +1747,10 @@ function resolveHarnessModule(
     );
   }
   return candidate as TypeScriptHarness;
+}
+
+function runnerErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function main(): Promise<void> {

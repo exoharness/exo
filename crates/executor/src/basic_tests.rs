@@ -6,20 +6,21 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use exoharness::{
     AddEventsRequest, AddEventsResult, AgentHandle, AgentId, AgentRecord, Artifact,
-    ArtifactVersion, BeginTurnRequest, Binding, BindingMetadata, BindingType, ConversationHandle,
+    ArtifactVersion, BeginTurnRequest, Binding, BindingRecord, BindingType, ConversationHandle,
     ConversationId, ConversationRecord, CreateSandboxRequest, Event, EventData, EventQuery,
     EventQueryDirection, EventStream, ExoHarness, ForkConversationRequest, GetEventsResult,
     NewAgentRequest, NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result,
-    RunInSandboxRequest, SandboxId, SandboxProcess, SandboxProcessParts, Secret, SecretMetadata,
-    SecretType, SessionId, SnapshotId, StartSandboxRequest, ToolRequest, ToolResult, TurnHandle,
-    TurnId, TurnRecord, Uuid7, WriteArtifactRequest,
+    RunInSandboxRequest, SandboxId, SandboxProcess, SandboxProcessEventQuery, SandboxProcessParts,
+    SandboxProcessRecord, SandboxProcessStatus, Secret, SecretMetadata, SecretType, SessionId,
+    SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, ToolRequest, ToolResult,
+    TurnHandle, TurnId, TurnRecord, Uuid7, WriteArtifactRequest,
 };
 use futures::FutureExt;
 use futures::io::Cursor;
 use futures::stream;
 use lingua::universal::{AssistantContent, UserContent};
 use lingua::{Message, UniversalStreamChunk};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
@@ -150,9 +151,9 @@ async fn send_executes_tool_round_trip() {
     );
     let agent_config = default_agent_config();
     let conversation_config = ConversationConfig {
-        enable_networking: true,
         shell_program: Some("bash".to_string()),
         mounts: Vec::new(),
+        ..Default::default()
     };
     let turn = conversation
         .begin_turn(BeginTurnRequest {
@@ -205,6 +206,115 @@ async fn send_executes_tool_round_trip() {
             EventData::Messages { messages, .. } => messages
                 .iter()
                 .any(|message| matches!(message, Message::Assistant { .. })),
+            _ => false,
+        }
+    }));
+
+    let requests = model.observed_requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| matches!(message, Message::Tool { .. }))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn send_records_tool_result_when_tool_execution_fails() {
+    let agent_id = Uuid7::now();
+    let conversation_id = Uuid7::now();
+    let exoharness = Arc::new(FakeExoHarness::new(agent_id, conversation_id));
+    let agent = exoharness
+        .get_agent(&agent_id)
+        .await
+        .expect("get agent should succeed")
+        .expect("agent should exist");
+    let conversation = agent
+        .get_conversation(&conversation_id)
+        .await
+        .expect("get conversation should succeed")
+        .expect("conversation should exist");
+    let tool_call_id = "call-1".to_string();
+    let model = Arc::new(FakeModelClient::new(vec![
+        ModelResponse {
+            response_id: Some(Uuid7::now()),
+            messages: vec![],
+            tool_calls: vec![PendingToolCall {
+                tool_call_id: tool_call_id.clone(),
+                request: ToolRequest {
+                    function_name: "shell".to_string(),
+                    arguments: Map::new(),
+                },
+            }],
+            usage: None,
+        },
+        ModelResponse {
+            response_id: Some(Uuid7::now()),
+            messages: vec![assistant_message("recovered")],
+            tool_calls: vec![],
+            usage: None,
+        },
+    ]));
+    let executor = BasicExecutor::new(
+        Arc::clone(&model),
+        Arc::new(FailingToolRuntime {
+            message: "sandbox quota exceeded".to_string(),
+        }),
+    );
+    let turn = conversation
+        .begin_turn(BeginTurnRequest {
+            session_id: None,
+            input: vec![user_message("run it")],
+        })
+        .await
+        .expect("begin turn should succeed");
+
+    HarnessExecutor::execute_turn(
+        &executor,
+        agent.as_ref(),
+        conversation.as_ref(),
+        Arc::clone(&turn),
+        &default_agent_config(),
+        &ConversationConfig {
+            shell_program: Some("bash".to_string()),
+            mounts: Vec::new(),
+            ..Default::default()
+        },
+        &(),
+        ExecutorStreamMode::Disabled,
+        None,
+    )
+    .await
+    .expect("execute turn should recover from tool failure");
+    turn.finish().await.expect("turn should finish");
+
+    let events = conversation
+        .get_events(Some(EventQuery {
+            cursor: None,
+            direction: Some(EventQueryDirection::Asc),
+            limit: None,
+            session_id: None,
+            turn_id: None,
+            types: None,
+        }))
+        .await
+        .expect("get events should succeed")
+        .events;
+
+    assert!(events.iter().any(|event| {
+        match &event.data {
+            EventData::ToolResult {
+                tool_call_id: event_tool_call_id,
+                result,
+            } => {
+                event_tool_call_id == &tool_call_id
+                    && result
+                        == &json!({
+                            "ok": false,
+                            "error": "sandbox quota exceeded",
+                        })
+            }
             _ => false,
         }
     }));
@@ -437,11 +547,29 @@ impl FakeToolRuntime {
     }
 }
 
+struct FailingToolRuntime {
+    message: String,
+}
+
+#[async_trait]
+impl ToolRuntime for FailingToolRuntime {
+    async fn execute(
+        &self,
+        _conversation: &dyn ConversationHandle,
+        _agent_config: &AgentConfig,
+        _config: &ConversationConfig,
+        _request: &ToolRequest,
+    ) -> Result<ToolResult> {
+        Err(anyhow!(self.message.clone()))
+    }
+}
+
 #[async_trait]
 impl ToolRuntime for FakeToolRuntime {
     async fn execute(
         &self,
         _conversation: &dyn ConversationHandle,
+        _agent_config: &AgentConfig,
         _config: &ConversationConfig,
         _request: &ToolRequest,
     ) -> Result<ToolResult> {
@@ -516,8 +644,8 @@ impl ExoHarness for FakeExoHarness {
         Err(anyhow!("not implemented"))
     }
 
-    async fn list_bindings(&self) -> Result<Vec<BindingMetadata>> {
-        Ok(vec![test_model_binding_metadata()])
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
+        Ok(vec![test_model_binding_record()])
     }
 
     async fn put_binding(&self, _binding: Binding) -> Result<exoharness::BindingId> {
@@ -587,8 +715,8 @@ impl AgentHandle for FakeAgentHandle {
         Err(anyhow!("not implemented"))
     }
 
-    async fn list_bindings(&self) -> Result<Vec<BindingMetadata>> {
-        Ok(vec![test_model_binding_metadata()])
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
+        Ok(vec![test_model_binding_record()])
     }
 
     async fn put_binding(&self, _binding: Binding) -> Result<exoharness::BindingId> {
@@ -677,6 +805,26 @@ impl ConversationHandle for FakeConversationHandle {
                 id: turn_id,
                 session_id,
             },
+            latest_event_id: Mutex::new(latest_event_id),
+        }))
+    }
+
+    async fn turn_handle(&self, record: TurnRecord) -> Result<Arc<dyn TurnHandle>> {
+        let state = self.state.lock().expect("state poisoned");
+        let latest_event_id = state
+            .conversation
+            .events
+            .iter()
+            .filter(|event| event.session_id == Some(record.session_id))
+            .filter(|event| event.turn_id == Some(record.id))
+            .map(|event| event.id)
+            .next_back();
+        if latest_event_id.is_none() {
+            return Err(anyhow!("turn not found"));
+        }
+        Ok(Arc::new(FakeTurnHandle {
+            state: Arc::clone(&self.state),
+            record,
             latest_event_id: Mutex::new(latest_event_id),
         }))
     }
@@ -799,6 +947,48 @@ impl ConversationHandle for FakeConversationHandle {
         Err(anyhow!("not implemented"))
     }
 
+    async fn start_sandbox_process(
+        &self,
+        _request: StartSandboxProcessRequest,
+    ) -> Result<SandboxProcessRecord> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn write_sandbox_process_input(
+        &self,
+        _request: exoharness::WriteSandboxProcessInputRequest,
+    ) -> Result<()> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn close_sandbox_process_input(
+        &self,
+        _request: exoharness::CloseSandboxProcessInputRequest,
+    ) -> Result<()> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn get_sandbox_process_events(
+        &self,
+        _query: SandboxProcessEventQuery,
+    ) -> Result<exoharness::GetSandboxProcessEventsResult> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn wait_sandbox_process(
+        &self,
+        _request: exoharness::WaitSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn cancel_sandbox_process(
+        &self,
+        _request: exoharness::CancelSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus> {
+        Err(anyhow!("not implemented"))
+    }
+
     async fn run_in_sandbox(
         &self,
         _request: RunInSandboxRequest,
@@ -806,8 +996,8 @@ impl ConversationHandle for FakeConversationHandle {
         Ok(Box::new(FakeSandboxProcess))
     }
 
-    async fn list_bindings(&self) -> Result<Vec<BindingMetadata>> {
-        Ok(vec![test_model_binding_metadata()])
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
+        Ok(vec![test_model_binding_record()])
     }
 
     async fn put_binding(&self, _binding: Binding) -> Result<exoharness::BindingId> {
@@ -930,6 +1120,9 @@ fn append_event(
 
 fn event_type(event: &Event) -> String {
     match &event.data {
+        EventData::ConversationCreated { .. } => "conversation_created".to_string(),
+        EventData::ConversationUpdated { .. } => "conversation_updated".to_string(),
+        EventData::ConversationDeleted => "conversation_deleted".to_string(),
         EventData::ConversationForked { .. } => "conversation_forked".to_string(),
         EventData::SessionStarted => "session_started".to_string(),
         EventData::SessionEnded => "session_ended".to_string(),
@@ -943,6 +1136,9 @@ fn event_type(event: &Event) -> String {
         EventData::SandboxStarted { .. } => "sandbox_started".to_string(),
         EventData::SandboxStopped { .. } => "sandbox_stopped".to_string(),
         EventData::SandboxSnapshotted { .. } => "sandbox_snapshotted".to_string(),
+        EventData::SandboxProcessStarted { .. } => "sandbox_process_started".to_string(),
+        EventData::SandboxProcessStateUpdated { .. } => "sandbox_process_state_updated".to_string(),
+        EventData::SandboxProcessEvent { .. } => "sandbox_process_event".to_string(),
         EventData::Custom { event_type, .. } => event_type.clone(),
     }
 }
@@ -960,13 +1156,14 @@ fn assistant_message(text: &str) -> Message {
     }
 }
 
-fn test_model_binding_metadata() -> BindingMetadata {
+fn test_model_binding_record() -> BindingRecord {
     let id = Uuid7::now();
-    BindingMetadata {
+    BindingRecord {
         id,
         r#type: BindingType::Llm,
         name: "test-model".to_string(),
         created_at: id.timestamp().expect("uuid7 timestamp"),
+        binding: test_model_binding(),
     }
 }
 
@@ -996,6 +1193,7 @@ fn default_agent_config() -> AgentConfig {
         typescript: None,
         enable_agent_tool_creation: true,
         sandbox_image: None,
+        sandbox_provider: Default::default(),
         enable_networking: false,
         model: "test-model".to_string(),
         max_output_tokens: None,

@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use exoharness::{
     ConversationHandle, CreateSandboxRequest, DEFAULT_SANDBOX_IMAGE, EventData, EventKind,
     EventQuery, EventQueryDirection, FileSystemMount, FileSystemMountMode, Result,
-    RunInSandboxRequest, ToolRequest, ToolResult,
+    RunInSandboxRequest, SandboxProvider, ToolRequest, ToolResult,
 };
 use futures::io::AsyncReadExt;
 use serde::{Deserialize, Serialize};
@@ -16,24 +16,22 @@ pub struct BasicToolRuntime;
 impl ToolRuntime for BasicToolRuntime {
     async fn prepare_conversation(
         &self,
-        conversation: &dyn ConversationHandle,
-        agent_config: &AgentConfig,
-        config: &ConversationConfig,
+        _conversation: &dyn ConversationHandle,
+        _agent_config: &AgentConfig,
+        _config: &ConversationConfig,
     ) -> Result<()> {
-        if config.shell_program.is_some() {
-            ensure_shell_sandbox(conversation, agent_config, config).await?;
-        }
         Ok(())
     }
 
     async fn execute(
         &self,
         conversation: &dyn ConversationHandle,
+        agent_config: &AgentConfig,
         config: &ConversationConfig,
         request: &ToolRequest,
     ) -> Result<ToolResult> {
         match request.function_name.as_str() {
-            "shell" => execute_shell_tool(conversation, config, request).await,
+            "shell" => execute_shell_tool(conversation, agent_config, config, request).await,
             other => Err(anyhow::anyhow!(
                 "tool execution is not configured for {other}"
             )),
@@ -55,6 +53,7 @@ struct ShellToolResult {
 
 async fn execute_shell_tool(
     conversation: &dyn ConversationHandle,
+    agent_config: &AgentConfig,
     config: &ConversationConfig,
     request: &ToolRequest,
 ) -> Result<ToolResult> {
@@ -64,10 +63,7 @@ async fn execute_shell_tool(
         .shell_program
         .clone()
         .ok_or_else(|| anyhow::anyhow!("shell tool is not enabled for this conversation"))?;
-    let sandbox_id = latest_shell_sandbox(conversation)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("shell sandbox is not available for this conversation"))?
-        .id;
+    let sandbox_id = ensure_shell_sandbox(conversation, agent_config, config).await?;
     let process = conversation
         .run_in_sandbox(RunInSandboxRequest {
             id: sandbox_id,
@@ -109,17 +105,14 @@ pub(crate) async fn ensure_shell_sandbox(
         .map(|mount| mount.mount_path.clone())
         .unwrap_or_else(|| "/".to_string());
     let desired_mounts = normalize_mounts(&config.mounts);
-    let desired_image = agent_config
-        .sandbox_image
-        .clone()
+    let desired_image = config
+        .effective_sandbox_image(agent_config)
+        .map(str::to_string)
         .unwrap_or_else(|| DEFAULT_SANDBOX_IMAGE.to_string());
-    let desired_enable_networking = agent_config.enable_networking || config.enable_networking;
+    let desired_provider = config.effective_sandbox_provider(agent_config);
+    let desired_enable_networking = agent_config.enable_networking;
 
-    if let Some(sandbox) = latest_shell_sandbox(conversation).await? {
-        let Some(program) = &config.shell_program else {
-            return Ok(sandbox.id);
-        };
-
+    if let Some(sandbox) = latest_shell_sandbox(conversation, desired_provider).await? {
         let config_matches = sandbox.image == desired_image
             && sandbox.default_workdir == desired_default_workdir
             && sandbox.file_system_mounts == desired_mounts
@@ -127,6 +120,10 @@ pub(crate) async fn ensure_shell_sandbox(
             && sandbox.idle_seconds == 300;
 
         if config_matches {
+            let Some(program) = &config.shell_program else {
+                return Ok(sandbox.id);
+            };
+
             let healthcheck = conversation
                 .run_in_sandbox(RunInSandboxRequest {
                     id: sandbox.id.clone(),
@@ -142,6 +139,7 @@ pub(crate) async fn ensure_shell_sandbox(
 
     conversation
         .create_sandbox(CreateSandboxRequest {
+            provider: desired_provider,
             image: desired_image,
             default_workdir: Some(desired_default_workdir),
             file_system_mounts: Some(desired_mounts),
@@ -178,6 +176,7 @@ struct ShellSandboxInfo {
 
 async fn latest_shell_sandbox(
     conversation: &dyn ConversationHandle,
+    desired_provider: SandboxProvider,
 ) -> Result<Option<ShellSandboxInfo>> {
     let events = conversation
         .get_events(Some(EventQuery {
@@ -197,19 +196,25 @@ async fn latest_shell_sandbox(
     match event.data {
         EventData::SandboxCreated {
             sandbox_id,
+            provider,
             image,
             default_workdir,
             file_system_mounts,
             enable_networking,
             idle_seconds,
-        } => Ok(Some(ShellSandboxInfo {
-            id: sandbox_id,
-            image,
-            default_workdir,
-            file_system_mounts,
-            enable_networking,
-            idle_seconds,
-        })),
+        } => {
+            if provider != desired_provider {
+                return Ok(None);
+            }
+            Ok(Some(ShellSandboxInfo {
+                id: sandbox_id,
+                image,
+                default_workdir,
+                file_system_mounts,
+                enable_networking,
+                idle_seconds,
+            }))
+        }
         other => Err(anyhow::anyhow!(
             "type-filtered query for {} returned unexpected variant {}",
             EventKind::SANDBOX_CREATED.as_str(),

@@ -1,122 +1,77 @@
-use futures::io::{AsyncReadExt, AsyncWriteExt};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::Duration;
+
+use anyhow::bail;
+use async_trait::async_trait;
+use futures::future::BoxFuture;
+use futures::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, Cursor};
 use lingua::Message;
 use lingua::universal::{AssistantContent, UserContent};
 use tempfile::TempDir;
 use tokio::fs;
+use tokio::sync::{Mutex as AsyncMutex, oneshot};
+use tokio::time::{sleep, timeout};
 
+use crate::test_support::local_test_config;
 use crate::{
-    Artifact, ArtifactVersion, BasicExoHarness, BasicExoHarnessConfig, BeginTurnRequest, Binding,
-    CreateSandboxRequest, EventData, EventKind, EventQuery, EventQueryDirection, ExoHarness,
-    ForkConversationRequest, NewAgentRequest, NewConversationRequest, PutSecretRequest,
-    RunInSandboxRequest, SandboxBackendChoice, Secret, SecretBackendChoice, WriteArtifactRequest,
+    Artifact, ArtifactVersion, BasicExoHarness, BeginTurnRequest, Binding, BoxAsyncRead,
+    BoxAsyncWrite, CloseSandboxProcessInputRequest, CreateSandboxRequest, EventData, EventKind,
+    EventQuery, EventQueryDirection, ExoHarness, ForkConversationRequest, ManagedSandboxBackend,
+    ManagedSandboxHandle, NewAgentRequest, NewConversationRequest, PutSecretRequest,
+    RunInSandboxRequest, SandboxCommand, SandboxCommandOutput, SandboxProcessEvent,
+    SandboxProcessEventQuery, SandboxProcessParts, SandboxProcessStatus, SandboxProcessStdin,
+    SandboxRequest, Secret, SnapshotPayload, StartSandboxProcessRequest, WaitSandboxProcessRequest,
+    WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
-
-fn local_test_config(root: impl Into<std::path::PathBuf>) -> BasicExoHarnessConfig {
-    BasicExoHarnessConfig {
-        root: root.into(),
-        secret_backend: SecretBackendChoice::Static([7u8; 32]),
-        sandbox_backend: SandboxBackendChoice::LocalProcess,
-    }
-}
 
 #[tokio::test(flavor = "current_thread")]
 async fn basic_backend_supports_agent_and_conversation_crud() {
     let tempdir = TempDir::new().expect("tempdir");
-    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
-        .await
-        .expect("harness should initialize");
-
-    let agent = harness
-        .new_agent(NewAgentRequest {
-            slug: "agent".to_string(),
-            name: "Agent".to_string(),
-        })
-        .await
-        .expect("agent should be created");
-    let conversation = agent
-        .new_conversation(NewConversationRequest {
-            slug: Some("conversation".to_string()),
-            name: Some("Conversation".to_string()),
-        })
-        .await
-        .expect("conversation should be created");
-
-    assert_eq!(harness.list_agents().await.expect("list agents").len(), 1);
-    assert_eq!(
-        agent
-            .list_conversations()
+    let harness: std::sync::Arc<dyn ExoHarness> = std::sync::Arc::new(
+        BasicExoHarness::new(local_test_config(tempdir.path()))
             .await
-            .expect("list conversations")
-            .len(),
-        1
+            .expect("harness should initialize"),
     );
-
-    assert!(
-        agent
-            .delete_conversation(&conversation.record().id)
-            .await
-            .expect("delete conversation")
-    );
-    assert!(
-        harness
-            .delete_agent(&agent.record().id)
-            .await
-            .expect("delete agent")
-    );
+    crate::contract_tests::supports_agent_and_conversation_crud(harness).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn begin_turn_tracks_events_through_finish() {
+async fn basic_backend_contract_begin_turn_tracks_events_through_finish() {
     let tempdir = TempDir::new().expect("tempdir");
-    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
-        .await
-        .expect("harness should initialize");
-    let agent = harness
-        .new_agent(NewAgentRequest {
-            slug: "agent".to_string(),
-            name: "Agent".to_string(),
-        })
-        .await
-        .expect("agent");
-    let conversation = agent
-        .new_conversation(NewConversationRequest::default())
-        .await
-        .expect("conversation");
+    let harness: std::sync::Arc<dyn ExoHarness> = std::sync::Arc::new(
+        BasicExoHarness::new(local_test_config(tempdir.path()))
+            .await
+            .expect("harness should initialize"),
+    );
+    crate::contract_tests::begin_turn_tracks_events_through_finish(harness).await;
+}
 
-    let turn = conversation
-        .begin_turn(BeginTurnRequest {
-            session_id: None,
-            input: vec![user_message("ping")],
-        })
-        .await
-        .expect("turn");
-    turn.add_events(vec![EventData::Messages {
-        messages: vec![assistant_message("pong")],
-        response_id: None,
-    }])
-    .await
-    .expect("append assistant message");
-    let latest_event_id = turn.finish().await.expect("finish turn");
+#[tokio::test(flavor = "current_thread")]
+async fn basic_backend_contract_turn_events_continue_after_artifact_writes() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness: std::sync::Arc<dyn ExoHarness> = std::sync::Arc::new(
+        BasicExoHarness::new(local_test_config(tempdir.path()))
+            .await
+            .expect("harness should initialize"),
+    );
+    crate::contract_tests::turn_events_continue_after_artifact_writes(harness).await;
+}
 
-    let events = conversation
-        .get_events(Some(EventQuery {
-            cursor: None,
-            direction: Some(EventQueryDirection::Asc),
-            limit: None,
-            session_id: None,
-            turn_id: Some(turn.record().id),
-            types: None,
-        }))
-        .await
-        .expect("get events")
-        .events;
-
-    assert!(matches!(events[0].data, EventData::SessionStarted));
-    assert!(matches!(events[1].data, EventData::TurnStarted));
-    assert!(matches!(events[2].data, EventData::Messages { .. }));
-    assert!(matches!(events[3].data, EventData::Messages { .. }));
-    assert!(matches!(events[4].data, EventData::TurnEnded));
-    assert_eq!(events.last().expect("turn ended").id, latest_event_id);
+#[tokio::test(flavor = "current_thread")]
+async fn basic_backend_contract_conversation_scope_overrides_and_forks() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness: std::sync::Arc<dyn ExoHarness> = std::sync::Arc::new(
+        BasicExoHarness::new(local_test_config(tempdir.path()))
+            .await
+            .expect("harness should initialize"),
+    );
+    crate::contract_tests::conversation_scope_overrides_agent_scope_and_fork_copies_bindings(
+        harness,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -556,6 +511,7 @@ async fn basic_backend_runs_commands_in_created_sandbox() {
 
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
+            provider: Default::default(),
             image: "basic-local-process".to_string(),
             default_workdir: Some(tempdir.path().display().to_string()),
             file_system_mounts: None,
@@ -592,6 +548,400 @@ async fn basic_backend_runs_commands_in_created_sandbox() {
     assert_eq!(String::from_utf8_lossy(&stdout_bytes), "hello");
     assert_eq!(String::from_utf8_lossy(&stderr_bytes), "");
     assert_eq!(wait_result.expect("process should exit"), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn basic_backend_exposes_process_events_and_input() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
+        .await
+        .expect("harness should initialize");
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let conversation = agent
+        .new_conversation(NewConversationRequest::default())
+        .await
+        .expect("conversation");
+    let sandbox_id = conversation
+        .create_sandbox(CreateSandboxRequest {
+            provider: Default::default(),
+            image: "basic-local-process".to_string(),
+            default_workdir: Some(tempdir.path().display().to_string()),
+            file_system_mounts: None,
+            enable_networking: Some(true),
+            idle_seconds: Some(60),
+        })
+        .await
+        .expect("sandbox should be created");
+    let process = conversation
+        .start_sandbox_process(StartSandboxProcessRequest {
+            sandbox_id: sandbox_id.clone(),
+            command: vec!["/bin/sh".to_string(), "-lc".to_string(), "cat".to_string()],
+            env: Default::default(),
+            cwd: None,
+            mode: Default::default(),
+            stdin: SandboxProcessStdin::Open,
+            output: Default::default(),
+            lifecycle: Default::default(),
+        })
+        .await
+        .expect("process should start");
+
+    conversation
+        .write_sandbox_process_input(WriteSandboxProcessInputRequest {
+            sandbox_id: sandbox_id.clone(),
+            process_id: process.id.clone(),
+            data: b"hello process api".to_vec(),
+        })
+        .await
+        .expect("stdin should write");
+    conversation
+        .close_sandbox_process_input(CloseSandboxProcessInputRequest {
+            sandbox_id: sandbox_id.clone(),
+            process_id: process.id.clone(),
+        })
+        .await
+        .expect("stdin should close");
+
+    let status = conversation
+        .wait_sandbox_process(WaitSandboxProcessRequest {
+            sandbox_id: sandbox_id.clone(),
+            process_id: process.id.clone(),
+        })
+        .await
+        .expect("process should wait");
+    assert_eq!(status, SandboxProcessStatus::Exited { exit_code: 0 });
+
+    let events = conversation
+        .get_sandbox_process_events(SandboxProcessEventQuery {
+            sandbox_id: sandbox_id.clone(),
+            process_id: process.id.clone(),
+            after: None,
+            limit: None,
+            follow: None,
+        })
+        .await
+        .expect("process events should read");
+    assert_eq!(events.status, SandboxProcessStatus::Exited { exit_code: 0 });
+    assert!(events.events.iter().any(|event| matches!(
+        event,
+        SandboxProcessEvent::Stdout { data, .. }
+            if String::from_utf8_lossy(data).contains("hello process api")
+    )));
+    assert!(matches!(
+        events.events.last(),
+        Some(SandboxProcessEvent::Exit { exit_code: 0, .. })
+    ));
+
+    let conversation_events = conversation
+        .get_events(None)
+        .await
+        .expect("conversation events should read")
+        .events;
+    assert!(conversation_events.iter().any(|event| matches!(
+        &event.data,
+        EventData::SandboxProcessStarted {
+            sandbox_id: event_sandbox_id,
+            process_id,
+            ..
+        } if event_sandbox_id == &sandbox_id && process_id == &process.id
+    )));
+    assert!(conversation_events.iter().any(|event| matches!(
+        &event.data,
+        EventData::SandboxProcessEvent {
+            sandbox_id: event_sandbox_id,
+            process_id,
+            event: SandboxProcessEvent::Stdout { data, .. },
+        } if event_sandbox_id == &sandbox_id
+            && process_id == &process.id
+            && String::from_utf8_lossy(data).contains("hello process api")
+    )));
+    assert!(conversation_events.iter().any(|event| matches!(
+        &event.data,
+        EventData::SandboxProcessStateUpdated {
+            sandbox_id: event_sandbox_id,
+            process_id,
+            status: SandboxProcessStatus::Exited { exit_code: 0 },
+            ..
+        } if event_sandbox_id == &sandbox_id && process_id == &process.id
+    )));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sandbox_process_terminal_event_waits_for_output_drain() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new_with_sandbox_backend(
+        local_test_config(tempdir.path()),
+        Arc::new(TestSandboxBackend::new(TestProcessSpec {
+            stdout: Box::pin(DelayedRead::new(
+                Duration::from_millis(50),
+                b"late stdout".to_vec(),
+            )),
+            stderr: Box::pin(Cursor::new(Vec::new())),
+            stdin: Box::pin(Cursor::new(Vec::new())),
+            wait: Box::pin(async { Ok(0) }),
+        })),
+    )
+    .await
+    .expect("harness should initialize");
+    let conversation = test_conversation(&harness).await;
+    let sandbox_id = test_sandbox(&conversation).await;
+    let process = conversation
+        .start_sandbox_process(StartSandboxProcessRequest {
+            sandbox_id: sandbox_id.clone(),
+            command: vec!["test".to_string()],
+            env: Default::default(),
+            cwd: None,
+            mode: Default::default(),
+            stdin: SandboxProcessStdin::None,
+            output: Default::default(),
+            lifecycle: Default::default(),
+        })
+        .await
+        .expect("process should start");
+
+    let status = timeout(
+        Duration::from_secs(1),
+        conversation.wait_sandbox_process(WaitSandboxProcessRequest {
+            sandbox_id: sandbox_id.clone(),
+            process_id: process.id.clone(),
+        }),
+    )
+    .await
+    .expect("wait should not hang")
+    .expect("wait should succeed");
+    assert_eq!(status, SandboxProcessStatus::Exited { exit_code: 0 });
+
+    let events = conversation
+        .get_sandbox_process_events(SandboxProcessEventQuery {
+            sandbox_id,
+            process_id: process.id,
+            after: None,
+            limit: None,
+            follow: None,
+        })
+        .await
+        .expect("events should read");
+    assert_eq!(
+        events
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                SandboxProcessEvent::Stdout { data, .. } => {
+                    Some(String::from_utf8_lossy(data).to_string())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec!["late stdout".to_string()]
+    );
+    assert!(matches!(
+        events.events.last(),
+        Some(SandboxProcessEvent::Exit { exit_code: 0, .. })
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn wait_sandbox_process_returns_after_concurrent_completion() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let (finish_tx, finish_rx) = oneshot::channel();
+    let harness = BasicExoHarness::new_with_sandbox_backend(
+        local_test_config(tempdir.path()),
+        Arc::new(TestSandboxBackend::new(TestProcessSpec {
+            stdout: Box::pin(Cursor::new(Vec::new())),
+            stderr: Box::pin(Cursor::new(Vec::new())),
+            stdin: Box::pin(Cursor::new(Vec::new())),
+            wait: Box::pin(async move {
+                finish_rx.await.expect("finish signal should send");
+                Ok(0)
+            }),
+        })),
+    )
+    .await
+    .expect("harness should initialize");
+    let conversation = test_conversation(&harness).await;
+    let sandbox_id = test_sandbox(&conversation).await;
+    let process = conversation
+        .start_sandbox_process(StartSandboxProcessRequest {
+            sandbox_id: sandbox_id.clone(),
+            command: vec!["test".to_string()],
+            env: Default::default(),
+            cwd: None,
+            mode: Default::default(),
+            stdin: SandboxProcessStdin::None,
+            output: Default::default(),
+            lifecycle: Default::default(),
+        })
+        .await
+        .expect("process should start");
+
+    let wait_conversation = Arc::clone(&conversation);
+    let wait_task = tokio::spawn(async move {
+        wait_conversation
+            .wait_sandbox_process(WaitSandboxProcessRequest {
+                sandbox_id,
+                process_id: process.id,
+            })
+            .await
+    });
+    tokio::task::yield_now().await;
+    finish_tx
+        .send(())
+        .expect("finish signal should be received");
+    let status = timeout(Duration::from_secs(1), wait_task)
+        .await
+        .expect("wait should not hang")
+        .expect("wait task should not panic")
+        .expect("wait should succeed");
+    assert_eq!(status, SandboxProcessStatus::Exited { exit_code: 0 });
+}
+
+async fn test_conversation(harness: &BasicExoHarness) -> Arc<dyn crate::ConversationHandle> {
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    agent
+        .new_conversation(NewConversationRequest::default())
+        .await
+        .expect("conversation")
+}
+
+async fn test_sandbox(conversation: &Arc<dyn crate::ConversationHandle>) -> String {
+    conversation
+        .create_sandbox(CreateSandboxRequest {
+            provider: Default::default(),
+            image: "test-sandbox".to_string(),
+            default_workdir: Some("/".to_string()),
+            file_system_mounts: None,
+            enable_networking: Some(true),
+            idle_seconds: Some(60),
+        })
+        .await
+        .expect("sandbox should be created")
+}
+
+struct TestSandboxBackend {
+    process: Arc<AsyncMutex<Option<TestProcessSpec>>>,
+}
+
+impl TestSandboxBackend {
+    fn new(process: TestProcessSpec) -> Self {
+        Self {
+            process: Arc::new(AsyncMutex::new(Some(process))),
+        }
+    }
+}
+
+#[async_trait]
+impl ManagedSandboxBackend for TestSandboxBackend {
+    async fn acquire(
+        &self,
+        _request: SandboxRequest,
+    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+        Ok(Arc::new(TestSandboxHandle {
+            process: Arc::clone(&self.process),
+        }))
+    }
+
+    async fn acquire_from_snapshot(
+        &self,
+        _request: SandboxRequest,
+        _payload: SnapshotPayload,
+    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+        bail!("test sandbox backend does not support snapshot restore")
+    }
+}
+
+struct TestSandboxHandle {
+    process: Arc<AsyncMutex<Option<TestProcessSpec>>>,
+}
+
+#[async_trait]
+impl ManagedSandboxHandle for TestSandboxHandle {
+    fn id(&self) -> &str {
+        "test-sandbox"
+    }
+
+    async fn exec(&self, _command: &SandboxCommand) -> crate::Result<SandboxCommandOutput> {
+        bail!("test sandbox handle only supports start_process")
+    }
+
+    async fn start_process(&self, _command: &SandboxCommand) -> crate::Result<SandboxProcessParts> {
+        let process = self
+            .process
+            .lock()
+            .await
+            .take()
+            .expect("test process should only start once");
+        Ok(SandboxProcessParts {
+            stdout: process.stdout,
+            stderr: process.stderr,
+            stdin: process.stdin,
+            wait: process.wait,
+        })
+    }
+
+    async fn stop(&self) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn snapshot(&self) -> crate::Result<SnapshotPayload> {
+        bail!("test sandbox handle does not support snapshots")
+    }
+}
+
+struct TestProcessSpec {
+    stdout: BoxAsyncRead,
+    stderr: BoxAsyncRead,
+    stdin: BoxAsyncWrite,
+    wait: BoxFuture<'static, crate::Result<i32>>,
+}
+
+struct DelayedRead {
+    sleep: Option<Pin<Box<tokio::time::Sleep>>>,
+    data: Vec<u8>,
+    offset: usize,
+}
+
+impl DelayedRead {
+    fn new(delay: Duration, data: Vec<u8>) -> Self {
+        Self {
+            sleep: Some(Box::pin(sleep(delay))),
+            data,
+            offset: 0,
+        }
+    }
+}
+
+impl AsyncRead for DelayedRead {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
+        if let Some(sleep) = self.sleep.as_mut() {
+            if sleep.as_mut().poll(cx).is_pending() {
+                return Poll::Pending;
+            }
+            self.sleep = None;
+        }
+        if self.offset >= self.data.len() {
+            return Poll::Ready(Ok(0));
+        }
+        let length = buffer.len().min(self.data.len() - self.offset);
+        buffer[..length].copy_from_slice(&self.data[self.offset..self.offset + length]);
+        self.offset += length;
+        Poll::Ready(Ok(length))
+    }
 }
 
 fn user_message(text: &str) -> Message {

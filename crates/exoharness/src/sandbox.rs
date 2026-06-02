@@ -253,7 +253,7 @@ impl CliContainerSandboxBackend {
         }
 
         if let Err(error) = reap_orphaned_warm_sandboxes(&self.container_bin).await {
-            eprintln!("failed to reap orphaned warm sandboxes: {error}");
+            tracing::warn!(%error, "failed to reap orphaned warm sandboxes");
         }
         *started = true;
         Ok(())
@@ -597,7 +597,7 @@ impl ManagedSandboxHandle for WarmSandboxHandle {
             // know to choose Docker for snapshot-using flows.
             ContainerCliFlavor::AppleContainer => bail!(
                 "snapshot is not yet implemented for the apple-container backend; \
-                 use --sandbox-backend docker for snapshot-using flows"
+                 use --sandbox-provider docker for snapshot-using flows"
             ),
         }
     }
@@ -1192,9 +1192,10 @@ async fn reap_orphaned_warm_sandboxes(container_bin: &Path) -> Result<()> {
         )
         .await
         {
-            eprintln!(
-                "failed to clean up orphaned warm sandbox {}: {error}",
-                container.configuration.id
+            tracing::warn!(
+                container_id = %container.configuration.id,
+                %error,
+                "failed to clean up orphaned warm sandbox"
             );
         }
     }
@@ -1237,7 +1238,7 @@ fn cleanup_named_container_blocking(container_bin: &Path, cli: ContainerCliFlavo
 fn schedule_cleanup_named_container(container_bin: PathBuf, cli: ContainerCliFlavor, name: String) {
     tokio::spawn(async move {
         if let Err(error) = cleanup_named_container(&container_bin, cli, &name).await {
-            eprintln!("failed to clean up warm sandbox {name}: {error}");
+            tracing::warn!(sandbox = %name, %error, "failed to clean up warm sandbox");
         }
     });
 }
@@ -1276,10 +1277,10 @@ fn run_container_admin_command_blocking<const N: usize>(container_bin: &Path, ar
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
             Ok(None) => {
                 if let Err(error) = child.kill() {
-                    eprintln!("failed to kill timed out container admin command: {error}");
+                    tracing::warn!(%error, "failed to kill timed out container admin command");
                 }
                 if let Err(error) = child.wait() {
-                    eprintln!("failed to wait for timed out container admin command: {error}");
+                    tracing::warn!(%error, "failed to wait for timed out container admin command");
                 }
                 return;
             }

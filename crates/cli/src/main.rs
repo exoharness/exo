@@ -12,23 +12,30 @@ mod secret_tests;
 mod tui;
 
 use std::collections::HashMap;
+use std::io::{self, Write};
+use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use executor::{
-    AgentHarnessKind, BasicExoHarness, BasicExoHarnessConfig, BasicHarness, Binding,
-    BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig, ConversationModelConfig,
-    CreateAgentRequest, CreateConversationRequest, EventKind, EventQuery, EventQueryDirection,
-    ExoHarness, FileSystemMount, FileSystemMountMode, ForkConversationRequest, Harness,
-    HarnessAgent, HarnessConversation, PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR,
-    SandboxBackendChoice, Secret, SecretBackendChoice, SendRequest, TypeScriptHarness,
-    TypeScriptHarnessConfig, Uuid7, load_agent_config,
+    AgentHarnessKind, BasicExoHarness, BasicExoHarnessConfig, BasicHarness, BasicToolRuntime,
+    Binding, BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig,
+    ConversationModelConfig, CreateAgentRequest, CreateConversationRequest, EventKind, EventQuery,
+    EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions, FileSystemMount,
+    FileSystemMountMode, ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET, Harness,
+    HarnessAgent, HarnessConversation, HttpExoHarness, LocalSandboxExoHarness, PutSecretRequest,
+    RlmHarness, SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxProvider, Secret,
+    SecretBackendChoice, SendRequest, ToolRequest, ToolRuntime, TypeScriptHarness,
+    TypeScriptHarnessConfig, Uuid7, load_agent_config, serve_exoharness_http_listener_with_options,
 };
 use lingua::Message;
 use lingua::universal::{AssistantContent, AssistantContentPart, ToolContentPart, UserContent};
+use serde::Deserialize;
+use tabwriter::TabWriter;
+use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::env::CliEnvironment;
 use tui::run_chat_repl;
@@ -47,8 +54,6 @@ struct Cli {
     harness: Option<HarnessSelection>,
     #[arg(long, global = true, value_enum, env = "EXO_SECRET_BACKEND")]
     secret_backend: Option<SecretBackendArg>,
-    #[arg(long, global = true, value_enum, env = "EXO_SANDBOX_BACKEND")]
-    sandbox_backend: Option<SandboxBackendArg>,
     #[arg(long, global = true, env = "EXO_MASTER_KEY_PATH")]
     master_key_path: Option<PathBuf>,
     #[arg(long, global = true)]
@@ -61,6 +66,23 @@ struct Cli {
     braintrust_app_url: Option<String>,
     #[arg(long, global = true, env = "BRAINTRUST_API_URL", hide = true)]
     braintrust_api_url: Option<String>,
+    #[arg(
+        long = "exoharness-url",
+        visible_alias = "url",
+        global = true,
+        env = "EXO_EXOHARNESS_URL"
+    )]
+    exoharness_url: Option<String>,
+    #[arg(
+        long = "bearer-env",
+        value_name = "ENV_VAR",
+        help = "Environment variable whose value is sent as the HTTP bearer token",
+        global = true,
+        env = "EXO_BEARER_ENV",
+        requires = "exoharness_url",
+        value_parser = parse_env_var_name
+    )]
+    bearer_env: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -174,12 +196,24 @@ enum SecretBackendArg {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
-enum SandboxBackendArg {
+enum SandboxProviderArg {
+    Daytona,
     #[value(name = "apple-container")]
     AppleContainer,
     Docker,
     #[value(name = "local-process")]
     LocalProcess,
+}
+
+impl From<SandboxProviderArg> for SandboxProvider {
+    fn from(value: SandboxProviderArg) -> Self {
+        match value {
+            SandboxProviderArg::Daytona => Self::Daytona,
+            SandboxProviderArg::AppleContainer => Self::AppleContainer,
+            SandboxProviderArg::Docker => Self::Docker,
+            SandboxProviderArg::LocalProcess => Self::LocalProcess,
+        }
+    }
 }
 
 fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
@@ -189,15 +223,10 @@ fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
             path: cli.master_key_path.clone(),
         },
     };
-    let sandbox_backend = match cli.sandbox_backend.unwrap_or_else(default_sandbox_backend) {
-        SandboxBackendArg::AppleContainer => SandboxBackendChoice::AppleContainer,
-        SandboxBackendArg::Docker => SandboxBackendChoice::Docker,
-        SandboxBackendArg::LocalProcess => SandboxBackendChoice::LocalProcess,
-    };
     Ok(BasicExoHarnessConfig {
         root: cli.root.join("exoharness"),
         secret_backend,
-        sandbox_backend,
+        sandbox_backend: default_sandbox_backend(),
     })
 }
 
@@ -212,13 +241,23 @@ fn default_secret_backend() -> SecretBackendArg {
 }
 
 #[cfg(target_os = "macos")]
-fn default_sandbox_backend() -> SandboxBackendArg {
-    SandboxBackendArg::AppleContainer
+fn default_sandbox_backend() -> SandboxBackendChoice {
+    SandboxBackendChoice::AppleContainer
 }
 
 #[cfg(not(target_os = "macos"))]
-fn default_sandbox_backend() -> SandboxBackendArg {
-    SandboxBackendArg::Docker
+fn default_sandbox_backend() -> SandboxBackendChoice {
+    SandboxBackendChoice::Docker
+}
+
+#[cfg(target_os = "macos")]
+fn default_local_sandbox_provider() -> SandboxProvider {
+    SandboxProvider::AppleContainer
+}
+
+#[cfg(not(target_os = "macos"))]
+fn default_local_sandbox_provider() -> SandboxProvider {
+    SandboxProvider::Docker
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -250,7 +289,7 @@ enum Commands {
         #[command(subcommand)]
         command: ModelCommands,
     },
-    /// Manage stored secrets for model and tool bindings.
+    /// Manage local stored secrets.
     Secret {
         #[command(subcommand)]
         command: SecretCommands,
@@ -266,6 +305,12 @@ enum Commands {
         /// Conversation slug to use or create (default: a fresh generated slug).
         #[arg(long)]
         conversation: Option<String>,
+    },
+    Serve {
+        #[arg(long, default_value = "127.0.0.1:4766")]
+        bind: SocketAddr,
+        #[arg(short, long, action = ArgAction::Count)]
+        verbose: u8,
     },
 }
 
@@ -285,6 +330,8 @@ enum AgentCommands {
         #[arg(long)]
         sandbox_image: Option<String>,
         #[arg(long, value_enum)]
+        sandbox_provider: Option<SandboxProviderArg>,
+        #[arg(long, value_enum)]
         networking: Option<EnabledDisabled>,
         #[arg(long)]
         model: String,
@@ -301,8 +348,8 @@ enum AgentCommands {
     },
     Update {
         agent: String,
-        #[arg(long)]
-        set_harness: Option<HarnessKind>,
+        #[arg(long, value_name = "HARNESS")]
+        set_harness: Option<HarnessSelection>,
         #[arg(long)]
         module: Option<PathBuf>,
         #[arg(long)]
@@ -317,6 +364,8 @@ enum AgentCommands {
         sandbox_image: Option<String>,
         #[arg(long)]
         clear_sandbox_image: bool,
+        #[arg(long, value_enum)]
+        sandbox_provider: Option<SandboxProviderArg>,
         #[arg(long, value_enum)]
         networking: Option<EnabledDisabled>,
         #[arg(long)]
@@ -356,6 +405,8 @@ enum ConversationCommands {
         name: Option<String>,
         #[arg(long)]
         slug: Option<String>,
+        #[command(flatten)]
+        sandbox_runtime: ConversationSandboxRuntimeArgs,
         #[arg(long)]
         repl: bool,
     },
@@ -373,12 +424,8 @@ enum ConversationCommands {
     Update {
         agent: String,
         conversation: String,
-        #[arg(long)]
-        shell_program: Option<String>,
-        #[arg(long)]
-        clear_shell_program: bool,
-        #[arg(long, value_enum)]
-        networking: Option<EnabledDisabled>,
+        #[command(flatten)]
+        sandbox_runtime: ConversationSandboxRuntimeUpdateArgs,
         #[arg(long)]
         model: Option<String>,
         #[arg(long)]
@@ -391,6 +438,10 @@ enum ConversationCommands {
     Mount {
         #[command(subcommand)]
         command: ConversationMountCommands,
+    },
+    Sandbox {
+        #[command(subcommand)]
+        command: ConversationSandboxCommands,
     },
     Show {
         agent: String,
@@ -424,11 +475,20 @@ enum ConversationCommands {
 }
 
 #[derive(Debug, Subcommand)]
+enum ConversationSandboxCommands {
+    Run {
+        agent: String,
+        conversation: String,
+        command: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum SecretCommands {
     List,
     Set {
         name: String,
-        #[arg(long)]
+        #[arg(long, value_parser = parse_env_var_name)]
         env: Option<String>,
         #[arg(long)]
         value: Option<String>,
@@ -447,6 +507,90 @@ enum ModelCommands {
         #[arg(long)]
         base_url: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Default, Args)]
+struct ConversationSandboxRuntimeArgs {
+    #[arg(long)]
+    sandbox_image: Option<String>,
+    #[arg(long, value_enum)]
+    sandbox_provider: Option<SandboxProviderArg>,
+    #[arg(long)]
+    shell_program: Option<String>,
+}
+
+impl ConversationSandboxRuntimeArgs {
+    fn validate(&self) -> Result<()> {
+        if self
+            .sandbox_image
+            .as_ref()
+            .is_some_and(|image| image.trim().is_empty())
+        {
+            bail!("sandbox image must not be empty");
+        }
+        if self
+            .shell_program
+            .as_ref()
+            .is_some_and(|program| program.trim().is_empty())
+        {
+            bail!("shell program must not be empty");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default, Args)]
+struct ConversationSandboxRuntimeUpdateArgs {
+    #[command(flatten)]
+    runtime: ConversationSandboxRuntimeArgs,
+    #[arg(long)]
+    clear_shell_program: bool,
+    #[arg(long)]
+    clear_sandbox_image: bool,
+    #[arg(long)]
+    clear_sandbox_provider: bool,
+}
+
+impl ConversationSandboxRuntimeUpdateArgs {
+    fn apply(self, config: &mut executor::ConversationConfig) -> Result<bool> {
+        if self.clear_shell_program && self.runtime.shell_program.is_some() {
+            bail!("provide either --clear-shell-program or --shell-program, not both");
+        }
+        if self.clear_sandbox_image && self.runtime.sandbox_image.is_some() {
+            bail!("provide either --clear-sandbox-image or --sandbox-image, not both");
+        }
+        if self.clear_sandbox_provider && self.runtime.sandbox_provider.is_some() {
+            bail!("provide either --clear-sandbox-provider or --sandbox-provider, not both");
+        }
+        self.runtime.validate()?;
+
+        let mut changed = false;
+        if self.clear_shell_program {
+            config.shell_program = None;
+            changed = true;
+        } else if let Some(shell_program) = self.runtime.shell_program {
+            config.shell_program = Some(shell_program);
+            changed = true;
+        }
+
+        if self.clear_sandbox_image {
+            config.sandbox_image = None;
+            changed = true;
+        } else if let Some(sandbox_image) = self.runtime.sandbox_image {
+            config.sandbox_image = Some(sandbox_image);
+            changed = true;
+        }
+
+        if self.clear_sandbox_provider {
+            config.sandbox_provider = None;
+            changed = true;
+        } else if let Some(sandbox_provider) = self.runtime.sandbox_provider {
+            config.sandbox_provider = Some(SandboxProvider::from(sandbox_provider));
+            changed = true;
+        }
+
+        Ok(changed)
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -484,10 +628,32 @@ async fn main() -> Result<()> {
     );
     let env_vars = env.into_vars();
     let harness_selection = cli.harness.clone();
-    let harness_kind =
-        determine_harness_kind(&exo_config, harness_selection.as_ref(), &cli.command).await?;
+    if let Some(config) = serve_config(&cli.command) {
+        serve_exoharness_http(&exo_config, config).await?;
+        return Ok(());
+    }
+
+    let bearer_token = cli
+        .bearer_env
+        .as_deref()
+        .map(|env| env_value_from_arg("--bearer-env", env, &env_vars))
+        .transpose()?;
+    let using_remote_exoharness = cli.exoharness_url.is_some();
+    let default_sandbox_provider = if using_remote_exoharness {
+        SandboxProvider::Daytona
+    } else {
+        default_local_sandbox_provider()
+    };
+    let exoharness =
+        instantiate_exoharness(&exo_config, cli.exoharness_url.as_deref(), bearer_token).await?;
+    let harness_kind = determine_harness_kind(
+        exoharness.as_ref(),
+        harness_selection.as_ref(),
+        &cli.command,
+    )
+    .await?;
     let harness = instantiate_harness(
-        &exo_config,
+        exoharness,
         harness_kind,
         runtime_config.clone(),
         env_vars.clone(),
@@ -511,6 +677,12 @@ async fn main() -> Result<()> {
                     if let Some(selection) = harness_selection.as_ref() {
                         ensure_agent_matches_harness_selection(agent.as_ref(), selection).await?;
                     }
+                    ensure_existing_repl_agent_model(
+                        harness.as_ref(),
+                        agent.as_ref(),
+                        model.clone(),
+                    )
+                    .await?;
                     agent
                 }
                 None => {
@@ -539,6 +711,7 @@ async fn main() -> Result<()> {
                                 .as_ref()
                                 .and_then(HarnessSelection::default_sandbox_image)
                                 .map(str::to_string),
+                            sandbox_provider: default_sandbox_provider,
                             enable_networking: harness_selection
                                 .as_ref()
                                 .is_some_and(HarnessSelection::default_enable_networking),
@@ -554,34 +727,28 @@ async fn main() -> Result<()> {
             let conversation = match agent.get_conversation(&conversation_slug).await? {
                 Some(conversation) => conversation,
                 None => {
-                    let conversation = agent
+                    agent
                         .create_conversation(CreateConversationRequest {
                             slug: Some(conversation_slug.clone()),
                             name: Some(conversation_slug),
+                            ..Default::default()
                         })
-                        .await?;
-                    // The default non-TypeScript REPL is a plain chat: drop the
-                    // shell tool so no sandbox is provisioned. TypeScript
-                    // harnesses decide their own tool and sandbox behavior.
-                    let mut config = conversation.config().await?;
-                    if !matches!(harness_kind, HarnessKind::TypeScript)
-                        && config.shell_program.is_some()
-                    {
-                        config.shell_program = None;
-                        conversation.put_config(config).await?;
-                    }
-                    conversation
+                        .await?
                 }
             };
 
-            run_chat_repl(conversation).await?;
+            run_chat_repl(Arc::clone(&agent), conversation).await?;
         }
         Commands::Agent { command } => match command {
             AgentCommands::List => {
-                println!("AGENT\tNAME");
-                for agent in harness.list_agents().await? {
-                    println!("{}\t{}", agent.slug, agent.name);
-                }
+                let agents = harness.list_agents().await?;
+                print_table(
+                    &["AGENT", "ID", "NAME"],
+                    agents
+                        .into_iter()
+                        .map(|agent| vec![agent.slug, agent.id.to_string(), agent.name])
+                        .collect(),
+                )?;
             }
             AgentCommands::Create {
                 name,
@@ -590,6 +757,7 @@ async fn main() -> Result<()> {
                 tool_modules,
                 tool_creation,
                 sandbox_image,
+                sandbox_provider,
                 networking,
                 model,
                 max_output_tokens,
@@ -636,6 +804,9 @@ async fn main() -> Result<()> {
                             .map(EnabledDisabled::enabled)
                             .unwrap_or(true),
                         sandbox_image,
+                        sandbox_provider: sandbox_provider
+                            .map(SandboxProvider::from)
+                            .unwrap_or(default_sandbox_provider),
                         enable_networking,
                         model,
                         max_output_tokens,
@@ -663,6 +834,7 @@ async fn main() -> Result<()> {
                 tool_creation,
                 sandbox_image,
                 clear_sandbox_image,
+                sandbox_provider,
                 networking,
                 model,
                 max_output_tokens,
@@ -708,14 +880,30 @@ async fn main() -> Result<()> {
                 let agent = must_get_agent(harness.as_ref(), &agent).await?;
                 let mut config = agent.config().await?;
                 let mut changed = false;
-                if let Some(set_harness) = set_harness {
-                    let new_harness = to_agent_harness_kind(set_harness);
+                if let Some(set_harness) = set_harness.as_ref() {
+                    if clear_module {
+                        bail!("provide either --set-harness or --clear-module, not both");
+                    }
+                    let new_harness = to_agent_harness_kind(set_harness.harness_kind());
                     if config.harness != new_harness {
                         config.harness = new_harness;
                         changed = true;
                     }
+                    let typescript = build_typescript_harness_config(
+                        Some(set_harness),
+                        module.as_deref(),
+                        &tool_modules,
+                    )?;
+                    if config.typescript != typescript {
+                        config.typescript = typescript;
+                        changed = true;
+                    }
                 }
-                if clear_module {
+                if set_harness.is_some() {
+                    if clear_tool_modules {
+                        bail!("provide either --set-harness or --clear-tool-modules, not both");
+                    }
+                } else if clear_module {
                     config.typescript = None;
                     changed = true;
                 } else if let Some(module) = module.as_deref() {
@@ -776,6 +964,14 @@ async fn main() -> Result<()> {
                     }
                     config.sandbox_image = Some(sandbox_image);
                     changed = true;
+                }
+
+                if let Some(sandbox_provider) = sandbox_provider {
+                    let sandbox_provider = SandboxProvider::from(sandbox_provider);
+                    if config.sandbox_provider != sandbox_provider {
+                        config.sandbox_provider = sandbox_provider;
+                        changed = true;
+                    }
                 }
 
                 if let Some(networking) = networking {
@@ -882,6 +1078,10 @@ async fn main() -> Result<()> {
                     "sandbox_image: {}",
                     config.sandbox_image.as_deref().unwrap_or("default")
                 );
+                println!(
+                    "sandbox_provider: {}",
+                    format_sandbox_provider(config.sandbox_provider)
+                );
                 println!("enable_networking: {}", config.enable_networking);
                 println!("model: {}", config.model);
                 println!(
@@ -913,17 +1113,29 @@ async fn main() -> Result<()> {
         Commands::Conversation { command } => match command {
             ConversationCommands::List { agent } => {
                 let agent = must_get_agent(harness.as_ref(), &agent).await?;
-                println!("CONVERSATION\tNAME");
-                for conversation in agent.list_conversations().await? {
-                    println!("{}\t{}", conversation.slug, conversation.name);
-                }
+                let conversations = agent.list_conversations().await?;
+                print_table(
+                    &["CONVERSATION", "ID", "NAME"],
+                    conversations
+                        .into_iter()
+                        .map(|conversation| {
+                            vec![
+                                conversation.slug,
+                                conversation.id.to_string(),
+                                conversation.name,
+                            ]
+                        })
+                        .collect(),
+                )?;
             }
             ConversationCommands::Create {
                 agent,
                 name,
                 slug,
+                sandbox_runtime,
                 repl,
             } => {
+                sandbox_runtime.validate()?;
                 let agent = must_get_agent(harness.as_ref(), &agent).await?;
                 let slug = slug.unwrap_or_else(|| {
                     name.as_deref()
@@ -938,6 +1150,11 @@ async fn main() -> Result<()> {
                     .create_conversation(CreateConversationRequest {
                         slug: Some(slug),
                         name,
+                        sandbox_image: sandbox_runtime.sandbox_image,
+                        sandbox_provider: sandbox_runtime
+                            .sandbox_provider
+                            .map(SandboxProvider::from),
+                        shell_program: sandbox_runtime.shell_program,
                     })
                     .await?;
                 println!(
@@ -946,7 +1163,7 @@ async fn main() -> Result<()> {
                     conversation.record().id
                 );
                 if repl {
-                    run_chat_repl(conversation).await?;
+                    run_chat_repl(Arc::clone(&agent), conversation).await?;
                 } else {
                     println!(
                         "start chatting with it via `{}`",
@@ -987,7 +1204,7 @@ async fn main() -> Result<()> {
                         .ok_or_else(|| {
                             anyhow!("forked conversation not found: {}", forked.record().slug)
                         })?;
-                    run_chat_repl(conversation).await?;
+                    run_chat_repl(agent, conversation).await?;
                 } else {
                     println!(
                         "start chatting with it via `{}`",
@@ -998,17 +1215,12 @@ async fn main() -> Result<()> {
             ConversationCommands::Update {
                 agent,
                 conversation,
-                shell_program,
-                clear_shell_program,
-                networking,
+                sandbox_runtime,
                 model,
                 max_output_tokens,
                 clear_max_output_tokens,
                 clear_model_override,
             } => {
-                if clear_shell_program && shell_program.is_some() {
-                    bail!("provide either --clear-shell-program or --shell-program, not both");
-                }
                 if clear_model_override
                     && (model.is_some() || max_output_tokens.is_some() || clear_max_output_tokens)
                 {
@@ -1028,23 +1240,7 @@ async fn main() -> Result<()> {
                     .await?
                     .ok_or_else(|| anyhow!("conversation not found: {}", conversation))?;
                 let mut config = conversation.config().await?;
-                let mut changed = false;
-
-                if clear_shell_program {
-                    config.shell_program = None;
-                    changed = true;
-                } else if let Some(shell_program) = shell_program {
-                    if shell_program.trim().is_empty() {
-                        bail!("shell program must not be empty");
-                    }
-                    config.shell_program = Some(shell_program);
-                    changed = true;
-                }
-
-                if let Some(networking) = networking {
-                    config.enable_networking = networking.enabled();
-                    changed = true;
-                }
+                let mut changed = sandbox_runtime.apply(&mut config)?;
 
                 let updated_model_override = if clear_model_override {
                     changed = true;
@@ -1170,6 +1366,30 @@ async fn main() -> Result<()> {
                     );
                 }
             },
+            ConversationCommands::Sandbox { command } => match command {
+                ConversationSandboxCommands::Run {
+                    agent,
+                    conversation,
+                    command,
+                } => {
+                    let agent_handle = must_get_agent(harness.as_ref(), &agent).await?;
+                    let conversation = agent_handle
+                        .get_conversation(&conversation)
+                        .await?
+                        .ok_or_else(|| anyhow!("conversation not found: {}", conversation))?;
+                    let output = run_sandbox_shell_command(
+                        agent_handle.as_ref(),
+                        conversation.as_ref(),
+                        command,
+                    )
+                    .await?;
+                    io::stdout().write_all(output.stdout.as_bytes())?;
+                    io::stderr().write_all(output.stderr.as_bytes())?;
+                    if output.exit_code != 0 {
+                        bail!("sandbox command exited with status {}", output.exit_code);
+                    }
+                }
+            },
             ConversationCommands::Show {
                 agent,
                 conversation,
@@ -1202,18 +1422,30 @@ async fn main() -> Result<()> {
                         .unwrap_or_else(|| "none".to_string())
                 );
                 println!("message_count: {}", messages.len());
-                println!("enable_networking: {}", config.enable_networking);
-                println!(
-                    "effective_enable_networking: {}",
-                    agent_config.enable_networking || config.enable_networking
-                );
                 println!(
                     "shell_program: {}",
-                    config.shell_program.unwrap_or_else(|| "none".to_string())
+                    config.shell_program.as_deref().unwrap_or("none")
+                );
+                println!(
+                    "sandbox_image: {}",
+                    config.sandbox_image.as_deref().unwrap_or("inherit")
                 );
                 println!(
                     "effective_sandbox_image: {}",
-                    agent_config.sandbox_image.as_deref().unwrap_or("default")
+                    config
+                        .effective_sandbox_image(&agent_config)
+                        .unwrap_or("default")
+                );
+                println!(
+                    "sandbox_provider: {}",
+                    config
+                        .sandbox_provider
+                        .map(format_sandbox_provider)
+                        .unwrap_or("inherit")
+                );
+                println!(
+                    "effective_sandbox_provider: {}",
+                    format_sandbox_provider(config.effective_sandbox_provider(&agent_config))
                 );
                 println!(
                     "model_override: {}",
@@ -1303,13 +1535,20 @@ async fn main() -> Result<()> {
         },
         Commands::Secret { command } => match command {
             SecretCommands::List => {
-                println!("SECRET\tTYPE\tCREATED_AT");
-                for secret in harness.exoharness_handle().list_secrets().await? {
-                    println!(
-                        "{}\t{:?}\t{}",
-                        secret.name, secret.r#type, secret.created_at
-                    );
-                }
+                let secrets = harness.exoharness_handle().list_secrets().await?;
+                print_table(
+                    &["SECRET", "TYPE", "CREATED_AT"],
+                    secrets
+                        .into_iter()
+                        .map(|secret| {
+                            vec![
+                                secret.name,
+                                format!("{:?}", secret.r#type),
+                                secret.created_at.to_string(),
+                            ]
+                        })
+                        .collect(),
+                )?;
             }
             SecretCommands::Set { name, env, value } => {
                 let value = match (env, value) {
@@ -1332,16 +1571,21 @@ async fn main() -> Result<()> {
         },
         Commands::Model { command } => match command {
             ModelCommands::List => {
-                println!("MODEL\tUPSTREAM_MODEL\tSECRET\tBASE_URL");
-                for model in list_model_bindings(harness.exoharness_handle().as_ref()).await? {
-                    println!(
-                        "{}\t{}\t{}\t{}",
-                        model.name,
-                        model.model,
-                        model.secret_name.unwrap_or_else(|| "none".to_string()),
-                        model.base_url.unwrap_or_else(|| "default".to_string())
-                    );
-                }
+                let models = list_model_bindings(harness.exoharness_handle().as_ref()).await?;
+                print_table(
+                    &["MODEL", "UPSTREAM_MODEL", "SECRET", "BASE_URL"],
+                    models
+                        .into_iter()
+                        .map(|model| {
+                            vec![
+                                model.name,
+                                model.model,
+                                model.secret_name.unwrap_or_else(|| "none".to_string()),
+                                model.base_url.unwrap_or_else(|| "default".to_string()),
+                            ]
+                        })
+                        .collect(),
+                )?;
             }
             ModelCommands::Register {
                 name,
@@ -1365,6 +1609,9 @@ async fn main() -> Result<()> {
                 println!("registered model {} ({})", name, id);
             }
         },
+        Commands::Serve { .. } => {
+            unreachable!("serve commands are handled before harness instantiation")
+        }
     }
 
     harness.flush_tracing().await?;
@@ -1372,7 +1619,7 @@ async fn main() -> Result<()> {
 }
 
 async fn determine_harness_kind(
-    exo_config: &BasicExoHarnessConfig,
+    exoharness: &dyn ExoHarness,
     selection: Option<&HarnessSelection>,
     command: &Commands,
 ) -> Result<HarnessKind> {
@@ -1384,7 +1631,7 @@ async fn determine_harness_kind(
         return Ok(HarnessKind::Basic);
     };
 
-    Ok(infer_agent_harness_kind(exo_config, agent_ref)
+    Ok(infer_agent_harness_kind(exoharness, agent_ref)
         .await?
         .unwrap_or(HarnessKind::Basic))
 }
@@ -1411,17 +1658,86 @@ fn command_agent_ref(command: &Commands) -> Option<&str> {
                 | ConversationMountCommands::Add { agent, .. }
                 | ConversationMountCommands::Remove { agent, .. } => Some(agent.as_str()),
             },
+            ConversationCommands::Sandbox { command } => match command {
+                ConversationSandboxCommands::Run { agent, .. } => Some(agent.as_str()),
+            },
         },
         Commands::Repl { agent, .. } => Some(agent.as_deref().unwrap_or(DEFAULT_REPL_SLUG)),
-        Commands::Secret { .. } | Commands::Model { .. } => None,
+        Commands::Secret { .. } | Commands::Model { .. } | Commands::Serve { .. } => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ServeConfig {
+    bind: SocketAddr,
+    verbosity: u8,
+}
+
+fn serve_config(command: &Commands) -> Option<ServeConfig> {
+    match command {
+        Commands::Serve { bind, verbose } => Some(ServeConfig {
+            bind: *bind,
+            verbosity: *verbose,
+        }),
+        _ => None,
+    }
+}
+
+async fn serve_exoharness_http(
+    exo_config: &BasicExoHarnessConfig,
+    config: ServeConfig,
+) -> Result<()> {
+    init_serve_tracing(config.verbosity);
+    if !config.bind.ip().is_loopback() {
+        anyhow::bail!(
+            "exo serve only binds loopback addresses; got {}",
+            config.bind
+        );
+    }
+    let exoharness = Arc::new(BasicExoHarness::new(exo_config.clone()).await?);
+    let listener = TcpListener::bind(config.bind)?;
+    let addr = listener.local_addr()?;
+    tracing::info!(
+        target: HTTP_EXOHARNESS_TRACING_TARGET,
+        %addr,
+        "serving exoharness HTTP"
+    );
+    serve_exoharness_http_listener_with_options(
+        listener,
+        exoharness,
+        ExoHarnessHttpServeOptions {
+            verbosity: config.verbosity,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+fn init_serve_tracing(verbosity: u8) {
+    if verbosity == 0 {
+        return;
+    }
+    let level = if verbosity > 1 {
+        tracing_subscriber::filter::LevelFilter::DEBUG
+    } else {
+        tracing_subscriber::filter::LevelFilter::INFO
+    };
+    let filter = tracing_subscriber::filter::Targets::new()
+        .with_target(HTTP_EXOHARNESS_TRACING_TARGET, level);
+    let layer = tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .without_time()
+        .with_writer(std::io::stderr)
+        .with_filter(filter);
+    match tracing_subscriber::registry().with(layer).try_init() {
+        Ok(()) | Err(_) => {}
     }
 }
 
 async fn infer_agent_harness_kind(
-    exo_config: &BasicExoHarnessConfig,
+    exoharness: &dyn ExoHarness,
     agent_ref: &str,
 ) -> Result<Option<HarnessKind>> {
-    let exoharness = BasicExoHarness::new(exo_config.clone()).await?;
     let agent = if let Ok(agent_id) = agent_ref.parse::<Uuid7>() {
         exoharness.get_agent(&agent_id).await?
     } else {
@@ -1439,22 +1755,47 @@ async fn infer_agent_harness_kind(
     Ok(Some(from_agent_harness_kind(config.harness)))
 }
 
-async fn instantiate_harness(
+async fn instantiate_exoharness(
     exo_config: &BasicExoHarnessConfig,
+    http_url: Option<&str>,
+    bearer_token: Option<String>,
+) -> Result<Arc<dyn ExoHarness>> {
+    if let Some(http_url) = http_url {
+        let mut harness = HttpExoHarness::new(http_url)?;
+        if let Some(bearer_token) = bearer_token {
+            harness = harness.with_bearer_token(bearer_token);
+        }
+        let remote: Arc<dyn ExoHarness> = Arc::new(harness);
+        let local: Arc<dyn ExoHarness> = Arc::new(BasicExoHarness::new(exo_config.clone()).await?);
+        return Ok(Arc::new(LocalSandboxExoHarness::new_with_force_local(
+            remote, local, false,
+        )));
+    }
+    Ok(Arc::new(BasicExoHarness::new(exo_config.clone()).await?))
+}
+
+async fn instantiate_harness(
+    exoharness: Arc<dyn ExoHarness>,
     kind: HarnessKind,
     runtime_config: Option<BraintrustRuntimeConfig>,
     env_vars: HashMap<String, String>,
 ) -> Result<Arc<dyn Harness>> {
     let harness: Arc<dyn Harness> = match kind {
-        HarnessKind::Basic => {
-            Arc::new(BasicHarness::from_config(exo_config.clone(), runtime_config, env_vars).await?)
-        }
-        HarnessKind::Rlm => {
-            Arc::new(RlmHarness::from_config(exo_config.clone(), runtime_config, env_vars).await?)
-        }
-        HarnessKind::TypeScript => Arc::new(
-            TypeScriptHarness::from_config(exo_config.clone(), runtime_config, env_vars).await?,
-        ),
+        HarnessKind::Basic => Arc::new(BasicHarness::from_exoharness(
+            exoharness,
+            runtime_config,
+            env_vars,
+        )),
+        HarnessKind::Rlm => Arc::new(RlmHarness::from_exoharness(
+            exoharness,
+            runtime_config,
+            env_vars,
+        )),
+        HarnessKind::TypeScript => Arc::new(TypeScriptHarness::from_exoharness(
+            exoharness,
+            runtime_config,
+            env_vars,
+        )?),
     };
     Ok(harness)
 }
@@ -1480,6 +1821,15 @@ fn format_harness_kind(kind: AgentHarnessKind) -> &'static str {
         AgentHarnessKind::Basic => "basic",
         AgentHarnessKind::Rlm => "rlm",
         AgentHarnessKind::TypeScript => "typescript",
+    }
+}
+
+fn format_sandbox_provider(provider: SandboxProvider) -> &'static str {
+    match provider {
+        SandboxProvider::Daytona => "daytona",
+        SandboxProvider::AppleContainer => "apple-container",
+        SandboxProvider::Docker => "docker",
+        SandboxProvider::LocalProcess => "local-process",
     }
 }
 
@@ -1626,6 +1976,27 @@ fn resolve_typescript_tool_module_paths(paths: &[PathBuf]) -> Result<Vec<String>
         .collect()
 }
 
+fn print_table(headers: &[&str], rows: Vec<Vec<String>>) -> Result<()> {
+    let stdout = io::stdout();
+    let mut writer = TabWriter::new(stdout.lock()).padding(2);
+    write_table_row(&mut writer, headers)?;
+    for row in rows {
+        write_table_row(&mut writer, &row)?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_table_row<T: AsRef<str>, W: Write>(writer: &mut W, values: &[T]) -> io::Result<()> {
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            write!(writer, "\t")?;
+        }
+        write!(writer, "{}", value.as_ref())?;
+    }
+    writeln!(writer)
+}
+
 struct RegisteredModel {
     name: String,
     model: String,
@@ -1637,12 +2008,12 @@ async fn list_model_bindings(exoharness: &dyn ExoHarness) -> Result<Vec<Register
     let secrets = exoharness.list_secrets().await?;
     let mut models = Vec::new();
     for metadata in exoharness.list_bindings().await? {
-        let Some(Binding::Llm {
+        let Binding::Llm {
             name,
             model,
             base_url,
             secret_id,
-        }) = exoharness.get_binding(&metadata.id).await?
+        } = metadata.binding
         else {
             continue;
         };
@@ -1659,7 +2030,18 @@ async fn list_model_bindings(exoharness: &dyn ExoHarness) -> Result<Vec<Register
             base_url,
         });
     }
-    Ok(models)
+    let mut deduped = Vec::<RegisteredModel>::new();
+    for model in models {
+        if let Some(existing) = deduped
+            .iter_mut()
+            .find(|existing| existing.name == model.name)
+        {
+            *existing = model;
+        } else {
+            deduped.push(model);
+        }
+    }
+    Ok(deduped)
 }
 
 const DEFAULT_REPL_SLUG: &str = "repl";
@@ -1674,6 +2056,27 @@ async fn ensure_repl_model(harness: &dyn Harness, requested: Option<String>) -> 
         .map(|binding| binding.name)
         .collect();
     pick_repl_model(&registered, requested)
+}
+
+async fn ensure_existing_repl_agent_model(
+    harness: &dyn Harness,
+    agent: &dyn HarnessAgent,
+    requested: Option<String>,
+) -> Result<()> {
+    let mut config = agent.config().await?;
+    if !repl_agent_model_needs_update(&config.model, requested.as_deref()) {
+        return Ok(());
+    }
+    let model = ensure_repl_model(harness, requested).await?;
+    if config.model == model {
+        return Ok(());
+    }
+    config.model = model;
+    agent.put_config(config).await
+}
+
+fn repl_agent_model_needs_update(current: &str, requested: Option<&str>) -> bool {
+    requested.is_some() || current.trim().is_empty()
 }
 
 /// Picks the model an explicit request names, falling back to the first
@@ -1833,6 +2236,46 @@ async fn must_get_conversation(
         .ok_or_else(|| anyhow!("conversation not found: {conversation_ref}"))
 }
 
+#[derive(Debug, Deserialize)]
+struct SandboxShellOutput {
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+}
+
+async fn run_sandbox_shell_command(
+    agent: &dyn HarnessAgent,
+    conversation: &dyn HarnessConversation,
+    command: String,
+) -> Result<SandboxShellOutput> {
+    let agent_config = agent.config().await?;
+    let config = conversation.config().await?;
+    if config.shell_program.is_none() {
+        bail!(
+            "shell sandbox is not enabled for this conversation; run `exo conversation update {} {} --shell-program /bin/bash`",
+            agent.record().slug,
+            conversation.record().slug
+        );
+    }
+    let conversation_handle = conversation.exoharness_handle();
+    let runtime = BasicToolRuntime;
+
+    let mut arguments = serde_json::Map::new();
+    arguments.insert("command".to_string(), serde_json::Value::String(command));
+    let result = runtime
+        .execute(
+            conversation_handle.as_ref(),
+            &agent_config,
+            &config,
+            &ToolRequest {
+                function_name: "shell".to_string(),
+                arguments,
+            },
+        )
+        .await?;
+    Ok(serde_json::from_value(result)?)
+}
+
 pub(crate) fn print_message(message: &Message) {
     match message {
         Message::User { content } => {
@@ -1923,9 +2366,28 @@ pub(crate) fn secret_value_from_env_arg(
     env: &str,
     loaded_env: &HashMap<String, String>,
 ) -> Result<String> {
+    env_value_from_arg("--env", env, loaded_env)
+}
+
+fn parse_env_var_name(value: &str) -> std::result::Result<String, String> {
+    if is_env_var_name(value) {
+        Ok(value.to_string())
+    } else {
+        Err(
+            "pass an environment variable name such as OPENAI_API_KEY, not the secret value"
+                .to_string(),
+        )
+    }
+}
+
+fn env_value_from_arg(
+    flag: &str,
+    env: &str,
+    loaded_env: &HashMap<String, String>,
+) -> Result<String> {
     if !is_env_var_name(env) {
         bail!(
-            "invalid --env value; pass an environment variable name such as OPENAI_API_KEY, not the secret value"
+            "invalid {flag} value; pass an environment variable name such as OPENAI_API_KEY, not the secret value"
         );
     }
 
@@ -1933,7 +2395,7 @@ pub(crate) fn secret_value_from_env_arg(
         .get(env)
         .cloned()
         .or_else(|| std::env::var(env).ok())
-        .ok_or_else(|| anyhow!("environment variable passed to --env is not set"))
+        .ok_or_else(|| anyhow!("environment variable passed to {flag} is not set"))
 }
 
 fn is_env_var_name(env: &str) -> bool {
@@ -2023,6 +2485,31 @@ mod create_tests {
     }
 
     #[test]
+    fn agent_update_accepts_preset_set_harness() {
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from([
+            "exo",
+            "agent",
+            "update",
+            "teleport2",
+            "--set-harness",
+            "codex",
+        ])
+        .expect("agent update parses with a preset harness");
+        assert!(matches!(
+            cli.command,
+            super::Commands::Agent {
+                command: super::AgentCommands::Update {
+                    set_harness: Some(super::HarnessSelection::TypeScriptPreset(
+                        super::TypeScriptHarnessPreset::Codex
+                    )),
+                    ..
+                }
+            }
+        ));
+    }
+
+    #[test]
     fn repl_command_accepts_preset_harness_and_conversation() {
         use clap::Parser;
         let cli = super::Cli::try_parse_from([
@@ -2081,6 +2568,95 @@ mod create_tests {
                     prompt,
                 }
             } if agent == "agent" && conversation == "conv" && prompt == "hello"
+        ));
+    }
+
+    #[test]
+    fn conversation_sandbox_run_command_parses() {
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from([
+            "exo",
+            "conversation",
+            "sandbox",
+            "run",
+            "agent",
+            "conv",
+            "pwd && git status",
+        ])
+        .expect("conversation sandbox run parses");
+        assert!(matches!(
+            cli.command,
+            super::Commands::Conversation {
+                command: super::ConversationCommands::Sandbox {
+                    command: super::ConversationSandboxCommands::Run {
+                        agent,
+                        conversation,
+                        command,
+                    },
+                }
+            } if agent == "agent" && conversation == "conv" && command == "pwd && git status"
+        ));
+    }
+
+    #[test]
+    fn exoharness_http_aliases_parse() {
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from([
+            "exo",
+            "--url",
+            "http://localhost:8000/exo/v1/projects/project-id",
+            "--bearer-env",
+            "BRAINTRUST_API_KEY",
+            "agent",
+            "list",
+        ])
+        .expect("HTTP exoharness aliases parse");
+        assert_eq!(
+            cli.exoharness_url.as_deref(),
+            Some("http://localhost:8000/exo/v1/projects/project-id")
+        );
+        assert_eq!(cli.bearer_env.as_deref(), Some("BRAINTRUST_API_KEY"));
+    }
+
+    #[test]
+    fn bearer_env_requires_exoharness_url() {
+        use clap::Parser;
+        let error = super::Cli::try_parse_from([
+            "exo",
+            "--bearer-env",
+            "BRAINTRUST_API_KEY",
+            "agent",
+            "list",
+        ])
+        .expect_err("bearer env should require an exoharness URL");
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    #[test]
+    fn sandbox_provider_local_process_parses() {
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from([
+            "exo",
+            "agent",
+            "create",
+            "test",
+            "--sandbox-provider",
+            "local-process",
+            "--model",
+            "test-model",
+        ])
+        .expect("local-process sandbox provider parses");
+        assert!(matches!(
+            cli.command,
+            super::Commands::Agent {
+                command: super::AgentCommands::Create {
+                    sandbox_provider: Some(super::SandboxProviderArg::LocalProcess),
+                    ..
+                }
+            }
         ));
     }
 }

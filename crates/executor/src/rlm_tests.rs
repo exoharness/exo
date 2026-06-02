@@ -8,24 +8,16 @@ use crate::{
 use anyhow::{anyhow, bail};
 use async_trait::async_trait;
 use exoharness::{
-    BasicExoHarness, BasicExoHarnessConfig, Binding, EventData, EventQuery, EventQueryDirection,
-    ExoHarness, PutSecretRequest, SandboxBackendChoice, Secret, SecretBackendChoice, ToolRequest,
-    Uuid7,
+    BasicExoHarness, Binding, EventData, EventQuery, EventQueryDirection, ExoHarness,
+    PutSecretRequest, Secret, ToolRequest, Uuid7,
 };
-
-fn local_test_config(root: impl Into<std::path::PathBuf>) -> BasicExoHarnessConfig {
-    BasicExoHarnessConfig {
-        root: root.into(),
-        secret_backend: SecretBackendChoice::Static([7u8; 32]),
-        sandbox_backend: SandboxBackendChoice::LocalProcess,
-    }
-}
 use lingua::universal::{AssistantContent, UserContent};
 use lingua::{Message, UniversalStreamChunk};
 use serde_json::{Map, Value};
 use tempfile::TempDir;
 use tokio_stream::StreamExt;
 
+use crate::test_support::local_test_config;
 use crate::{CreateAgentRequest, CreateConversationRequest, Harness, RlmHarness};
 
 #[tokio::test(flavor = "current_thread")]
@@ -73,6 +65,7 @@ async fn rlm_send_executes_repl_steps_and_persists_final_answer() {
             typescript: None,
             enable_agent_tool_creation: true,
             sandbox_image: None,
+            sandbox_provider: Default::default(),
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: Some(512),
@@ -200,6 +193,7 @@ async fn rlm_subquery_variable_can_store_final_answer() {
             typescript: None,
             enable_agent_tool_creation: true,
             sandbox_image: None,
+            sandbox_provider: Default::default(),
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: Some(512),
@@ -265,6 +259,7 @@ async fn rlm_send_stream_suppresses_internal_control_text() {
             typescript: None,
             enable_agent_tool_creation: true,
             sandbox_image: None,
+            sandbox_provider: Default::default(),
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: Some(512),
@@ -367,6 +362,7 @@ globalThis.answer = String(\n\
             typescript: None,
             enable_agent_tool_creation: true,
             sandbox_image: None,
+            sandbox_provider: Default::default(),
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: Some(512),
@@ -437,6 +433,7 @@ async fn rlm_can_finish_by_setting_final_in_repl() {
             typescript: None,
             enable_agent_tool_creation: true,
             sandbox_image: None,
+            sandbox_provider: Default::default(),
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: Some(512),

@@ -234,7 +234,8 @@ export async function resolveLlmBinding(
     await context.exoharness.current.conversation.listBindings()
   )
     .filter((binding) => binding.type === "llm")
-    .find((binding) => binding.name === name);
+    .filter((binding) => binding.name === name)
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
   if (!metadata) {
     throw new Error(
       `model is not registered: ${name}; run \`exo model register ${name} --secret <secret>\``,

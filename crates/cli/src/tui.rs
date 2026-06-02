@@ -7,8 +7,8 @@ use std::time::Duration;
 use anyhow::Result;
 use executor::{
     ConversationHandle, EventData, EventId, EventKind, EventQuery, EventQueryDirection,
-    ExecutionStreamEvent, HarnessConversation, SandboxId, SendRequest, SessionId, SnapshotId,
-    StartSandboxRequest,
+    ExecutionStreamEvent, HarnessAgent, HarnessConversation, SandboxId, SendRequest, SessionId,
+    SnapshotId, StartSandboxRequest,
 };
 use lingua::universal::{UserContent, UserContentPart};
 use lingua::{Message, UniversalStreamChunk};
@@ -19,13 +19,17 @@ use serde_json::{Map, Value};
 use tokio::runtime::Handle;
 use tokio_stream::StreamExt;
 
-use crate::{print_message, render_assistant_content};
+use crate::{print_message, render_assistant_content, run_sandbox_shell_command};
 
+const DEFAULT_SHELL_PROGRAM: &str = "/bin/bash";
 const REMOTE_HISTORY_BASE: usize = 1_000_000;
 const REMOTE_HISTORY_PAGE_SIZE: u32 = 32;
 
-pub async fn run_chat_repl(conversation: Arc<dyn HarnessConversation>) -> Result<()> {
-    let mut repl = ChatRepl::new(conversation)?;
+pub async fn run_chat_repl(
+    agent: Arc<dyn HarnessAgent>,
+    conversation: Arc<dyn HarnessConversation>,
+) -> Result<()> {
+    let mut repl = ChatRepl::new(agent, conversation)?;
     repl.print_transcript().await?;
     repl.run().await
 }
@@ -338,13 +342,17 @@ fn fetch_remote_user_messages(
 }
 
 struct ChatRepl {
+    agent: Arc<dyn HarnessAgent>,
     conversation: Arc<dyn HarnessConversation>,
     editor: Editor<(), ChatHistory>,
     session_id: Option<SessionId>,
 }
 
 impl ChatRepl {
-    fn new(conversation: Arc<dyn HarnessConversation>) -> Result<Self> {
+    fn new(
+        agent: Arc<dyn HarnessAgent>,
+        conversation: Arc<dyn HarnessConversation>,
+    ) -> Result<Self> {
         let history = ChatHistory::new(
             conversation.exoharness_handle(),
             conversation.record().latest_event_id,
@@ -352,6 +360,7 @@ impl ChatRepl {
         let mut editor = Editor::with_history(Config::default(), history)?;
         editor.bind_sequence(KeyEvent(KeyCode::Enter, Modifiers::ALT), Cmd::Newline);
         Ok(Self {
+            agent,
             conversation,
             editor,
             session_id: None,
@@ -378,6 +387,29 @@ impl ChatRepl {
                         "/quit" | "/exit" => break,
                         "/history" => self.print_transcript().await?,
                         "/help" => print_help(),
+                        "/shell" | "/sandbox" => {
+                            println!("usage: /shell <command>");
+                            println!("alias: /sandbox <command>");
+                        }
+                        other
+                            if other
+                                .strip_prefix("/shell ")
+                                .or_else(|| other.strip_prefix("/sandbox "))
+                                .is_some() =>
+                        {
+                            let command = other
+                                .strip_prefix("/shell ")
+                                .or_else(|| other.strip_prefix("/sandbox "))
+                                .expect("shell prefix should exist")
+                                .trim();
+                            if command.is_empty() {
+                                println!("usage: /shell <command>");
+                                println!("alias: /sandbox <command>");
+                            } else {
+                                self.editor.add_history_entry(line.as_str())?;
+                                self.run_shell(command).await?;
+                            }
+                        }
                         "/snapshot" => match self.snapshot_sandbox(None).await {
                             Ok(snapshot_id) => println!("snapshot {snapshot_id}"),
                             Err(error) => println!("snapshot failed: {error:#}"),
@@ -554,6 +586,26 @@ impl ChatRepl {
             }
         }
         println!();
+        Ok(())
+    }
+
+    async fn run_shell(&self, command: &str) -> Result<()> {
+        let mut config = self.conversation.config().await?;
+        if config.shell_program.is_none() {
+            config.shell_program = Some(DEFAULT_SHELL_PROGRAM.to_string());
+            self.conversation.put_config(config).await?;
+        }
+        let output = run_sandbox_shell_command(
+            self.agent.as_ref(),
+            self.conversation.as_ref(),
+            command.to_string(),
+        )
+        .await?;
+        io::stdout().write_all(output.stdout.as_bytes())?;
+        io::stderr().write_all(output.stderr.as_bytes())?;
+        if output.exit_code != 0 {
+            println!("[exit {}]", output.exit_code);
+        }
         Ok(())
     }
 }

@@ -7,26 +7,19 @@ use crate::{
 use anyhow::anyhow;
 use async_trait::async_trait;
 use exoharness::{
-    BasicExoHarness, BasicExoHarnessConfig, Binding, EventData, EventKind, EventQuery,
-    EventQueryDirection, ExoHarness, FileSystemMount, FileSystemMountMode, PutSecretRequest,
-    Result, SandboxBackendChoice, Secret, SecretBackendChoice, ToolRequest, Uuid7,
+    BasicExoHarness, Binding, EventData, EventKind, EventQuery, EventQueryDirection, ExoHarness,
+    FileSystemMount, FileSystemMountMode, PutSecretRequest, Result, SandboxProvider, Secret,
+    ToolRequest, Uuid7,
 };
-
-fn local_test_config(root: impl Into<std::path::PathBuf>) -> BasicExoHarnessConfig {
-    BasicExoHarnessConfig {
-        root: root.into(),
-        secret_backend: SecretBackendChoice::Static([7u8; 32]),
-        sandbox_backend: SandboxBackendChoice::LocalProcess,
-    }
-}
 use lingua::universal::{AssistantContent, UserContent};
 use lingua::{Message, UniversalStreamChunk};
 use serde_json::{Map, Value};
 use tempfile::TempDir;
 
+use crate::test_support::local_test_config;
 use crate::{
     BasicHarness, BasicToolRuntime, ConversationModelConfig, CreateAgentRequest,
-    CreateConversationRequest, Harness,
+    CreateConversationRequest, Harness, harness_tool::ensure_shell_sandbox,
 };
 
 #[tokio::test(flavor = "current_thread")]
@@ -51,7 +44,8 @@ async fn creates_agents_and_conversations_with_persisted_config() {
             harness: crate::AgentHarnessKind::Basic,
             typescript: None,
             enable_agent_tool_creation: true,
-            sandbox_image: None,
+            sandbox_image: Some("agent-image".to_string()),
+            sandbox_provider: SandboxProvider::Docker,
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: Some(512),
@@ -64,6 +58,7 @@ async fn creates_agents_and_conversations_with_persisted_config() {
         .create_conversation(CreateConversationRequest {
             slug: Some("session".to_string()),
             name: Some("Session".to_string()),
+            ..Default::default()
         })
         .await
         .expect("conversation should be created");
@@ -84,13 +79,21 @@ async fn creates_agents_and_conversations_with_persisted_config() {
         stored_agent.config().await.expect("agent config").model,
         "gpt-5.4"
     );
+    let stored_conversation_config = stored_conversation
+        .config()
+        .await
+        .expect("conversation config");
     assert_eq!(
-        stored_conversation
-            .config()
-            .await
-            .expect("conversation config")
-            .shell_program,
+        stored_conversation_config.shell_program,
         Some("/bin/bash".to_string())
+    );
+    assert_eq!(
+        stored_conversation_config.sandbox_image,
+        Some("agent-image".to_string())
+    );
+    assert_eq!(
+        stored_conversation_config.sandbox_provider,
+        Some(SandboxProvider::Docker)
     );
     assert_eq!(conversation.record().slug, "session");
 }
@@ -123,6 +126,7 @@ async fn send_persists_messages_through_harness() {
             typescript: None,
             enable_agent_tool_creation: true,
             sandbox_image: None,
+            sandbox_provider: Default::default(),
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: None,
@@ -148,6 +152,24 @@ async fn send_persists_messages_through_harness() {
     assert_eq!(messages.len(), 2);
     assert!(matches!(messages[0], Message::User { .. }));
     assert!(matches!(messages[1], Message::Assistant { .. }));
+
+    let sandbox_events = conversation
+        .exoharness_handle()
+        .get_events(Some(EventQuery {
+            cursor: None,
+            direction: Some(EventQueryDirection::Asc),
+            limit: None,
+            session_id: None,
+            turn_id: None,
+            types: Some(vec![EventKind::SANDBOX_CREATED]),
+        }))
+        .await
+        .expect("sandbox events should load")
+        .events;
+    assert!(
+        sandbox_events.is_empty(),
+        "plain chat should not provision a sandbox"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -178,6 +200,7 @@ async fn close_session_appends_session_ended_event() {
             typescript: None,
             enable_agent_tool_creation: true,
             sandbox_image: None,
+            sandbox_provider: Default::default(),
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: None,
@@ -258,6 +281,7 @@ async fn updating_agent_config_refreshes_executor_cache() {
             typescript: None,
             enable_agent_tool_creation: true,
             sandbox_image: None,
+            sandbox_provider: Default::default(),
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: None,
@@ -338,7 +362,8 @@ async fn send_executes_shell_tool_when_enabled() {
             harness: crate::AgentHarnessKind::Basic,
             typescript: None,
             enable_agent_tool_creation: true,
-            sandbox_image: None,
+            sandbox_image: Some("agent-image".to_string()),
+            sandbox_provider: Default::default(),
             enable_networking: true,
             model: "gpt-5.4".to_string(),
             max_output_tokens: None,
@@ -357,6 +382,8 @@ async fn send_executes_shell_tool_when_enabled() {
         .await
         .expect("conversation config should load");
     conversation_config.shell_program = Some("/bin/sh".to_string());
+    conversation_config.sandbox_image = Some("conversation-image".to_string());
+    conversation_config.sandbox_provider = Some(SandboxProvider::LocalProcess);
     conversation
         .put_config(conversation_config)
         .await
@@ -399,9 +426,11 @@ async fn send_executes_shell_tool_when_enabled() {
     assert!(matches!(
         &sandbox_events[0].data,
         EventData::SandboxCreated {
+            provider: SandboxProvider::LocalProcess,
+            image,
             enable_networking: true,
             ..
-        }
+        } if image == "conversation-image"
     ));
 }
 
@@ -428,6 +457,7 @@ async fn harness_exposes_raw_exoharness_handles() {
             typescript: None,
             enable_agent_tool_creation: true,
             sandbox_image: None,
+            sandbox_provider: Default::default(),
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: None,
@@ -486,8 +516,32 @@ async fn updating_mounts_recreates_shell_sandbox() {
     let model = Arc::new(FakeModelClient::new(vec![
         ModelResponse {
             response_id: Some(Uuid7::now()),
+            messages: Vec::new(),
+            tool_calls: vec![PendingToolCall {
+                tool_call_id: "call-1".to_string(),
+                request: ToolRequest {
+                    function_name: "shell".to_string(),
+                    arguments: shell_command_arguments("printf first"),
+                },
+            }],
+            usage: None,
+        },
+        ModelResponse {
+            response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("done-1")],
             tool_calls: Vec::new(),
+            usage: None,
+        },
+        ModelResponse {
+            response_id: Some(Uuid7::now()),
+            messages: Vec::new(),
+            tool_calls: vec![PendingToolCall {
+                tool_call_id: "call-2".to_string(),
+                request: ToolRequest {
+                    function_name: "shell".to_string(),
+                    arguments: shell_command_arguments("printf second"),
+                },
+            }],
             usage: None,
         },
         ModelResponse {
@@ -508,6 +562,7 @@ async fn updating_mounts_recreates_shell_sandbox() {
             typescript: None,
             enable_agent_tool_creation: true,
             sandbox_image: None,
+            sandbox_provider: Default::default(),
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: None,
@@ -598,6 +653,101 @@ async fn updating_mounts_recreates_shell_sandbox() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn updating_sandbox_image_recreates_shell_sandbox_without_shell_program() {
+    let tempdir = TempDir::new().expect("tempdir should exist");
+    let exoharness = Arc::new(
+        BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
+            .await
+            .expect("basic exoharness should initialize"),
+    );
+    let harness = BasicHarness::new(
+        exoharness,
+        Arc::new(FakeModelClient::default()),
+        Arc::new(BasicToolRuntime),
+    );
+
+    let agent = harness
+        .create_agent(CreateAgentRequest {
+            slug: "demo".to_string(),
+            name: Some("Demo".to_string()),
+            harness: crate::AgentHarnessKind::Basic,
+            typescript: None,
+            enable_agent_tool_creation: true,
+            sandbox_image: None,
+            sandbox_provider: Default::default(),
+            enable_networking: false,
+            model: "gpt-5.4".to_string(),
+            max_output_tokens: None,
+            max_tool_round_trips: Some(1),
+            braintrust: None,
+        })
+        .await
+        .expect("agent should be created");
+    let conversation = agent
+        .create_conversation(CreateConversationRequest::default())
+        .await
+        .expect("conversation should be created");
+    let agent_config = agent.config().await.expect("agent config should load");
+
+    let mut conversation_config = conversation
+        .config()
+        .await
+        .expect("conversation config should load");
+    conversation_config.shell_program = None;
+    conversation_config.sandbox_image = Some("first-image".to_string());
+    conversation
+        .put_config(conversation_config.clone())
+        .await
+        .expect("conversation config should update");
+
+    let first_sandbox_id = ensure_shell_sandbox(
+        conversation.exoharness_handle().as_ref(),
+        &agent_config,
+        &conversation_config,
+    )
+    .await
+    .expect("first sandbox should be created");
+
+    conversation_config.sandbox_image = Some("second-image".to_string());
+    conversation
+        .put_config(conversation_config.clone())
+        .await
+        .expect("conversation config should update again");
+
+    let second_sandbox_id = ensure_shell_sandbox(
+        conversation.exoharness_handle().as_ref(),
+        &agent_config,
+        &conversation_config,
+    )
+    .await
+    .expect("second sandbox should be created");
+
+    assert_ne!(first_sandbox_id, second_sandbox_id);
+    let sandbox_events = conversation
+        .exoharness_handle()
+        .get_events(Some(EventQuery {
+            cursor: None,
+            direction: Some(EventQueryDirection::Asc),
+            limit: None,
+            session_id: None,
+            turn_id: None,
+            types: Some(vec![EventKind::SANDBOX_CREATED]),
+        }))
+        .await
+        .expect("get sandbox events")
+        .events;
+    assert_eq!(sandbox_events.len(), 2);
+    assert!(matches!(
+        &sandbox_events[0].data,
+        EventData::SandboxCreated { image, .. } if image == "first-image"
+    ));
+    assert!(matches!(
+        &sandbox_events[1].data,
+        EventData::SandboxCreated { image, .. } if image == "second-image"
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn conversation_model_override_changes_effective_model() {
     let tempdir = TempDir::new().expect("tempdir should exist");
     let exoharness: Arc<dyn ExoHarness> = Arc::new(
@@ -636,6 +786,7 @@ async fn conversation_model_override_changes_effective_model() {
             typescript: None,
             enable_agent_tool_creation: true,
             sandbox_image: None,
+            sandbox_provider: Default::default(),
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: Some(512),

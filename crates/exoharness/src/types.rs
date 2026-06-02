@@ -22,7 +22,7 @@ pub trait ExoHarness: Send + Sync {
     async fn new_agent(&self, request: NewAgentRequest) -> Result<Arc<dyn AgentHandle>>;
     async fn delete_agent(&self, id: &AgentId) -> Result<bool>;
 
-    async fn list_bindings(&self) -> Result<Vec<BindingMetadata>>;
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>>;
     async fn put_binding(&self, binding: Binding) -> Result<BindingId>;
     async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>>;
 
@@ -46,7 +46,7 @@ pub trait AgentHandle: Send + Sync {
     ) -> Result<Arc<dyn ConversationHandle>>;
     async fn delete_conversation(&self, id: &ConversationId) -> Result<bool>;
 
-    async fn list_bindings(&self) -> Result<Vec<BindingMetadata>>;
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>>;
     async fn put_binding(&self, binding: Binding) -> Result<BindingId>;
     async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>>;
 
@@ -66,6 +66,10 @@ pub trait ConversationHandle: Send + Sync {
     async fn start_session(&self) -> Result<SessionId>;
     async fn end_session(&self, id: SessionId) -> Result<()>;
     async fn begin_turn(&self, request: BeginTurnRequest) -> Result<Arc<dyn TurnHandle>>;
+    /// Rebuilds the local TurnHandle facade for an already-created turn.
+    /// The durable identity is the agent, conversation, session, and turn ids;
+    /// this method only bundles those ids back into the trait object API.
+    async fn turn_handle(&self, record: TurnRecord) -> Result<Arc<dyn TurnHandle>>;
 
     async fn get_events(&self, query: Option<EventQuery>) -> Result<GetEventsResult>;
     async fn watch_events(&self, after_exclusive: Bound<EventId>) -> Result<EventStream>;
@@ -81,10 +85,34 @@ pub trait ConversationHandle: Send + Sync {
     async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId>;
     async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()>;
     async fn stop_sandbox(&self, id: SandboxId) -> Result<()>;
+    async fn start_sandbox_process(
+        &self,
+        request: StartSandboxProcessRequest,
+    ) -> Result<SandboxProcessRecord>;
+    async fn write_sandbox_process_input(
+        &self,
+        request: WriteSandboxProcessInputRequest,
+    ) -> Result<()>;
+    async fn close_sandbox_process_input(
+        &self,
+        request: CloseSandboxProcessInputRequest,
+    ) -> Result<()>;
+    async fn get_sandbox_process_events(
+        &self,
+        query: SandboxProcessEventQuery,
+    ) -> Result<GetSandboxProcessEventsResult>;
+    async fn wait_sandbox_process(
+        &self,
+        request: WaitSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus>;
+    async fn cancel_sandbox_process(
+        &self,
+        request: CancelSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus>;
     async fn run_in_sandbox(&self, request: RunInSandboxRequest)
     -> Result<Box<dyn SandboxProcess>>;
 
-    async fn list_bindings(&self) -> Result<Vec<BindingMetadata>>;
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>>;
     async fn put_binding(&self, binding: Binding) -> Result<BindingId>;
     async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>>;
 
@@ -165,6 +193,9 @@ pub struct EventQuery {
 pub struct EventKind(Cow<'static, str>);
 
 impl EventKind {
+    pub const CONVERSATION_CREATED: EventKind = EventKind(Cow::Borrowed("conversation_created"));
+    pub const CONVERSATION_UPDATED: EventKind = EventKind(Cow::Borrowed("conversation_updated"));
+    pub const CONVERSATION_DELETED: EventKind = EventKind(Cow::Borrowed("conversation_deleted"));
     pub const CONVERSATION_FORKED: EventKind = EventKind(Cow::Borrowed("conversation_forked"));
     pub const SESSION_STARTED: EventKind = EventKind(Cow::Borrowed("session_started"));
     pub const SESSION_ENDED: EventKind = EventKind(Cow::Borrowed("session_ended"));
@@ -178,6 +209,11 @@ impl EventKind {
     pub const SANDBOX_STARTED: EventKind = EventKind(Cow::Borrowed("sandbox_started"));
     pub const SANDBOX_STOPPED: EventKind = EventKind(Cow::Borrowed("sandbox_stopped"));
     pub const SANDBOX_SNAPSHOTTED: EventKind = EventKind(Cow::Borrowed("sandbox_snapshotted"));
+    pub const SANDBOX_PROCESS_STARTED: EventKind =
+        EventKind(Cow::Borrowed("sandbox_process_started"));
+    pub const SANDBOX_PROCESS_STATE_UPDATED: EventKind =
+        EventKind(Cow::Borrowed("sandbox_process_state_updated"));
+    pub const SANDBOX_PROCESS_EVENT: EventKind = EventKind(Cow::Borrowed("sandbox_process_event"));
 
     pub fn custom(name: impl Into<Cow<'static, str>>) -> Self {
         Self(name.into())
@@ -235,6 +271,15 @@ pub struct Event {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventData {
+    ConversationCreated {
+        slug: String,
+        name: String,
+    },
+    ConversationUpdated {
+        slug: Option<String>,
+        name: Option<String>,
+    },
+    ConversationDeleted,
     ConversationForked {
         source_conversation_id: ConversationId,
         up_to_inclusive: Option<EventId>,
@@ -263,6 +308,8 @@ pub enum EventData {
     },
     SandboxCreated {
         sandbox_id: SandboxId,
+        #[serde(default)]
+        provider: SandboxProvider,
         image: String,
         default_workdir: String,
         file_system_mounts: Vec<FileSystemMount>,
@@ -280,6 +327,29 @@ pub enum EventData {
         sandbox_id: SandboxId,
         snapshot_id: SnapshotId,
     },
+    SandboxProcessStarted {
+        sandbox_id: SandboxId,
+        process_id: SandboxProcessId,
+        command: Vec<String>,
+        cwd: Option<String>,
+        mode: SandboxProcessMode,
+        stdin: SandboxProcessStdin,
+        output: SandboxProcessOutput,
+        lifecycle: SandboxProcessLifecycle,
+        status: SandboxProcessStatus,
+        provider_state: Option<Value>,
+    },
+    SandboxProcessStateUpdated {
+        sandbox_id: SandboxId,
+        process_id: SandboxProcessId,
+        status: SandboxProcessStatus,
+        provider_state: Option<Value>,
+    },
+    SandboxProcessEvent {
+        sandbox_id: SandboxId,
+        process_id: SandboxProcessId,
+        event: SandboxProcessEvent,
+    },
     Custom {
         event_type: String,
         payload: Value,
@@ -291,6 +361,9 @@ impl EventData {
     /// `EventQuery::types` filter on `get_events`.
     pub fn kind(&self) -> EventKind {
         match self {
+            Self::ConversationCreated { .. } => EventKind::CONVERSATION_CREATED,
+            Self::ConversationUpdated { .. } => EventKind::CONVERSATION_UPDATED,
+            Self::ConversationDeleted => EventKind::CONVERSATION_DELETED,
             Self::ConversationForked { .. } => EventKind::CONVERSATION_FORKED,
             Self::SessionStarted => EventKind::SESSION_STARTED,
             Self::SessionEnded => EventKind::SESSION_ENDED,
@@ -304,6 +377,9 @@ impl EventData {
             Self::SandboxStarted { .. } => EventKind::SANDBOX_STARTED,
             Self::SandboxStopped { .. } => EventKind::SANDBOX_STOPPED,
             Self::SandboxSnapshotted { .. } => EventKind::SANDBOX_SNAPSHOTTED,
+            Self::SandboxProcessStarted { .. } => EventKind::SANDBOX_PROCESS_STARTED,
+            Self::SandboxProcessStateUpdated { .. } => EventKind::SANDBOX_PROCESS_STATE_UPDATED,
+            Self::SandboxProcessEvent { .. } => EventKind::SANDBOX_PROCESS_EVENT,
             Self::Custom { event_type, .. } => EventKind::custom(event_type.clone()),
         }
     }
@@ -361,11 +437,33 @@ pub struct FileSystemMount {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreateSandboxRequest {
+    #[serde(default)]
+    pub provider: SandboxProvider,
     pub image: String,
     pub default_workdir: Option<String>,
     pub file_system_mounts: Option<Vec<FileSystemMount>>,
     pub enable_networking: Option<bool>,
     pub idle_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxProvider {
+    #[default]
+    Daytona,
+    AppleContainer,
+    Docker,
+    #[serde(alias = "local")]
+    LocalProcess,
+}
+
+impl SandboxProvider {
+    pub fn is_local(self) -> bool {
+        matches!(
+            self,
+            Self::AppleContainer | Self::Docker | Self::LocalProcess
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -383,6 +481,141 @@ pub struct RunInSandboxRequest {
     pub env: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StartSandboxProcessRequest {
+    pub sandbox_id: SandboxId,
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub mode: SandboxProcessMode,
+    #[serde(default)]
+    pub stdin: SandboxProcessStdin,
+    #[serde(default)]
+    pub output: SandboxProcessOutput,
+    #[serde(default)]
+    pub lifecycle: SandboxProcessLifecycle,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxProcessMode {
+    #[default]
+    Exec,
+    Pty,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxProcessStdin {
+    None,
+    #[default]
+    Open,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxProcessOutput {
+    Buffered,
+    #[default]
+    Stream,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxProcessLifecycle {
+    #[default]
+    Attached,
+    Detached,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SandboxProcessRecord {
+    pub id: SandboxProcessId,
+    pub sandbox_id: SandboxId,
+    pub status: SandboxProcessStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SandboxProcessStatus {
+    Running,
+    Exited { exit_code: i32 },
+    Failed { message: String },
+    Cancelled,
+}
+
+impl SandboxProcessStatus {
+    pub fn is_running(&self) -> bool {
+        matches!(self, Self::Running)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SandboxProcessEventQuery {
+    pub sandbox_id: SandboxId,
+    pub process_id: SandboxProcessId,
+    pub after: Option<u64>,
+    pub limit: Option<u32>,
+    pub follow: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GetSandboxProcessEventsResult {
+    pub events: Vec<SandboxProcessEvent>,
+    pub cursor: Option<u64>,
+    pub status: SandboxProcessStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SandboxProcessEvent {
+    Stdout { cursor: u64, data: Vec<u8> },
+    Stderr { cursor: u64, data: Vec<u8> },
+    Exit { cursor: u64, exit_code: i32 },
+    Error { cursor: u64, message: String },
+    Cancelled { cursor: u64 },
+}
+
+impl SandboxProcessEvent {
+    pub fn cursor(&self) -> u64 {
+        match self {
+            Self::Stdout { cursor, .. }
+            | Self::Stderr { cursor, .. }
+            | Self::Exit { cursor, .. }
+            | Self::Error { cursor, .. }
+            | Self::Cancelled { cursor } => *cursor,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WriteSandboxProcessInputRequest {
+    pub sandbox_id: SandboxId,
+    pub process_id: SandboxProcessId,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloseSandboxProcessInputRequest {
+    pub sandbox_id: SandboxId,
+    pub process_id: SandboxProcessId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WaitSandboxProcessRequest {
+    pub sandbox_id: SandboxId,
+    pub process_id: SandboxProcessId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CancelSandboxProcessRequest {
+    pub sandbox_id: SandboxId,
+    pub process_id: SandboxProcessId,
+    pub signal: Option<String>,
+}
+
 #[async_trait]
 pub trait SandboxProcess: Send {
     fn into_parts(self: Box<Self>) -> SandboxProcessParts;
@@ -396,11 +629,12 @@ pub struct SandboxProcessParts {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BindingMetadata {
+pub struct BindingRecord {
     pub id: BindingId,
     pub r#type: BindingType,
     pub name: String,
     pub created_at: DateTimeUtc,
+    pub binding: Binding,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -474,6 +708,7 @@ pub type ResponseId = Uuid7;
 pub type ToolCallId = String;
 pub type ArtifactId = Uuid7;
 pub type SandboxId = String;
+pub type SandboxProcessId = String;
 pub type SnapshotId = Uuid7;
 pub type BindingId = Uuid7;
 pub type SecretId = Uuid7;
@@ -488,7 +723,7 @@ crate::impl_has_uuid7_id!(AgentRecord, id);
 crate::impl_has_uuid7_id!(ConversationRecord, id);
 crate::impl_has_uuid7_id!(TurnRecord, id);
 crate::impl_has_uuid7_id!(Event, id);
-crate::impl_has_uuid7_id!(BindingMetadata, id);
+crate::impl_has_uuid7_id!(BindingRecord, id);
 crate::impl_has_uuid7_id!(SecretMetadata, id);
 
 #[cfg(test)]
