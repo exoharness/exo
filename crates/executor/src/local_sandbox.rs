@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use exoharness::{
     AddEventsRequest, AddEventsResult, AgentHandle, AgentId, Artifact, ArtifactVersion, Binding,
     BindingId, BindingRecord, CancelSandboxProcessRequest, CloseSandboxProcessInputRequest,
-    ConversationHandle, ConversationId, CreateSandboxRequest, Event, EventData, EventId,
+    ConversationHandle, ConversationId, CreateSandboxRequest, Event, EventData, EventId, EventKind,
     EventStream, ExoHarness, ForkConversationRequest, GetEventsResult, NewAgentRequest,
     NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result, RunInSandboxRequest,
     SandboxId, SandboxProcess, SandboxProcessEventQuery, SandboxProcessRecord,
@@ -292,7 +292,7 @@ impl LocalSandboxConversation {
                 limit: None,
                 session_id: None,
                 turn_id: None,
-                types: Some(vec![LOCAL_SANDBOX_MAP_EVENT.to_string()]),
+                types: Some(vec![EventKind::custom(LOCAL_SANDBOX_MAP_EVENT)]),
             }))
             .await?
             .events;

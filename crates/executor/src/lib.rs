@@ -35,11 +35,12 @@ pub use executor_types::{
 };
 pub use exoharness::{
     AgentHandle, BasicExoHarness, BasicExoHarnessConfig, Binding, BindingRecord,
-    ConversationHandle, DEFAULT_SANDBOX_IMAGE, EventData, EventId, EventQuery, EventQueryDirection,
-    ExoHarness, ExoHarnessHttpServeOptions, FileSystemMount, FileSystemMountMode,
-    ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET, HttpExoHarness, PutSecretRequest,
-    SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxProvider, Secret, SecretBackendChoice,
-    SecretMetadata, SessionId, ToolRequest, Uuid7, serve_exoharness_http_listener,
+    ConversationHandle, DEFAULT_SANDBOX_IMAGE, EventData, EventId, EventKind, EventQuery,
+    EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions, FileSystemMount,
+    FileSystemMountMode, ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET, HttpExoHarness,
+    PutSecretRequest, SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxId, SandboxProvider,
+    Secret, SecretBackendChoice, SecretMetadata, SessionId, SnapshotId, StartSandboxRequest,
+    ToolRequest, Uuid7, serve_exoharness_http_listener,
     serve_exoharness_http_listener_with_options,
 };
 pub use harness_basic::BasicHarness;

@@ -1,9 +1,9 @@
 use crate::{AgentConfig, ConversationConfig, ToolRuntime};
 use async_trait::async_trait;
 use exoharness::{
-    ConversationHandle, CreateSandboxRequest, DEFAULT_SANDBOX_IMAGE, EventData, EventQuery,
-    EventQueryDirection, FileSystemMount, FileSystemMountMode, Result, RunInSandboxRequest,
-    SandboxProvider, ToolRequest, ToolResult,
+    ConversationHandle, CreateSandboxRequest, DEFAULT_SANDBOX_IMAGE, EventData, EventKind,
+    EventQuery, EventQueryDirection, FileSystemMount, FileSystemMountMode, Result,
+    RunInSandboxRequest, SandboxProvider, ToolRequest, ToolResult,
 };
 use futures::io::AsyncReadExt;
 use serde::{Deserialize, Serialize};
@@ -185,13 +185,16 @@ async fn latest_shell_sandbox(
             limit: Some(50),
             session_id: None,
             turn_id: None,
-            types: Some(vec!["sandbox_created".to_string()]),
+            types: Some(vec![EventKind::SANDBOX_CREATED]),
         }))
         .await?
         .events;
 
-    for event in events {
-        if let EventData::SandboxCreated {
+    let Some(event) = events.into_iter().next() else {
+        return Ok(None);
+    };
+    match event.data {
+        EventData::SandboxCreated {
             sandbox_id,
             provider,
             image,
@@ -199,21 +202,23 @@ async fn latest_shell_sandbox(
             file_system_mounts,
             enable_networking,
             idle_seconds,
-        } = event.data
-        {
+        } => {
             if provider != desired_provider {
-                continue;
+                return Ok(None);
             }
-            return Ok(Some(ShellSandboxInfo {
+            Ok(Some(ShellSandboxInfo {
                 id: sandbox_id,
                 image,
                 default_workdir,
                 file_system_mounts,
                 enable_networking,
                 idle_seconds,
-            }));
+            }))
         }
+        other => Err(anyhow::anyhow!(
+            "type-filtered query for {} returned unexpected variant {}",
+            EventKind::SANDBOX_CREATED.as_str(),
+            other.kind().as_str(),
+        )),
     }
-
-    Ok(None)
 }

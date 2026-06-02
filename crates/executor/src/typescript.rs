@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use exoharness::{
     AddEventsRequest, AgentHandle, AgentId, BasicExoHarness, BasicExoHarnessConfig,
     CancelSandboxProcessRequest, CloseSandboxProcessInputRequest, ConversationHandle,
-    ConversationId, EventData, EventQuery, EventQueryDirection, ExoHarness,
+    ConversationId, EventData, EventKind, EventQuery, EventQueryDirection, ExoHarness,
     GetSandboxProcessEventsResult, Result, SandboxId, SandboxProcessEvent,
     SandboxProcessEventQuery, SandboxProcessId, SandboxProcessLifecycle, SandboxProcessMode,
     SandboxProcessStatus, SandboxProcessStdin, StartSandboxProcessRequest, ToolArguments,
@@ -660,7 +660,9 @@ async fn reusable_sandbox_process(
             limit: Some(100),
             session_id: None,
             turn_id: None,
-            types: Some(vec![TYPESCRIPT_SANDBOX_PROCESS_REUSE_EVENT.to_string()]),
+            types: Some(vec![EventKind::custom(
+                TYPESCRIPT_SANDBOX_PROCESS_REUSE_EVENT,
+            )]),
         }))
         .await?
         .events;

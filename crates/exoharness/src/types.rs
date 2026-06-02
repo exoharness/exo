@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Bound;
 use std::pin::Pin;
@@ -175,7 +176,52 @@ pub struct EventQuery {
     pub limit: Option<u32>,
     pub session_id: Option<SessionId>,
     pub turn_id: Option<TurnId>,
-    pub types: Option<Vec<String>>,
+    pub types: Option<Vec<EventKind>>,
+}
+
+/// Tag identifying an `EventData` variant — used by `EventQuery::types` to
+/// filter events by kind without stringly comparing snake_case names. The
+/// constants below cover every built-in variant; `EventKind::custom(name)`
+/// is the escape hatch for `EventData::Custom { event_type, .. }`.
+///
+/// Wire format is the same single-string-per-kind shape the underlying
+/// `EventData` serde tag uses (`#[serde(transparent)]`), so changing
+/// `EventQuery::types` from `Vec<String>` to `Vec<EventKind>` is a
+/// source-level change only.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EventKind(Cow<'static, str>);
+
+impl EventKind {
+    pub const CONVERSATION_CREATED: EventKind = EventKind(Cow::Borrowed("conversation_created"));
+    pub const CONVERSATION_UPDATED: EventKind = EventKind(Cow::Borrowed("conversation_updated"));
+    pub const CONVERSATION_DELETED: EventKind = EventKind(Cow::Borrowed("conversation_deleted"));
+    pub const CONVERSATION_FORKED: EventKind = EventKind(Cow::Borrowed("conversation_forked"));
+    pub const SESSION_STARTED: EventKind = EventKind(Cow::Borrowed("session_started"));
+    pub const SESSION_ENDED: EventKind = EventKind(Cow::Borrowed("session_ended"));
+    pub const TURN_STARTED: EventKind = EventKind(Cow::Borrowed("turn_started"));
+    pub const TURN_ENDED: EventKind = EventKind(Cow::Borrowed("turn_ended"));
+    pub const MESSAGES: EventKind = EventKind(Cow::Borrowed("messages"));
+    pub const TOOL_REQUESTED: EventKind = EventKind(Cow::Borrowed("tool_requested"));
+    pub const TOOL_RESULT: EventKind = EventKind(Cow::Borrowed("tool_result"));
+    pub const ARTIFACT_WRITTEN: EventKind = EventKind(Cow::Borrowed("artifact_written"));
+    pub const SANDBOX_CREATED: EventKind = EventKind(Cow::Borrowed("sandbox_created"));
+    pub const SANDBOX_STARTED: EventKind = EventKind(Cow::Borrowed("sandbox_started"));
+    pub const SANDBOX_STOPPED: EventKind = EventKind(Cow::Borrowed("sandbox_stopped"));
+    pub const SANDBOX_SNAPSHOTTED: EventKind = EventKind(Cow::Borrowed("sandbox_snapshotted"));
+    pub const SANDBOX_PROCESS_STARTED: EventKind =
+        EventKind(Cow::Borrowed("sandbox_process_started"));
+    pub const SANDBOX_PROCESS_STATE_UPDATED: EventKind =
+        EventKind(Cow::Borrowed("sandbox_process_state_updated"));
+    pub const SANDBOX_PROCESS_EVENT: EventKind = EventKind(Cow::Borrowed("sandbox_process_event"));
+
+    pub fn custom(name: impl Into<Cow<'static, str>>) -> Self {
+        Self(name.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -308,6 +354,35 @@ pub enum EventData {
         event_type: String,
         payload: Value,
     },
+}
+
+impl EventData {
+    /// Tag identifying this event's variant. Source of truth for the
+    /// `EventQuery::types` filter on `get_events`.
+    pub fn kind(&self) -> EventKind {
+        match self {
+            Self::ConversationCreated { .. } => EventKind::CONVERSATION_CREATED,
+            Self::ConversationUpdated { .. } => EventKind::CONVERSATION_UPDATED,
+            Self::ConversationDeleted => EventKind::CONVERSATION_DELETED,
+            Self::ConversationForked { .. } => EventKind::CONVERSATION_FORKED,
+            Self::SessionStarted => EventKind::SESSION_STARTED,
+            Self::SessionEnded => EventKind::SESSION_ENDED,
+            Self::TurnStarted => EventKind::TURN_STARTED,
+            Self::TurnEnded => EventKind::TURN_ENDED,
+            Self::Messages { .. } => EventKind::MESSAGES,
+            Self::ToolRequested { .. } => EventKind::TOOL_REQUESTED,
+            Self::ToolResult { .. } => EventKind::TOOL_RESULT,
+            Self::ArtifactWritten { .. } => EventKind::ARTIFACT_WRITTEN,
+            Self::SandboxCreated { .. } => EventKind::SANDBOX_CREATED,
+            Self::SandboxStarted { .. } => EventKind::SANDBOX_STARTED,
+            Self::SandboxStopped { .. } => EventKind::SANDBOX_STOPPED,
+            Self::SandboxSnapshotted { .. } => EventKind::SANDBOX_SNAPSHOTTED,
+            Self::SandboxProcessStarted { .. } => EventKind::SANDBOX_PROCESS_STARTED,
+            Self::SandboxProcessStateUpdated { .. } => EventKind::SANDBOX_PROCESS_STATE_UPDATED,
+            Self::SandboxProcessEvent { .. } => EventKind::SANDBOX_PROCESS_EVENT,
+            Self::Custom { event_type, .. } => EventKind::custom(event_type.clone()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

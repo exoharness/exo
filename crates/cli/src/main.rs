@@ -23,7 +23,7 @@ use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use executor::{
     AgentHarnessKind, BasicExoHarness, BasicExoHarnessConfig, BasicHarness, BasicToolRuntime,
     Binding, BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig,
-    ConversationModelConfig, CreateAgentRequest, CreateConversationRequest, EventQuery,
+    ConversationModelConfig, CreateAgentRequest, CreateConversationRequest, EventKind, EventQuery,
     EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions, FileSystemMount,
     FileSystemMountMode, ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET, Harness,
     HarnessAgent, HarnessConversation, HttpExoHarness, LocalSandboxExoHarness, PutSecretRequest,
@@ -1487,7 +1487,13 @@ async fn main() -> Result<()> {
                         limit,
                         session_id: parse_optional_uuid7(session_id.as_deref(), "session_id")?,
                         turn_id: parse_optional_uuid7(turn_id.as_deref(), "turn_id")?,
-                        types: if types.is_empty() { None } else { Some(types) },
+                        types: if types.is_empty() {
+                            None
+                        } else {
+                            // User-supplied strings; `EventKind::custom` matches
+                            // both known kinds (by name) and Custom events.
+                            Some(types.into_iter().map(EventKind::custom).collect())
+                        },
                     }))
                     .await?;
                 println!("{}", serde_json::to_string_pretty(&result)?);

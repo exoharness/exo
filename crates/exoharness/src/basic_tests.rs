@@ -18,12 +18,12 @@ use tokio::time::{sleep, timeout};
 use crate::test_support::local_test_config;
 use crate::{
     Artifact, ArtifactVersion, BasicExoHarness, BeginTurnRequest, Binding, BoxAsyncRead,
-    BoxAsyncWrite, CloseSandboxProcessInputRequest, CreateSandboxRequest, EventData, EventQuery,
-    EventQueryDirection, ExoHarness, ForkConversationRequest, ManagedSandboxBackend,
+    BoxAsyncWrite, CloseSandboxProcessInputRequest, CreateSandboxRequest, EventData, EventKind,
+    EventQuery, EventQueryDirection, ExoHarness, ForkConversationRequest, ManagedSandboxBackend,
     ManagedSandboxHandle, NewAgentRequest, NewConversationRequest, PutSecretRequest,
     RunInSandboxRequest, SandboxCommand, SandboxCommandOutput, SandboxProcessEvent,
     SandboxProcessEventQuery, SandboxProcessParts, SandboxProcessStatus, SandboxProcessStdin,
-    SandboxRequest, Secret, StartSandboxProcessRequest, WaitSandboxProcessRequest,
+    SandboxRequest, Secret, SnapshotPayload, StartSandboxProcessRequest, WaitSandboxProcessRequest,
     WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
@@ -120,7 +120,7 @@ async fn turn_events_continue_after_artifact_writes() {
             limit: None,
             session_id: None,
             turn_id: None,
-            types: Some(vec!["artifact_written".to_string()]),
+            types: Some(vec![EventKind::ARTIFACT_WRITTEN]),
         }))
         .await
         .expect("artifact event")
@@ -851,6 +851,14 @@ impl ManagedSandboxBackend for TestSandboxBackend {
             process: Arc::clone(&self.process),
         }))
     }
+
+    async fn acquire_from_snapshot(
+        &self,
+        _request: SandboxRequest,
+        _payload: SnapshotPayload,
+    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+        bail!("test sandbox backend does not support snapshot restore")
+    }
 }
 
 struct TestSandboxHandle {
@@ -884,6 +892,10 @@ impl ManagedSandboxHandle for TestSandboxHandle {
 
     async fn stop(&self) -> crate::Result<()> {
         Ok(())
+    }
+
+    async fn snapshot(&self) -> crate::Result<SnapshotPayload> {
+        bail!("test sandbox handle does not support snapshots")
     }
 }
 

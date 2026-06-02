@@ -4,7 +4,7 @@ use lingua::Message;
 use lingua::universal::{AssistantContent, UserContent};
 
 use crate::{
-    BeginTurnRequest, Binding, EventData, EventQuery, EventQueryDirection, ExoHarness,
+    BeginTurnRequest, Binding, EventData, EventKind, EventQuery, EventQueryDirection, ExoHarness,
     ForkConversationRequest, NewAgentRequest, NewConversationRequest, Uuid7, WriteArtifactRequest,
 };
 
@@ -174,7 +174,7 @@ pub async fn turn_events_continue_after_artifact_writes(harness: Arc<dyn ExoHarn
             limit: None,
             session_id: None,
             turn_id: None,
-            types: Some(vec!["artifact_written".to_string()]),
+            types: Some(vec![EventKind::ARTIFACT_WRITTEN]),
         }))
         .await
         .expect("artifact event")

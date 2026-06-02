@@ -7,7 +7,7 @@ use crate::{
 use anyhow::anyhow;
 use async_trait::async_trait;
 use exoharness::{
-    BasicExoHarness, Binding, EventData, EventQuery, EventQueryDirection, ExoHarness,
+    BasicExoHarness, Binding, EventData, EventKind, EventQuery, EventQueryDirection, ExoHarness,
     FileSystemMount, FileSystemMountMode, PutSecretRequest, Result, SandboxProvider, Secret,
     ToolRequest, Uuid7,
 };
@@ -161,7 +161,7 @@ async fn send_persists_messages_through_harness() {
             limit: None,
             session_id: None,
             turn_id: None,
-            types: Some(vec!["sandbox_created".to_string()]),
+            types: Some(vec![EventKind::SANDBOX_CREATED]),
         }))
         .await
         .expect("sandbox events should load")
@@ -418,7 +418,7 @@ async fn send_executes_shell_tool_when_enabled() {
             limit: None,
             session_id: None,
             turn_id: None,
-            types: Some(vec!["sandbox_created".to_string()]),
+            types: Some(vec![EventKind::SANDBOX_CREATED]),
         }))
         .await
         .expect("sandbox events should load")
@@ -602,7 +602,7 @@ async fn updating_mounts_recreates_shell_sandbox() {
             limit: None,
             session_id: None,
             turn_id: None,
-            types: Some(vec!["sandbox_created".to_string()]),
+            types: Some(vec![EventKind::SANDBOX_CREATED]),
         }))
         .await
         .expect("get sandbox events")
@@ -644,7 +644,7 @@ async fn updating_mounts_recreates_shell_sandbox() {
             limit: None,
             session_id: None,
             turn_id: None,
-            types: Some(vec!["sandbox_created".to_string()]),
+            types: Some(vec![EventKind::SANDBOX_CREATED]),
         }))
         .await
         .expect("get sandbox events after mount change")
@@ -731,7 +731,7 @@ async fn updating_sandbox_image_recreates_shell_sandbox_without_shell_program() 
             limit: None,
             session_id: None,
             turn_id: None,
-            types: Some(vec!["sandbox_created".to_string()]),
+            types: Some(vec![EventKind::SANDBOX_CREATED]),
         }))
         .await
         .expect("get sandbox events")
