@@ -9,7 +9,7 @@ use anyhow::{anyhow, bail};
 use async_trait::async_trait;
 use exoharness::{
     BasicExoHarness, Binding, EventData, EventQuery, EventQueryDirection, ExoHarness,
-    PutSecretRequest, Secret, ToolRequest, Uuid7,
+    PutSecretRequest, SandboxProvider, Secret, ToolRequest, Uuid7,
 };
 use lingua::universal::{AssistantContent, UserContent};
 use lingua::{Message, UniversalStreamChunk};
@@ -65,7 +65,7 @@ async fn rlm_send_executes_repl_steps_and_persists_final_answer() {
             typescript: None,
             enable_agent_tool_creation: true,
             sandbox_image: None,
-            sandbox_provider: Default::default(),
+            sandbox_provider: SandboxProvider::LocalProcess,
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: Some(512),
@@ -193,7 +193,7 @@ async fn rlm_subquery_variable_can_store_final_answer() {
             typescript: None,
             enable_agent_tool_creation: true,
             sandbox_image: None,
-            sandbox_provider: Default::default(),
+            sandbox_provider: SandboxProvider::LocalProcess,
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: Some(512),
@@ -259,7 +259,7 @@ async fn rlm_send_stream_suppresses_internal_control_text() {
             typescript: None,
             enable_agent_tool_creation: true,
             sandbox_image: None,
-            sandbox_provider: Default::default(),
+            sandbox_provider: SandboxProvider::LocalProcess,
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: Some(512),
@@ -362,7 +362,7 @@ globalThis.answer = String(\n\
             typescript: None,
             enable_agent_tool_creation: true,
             sandbox_image: None,
-            sandbox_provider: Default::default(),
+            sandbox_provider: SandboxProvider::LocalProcess,
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: Some(512),
@@ -433,7 +433,7 @@ async fn rlm_can_finish_by_setting_final_in_repl() {
             typescript: None,
             enable_agent_tool_creation: true,
             sandbox_image: None,
-            sandbox_provider: Default::default(),
+            sandbox_provider: SandboxProvider::LocalProcess,
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: Some(512),

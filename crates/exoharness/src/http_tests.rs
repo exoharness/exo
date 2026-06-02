@@ -8,8 +8,8 @@ use crate::test_support::local_test_config;
 use crate::{
     BasicExoHarness, CreateSandboxRequest, ExoHarness, HttpExoHarness, RunInSandboxRequest,
     SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessStatus, SandboxProcessStdin,
-    StartSandboxProcessRequest, WaitSandboxProcessRequest, WriteSandboxProcessInputRequest,
-    serve_exoharness_http_listener,
+    SandboxProvider, StartSandboxProcessRequest, WaitSandboxProcessRequest,
+    WriteSandboxProcessInputRequest, serve_exoharness_http_listener,
 };
 
 struct HttpHarnessFixture {
@@ -97,7 +97,7 @@ async fn http_exoharness_runs_noninteractive_sandbox_commands() {
         .expect("conversation");
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
-            provider: Default::default(),
+            provider: SandboxProvider::LocalProcess,
             image: "local".to_string(),
             default_workdir: Some("/".to_string()),
             file_system_mounts: None,
@@ -143,7 +143,7 @@ async fn http_exoharness_supports_sandbox_process_events() {
         .expect("conversation");
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
-            provider: Default::default(),
+            provider: SandboxProvider::LocalProcess,
             image: "local".to_string(),
             default_workdir: Some("/".to_string()),
             file_system_mounts: None,
