@@ -557,6 +557,7 @@ struct FailingToolRuntime {
 impl ToolRuntime for FailingToolRuntime {
     async fn execute(
         &self,
+        _agent: &dyn AgentHandle,
         _conversation: &dyn ConversationHandle,
         _agent_config: &AgentConfig,
         _config: &ConversationConfig,
