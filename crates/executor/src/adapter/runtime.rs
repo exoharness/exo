@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
-use exoharness::{AgentHandle, ConversationHandle, Secret};
+use exoharness::{AgentHandle, ConversationHandle, Secret, SecretId};
 
 use super::store::AdapterStore;
 use super::types::{AdapterAttachment, AdapterConfig, AdapterEventType, AdapterRecord};
@@ -86,6 +86,7 @@ pub async fn send_adapter_message_with_handles(
     if !attachments.is_empty()
         && adapter.config.adapter_type != "whatsapp"
         && adapter.config.adapter_type != "signal"
+        && adapter.config.adapter_type != "discord"
     {
         bail!(
             "adapter {} does not support rich attachments",
@@ -328,7 +329,7 @@ async fn worker_secret_env(
 ) -> Result<Vec<(String, String)>> {
     let mut env = Vec::new();
     for secret_env in &config.secret_env {
-        let secret_uuid = secret_env.secret_id.parse()?;
+        let secret_uuid = resolve_secret_id(agent, &secret_env.secret_id).await?;
         let Some(secret) = agent.get_secret(&secret_uuid).await? else {
             bail!("adapter secret not found: {}", secret_env.secret_id);
         };
@@ -339,4 +340,17 @@ async fn worker_secret_env(
         env.push((secret_env.env.clone(), value));
     }
     Ok(env)
+}
+
+async fn resolve_secret_id(agent: &dyn AgentHandle, reference: &str) -> Result<SecretId> {
+    if let Ok(secret_id) = reference.parse() {
+        return Ok(secret_id);
+    }
+    agent
+        .list_secrets()
+        .await?
+        .into_iter()
+        .find(|secret| secret.name == reference)
+        .map(|secret| secret.id)
+        .ok_or_else(|| anyhow!("adapter secret not found: {reference}"))
 }

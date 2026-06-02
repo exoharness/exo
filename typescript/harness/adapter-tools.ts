@@ -42,7 +42,7 @@ function createAdapterTool(): ToolInstance {
     definition: {
       name: "create_adapter",
       description:
-        "Create and enable a long-running Exoclaw adapter for this conversation. Use source 'built_in' only with config type 'irc'. Use source 'library' with config type 'whatsapp' or 'signal' for shipped library adapters.",
+        "Create and enable a long-running Exoclaw adapter for this conversation. Use source 'built_in' only with config type 'irc'. Use source 'library' with config type 'whatsapp', 'signal', or 'discord' for shipped library adapters.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -121,7 +121,7 @@ function sendAdapterMessageTool(): ToolInstance {
   return hostTool({
     name: "send_adapter_message",
     description:
-      "Send an explicit outbound message through an adapter. For IRC this sends PRIVMSG to the adapter channel. For WhatsApp, provide target as the chat id from the inbound message. For Signal, provide a username such as u:example.01, a phone number, UUID, or group id. Only call this when the user or conversation context makes the external side effect appropriate.",
+      "Send an explicit outbound message through an adapter. For IRC this sends PRIVMSG to the adapter channel. For WhatsApp, provide target as the chat id from the inbound message. For Signal, provide a username such as u:example.01, a phone number, UUID, or group id. For Discord, provide a channel id unless defaultChannelId was configured. Only call this when the user or conversation context makes the external side effect appropriate.",
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -152,7 +152,7 @@ function sendAdapterMessageTool(): ToolInstance {
                     type: "string",
                     enum: ["image", "video", "audio", "document"],
                     description:
-                      "Attachment kind. Rich attachments are currently supported by the WhatsApp and Signal adapters.",
+                      "Attachment kind. Rich attachments are currently supported by the WhatsApp, Signal, and Discord adapters.",
                   },
                   path: {
                     type: ["string", "null"],
@@ -361,6 +361,44 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
           "workerCommand",
         ],
       },
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          type: { type: "string", enum: ["discord"] },
+          botTokenSecretId: {
+            type: "string",
+            description:
+              "Secret name or id containing the Discord bot token. The worker receives it as EXO_DISCORD_BOT_TOKEN.",
+          },
+          defaultChannelId: {
+            type: ["string", "null"],
+            description:
+              "Optional Discord channel id used when send_adapter_message target is null.",
+          },
+          trigger: {
+            type: "string",
+            enum: ["all_messages", "mentions_only"],
+            description:
+              "Wake policy. Use mentions_only unless the user explicitly wants every channel message.",
+          },
+          allowedChannels: {
+            anyOf: [
+              { type: "array", items: { type: "string" } },
+              { type: "null" },
+            ],
+            description:
+              "Optional list of Discord channel ids to wake on. Use null to allow every channel the bot can read.",
+          },
+        },
+        required: [
+          "type",
+          "botTokenSecretId",
+          "defaultChannelId",
+          "trigger",
+          "allowedChannels",
+        ],
+      },
     ],
   } as ToolDefinition["parameters"];
 }
@@ -381,7 +419,10 @@ function validateAdapterSource(source: string, type: string): void {
   if (type === "irc" && source !== "built_in") {
     throw new Error("IRC adapters must use source 'built_in'");
   }
-  if ((type === "whatsapp" || type === "signal") && source !== "library") {
+  if (
+    (type === "whatsapp" || type === "signal" || type === "discord") &&
+    source !== "library"
+  ) {
     throw new Error(`${type} adapters must use source 'library'`);
   }
 }
@@ -445,6 +486,29 @@ function transformAdapterConfig(config: JsonObject): JsonObject {
       },
       stateDir: null,
       secretEnv: [],
+    };
+  }
+  if (type === "discord") {
+    return {
+      adapterType: "discord",
+      workerCommand: [
+        "pnpm",
+        "tsx",
+        "examples/exoclaw/adapters/discord/worker.ts",
+      ],
+      initialization: {
+        tokenEnv: "EXO_DISCORD_BOT_TOKEN",
+        defaultChannelId: nullableStringField(config, "defaultChannelId"),
+        trigger: stringField(config, "trigger"),
+        allowedChannels: nullableStringArrayField(config, "allowedChannels"),
+      },
+      stateDir: null,
+      secretEnv: [
+        {
+          env: "EXO_DISCORD_BOT_TOKEN",
+          secretId: stringField(config, "botTokenSecretId"),
+        },
+      ],
     };
   }
   return config;
