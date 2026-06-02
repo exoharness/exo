@@ -96,3 +96,28 @@ For `all_messages`, every message in allowed channels can wake the Exoclaw conve
 - `allowedChannels` optionally restricts inbound wakeups to specific Discord channel ids.
 
 Outbound messages support text plus the shared adapter attachment forms: staged `path`, HTTPS `url`, or base64/data URL `data`.
+
+## Rich Attachments
+
+Discord supports outbound image, video, audio, and document attachments through `send_adapter_message`. Prefer `sandboxPath` for files created by shell commands in the Exoclaw sandbox:
+
+```json
+{
+  "adapterId": "<discord-adapter-id>",
+  "target": "<discord-channel-id>",
+  "text": "Here is the generated file.",
+  "attachments": [
+    {
+      "kind": "document",
+      "path": null,
+      "url": null,
+      "data": null,
+      "sandboxPath": "/tmp/report.txt",
+      "mimeType": "text/plain",
+      "fileName": "report.txt"
+    }
+  ]
+}
+```
+
+For files already visible on the host, use `path`. For remote media, use an HTTPS `url`. For small inline payloads, use base64 `data` or a data URL.

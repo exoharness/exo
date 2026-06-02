@@ -138,7 +138,7 @@ function sendAdapterMessageTool(): ToolInstance {
         target: {
           type: ["string", "null"],
           description:
-            "External destination for adapters that need one. Use the target from the inbound wakeup when available; WhatsApp requires a chat id and Signal requires a username/phone/UUID/group id.",
+            "External destination for adapters that need one. Use the target from the inbound wakeup when available; WhatsApp requires a chat id, Signal requires a username/phone/UUID/group id, and Discord requires a channel id unless defaultChannelId was configured.",
         },
         attachments: {
           anyOf: [

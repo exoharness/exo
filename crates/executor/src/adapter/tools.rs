@@ -165,6 +165,7 @@ pub async fn execute_send_adapter_message_tool(
     if !attachments.is_empty()
         && adapter.config.adapter_type != "whatsapp"
         && adapter.config.adapter_type != "signal"
+        && adapter.config.adapter_type != "discord"
     {
         bail!(
             "adapter {} does not support rich attachments",
