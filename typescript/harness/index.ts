@@ -33,6 +33,7 @@ export interface AgentConfig {
   } | null;
   enableAgentToolCreation: boolean;
   sandboxImage?: string | null;
+  sandboxProvider: "daytona" | "apple_container" | "docker" | "local_process";
   enableNetworking: boolean;
   model: string;
   maxOutputTokens?: number | null;
@@ -61,11 +62,12 @@ export type Binding =
       secretId?: string | null;
     };
 
-export interface BindingMetadata {
+export interface BindingRecord {
   id: string;
   type: "env" | "mcp" | "llm";
   name: string;
   createdAt: string;
+  binding: Binding;
 }
 
 export type Secret =
@@ -87,7 +89,13 @@ export interface SecretMetadata {
 }
 
 export interface ConversationConfig {
-  enableNetworking: boolean;
+  sandboxImage?: string | null;
+  sandboxProvider?:
+    | "daytona"
+    | "apple_container"
+    | "docker"
+    | "local_process"
+    | null;
   shellProgram?: string | null;
   sandboxScope?: "agent" | "conversation" | null;
   mounts: FileSystemMount[];
@@ -115,9 +123,13 @@ export interface ToolRequest {
 export interface SandboxProcessStartRequest {
   command: string[];
   env?: Record<string, string>;
+  reuseKey?: string;
 }
 
 export interface SandboxProcess {
+  readonly sandboxId?: string;
+  readonly sandboxProcessId?: string;
+  readonly reused: boolean;
   readonly stdout: ReadableStream<string>;
   readonly stderr: ReadableStream<string>;
   writeStdin(data: string): Promise<void>;
@@ -254,7 +266,7 @@ export interface Agent {
     path: string;
     value: JsonValue;
   }): Promise<ArtifactVersion>;
-  listBindings(): Promise<BindingMetadata[]>;
+  listBindings(): Promise<BindingRecord[]>;
   getBinding(id: string): Promise<Binding | null>;
   listSecrets(): Promise<SecretMetadata[]>;
   getSecret(id: string): Promise<Secret | null>;
@@ -266,7 +278,7 @@ export interface ExoHarness {
   getAgent(id: string): Promise<Agent | null>;
   newAgent(request: { slug: string; name: string }): Promise<Agent>;
   deleteAgent(id: string): Promise<boolean>;
-  listBindings(): Promise<BindingMetadata[]>;
+  listBindings(): Promise<BindingRecord[]>;
   getBinding(id: string): Promise<Binding | null>;
   listSecrets(): Promise<SecretMetadata[]>;
   getSecret(id: string): Promise<Secret | null>;
@@ -312,14 +324,17 @@ export interface Conversation {
     path: string;
     value: JsonValue;
   }): Promise<ArtifactVersion>;
-  listBindings(): Promise<BindingMetadata[]>;
+  listBindings(): Promise<BindingRecord[]>;
   getBinding(id: string): Promise<Binding | null>;
   listSecrets(): Promise<SecretMetadata[]>;
   getSecret(id: string): Promise<Secret | null>;
 }
 
 export interface Turn {
-  readonly handleId: number;
+  readonly agentId: string;
+  readonly conversationId: string;
+  readonly sessionId: string;
+  readonly turnId: string;
   readonly conversation: Conversation;
   readonly record: TurnRecord;
   addEvents(data: EventData[]): Promise<AddEventsResult>;

@@ -113,13 +113,7 @@ async function runRlmTurnLoop(
   const history: Message[] = [
     ...context.agentConfig.instructions,
     systemTextMessage(buildRlmSystemPrompt()),
-    userTextMessage(
-      buildRlmRootPrompt(
-        queryText,
-        contextText,
-        context.conversationConfig.enableNetworking,
-      ),
-    ),
+    userTextMessage(buildRlmRootPrompt(queryText, contextText)),
   ];
 
   for (let round = 0; ; round += 1) {
@@ -536,11 +530,7 @@ When you are done, prefer setting \`globalThis.Final\` in the REPL to the final 
 Think step by step carefully, plan, and execute immediately. Do not just say what you will do. Prefer code, variables, and recursive subqueries over long prose.`;
 }
 
-function buildRlmRootPrompt(
-  queryText: string,
-  contextText: string,
-  networkingEnabled: boolean,
-): string {
+function buildRlmRootPrompt(queryText: string, contextText: string): string {
   return `Latest user request:
 ${queryText}
 
@@ -549,7 +539,6 @@ Prompt metadata:
 - preview: ${JSON.stringify(clampPreview(contextText, CONTEXT_PREVIEW_CHARS))}
 - js repl: persistent \`context\` plus JSON-compatible globals on \`globalThis\`
 - history api: \`getMessages(role = null)\` returning \`{ index, role, content }[]\`
-- conversation networking enabled: ${networkingEnabled}
 
 The prompt string in \`context\` is the external environment. It is formatted as a flattened transcript with blocks like \`USER:\\n...\`, \`ASSISTANT:\\n...\`, and \`TOOL:\\n...\`, separated by blank lines. Solve the latest request by inspecting and manipulating \`context\` directly. If you need precise message-level access, use \`getMessages(...)\` and then slice/filter/search in plain JavaScript. If you need intermediate state, create variables on \`globalThis\` and reuse them across \`repl_execute\` calls.`;
 }

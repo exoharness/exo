@@ -1,4 +1,4 @@
-use crate::pick_repl_model;
+use crate::{pick_repl_model, repl_agent_model_needs_update};
 
 #[test]
 fn pick_repl_model_prefers_an_explicit_request() {
@@ -28,4 +28,20 @@ fn pick_repl_model_rejects_an_unregistered_request() {
 #[test]
 fn pick_repl_model_requires_a_registered_model() {
     assert!(pick_repl_model(&[], None).is_err());
+}
+
+#[test]
+fn repl_agent_model_update_repairs_a_blank_model() {
+    assert!(repl_agent_model_needs_update("", None));
+    assert!(repl_agent_model_needs_update("   ", None));
+}
+
+#[test]
+fn repl_agent_model_update_honors_an_explicit_request() {
+    assert!(repl_agent_model_needs_update("gpt-5.4", Some("gpt-5.5")));
+}
+
+#[test]
+fn repl_agent_model_update_keeps_an_existing_model_without_request() {
+    assert!(!repl_agent_model_needs_update("gpt-5.4", None));
 }

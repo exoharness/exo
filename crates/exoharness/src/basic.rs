@@ -9,9 +9,12 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
+use futures::future::BoxFuture;
+use futures::io::{AsyncReadExt, AsyncWriteExt};
 use futures::stream::{self, BoxStream};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex as AsyncMutex, mpsc};
+use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
+use tokio::task::JoinHandle;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::sandbox::{
@@ -20,26 +23,35 @@ use crate::sandbox::{
     SandboxLifecycleConfig, SandboxMount, SandboxMountAccess, SandboxNetworkPolicy, SandboxRequest,
     SandboxSpec, SnapshotKind, SnapshotPayload,
 };
+#[cfg(feature = "apple-keychain")]
+use crate::secrets::AppleKeychainSecretKeyProvider;
 use crate::secrets::{
-    AppleKeychainSecretKeyProvider, EncryptedSecret, FileBackedSecretKeyProvider, SecretCipher,
-    SecretKeyProvider, StaticSecretKeyProvider, default_master_key_path,
+    EncryptedSecret, FileBackedSecretKeyProvider, SecretCipher, SecretKeyProvider,
+    StaticSecretKeyProvider, default_master_key_path,
 };
 use crate::storage::BasicObjectStore;
 use crate::{
     AddEventsRequest, AddEventsResult, AgentHandle, AgentId, AgentRecord, Artifact,
-    ArtifactVersion, BeginTurnRequest, Binding, BindingId, BindingMetadata, BindingType,
+    ArtifactVersion, BeginTurnRequest, Binding, BindingId, BindingRecord, BindingType,
+    BoxAsyncRead, BoxAsyncWrite, CancelSandboxProcessRequest, CloseSandboxProcessInputRequest,
     ConversationHandle, ConversationId, ConversationRecord, CreateSandboxRequest, Event, EventData,
     EventId, EventQuery, EventQueryDirection, EventStream, ExoHarness, FileSystemMount,
-    ForkConversationRequest, GetEventsResult, NewAgentRequest, NewConversationRequest,
-    PutSecretRequest, ReadArtifactRequest, Result, RunInSandboxRequest, SandboxId, SandboxProcess,
-    SandboxProcessParts, Secret, SecretId, SecretMetadata, SecretType, SessionId, SnapshotId,
-    StartSandboxRequest, TurnHandle, TurnId, TurnRecord, Uuid7, WriteArtifactRequest,
+    ForkConversationRequest, GetEventsResult, GetSandboxProcessEventsResult, NewAgentRequest,
+    NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result, RunInSandboxRequest,
+    SandboxId, SandboxProcess, SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessId,
+    SandboxProcessMode, SandboxProcessParts, SandboxProcessRecord, SandboxProcessStatus,
+    SandboxProcessStdin, SandboxProvider, Secret, SecretId, SecretMetadata, SecretType, SessionId,
+    SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnHandle, TurnId, TurnRecord,
+    Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
 #[derive(Debug, Clone)]
 pub enum SecretBackendChoice {
+    #[cfg(feature = "apple-keychain")]
     AppleKeychain,
-    File { path: Option<PathBuf> },
+    File {
+        path: Option<PathBuf>,
+    },
     Static([u8; 32]),
 }
 
@@ -51,7 +63,7 @@ pub enum SandboxBackendChoice {
 }
 
 // TODO: as more knobs land here, swap to a builder pattern.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BasicExoHarnessConfig {
     pub root: PathBuf,
     pub secret_backend: SecretBackendChoice,
@@ -68,8 +80,41 @@ struct BasicExoHarnessInner {
     write_lock: AsyncMutex<()>,
     subscribers: Mutex<HashMap<ConversationId, Vec<mpsc::UnboundedSender<Result<Event>>>>>,
     sandbox_backend: Arc<dyn ManagedSandboxBackend>,
+    sandbox_backend_choice: SandboxBackendChoice,
     running_sandboxes: AsyncMutex<HashMap<SandboxId, Arc<dyn ManagedSandboxHandle>>>,
+    running_processes: AsyncMutex<HashMap<SandboxProcessId, Arc<RunningSandboxProcess>>>,
     secret_cipher: SecretCipher,
+}
+
+impl BasicExoHarnessInner {
+    fn sandbox_backend_for_provider(
+        &self,
+        provider: SandboxProvider,
+    ) -> Arc<dyn ManagedSandboxBackend> {
+        if matches!(
+            (self.sandbox_backend_choice, provider),
+            (
+                SandboxBackendChoice::AppleContainer,
+                SandboxProvider::AppleContainer
+            ) | (SandboxBackendChoice::Docker, SandboxProvider::Docker)
+                | (
+                    SandboxBackendChoice::LocalProcess,
+                    SandboxProvider::LocalProcess
+                )
+                | (_, SandboxProvider::Daytona)
+        ) {
+            return Arc::clone(&self.sandbox_backend);
+        }
+
+        match provider {
+            SandboxProvider::AppleContainer => {
+                Arc::new(CliContainerSandboxBackend::apple_container())
+            }
+            SandboxProvider::Docker => Arc::new(CliContainerSandboxBackend::docker()),
+            SandboxProvider::LocalProcess => Arc::new(LocalProcessSandboxBackend::new()),
+            SandboxProvider::Daytona => Arc::clone(&self.sandbox_backend),
+        }
+    }
 }
 
 impl BasicExoHarness {
@@ -79,17 +124,49 @@ impl BasicExoHarness {
             secret_backend,
             sandbox_backend,
         } = config;
+        let sandbox_backend_choice = sandbox_backend;
+        let sandbox_backend = build_sandbox_backend(sandbox_backend);
+        Self::new_with_backend(
+            root,
+            secret_backend,
+            sandbox_backend_choice,
+            sandbox_backend,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn new_with_sandbox_backend(
+        config: BasicExoHarnessConfig,
+        sandbox_backend: Arc<dyn ManagedSandboxBackend>,
+    ) -> Result<Self> {
+        Self::new_with_backend(
+            config.root,
+            config.secret_backend,
+            config.sandbox_backend,
+            sandbox_backend,
+        )
+        .await
+    }
+
+    async fn new_with_backend(
+        root: PathBuf,
+        secret_backend: SecretBackendChoice,
+        sandbox_backend_choice: SandboxBackendChoice,
+        sandbox_backend: Arc<dyn ManagedSandboxBackend>,
+    ) -> Result<Self> {
         let storage = BasicObjectStore::local_filesystem(&root).await?;
         let secret_cipher =
             build_secret_cipher(secret_backend, root.to_string_lossy().to_string())?;
-        let sandbox_backend = build_sandbox_backend(sandbox_backend);
         Ok(Self {
             inner: Arc::new(BasicExoHarnessInner {
                 storage,
                 write_lock: AsyncMutex::new(()),
                 subscribers: Mutex::new(HashMap::new()),
                 sandbox_backend,
+                sandbox_backend_choice,
                 running_sandboxes: AsyncMutex::new(HashMap::new()),
+                running_processes: AsyncMutex::new(HashMap::new()),
                 secret_cipher,
             }),
         })
@@ -187,22 +264,14 @@ impl ExoHarness for BasicExoHarness {
         Ok(true)
     }
 
-    async fn list_bindings(&self) -> Result<Vec<BindingMetadata>> {
-        list_binding_metadata(&self.inner.storage, &self.bindings_dir()).await
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
+        list_binding_records(&self.inner.storage, &self.bindings_dir()).await
     }
 
     async fn put_binding(&self, binding: Binding) -> Result<BindingId> {
         let _guard = self.inner.write_lock.lock().await;
         let id = Uuid7::now();
-        let record = StoredBinding {
-            metadata: BindingMetadata {
-                id,
-                r#type: binding_type(&binding),
-                name: binding_name(&binding).to_string(),
-                created_at: id.timestamp().expect("uuid7 timestamp"),
-            },
-            binding,
-        };
+        let record = stored_binding(id, binding);
         self.inner
             .storage
             .put_json(self.bindings_dir().join(format!("{id}.json")), &record)
@@ -217,7 +286,7 @@ impl ExoHarness for BasicExoHarness {
             .storage
             .get_json_if_exists::<StoredBinding>(&path)
             .await?
-            .map(|record| record.binding))
+            .map(|record| record.record.binding))
     }
 
     async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
@@ -331,6 +400,21 @@ impl AgentHandle for BasicAgentHandle {
             latest_event_id: None,
         };
         let conversation_dir = self.conversations_dir().join(record.id.to_string());
+        let mut record = record;
+        append_events_to_conversation(
+            &self.harness.inner,
+            &conversation_dir,
+            record.id,
+            None,
+            None,
+            None,
+            vec![EventData::ConversationCreated {
+                slug: record.slug.clone(),
+                name: record.name.clone(),
+            }],
+            &mut record,
+        )
+        .await?;
         self.harness
             .inner
             .storage
@@ -356,6 +440,25 @@ impl AgentHandle for BasicAgentHandle {
         {
             return Ok(false);
         }
+        if let Ok(mut record) = self
+            .harness
+            .inner
+            .storage
+            .get_json::<ConversationRecord>(conversation_dir.join("record.json"))
+            .await
+        {
+            append_events_to_conversation(
+                &self.harness.inner,
+                &conversation_dir,
+                record.id,
+                None,
+                None,
+                record.latest_event_id,
+                vec![EventData::ConversationDeleted],
+                &mut record,
+            )
+            .await?;
+        }
         self.harness
             .inner
             .storage
@@ -364,26 +467,17 @@ impl AgentHandle for BasicAgentHandle {
         Ok(true)
     }
 
-    async fn list_bindings(&self) -> Result<Vec<BindingMetadata>> {
-        Ok(merge_binding_metadata(vec![
-            list_binding_metadata(&self.harness.inner.storage, &self.harness.bindings_dir())
-                .await?,
-            list_binding_metadata(&self.harness.inner.storage, &self.bindings_dir()).await?,
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
+        Ok(merge_binding_records(vec![
+            list_binding_records(&self.harness.inner.storage, &self.harness.bindings_dir()).await?,
+            list_binding_records(&self.harness.inner.storage, &self.bindings_dir()).await?,
         ]))
     }
 
     async fn put_binding(&self, binding: Binding) -> Result<BindingId> {
         let _guard = self.harness.inner.write_lock.lock().await;
         let id = Uuid7::now();
-        let record = StoredBinding {
-            metadata: BindingMetadata {
-                id,
-                r#type: binding_type(&binding),
-                name: binding_name(&binding).to_string(),
-                created_at: id.timestamp().expect("uuid7 timestamp"),
-            },
-            binding,
-        };
+        let record = stored_binding(id, binding);
         self.harness
             .inner
             .storage
@@ -401,7 +495,7 @@ impl AgentHandle for BasicAgentHandle {
             .get_json_if_exists::<StoredBinding>(&path)
             .await?
         {
-            return Ok(Some(record.binding));
+            return Ok(Some(record.record.binding));
         }
         self.harness.get_binding(id).await
     }
@@ -543,6 +637,40 @@ struct BasicConversationHandle {
     record: ConversationRecord,
 }
 
+impl BasicConversationHandle {
+    async fn active_sandbox_handle(
+        &self,
+        sandbox_id: &SandboxId,
+        sandbox: &StoredSandbox,
+    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
+        if let Some(handle) = self
+            .harness
+            .inner
+            .running_sandboxes
+            .lock()
+            .await
+            .get(sandbox_id)
+            .cloned()
+        {
+            return Ok(handle);
+        }
+
+        let handle = self
+            .harness
+            .inner
+            .sandbox_backend_for_provider(sandbox.provider)
+            .acquire(sandbox_request(self.record.id, sandbox_id, sandbox))
+            .await?;
+        self.harness
+            .inner
+            .running_sandboxes
+            .lock()
+            .await
+            .insert(sandbox_id.clone(), Arc::clone(&handle));
+        Ok(handle)
+    }
+}
+
 #[async_trait]
 impl ConversationHandle for BasicConversationHandle {
     fn record(&self) -> &ConversationRecord {
@@ -615,6 +743,37 @@ impl ConversationHandle for BasicConversationHandle {
             state: Mutex::new(BasicTurnState {
                 latest_event_id: Some(add_result.latest_event_id),
                 finished: false,
+            }),
+        }))
+    }
+
+    async fn turn_handle(&self, record: TurnRecord) -> Result<Arc<dyn TurnHandle>> {
+        let events = load_events(&self.harness.inner.storage, &self.events_dir()).await?;
+        let mut latest_event_id = None;
+        let mut finished = false;
+        for event in events
+            .into_iter()
+            .filter(|event| event.session_id == Some(record.session_id))
+            .filter(|event| event.turn_id == Some(record.id))
+        {
+            latest_event_id = Some(event.id);
+            finished = matches!(event.data, EventData::TurnEnded);
+        }
+        if latest_event_id.is_none() {
+            bail!(
+                "turn {} in session {} was not found",
+                record.id,
+                record.session_id
+            );
+        }
+        Ok(Arc::new(BasicTurnHandle {
+            harness: self.harness.clone(),
+            conversation_dir: self.conversation_dir(),
+            conversation_id: self.record.id,
+            record,
+            state: Mutex::new(BasicTurnState {
+                latest_event_id,
+                finished,
             }),
         }))
     }
@@ -861,6 +1020,7 @@ impl ConversationHandle for BasicConversationHandle {
         let conversation_dir = self.conversation_dir();
         let metadata = StoredSandbox {
             id: sandbox_id.clone(),
+            provider: request.provider,
             image: request.image.clone(),
             default_workdir: request.default_workdir.clone(),
             file_system_mounts: request.file_system_mounts.clone().unwrap_or_default(),
@@ -872,7 +1032,7 @@ impl ConversationHandle for BasicConversationHandle {
         let sandbox_handle = self
             .harness
             .inner
-            .sandbox_backend
+            .sandbox_backend_for_provider(metadata.provider)
             .acquire(sandbox_request(self.record.id, &sandbox_id, &metadata))
             .await?;
         self.harness
@@ -900,6 +1060,7 @@ impl ConversationHandle for BasicConversationHandle {
             vec![
                 EventData::SandboxCreated {
                     sandbox_id: sandbox_id.clone(),
+                    provider: request.provider,
                     image: request.image,
                     default_workdir: metadata.default_workdir.clone().unwrap_or_default(),
                     file_system_mounts: metadata.file_system_mounts.clone(),
@@ -1026,7 +1187,7 @@ impl ConversationHandle for BasicConversationHandle {
         let sandbox_handle = self
             .harness
             .inner
-            .sandbox_backend
+            .sandbox_backend_for_provider(sandbox.provider)
             .acquire_from_snapshot(
                 sandbox_request(self.record.id, &request.id, &sandbox),
                 payload,
@@ -1111,6 +1272,198 @@ impl ConversationHandle for BasicConversationHandle {
         Ok(())
     }
 
+    async fn start_sandbox_process(
+        &self,
+        request: StartSandboxProcessRequest,
+    ) -> Result<SandboxProcessRecord> {
+        let sandbox = self.load_sandbox(&request.sandbox_id).await?;
+        if !sandbox.running {
+            bail!("sandbox is not running: {}", request.sandbox_id);
+        }
+        if request.command.is_empty() {
+            bail!("sandbox command must not be empty");
+        }
+        if request.mode != SandboxProcessMode::Exec {
+            bail!("basic sandbox backend only supports exec-mode processes");
+        }
+        let sandbox_handle = self
+            .active_sandbox_handle(&request.sandbox_id, &sandbox)
+            .await?;
+        let process_id = format!("process-{}", Uuid7::now());
+        let sandbox_id = request.sandbox_id.clone();
+        let command = request.command.clone();
+        let cwd = request.cwd.clone();
+        let mode = request.mode;
+        let stdin_mode = request.stdin;
+        let output = request.output;
+        let lifecycle = request.lifecycle;
+        let parts = sandbox_handle
+            .start_process(&SandboxCommand {
+                argv: command.clone(),
+                env: request.env,
+                display_argv: Some(command.clone()),
+                cwd: cwd.clone(),
+                timeout: None,
+            })
+            .await
+            .with_context(|| {
+                format!("failed to start process in sandbox {}", request.sandbox_id)
+            })?;
+        let stdin = match stdin_mode {
+            SandboxProcessStdin::Open => Some(parts.stdin),
+            SandboxProcessStdin::None => None,
+        };
+        let process = Arc::new(RunningSandboxProcess {
+            inner: Arc::clone(&self.harness.inner),
+            conversation_id: self.record.id,
+            conversation_dir: self.conversation_dir(),
+            sandbox_id: sandbox_id.clone(),
+            process_id: process_id.clone(),
+            stdin: AsyncMutex::new(stdin),
+            events: AsyncMutex::new(Vec::new()),
+            status: AsyncMutex::new(SandboxProcessStatus::Running),
+            open_output_streams: AsyncMutex::new(2),
+            output_drained: Notify::new(),
+            tasks: AsyncMutex::new(None),
+            notify: Notify::new(),
+        });
+        self.append_events_internal(
+            None,
+            None,
+            None,
+            vec![EventData::SandboxProcessStarted {
+                sandbox_id: sandbox_id.clone(),
+                process_id: process_id.clone(),
+                command,
+                cwd,
+                mode,
+                stdin: stdin_mode,
+                output,
+                lifecycle,
+                status: SandboxProcessStatus::Running,
+                provider_state: None,
+            }],
+        )
+        .await?;
+        let stdout_task = tokio::spawn(record_sandbox_process_output(
+            Arc::clone(&process),
+            SandboxProcessOutputStream::Stdout,
+            parts.stdout,
+        ));
+        let stderr_task = tokio::spawn(record_sandbox_process_output(
+            Arc::clone(&process),
+            SandboxProcessOutputStream::Stderr,
+            parts.stderr,
+        ));
+        let wait_task = tokio::spawn(record_sandbox_process_exit(
+            Arc::clone(&process),
+            parts.wait,
+        ));
+        *process.tasks.lock().await = Some(RunningSandboxProcessTasks {
+            stdout: stdout_task,
+            stderr: stderr_task,
+            wait: wait_task,
+        });
+        self.harness
+            .inner
+            .running_processes
+            .lock()
+            .await
+            .insert(process_id.clone(), process);
+        Ok(SandboxProcessRecord {
+            id: process_id,
+            sandbox_id,
+            status: SandboxProcessStatus::Running,
+        })
+    }
+
+    async fn write_sandbox_process_input(
+        &self,
+        request: WriteSandboxProcessInputRequest,
+    ) -> Result<()> {
+        let process = self
+            .require_sandbox_process(&request.sandbox_id, &request.process_id)
+            .await?;
+        if !sandbox_process_status(&process).await.is_running() {
+            bail!("sandbox process is not running: {}", request.process_id);
+        }
+        let mut stdin = process.stdin.lock().await;
+        let stdin = stdin
+            .as_mut()
+            .ok_or_else(|| anyhow!("sandbox process stdin is closed: {}", request.process_id))?;
+        stdin.write_all(&request.data).await?;
+        stdin.flush().await?;
+        Ok(())
+    }
+
+    async fn close_sandbox_process_input(
+        &self,
+        request: CloseSandboxProcessInputRequest,
+    ) -> Result<()> {
+        let process = self
+            .require_sandbox_process(&request.sandbox_id, &request.process_id)
+            .await?;
+        process.stdin.lock().await.take();
+        Ok(())
+    }
+
+    async fn get_sandbox_process_events(
+        &self,
+        query: SandboxProcessEventQuery,
+    ) -> Result<GetSandboxProcessEventsResult> {
+        let process = self
+            .require_sandbox_process(&query.sandbox_id, &query.process_id)
+            .await?;
+        let after = query.after.unwrap_or_default();
+        let limit = query.limit.unwrap_or(u32::MAX) as usize;
+        let events = process
+            .events
+            .lock()
+            .await
+            .iter()
+            .filter(|event| event.cursor() > after)
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        let cursor = events
+            .last()
+            .map(SandboxProcessEvent::cursor)
+            .or(query.after);
+        Ok(GetSandboxProcessEventsResult {
+            events,
+            cursor,
+            status: sandbox_process_status(&process).await,
+        })
+    }
+
+    async fn wait_sandbox_process(
+        &self,
+        request: WaitSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus> {
+        let process = self
+            .require_sandbox_process(&request.sandbox_id, &request.process_id)
+            .await?;
+        Ok(wait_for_sandbox_process_terminal_status(&process).await)
+    }
+
+    async fn cancel_sandbox_process(
+        &self,
+        request: CancelSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus> {
+        let process = self
+            .require_sandbox_process(&request.sandbox_id, &request.process_id)
+            .await?;
+        process.stdin.lock().await.take();
+        if let Some(tasks) = process.tasks.lock().await.take() {
+            tasks.stdout.abort();
+            tasks.stderr.abort();
+            tasks.wait.abort();
+        }
+        push_sandbox_process_event(&process, SandboxProcessEventPayload::Cancelled).await;
+        set_sandbox_process_status(&process, SandboxProcessStatus::Cancelled).await;
+        Ok(SandboxProcessStatus::Cancelled)
+    }
+
     async fn run_in_sandbox(
         &self,
         request: RunInSandboxRequest,
@@ -1122,28 +1475,7 @@ impl ConversationHandle for BasicConversationHandle {
         if request.command.is_empty() {
             bail!("sandbox command must not be empty");
         }
-        let sandbox_handle = {
-            let running_sandboxes = self.harness.inner.running_sandboxes.lock().await;
-            running_sandboxes.get(&request.id).cloned()
-        };
-        let sandbox_handle = match sandbox_handle {
-            Some(sandbox_handle) => sandbox_handle,
-            None => {
-                let sandbox_handle = self
-                    .harness
-                    .inner
-                    .sandbox_backend
-                    .acquire(sandbox_request(self.record.id, &request.id, &sandbox))
-                    .await?;
-                self.harness
-                    .inner
-                    .running_sandboxes
-                    .lock()
-                    .await
-                    .insert(request.id.clone(), sandbox_handle.clone());
-                sandbox_handle
-            }
-        };
+        let sandbox_handle = self.active_sandbox_handle(&request.id, &sandbox).await?;
         let parts = sandbox_handle
             .start_process(&SandboxCommand {
                 argv: request.command.clone(),
@@ -1157,31 +1489,22 @@ impl ConversationHandle for BasicConversationHandle {
         Ok(Box::new(LiveSandboxProcess::new(parts)))
     }
 
-    async fn list_bindings(&self) -> Result<Vec<BindingMetadata>> {
-        Ok(merge_binding_metadata(vec![
-            list_binding_metadata(&self.harness.inner.storage, &self.harness.bindings_dir())
-                .await?,
-            list_binding_metadata(
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
+        Ok(merge_binding_records(vec![
+            list_binding_records(&self.harness.inner.storage, &self.harness.bindings_dir()).await?,
+            list_binding_records(
                 &self.harness.inner.storage,
                 &agent_bindings_dir(&self.harness, self.agent_id),
             )
             .await?,
-            list_binding_metadata(&self.harness.inner.storage, &self.bindings_dir()).await?,
+            list_binding_records(&self.harness.inner.storage, &self.bindings_dir()).await?,
         ]))
     }
 
     async fn put_binding(&self, binding: Binding) -> Result<BindingId> {
         let _guard = self.harness.inner.write_lock.lock().await;
         let id = Uuid7::now();
-        let record = StoredBinding {
-            metadata: BindingMetadata {
-                id,
-                r#type: binding_type(&binding),
-                name: binding_name(&binding).to_string(),
-                created_at: id.timestamp().expect("uuid7 timestamp"),
-            },
-            binding,
-        };
+        let record = stored_binding(id, binding);
         self.harness
             .inner
             .storage
@@ -1199,7 +1522,7 @@ impl ConversationHandle for BasicConversationHandle {
             .get_json_if_exists::<StoredBinding>(&local_path)
             .await?
         {
-            return Ok(Some(record.binding));
+            return Ok(Some(record.record.binding));
         }
         let agent_path =
             agent_bindings_dir(&self.harness, self.agent_id).join(format!("{id}.json"));
@@ -1210,7 +1533,7 @@ impl ConversationHandle for BasicConversationHandle {
             .get_json_if_exists::<StoredBinding>(&agent_path)
             .await?
         {
-            return Ok(Some(record.binding));
+            return Ok(Some(record.record.binding));
         }
         self.harness.get_binding(id).await
     }
@@ -1369,6 +1692,26 @@ impl BasicConversationHandle {
             .get_json(self.sandboxes_dir().join(format!("{id}.json")))
             .await
     }
+
+    async fn require_sandbox_process(
+        &self,
+        sandbox_id: &str,
+        process_id: &str,
+    ) -> Result<Arc<RunningSandboxProcess>> {
+        let process = self
+            .harness
+            .inner
+            .running_processes
+            .lock()
+            .await
+            .get(process_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("sandbox process not found: {process_id}"))?;
+        if process.sandbox_id != sandbox_id {
+            bail!("sandbox process {process_id} does not belong to sandbox {sandbox_id}");
+        }
+        Ok(process)
+    }
 }
 
 struct BasicTurnHandle {
@@ -1392,17 +1735,13 @@ impl TurnHandle for BasicTurnHandle {
 
     async fn add_events(&self, data: Vec<EventData>) -> Result<AddEventsResult> {
         let _guard = self.harness.inner.write_lock.lock().await;
-        let expected_head = self
-            .state
-            .lock()
-            .expect("turn state poisoned")
-            .latest_event_id;
         let mut record = self
             .harness
             .inner
             .storage
             .get_json::<ConversationRecord>(self.conversation_dir.join("record.json"))
             .await?;
+        let expected_head = record.latest_event_id;
         let add_result = append_events_to_conversation(
             &self.harness.inner,
             &self.conversation_dir,
@@ -1480,21 +1819,21 @@ impl TurnHandle for BasicTurnHandle {
 
     async fn finish(&self) -> Result<EventId> {
         let _guard = self.harness.inner.write_lock.lock().await;
-        let expected_head = {
+        {
             let state = self.state.lock().expect("turn state poisoned");
             if state.finished {
                 return state
                     .latest_event_id
                     .ok_or_else(|| anyhow!("turn has no latest event id"));
             }
-            state.latest_event_id
-        };
+        }
         let mut record = self
             .harness
             .inner
             .storage
             .get_json::<ConversationRecord>(self.conversation_dir.join("record.json"))
             .await?;
+        let expected_head = record.latest_event_id;
         let add_result = append_events_to_conversation(
             &self.harness.inner,
             &self.conversation_dir,
@@ -1521,8 +1860,7 @@ impl TurnHandle for BasicTurnHandle {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredBinding {
-    metadata: BindingMetadata,
-    binding: Binding,
+    record: BindingRecord,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1540,6 +1878,8 @@ struct StoredArtifactMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredSandbox {
     id: SandboxId,
+    #[serde(default)]
+    provider: SandboxProvider,
     image: String,
     default_workdir: Option<String>,
     file_system_mounts: Vec<FileSystemMount>,
@@ -1547,6 +1887,268 @@ struct StoredSandbox {
     idle_seconds: u64,
     running: bool,
     latest_snapshot_id: Option<SnapshotId>,
+}
+
+struct RunningSandboxProcess {
+    inner: Arc<BasicExoHarnessInner>,
+    conversation_id: ConversationId,
+    conversation_dir: PathBuf,
+    sandbox_id: SandboxId,
+    process_id: SandboxProcessId,
+    stdin: AsyncMutex<Option<BoxAsyncWrite>>,
+    events: AsyncMutex<Vec<SandboxProcessEvent>>,
+    status: AsyncMutex<SandboxProcessStatus>,
+    open_output_streams: AsyncMutex<u8>,
+    output_drained: Notify,
+    tasks: AsyncMutex<Option<RunningSandboxProcessTasks>>,
+    notify: Notify,
+}
+
+struct RunningSandboxProcessTasks {
+    stdout: JoinHandle<()>,
+    stderr: JoinHandle<()>,
+    wait: JoinHandle<()>,
+}
+
+enum SandboxProcessOutputStream {
+    Stdout,
+    Stderr,
+}
+
+async fn record_sandbox_process_output(
+    process: Arc<RunningSandboxProcess>,
+    stream: SandboxProcessOutputStream,
+    mut reader: BoxAsyncRead,
+) {
+    let mut buffer = vec![0; 8192];
+    loop {
+        match reader.read(&mut buffer).await {
+            Ok(0) => {
+                mark_sandbox_process_output_closed(&process).await;
+                return;
+            }
+            Ok(length) => {
+                let data = buffer[..length].to_vec();
+                match stream {
+                    SandboxProcessOutputStream::Stdout => {
+                        push_sandbox_process_event(
+                            &process,
+                            SandboxProcessEventPayload::Stdout(data),
+                        )
+                        .await;
+                    }
+                    SandboxProcessOutputStream::Stderr => {
+                        push_sandbox_process_event(
+                            &process,
+                            SandboxProcessEventPayload::Stderr(data),
+                        )
+                        .await;
+                    }
+                }
+            }
+            Err(error) => {
+                let message = error.to_string();
+                push_sandbox_process_event(
+                    &process,
+                    SandboxProcessEventPayload::Error(message.clone()),
+                )
+                .await;
+                set_sandbox_process_status(&process, SandboxProcessStatus::Failed { message })
+                    .await;
+                mark_sandbox_process_output_closed(&process).await;
+                return;
+            }
+        }
+    }
+}
+
+async fn record_sandbox_process_exit(
+    process: Arc<RunningSandboxProcess>,
+    wait: BoxFuture<'static, Result<i32>>,
+) {
+    let terminal = wait.await;
+    wait_for_sandbox_process_output_drained(&process).await;
+    if !sandbox_process_status(&process).await.is_running() {
+        return;
+    }
+    match terminal {
+        Ok(exit_code) => {
+            push_sandbox_process_event(&process, SandboxProcessEventPayload::Exit(exit_code)).await;
+            set_sandbox_process_status(&process, SandboxProcessStatus::Exited { exit_code }).await;
+        }
+        Err(error) => {
+            let message = error.to_string();
+            push_sandbox_process_event(
+                &process,
+                SandboxProcessEventPayload::Error(message.clone()),
+            )
+            .await;
+            set_sandbox_process_status(
+                &process,
+                SandboxProcessStatus::Failed {
+                    message: message.clone(),
+                },
+            )
+            .await;
+        }
+    }
+}
+
+async fn mark_sandbox_process_output_closed(process: &Arc<RunningSandboxProcess>) {
+    let mut open_output_streams = process.open_output_streams.lock().await;
+    if *open_output_streams > 0 {
+        *open_output_streams -= 1;
+    }
+    let drained = *open_output_streams == 0;
+    drop(open_output_streams);
+    if drained {
+        process.output_drained.notify_waiters();
+    }
+}
+
+async fn wait_for_sandbox_process_output_drained(process: &Arc<RunningSandboxProcess>) {
+    loop {
+        let notified = process.output_drained.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if *process.open_output_streams.lock().await == 0 {
+            return;
+        }
+        notified.await;
+    }
+}
+
+enum SandboxProcessEventPayload {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+    Exit(i32),
+    Error(String),
+    Cancelled,
+}
+
+async fn push_sandbox_process_event(
+    process: &Arc<RunningSandboxProcess>,
+    payload: SandboxProcessEventPayload,
+) {
+    let event = push_sandbox_process_event_memory_only(process, payload).await;
+    if let Err(error) = append_sandbox_process_data(
+        process,
+        vec![EventData::SandboxProcessEvent {
+            sandbox_id: process.sandbox_id.clone(),
+            process_id: process.process_id.clone(),
+            event,
+        }],
+    )
+    .await
+    {
+        push_sandbox_process_event_memory_only(
+            process,
+            SandboxProcessEventPayload::Error(format!(
+                "failed to persist sandbox process event: {error}"
+            )),
+        )
+        .await;
+    }
+}
+
+async fn push_sandbox_process_event_memory_only(
+    process: &Arc<RunningSandboxProcess>,
+    payload: SandboxProcessEventPayload,
+) -> SandboxProcessEvent {
+    let mut events = process.events.lock().await;
+    let cursor = events.len() as u64 + 1;
+    let event = match payload {
+        SandboxProcessEventPayload::Stdout(data) => SandboxProcessEvent::Stdout { cursor, data },
+        SandboxProcessEventPayload::Stderr(data) => SandboxProcessEvent::Stderr { cursor, data },
+        SandboxProcessEventPayload::Exit(exit_code) => {
+            SandboxProcessEvent::Exit { cursor, exit_code }
+        }
+        SandboxProcessEventPayload::Error(message) => {
+            SandboxProcessEvent::Error { cursor, message }
+        }
+        SandboxProcessEventPayload::Cancelled => SandboxProcessEvent::Cancelled { cursor },
+    };
+    events.push(event.clone());
+    drop(events);
+    process.notify.notify_waiters();
+    event
+}
+
+async fn set_sandbox_process_status(
+    process: &Arc<RunningSandboxProcess>,
+    status: SandboxProcessStatus,
+) {
+    let append_result = append_sandbox_process_data(
+        process,
+        vec![EventData::SandboxProcessStateUpdated {
+            sandbox_id: process.sandbox_id.clone(),
+            process_id: process.process_id.clone(),
+            status: status.clone(),
+            provider_state: None,
+        }],
+    )
+    .await;
+    let mut current = process.status.lock().await;
+    *current = status;
+    drop(current);
+    process.notify.notify_waiters();
+    if let Err(error) = append_result {
+        push_sandbox_process_event_memory_only(
+            process,
+            SandboxProcessEventPayload::Error(format!(
+                "failed to persist sandbox process status: {error}"
+            )),
+        )
+        .await;
+    }
+}
+
+async fn append_sandbox_process_data(
+    process: &Arc<RunningSandboxProcess>,
+    data: Vec<EventData>,
+) -> Result<AddEventsResult> {
+    let _guard = process.inner.write_lock.lock().await;
+    let mut record = process
+        .inner
+        .storage
+        .get_json::<ConversationRecord>(process.conversation_dir.join("record.json"))
+        .await?;
+    let result = append_events_to_conversation(
+        &process.inner,
+        &process.conversation_dir,
+        process.conversation_id,
+        None,
+        None,
+        record.latest_event_id,
+        data,
+        &mut record,
+    )
+    .await?;
+    process
+        .inner
+        .storage
+        .put_json(process.conversation_dir.join("record.json"), &record)
+        .await?;
+    Ok(result)
+}
+
+async fn sandbox_process_status(process: &Arc<RunningSandboxProcess>) -> SandboxProcessStatus {
+    process.status.lock().await.clone()
+}
+
+async fn wait_for_sandbox_process_terminal_status(
+    process: &Arc<RunningSandboxProcess>,
+) -> SandboxProcessStatus {
+    loop {
+        let notified = process.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let status = sandbox_process_status(process).await;
+        if !status.is_running() {
+            return status;
+        }
+        notified.await;
+    }
 }
 
 /// Sidecar JSON describing a snapshot payload.
@@ -1837,18 +2439,30 @@ async fn load_artifact_contents(
     Ok(legacy_artifact.contents)
 }
 
-async fn list_binding_metadata(
+async fn list_binding_records(
     storage: &BasicObjectStore,
     bindings_dir: &Path,
-) -> Result<Vec<BindingMetadata>> {
+) -> Result<Vec<BindingRecord>> {
     let mut bindings = storage
         .list_json_matching_suffix::<StoredBinding>(bindings_dir, ".json")
         .await?
         .into_iter()
-        .map(|binding| binding.metadata)
+        .map(|stored| stored.record)
         .collect::<Vec<_>>();
     bindings.sort_by_key(|metadata| metadata.id);
     Ok(bindings)
+}
+
+fn stored_binding(id: BindingId, binding: Binding) -> StoredBinding {
+    StoredBinding {
+        record: BindingRecord {
+            id,
+            r#type: binding_type(&binding),
+            name: binding_name(&binding).to_string(),
+            created_at: id.timestamp().expect("uuid7 timestamp"),
+            binding,
+        },
+    }
 }
 
 async fn list_secret_metadata(
@@ -1865,8 +2479,8 @@ async fn list_secret_metadata(
     Ok(secrets)
 }
 
-fn merge_binding_metadata(scopes: Vec<Vec<BindingMetadata>>) -> Vec<BindingMetadata> {
-    let mut effective = HashMap::<String, BindingMetadata>::new();
+fn merge_binding_records(scopes: Vec<Vec<BindingRecord>>) -> Vec<BindingRecord> {
+    let mut effective = HashMap::<String, BindingRecord>::new();
     for bindings in scopes {
         for binding in bindings {
             effective.insert(binding.name.clone(), binding);
@@ -1946,7 +2560,11 @@ fn build_secret_cipher(
     choice: SecretBackendChoice,
     keychain_account: String,
 ) -> Result<SecretCipher> {
+    #[cfg(not(feature = "apple-keychain"))]
+    drop(keychain_account);
+
     let provider: Arc<dyn SecretKeyProvider> = match choice {
+        #[cfg(feature = "apple-keychain")]
         SecretBackendChoice::AppleKeychain => {
             Arc::new(AppleKeychainSecretKeyProvider::new(keychain_account))
         }

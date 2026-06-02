@@ -9,16 +9,21 @@ rust-version.workspace = true
 default = []
 basic-backend = [
   "dep:aes-gcm",
-  "dep:keyring",
-  "dep:keyring-core",
+  "dep:actix-web",
   "dep:object_store",
+  "dep:reqwest",
   "dep:tokio",
   "dep:tokio-stream",
   "dep:tokio-util",
+  "dep:tracing",
+  "dep:url",
 ]
+apple-keychain = ["dep:keyring", "dep:keyring-core"]
+contract-tests = []
 
 [dependencies]
 aes-gcm = { version = "0.11.0-rc.3", optional = true }
+actix-web = { workspace = true, optional = true }
 anyhow.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
@@ -28,6 +33,7 @@ keyring = { version = "4.0.0-rc.3", optional = true }
 keyring-core = { version = "0.7.2", optional = true }
 lingua.workspace = true
 object_store = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -41,6 +47,8 @@ tokio = { version = "1.52.1", default-features = false, features = [
 ], optional = true }
 tokio-stream = { workspace = true, optional = true }
 tokio-util = { workspace = true, optional = true, features = ["compat"] }
+tracing = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
 uuid = { workspace = true, features = ["serde", "v4", "v7", "js"] }
 
 [dev-dependencies]

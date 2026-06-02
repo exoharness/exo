@@ -1,11 +1,9 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{Context, anyhow, bail};
-use keyring_core::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -13,6 +11,7 @@ use crate::{Result, Secret};
 
 const MASTER_KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
+#[cfg(feature = "apple-keychain")]
 const KEYCHAIN_SERVICE: &str = "exo-exoharness-master-key";
 const MASTER_KEY_FILE_PERMS: u32 = 0o600;
 const MASTER_KEY_DIR_PERMS: u32 = 0o700;
@@ -86,11 +85,13 @@ impl SecretKeyProvider for StaticSecretKeyProvider {
     }
 }
 
+#[cfg(feature = "apple-keychain")]
 pub(crate) struct AppleKeychainSecretKeyProvider {
     account: String,
     key: OnceLock<[u8; MASTER_KEY_LEN]>,
 }
 
+#[cfg(feature = "apple-keychain")]
 impl AppleKeychainSecretKeyProvider {
     pub(crate) fn new(account: String) -> Self {
         Self {
@@ -100,8 +101,11 @@ impl AppleKeychainSecretKeyProvider {
     }
 }
 
+#[cfg(feature = "apple-keychain")]
 impl SecretKeyProvider for AppleKeychainSecretKeyProvider {
     fn get_or_create_key(&self) -> Result<[u8; MASTER_KEY_LEN]> {
+        use keyring_core::{Entry, Error as KeyringError};
+
         if let Some(key) = self.key.get() {
             return Ok(*key);
         }
@@ -175,6 +179,7 @@ pub(crate) enum SecretEncryptionAlgorithm {
     Aes256Gcm,
 }
 
+#[cfg(feature = "apple-keychain")]
 fn deserialize_key(serialized: &str) -> Result<[u8; MASTER_KEY_LEN]> {
     let bytes: Vec<u8> = serde_json::from_str(serialized)?;
     if bytes.len() != MASTER_KEY_LEN {
@@ -198,7 +203,10 @@ fn random_nonce() -> [u8; NONCE_LEN] {
     nonce
 }
 
+#[cfg(feature = "apple-keychain")]
 fn ensure_apple_keychain_store() -> Result<()> {
+    use std::collections::HashMap;
+
     static INIT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
     let result = INIT.get_or_init(|| {
         keyring::use_apple_keychain_store(&HashMap::new())

@@ -6,7 +6,7 @@ use crate::adapter::tools::{
     execute_list_adapters_tool, execute_send_adapter_message_tool,
 };
 use crate::agent_sandbox::ensure_agent_sandbox;
-use crate::conversation_sandbox::{conversation_sandboxes, ensure_conversation_sandbox};
+use crate::conversation_sandbox::ensure_conversation_sandbox;
 use crate::scheduler_store::SchedulerStore;
 use crate::scheduler_types::{
     DEFAULT_MAX_OUTPUT_BYTES, NewScheduledTask, ScheduledTaskSandboxMode,
@@ -15,8 +15,9 @@ use crate::{AgentConfig, ConversationConfig, ToolRuntime};
 use crate::{SandboxScope, effective_sandbox_scope};
 use async_trait::async_trait;
 use exoharness::{
-    AgentHandle, ConversationHandle, Result, RunInSandboxRequest, SandboxProcess, ToolRequest,
-    ToolResult,
+    AgentHandle, ConversationHandle, CreateSandboxRequest, DEFAULT_SANDBOX_IMAGE, EventData,
+    EventKind, EventQuery, EventQueryDirection, FileSystemMount, FileSystemMountMode, Result,
+    RunInSandboxRequest, SandboxProcess, SandboxProvider, ToolRequest, ToolResult,
 };
 use futures::io::AsyncReadExt;
 use serde::{Deserialize, Serialize};
@@ -53,7 +54,7 @@ impl ToolRuntime for BasicToolRuntime {
         config: &ConversationConfig,
     ) -> Result<()> {
         if config.shell_program.is_some() {
-            ensure_conversation_sandbox(conversation, agent_config, config).await?;
+            ensure_shell_sandbox(conversation, agent_config, config).await?;
         }
         Ok(())
     }
@@ -62,12 +63,12 @@ impl ToolRuntime for BasicToolRuntime {
         &self,
         _agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
-        _agent_config: &AgentConfig,
+        agent_config: &AgentConfig,
         config: &ConversationConfig,
         request: &ToolRequest,
     ) -> Result<ToolResult> {
         match request.function_name.as_str() {
-            "shell" => execute_shell_tool(conversation, config, request).await,
+            "shell" => execute_shell_tool(conversation, agent_config, config, request).await,
             other => Err(anyhow::anyhow!(
                 "tool execution is not configured for {other}"
             )),
@@ -303,6 +304,7 @@ async fn execute_delete_scheduled_task_tool(
 
 async fn execute_shell_tool(
     conversation: &dyn ConversationHandle,
+    agent_config: &AgentConfig,
     config: &ConversationConfig,
     request: &ToolRequest,
 ) -> Result<ToolResult> {
@@ -312,12 +314,7 @@ async fn execute_shell_tool(
         .shell_program
         .clone()
         .ok_or_else(|| anyhow::anyhow!("shell tool is not enabled for this conversation"))?;
-    let sandbox_id = conversation_sandboxes(conversation)
-        .await?
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("shell sandbox is not available for this conversation"))?
-        .id;
+    let sandbox_id = ensure_shell_sandbox(conversation, agent_config, config).await?;
     let process = conversation
         .run_in_sandbox(RunInSandboxRequest {
             id: sandbox_id,
@@ -360,7 +357,7 @@ async fn execute_exoclaw_shell_tool(
     request: &ToolRequest,
 ) -> Result<ToolResult> {
     if effective_sandbox_scope(agent_config, config) == SandboxScope::Conversation {
-        return execute_shell_tool(conversation, config, request).await;
+        return execute_shell_tool(conversation, agent_config, config, request).await;
     }
 
     let args =
@@ -379,4 +376,133 @@ async fn execute_exoclaw_shell_tool(
         })
         .await?;
     read_shell_process(process).await
+}
+
+pub(crate) async fn ensure_shell_sandbox(
+    conversation: &dyn ConversationHandle,
+    agent_config: &AgentConfig,
+    config: &ConversationConfig,
+) -> Result<String> {
+    let desired_default_workdir = config
+        .mounts
+        .first()
+        .map(|mount| mount.mount_path.clone())
+        .unwrap_or_else(|| "/".to_string());
+    let desired_mounts = normalize_mounts(&config.mounts);
+    let desired_image = config
+        .effective_sandbox_image(agent_config)
+        .map(str::to_string)
+        .unwrap_or_else(|| DEFAULT_SANDBOX_IMAGE.to_string());
+    let desired_provider = config.effective_sandbox_provider(agent_config);
+    let desired_enable_networking = agent_config.enable_networking;
+
+    if let Some(sandbox) = latest_shell_sandbox(conversation, desired_provider).await? {
+        let config_matches = sandbox.image == desired_image
+            && sandbox.default_workdir == desired_default_workdir
+            && sandbox.file_system_mounts == desired_mounts
+            && sandbox.enable_networking == desired_enable_networking
+            && sandbox.idle_seconds == 300;
+
+        if config_matches {
+            let Some(program) = &config.shell_program else {
+                return Ok(sandbox.id);
+            };
+
+            let healthcheck = conversation
+                .run_in_sandbox(RunInSandboxRequest {
+                    id: sandbox.id.clone(),
+                    command: vec![program.clone(), "-lc".to_string(), "true".to_string()],
+                    env: Default::default(),
+                })
+                .await;
+            if healthcheck.is_ok() {
+                return Ok(sandbox.id);
+            }
+        }
+    }
+
+    conversation
+        .create_sandbox(CreateSandboxRequest {
+            provider: desired_provider,
+            image: desired_image,
+            default_workdir: Some(desired_default_workdir),
+            file_system_mounts: Some(desired_mounts),
+            enable_networking: Some(desired_enable_networking),
+            idle_seconds: Some(300),
+        })
+        .await
+}
+
+fn normalize_mounts(mounts: &[FileSystemMount]) -> Vec<FileSystemMount> {
+    mounts
+        .iter()
+        .map(|mount| FileSystemMount {
+            host_path: mount.host_path.clone(),
+            mount_path: mount.mount_path.clone(),
+            mode: match mount.mode {
+                FileSystemMountMode::ReadOnly => FileSystemMountMode::ReadOnly,
+                FileSystemMountMode::ReadWrite => FileSystemMountMode::ReadWrite,
+            },
+            internal: Some(mount.internal.unwrap_or(false)),
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShellSandboxInfo {
+    id: String,
+    image: String,
+    default_workdir: String,
+    file_system_mounts: Vec<FileSystemMount>,
+    enable_networking: bool,
+    idle_seconds: u64,
+}
+
+async fn latest_shell_sandbox(
+    conversation: &dyn ConversationHandle,
+    desired_provider: SandboxProvider,
+) -> Result<Option<ShellSandboxInfo>> {
+    let events = conversation
+        .get_events(Some(EventQuery {
+            cursor: None,
+            direction: Some(EventQueryDirection::Desc),
+            limit: Some(50),
+            session_id: None,
+            turn_id: None,
+            types: Some(vec![EventKind::SANDBOX_CREATED]),
+        }))
+        .await?
+        .events;
+
+    let Some(event) = events.into_iter().next() else {
+        return Ok(None);
+    };
+    match event.data {
+        EventData::SandboxCreated {
+            sandbox_id,
+            provider,
+            image,
+            default_workdir,
+            file_system_mounts,
+            enable_networking,
+            idle_seconds,
+        } => {
+            if provider != desired_provider {
+                return Ok(None);
+            }
+            Ok(Some(ShellSandboxInfo {
+                id: sandbox_id,
+                image,
+                default_workdir,
+                file_system_mounts,
+                enable_networking,
+                idle_seconds,
+            }))
+        }
+        other => Err(anyhow::anyhow!(
+            "type-filtered query for {} returned unexpected variant {}",
+            EventKind::SANDBOX_CREATED.as_str(),
+            other.kind().as_str(),
+        )),
+    }
 }

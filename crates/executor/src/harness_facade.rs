@@ -126,6 +126,7 @@ where
             typescript: request.typescript,
             enable_agent_tool_creation: request.enable_agent_tool_creation,
             sandbox_image: request.sandbox_image,
+            sandbox_provider: request.sandbox_provider,
             enable_networking: request.enable_networking,
             model: request.model,
             max_output_tokens: request.max_output_tokens,
@@ -221,6 +222,7 @@ where
         &self,
         request: CreateConversationRequest,
     ) -> Result<Arc<dyn HarnessConversation>> {
+        let agent_config = self.config().await?;
         let conversation = self
             .agent
             .new_conversation(NewConversationRequest {
@@ -228,8 +230,21 @@ where
                 name: request.name,
             })
             .await?;
+        let default_conversation_config = ConversationConfig::default();
+        let conversation_config = ConversationConfig {
+            sandbox_image: request.sandbox_image.or(agent_config.sandbox_image),
+            sandbox_provider: Some(
+                request
+                    .sandbox_provider
+                    .unwrap_or(agent_config.sandbox_provider),
+            ),
+            shell_program: request
+                .shell_program
+                .or(default_conversation_config.shell_program),
+            mounts: default_conversation_config.mounts,
+        };
         self.runtime
-            .put_conversation_config(conversation.as_ref(), ConversationConfig::default())
+            .put_conversation_config(conversation.as_ref(), conversation_config)
             .await?;
         Ok(Arc::new(SharedHarnessConversation {
             agent: Arc::clone(&self.agent),

@@ -21,6 +21,7 @@ mod harness_js_repl;
 mod harness_runtime;
 mod harness_tool;
 mod harness_types;
+mod local_sandbox;
 mod rlm;
 #[cfg(test)]
 mod rlm_tests;
@@ -28,6 +29,8 @@ mod scheduler_runtime;
 mod scheduler_store;
 mod scheduler_types;
 mod shared;
+#[cfg(test)]
+mod test_support;
 mod typescript;
 
 pub use adapter::AdapterStore;
@@ -45,11 +48,14 @@ pub use executor_types::{
     ToolRuntime, TypeScriptHarnessConfig, effective_sandbox_scope,
 };
 pub use exoharness::{
-    AgentHandle, BasicExoHarness, BasicExoHarnessConfig, Binding, BindingMetadata,
-    ConversationHandle, EventData, EventId, EventKind, EventQuery, EventQueryDirection, ExoHarness,
-    FileSystemMount, FileSystemMountMode, ForkConversationRequest, PutSecretRequest,
-    SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxId, Secret, SecretBackendChoice,
-    SecretMetadata, SessionId, SnapshotId, StartSandboxRequest, Uuid7,
+    AgentHandle, BasicExoHarness, BasicExoHarnessConfig, Binding, BindingRecord,
+    ConversationHandle, DEFAULT_SANDBOX_IMAGE, EventData, EventId, EventKind, EventQuery,
+    EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions, FileSystemMount,
+    FileSystemMountMode, ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET, HttpExoHarness,
+    PutSecretRequest, SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxId, SandboxProvider,
+    Secret, SecretBackendChoice, SecretMetadata, SessionId, SnapshotId, StartSandboxRequest,
+    ToolRequest, Uuid7, serve_exoharness_http_listener,
+    serve_exoharness_http_listener_with_options,
 };
 pub use harness_basic::BasicHarness;
 pub use harness_config::load_agent_config;
@@ -57,6 +63,7 @@ pub use harness_tool::{BasicToolRuntime, ExoclawToolRuntime};
 pub use harness_types::{
     CreateAgentRequest, CreateConversationRequest, Harness, HarnessAgent, HarnessConversation,
 };
+pub use local_sandbox::LocalSandboxExoHarness;
 pub use rlm::RlmHarness;
 pub use scheduler_runtime::{SchedulerRunOptions, run_due_tasks, run_task};
 pub use scheduler_store::SchedulerStore;
