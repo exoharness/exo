@@ -2170,6 +2170,7 @@ dependencies = [
  "bytes",
  "chrono",
  "futures",
+ "getrandom 0.3.4",
  "keyring",
  "keyring-core",
  "lingua",

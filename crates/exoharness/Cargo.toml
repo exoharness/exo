@@ -10,6 +10,7 @@ default = []
 basic-backend = [
   "dep:aes-gcm",
   "dep:actix-web",
+  "dep:getrandom",
   "dep:object_store",
   "dep:reqwest",
   "dep:tokio",
@@ -29,6 +30,7 @@ async-trait.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 futures.workspace = true
+getrandom = { version = "0.3", optional = true }
 keyring = { version = "4.0.0-rc.3", optional = true }
 keyring-core = { version = "0.7.2", optional = true }
 lingua.workspace = true
