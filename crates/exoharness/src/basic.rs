@@ -15,6 +15,7 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::daytona::DaytonaSandboxBackend;
+use crate::e2b::E2bSandboxBackend;
 use crate::sandbox::{
     CliContainerSandboxBackend, LocalProcessSandboxBackend, ManagedSandboxBackend,
     ManagedSandboxHandle, SANDBOX_MAIN_MOUNT_DIR, SandboxCommand, SandboxKey,
@@ -50,6 +51,7 @@ pub enum SandboxBackendChoice {
     Docker,
     LocalProcess,
     Daytona(crate::DaytonaConfig),
+    E2b(crate::E2bConfig),
 }
 
 // TODO: as more knobs land here, swap to a builder pattern.
@@ -1987,6 +1989,7 @@ fn build_sandbox_backend(choice: SandboxBackendChoice) -> Result<Arc<dyn Managed
         SandboxBackendChoice::Docker => Arc::new(CliContainerSandboxBackend::docker()),
         SandboxBackendChoice::LocalProcess => Arc::new(LocalProcessSandboxBackend::new()),
         SandboxBackendChoice::Daytona(config) => Arc::new(DaytonaSandboxBackend::new(config)?),
+        SandboxBackendChoice::E2b(config) => Arc::new(E2bSandboxBackend::new(config)?),
     };
     Ok(backend)
 }
