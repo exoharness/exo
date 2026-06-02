@@ -1113,10 +1113,16 @@ async fn main() -> Result<()> {
                 let agent = must_get_agent(harness.as_ref(), &agent).await?;
                 let conversations = agent.list_conversations().await?;
                 print_table(
-                    &["CONVERSATION", "NAME"],
+                    &["CONVERSATION", "ID", "NAME"],
                     conversations
                         .into_iter()
-                        .map(|conversation| vec![conversation.slug, conversation.name])
+                        .map(|conversation| {
+                            vec![
+                                conversation.slug,
+                                conversation.id.to_string(),
+                                conversation.name,
+                            ]
+                        })
                         .collect(),
                 )?;
             }
