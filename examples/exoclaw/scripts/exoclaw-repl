@@ -343,7 +343,7 @@ container_pull_image() {
   die "docker or podman is required to pre-pull sandbox images"
 }
 
-preflight_sandbox_image() {
+ensure_sandbox_image() {
   local status=0
   container_image_exists || status=$?
   case "$status" in
@@ -351,7 +351,12 @@ preflight_sandbox_image() {
       return
       ;;
     1)
-      die "sandbox image $SANDBOX_IMAGE is not present; you have to either --pull-sandbox or use --no-sandbox"
+      if [[ "$PULL_SANDBOX" == true ]]; then
+        echo "Pulling missing sandbox image $SANDBOX_IMAGE..."
+        container_pull_image
+      else
+        die "sandbox image $SANDBOX_IMAGE is not present; you have to either --pull-sandbox or use --no-sandbox"
+      fi
       ;;
     2)
       die "docker/podman not found; you have to either install one or use --no-sandbox"
@@ -441,7 +446,7 @@ list_agents_and_conversations() {
         }
       }
     '
-    exo conversation list "$agent" | awk -F '\t' 'NR == 1 { next } { printf "  %s - %s\n", $1, $2 }'
+    exo conversation list "$agent" | awk 'NR == 1 { next } { printf "  %s - %s\n", $1, $3 }'
   done <<<"$agents"
 }
 
@@ -505,7 +510,7 @@ delete_all_agents_and_conversations() {
     [[ -z "$agent" ]] && continue
 
     local conversations
-    conversations="$(exo conversation list "$agent" | awk -F '\t' 'NR > 1 { print $1 }')"
+    conversations="$(exo conversation list "$agent" | awk 'NR > 1 { print $1 }')"
     while IFS= read -r conversation; do
       [[ -z "$conversation" ]] && continue
       echo "Deleting conversation $agent/$conversation..."
@@ -559,6 +564,9 @@ setup_local_profile() {
 fresh_start() {
   build_exo
   delete_all_agents_and_conversations
+  if [[ "$USE_SANDBOX" == true ]]; then
+    PULL_SANDBOX=true
+  fi
   run_repl
 }
 
@@ -569,11 +577,7 @@ run_repl() {
   fi
   ensure_signal_cli
   if [[ "$USE_SANDBOX" == true ]]; then
-    if [[ "$PULL_SANDBOX" == true ]]; then
-      container_pull_image
-    else
-      preflight_sandbox_image
-    fi
+    ensure_sandbox_image
   fi
   ensure_agent
   ensure_conversation

@@ -1315,35 +1315,6 @@ async fn run_container_admin_command<const N: usize>(
     }
 }
 
-fn run_container_admin_command_blocking<const N: usize>(container_bin: &Path, args: [&str; N]) {
-    let Ok(mut child) = std::process::Command::new(container_bin)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        return;
-    };
-
-    let deadline = Instant::now() + WARM_SANDBOX_CLEANUP_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-            Ok(None) => {
-                if let Err(error) = child.kill() {
-                    tracing::warn!(%error, "failed to kill timed out container admin command");
-                }
-                if let Err(error) = child.wait() {
-                    tracing::warn!(%error, "failed to wait for timed out container admin command");
-                }
-                return;
-            }
-            Err(_) => return,
-        }
-    }
-}
-
 fn is_missing_container_error(stderr: &str) -> bool {
     let lower = stderr.to_ascii_lowercase();
     lower.contains("not found") || lower.contains("no such")

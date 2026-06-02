@@ -1,12 +1,13 @@
 use crate::{AgentConfig, ConversationConfig};
 use exoharness::{
     ConversationHandle, CreateSandboxRequest, DEFAULT_SANDBOX_IMAGE, EventData, EventKind,
-    EventQuery, EventQueryDirection, FileSystemMount, FileSystemMountMode, Result,
+    EventQuery, EventQueryDirection, FileSystemMount, FileSystemMountMode, Result, SandboxProvider,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConversationSandboxInfo {
     pub(crate) id: String,
+    pub(crate) provider: SandboxProvider,
     pub(crate) image: String,
     pub(crate) default_workdir: String,
     pub(crate) file_system_mounts: Vec<FileSystemMount>,
@@ -16,7 +17,8 @@ pub(crate) struct ConversationSandboxInfo {
 
 impl ConversationSandboxInfo {
     pub(crate) fn matches_spec(&self, spec: &ConversationSandboxSpec) -> bool {
-        self.image == spec.image
+        self.provider == spec.provider
+            && self.image == spec.image
             && self.default_workdir == spec.default_workdir
             && self.file_system_mounts == spec.file_system_mounts
             && self.enable_networking == spec.enable_networking
@@ -26,6 +28,7 @@ impl ConversationSandboxInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConversationSandboxSpec {
+    pub(crate) provider: SandboxProvider,
     pub(crate) image: String,
     pub(crate) default_workdir: String,
     pub(crate) file_system_mounts: Vec<FileSystemMount>,
@@ -57,6 +60,7 @@ pub(crate) async fn create_conversation_sandbox(
     let spec = conversation_sandbox_spec(agent_config, config);
     conversation
         .create_sandbox(CreateSandboxRequest {
+            provider: spec.provider,
             image: spec.image,
             default_workdir: Some(spec.default_workdir),
             file_system_mounts: Some(spec.file_system_mounts),
@@ -85,6 +89,7 @@ pub(crate) async fn conversation_sandboxes(
     for event in events {
         if let EventData::SandboxCreated {
             sandbox_id,
+            provider,
             image,
             default_workdir,
             file_system_mounts,
@@ -94,6 +99,7 @@ pub(crate) async fn conversation_sandboxes(
         {
             sandboxes.push(ConversationSandboxInfo {
                 id: sandbox_id,
+                provider,
                 image,
                 default_workdir,
                 file_system_mounts,
@@ -111,9 +117,10 @@ pub(crate) fn conversation_sandbox_spec(
     config: &ConversationConfig,
 ) -> ConversationSandboxSpec {
     ConversationSandboxSpec {
-        image: agent_config
-            .sandbox_image
-            .clone()
+        provider: config.effective_sandbox_provider(agent_config),
+        image: config
+            .effective_sandbox_image(agent_config)
+            .map(str::to_string)
             .unwrap_or_else(|| DEFAULT_SANDBOX_IMAGE.to_string()),
         default_workdir: config
             .mounts
@@ -121,7 +128,7 @@ pub(crate) fn conversation_sandbox_spec(
             .map(|mount| mount.mount_path.clone())
             .unwrap_or_else(|| "/".to_string()),
         file_system_mounts: normalize_mounts(&config.mounts),
-        enable_networking: agent_config.enable_networking || config.enable_networking,
+        enable_networking: agent_config.enable_networking,
         idle_seconds: 300,
     }
 }

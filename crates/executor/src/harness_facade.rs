@@ -242,6 +242,7 @@ where
                 .shell_program
                 .or(default_conversation_config.shell_program),
             mounts: default_conversation_config.mounts,
+            sandbox_scope: default_conversation_config.sandbox_scope,
         };
         self.runtime
             .put_conversation_config(conversation.as_ref(), conversation_config)

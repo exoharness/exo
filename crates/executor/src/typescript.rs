@@ -403,6 +403,7 @@ impl TypeScriptRunnerProcess {
                             send_host_message(&self.host_tx, response)?;
                         }
                         GuestToHostMessage::ExoRequest { id, request } => {
+                            let request_kind = request.kind();
                             let response = match exoharness_server.handle_request(request).await {
                                 Ok(response) => HostToGuestMessage::ExoResponse {
                                     id,
@@ -416,7 +417,9 @@ impl TypeScriptRunnerProcess {
                                     response: None,
                                     error: Some(format_error_chain(
                                         &error,
-                                        format_args!("typescript exoharness request failed"),
+                                        format_args!(
+                                            "typescript exoharness request `{request_kind}` failed"
+                                        ),
                                     )),
                                 },
                             };

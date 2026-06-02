@@ -1,6 +1,6 @@
 use exoharness::{
     AgentHandle, Artifact, ArtifactVersion, ConversationHandle, CreateSandboxRequest,
-    ReadArtifactRequest, Result, Uuid7, WriteArtifactRequest,
+    ReadArtifactRequest, Result, SandboxProvider, Uuid7, WriteArtifactRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +22,7 @@ pub(crate) struct AgentSandboxHandle {
 struct AgentSandboxRecord {
     conversation_id: String,
     sandbox_id: String,
+    provider: SandboxProvider,
     image: String,
     default_workdir: String,
     file_system_mounts: Vec<exoharness::FileSystemMount>,
@@ -31,7 +32,8 @@ struct AgentSandboxRecord {
 
 impl AgentSandboxRecord {
     fn matches_spec(&self, spec: &ConversationSandboxSpec) -> bool {
-        self.image == spec.image
+        self.provider == spec.provider
+            && self.image == spec.image
             && self.default_workdir == spec.default_workdir
             && self.file_system_mounts == spec.file_system_mounts
             && self.enable_networking == spec.enable_networking
@@ -63,6 +65,7 @@ pub(crate) async fn ensure_agent_sandbox(
 
     let sandbox_id = current_conversation
         .create_sandbox(CreateSandboxRequest {
+            provider: spec.provider,
             image: spec.image.clone(),
             default_workdir: Some(spec.default_workdir.clone()),
             file_system_mounts: Some(spec.file_system_mounts.clone()),
@@ -75,6 +78,7 @@ pub(crate) async fn ensure_agent_sandbox(
         &AgentSandboxRecord {
             conversation_id: current_conversation.record().id.to_string(),
             sandbox_id: sandbox_id.clone(),
+            provider: spec.provider,
             image: spec.image,
             default_workdir: spec.default_workdir,
             file_system_mounts: spec.file_system_mounts,

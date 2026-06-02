@@ -539,7 +539,12 @@ class ProtocolClient {
       id,
       request,
     });
-    return response;
+    try {
+      return await response;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`exoharness request ${request.type} failed: ${message}`);
+    }
   }
 
   async emitStream(event: RawTypeScriptStreamEvent): Promise<void> {

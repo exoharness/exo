@@ -30,8 +30,8 @@ use executor::{
     FileSystemMount, FileSystemMountMode, ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET,
     Harness, HarnessAgent, HarnessConversation, HttpExoHarness, LocalSandboxExoHarness,
     PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxProvider,
-    SandboxScope, Secret, SecretBackendChoice, SendRequest, ToolRequest, ToolRuntime,
-    TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, effective_sandbox_scope, load_agent_config,
+    SandboxScope, Secret, SecretBackendChoice, ToolRequest, ToolRuntime, TypeScriptHarness,
+    TypeScriptHarnessConfig, Uuid7, effective_sandbox_scope, load_agent_config,
     send_conversation_wakeup, serve_exoharness_http_listener_with_options,
 };
 use lingua::Message;
@@ -1588,9 +1588,10 @@ async fn main() -> Result<()> {
             } => {
                 let agent = must_get_agent(harness.as_ref(), &agent).await?;
                 if !agent.delete_conversation(&conversation).await? {
-                    bail!("conversation not found: {conversation}");
+                    println!("conversation {} not found; nothing to delete", conversation);
+                } else {
+                    println!("deleted conversation {}", conversation);
                 }
-                println!("deleted conversation {}", conversation);
             }
         },
         Commands::Secret { command } => match command {
@@ -2346,6 +2347,7 @@ async fn run_sandbox_shell_command(
             conversation.record().slug
         );
     }
+    let agent_handle = agent.exoharness_handle();
     let conversation_handle = conversation.exoharness_handle();
     let runtime = BasicToolRuntime;
 
@@ -2353,6 +2355,7 @@ async fn run_sandbox_shell_command(
     arguments.insert("command".to_string(), serde_json::Value::String(command));
     let result = runtime
         .execute(
+            agent_handle.as_ref(),
             conversation_handle.as_ref(),
             &agent_config,
             &config,

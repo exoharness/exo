@@ -50,6 +50,7 @@ await fs.mkdir(authDir, { recursive: true });
 
 const { state, saveCreds } = await useMultiFileAuthState(authDir);
 const { version } = await fetchLatestBaileysVersion();
+const SEND_TIMEOUT_MS = 60_000;
 const socket = makeWASocket({
   auth: state,
   logger,
@@ -126,15 +127,23 @@ for await (const line of input) {
     if (!command.target) {
       throw new Error("WhatsApp send_message requires a target chat id");
     }
+    writeWorkerEvent({
+      type: "lifecycle",
+      name: "send_starting",
+      metadata: {
+        target: command.target,
+        attachmentCount: command.attachments.length,
+      },
+    });
     if (command.attachments.length === 0) {
-      await socket.sendMessage(command.target, { text: command.text });
+      await sendWhatsAppMessage(command.target, { text: command.text });
     } else {
       let captionUsed = false;
       const textBeforeMedia = command.attachments.every(
         (attachment) => !attachmentSupportsCaption(attachment),
       );
       if (textBeforeMedia) {
-        await socket.sendMessage(command.target, { text: command.text });
+        await sendWhatsAppMessage(command.target, { text: command.text });
         captionUsed = true;
       }
       for (const attachment of command.attachments) {
@@ -146,9 +155,17 @@ for await (const line of input) {
         await sendAttachment(command.target, attachment, caption);
       }
       if (!captionUsed) {
-        await socket.sendMessage(command.target, { text: command.text });
+        await sendWhatsAppMessage(command.target, { text: command.text });
       }
     }
+    writeWorkerEvent({
+      type: "lifecycle",
+      name: "send_result",
+      metadata: {
+        target: command.target,
+        attachmentCount: command.attachments.length,
+      },
+    });
   } catch (error) {
     writeWorkerEvent({
       type: "error",
@@ -170,26 +187,19 @@ async function sendAttachment(
   attachment: AdapterAttachment,
   caption: string | null,
 ): Promise<void> {
-  try {
-    await socket.sendMessage(
-      target,
-      whatsappAttachmentContent(attachment, caption),
-    );
-  } catch (error) {
-    if (attachment.kind !== "audio") {
-      throw error;
-    }
-    await socket.sendMessage(target, audioDocumentContent(attachment));
-  }
+  await sendWhatsAppMessage(
+    target,
+    await whatsappAttachmentContent(attachment, caption),
+  );
 }
 
 type WhatsAppMessageContent = Parameters<typeof socket.sendMessage>[1];
 
-function whatsappAttachmentContent(
+async function whatsappAttachmentContent(
   attachment: AdapterAttachment,
   caption: string | null,
-): WhatsAppMessageContent {
-  const media = mediaSource(attachment);
+): Promise<WhatsAppMessageContent> {
+  const media = await mediaSource(attachment);
   switch (attachment.kind) {
     case "image":
       return {
@@ -202,6 +212,9 @@ function whatsappAttachmentContent(
         caption: caption ?? undefined,
       } as WhatsAppMessageContent;
     case "audio":
+      if (!isOpusAudio(attachment)) {
+        return audioDocumentContent(attachment, media);
+      }
       return {
         audio: media,
         mimetype: whatsappAudioMimeType(attachment),
@@ -223,11 +236,37 @@ function whatsappAttachmentContent(
   }
 }
 
+async function sendWhatsAppMessage(
+  target: string,
+  content: WhatsAppMessageContent,
+): Promise<void> {
+  let timeout: NodeJS.Timeout | null = null;
+  try {
+    await Promise.race([
+      socket.sendMessage(target, content),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          reject(
+            new Error(
+              `WhatsApp send_message timed out after ${SEND_TIMEOUT_MS}ms`,
+            ),
+          );
+        }, SEND_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timeout !== null) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
 function audioDocumentContent(
   attachment: AdapterAttachment,
+  media: { url: string } | Buffer,
 ): WhatsAppMessageContent {
   return {
-    document: mediaSource(attachment),
+    document: media,
     mimetype: attachment.mimeType ?? "application/octet-stream",
     fileName: attachment.fileName ?? "audio",
   } as WhatsAppMessageContent;
@@ -248,18 +287,19 @@ function isOpusAudio(attachment: AdapterAttachment): boolean {
   const source = (attachment.path ?? attachment.url ?? "").toLowerCase();
   return (
     mimeType.includes("opus") ||
-    mimeType === "audio/ogg" ||
-    fileName.endsWith(".ogg") ||
     fileName.endsWith(".opus") ||
-    source.endsWith(".ogg") ||
     source.endsWith(".opus")
   );
 }
 
-function mediaSource(attachment: AdapterAttachment): { url: string } | Buffer {
-  const source = attachment.path ?? attachment.url;
-  if (source) {
-    return { url: source };
+async function mediaSource(
+  attachment: AdapterAttachment,
+): Promise<{ url: string } | Buffer> {
+  if (attachment.path) {
+    return fs.readFile(attachment.path);
+  }
+  if (attachment.url) {
+    return { url: attachment.url };
   }
   if (attachment.data) {
     return Buffer.from(base64Payload(attachment.data), "base64");
