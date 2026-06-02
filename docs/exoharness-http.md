@@ -7,13 +7,13 @@ The HTTP transport exposes the existing exoharness protocol over a single unary 
 An exoharness HTTP server exposes:
 
 - `GET /health`
-- `POST /v1/requests`
+- `POST /request`
 
-Clients may be configured with either the server base URL, such as `http://127.0.0.1:4766`, or the full request endpoint, such as `http://127.0.0.1:4766/v1/requests`.
+Clients may be configured with either the server base URL, such as `http://127.0.0.1:4766`, or the full request endpoint, such as `http://127.0.0.1:4766/request`.
 
 ## Request
 
-`POST /v1/requests`
+`POST /request`
 
 Headers:
 

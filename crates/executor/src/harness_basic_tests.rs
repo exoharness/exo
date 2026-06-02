@@ -26,7 +26,7 @@ use tempfile::TempDir;
 
 use crate::{
     BasicHarness, BasicToolRuntime, ConversationModelConfig, CreateAgentRequest,
-    CreateConversationRequest, Harness,
+    CreateConversationRequest, Harness, harness_tool::ensure_shell_sandbox,
 };
 
 #[tokio::test(flavor = "current_thread")]
@@ -657,6 +657,101 @@ async fn updating_mounts_recreates_shell_sandbox() {
         .expect("get sandbox events after mount change")
         .events;
     assert_eq!(second_sandboxes.len(), 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn updating_sandbox_image_recreates_shell_sandbox_without_shell_program() {
+    let tempdir = TempDir::new().expect("tempdir should exist");
+    let exoharness = Arc::new(
+        BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
+            .await
+            .expect("basic exoharness should initialize"),
+    );
+    let harness = BasicHarness::new(
+        exoharness,
+        Arc::new(FakeModelClient::default()),
+        Arc::new(BasicToolRuntime),
+    );
+
+    let agent = harness
+        .create_agent(CreateAgentRequest {
+            slug: "demo".to_string(),
+            name: Some("Demo".to_string()),
+            harness: crate::AgentHarnessKind::Basic,
+            typescript: None,
+            enable_agent_tool_creation: true,
+            sandbox_image: None,
+            sandbox_provider: Default::default(),
+            enable_networking: false,
+            model: "gpt-5.4".to_string(),
+            max_output_tokens: None,
+            max_tool_round_trips: Some(1),
+            braintrust: None,
+        })
+        .await
+        .expect("agent should be created");
+    let conversation = agent
+        .create_conversation(CreateConversationRequest::default())
+        .await
+        .expect("conversation should be created");
+    let agent_config = agent.config().await.expect("agent config should load");
+
+    let mut conversation_config = conversation
+        .config()
+        .await
+        .expect("conversation config should load");
+    conversation_config.shell_program = None;
+    conversation_config.sandbox_image = Some("first-image".to_string());
+    conversation
+        .put_config(conversation_config.clone())
+        .await
+        .expect("conversation config should update");
+
+    let first_sandbox_id = ensure_shell_sandbox(
+        conversation.exoharness_handle().as_ref(),
+        &agent_config,
+        &conversation_config,
+    )
+    .await
+    .expect("first sandbox should be created");
+
+    conversation_config.sandbox_image = Some("second-image".to_string());
+    conversation
+        .put_config(conversation_config.clone())
+        .await
+        .expect("conversation config should update again");
+
+    let second_sandbox_id = ensure_shell_sandbox(
+        conversation.exoharness_handle().as_ref(),
+        &agent_config,
+        &conversation_config,
+    )
+    .await
+    .expect("second sandbox should be created");
+
+    assert_ne!(first_sandbox_id, second_sandbox_id);
+    let sandbox_events = conversation
+        .exoharness_handle()
+        .get_events(Some(EventQuery {
+            cursor: None,
+            direction: Some(EventQueryDirection::Asc),
+            limit: None,
+            session_id: None,
+            turn_id: None,
+            types: Some(vec!["sandbox_created".to_string()]),
+        }))
+        .await
+        .expect("get sandbox events")
+        .events;
+    assert_eq!(sandbox_events.len(), 2);
+    assert!(matches!(
+        &sandbox_events[0].data,
+        EventData::SandboxCreated { image, .. } if image == "first-image"
+    ));
+    assert!(matches!(
+        &sandbox_events[1].data,
+        EventData::SandboxCreated { image, .. } if image == "second-image"
+    ));
 }
 
 #[tokio::test(flavor = "current_thread")]

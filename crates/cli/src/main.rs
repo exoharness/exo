@@ -1674,6 +1674,12 @@ async fn serve_exoharness_http(
     config: ServeConfig,
 ) -> Result<()> {
     init_serve_tracing(config.verbosity);
+    if !config.bind.ip().is_loopback() {
+        anyhow::bail!(
+            "exo serve only binds loopback addresses; got {}",
+            config.bind
+        );
+    }
     let exoharness = Arc::new(BasicExoHarness::new(exo_config.clone()).await?);
     let listener = TcpListener::bind(config.bind)?;
     let addr = listener.local_addr()?;

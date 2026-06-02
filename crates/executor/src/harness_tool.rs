@@ -113,10 +113,6 @@ pub(crate) async fn ensure_shell_sandbox(
     let desired_enable_networking = agent_config.enable_networking;
 
     if let Some(sandbox) = latest_shell_sandbox(conversation, desired_provider).await? {
-        let Some(program) = &config.shell_program else {
-            return Ok(sandbox.id);
-        };
-
         let config_matches = sandbox.image == desired_image
             && sandbox.default_workdir == desired_default_workdir
             && sandbox.file_system_mounts == desired_mounts
@@ -124,6 +120,10 @@ pub(crate) async fn ensure_shell_sandbox(
             && sandbox.idle_seconds == 300;
 
         if config_matches {
+            let Some(program) = &config.shell_program else {
+                return Ok(sandbox.id);
+            };
+
             let healthcheck = conversation
                 .run_in_sandbox(RunInSandboxRequest {
                     id: sandbox.id.clone(),

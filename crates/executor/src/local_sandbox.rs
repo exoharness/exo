@@ -11,8 +11,8 @@ use exoharness::{
     NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result, RunInSandboxRequest,
     SandboxId, SandboxProcess, SandboxProcessEventQuery, SandboxProcessRecord,
     SandboxProcessStatus, Secret, SecretId, SecretMetadata, SnapshotId, StartSandboxProcessRequest,
-    StartSandboxRequest, TurnHandle, TurnRecord, WaitSandboxProcessRequest, WriteArtifactRequest,
-    WriteSandboxProcessInputRequest,
+    StartSandboxRequest, TurnHandle, TurnRecord, Uuid7, WaitSandboxProcessRequest,
+    WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -34,6 +34,7 @@ struct LocalSandboxState {
     remote: Arc<dyn ExoHarness>,
     local: Arc<dyn ExoHarness>,
     conversations: Mutex<HashMap<ConversationId, Arc<dyn ConversationHandle>>>,
+    conversation_init: Mutex<()>,
     sandboxes: Mutex<HashMap<SandboxId, SandboxId>>,
     force_local: bool,
 }
@@ -53,6 +54,7 @@ impl LocalSandboxExoHarness {
                 remote,
                 local,
                 conversations: Mutex::new(HashMap::new()),
+                conversation_init: Mutex::new(()),
                 sandboxes: Mutex::new(HashMap::new()),
                 force_local,
             }),
@@ -215,9 +217,19 @@ fn wrap_conversation(
 
 impl LocalSandboxConversation {
     async fn local_conversation(&self) -> Result<Arc<dyn ConversationHandle>> {
-        let mut conversations = self.state.conversations.lock().await;
-        if let Some(conversation) = conversations.get(&self.remote.record().id) {
-            return Ok(Arc::clone(conversation));
+        {
+            let conversations = self.state.conversations.lock().await;
+            if let Some(conversation) = conversations.get(&self.remote.record().id) {
+                return Ok(Arc::clone(conversation));
+            }
+        }
+
+        let _init_guard = self.state.conversation_init.lock().await;
+        {
+            let conversations = self.state.conversations.lock().await;
+            if let Some(conversation) = conversations.get(&self.remote.record().id) {
+                return Ok(Arc::clone(conversation));
+            }
         }
 
         let local_agent = match self
@@ -258,6 +270,7 @@ impl LocalSandboxConversation {
             }
         };
 
+        let mut conversations = self.state.conversations.lock().await;
         conversations.insert(self.remote.record().id, Arc::clone(&local_conversation));
         Ok(local_conversation)
     }
@@ -276,7 +289,7 @@ impl LocalSandboxConversation {
             .get_events(Some(exoharness::EventQuery {
                 cursor: None,
                 direction: Some(exoharness::EventQueryDirection::Desc),
-                limit: Some(100),
+                limit: None,
                 session_id: None,
                 turn_id: None,
                 types: Some(vec![LOCAL_SANDBOX_MAP_EVENT.to_string()]),
@@ -408,13 +421,29 @@ impl ConversationHandle for LocalSandboxConversation {
             return self.remote.create_sandbox(request).await;
         }
 
-        let remote_id = self.remote.create_sandbox(request.clone()).await?;
+        let remote_id = format!("sandbox-{}", Uuid7::now());
         let local_id = self
             .local_conversation()
             .await?
-            .create_sandbox(request)
+            .create_sandbox(request.clone())
             .await?;
         self.map_local_sandbox(remote_id.clone(), local_id).await?;
+        self.append_remote_sandbox_events(vec![
+            EventData::SandboxCreated {
+                sandbox_id: remote_id.clone(),
+                provider: request.provider,
+                image: request.image,
+                default_workdir: request.default_workdir.unwrap_or_default(),
+                file_system_mounts: request.file_system_mounts.unwrap_or_default(),
+                enable_networking: request.enable_networking.unwrap_or(true),
+                idle_seconds: request.idle_seconds.unwrap_or(60),
+            },
+            EventData::SandboxStarted {
+                sandbox_id: remote_id.clone(),
+                snapshot_id: None,
+            },
+        ])
+        .await?;
         Ok(remote_id)
     }
 
@@ -605,5 +634,103 @@ impl ConversationHandle for LocalSandboxConversation {
 
     async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>> {
         self.remote.get_secret(id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use exoharness::{
+        BasicExoHarness, BasicExoHarnessConfig, EventQuery, EventQueryDirection,
+        SandboxBackendChoice, SandboxProvider, SecretBackendChoice,
+    };
+    use tempfile::TempDir;
+
+    fn test_config(root: impl Into<std::path::PathBuf>) -> BasicExoHarnessConfig {
+        BasicExoHarnessConfig {
+            root: root.into(),
+            secret_backend: SecretBackendChoice::Static([7u8; 32]),
+            sandbox_backend: SandboxBackendChoice::LocalProcess,
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_sandbox_creation_only_records_remote_events() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let remote = Arc::new(
+            BasicExoHarness::new(test_config(tempdir.path().join("remote")))
+                .await
+                .expect("remote harness should initialize"),
+        );
+        let local = Arc::new(
+            BasicExoHarness::new(test_config(tempdir.path().join("local")))
+                .await
+                .expect("local harness should initialize"),
+        );
+        let remote_harness: Arc<dyn ExoHarness> = remote.clone();
+        let local_harness: Arc<dyn ExoHarness> = local;
+        let wrapper = LocalSandboxExoHarness::new(remote_harness, local_harness);
+
+        let agent = wrapper
+            .new_agent(NewAgentRequest {
+                slug: "demo".to_string(),
+                name: "Demo".to_string(),
+            })
+            .await
+            .expect("agent should be created");
+        let conversation = agent
+            .new_conversation(NewConversationRequest {
+                slug: Some("session".to_string()),
+                name: Some("Session".to_string()),
+            })
+            .await
+            .expect("conversation should be created");
+        let sandbox_id = conversation
+            .create_sandbox(CreateSandboxRequest {
+                provider: SandboxProvider::Docker,
+                image: "local-image".to_string(),
+                default_workdir: Some("/workspace".to_string()),
+                file_system_mounts: Some(Vec::new()),
+                enable_networking: Some(false),
+                idle_seconds: Some(120),
+            })
+            .await
+            .expect("sandbox should be created");
+
+        let remote_events = conversation
+            .get_events(Some(EventQuery {
+                cursor: None,
+                direction: Some(EventQueryDirection::Asc),
+                limit: None,
+                session_id: None,
+                turn_id: None,
+                types: Some(vec![
+                    "sandbox_created".to_string(),
+                    "sandbox_started".to_string(),
+                ]),
+            }))
+            .await
+            .expect("remote events should load")
+            .events;
+        assert_eq!(remote_events.len(), 2);
+
+        let remote_agent = remote
+            .get_agent(&agent.record().id)
+            .await
+            .expect("remote get agent should succeed")
+            .expect("remote agent should exist");
+        let remote_conversation = remote_agent
+            .get_conversation(&conversation.record().id)
+            .await
+            .expect("remote get conversation should succeed")
+            .expect("remote conversation should exist");
+        let remote_process = remote_conversation
+            .run_in_sandbox(RunInSandboxRequest {
+                id: sandbox_id,
+                command: vec!["true".to_string()],
+                env: Default::default(),
+            })
+            .await;
+        assert!(remote_process.is_err());
     }
 }
