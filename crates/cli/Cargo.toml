@@ -20,6 +20,7 @@ serde_json.workspace = true
 tabwriter.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
+tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]

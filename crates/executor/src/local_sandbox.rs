@@ -677,7 +677,7 @@ mod tests {
             .expect("conversation should be created");
         let sandbox_id = conversation
             .create_sandbox(CreateSandboxRequest {
-                provider: SandboxProvider::Docker,
+                provider: SandboxProvider::LocalProcess,
                 image: "local-image".to_string(),
                 default_workdir: Some("/workspace".to_string()),
                 file_system_mounts: Some(Vec::new()),
@@ -694,10 +694,7 @@ mod tests {
                 limit: None,
                 session_id: None,
                 turn_id: None,
-                types: Some(vec![
-                    "sandbox_created".to_string(),
-                    "sandbox_started".to_string(),
-                ]),
+                types: Some(vec![EventKind::SANDBOX_CREATED, EventKind::SANDBOX_STARTED]),
             }))
             .await
             .expect("remote events should load")

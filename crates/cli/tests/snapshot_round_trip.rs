@@ -23,7 +23,7 @@ use std::process::Command;
 use exoharness::{
     BasicExoHarness, BasicExoHarnessConfig, ConversationHandle, CreateSandboxRequest, ExoHarness,
     NewAgentRequest, NewConversationRequest, RunInSandboxRequest, SandboxBackendChoice, SandboxId,
-    SecretBackendChoice, StartSandboxRequest,
+    SandboxProvider, SecretBackendChoice, StartSandboxRequest,
 };
 use futures::io::AsyncReadExt;
 use tempfile::TempDir;
@@ -69,6 +69,7 @@ async fn filesystem_snapshot_and_rewind_round_trip() {
     // ───── Phase 1: create a docker sandbox and write the initial state ─────
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
+            provider: SandboxProvider::Docker,
             image: SANDBOX_IMAGE.into(),
             default_workdir: Some("/".into()),
             file_system_mounts: None,

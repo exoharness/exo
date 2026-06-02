@@ -597,7 +597,7 @@ impl ManagedSandboxHandle for WarmSandboxHandle {
             // know to choose Docker for snapshot-using flows.
             ContainerCliFlavor::AppleContainer => bail!(
                 "snapshot is not yet implemented for the apple-container backend; \
-                 use --sandbox-backend docker for snapshot-using flows"
+                 use --sandbox-provider docker for snapshot-using flows"
             ),
         }
     }

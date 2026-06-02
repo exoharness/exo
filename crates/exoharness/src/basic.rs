@@ -93,12 +93,14 @@ impl BasicExoHarnessInner {
     ) -> Arc<dyn ManagedSandboxBackend> {
         if matches!(
             (self.sandbox_backend_choice, provider),
-            (SandboxBackendChoice::LocalProcess, _)
+            (
+                SandboxBackendChoice::AppleContainer,
+                SandboxProvider::AppleContainer
+            ) | (SandboxBackendChoice::Docker, SandboxProvider::Docker)
                 | (
-                    SandboxBackendChoice::AppleContainer,
-                    SandboxProvider::AppleContainer
+                    SandboxBackendChoice::LocalProcess,
+                    SandboxProvider::LocalProcess
                 )
-                | (SandboxBackendChoice::Docker, SandboxProvider::Docker)
                 | (_, SandboxProvider::Daytona)
         ) {
             return Arc::clone(&self.sandbox_backend);
@@ -109,6 +111,7 @@ impl BasicExoHarnessInner {
                 Arc::new(CliContainerSandboxBackend::apple_container())
             }
             SandboxProvider::Docker => Arc::new(CliContainerSandboxBackend::docker()),
+            SandboxProvider::LocalProcess => Arc::new(LocalProcessSandboxBackend::new()),
             SandboxProvider::Daytona => Arc::clone(&self.sandbox_backend),
         }
     }

@@ -50,7 +50,7 @@ interface RawAgentConfig {
   } | null;
   enable_agent_tool_creation?: boolean;
   sandbox_image?: string | null;
-  sandbox_provider?: "daytona" | "apple_container" | "docker";
+  sandbox_provider?: "daytona" | "apple_container" | "docker" | "local_process";
   enable_networking: boolean;
   model: string;
   max_output_tokens?: number | null;
@@ -60,7 +60,12 @@ interface RawAgentConfig {
 
 interface RawConversationConfig {
   sandbox_image?: string | null;
-  sandbox_provider?: "daytona" | "apple_container" | "docker" | null;
+  sandbox_provider?:
+    | "daytona"
+    | "apple_container"
+    | "docker"
+    | "local_process"
+    | null;
   shell_program?: string | null;
   mounts: Array<{
     host_path: string;

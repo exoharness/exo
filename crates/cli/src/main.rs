@@ -78,7 +78,9 @@ struct Cli {
         value_name = "ENV_VAR",
         help = "Environment variable whose value is sent as the HTTP bearer token",
         global = true,
-        env = "EXO_BEARER_ENV"
+        env = "EXO_BEARER_ENV",
+        requires = "exoharness_url",
+        value_parser = parse_env_var_name
     )]
     bearer_env: Option<String>,
     #[command(subcommand)]
@@ -199,6 +201,8 @@ enum SandboxProviderArg {
     #[value(name = "apple-container")]
     AppleContainer,
     Docker,
+    #[value(name = "local-process")]
+    LocalProcess,
 }
 
 impl From<SandboxProviderArg> for SandboxProvider {
@@ -207,6 +211,7 @@ impl From<SandboxProviderArg> for SandboxProvider {
             SandboxProviderArg::Daytona => Self::Daytona,
             SandboxProviderArg::AppleContainer => Self::AppleContainer,
             SandboxProviderArg::Docker => Self::Docker,
+            SandboxProviderArg::LocalProcess => Self::LocalProcess,
         }
     }
 }
@@ -483,7 +488,7 @@ enum SecretCommands {
     List,
     Set {
         name: String,
-        #[arg(long)]
+        #[arg(long, value_parser = parse_env_var_name)]
         env: Option<String>,
         #[arg(long)]
         value: Option<String>,
@@ -628,9 +633,6 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    if cli.bearer_env.is_some() && cli.exoharness_url.is_none() {
-        bail!("--bearer-env requires --url");
-    }
     let bearer_token = cli
         .bearer_env
         .as_deref()
@@ -1695,7 +1697,11 @@ async fn serve_exoharness_http(
     let exoharness = Arc::new(BasicExoHarness::new(exo_config.clone()).await?);
     let listener = TcpListener::bind(config.bind)?;
     let addr = listener.local_addr()?;
-    println!("serving exoharness HTTP on http://{addr}");
+    tracing::info!(
+        target: HTTP_EXOHARNESS_TRACING_TARGET,
+        %addr,
+        "serving exoharness HTTP"
+    );
     serve_exoharness_http_listener_with_options(
         listener,
         exoharness,
@@ -1823,6 +1829,7 @@ fn format_sandbox_provider(provider: SandboxProvider) -> &'static str {
         SandboxProvider::Daytona => "daytona",
         SandboxProvider::AppleContainer => "apple-container",
         SandboxProvider::Docker => "docker",
+        SandboxProvider::LocalProcess => "local-process",
     }
 }
 
@@ -2362,6 +2369,17 @@ pub(crate) fn secret_value_from_env_arg(
     env_value_from_arg("--env", env, loaded_env)
 }
 
+fn parse_env_var_name(value: &str) -> std::result::Result<String, String> {
+    if is_env_var_name(value) {
+        Ok(value.to_string())
+    } else {
+        Err(
+            "pass an environment variable name such as OPENAI_API_KEY, not the secret value"
+                .to_string(),
+        )
+    }
+}
+
 fn env_value_from_arg(
     flag: &str,
     env: &str,
@@ -2598,5 +2616,47 @@ mod create_tests {
             Some("http://localhost:8000/exo/v1/projects/project-id")
         );
         assert_eq!(cli.bearer_env.as_deref(), Some("BRAINTRUST_API_KEY"));
+    }
+
+    #[test]
+    fn bearer_env_requires_exoharness_url() {
+        use clap::Parser;
+        let error = super::Cli::try_parse_from([
+            "exo",
+            "--bearer-env",
+            "BRAINTRUST_API_KEY",
+            "agent",
+            "list",
+        ])
+        .expect_err("bearer env should require an exoharness URL");
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    #[test]
+    fn sandbox_provider_local_process_parses() {
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from([
+            "exo",
+            "agent",
+            "create",
+            "test",
+            "--sandbox-provider",
+            "local-process",
+            "--model",
+            "test-model",
+        ])
+        .expect("local-process sandbox provider parses");
+        assert!(matches!(
+            cli.command,
+            super::Commands::Agent {
+                command: super::AgentCommands::Create {
+                    sandbox_provider: Some(super::SandboxProviderArg::LocalProcess),
+                    ..
+                }
+            }
+        ));
     }
 }

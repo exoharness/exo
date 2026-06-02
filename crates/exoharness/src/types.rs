@@ -451,14 +451,18 @@ pub struct CreateSandboxRequest {
 pub enum SandboxProvider {
     #[default]
     Daytona,
-    #[serde(alias = "local")]
     AppleContainer,
     Docker,
+    #[serde(alias = "local")]
+    LocalProcess,
 }
 
 impl SandboxProvider {
     pub fn is_local(self) -> bool {
-        matches!(self, Self::AppleContainer | Self::Docker)
+        matches!(
+            self,
+            Self::AppleContainer | Self::Docker | Self::LocalProcess
+        )
     }
 }
 
