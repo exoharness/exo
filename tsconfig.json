@@ -17,6 +17,7 @@
         "./typescript/model-runtime/responses.ts"
       ],
       "@exo/codex/app-server": ["./typescript/codex/app-server.ts"],
+      "@exo/codex/turn-runner": ["./typescript/codex/turn-runner.ts"],
       "@exo/cursor/sdk": ["./typescript/cursor/sdk.ts"],
       "@exo/cursor/protocol": ["./typescript/cursor/protocol.ts"]
     },
