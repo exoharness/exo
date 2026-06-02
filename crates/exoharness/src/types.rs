@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use futures::Stream;
 use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncWrite};
-use lingua::Message;
+use lingua::{Message, universal::UniversalStreamChunk};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -204,6 +204,7 @@ impl EventKind {
     pub const MESSAGES: EventKind = EventKind(Cow::Borrowed("messages"));
     pub const TOOL_REQUESTED: EventKind = EventKind(Cow::Borrowed("tool_requested"));
     pub const TOOL_RESULT: EventKind = EventKind(Cow::Borrowed("tool_result"));
+    pub const LINGUA_STREAM_CHUNK: EventKind = EventKind(Cow::Borrowed("lingua_stream_chunk"));
     pub const ARTIFACT_WRITTEN: EventKind = EventKind(Cow::Borrowed("artifact_written"));
     pub const SANDBOX_CREATED: EventKind = EventKind(Cow::Borrowed("sandbox_created"));
     pub const SANDBOX_STARTED: EventKind = EventKind(Cow::Borrowed("sandbox_started"));
@@ -301,6 +302,9 @@ pub enum EventData {
         tool_call_id: ToolCallId,
         result: ToolResult,
     },
+    LinguaStreamChunk {
+        chunk: UniversalStreamChunk,
+    },
     ArtifactWritten {
         artifact_id: ArtifactId,
         path: String,
@@ -308,7 +312,6 @@ pub enum EventData {
     },
     SandboxCreated {
         sandbox_id: SandboxId,
-        #[serde(default)]
         provider: SandboxProvider,
         image: String,
         default_workdir: String,
@@ -372,6 +375,7 @@ impl EventData {
             Self::Messages { .. } => EventKind::MESSAGES,
             Self::ToolRequested { .. } => EventKind::TOOL_REQUESTED,
             Self::ToolResult { .. } => EventKind::TOOL_RESULT,
+            Self::LinguaStreamChunk { .. } => EventKind::LINGUA_STREAM_CHUNK,
             Self::ArtifactWritten { .. } => EventKind::ARTIFACT_WRITTEN,
             Self::SandboxCreated { .. } => EventKind::SANDBOX_CREATED,
             Self::SandboxStarted { .. } => EventKind::SANDBOX_STARTED,
@@ -437,7 +441,6 @@ pub struct FileSystemMount {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreateSandboxRequest {
-    #[serde(default)]
     pub provider: SandboxProvider,
     pub image: String,
     pub default_workdir: Option<String>,
@@ -446,10 +449,9 @@ pub struct CreateSandboxRequest {
     pub idle_seconds: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxProvider {
-    #[default]
     Daytona,
     AppleContainer,
     Docker,
