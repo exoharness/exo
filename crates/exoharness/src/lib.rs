@@ -4,6 +4,7 @@ mod basic;
 mod basic_tests;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod daytona;
+mod e2b;
 mod error;
 pub mod protocol;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
@@ -21,6 +22,7 @@ mod uuid7;
 pub use basic::*;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub use daytona::{DEFAULT_DAYTONA_API_URL, DaytonaConfig, DaytonaSandboxBackend};
+pub use e2b::{DEFAULT_E2B_API_URL, E2bConfig, E2bSandboxBackend};
 pub use error::*;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub use sandbox::*;
