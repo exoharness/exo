@@ -33,6 +33,7 @@ pub use executor_types::{
 pub use exoharness::{
     AgentHandle, BasicExoHarness, BasicExoHarnessConfig, Binding, BindingMetadata,
     ConversationHandle, DaytonaConfig, E2bConfig, EventData, EventId, EventKind, EventQuery,
+    SpritesConfig,
     EventQueryDirection, ExoHarness, FileSystemMount, FileSystemMountMode, ForkConversationRequest,
     PutSecretRequest, SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxId, Secret,
     SecretBackendChoice, SecretMetadata, SessionId, SnapshotId, StartSandboxRequest, Uuid7,

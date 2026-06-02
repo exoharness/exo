@@ -123,6 +123,9 @@ pub enum SnapshotKind {
     /// Reference to an E2B snapshot template id. Payload bytes are a small JSON
     /// manifest; restoring is `POST /sandboxes { templateID: <snapshot_id> }`.
     E2bSnapshot,
+    /// Reference to a Sprites checkpoint id on a named sprite. Payload bytes are
+    /// a small JSON manifest; restoring is `POST .../checkpoints/{id}/restore`.
+    SpritesSnapshot,
 }
 
 #[async_trait]
@@ -550,6 +553,10 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
             (_, SnapshotKind::E2bSnapshot) => bail!(
                 "E2bSnapshot payloads can only be restored by the E2B sandbox backend; \
                  switch to --sandbox-backend e2b to rewind this snapshot"
+            ),
+            (_, SnapshotKind::SpritesSnapshot) => bail!(
+                "SpritesSnapshot payloads can only be restored by the Sprites sandbox backend; \
+                 switch to --sandbox-backend sprites to rewind this snapshot"
             ),
             (ContainerCliFlavor::AppleContainer, _) => bail!(
                 "restore-from-snapshot is not yet implemented for the apple-container backend"

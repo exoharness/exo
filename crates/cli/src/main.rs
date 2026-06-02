@@ -22,6 +22,7 @@ use executor::{
     AgentHarnessKind, BasicExoHarness, BasicExoHarnessConfig, BasicHarness, Binding,
     BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig, ConversationModelConfig,
     CreateAgentRequest, CreateConversationRequest, DaytonaConfig, E2bConfig, EventKind, EventQuery,
+    SpritesConfig,
     EventQueryDirection, ExoHarness, FileSystemMount, FileSystemMountMode, ForkConversationRequest,
     Harness, HarnessAgent, HarnessConversation, PutSecretRequest, RlmHarness,
     SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, Secret, SecretBackendChoice, SendRequest,
@@ -182,6 +183,7 @@ enum SandboxBackendArg {
     LocalProcess,
     Daytona,
     E2b,
+    Sprites,
 }
 
 fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
@@ -197,6 +199,9 @@ fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
         SandboxBackendArg::LocalProcess => SandboxBackendChoice::LocalProcess,
         SandboxBackendArg::Daytona => SandboxBackendChoice::Daytona(DaytonaConfig::from_env()?),
         SandboxBackendArg::E2b => SandboxBackendChoice::E2b(E2bConfig::from_env()?),
+        SandboxBackendArg::Sprites => {
+            SandboxBackendChoice::Sprites(SpritesConfig::from_env()?)
+        }
     };
     Ok(BasicExoHarnessConfig {
         root: cli.root.join("exoharness"),
