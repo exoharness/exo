@@ -619,8 +619,8 @@ async fn basic_backend_exposes_process_events_and_input() {
 
     let events = conversation
         .get_sandbox_process_events(SandboxProcessEventQuery {
-            sandbox_id,
-            process_id: process.id,
+            sandbox_id: sandbox_id.clone(),
+            process_id: process.id.clone(),
             after: None,
             limit: None,
             follow: None,
@@ -637,6 +637,39 @@ async fn basic_backend_exposes_process_events_and_input() {
         events.events.last(),
         Some(SandboxProcessEvent::Exit { exit_code: 0, .. })
     ));
+
+    let conversation_events = conversation
+        .get_events(None)
+        .await
+        .expect("conversation events should read")
+        .events;
+    assert!(conversation_events.iter().any(|event| matches!(
+        &event.data,
+        EventData::SandboxProcessStarted {
+            sandbox_id: event_sandbox_id,
+            process_id,
+            ..
+        } if event_sandbox_id == &sandbox_id && process_id == &process.id
+    )));
+    assert!(conversation_events.iter().any(|event| matches!(
+        &event.data,
+        EventData::SandboxProcessEvent {
+            sandbox_id: event_sandbox_id,
+            process_id,
+            event: SandboxProcessEvent::Stdout { data, .. },
+        } if event_sandbox_id == &sandbox_id
+            && process_id == &process.id
+            && String::from_utf8_lossy(data).contains("hello process api")
+    )));
+    assert!(conversation_events.iter().any(|event| matches!(
+        &event.data,
+        EventData::SandboxProcessStateUpdated {
+            sandbox_id: event_sandbox_id,
+            process_id,
+            status: SandboxProcessStatus::Exited { exit_code: 0 },
+            ..
+        } if event_sandbox_id == &sandbox_id && process_id == &process.id
+    )));
 }
 
 #[tokio::test(flavor = "current_thread")]

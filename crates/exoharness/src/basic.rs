@@ -1232,24 +1232,35 @@ impl ConversationHandle for BasicConversationHandle {
             .active_sandbox_handle(&request.sandbox_id, &sandbox)
             .await?;
         let process_id = format!("process-{}", Uuid7::now());
+        let sandbox_id = request.sandbox_id.clone();
+        let command = request.command.clone();
+        let cwd = request.cwd.clone();
+        let mode = request.mode;
+        let stdin_mode = request.stdin;
+        let output = request.output;
+        let lifecycle = request.lifecycle;
         let parts = sandbox_handle
             .start_process(&SandboxCommand {
-                argv: request.command.clone(),
+                argv: command.clone(),
                 env: request.env,
-                display_argv: Some(request.command),
-                cwd: request.cwd,
+                display_argv: Some(command.clone()),
+                cwd: cwd.clone(),
                 timeout: None,
             })
             .await
             .with_context(|| {
                 format!("failed to start process in sandbox {}", request.sandbox_id)
             })?;
-        let stdin = match request.stdin {
+        let stdin = match stdin_mode {
             SandboxProcessStdin::Open => Some(parts.stdin),
             SandboxProcessStdin::None => None,
         };
         let process = Arc::new(RunningSandboxProcess {
-            sandbox_id: request.sandbox_id.clone(),
+            inner: Arc::clone(&self.harness.inner),
+            conversation_id: self.record.id,
+            conversation_dir: self.conversation_dir(),
+            sandbox_id: sandbox_id.clone(),
+            process_id: process_id.clone(),
             stdin: AsyncMutex::new(stdin),
             events: AsyncMutex::new(Vec::new()),
             status: AsyncMutex::new(SandboxProcessStatus::Running),
@@ -1258,6 +1269,24 @@ impl ConversationHandle for BasicConversationHandle {
             tasks: AsyncMutex::new(None),
             notify: Notify::new(),
         });
+        self.append_events_internal(
+            None,
+            None,
+            None,
+            vec![EventData::SandboxProcessStarted {
+                sandbox_id: sandbox_id.clone(),
+                process_id: process_id.clone(),
+                command,
+                cwd,
+                mode,
+                stdin: stdin_mode,
+                output,
+                lifecycle,
+                status: SandboxProcessStatus::Running,
+                provider_state: None,
+            }],
+        )
+        .await?;
         let stdout_task = tokio::spawn(record_sandbox_process_output(
             Arc::clone(&process),
             SandboxProcessOutputStream::Stdout,
@@ -1285,7 +1314,7 @@ impl ConversationHandle for BasicConversationHandle {
             .insert(process_id.clone(), process);
         Ok(SandboxProcessRecord {
             id: process_id,
-            sandbox_id: request.sandbox_id,
+            sandbox_id,
             status: SandboxProcessStatus::Running,
         })
     }
@@ -1795,7 +1824,11 @@ struct StoredSandbox {
 }
 
 struct RunningSandboxProcess {
+    inner: Arc<BasicExoHarnessInner>,
+    conversation_id: ConversationId,
+    conversation_dir: PathBuf,
     sandbox_id: SandboxId,
+    process_id: SandboxProcessId,
     stdin: AsyncMutex<Option<BoxAsyncWrite>>,
     events: AsyncMutex<Vec<SandboxProcessEvent>>,
     status: AsyncMutex<SandboxProcessStatus>,
@@ -1931,9 +1964,34 @@ async fn push_sandbox_process_event(
     process: &Arc<RunningSandboxProcess>,
     payload: SandboxProcessEventPayload,
 ) {
+    let event = push_sandbox_process_event_memory_only(process, payload).await;
+    if let Err(error) = append_sandbox_process_data(
+        process,
+        vec![EventData::SandboxProcessEvent {
+            sandbox_id: process.sandbox_id.clone(),
+            process_id: process.process_id.clone(),
+            event,
+        }],
+    )
+    .await
+    {
+        push_sandbox_process_event_memory_only(
+            process,
+            SandboxProcessEventPayload::Error(format!(
+                "failed to persist sandbox process event: {error}"
+            )),
+        )
+        .await;
+    }
+}
+
+async fn push_sandbox_process_event_memory_only(
+    process: &Arc<RunningSandboxProcess>,
+    payload: SandboxProcessEventPayload,
+) -> SandboxProcessEvent {
     let mut events = process.events.lock().await;
     let cursor = events.len() as u64 + 1;
-    events.push(match payload {
+    let event = match payload {
         SandboxProcessEventPayload::Stdout(data) => SandboxProcessEvent::Stdout { cursor, data },
         SandboxProcessEventPayload::Stderr(data) => SandboxProcessEvent::Stderr { cursor, data },
         SandboxProcessEventPayload::Exit(exit_code) => {
@@ -1943,19 +2001,69 @@ async fn push_sandbox_process_event(
             SandboxProcessEvent::Error { cursor, message }
         }
         SandboxProcessEventPayload::Cancelled => SandboxProcessEvent::Cancelled { cursor },
-    });
+    };
+    events.push(event.clone());
     drop(events);
     process.notify.notify_waiters();
+    event
 }
 
 async fn set_sandbox_process_status(
     process: &Arc<RunningSandboxProcess>,
     status: SandboxProcessStatus,
 ) {
+    let append_result = append_sandbox_process_data(
+        process,
+        vec![EventData::SandboxProcessStateUpdated {
+            sandbox_id: process.sandbox_id.clone(),
+            process_id: process.process_id.clone(),
+            status: status.clone(),
+            provider_state: None,
+        }],
+    )
+    .await;
     let mut current = process.status.lock().await;
     *current = status;
     drop(current);
     process.notify.notify_waiters();
+    if let Err(error) = append_result {
+        push_sandbox_process_event_memory_only(
+            process,
+            SandboxProcessEventPayload::Error(format!(
+                "failed to persist sandbox process status: {error}"
+            )),
+        )
+        .await;
+    }
+}
+
+async fn append_sandbox_process_data(
+    process: &Arc<RunningSandboxProcess>,
+    data: Vec<EventData>,
+) -> Result<AddEventsResult> {
+    let _guard = process.inner.write_lock.lock().await;
+    let mut record = process
+        .inner
+        .storage
+        .get_json::<ConversationRecord>(process.conversation_dir.join("record.json"))
+        .await?;
+    let result = append_events_to_conversation(
+        &process.inner,
+        &process.conversation_dir,
+        process.conversation_id,
+        None,
+        None,
+        record.latest_event_id,
+        data,
+        &mut record,
+    )
+    .await?;
+    process
+        .inner
+        .storage
+        .put_json(process.conversation_dir.join("record.json"), &record)
+        .await?;
+    Ok(result)
 }
 
 async fn sandbox_process_status(process: &Arc<RunningSandboxProcess>) -> SandboxProcessStatus {
@@ -2332,6 +2440,9 @@ fn event_type(data: &EventData) -> String {
         EventData::SandboxStarted { .. } => "sandbox_started".to_string(),
         EventData::SandboxStopped { .. } => "sandbox_stopped".to_string(),
         EventData::SandboxSnapshotted { .. } => "sandbox_snapshotted".to_string(),
+        EventData::SandboxProcessStarted { .. } => "sandbox_process_started".to_string(),
+        EventData::SandboxProcessStateUpdated { .. } => "sandbox_process_state_updated".to_string(),
+        EventData::SandboxProcessEvent { .. } => "sandbox_process_event".to_string(),
         EventData::Custom { event_type, .. } => event_type.clone(),
     }
 }
