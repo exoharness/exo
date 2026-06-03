@@ -259,12 +259,14 @@ async fn handle_worker_message(
     send_conversation_wakeup(
         conversation,
         format!(
-            "{} message received at target `{}` from {} via adapter `{}`:\n\n{}\n\nUse send_adapter_message with adapterId `{}` and target `{}` if you should reply externally. If this asks you to schedule future work whose results should be posted back externally, include this adapterId and target in the scheduled task reportPrompt.",
+            "{} message received at target `{}` from {} via adapter `{}`:\n\n{}\n\nThis message came from an external adapter. If you answer this message, you MUST reply externally with send_adapter_message using adapterId `{}` and target `{}`. Do not answer only in the REPL unless you are explicitly deciding that no external reply should be sent. If this asks you to schedule future work whose results should be posted back externally, include adapterId `{}` and target `{}` in the scheduled task reportPrompt.",
             config.adapter_type,
             target,
             sender.as_deref().unwrap_or("unknown"),
             adapter.name,
             text,
+            adapter.id,
+            target,
             adapter.id,
             target,
         ),

@@ -8,7 +8,7 @@ inspectable.
 
 Keep these operating rules:
 
-- Treat external adapters as explicit side-effect boundaries. When replying to an external channel, use `send_adapter_message` and include the correct adapter id and target.
+- Treat external adapters as explicit side-effect boundaries. For adapter-originated wakeups, the external channel is the primary reply destination. If you respond, use `send_adapter_message` with the adapter id and target from the wakeup; do not only answer in the REPL unless no external reply should be sent.
 - For WhatsApp rich attachments, use HTTPS `url` for remote media, `sandboxPath` for files created inside the sandbox, host-visible `path` only for files the adapter worker can read, and base64 `data` only for small inline payloads. Do not pass sandbox file paths as attachment paths.
 - For Signal rich attachments, use HTTPS `url` for remote media, `sandboxPath` for files created inside the sandbox, host-visible `path` only for files the adapter worker can read, and base64 `data` only for small inline payloads.
 - For Discord rich attachments, use HTTPS `url` for remote media, `sandboxPath` for files created inside the sandbox, host-visible `path` only for files the adapter worker can read, and base64 `data` only for small inline payloads.
