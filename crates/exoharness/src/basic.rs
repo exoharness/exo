@@ -656,12 +656,21 @@ impl BasicConversationHandle {
             return Ok(handle);
         }
 
-        let handle = self
+        // Cache miss: resume by SandboxKey, don't silently `acquire` a fresh
+        // container under the same logical id.
+        let req = sandbox_request(self.record.id, sandbox_id, sandbox);
+        let Some(handle) = self
             .harness
             .inner
             .sandbox_backend_for_provider(sandbox.provider)?
-            .acquire(sandbox_request(self.record.id, sandbox_id, sandbox))
-            .await?;
+            .try_resume(req)
+            .await?
+        else {
+            bail!(
+                "sandbox {sandbox_id} no longer exists on the backend; \
+                 create a new one or restore from a snapshot"
+            );
+        };
         self.harness
             .inner
             .running_sandboxes

@@ -133,7 +133,20 @@ pub trait ManagedSandboxHandle: Send + Sync {
 
 #[async_trait]
 pub trait ManagedSandboxBackend: Send + Sync {
+    /// Bring up a sandbox for `request.key`. Reuses an in-process warm
+    /// sandbox if one matches; otherwise creates fresh from
+    /// `request.spec.image`. Cross-process reuse goes through
+    /// [`Self::try_resume`].
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>>;
+
+    /// Reattach to a sandbox from a previous exo process (e.g. a stopped
+    /// docker container labelled with `exo.sandbox.key`). Starts it if
+    /// stopped. Returns `Ok(None)` if no match. Backends with no
+    /// cross-process identity (local-process) always return `Ok(None)`.
+    async fn try_resume(
+        &self,
+        request: SandboxRequest,
+    ) -> Result<Option<Arc<dyn ManagedSandboxHandle>>>;
 
     /// Acquire a sandbox initialised from a previously-captured snapshot.
     /// The request is honoured for mounts, network, lifecycle, etc., but the
@@ -351,6 +364,7 @@ impl CliContainerSandboxBackend {
 
 impl Drop for CliContainerSandboxBackend {
     fn drop(&mut self) {
+        // Stop, don't delete — let the next process `try_resume` by label.
         let Ok(mut warm_sandboxes) = self.warm_sandboxes.try_lock() else {
             return;
         };
@@ -359,7 +373,7 @@ impl Drop for CliContainerSandboxBackend {
             .map(|(_, entry)| entry.name)
             .collect::<Vec<_>>();
         for name in names {
-            cleanup_named_container_blocking(&self.container_bin, self.cli, &name);
+            stop_named_container_blocking(&self.container_bin, self.cli, &name);
         }
     }
 }
@@ -420,6 +434,77 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
             request,
             warm_sandboxes: Arc::clone(&self.warm_sandboxes),
         }))
+    }
+
+    async fn try_resume(
+        &self,
+        request: SandboxRequest,
+    ) -> Result<Option<Arc<dyn ManagedSandboxHandle>>> {
+        let request = self.prepare_request(request).await?;
+
+        // No warm pool, no cross-process identity.
+        let Some(idle_ttl) = request.lifecycle.idle_ttl else {
+            return Ok(None);
+        };
+
+        // In-process warm pool first.
+        {
+            let warm_sandboxes = self.warm_sandboxes.lock().await;
+            if let Some(entry) = warm_sandboxes.get(&request.key)
+                && entry.request.spec == request.spec
+            {
+                return Ok(Some(Arc::new(WarmSandboxHandle {
+                    id: format!("warm:{}", request.key),
+                    cli: self.cli,
+                    container_bin: self.container_bin.clone(),
+                    request,
+                    warm_sandboxes: Arc::clone(&self.warm_sandboxes),
+                })));
+            }
+        }
+
+        // Cross-process: look up by label; stale spec-hashes are reaped.
+        let spec_hash = sandbox_spec_hash(&request.spec);
+        let key_str = request.key.to_string();
+        let Some(existing) =
+            find_resumable_container(&self.container_bin, self.cli, &key_str, &spec_hash).await?
+        else {
+            return Ok(None);
+        };
+
+        // Drop containers idle past the TTL.
+        if !existing.is_running
+            && let Some(finished_at) = existing.finished_at
+            && let Ok(idle_for) = SystemTime::now().duration_since(finished_at)
+            && idle_for > idle_ttl
+        {
+            cleanup_named_container(&self.container_bin, self.cli, &existing.name).await?;
+            return Ok(None);
+        }
+
+        if !existing.is_running {
+            start_named_container(&self.container_bin, self.cli, &existing.name).await?;
+        }
+
+        {
+            let mut warm_sandboxes = self.warm_sandboxes.lock().await;
+            warm_sandboxes.insert(
+                request.key.clone(),
+                WarmSandboxEntry {
+                    name: existing.name.clone(),
+                    request: request.clone(),
+                    last_used_at: Instant::now(),
+                },
+            );
+        }
+
+        Ok(Some(Arc::new(WarmSandboxHandle {
+            id: format!("warm:{}", request.key),
+            cli: self.cli,
+            container_bin: self.container_bin.clone(),
+            request,
+            warm_sandboxes: Arc::clone(&self.warm_sandboxes),
+        })))
     }
 
     async fn acquire_from_snapshot(
@@ -619,6 +704,14 @@ impl ManagedSandboxBackend for LocalProcessSandboxBackend {
             id: format!("local:{}", request.key),
             request,
         }))
+    }
+
+    async fn try_resume(
+        &self,
+        _request: SandboxRequest,
+    ) -> Result<Option<Arc<dyn ManagedSandboxHandle>>> {
+        // Local-process "sandboxes" don't outlive the exo invocation.
+        Ok(None)
     }
 
     async fn acquire_from_snapshot(
@@ -1223,16 +1316,12 @@ fn owner_pid_is_alive(pid: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-fn cleanup_named_container_blocking(container_bin: &Path, cli: ContainerCliFlavor, name: &str) {
-    match cli {
-        ContainerCliFlavor::AppleContainer => {
-            run_container_admin_command_blocking(container_bin, ["stop", name]);
-            run_container_admin_command_blocking(container_bin, ["delete", name]);
-        }
-        ContainerCliFlavor::Docker => {
-            run_container_admin_command_blocking(container_bin, ["rm", "-f", name]);
-        }
-    }
+/// Stop without deleting, so the next process can `try_resume` by label.
+/// For destructive cleanup use `cleanup_named_container`.
+fn stop_named_container_blocking(container_bin: &Path, cli: ContainerCliFlavor, name: &str) {
+    let _ = cli; // both flavors accept `stop <name>`
+    // `-t 0` = SIGKILL immediately on Docker (no 10s SIGTERM grace).
+    run_container_admin_command_blocking(container_bin, ["stop", "-t", "0", name]);
 }
 
 fn schedule_cleanup_named_container(container_bin: PathBuf, cli: ContainerCliFlavor, name: String) {
@@ -1292,6 +1381,241 @@ fn run_container_admin_command_blocking<const N: usize>(container_bin: &Path, ar
 fn is_missing_container_error(stderr: &str) -> bool {
     let lower = stderr.to_ascii_lowercase();
     lower.contains("not found") || lower.contains("no such")
+}
+
+#[derive(Debug)]
+struct ResumableContainerInfo {
+    name: String,
+    is_running: bool,
+    /// `None` for running containers or backends without a `FinishedAt`.
+    finished_at: Option<SystemTime>,
+}
+
+/// Look up any container labelled with this `SandboxKey`. Stale spec-hash
+/// containers are reaped on the way out.
+async fn find_resumable_container(
+    container_bin: &Path,
+    cli: ContainerCliFlavor,
+    key: &str,
+    spec_hash: &str,
+) -> Result<Option<ResumableContainerInfo>> {
+    match cli {
+        ContainerCliFlavor::Docker => find_docker_resumable(container_bin, key, spec_hash).await,
+        ContainerCliFlavor::AppleContainer => {
+            find_apple_resumable(container_bin, key, spec_hash).await
+        }
+    }
+}
+
+/// One row of `docker ps --format '{{json .}}'`.
+#[derive(Debug, Deserialize)]
+struct DockerPsItem {
+    #[serde(rename = "Names")]
+    names: String,
+    /// `"k1=v1,k2=v2"`; parse with [`parse_docker_labels`].
+    #[serde(rename = "Labels")]
+    labels: String,
+    #[serde(rename = "State")]
+    state: String,
+    #[serde(rename = "CreatedAt")]
+    created_at: String,
+}
+
+fn parse_docker_labels(raw: &str) -> HashMap<&str, &str> {
+    raw.split(',').filter_map(|kv| kv.split_once('=')).collect()
+}
+
+async fn find_docker_resumable(
+    container_bin: &Path,
+    key: &str,
+    spec_hash: &str,
+) -> Result<Option<ResumableContainerInfo>> {
+    // `docker ps -a --filter label=...` already does an exact-match on
+    // the key label server-side. We still pull every candidate so we can
+    // pick the most recent if there are duplicates (concurrent races)
+    // and reap any whose spec hash has drifted.
+    let key_filter = format!("label={WARM_SANDBOX_KEY_LABEL}={key}");
+    let mut command = Command::new(container_bin);
+    command
+        .arg("ps")
+        .arg("-a")
+        .arg("--filter")
+        .arg(&key_filter)
+        .arg("--format")
+        .arg("{{json .}}")
+        .kill_on_drop(true);
+    let output = match time::timeout(WARM_SANDBOX_CLEANUP_TIMEOUT, command.output()).await {
+        Ok(out) => out?,
+        Err(_) => {
+            return Err(anyhow!(
+                "docker ps timed out while listing resumable containers"
+            ));
+        }
+    };
+    if !output.status.success() {
+        return Err(anyhow!(
+            "docker ps failed while listing resumable containers: {}",
+            render_command_error(&output.stderr)
+        ));
+    }
+
+    let stdout = std::str::from_utf8(&output.stdout).context("docker ps output is not utf-8")?;
+    let mut matches: Vec<(String, String, String)> = Vec::new();
+    let mut stale_names: Vec<String> = Vec::new();
+    for line in stdout.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let item: DockerPsItem = serde_json::from_str(line)
+            .with_context(|| format!("decoding docker ps json line: {line}"))?;
+        let hash = parse_docker_labels(&item.labels)
+            .get(WARM_SANDBOX_SPEC_HASH_LABEL)
+            .copied()
+            .unwrap_or("");
+        if hash == spec_hash {
+            matches.push((item.names, item.state, item.created_at));
+        } else {
+            stale_names.push(item.names);
+        }
+    }
+    for name in stale_names {
+        if let Err(err) =
+            cleanup_named_container(container_bin, ContainerCliFlavor::Docker, &name).await
+        {
+            eprintln!("failed to reap container {name} with stale spec hash: {err}");
+        }
+    }
+    // Prefer the most-recent entry (Docker's CreatedAt sorts
+    // lexicographically as ISO-8601-ish text).
+    matches.sort_by(|a, b| b.2.cmp(&a.2));
+    let Some((name, state, _created)) = matches.into_iter().next() else {
+        return Ok(None);
+    };
+    let is_running = state.eq_ignore_ascii_case("running");
+    let finished_at = if !is_running {
+        docker_container_finished_at(container_bin, &name).await?
+    } else {
+        None
+    };
+    Ok(Some(ResumableContainerInfo {
+        name,
+        is_running,
+        finished_at,
+    }))
+}
+
+async fn docker_container_finished_at(
+    container_bin: &Path,
+    name: &str,
+) -> Result<Option<SystemTime>> {
+    let mut command = Command::new(container_bin);
+    command
+        .arg("inspect")
+        .arg("--format")
+        .arg("{{.State.FinishedAt}}")
+        .arg(name)
+        .kill_on_drop(true);
+    let output = match time::timeout(WARM_SANDBOX_CLEANUP_TIMEOUT, command.output()).await {
+        Ok(out) => out?,
+        Err(_) => return Ok(None),
+    };
+    if !output.status.success() {
+        // Container disappeared between list and inspect — treat as
+        // unknown, the caller will create fresh.
+        return Ok(None);
+    }
+    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // "0001-01-01T00:00:00Z" is Docker's "never finished" sentinel.
+    if s.is_empty() || s.starts_with("0001-01-01") {
+        return Ok(None);
+    }
+    Ok(parse_rfc3339_to_system_time(&s))
+}
+
+fn parse_rfc3339_to_system_time(s: &str) -> Option<SystemTime> {
+    let dt = chrono::DateTime::parse_from_rfc3339(s).ok()?;
+    let nanos = dt.timestamp_nanos_opt()?;
+    if nanos < 0 {
+        return None;
+    }
+    Some(SystemTime::UNIX_EPOCH + Duration::from_nanos(nanos as u64))
+}
+
+async fn find_apple_resumable(
+    container_bin: &Path,
+    key: &str,
+    spec_hash: &str,
+) -> Result<Option<ResumableContainerInfo>> {
+    // Apple's `container` CLI doesn't expose a label filter; we list
+    // everything and match in-process.
+    let output = run_container_admin_command(
+        container_bin,
+        WARM_SANDBOX_CLEANUP_TIMEOUT,
+        ["list", "--format", "json"],
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "container list failed: {}",
+            render_command_error(&output.stderr)
+        ));
+    }
+    let containers: Vec<ContainerListItem> = serde_json::from_slice(&output.stdout)?;
+    let mut chosen: Option<ResumableContainerInfo> = None;
+    let mut stale_names: Vec<String> = Vec::new();
+    for c in containers {
+        let labels = &c.configuration.labels;
+        let Some(matched_key) = labels.get(WARM_SANDBOX_KEY_LABEL) else {
+            continue;
+        };
+        if matched_key != key {
+            continue;
+        }
+        let hash_matches = labels
+            .get(WARM_SANDBOX_SPEC_HASH_LABEL)
+            .map(|s| s == spec_hash)
+            .unwrap_or(false);
+        if !hash_matches {
+            stale_names.push(c.configuration.id);
+            continue;
+        }
+        // We don't have a portable finished-at signal from the apple
+        // CLI's list output; trust the status field for run-state and
+        // leave finished_at as None (the TTL guard simply skips its
+        // staleness check when finished_at is unknown).
+        let is_running = c.status.as_deref() == Some("running");
+        chosen = Some(ResumableContainerInfo {
+            name: c.configuration.id,
+            is_running,
+            finished_at: None,
+        });
+    }
+    for name in stale_names {
+        if let Err(err) =
+            cleanup_named_container(container_bin, ContainerCliFlavor::AppleContainer, &name).await
+        {
+            eprintln!("failed to reap apple-container {name} with stale spec hash: {err}");
+        }
+    }
+    Ok(chosen)
+}
+
+async fn start_named_container(
+    container_bin: &Path,
+    cli: ContainerCliFlavor,
+    name: &str,
+) -> Result<()> {
+    let _ = cli; // both flavors take `start <name>`
+    let output =
+        run_container_admin_command(container_bin, WARM_SANDBOX_CLEANUP_TIMEOUT, ["start", name])
+            .await?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "failed to start container {name}: {}",
+            render_command_error(&output.stderr)
+        ));
+    }
+    Ok(())
 }
 
 fn is_already_exists_error(message: &str) -> bool {
@@ -1449,4 +1773,18 @@ async fn docker_load_image(container_bin: &Path, payload: &Bytes) -> Result<Stri
         }
     }
     bail!("docker load completed but no image reference found in output: {stdout}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_docker_labels_handles_empty_and_multi() {
+        assert!(!parse_docker_labels("").contains_key("anything"));
+        let labels =
+            parse_docker_labels("exo.sandbox.key=conversation:c1:s1,exo.sandbox.spec-hash=abc123");
+        assert_eq!(labels.get("exo.sandbox.key"), Some(&"conversation:c1:s1"));
+        assert_eq!(labels.get("exo.sandbox.spec-hash"), Some(&"abc123"));
+    }
 }

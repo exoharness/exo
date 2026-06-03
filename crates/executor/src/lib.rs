@@ -40,7 +40,7 @@ pub use exoharness::{
     FileSystemMountMode, ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET, HttpExoHarness,
     PutSecretRequest, SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxId, SandboxProvider,
     Secret, SecretBackendChoice, SecretMetadata, SessionId, SnapshotId, StartSandboxRequest,
-    ToolRequest, Uuid7, serve_exoharness_http_listener,
+    ToolRequest, Uuid7, first_matching_event, serve_exoharness_http_listener,
     serve_exoharness_http_listener_with_options,
 };
 pub use harness_basic::BasicHarness;
