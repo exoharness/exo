@@ -151,6 +151,32 @@ pub struct EventQuery {
     pub types: Option<Vec<EventKind>>,
 }
 
+/// Return the first event of `kind` (in `direction` order) for which
+/// `extract` yields `Some`. `limit` caps the scan; set it generously
+/// when `extract` may filter most candidates out.
+pub async fn first_matching_event<T>(
+    conversation: &dyn ConversationHandle,
+    kind: EventKind,
+    direction: EventQueryDirection,
+    limit: u32,
+    mut extract: impl FnMut(EventData) -> Option<T>,
+) -> Result<Option<T>> {
+    let result = conversation
+        .get_events(Some(EventQuery {
+            cursor: None,
+            direction: Some(direction),
+            limit: Some(limit),
+            session_id: None,
+            turn_id: None,
+            types: Some(vec![kind]),
+        }))
+        .await?;
+    Ok(result
+        .events
+        .into_iter()
+        .find_map(|event| extract(event.data)))
+}
+
 /// Tag identifying an `EventData` variant — used by `EventQuery::types` to
 /// filter events by kind without stringly comparing snake_case names. The
 /// constants below cover every built-in variant; `EventKind::custom(name)`
