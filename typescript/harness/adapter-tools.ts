@@ -402,6 +402,7 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
           "defaultChannelId",
           "trigger",
           "allowedChannels",
+          "allowBots",
         ],
       },
     ],
