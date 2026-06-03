@@ -243,25 +243,172 @@ async fn conversation_send_round_trips_through_real_sandbox_and_mocked_openai() 
     );
 
     if provider == SandboxProvider::Docker {
-        let leftover_containers = Command::new("docker")
-            .args([
-                "ps",
-                "-aq",
-                "--filter",
-                "label=exo.sandbox.owner-pid",
-                "--filter",
-                "status=exited",
-            ])
-            .output()
-            .expect("docker ps");
-        let stdout = String::from_utf8_lossy(&leftover_containers.stdout);
-        let stale = stdout
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .collect::<Vec<_>>();
-        assert!(
-            stale.is_empty(),
-            "expected zero leftover Exited exo containers after binary exit; found: {stale:?}"
+        // Drop stops (not rm's) the container so the next process can resume it.
+        let leftover = list_exo_containers_for_conversation(&conv_dir);
+        assert_eq!(
+            leftover.len(),
+            1,
+            "expected exactly one stopped exo container after binary exit (resume target); found: {leftover:?}"
         );
+
+        // Test cleanup: don't leak the resume target onto the docker host.
+        for id in &leftover {
+            let _ = Command::new("docker").args(["rm", "-f", id]).output();
+        }
+    }
+}
+
+/// Docker container IDs labelled for the conversation at `conv_dir`.
+fn list_exo_containers_for_conversation(conv_dir: &std::path::Path) -> Vec<String> {
+    let conv_id = conv_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .expect("conv dir name");
+    let key_prefix = format!("conversation:{conv_id}:");
+    let output = Command::new("docker")
+        .args([
+            "ps",
+            "-a",
+            "--filter",
+            "label=exo.sandbox.key",
+            "--format",
+            "{{json .}}",
+        ])
+        .output()
+        .expect("docker ps");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| {
+            let row: Value = serde_json::from_str(line).expect("docker ps row is json");
+            let id = row.get("ID")?.as_str()?.to_string();
+            let labels = row.get("Labels")?.as_str()?;
+            let key = labels
+                .split(',')
+                .filter_map(|kv| kv.split_once('='))
+                .find_map(|(k, v)| (k == "exo.sandbox.key").then_some(v))?;
+            key.starts_with(&key_prefix).then_some(id)
+        })
+        .collect()
+}
+
+/// Two separate `conversation send` invocations on the same conversation must
+/// hit the same docker container — the cross-process resume path.
+#[tokio::test]
+#[ignore = "spawns real exo binary + real sandbox + wiremock; run with cargo test -- --ignored"]
+async fn cross_process_send_resumes_the_same_sandbox_container() {
+    let provider = SandboxProvider::from_env();
+    if provider != SandboxProvider::Docker {
+        eprintln!("cross-process resume test only meaningful on docker; skipping");
+        return;
+    }
+    if !provider.runtime_available() {
+        eprintln!("docker not available on this runner; skipping");
+        return;
+    }
+
+    let root_dir = TempDir::new().expect("tempdir for --root");
+    let xdg_dir = TempDir::new().expect("tempdir for XDG_CONFIG_HOME");
+    let root = root_dir.path().to_string_lossy().into_owned();
+    let xdg = xdg_dir.path().to_string_lossy().into_owned();
+
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(canned_response_body()))
+        .mount(&mock_server)
+        .await;
+
+    run_exo(
+        &["secret", "set", "test-key", "--env", "OPENAI_API_KEY"],
+        &root,
+        &xdg,
+    );
+    run_exo(
+        &[
+            "model",
+            "register",
+            "gpt-test",
+            "--secret",
+            "test-key",
+            "--base-url",
+            &mock_server.uri(),
+        ],
+        &root,
+        &xdg,
+    );
+    run_exo(
+        &[
+            "agent",
+            "create",
+            "--slug",
+            "test-agent",
+            "--model",
+            "gpt-test",
+            "Integration Test Agent",
+        ],
+        &root,
+        &xdg,
+    );
+    run_exo(
+        &["conversation", "create", "test-agent", "first"],
+        &root,
+        &xdg,
+    );
+
+    // First send provisions the warm sandbox.
+    run_exo(
+        &[
+            "conversation",
+            "send",
+            "test-agent",
+            "first",
+            "first message",
+        ],
+        &root,
+        &xdg,
+    );
+
+    // Second send: fresh exo process; should `try_resume` the same container.
+    run_exo(
+        &[
+            "conversation",
+            "send",
+            "test-agent",
+            "first",
+            "second message",
+        ],
+        &root,
+        &xdg,
+    );
+
+    let conv_dir = root_dir
+        .path()
+        .join("exoharness/agents")
+        .read_dir()
+        .expect("agents dir")
+        .next()
+        .expect("agent")
+        .unwrap()
+        .path()
+        .join("conversations")
+        .read_dir()
+        .expect("conversations dir")
+        .next()
+        .expect("conversation")
+        .unwrap()
+        .path();
+
+    let containers = list_exo_containers_for_conversation(&conv_dir);
+    assert_eq!(
+        containers.len(),
+        1,
+        "expected exactly one docker container after two cross-process sends \
+         (resume should reuse, not create new); found: {containers:?}"
+    );
+
+    // Cleanup.
+    for id in &containers {
+        let _ = Command::new("docker").args(["rm", "-f", id]).output();
     }
 }

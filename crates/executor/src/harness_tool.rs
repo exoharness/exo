@@ -2,8 +2,8 @@ use crate::{AgentConfig, ConversationConfig, ToolRuntime};
 use async_trait::async_trait;
 use exoharness::{
     ConversationHandle, CreateSandboxRequest, DEFAULT_SANDBOX_IMAGE, EventData, EventKind,
-    EventQuery, EventQueryDirection, FileSystemMount, FileSystemMountMode, Result,
-    RunInSandboxRequest, SandboxProvider, ToolRequest, ToolResult,
+    EventQueryDirection, FileSystemMount, FileSystemMountMode, Result, RunInSandboxRequest,
+    SandboxProvider, SnapshotId, StartSandboxRequest, ToolRequest, ToolResult,
 };
 use futures::io::AsyncReadExt;
 use serde::{Deserialize, Serialize};
@@ -124,6 +124,8 @@ pub(crate) async fn ensure_shell_sandbox(
                 return Ok(sandbox.id);
             };
 
+            // Tier 1: container is still around — `run_in_sandbox` does the
+            // cross-process `try_resume` internally on cache miss.
             let healthcheck = conversation
                 .run_in_sandbox(RunInSandboxRequest {
                     id: sandbox.id.clone(),
@@ -134,9 +136,26 @@ pub(crate) async fn ensure_shell_sandbox(
             if healthcheck.is_ok() {
                 return Ok(sandbox.id);
             }
+
+            // Tier 2: container is gone. If we ever took a snapshot of this
+            // sandbox in this conversation, restore from the latest one.
+            if let Some(snapshot_id) =
+                latest_snapshot_for_sandbox(conversation, &sandbox.id).await?
+                && conversation
+                    .start_sandbox(StartSandboxRequest {
+                        id: sandbox.id.clone(),
+                        snapshot_id,
+                        idle_seconds: Some(sandbox.idle_seconds),
+                    })
+                    .await
+                    .is_ok()
+            {
+                return Ok(sandbox.id);
+            }
         }
     }
 
+    // Tier 3: nothing reusable; create fresh.
     conversation
         .create_sandbox(CreateSandboxRequest {
             provider: desired_provider,
@@ -147,6 +166,26 @@ pub(crate) async fn ensure_shell_sandbox(
             idle_seconds: Some(300),
         })
         .await
+}
+
+async fn latest_snapshot_for_sandbox(
+    conversation: &dyn ConversationHandle,
+    sandbox_id: &str,
+) -> Result<Option<SnapshotId>> {
+    exoharness::first_matching_event(
+        conversation,
+        EventKind::SANDBOX_SNAPSHOTTED,
+        EventQueryDirection::Desc,
+        100,
+        |data| match data {
+            EventData::SandboxSnapshotted {
+                sandbox_id: sid,
+                snapshot_id,
+            } if sid == sandbox_id => Some(snapshot_id),
+            _ => None,
+        },
+    )
+    .await
 }
 
 fn normalize_mounts(mounts: &[FileSystemMount]) -> Vec<FileSystemMount> {
@@ -178,47 +217,30 @@ async fn latest_shell_sandbox(
     conversation: &dyn ConversationHandle,
     desired_provider: SandboxProvider,
 ) -> Result<Option<ShellSandboxInfo>> {
-    let events = conversation
-        .get_events(Some(EventQuery {
-            cursor: None,
-            direction: Some(EventQueryDirection::Desc),
-            limit: Some(50),
-            session_id: None,
-            turn_id: None,
-            types: Some(vec![EventKind::SANDBOX_CREATED]),
-        }))
-        .await?
-        .events;
-
-    let Some(event) = events.into_iter().next() else {
-        return Ok(None);
-    };
-    match event.data {
-        EventData::SandboxCreated {
-            sandbox_id,
-            provider,
-            image,
-            default_workdir,
-            file_system_mounts,
-            enable_networking,
-            idle_seconds,
-        } => {
-            if provider != desired_provider {
-                return Ok(None);
-            }
-            Ok(Some(ShellSandboxInfo {
+    exoharness::first_matching_event(
+        conversation,
+        EventKind::SANDBOX_CREATED,
+        EventQueryDirection::Desc,
+        1,
+        |data| match data {
+            EventData::SandboxCreated {
+                sandbox_id,
+                provider,
+                image,
+                default_workdir,
+                file_system_mounts,
+                enable_networking,
+                idle_seconds,
+            } if provider == desired_provider => Some(ShellSandboxInfo {
                 id: sandbox_id,
                 image,
                 default_workdir,
                 file_system_mounts,
                 enable_networking,
                 idle_seconds,
-            }))
-        }
-        other => Err(anyhow::anyhow!(
-            "type-filtered query for {} returned unexpected variant {}",
-            EventKind::SANDBOX_CREATED.as_str(),
-            other.kind().as_str(),
-        )),
-    }
+            }),
+            _ => None,
+        },
+    )
+    .await
 }

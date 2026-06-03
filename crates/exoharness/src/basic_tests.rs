@@ -903,6 +903,13 @@ impl ManagedSandboxBackend for TestSandboxBackend {
         }))
     }
 
+    async fn try_resume(
+        &self,
+        _request: SandboxRequest,
+    ) -> crate::Result<Option<Arc<dyn ManagedSandboxHandle>>> {
+        Ok(None)
+    }
+
     async fn acquire_from_snapshot(
         &self,
         _request: SandboxRequest,
