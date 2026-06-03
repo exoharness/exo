@@ -23,8 +23,8 @@ use crate::{
     ManagedSandboxHandle, NewAgentRequest, NewConversationRequest, PutSecretRequest,
     RunInSandboxRequest, SandboxCommand, SandboxCommandOutput, SandboxProcessEvent,
     SandboxProcessEventQuery, SandboxProcessParts, SandboxProcessStatus, SandboxProcessStdin,
-    SandboxRequest, Secret, SnapshotPayload, StartSandboxProcessRequest, WaitSandboxProcessRequest,
-    WriteArtifactRequest, WriteSandboxProcessInputRequest,
+    SandboxProvider, SandboxRequest, Secret, SnapshotPayload, StartSandboxProcessRequest,
+    WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
 #[tokio::test(flavor = "current_thread")]
@@ -511,7 +511,7 @@ async fn basic_backend_runs_commands_in_created_sandbox() {
 
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
-            provider: Default::default(),
+            provider: SandboxProvider::LocalProcess,
             image: "basic-local-process".to_string(),
             default_workdir: Some(tempdir.path().display().to_string()),
             file_system_mounts: None,
@@ -572,7 +572,7 @@ async fn basic_backend_reattaches_running_sandbox_in_new_harness_process() {
 
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
-            provider: Default::default(),
+            provider: SandboxProvider::LocalProcess,
             image: "basic-local-process".to_string(),
             default_workdir: Some(tempdir.path().display().to_string()),
             file_system_mounts: None,
@@ -649,7 +649,7 @@ async fn basic_backend_exposes_process_events_and_input() {
         .expect("conversation");
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
-            provider: Default::default(),
+            provider: SandboxProvider::LocalProcess,
             image: "basic-local-process".to_string(),
             default_workdir: Some(tempdir.path().display().to_string()),
             file_system_mounts: None,
@@ -898,7 +898,7 @@ async fn test_conversation(harness: &BasicExoHarness) -> Arc<dyn crate::Conversa
 async fn test_sandbox(conversation: &Arc<dyn crate::ConversationHandle>) -> String {
     conversation
         .create_sandbox(CreateSandboxRequest {
-            provider: Default::default(),
+            provider: SandboxProvider::LocalProcess,
             image: "test-sandbox".to_string(),
             default_workdir: Some("/".to_string()),
             file_system_mounts: None,
@@ -907,6 +907,57 @@ async fn test_sandbox(conversation: &Arc<dyn crate::ConversationHandle>) -> Stri
         })
         .await
         .expect("sandbox should be created")
+}
+
+#[test]
+fn create_sandbox_request_requires_provider() {
+    let error = serde_json::from_value::<CreateSandboxRequest>(serde_json::json!({
+        "image": "test-sandbox",
+        "default_workdir": "/",
+        "file_system_mounts": null,
+        "enable_networking": true,
+        "idle_seconds": 60,
+    }))
+    .expect_err("provider should be required");
+
+    assert!(error.to_string().contains("missing field `provider`"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn basic_backend_rejects_daytona_provider() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
+        .await
+        .expect("harness should initialize");
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let conversation = agent
+        .new_conversation(NewConversationRequest::default())
+        .await
+        .expect("conversation");
+
+    let error = conversation
+        .create_sandbox(CreateSandboxRequest {
+            provider: SandboxProvider::Daytona,
+            image: "test-sandbox".to_string(),
+            default_workdir: Some("/".to_string()),
+            file_system_mounts: None,
+            enable_networking: Some(true),
+            idle_seconds: Some(60),
+        })
+        .await
+        .expect_err("daytona should not be handled by BasicExoHarness");
+
+    assert!(
+        error
+            .to_string()
+            .contains("daytona sandbox provider is not supported")
+    );
 }
 
 struct TestSandboxBackend {

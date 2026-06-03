@@ -90,7 +90,7 @@ impl BasicExoHarnessInner {
     fn sandbox_backend_for_provider(
         &self,
         provider: SandboxProvider,
-    ) -> Arc<dyn ManagedSandboxBackend> {
+    ) -> Result<Arc<dyn ManagedSandboxBackend>> {
         if matches!(
             (self.sandbox_backend_choice, provider),
             (
@@ -101,19 +101,20 @@ impl BasicExoHarnessInner {
                     SandboxBackendChoice::LocalProcess,
                     SandboxProvider::LocalProcess
                 )
-                | (_, SandboxProvider::Daytona)
         ) {
-            return Arc::clone(&self.sandbox_backend);
+            return Ok(Arc::clone(&self.sandbox_backend));
         }
 
-        match provider {
+        Ok(match provider {
             SandboxProvider::AppleContainer => {
                 Arc::new(CliContainerSandboxBackend::apple_container())
             }
             SandboxProvider::Docker => Arc::new(CliContainerSandboxBackend::docker()),
             SandboxProvider::LocalProcess => Arc::new(LocalProcessSandboxBackend::new()),
-            SandboxProvider::Daytona => Arc::clone(&self.sandbox_backend),
-        }
+            SandboxProvider::Daytona => {
+                bail!("daytona sandbox provider is not supported by BasicExoHarness")
+            }
+        })
     }
 }
 
@@ -658,7 +659,7 @@ impl BasicConversationHandle {
         let handle = self
             .harness
             .inner
-            .sandbox_backend_for_provider(sandbox.provider)
+            .sandbox_backend_for_provider(sandbox.provider)?
             .acquire(sandbox_request(self.record.id, sandbox_id, sandbox))
             .await?;
         self.harness
@@ -1032,7 +1033,7 @@ impl ConversationHandle for BasicConversationHandle {
         let sandbox_handle = self
             .harness
             .inner
-            .sandbox_backend_for_provider(metadata.provider)
+            .sandbox_backend_for_provider(metadata.provider)?
             .acquire(sandbox_request(self.record.id, &sandbox_id, &metadata))
             .await?;
         self.harness
@@ -1187,7 +1188,7 @@ impl ConversationHandle for BasicConversationHandle {
         let sandbox_handle = self
             .harness
             .inner
-            .sandbox_backend_for_provider(sandbox.provider)
+            .sandbox_backend_for_provider(sandbox.provider)?
             .acquire_from_snapshot(
                 sandbox_request(self.record.id, &request.id, &sandbox),
                 payload,
@@ -1878,7 +1879,6 @@ struct StoredArtifactMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredSandbox {
     id: SandboxId,
-    #[serde(default)]
     provider: SandboxProvider,
     image: String,
     default_workdir: Option<String>,

@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use exoharness::{
     AgentHandle, Artifact, ArtifactVersion, ConversationHandle, ReadArtifactRequest, Result,
     WriteArtifactRequest,
@@ -11,11 +12,9 @@ pub(crate) const AGENT_CONFIG_ARTIFACT_PATH: &str = "config/executor.json";
 pub(crate) const CONVERSATION_CONFIG_ARTIFACT_PATH: &str = "config/executor.json";
 
 pub async fn load_agent_config(agent: &dyn AgentHandle) -> Result<AgentConfig> {
-    Ok(
-        read_json_artifact_from_agent(agent, AGENT_CONFIG_ARTIFACT_PATH)
-            .await?
-            .unwrap_or_default(),
-    )
+    read_json_artifact_from_agent(agent, AGENT_CONFIG_ARTIFACT_PATH)
+        .await?
+        .ok_or_else(|| anyhow!("missing agent config artifact at {AGENT_CONFIG_ARTIFACT_PATH}"))
 }
 
 pub async fn store_agent_config(agent: &dyn AgentHandle, config: &AgentConfig) -> Result<()> {

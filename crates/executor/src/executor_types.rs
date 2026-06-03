@@ -15,7 +15,7 @@ use tokio_stream::{Stream, wrappers::UnboundedReceiverStream};
 
 use crate::braintrust::BraintrustTracingConfig;
 
-#[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct AgentConfig {
     pub instructions: Vec<Message>,
     #[serde(default)]
@@ -26,7 +26,6 @@ pub struct AgentConfig {
     pub enable_agent_tool_creation: bool,
     #[serde(default)]
     pub sandbox_image: Option<String>,
-    #[serde(default)]
     pub sandbox_provider: SandboxProvider,
     #[serde(default)]
     pub enable_networking: bool,

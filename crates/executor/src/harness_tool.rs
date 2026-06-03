@@ -49,13 +49,10 @@ impl ToolRuntime for BasicToolRuntime {
     async fn prepare_conversation(
         &self,
         _agent: &dyn AgentHandle,
-        conversation: &dyn ConversationHandle,
-        agent_config: &AgentConfig,
-        config: &ConversationConfig,
+        _conversation: &dyn ConversationHandle,
+        _agent_config: &AgentConfig,
+        _config: &ConversationConfig,
     ) -> Result<()> {
-        if config.shell_program.is_some() {
-            ensure_shell_sandbox(conversation, agent_config, config).await?;
-        }
         Ok(())
     }
 

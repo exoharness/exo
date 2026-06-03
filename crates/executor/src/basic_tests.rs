@@ -1123,28 +1123,7 @@ fn append_event(
 }
 
 fn event_type(event: &Event) -> String {
-    match &event.data {
-        EventData::ConversationCreated { .. } => "conversation_created".to_string(),
-        EventData::ConversationUpdated { .. } => "conversation_updated".to_string(),
-        EventData::ConversationDeleted => "conversation_deleted".to_string(),
-        EventData::ConversationForked { .. } => "conversation_forked".to_string(),
-        EventData::SessionStarted => "session_started".to_string(),
-        EventData::SessionEnded => "session_ended".to_string(),
-        EventData::TurnStarted => "turn_started".to_string(),
-        EventData::TurnEnded => "turn_ended".to_string(),
-        EventData::Messages { .. } => "messages".to_string(),
-        EventData::ToolRequested { .. } => "tool_requested".to_string(),
-        EventData::ToolResult { .. } => "tool_result".to_string(),
-        EventData::ArtifactWritten { .. } => "artifact_written".to_string(),
-        EventData::SandboxCreated { .. } => "sandbox_created".to_string(),
-        EventData::SandboxStarted { .. } => "sandbox_started".to_string(),
-        EventData::SandboxStopped { .. } => "sandbox_stopped".to_string(),
-        EventData::SandboxSnapshotted { .. } => "sandbox_snapshotted".to_string(),
-        EventData::SandboxProcessStarted { .. } => "sandbox_process_started".to_string(),
-        EventData::SandboxProcessStateUpdated { .. } => "sandbox_process_state_updated".to_string(),
-        EventData::SandboxProcessEvent { .. } => "sandbox_process_event".to_string(),
-        EventData::Custom { event_type, .. } => event_type.clone(),
-    }
+    event.data.kind().as_str().to_string()
 }
 
 fn user_message(text: &str) -> Message {
@@ -1197,7 +1176,7 @@ fn default_agent_config() -> AgentConfig {
         typescript: None,
         enable_agent_tool_creation: true,
         sandbox_image: None,
-        sandbox_provider: Default::default(),
+        sandbox_provider: SandboxProvider::LocalProcess,
         enable_networking: false,
         model: "test-model".to_string(),
         max_output_tokens: None,

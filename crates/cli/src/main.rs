@@ -666,12 +666,7 @@ async fn main() -> Result<()> {
         .as_deref()
         .map(|env| env_value_from_arg("--bearer-env", env, &env_vars))
         .transpose()?;
-    let using_remote_exoharness = cli.exoharness_url.is_some();
-    let default_sandbox_provider = if using_remote_exoharness {
-        SandboxProvider::Daytona
-    } else {
-        default_local_sandbox_provider()
-    };
+    let default_sandbox_provider = default_local_sandbox_provider();
     let exoharness =
         instantiate_exoharness(&exo_config, cli.exoharness_url.as_deref(), bearer_token).await?;
     let harness_kind = determine_harness_kind(

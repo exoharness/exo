@@ -50,7 +50,7 @@ interface RawAgentConfig {
   } | null;
   enable_agent_tool_creation?: boolean;
   sandbox_image?: string | null;
-  sandbox_provider?: "daytona" | "apple_container" | "docker" | "local_process";
+  sandbox_provider: "daytona" | "apple_container" | "docker" | "local_process";
   enable_networking: boolean;
   model: string;
   max_output_tokens?: number | null;
@@ -835,7 +835,7 @@ function toAgentConfig(raw: RawAgentConfig): AgentConfig {
       : null,
     enableAgentToolCreation: raw.enable_agent_tool_creation ?? true,
     sandboxImage: raw.sandbox_image ?? null,
-    sandboxProvider: raw.sandbox_provider ?? "daytona",
+    sandboxProvider: raw.sandbox_provider,
     enableNetworking: raw.enable_networking,
     model: raw.model,
     maxOutputTokens: raw.max_output_tokens ?? null,
