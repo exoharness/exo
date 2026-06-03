@@ -9,6 +9,7 @@ Create a library Discord adapter if one does not already exist for this conversa
 - defaultChannelId: `null`
 - trigger: `mentions_only`
 - allowedChannels: `null`
+- allowBots: `false`
 
 Do not block on secret inspection. The harness may not expose a secret-listing tool, so assume secret `discord-bot-token` exists and create the adapter. If the adapter later reports a missing Discord token, tell the user to create the secret with `exo secret set discord-bot-token --env DISCORD_BOT_TOKEN` after exporting a Discord bot token locally.
 
