@@ -205,6 +205,7 @@ impl EventKind {
     pub const TOOL_REQUESTED: EventKind = EventKind(Cow::Borrowed("tool_requested"));
     pub const TOOL_RESULT: EventKind = EventKind(Cow::Borrowed("tool_result"));
     pub const LINGUA_STREAM_CHUNK: EventKind = EventKind(Cow::Borrowed("lingua_stream_chunk"));
+    pub const ERROR: EventKind = EventKind(Cow::Borrowed("error"));
     pub const ARTIFACT_WRITTEN: EventKind = EventKind(Cow::Borrowed("artifact_written"));
     pub const SANDBOX_CREATED: EventKind = EventKind(Cow::Borrowed("sandbox_created"));
     pub const SANDBOX_STARTED: EventKind = EventKind(Cow::Borrowed("sandbox_started"));
@@ -305,6 +306,9 @@ pub enum EventData {
     LinguaStreamChunk {
         chunk: UniversalStreamChunk,
     },
+    Error {
+        message: String,
+    },
     ArtifactWritten {
         artifact_id: ArtifactId,
         path: String,
@@ -376,6 +380,7 @@ impl EventData {
             Self::ToolRequested { .. } => EventKind::TOOL_REQUESTED,
             Self::ToolResult { .. } => EventKind::TOOL_RESULT,
             Self::LinguaStreamChunk { .. } => EventKind::LINGUA_STREAM_CHUNK,
+            Self::Error { .. } => EventKind::ERROR,
             Self::ArtifactWritten { .. } => EventKind::ARTIFACT_WRITTEN,
             Self::SandboxCreated { .. } => EventKind::SANDBOX_CREATED,
             Self::SandboxStarted { .. } => EventKind::SANDBOX_STARTED,
