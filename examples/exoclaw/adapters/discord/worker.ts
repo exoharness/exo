@@ -30,6 +30,7 @@ if (!token) {
 const trigger = optionalStringField(config, "trigger") ?? "mentions_only";
 const defaultChannelId = optionalStringField(config, "defaultChannelId");
 const allowedChannels = stringArrayOrNull(config.allowedChannels);
+const allowBots = config.allowBots === true;
 if (trigger !== "all_messages" && trigger !== "mentions_only") {
   throw new Error("Discord trigger must be all_messages or mentions_only");
 }
@@ -66,7 +67,10 @@ client.on("shardDisconnect", (event) => {
 });
 
 client.on("messageCreate", (message) => {
-  if (message.author.bot || message.author.id === client.user?.id) {
+  if (message.author.id === client.user?.id) {
+    return;
+  }
+  if (message.author.bot && !allowBots) {
     return;
   }
   if (!shouldTrigger(message)) {

@@ -390,6 +390,11 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
             description:
               "Optional list of Discord channel ids to wake on. Use null to allow every channel the bot can read.",
           },
+          allowBots: {
+            type: "boolean",
+            description:
+              "When true, messages from other bot accounts wake this adapter. Defaults to false (ignore all bots). The adapter never wakes on its own messages.",
+          },
         },
         required: [
           "type",
@@ -501,6 +506,7 @@ function transformAdapterConfig(config: JsonObject): JsonObject {
         defaultChannelId: nullableStringField(config, "defaultChannelId"),
         trigger: stringField(config, "trigger"),
         allowedChannels: nullableStringArrayField(config, "allowedChannels"),
+        allowBots: config.allowBots === true,
       },
       stateDir: null,
       secretEnv: [
