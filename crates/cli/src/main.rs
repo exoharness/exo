@@ -1820,12 +1820,7 @@ fn format_harness_kind(kind: AgentHarnessKind) -> &'static str {
 }
 
 fn format_sandbox_provider(provider: SandboxProvider) -> &'static str {
-    match provider {
-        SandboxProvider::Daytona => "daytona",
-        SandboxProvider::AppleContainer => "apple-container",
-        SandboxProvider::Docker => "docker",
-        SandboxProvider::LocalProcess => "local-process",
-    }
+    provider.as_str()
 }
 
 fn build_typescript_harness_config(

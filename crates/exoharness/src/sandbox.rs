@@ -1088,16 +1088,39 @@ async fn cleanup_named_container(
 ) -> Result<()> {
     match cli {
         ContainerCliFlavor::AppleContainer => {
-            let stop = run_container_admin_command(
+            match run_container_admin_command(
                 container_bin,
                 WARM_SANDBOX_CLEANUP_TIMEOUT,
                 ["stop", name],
             )
-            .await?;
-            if !stop.status.success() {
-                let stderr = String::from_utf8_lossy(&stop.stderr).trim().to_string();
-                if !is_missing_container_error(&stderr) {
-                    return Err(anyhow!("failed to stop warm sandbox {}: {}", name, stderr));
+            .await
+            {
+                Ok(stop) if stop.status.success() => {}
+                Ok(stop) => {
+                    let stderr = String::from_utf8_lossy(&stop.stderr).trim().to_string();
+                    if !is_missing_container_error(&stderr)
+                        && let Err(kill_error) =
+                            kill_named_container_if_present(container_bin, name).await
+                    {
+                        return Err(anyhow!(
+                            "failed to stop warm sandbox {}: {}; {}",
+                            name,
+                            stderr,
+                            kill_error
+                        ));
+                    }
+                }
+                Err(stop_error) => {
+                    if let Err(kill_error) =
+                        kill_named_container_if_present(container_bin, name).await
+                    {
+                        return Err(anyhow!(
+                            "failed to stop warm sandbox {}: {}; {}",
+                            name,
+                            stop_error,
+                            kill_error
+                        ));
+                    }
                 }
             }
 
@@ -1141,6 +1164,19 @@ async fn cleanup_named_container(
         }
     }
 
+    Ok(())
+}
+
+async fn kill_named_container_if_present(container_bin: &Path, name: &str) -> Result<()> {
+    let kill =
+        run_container_admin_command(container_bin, WARM_SANDBOX_CLEANUP_TIMEOUT, ["kill", name])
+            .await?;
+    if !kill.status.success() {
+        let stderr = String::from_utf8_lossy(&kill.stderr).trim().to_string();
+        if !is_missing_container_error(&stderr) {
+            return Err(anyhow!("failed to kill warm sandbox {}: {}", name, stderr));
+        }
+    }
     Ok(())
 }
 
@@ -1227,6 +1263,7 @@ fn cleanup_named_container_blocking(container_bin: &Path, cli: ContainerCliFlavo
     match cli {
         ContainerCliFlavor::AppleContainer => {
             run_container_admin_command_blocking(container_bin, ["stop", name]);
+            run_container_admin_command_blocking(container_bin, ["kill", name]);
             run_container_admin_command_blocking(container_bin, ["delete", name]);
         }
         ContainerCliFlavor::Docker => {

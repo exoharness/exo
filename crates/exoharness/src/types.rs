@@ -1,7 +1,9 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt::{Display, Formatter};
 use std::ops::Bound;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -471,6 +473,35 @@ impl SandboxProvider {
             Self::AppleContainer | Self::Docker | Self::LocalProcess
         )
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Daytona => "daytona",
+            Self::AppleContainer => "apple-container",
+            Self::Docker => "docker",
+            Self::LocalProcess => "local-process",
+        }
+    }
+}
+
+impl Display for SandboxProvider {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for SandboxProvider {
+    type Err = crate::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value.trim() {
+            "daytona" => Ok(Self::Daytona),
+            "apple-container" | "apple_container" => Ok(Self::AppleContainer),
+            "docker" => Ok(Self::Docker),
+            "local" | "local-process" | "local_process" => Ok(Self::LocalProcess),
+            provider => Err(anyhow::anyhow!("unsupported sandbox provider: {provider}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -755,5 +786,26 @@ mod tests {
             serde_json::to_value(FileSystemMountMode::ReadWrite).expect("mode should serialize");
         assert_eq!(ro, Value::String("ro".to_string()));
         assert_eq!(rw, Value::String("rw".to_string()));
+    }
+
+    #[test]
+    fn parses_and_formats_sandbox_providers() {
+        assert_eq!(
+            "apple-container".parse::<SandboxProvider>().unwrap(),
+            SandboxProvider::AppleContainer
+        );
+        assert_eq!(
+            "apple_container".parse::<SandboxProvider>().unwrap(),
+            SandboxProvider::AppleContainer
+        );
+        assert_eq!(
+            "local".parse::<SandboxProvider>().unwrap(),
+            SandboxProvider::LocalProcess
+        );
+        assert_eq!(
+            SandboxProvider::AppleContainer.to_string(),
+            "apple-container"
+        );
+        assert_eq!(SandboxProvider::LocalProcess.to_string(), "local-process");
     }
 }
