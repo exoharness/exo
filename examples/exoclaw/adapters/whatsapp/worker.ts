@@ -24,6 +24,11 @@ const allowedChats = stringArrayOrNull(config.allowedChats);
 if (trigger !== "all_messages" && trigger !== "contacts_only") {
   throw new Error("WhatsApp trigger must be all_messages or contacts_only");
 }
+const linkMethod = optionalStringField(config, "linkMethod") ?? "qr";
+if (linkMethod !== "qr" && linkMethod !== "pairing-code") {
+  throw new Error("WhatsApp linkMethod must be qr or pairing-code");
+}
+const pairingPhoneNumber = optionalStringField(config, "phoneNumber");
 const authDir =
   optionalStringField(config, "authDir") ??
   (process.env.EXO_ADAPTER_STATE_DIR === undefined
@@ -62,7 +67,7 @@ const socket = makeWASocket({
 socket.ev.on("creds.update", saveCreds);
 
 socket.ev.on("connection.update", (update) => {
-  if (update.qr) {
+  if (update.qr && linkMethod === "qr") {
     qrcodeTerminal.generate(update.qr, { small: true }, (qr) => {
       process.stderr.write(
         `\n[whatsapp-adapter] Scan this QR with WhatsApp:\n${qr}\n`,
@@ -96,6 +101,21 @@ socket.ev.on("connection.update", (update) => {
     process.exit(1);
   }
 });
+
+if (linkMethod === "pairing-code" && !state.creds.registered) {
+  if (!pairingPhoneNumber) {
+    throw new Error("WhatsApp pairing-code linkMethod requires phoneNumber");
+  }
+  const code = await socket.requestPairingCode(pairingPhoneNumber);
+  process.stderr.write(
+    `\n[whatsapp-adapter] Enter this WhatsApp pairing code for ${pairingPhoneNumber}: ${code}\n`,
+  );
+  writeWorkerEvent({
+    type: "lifecycle",
+    name: "pairing_code",
+    metadata: { phoneNumber: pairingPhoneNumber, code },
+  });
+}
 
 socket.ev.on("messages.upsert", (event) => {
   if (event.type !== "notify") {

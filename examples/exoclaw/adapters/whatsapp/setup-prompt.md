@@ -6,6 +6,8 @@ Create a library WhatsApp adapter if one does not already exist for this convers
 - source: `library`
 - type: `whatsapp`
 - authDir: `null`
+- linkMethod: `qr` unless the user asks for a pairing code
+- phoneNumber: `null` unless linkMethod is `pairing-code`
 - trigger: `all_messages`
 - allowedChats: `null`
 

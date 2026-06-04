@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use exoharness::Uuid7;
+use serde::Serialize;
 use tokio::fs;
+use tokio::io::AsyncWriteExt;
 
 use super::types::{
     AdapterAttachment, AdapterEventRecord, AdapterEventType, AdapterInboundMessageRecord,
@@ -95,7 +98,7 @@ impl AdapterStore {
     pub async fn put_adapter(&self, adapter: &AdapterRecord) -> Result<()> {
         fs::create_dir_all(self.adapters_dir()).await?;
         let path = self.adapter_path(&adapter.id);
-        fs::write(&path, serde_json::to_vec_pretty(adapter)?)
+        write_json_file(&path, adapter)
             .await
             .with_context(|| format!("failed to write adapter {}", path.display()))
     }
@@ -150,7 +153,7 @@ impl AdapterStore {
     pub async fn put_event(&self, event: &AdapterEventRecord) -> Result<()> {
         fs::create_dir_all(self.events_dir(&event.adapter_id)).await?;
         let path = self.event_path(&event.adapter_id, &event.id);
-        fs::write(&path, serde_json::to_vec_pretty(event)?)
+        write_json_file(&path, event)
             .await
             .with_context(|| format!("failed to write adapter event {}", path.display()))
     }
@@ -181,14 +184,12 @@ impl AdapterStore {
             AdapterOutboundMessageRecord::new(adapter_id, text, target, attachments, now_ms())?;
         fs::create_dir_all(self.outbox_dir(&message.adapter_id)).await?;
         let path = self.outbox_path(&message.adapter_id, &message.id);
-        fs::write(&path, serde_json::to_vec_pretty(&message)?)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to write adapter outbound message {}",
-                    path.display()
-                )
-            })?;
+        write_json_file(&path, &message).await.with_context(|| {
+            format!(
+                "failed to write adapter outbound message {}",
+                path.display()
+            )
+        })?;
         Ok(message)
     }
 
@@ -307,12 +308,14 @@ impl AdapterStore {
             .open(&path)
             .await
         {
-            Ok(_) => {
-                fs::write(&path, serde_json::to_vec_pretty(&record)?)
-                    .await
-                    .with_context(|| {
-                        format!("failed to write inbound seen marker {}", path.display())
-                    })?;
+            Ok(mut file) => {
+                let bytes = serde_json::to_vec_pretty(&record)?;
+                file.write_all(&bytes).await.with_context(|| {
+                    format!("failed to write inbound seen marker {}", path.display())
+                })?;
+                file.flush().await.with_context(|| {
+                    format!("failed to flush inbound seen marker {}", path.display())
+                })?;
                 Ok(true)
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
@@ -369,6 +372,20 @@ async fn remove_file_if_exists(path: PathBuf) -> Result<()> {
             Err(error).with_context(|| format!("failed to delete file {}", path.display()))
         }
     }
+}
+
+async fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let temp_path = path.with_extension(format!("json.{}.tmp", Uuid7::now()));
+    fs::write(&temp_path, serde_json::to_vec_pretty(value)?)
+        .await
+        .with_context(|| format!("failed to write temp file {}", temp_path.display()))?;
+    fs::rename(&temp_path, path).await.with_context(|| {
+        format!(
+            "failed to replace {} with temp file {}",
+            path.display(),
+            temp_path.display()
+        )
+    })
 }
 
 async fn remove_dir_if_exists(path: PathBuf) -> Result<()> {

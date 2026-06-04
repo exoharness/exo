@@ -15,8 +15,6 @@ pub async fn send_conversation_wakeup(
     conversation: &dyn HarnessConversation,
     prompt: String,
 ) -> Result<SendResult> {
-    let wakeup_lock = conversation_wakeup_lock(&conversation.record().id.to_string());
-    let _guard = wakeup_lock.lock().await;
     let _file_guard = WakeupFileLock::acquire(&conversation.record().id.to_string()).await?;
     let result = conversation
         .send(SendRequest {
@@ -94,7 +92,7 @@ async fn remove_stale_lock(path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn conversation_wakeup_lock(conversation_id: &str) -> Arc<AsyncMutex<()>> {
+pub(crate) fn conversation_send_lock(conversation_id: &str) -> Arc<AsyncMutex<()>> {
     static LOCKS: OnceLock<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>> = OnceLock::new();
     let locks = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut locks = locks

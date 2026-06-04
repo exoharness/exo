@@ -87,6 +87,8 @@ struct WhatsappAdapterCreationConfig {
     #[serde(rename = "type")]
     _adapter_type: WhatsappAdapterType,
     auth_dir: Option<String>,
+    link_method: Option<WhatsappLinkMethod>,
+    phone_number: Option<String>,
     trigger: ChatTrigger,
     allowed_chats: Option<Vec<String>>,
 }
@@ -125,6 +127,13 @@ enum IrcAdapterType {
 #[serde(rename_all = "lowercase")]
 enum WhatsappAdapterType {
     Whatsapp,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum WhatsappLinkMethod {
+    Qr,
+    PairingCode,
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,11 +185,9 @@ impl AdapterCreationConfig {
                 require_source(source, AdapterSource::BuiltIn, "irc")?;
                 Ok(AdapterConfig {
                     adapter_type: "irc".to_string(),
-                    worker_command: vec![
-                        "pnpm".to_string(),
-                        "tsx".to_string(),
-                        "examples/exoclaw/adapters/irc/worker.ts".to_string(),
-                    ],
+                    worker_command: bundled_worker_command(
+                        "examples/exoclaw/adapters/irc/worker.ts",
+                    ),
                     initialization: serde_json::json!({
                         "server": config.server,
                         "port": config.port,
@@ -205,15 +212,23 @@ impl AdapterCreationConfig {
             }
             Self::Whatsapp(config) => {
                 require_source(source, AdapterSource::Library, "whatsapp")?;
+                if matches!(config.link_method, Some(WhatsappLinkMethod::PairingCode))
+                    && config
+                        .phone_number
+                        .as_deref()
+                        .is_none_or(|phone_number| phone_number.trim().is_empty())
+                {
+                    bail!("whatsapp pairing-code linkMethod requires phoneNumber");
+                }
                 Ok(AdapterConfig {
                     adapter_type: "whatsapp".to_string(),
-                    worker_command: vec![
-                        "pnpm".to_string(),
-                        "tsx".to_string(),
-                        "examples/exoclaw/adapters/whatsapp/worker.ts".to_string(),
-                    ],
+                    worker_command: bundled_worker_command(
+                        "examples/exoclaw/adapters/whatsapp/worker.ts",
+                    ),
                     initialization: serde_json::json!({
                         "authDir": config.auth_dir,
+                        "linkMethod": config.link_method.map(|method| method.as_str()),
+                        "phoneNumber": config.phone_number,
                         "trigger": config.trigger.as_str(),
                         "allowedChats": config.allowed_chats,
                     }),
@@ -225,11 +240,9 @@ impl AdapterCreationConfig {
                 require_source(source, AdapterSource::Library, "signal")?;
                 Ok(AdapterConfig {
                     adapter_type: "signal".to_string(),
-                    worker_command: vec![
-                        "pnpm".to_string(),
-                        "tsx".to_string(),
-                        "examples/exoclaw/adapters/signal/worker.ts".to_string(),
-                    ],
+                    worker_command: bundled_worker_command(
+                        "examples/exoclaw/adapters/signal/worker.ts",
+                    ),
                     initialization: serde_json::json!({
                         "account": config.account,
                         "deviceName": config.device_name,
@@ -245,11 +258,9 @@ impl AdapterCreationConfig {
                 require_source(source, AdapterSource::Library, "discord")?;
                 Ok(AdapterConfig {
                     adapter_type: "discord".to_string(),
-                    worker_command: vec![
-                        "pnpm".to_string(),
-                        "tsx".to_string(),
-                        "examples/exoclaw/adapters/discord/worker.ts".to_string(),
-                    ],
+                    worker_command: bundled_worker_command(
+                        "examples/exoclaw/adapters/discord/worker.ts",
+                    ),
                     initialization: serde_json::json!({
                         "tokenEnv": "EXO_DISCORD_BOT_TOKEN",
                         "defaultChannelId": config.default_channel_id,
@@ -286,6 +297,15 @@ impl ChatTrigger {
     }
 }
 
+impl WhatsappLinkMethod {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Qr => "qr",
+            Self::PairingCode => "pairing-code",
+        }
+    }
+}
+
 impl DiscordTrigger {
     fn as_str(&self) -> &'static str {
         match self {
@@ -304,6 +324,17 @@ fn require_source(
         bail!("{adapter_type} adapters must use source {expected:?}");
     }
     Ok(())
+}
+
+fn bundled_worker_command(relative_path: &str) -> Vec<String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(relative_path);
+    vec![
+        "pnpm".to_string(),
+        "tsx".to_string(),
+        path.to_string_lossy().into_owned(),
+    ]
 }
 
 pub async fn execute_create_adapter_tool(
@@ -803,13 +834,10 @@ mod tests {
             adapter.conversation_id,
             conversation.record().id.to_string()
         );
-        assert_eq!(
-            adapter.config.worker_command,
-            vec![
-                "pnpm".to_string(),
-                "tsx".to_string(),
-                "examples/exoclaw/adapters/irc/worker.ts".to_string(),
-            ]
+        assert_eq!(adapter.config.worker_command[0], "pnpm");
+        assert_eq!(adapter.config.worker_command[1], "tsx");
+        assert!(
+            adapter.config.worker_command[2].ends_with("examples/exoclaw/adapters/irc/worker.ts")
         );
 
         let list_result = execute_list_adapters_tool(

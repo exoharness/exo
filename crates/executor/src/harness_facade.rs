@@ -8,6 +8,7 @@ use exoharness::{
 };
 use lingua::Message;
 
+use crate::conversation_wakeup::conversation_send_lock;
 use crate::harness_helpers::{
     get_conversation_model_override, materialize_conversation_messages,
     put_conversation_model_override, resolve_agent_handle, resolve_conversation_handle,
@@ -319,6 +320,8 @@ where
     }
 
     async fn send(&self, request: SendRequest) -> Result<SendResult> {
+        let send_lock = conversation_send_lock(&self.conversation.record().id.to_string());
+        let _guard = send_lock.lock().await;
         self.runtime
             .send(
                 Arc::clone(&self.agent),
@@ -329,12 +332,16 @@ where
     }
 
     async fn send_stream(&self, request: SendRequest) -> Result<ExecutionStreamHandle> {
-        self.runtime
+        let send_lock = conversation_send_lock(&self.conversation.record().id.to_string());
+        let send_guard = send_lock.lock_owned().await;
+        let stream = self
+            .runtime
             .send_stream(
                 Arc::clone(&self.agent),
                 Arc::clone(&self.conversation),
                 request,
             )
-            .await
+            .await?;
+        Ok(stream.with_send_guard(send_guard))
     }
 }

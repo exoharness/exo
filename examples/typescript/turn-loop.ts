@@ -14,7 +14,7 @@ import {
 import {
   responseToLinguaEvents,
   responseToolCalls,
-  ResponsesRuntime,
+  runtimeFromModelBinding,
   type NativeResponsesRequest,
   type ResponsesRuntimeLike,
   type TraceParent,
@@ -35,10 +35,7 @@ export async function runResponsesHarnessTurn(
   options: ResponsesTurnLoopOptions = {},
 ): Promise<void> {
   const modelBinding = await resolveLlmBinding(context);
-  const runtime = ResponsesRuntime.fromModelBinding(
-    context.agentConfig,
-    modelBinding,
-  );
+  const runtime = runtimeFromModelBinding(context.agentConfig, modelBinding);
   await runtime.runTurn(context, (turnParent) =>
     runResponsesTurnLoop(
       runtime,
@@ -151,7 +148,13 @@ async function runResponsesTurnLoop(
     }
 
     const toolCalls = responseToolCalls(response);
+    const hasSyntheticToolResult = events.some(
+      (event) => event.type === "tool_result",
+    );
     if (toolCalls.length === 0) {
+      if (hasSyntheticToolResult) {
+        continue;
+      }
       return latestEventId;
     }
 

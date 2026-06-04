@@ -37,7 +37,7 @@ const signal = spawnSignalCli([
   "-a",
   account,
   "jsonRpc",
-  "--receive-mode=on-connection",
+  "--receive-mode=on-start",
 ]);
 installChildCleanup(signal);
 

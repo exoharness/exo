@@ -1,12 +1,12 @@
 # WhatsApp Adapter
 
-The WhatsApp adapter is an experimental Exoclaw library adapter implemented as a TypeScript worker using Baileys. It runs as a linked-device client: WhatsApp remains owned by the phone account, and Exoclaw connects as an additional device after QR pairing.
+The WhatsApp adapter is an experimental Exoclaw library adapter implemented as a TypeScript worker using Baileys. It runs as a linked-device client: WhatsApp remains owned by the phone account, and Exoclaw connects as an additional device after QR or pairing-code linking.
 
 ## How It Works
 
 The host adapter runner starts `worker.ts` and passes adapter configuration through `EXO_ADAPTER_CONFIG`. The worker stores Baileys auth state on disk, opens a WhatsApp socket, emits JSONL events on stdout, and receives outbound send commands on stdin.
 
-When WhatsApp asks for pairing, the worker logs an ASCII QR code and emits a lifecycle event named `qr`. After pairing, incoming text messages become Exoclaw adapter message events. Outbound `send_adapter_message` calls send text, or text plus rich attachments, to the target WhatsApp chat id.
+When WhatsApp asks for pairing, the worker logs an ASCII QR code and emits a lifecycle event named `qr`, or requests and emits a `pairing_code` when configured for pairing-code linking. After pairing, incoming text messages become Exoclaw adapter message events. Outbound `send_adapter_message` calls send text, or text plus rich attachments, to the target WhatsApp chat id.
 
 ## Setup
 
@@ -27,6 +27,8 @@ The setup prompt at `setup-prompt.md` asks Exoclaw to create a library adapter s
   "config": {
     "type": "whatsapp",
     "authDir": null,
+    "linkMethod": "qr",
+    "phoneNumber": null,
     "trigger": "all_messages",
     "allowedChats": null
   }
@@ -36,6 +38,7 @@ The setup prompt at `setup-prompt.md` asks Exoclaw to create a library adapter s
 ## Configuration
 
 - `authDir` controls where Baileys stores linked-device credentials. If omitted, the worker uses `.exo/adapters/whatsapp/<adapter-id>/auth` or the host-provided adapter state directory.
+- `linkMethod` is `qr` or `pairing-code`. Use `pairing-code` with `phoneNumber` when QR linking is unreliable.
 - `trigger` is `all_messages` or `contacts_only`.
 - `allowedChats` can restrict wakeups to specific WhatsApp chat ids.
 

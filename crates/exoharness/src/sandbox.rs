@@ -245,7 +245,8 @@ impl CliContainerSandboxBackend {
             .arg("start")
             .kill_on_drop(true)
             .output()
-            .await?;
+            .await
+            .with_context(|| missing_container_cli_message(self.cli, &self.container_bin))?;
         if !output.status.success() {
             return Err(anyhow!(
                 "failed to start container system: {}",
@@ -1298,6 +1299,19 @@ fn schedule_cleanup_named_container(container_bin: PathBuf, cli: ContainerCliFla
     });
 }
 
+fn missing_container_cli_message(cli: ContainerCliFlavor, container_bin: &Path) -> String {
+    match cli {
+        ContainerCliFlavor::AppleContainer => format!(
+            "apple-container sandbox backend requires the `{}` CLI; install Apple container CLI or use `--sandbox-backend local-process`",
+            container_bin.display()
+        ),
+        ContainerCliFlavor::Docker => format!(
+            "docker sandbox backend requires the `{}` CLI; install Docker or use `--sandbox-backend local-process`",
+            container_bin.display()
+        ),
+    }
+}
+
 async fn run_container_admin_command<const N: usize>(
     container_bin: &Path,
     timeout: Duration,
@@ -1411,9 +1425,10 @@ async fn docker_snapshot_container(
     if let Ok(output) = &rm_output
         && !output.status.success()
     {
-        eprintln!(
-            "warning: failed to remove ephemeral snapshot image {snap_tag}: {}",
-            render_command_error(&output.stderr)
+        tracing::warn!(
+            image_tag = %snap_tag,
+            stderr = %render_command_error(&output.stderr),
+            "failed to remove ephemeral snapshot image"
         );
     }
 
@@ -1475,4 +1490,30 @@ async fn docker_load_image(container_bin: &Path, payload: &Bytes) -> Result<Stri
         }
     }
     bail!("docker load completed but no image reference found in output: {stdout}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn apple_container_backend_names_missing_container_cli() {
+        let missing_bin = std::env::temp_dir().join(format!(
+            "exo-missing-container-cli-{}",
+            Uuid::new_v4().simple()
+        ));
+        let backend = CliContainerSandboxBackend {
+            cli: ContainerCliFlavor::AppleContainer,
+            container_bin: missing_bin,
+            system_started: Mutex::new(false),
+            network_created: Mutex::new(false),
+            warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        let error = backend.ensure_system_started().await.unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("apple-container sandbox backend requires"));
+        assert!(message.contains("install Apple container CLI"));
+        assert!(message.contains("--sandbox-backend local-process"));
+    }
 }

@@ -11,6 +11,7 @@ use exoharness::{
 use lingua::{Message, UniversalStreamChunk, UniversalUsage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::OwnedMutexGuard;
 use tokio_stream::{Stream, wrappers::UnboundedReceiverStream};
 
 use crate::braintrust::BraintrustTracingConfig;
@@ -213,11 +214,20 @@ pub struct SendResult {
 
 pub struct ExecutionStreamHandle {
     event_stream: UnboundedReceiverStream<Result<ExecutionStreamEvent>>,
+    _send_guard: Option<OwnedMutexGuard<()>>,
 }
 
 impl ExecutionStreamHandle {
     pub fn new(event_stream: UnboundedReceiverStream<Result<ExecutionStreamEvent>>) -> Self {
-        Self { event_stream }
+        Self {
+            event_stream,
+            _send_guard: None,
+        }
+    }
+
+    pub(crate) fn with_send_guard(mut self, send_guard: OwnedMutexGuard<()>) -> Self {
+        self._send_guard = Some(send_guard);
+        self
     }
 }
 

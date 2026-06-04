@@ -312,6 +312,17 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
             description:
               "Optional directory for Baileys auth state. Use null for the default under .exo.",
           },
+          linkMethod: {
+            type: ["string", "null"],
+            enum: ["qr", "pairing-code", null],
+            description:
+              "Link method for first-time pairing. Use qr by default; use pairing-code when QR linking is unreliable.",
+          },
+          phoneNumber: {
+            type: ["string", "null"],
+            description:
+              "Phone number for pairing-code linkMethod. Use null with qr.",
+          },
           trigger: {
             type: "string",
             enum: ["all_messages", "contacts_only"],
@@ -327,7 +338,14 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
               "Optional list of WhatsApp chat ids to wake on. Use null to allow all chats permitted by trigger.",
           },
         },
-        required: ["type", "authDir", "trigger", "allowedChats"],
+        required: [
+          "type",
+          "authDir",
+          "linkMethod",
+          "phoneNumber",
+          "trigger",
+          "allowedChats",
+        ],
       },
       {
         type: "object",

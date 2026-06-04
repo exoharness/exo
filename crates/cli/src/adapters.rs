@@ -1,10 +1,13 @@
+use std::fs;
+use std::io::Write;
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::{fs, process::Command};
 
 use anyhow::{Result, bail};
 use clap::Subcommand;
 use executor::{AdapterRunOptions, AdapterStore, Harness, run_adapters_watch};
+use tabwriter::TabWriter;
 
 #[derive(Debug, Subcommand)]
 pub enum AdapterCommands {
@@ -32,18 +35,21 @@ pub async fn handle_adapter_command(
     let store = AdapterStore::new(root.join("adapters"));
     match command {
         AdapterCommands::List { include_disabled } => {
-            println!("ADAPTER\tENABLED\tSOURCE\tNAME");
+            let mut writer = TabWriter::new(std::io::stdout());
+            writeln!(writer, "ADAPTER\tENABLED\tSOURCE\tNAME")?;
             for adapter in store
                 .list_adapters()
                 .await?
                 .into_iter()
                 .filter(|adapter| include_disabled || adapter.enabled)
             {
-                println!(
+                writeln!(
+                    writer,
                     "{}\t{}\t{:?}\t{}",
                     adapter.id, adapter.enabled, adapter.source, adapter.name
-                );
+                )?;
             }
+            writer.flush()?;
         }
         AdapterCommands::Run { limit } => {
             let _lock = AdapterRunnerLock::acquire(root)?;
@@ -67,6 +73,7 @@ pub async fn handle_adapter_command(
     Ok(())
 }
 
+#[derive(Debug)]
 struct AdapterRunnerLock {
     path: std::path::PathBuf,
 }
@@ -103,7 +110,13 @@ impl AdapterRunnerLock {
 
 impl Drop for AdapterRunnerLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        if let Err(error) = fs::remove_file(&self.path) {
+            tracing::warn!(
+                path = %self.path.display(),
+                %error,
+                "failed to remove adapter runner lock"
+            );
+        }
     }
 }
 
@@ -112,6 +125,39 @@ fn process_is_running(pid: &str) -> bool {
         && Command::new("kill")
             .arg("-0")
             .arg(pid)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
             .is_ok_and(|status| status.success())
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn adapter_runner_lock_rejects_concurrent_holder() {
+        let tempdir = TempDir::new().unwrap();
+        let first = AdapterRunnerLock::acquire(tempdir.path()).unwrap();
+
+        let error = AdapterRunnerLock::acquire(tempdir.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("adapter runner already appears to be running")
+        );
+
+        drop(first);
+        AdapterRunnerLock::acquire(tempdir.path()).unwrap();
+    }
+
+    #[test]
+    fn adapter_runner_lock_reclaims_stale_pid_file() {
+        let tempdir = TempDir::new().unwrap();
+        fs::write(tempdir.path().join("exoclaw-adapters.lock"), "999999999").unwrap();
+
+        AdapterRunnerLock::acquire(tempdir.path()).unwrap();
+    }
 }
