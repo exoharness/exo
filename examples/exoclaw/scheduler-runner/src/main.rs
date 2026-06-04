@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -62,6 +63,7 @@ async fn main() -> Result<()> {
             interval_seconds,
             limit,
         } => {
+            let _lock = SchedulerRunnerLock::acquire(&cli.root)?;
             let store = SchedulerStore::new(cli.root.join("scheduled-tasks"));
             loop {
                 let runs =
@@ -88,6 +90,62 @@ async fn main() -> Result<()> {
 
     harness.flush_tracing().await?;
     Ok(())
+}
+
+struct SchedulerRunnerLock {
+    path: PathBuf,
+}
+
+impl SchedulerRunnerLock {
+    fn acquire(root: &Path) -> Result<Self> {
+        fs::create_dir_all(root)?;
+        let path = root.join("exoclaw-scheduler.lock");
+        let pid = std::process::id().to_string();
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                use std::io::Write;
+                writeln!(file, "{pid}")?;
+                Ok(Self { path })
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let existing_pid = fs::read_to_string(&path).unwrap_or_default();
+                if process_is_running(existing_pid.trim()) {
+                    return Err(anyhow!(
+                        "scheduler runner already appears to be running with pid {}",
+                        existing_pid.trim()
+                    ));
+                }
+                fs::remove_file(&path)?;
+                Self::acquire(root)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+impl Drop for SchedulerRunnerLock {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_file(&self.path) {
+            tracing::error!(
+                path = %self.path.display(),
+                %error,
+                "failed to remove scheduler lock"
+            );
+        }
+    }
+}
+
+fn process_is_running(pid: &str) -> bool {
+    !pid.is_empty()
+        && Command::new("kill")
+            .arg("-0")
+            .arg(pid)
+            .status()
+            .is_ok_and(|status| status.success())
 }
 
 async fn exoclaw_harness(

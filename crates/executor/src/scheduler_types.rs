@@ -5,6 +5,9 @@ use exoharness::Uuid7;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_MAX_OUTPUT_BYTES: u64 = 200_000;
+pub const MAX_OUTPUT_BYTES: u64 = 2_000_000;
+pub const DEFAULT_TASK_LEASE_MS: u64 = 10 * 60 * 1_000;
+pub const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 10 * 60 * 1_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScheduledTaskRecord {
@@ -29,6 +32,7 @@ pub struct ScheduledTaskRecord {
     pub last_run_at_ms: Option<u64>,
     pub latest_run_id: Option<String>,
     pub latest_result_artifact_id: Option<String>,
+    pub lease: Option<ScheduledTaskLease>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -67,6 +71,13 @@ pub struct ScheduledTaskRunRecord {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScheduledTaskLease {
+    pub id: String,
+    pub leased_at_ms: u64,
+    pub expires_at_ms: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParsedSchedule {
     interval_ms: u64,
@@ -83,6 +94,12 @@ impl ScheduledTaskRecord {
         let max_output_bytes = request.max_output_bytes.unwrap_or(DEFAULT_MAX_OUTPUT_BYTES);
         if max_output_bytes == 0 {
             bail!("scheduled task maxOutputBytes must be greater than zero");
+        }
+        if max_output_bytes > MAX_OUTPUT_BYTES {
+            bail!(
+                "scheduled task maxOutputBytes must be less than or equal to {}",
+                MAX_OUTPUT_BYTES
+            );
         }
         Ok(Self {
             id: Uuid7::now().to_string(),
@@ -103,11 +120,26 @@ impl ScheduledTaskRecord {
             last_run_at_ms: None,
             latest_run_id: None,
             latest_result_artifact_id: None,
+            lease: None,
         })
     }
 
     pub fn is_due(&self, now_ms: u64) -> bool {
-        self.enabled && self.next_run_at_ms <= now_ms
+        self.enabled
+            && self.next_run_at_ms <= now_ms
+            && self
+                .lease
+                .as_ref()
+                .is_none_or(|lease| lease.expires_at_ms <= now_ms)
+    }
+
+    pub fn claim(&mut self, now_ms: u64, lease_ms: u64) {
+        self.lease = Some(ScheduledTaskLease {
+            id: Uuid7::now().to_string(),
+            leased_at_ms: now_ms,
+            expires_at_ms: now_ms.saturating_add(lease_ms),
+        });
+        self.updated_at_ms = now_ms;
     }
 
     pub fn mark_completed(
@@ -122,6 +154,7 @@ impl ScheduledTaskRecord {
         self.latest_run_id = Some(run.id.clone());
         self.latest_result_artifact_id = result_artifact_id;
         self.next_run_at_ms = schedule.next_after_ms(now_ms);
+        self.lease = None;
         Ok(())
     }
 }
@@ -288,5 +321,26 @@ mod tests {
 
         assert_eq!(task.sandbox_mode, ScheduledTaskSandboxMode::TaskFresh);
         assert_eq!(task.task_sandbox_id, None);
+    }
+
+    #[test]
+    fn scheduled_task_rejects_excessive_output_cap() {
+        assert!(
+            ScheduledTaskRecord::new(
+                NewScheduledTask {
+                    agent_id: "agent".to_string(),
+                    conversation_id: "conversation".to_string(),
+                    name: "check".to_string(),
+                    schedule: "@every 1m".to_string(),
+                    sandbox_mode: None,
+                    setup_command: None,
+                    command: vec!["true".to_string()],
+                    report_prompt: "Report.".to_string(),
+                    max_output_bytes: Some(MAX_OUTPUT_BYTES + 1),
+                },
+                1,
+            )
+            .is_err()
+        );
     }
 }

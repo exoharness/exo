@@ -37,7 +37,7 @@ const signal = spawnSignalCli([
   "-a",
   account,
   "jsonRpc",
-  "--receive-mode=on-connection",
+  "--receive-mode=on-start",
 ]);
 installChildCleanup(signal);
 
@@ -100,19 +100,30 @@ for await (const line of input) {
   if (line.trim().length === 0) {
     continue;
   }
+  let commandId: string | null = null;
   try {
     const command = parseWorkerCommand(JSON.parse(line));
+    commandId = command.id;
     if (!command.target) {
       throw new Error(
         "Signal send_message requires a target username, uuid, phone number, or group id",
       );
     }
     await sendSignalMessage(command.target, command.text, command.attachments);
+    writeWorkerEvent({ type: "command_ack", command_id: command.id });
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     writeWorkerEvent({
       type: "error",
-      message: error instanceof Error ? error.message : String(error),
+      message,
     });
+    if (commandId !== null) {
+      writeWorkerEvent({
+        type: "command_nack",
+        command_id: commandId,
+        message,
+      });
+    }
   }
 }
 

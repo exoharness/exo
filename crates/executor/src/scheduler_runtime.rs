@@ -10,7 +10,8 @@ use crate::conversation_sandbox::{create_conversation_sandbox, ensure_conversati
 use crate::conversation_wakeup::send_conversation_wakeup;
 use crate::scheduler_store::SchedulerStore;
 use crate::scheduler_types::{
-    ScheduledTaskRecord, ScheduledTaskRunRecord, ScheduledTaskSandboxMode, now_ms,
+    DEFAULT_COMMAND_TIMEOUT_MS, DEFAULT_TASK_LEASE_MS, ScheduledTaskRecord, ScheduledTaskRunRecord,
+    ScheduledTaskSandboxMode, now_ms,
 };
 use crate::{Harness, Uuid7};
 
@@ -47,15 +48,14 @@ pub async fn run_due_tasks(
     store: &SchedulerStore,
     options: SchedulerRunOptions,
 ) -> Result<Vec<ScheduledTaskRunRecord>> {
-    let mut due = store.due_tasks(now_ms()).await?;
-    due.sort_by_key(|task| task.next_run_at_ms);
-    due.truncate(options.limit);
-
-    let mut runs = Vec::new();
-    for task in due {
-        runs.push(run_task(Arc::clone(&harness), store, task).await?);
-    }
-    Ok(runs)
+    let due = store
+        .claim_due_tasks(now_ms(), options.limit, DEFAULT_TASK_LEASE_MS)
+        .await?;
+    futures::future::try_join_all(
+        due.into_iter()
+            .map(|task| run_task(Arc::clone(&harness), store, task)),
+    )
+    .await
 }
 
 pub async fn run_task(
@@ -175,7 +175,8 @@ async fn run_task_inner(
                 env: Default::default(),
             })
             .await?;
-        let setup_output = read_process_output(process, task.max_output_bytes).await?;
+        let setup_output =
+            read_process_output(process, task.max_output_bytes, DEFAULT_COMMAND_TIMEOUT_MS).await?;
         if task.setup_command.is_none() {
             return Ok(CommandOutput {
                 sandbox_id: sandbox.sandbox_id.clone(),
@@ -200,7 +201,8 @@ async fn run_task_inner(
                 env: Default::default(),
             })
             .await?;
-        let main_output = read_process_output(process, task.max_output_bytes).await?;
+        let main_output =
+            read_process_output(process, task.max_output_bytes, DEFAULT_COMMAND_TIMEOUT_MS).await?;
         Ok(CommandOutput {
             sandbox_id: sandbox.sandbox_id.clone(),
             setup: Some(setup_output),
@@ -337,18 +339,32 @@ async fn resolve_task_sandbox(
 async fn read_process_output(
     process: Box<dyn SandboxProcess>,
     max_stream_bytes: u64,
+    timeout_ms: u64,
 ) -> Result<ProcessOutput> {
     let parts = process.into_parts();
     drop(parts.stdin);
 
-    let (stdout_result, stderr_result, exit_result) = tokio::join!(
-        read_limited(parts.stdout, max_stream_bytes),
-        read_limited(parts.stderr, max_stream_bytes),
-        parts.wait,
-    );
-    let (stdout, stdout_truncated) = stdout_result?;
-    let (stderr, stderr_truncated) = stderr_result?;
-    let exit_code = exit_result?;
+    let read_output = async {
+        let (stdout_result, stderr_result, exit_result) = tokio::join!(
+            read_limited(parts.stdout, max_stream_bytes),
+            read_limited(parts.stderr, max_stream_bytes),
+            parts.wait,
+        );
+        let (stdout, stdout_truncated) = stdout_result?;
+        let (stderr, stderr_truncated) = stderr_result?;
+        let exit_code = exit_result?;
+        Result::<_>::Ok((
+            stdout,
+            stdout_truncated,
+            stderr,
+            stderr_truncated,
+            exit_code,
+        ))
+    };
+    let (stdout, stdout_truncated, stderr, stderr_truncated, exit_code) =
+        tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), read_output)
+            .await
+            .map_err(|_| anyhow!("scheduled task command timed out after {timeout_ms}ms"))??;
     let truncated = stdout_truncated || stderr_truncated;
     Ok(ProcessOutput {
         exit_code: Some(exit_code),
@@ -365,6 +381,7 @@ struct CommandOutput {
     error: Option<String>,
 }
 
+#[derive(Debug)]
 struct ProcessOutput {
     exit_code: Option<i32>,
     stdout: Vec<u8>,
@@ -452,4 +469,35 @@ fn preview(bytes: &[u8]) -> String {
     const PREVIEW_BYTES: usize = 4_000;
     let end = bytes.len().min(PREVIEW_BYTES);
     String::from_utf8_lossy(&bytes[..end]).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::{future::FutureExt, io::Cursor};
+
+    struct HangingSandboxProcess;
+
+    impl SandboxProcess for HangingSandboxProcess {
+        fn into_parts(self: Box<Self>) -> exoharness::SandboxProcessParts {
+            exoharness::SandboxProcessParts {
+                stdout: Box::pin(Cursor::new(Vec::new())),
+                stderr: Box::pin(Cursor::new(Vec::new())),
+                stdin: Box::pin(Cursor::new(Vec::new())),
+                wait: async {
+                    futures::future::pending::<()>().await;
+                    Ok(0)
+                }
+                .boxed(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn read_process_output_times_out() {
+        let error = read_process_output(Box::new(HangingSandboxProcess), 1024, 1)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+    }
 }

@@ -1,5 +1,6 @@
 export type WorkerOutboundCommand = {
   type: "send_message";
+  id: string;
   target?: string | null;
   text: string;
   attachments: AdapterAttachment[];
@@ -38,6 +39,15 @@ export type WorkerInboundEvent =
       message: string;
     }
   | {
+      type: "command_ack";
+      command_id: string;
+    }
+  | {
+      type: "command_nack";
+      command_id: string;
+      message: string;
+    }
+  | {
       type: "disconnected";
       reason?: string | null;
     };
@@ -61,6 +71,9 @@ export function parseWorkerCommand(value: unknown): WorkerOutboundCommand {
   if (!isRecord(value) || value.type !== "send_message") {
     throw new Error("worker command must be a send_message object");
   }
+  if (typeof value.id !== "string" || value.id.length === 0) {
+    throw new Error("send_message id must be a non-empty string");
+  }
   if (
     value.target !== undefined &&
     value.target !== null &&
@@ -73,6 +86,7 @@ export function parseWorkerCommand(value: unknown): WorkerOutboundCommand {
   }
   return {
     type: "send_message",
+    id: value.id,
     target: value.target ?? null,
     text: value.text,
     attachments: parseAttachments(value.attachments),

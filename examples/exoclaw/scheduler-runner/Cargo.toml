@@ -10,3 +10,4 @@ anyhow.workspace = true
 clap = { workspace = true, features = ["derive", "env"] }
 executor = { path = "../../../crates/executor" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tracing.workspace = true

@@ -113,6 +113,14 @@ pub enum AdapterEventType {
     Error,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdapterInboundMessageRecord {
+    pub adapter_id: String,
+    pub target: String,
+    pub message_id: String,
+    pub first_seen_at_ms: u64,
+}
+
 impl AdapterRecord {
     pub fn new(request: NewAdapter, now_ms: u64) -> Result<Self> {
         validate_adapter_name(&request.name)?;

@@ -1,8 +1,12 @@
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
 use crate::{AgentConfig, ConversationConfig};
 use exoharness::{
     ConversationHandle, CreateSandboxRequest, DEFAULT_SANDBOX_IMAGE, EventData, EventKind,
     EventQuery, EventQueryDirection, FileSystemMount, FileSystemMountMode, Result, SandboxProvider,
 };
+use tokio::sync::Mutex as AsyncMutex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConversationSandboxInfo {
@@ -41,6 +45,8 @@ pub(crate) async fn ensure_conversation_sandbox(
     agent_config: &AgentConfig,
     config: &ConversationConfig,
 ) -> Result<String> {
+    let sandbox_lock = conversation_sandbox_lock(&conversation.record().id.to_string());
+    let _guard = sandbox_lock.lock().await;
     let spec = conversation_sandbox_spec(agent_config, config);
 
     for sandbox in conversation_sandboxes(conversation).await? {
@@ -146,4 +152,17 @@ fn normalize_mounts(mounts: &[FileSystemMount]) -> Vec<FileSystemMount> {
             internal: Some(mount.internal.unwrap_or(false)),
         })
         .collect()
+}
+
+fn conversation_sandbox_lock(conversation_id: &str) -> Arc<AsyncMutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>> = OnceLock::new();
+    let locks = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = locks
+        .lock()
+        .expect("conversation sandbox lock registry poisoned");
+    Arc::clone(
+        locks
+            .entry(conversation_id.to_string())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+    )
 }
