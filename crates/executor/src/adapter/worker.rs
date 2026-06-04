@@ -12,6 +12,7 @@ use super::types::{AdapterAttachment, AdapterConfig};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WorkerCommand {
     SendMessage {
+        id: String,
         #[serde(default)]
         target: Option<String>,
         text: String,
@@ -47,28 +48,40 @@ pub enum WorkerEvent {
     Error {
         message: String,
     },
+    CommandAck {
+        command_id: String,
+    },
+    CommandNack {
+        command_id: String,
+        message: String,
+    },
     Disconnected {
         #[serde(default)]
         reason: Option<String>,
     },
 }
 
-pub async fn run_worker_loop<F, Fut, G, OutFut>(
+pub async fn run_worker_loop<F, Fut, G, OutFut, S, StopFut>(
     adapter_id: &str,
     config: &AdapterConfig,
     secret_env: Vec<(String, String)>,
     mut on_event: F,
     mut take_outbound_messages: G,
+    mut should_stop: S,
 ) -> Result<()>
 where
     F: FnMut(WorkerEvent) -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
     G: FnMut() -> OutFut,
     OutFut: std::future::Future<Output = Result<Vec<WorkerCommand>>>,
+    S: FnMut() -> StopFut,
+    StopFut: std::future::Future<Output = Result<bool>>,
 {
-    eprintln!(
-        "starting {} adapter worker {}: {:?}",
-        config.adapter_type, adapter_id, config.worker_command
+    tracing::info!(
+        adapter_type = %config.adapter_type,
+        adapter_id = %adapter_id,
+        worker_command = ?config.worker_command,
+        "starting adapter worker"
     );
     let mut command = worker_command(adapter_id, config, secret_env);
     let mut child = command
@@ -87,6 +100,8 @@ where
         .take()
         .ok_or_else(|| anyhow!("adapter worker stdout was not piped"))?;
     let mut lines = BufReader::new(stdout).lines();
+    let mut outbound_interval = tokio::time::interval(std::time::Duration::from_secs(1));
+    let mut stop_interval = tokio::time::interval(std::time::Duration::from_secs(1));
 
     loop {
         tokio::select! {
@@ -100,16 +115,20 @@ where
                 };
                 let event = serde_json::from_str::<WorkerEvent>(&line)
                     .with_context(|| format!("failed to parse adapter worker event: {line}"))?;
-                eprintln!(
-                    "adapter_worker_event adapter_type={} payload={}",
-                    config.adapter_type,
-                    serde_json::to_string(&event)
-                        .unwrap_or_else(|_| "<unserializable event>".to_string())
+                tracing::debug!(
+                    adapter_type = %config.adapter_type,
+                    event = ?event,
+                    "adapter worker event"
                 );
                 on_event(event).await?;
             }
-            result = send_pending_commands(&mut stdin, &mut take_outbound_messages) => {
-                result?;
+            _ = outbound_interval.tick() => {
+                send_pending_commands(&mut stdin, &mut take_outbound_messages).await?;
+            }
+            _ = stop_interval.tick() => {
+                if should_stop().await? {
+                    return Ok(());
+                }
             }
         }
     }
@@ -155,9 +174,8 @@ where
     G: FnMut() -> OutFut,
     OutFut: std::future::Future<Output = Result<Vec<WorkerCommand>>>,
 {
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     for command in take_outbound_messages().await? {
-        eprintln!("sending adapter worker command: {:?}", command);
+        tracing::debug!(command = ?command, "sending adapter worker command");
         stdin
             .write_all(serde_json::to_string(&command)?.as_bytes())
             .await?;
@@ -165,4 +183,35 @@ where
         stdin.flush().await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stops_worker_when_cancellation_trips() {
+        let config = AdapterConfig {
+            adapter_type: "test".to_string(),
+            worker_command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "while true; do sleep 1; done".to_string(),
+            ],
+            initialization: serde_json::json!({}),
+            state_dir: None,
+            secret_env: Vec::new(),
+        };
+
+        run_worker_loop(
+            "adapter",
+            &config,
+            Vec::new(),
+            |_event| async { Ok(()) },
+            || async { Ok(Vec::new()) },
+            || async { Ok(true) },
+        )
+        .await
+        .unwrap();
+    }
 }

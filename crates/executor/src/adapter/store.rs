@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use tokio::fs;
 
 use super::types::{
-    AdapterAttachment, AdapterEventRecord, AdapterEventType, AdapterOutboundMessageRecord,
-    AdapterRecord, NewAdapter, now_ms,
+    AdapterAttachment, AdapterEventRecord, AdapterEventType, AdapterInboundMessageRecord,
+    AdapterOutboundMessageRecord, AdapterRecord, NewAdapter, now_ms,
 };
 
 #[derive(Debug, Clone)]
@@ -117,6 +117,8 @@ impl AdapterStore {
         remove_file_if_exists(self.adapter_path(adapter_id)).await?;
         remove_dir_if_exists(self.events_dir(adapter_id)).await?;
         remove_dir_if_exists(self.outbox_dir(adapter_id)).await?;
+        remove_dir_if_exists(self.inflight_dir(adapter_id)).await?;
+        remove_dir_if_exists(self.inbound_seen_dir(adapter_id)).await?;
         Ok(Some(adapter))
     }
 
@@ -190,7 +192,7 @@ impl AdapterStore {
         Ok(message)
     }
 
-    pub async fn take_outbound_messages(
+    pub async fn claim_outbound_messages(
         &self,
         adapter_id: &str,
     ) -> Result<Vec<AdapterOutboundMessageRecord>> {
@@ -215,11 +217,109 @@ impl AdapterStore {
                 format!("failed to read adapter outbound message {}", path.display())
             })?;
             let message = serde_json::from_slice::<AdapterOutboundMessageRecord>(&bytes)?;
-            remove_file_if_exists(path).await?;
+            fs::create_dir_all(self.inflight_dir(adapter_id)).await?;
+            let inflight_path = self.inflight_path(adapter_id, &message.id);
+            fs::rename(&path, &inflight_path).await.with_context(|| {
+                format!(
+                    "failed to claim adapter outbound message {} into {}",
+                    path.display(),
+                    inflight_path.display()
+                )
+            })?;
             messages.push(message);
         }
         messages.sort_by_key(|message| message.created_at_ms);
         Ok(messages)
+    }
+
+    pub async fn acknowledge_outbound_message(
+        &self,
+        adapter_id: &str,
+        message_id: &str,
+    ) -> Result<()> {
+        remove_file_if_exists(self.inflight_path(adapter_id, message_id)).await?;
+        remove_file_if_exists(self.outbox_path(adapter_id, message_id)).await?;
+        Ok(())
+    }
+
+    pub async fn requeue_outbound_message(&self, adapter_id: &str, message_id: &str) -> Result<()> {
+        let inflight_path = self.inflight_path(adapter_id, message_id);
+        match fs::metadata(&inflight_path).await {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+        fs::create_dir_all(self.outbox_dir(adapter_id)).await?;
+        let outbox_path = self.outbox_path(adapter_id, message_id);
+        fs::rename(&inflight_path, &outbox_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to requeue adapter outbound message {} into {}",
+                    inflight_path.display(),
+                    outbox_path.display()
+                )
+            })
+    }
+
+    pub async fn requeue_inflight_messages(&self, adapter_id: &str) -> Result<()> {
+        let inflight_dir = self.inflight_dir(adapter_id);
+        match fs::metadata(&inflight_dir).await {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+        let mut entries = fs::read_dir(&inflight_dir).await.with_context(|| {
+            format!("failed to read adapter inflight directory {inflight_dir:?}")
+        })?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(message_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            self.requeue_outbound_message(adapter_id, message_id)
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn record_inbound_message_once(
+        &self,
+        adapter_id: &str,
+        target: &str,
+        message_id: &str,
+    ) -> Result<bool> {
+        let record = AdapterInboundMessageRecord {
+            adapter_id: adapter_id.to_string(),
+            target: target.to_string(),
+            message_id: message_id.to_string(),
+            first_seen_at_ms: now_ms(),
+        };
+        let seen_dir = self.inbound_seen_dir(adapter_id);
+        fs::create_dir_all(&seen_dir).await?;
+        let path = seen_dir.join(format!("{}.json", stable_message_key(target, message_id)));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+        {
+            Ok(_) => {
+                fs::write(&path, serde_json::to_vec_pretty(&record)?)
+                    .await
+                    .with_context(|| {
+                        format!("failed to write inbound seen marker {}", path.display())
+                    })?;
+                Ok(true)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(error).with_context(|| {
+                format!("failed to create inbound seen marker {}", path.display())
+            }),
+        }
     }
 
     fn adapters_dir(&self) -> PathBuf {
@@ -246,6 +346,19 @@ impl AdapterStore {
         self.outbox_dir(adapter_id)
             .join(format!("{message_id}.json"))
     }
+
+    fn inflight_dir(&self, adapter_id: &str) -> PathBuf {
+        self.root.join("outbox-inflight").join(adapter_id)
+    }
+
+    fn inflight_path(&self, adapter_id: &str, message_id: &str) -> PathBuf {
+        self.inflight_dir(adapter_id)
+            .join(format!("{message_id}.json"))
+    }
+
+    fn inbound_seen_dir(&self, adapter_id: &str) -> PathBuf {
+        self.root.join("inbound-seen").join(adapter_id)
+    }
 }
 
 async fn remove_file_if_exists(path: PathBuf) -> Result<()> {
@@ -266,6 +379,15 @@ async fn remove_dir_if_exists(path: PathBuf) -> Result<()> {
             Err(error).with_context(|| format!("failed to delete directory {}", path.display()))
         }
     }
+}
+
+fn stable_message_key(target: &str, message_id: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in target.bytes().chain([0]).chain(message_id.bytes()) {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 #[cfg(test)]
@@ -352,7 +474,7 @@ mod tests {
 
         assert_eq!(message.target.as_deref(), Some("123@s.whatsapp.net"));
         assert_eq!(message.attachments.len(), 1);
-        let messages = store.take_outbound_messages("adapter").await.unwrap();
+        let messages = store.claim_outbound_messages("adapter").await.unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].target.as_deref(), Some("123@s.whatsapp.net"));
         assert_eq!(
@@ -361,10 +483,68 @@ mod tests {
         );
         assert!(
             store
-                .take_outbound_messages("adapter")
+                .claim_outbound_messages("adapter")
                 .await
                 .unwrap()
                 .is_empty()
+        );
+        store
+            .acknowledge_outbound_message("adapter", &message.id)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .claim_outbound_messages("adapter")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn requeues_claimed_outbound_messages() {
+        let tempdir = TempDir::new().unwrap();
+        let store = AdapterStore::new(tempdir.path());
+        let message = store
+            .enqueue_outbound_message("adapter".to_string(), "hello".to_string(), None, Vec::new())
+            .await
+            .unwrap();
+
+        let claimed = store.claim_outbound_messages("adapter").await.unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert!(
+            store
+                .claim_outbound_messages("adapter")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        store
+            .requeue_outbound_message("adapter", &message.id)
+            .await
+            .unwrap();
+        let claimed_again = store.claim_outbound_messages("adapter").await.unwrap();
+        assert_eq!(claimed_again.len(), 1);
+        assert_eq!(claimed_again[0].id, message.id);
+    }
+
+    #[tokio::test]
+    async fn records_inbound_message_ids_once() {
+        let tempdir = TempDir::new().unwrap();
+        let store = AdapterStore::new(tempdir.path());
+
+        assert!(
+            store
+                .record_inbound_message_once("adapter", "target", "message")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .record_inbound_message_once("adapter", "target", "message")
+                .await
+                .unwrap()
         );
     }
 }

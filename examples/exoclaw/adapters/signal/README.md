@@ -30,7 +30,6 @@ The setup prompt at `setup-prompt.md` asks Exoclaw to create a library adapter s
     "type": "signal",
     "account": null,
     "deviceName": "Exoclaw",
-    "signalCliCommand": null,
     "configDir": null,
     "trigger": "all_messages",
     "allowedContacts": null
@@ -42,7 +41,6 @@ The setup prompt at `setup-prompt.md` asks Exoclaw to create a library adapter s
 
 - `account` is the local Signal account identifier for `signal-cli -a`. Use `null` for first-time setup or automatic account discovery.
 - `deviceName` is shown in Signal's linked-device list during pairing.
-- `signalCliCommand` is the command array used to run `signal-cli`. Use `null` to use `signal-cli` from `PATH`, or set an absolute path for a local JVM script.
 - `configDir` controls where `signal-cli` stores linked-device state. If omitted, the worker uses `.exo/adapters/signal/<adapter-id>/signal-cli` or the host-provided adapter state directory.
 - `trigger` is `all_messages` or `contacts_only`.
 - `allowedContacts` can restrict wakeups to specific sender identifiers.
@@ -57,17 +55,7 @@ brew install openjdk
 
 The native/Homebrew `signal-cli` binary may receive messages but fail outbound sends with `NETWORK_FAILURE` and an error mentioning `IdentityKeyDeserializer has no default (no arg) constructor`. Use the JVM `signal-cli` distribution for Exoclaw instead.
 
-One tested local setup uses a wrapper or symlink at:
-
-```text
-/Users/martin/.local/bin/signal-cli-jvm
-```
-
-With that setup, set `signalCliCommand` to:
-
-```json
-["/Users/martin/.local/bin/signal-cli-jvm"]
-```
+One tested local setup uses a wrapper or symlink named `signal-cli` on `PATH`, backed by the JVM distribution.
 
 Java must be visible on `PATH` for the JVM script. On Homebrew macOS, prefix Exoclaw commands with:
 
@@ -98,7 +86,6 @@ For sandbox-generated files, prefer `sandboxPath`; the host tool stages the file
 ```json
 {
   "kind": "image",
-  "path": null,
   "url": null,
   "data": null,
   "sandboxPath": "/tmp/exoclaw_media/image.png",
@@ -107,7 +94,7 @@ For sandbox-generated files, prefer `sandboxPath`; the host tool stages the file
 }
 ```
 
-Signal attachments can also use HTTPS `url`, host-visible `path`, or small inline `data` payloads. The host tool downloads HTTPS URLs into `.exo/adapters/media` before passing them to `signal-cli`.
+Signal attachments can also use HTTPS `url` or small inline `data` payloads. The host tool validates and stages all attachment sources into `.exo/adapters/media` before passing them to `signal-cli`.
 
 ## Quirks And Gotchas
 

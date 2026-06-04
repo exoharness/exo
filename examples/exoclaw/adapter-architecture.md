@@ -87,10 +87,9 @@ Exoclaw exposes these adapter tools:
 - `delete_adapter`: remove adapter state and event history.
 - `send_adapter_message`: request an explicit outbound send.
 
-All adapter tools are conversation-scoped. The TypeScript tool definitions add
-the current `agentId` and `conversationId` before dispatching to Rust, and the
-Rust tool handlers verify that the requested adapter belongs to that
-conversation.
+All adapter tools are conversation-scoped. Rust derives the current `agentId`
+and `conversationId` from the active handles, then verifies that the requested
+adapter belongs to that conversation.
 
 ## IRC Adapter Example
 
@@ -246,14 +245,14 @@ JSON-RPC. WhatsApp and Signal messages require an outbox `target`; IRC messages
 do not because the destination channel is fixed in adapter config.
 
 WhatsApp and Signal also support outbound rich attachments on `send_adapter_message`.
-Attachments specify exactly one host-visible local `path`, HTTPS `url`, base64
-`data` payload, or `sandboxPath` and a `kind` of `image`, `video`, `audio`, or
-`document`. Use `sandboxPath` for files created inside the agent sandbox; the
-host tool copies the file into `.exo/adapters/media` before queueing the
-outbound send. Signal URL attachments are also staged because `signal-cli`
-requires a local file path or data URI. Image, video, and document WhatsApp
-attachments use the message text as the first caption-capable media caption.
-Documents also require `mimeType` and `fileName`.
+Attachments specify exactly one HTTPS `url`, base64 `data` payload, or
+`sandboxPath` and a `kind` of `image`, `video`, `audio`, or `document`. Use
+`sandboxPath` for files created inside the agent sandbox; the host tool copies
+the file into `.exo/adapters/media` before queueing the outbound send. URL and
+inline-data attachments are also size-checked and staged by the host before
+they reach adapter workers. Image, video, and document WhatsApp attachments use
+the message text as the first caption-capable media caption. Documents also
+require `mimeType` and `fileName`.
 
 The outbox also decouples conversation turns from socket ownership. The model
 turn can finish after queueing a message; the adapter runtime owns the external

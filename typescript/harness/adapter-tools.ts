@@ -1,4 +1,4 @@
-import type { JsonObject, ToolDefinition, TurnContext } from "./index";
+import type { JsonObject, ToolDefinition } from "./index";
 import type { HarnessToolRegistry, ToolInstance } from "./tools";
 
 export type AdapterToolName =
@@ -66,10 +66,7 @@ function createAdapterTool(): ToolInstance {
       execute(toolArgs, execution) {
         return execution.context.executeTool({
           functionName: "create_adapter",
-          arguments: withConversationScope(
-            execution.context,
-            transformCreateAdapterArguments(toolArgs),
-          ),
+          arguments: transformCreateAdapterArguments(toolArgs),
         });
       },
     },
@@ -154,20 +151,15 @@ function sendAdapterMessageTool(): ToolInstance {
                     description:
                       "Attachment kind. Rich attachments are currently supported by the WhatsApp, Signal, and Discord adapters.",
                   },
-                  path: {
-                    type: ["string", "null"],
-                    description:
-                      "Local host path visible to the adapter worker. Do not use sandbox paths here. Specify exactly one of path, url, data, or sandboxPath.",
-                  },
                   url: {
                     type: ["string", "null"],
                     description:
-                      "HTTPS URL for the media file. Specify exactly one of path, url, data, or sandboxPath.",
+                      "HTTPS URL for the media file. Specify exactly one of url, data, or sandboxPath.",
                   },
                   data: {
                     type: ["string", "null"],
                     description:
-                      "Base64 media bytes, or a data: URL. Prefer sandboxPath for files created inside the sandbox; large inline data may be truncated.",
+                      "Base64 media bytes, or a data: URL. Prefer sandboxPath for files created inside the sandbox.",
                   },
                   sandboxPath: {
                     type: ["string", "null"],
@@ -187,7 +179,6 @@ function sendAdapterMessageTool(): ToolInstance {
                 },
                 required: [
                   "kind",
-                  "path",
                   "url",
                   "data",
                   "sandboxPath",
@@ -224,7 +215,7 @@ function hostTool(args: {
       execute(toolArgs, execution) {
         return execution.context.executeTool({
           functionName: args.functionName ?? args.name,
-          arguments: withConversationScope(execution.context, toolArgs),
+          arguments: toolArgs,
         });
       },
     },
@@ -282,14 +273,6 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
             description:
               "Optional linked-device name when account is null. Use null for Exoclaw.",
           },
-          signalCliCommand: {
-            anyOf: [
-              { type: "array", items: { type: "string" } },
-              { type: "null" },
-            ],
-            description:
-              "Optional command argv for signal-cli. Use null for ['signal-cli'].",
-          },
           configDir: {
             type: ["string", "null"],
             description:
@@ -314,7 +297,6 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
           "type",
           "account",
           "deviceName",
-          "signalCliCommand",
           "configDir",
           "trigger",
           "allowedContacts",
@@ -344,22 +326,8 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
             description:
               "Optional list of WhatsApp chat ids to wake on. Use null to allow all chats permitted by trigger.",
           },
-          workerCommand: {
-            anyOf: [
-              { type: "array", items: { type: "string" } },
-              { type: "null" },
-            ],
-            description:
-              "Optional command argv for the worker. Use null for the bundled Baileys worker.",
-          },
         },
-        required: [
-          "type",
-          "authDir",
-          "trigger",
-          "allowedChats",
-          "workerCommand",
-        ],
+        required: ["type", "authDir", "trigger", "allowedChats"],
       },
       {
         type: "object",
@@ -415,10 +383,7 @@ function transformCreateAdapterArguments(args: JsonObject): JsonObject {
     stringField(args, "source"),
     stringField(config, "type"),
   );
-  return {
-    ...args,
-    config: transformAdapterConfig(config),
-  };
+  return args;
 }
 
 function validateAdapterSource(source: string, type: string): void {
@@ -431,94 +396,6 @@ function validateAdapterSource(source: string, type: string): void {
   ) {
     throw new Error(`${type} adapters must use source 'library'`);
   }
-}
-
-function transformAdapterConfig(config: JsonObject): JsonObject {
-  const type = stringField(config, "type");
-  if (type === "irc") {
-    const passwordSecretId = nullableStringField(config, "passwordSecretId");
-    return {
-      adapterType: "irc",
-      workerCommand: ["pnpm", "tsx", "examples/exoclaw/adapters/irc/worker.ts"],
-      initialization: {
-        server: stringField(config, "server"),
-        port: numberField(config, "port"),
-        tls: booleanField(config, "tls"),
-        nick: stringField(config, "nick"),
-        username: stringField(config, "username"),
-        realname: stringField(config, "realname"),
-        channel: stringField(config, "channel"),
-        trigger: stringField(config, "trigger"),
-      },
-      stateDir: null,
-      secretEnv:
-        passwordSecretId === null
-          ? []
-          : [{ env: "EXO_IRC_PASSWORD", secretId: passwordSecretId }],
-    };
-  }
-  if (type === "whatsapp") {
-    return {
-      adapterType: "whatsapp",
-      workerCommand: [
-        "pnpm",
-        "tsx",
-        "examples/exoclaw/adapters/whatsapp/worker.ts",
-      ],
-      initialization: {
-        authDir: nullableStringField(config, "authDir"),
-        trigger: stringField(config, "trigger"),
-        allowedChats: nullableStringArrayField(config, "allowedChats"),
-      },
-      stateDir: null,
-      secretEnv: [],
-    };
-  }
-  if (type === "signal") {
-    return {
-      adapterType: "signal",
-      workerCommand: [
-        "pnpm",
-        "tsx",
-        "examples/exoclaw/adapters/signal/worker.ts",
-      ],
-      initialization: {
-        account: nullableStringField(config, "account"),
-        deviceName: nullableStringField(config, "deviceName"),
-        signalCliCommand: nullableStringArrayField(config, "signalCliCommand"),
-        configDir: nullableStringField(config, "configDir"),
-        trigger: stringField(config, "trigger"),
-        allowedContacts: nullableStringArrayField(config, "allowedContacts"),
-      },
-      stateDir: null,
-      secretEnv: [],
-    };
-  }
-  if (type === "discord") {
-    return {
-      adapterType: "discord",
-      workerCommand: [
-        "pnpm",
-        "tsx",
-        "examples/exoclaw/adapters/discord/worker.ts",
-      ],
-      initialization: {
-        tokenEnv: "EXO_DISCORD_BOT_TOKEN",
-        defaultChannelId: nullableStringField(config, "defaultChannelId"),
-        trigger: stringField(config, "trigger"),
-        allowedChannels: nullableStringArrayField(config, "allowedChannels"),
-        allowBots: config.allowBots === true,
-      },
-      stateDir: null,
-      secretEnv: [
-        {
-          env: "EXO_DISCORD_BOT_TOKEN",
-          secretId: stringField(config, "botTokenSecretId"),
-        },
-      ],
-    };
-  }
-  return config;
 }
 
 function adapterIdParameters(
@@ -537,18 +414,6 @@ function adapterIdParameters(
   };
 }
 
-function withConversationScope(
-  context: TurnContext,
-  args: JsonObject,
-): JsonObject {
-  const { agent, conversation } = context.exoharness.current;
-  return {
-    ...args,
-    agentId: agent.record.id,
-    conversationId: conversation.record.id,
-  };
-}
-
 function stringField(args: JsonObject, name: string): string {
   const value = args[name];
   if (typeof value !== "string" || value.length === 0) {
@@ -557,58 +422,10 @@ function stringField(args: JsonObject, name: string): string {
   return value;
 }
 
-function nullableStringField(args: JsonObject, name: string): string | null {
-  const value = args[name];
-  if (value === null || value === undefined) {
-    return null;
-  }
-  if (typeof value !== "string" || value.length === 0) {
-    throw new Error(
-      `adapter argument ${name} must be null or a non-empty string`,
-    );
-  }
-  return value;
-}
-
-function numberField(args: JsonObject, name: string): number {
-  const value = args[name];
-  if (typeof value !== "number") {
-    throw new Error(`adapter argument ${name} must be a number`);
-  }
-  return value;
-}
-
-function booleanField(args: JsonObject, name: string): boolean {
-  const value = args[name];
-  if (typeof value !== "boolean") {
-    throw new Error(`adapter argument ${name} must be a boolean`);
-  }
-  return value;
-}
-
 function objectField(args: JsonObject, name: string): JsonObject {
   const value = args[name];
   if (!isRecord(value)) {
     throw new Error(`adapter argument ${name} must be an object`);
-  }
-  return value;
-}
-
-function nullableStringArrayField(
-  args: JsonObject,
-  name: string,
-): string[] | null {
-  const value = args[name];
-  if (value === null || value === undefined) {
-    return null;
-  }
-  if (
-    !Array.isArray(value) ||
-    !value.every((item) => typeof item === "string")
-  ) {
-    throw new Error(
-      `adapter argument ${name} must be null or an array of strings`,
-    );
   }
   return value;
 }

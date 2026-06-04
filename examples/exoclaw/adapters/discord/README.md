@@ -98,7 +98,7 @@ For `all_messages`, every message in allowed channels can wake the Exoclaw conve
 - `trigger` is either `mentions_only` or `all_messages`. Direct messages always trigger.
 - `allowedChannels` optionally restricts inbound wakeups to specific Discord channel ids.
 
-Outbound messages support text plus the shared adapter attachment forms: staged `path`, HTTPS `url`, or base64/data URL `data`.
+Outbound messages support text plus the shared adapter attachment forms: `sandboxPath`, HTTPS `url`, or base64/data URL `data`.
 
 ## Rich Attachments
 
@@ -112,7 +112,6 @@ Discord supports outbound image, video, audio, and document attachments through 
   "attachments": [
     {
       "kind": "document",
-      "path": null,
       "url": null,
       "data": null,
       "sandboxPath": "/tmp/report.txt",
@@ -123,4 +122,4 @@ Discord supports outbound image, video, audio, and document attachments through 
 }
 ```
 
-For files already visible on the host, use `path`. For remote media, use an HTTPS `url`. For small inline payloads, use base64 `data` or a data URL.
+For files created in the sandbox, use `sandboxPath`. For remote media, use an HTTPS `url`. For small inline payloads, use base64 `data` or a data URL.

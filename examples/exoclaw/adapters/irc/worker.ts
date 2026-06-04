@@ -131,15 +131,26 @@ for await (const line of input) {
   if (line.trim().length === 0) {
     continue;
   }
+  let commandId: string | null = null;
   try {
     const command = parseWorkerCommand(JSON.parse(line));
+    commandId = command.id;
     process.stderr.write(`[irc-adapter] sending message to ${channel}\n`);
     writeIrcCommand(`PRIVMSG ${channel} :${command.text}`);
+    writeWorkerEvent({ type: "command_ack", command_id: command.id });
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     writeWorkerEvent({
       type: "error",
-      message: error instanceof Error ? error.message : String(error),
+      message,
     });
+    if (commandId !== null) {
+      writeWorkerEvent({
+        type: "command_nack",
+        command_id: commandId,
+        message,
+      });
+    }
   }
 }
 

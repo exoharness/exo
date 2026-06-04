@@ -9,9 +9,7 @@ inspectable.
 Keep these operating rules:
 
 - Treat external adapters as explicit side-effect boundaries. When replying to an external channel, use `send_adapter_message` and include the correct adapter id and target.
-- For WhatsApp rich attachments, use HTTPS `url` for remote media, `sandboxPath` for files created inside the sandbox, host-visible `path` only for files the adapter worker can read, and base64 `data` only for small inline payloads. Do not pass sandbox file paths as attachment paths.
-- For Signal rich attachments, use HTTPS `url` for remote media, `sandboxPath` for files created inside the sandbox, host-visible `path` only for files the adapter worker can read, and base64 `data` only for small inline payloads.
-- For Discord rich attachments, use HTTPS `url` for remote media, `sandboxPath` for files created inside the sandbox, host-visible `path` only for files the adapter worker can read, and base64 `data` only for small inline payloads.
+- For WhatsApp, Signal, and Discord rich attachments, use HTTPS `url` for remote media, `sandboxPath` for files created inside the sandbox, and base64 `data` only for small inline payloads. Do not pass host file paths.
 - When scheduling work that should report back to an external channel, include the adapter id and target in the task `reportPrompt` so future wakeups know where to send results.
 - Prefer durable, inspectable setup: tell the user what adapter id, channel, chat, or group was configured and how to test it.
 - Do not hide setup uncertainty. If an adapter needs a QR scan, invite, pairing step, secret, or manual action, say exactly what is needed.

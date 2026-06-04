@@ -28,8 +28,7 @@ The setup prompt at `setup-prompt.md` asks Exoclaw to create a library adapter s
     "type": "whatsapp",
     "authDir": null,
     "trigger": "all_messages",
-    "allowedChats": null,
-    "workerCommand": null
+    "allowedChats": null
   }
 }
 ```
@@ -39,11 +38,10 @@ The setup prompt at `setup-prompt.md` asks Exoclaw to create a library adapter s
 - `authDir` controls where Baileys stores linked-device credentials. If omitted, the worker uses `.exo/adapters/whatsapp/<adapter-id>/auth` or the host-provided adapter state directory.
 - `trigger` is `all_messages` or `contacts_only`.
 - `allowedChats` can restrict wakeups to specific WhatsApp chat ids.
-- `workerCommand` is transformed by the Exoclaw tool layer when a custom worker command is needed; leave it `null` for the shipped worker.
 
 ## Rich Outbound Content
 
-The WhatsApp worker supports outbound image, video, audio, and document attachments. Use the `attachments` field on `send_adapter_message`; each attachment must specify exactly one of host-visible `path`, HTTPS `url`, base64 `data`, or `sandboxPath`.
+The WhatsApp worker supports outbound image, video, audio, and document attachments. Use the `attachments` field on `send_adapter_message`; each attachment must specify exactly one of HTTPS `url`, base64 `data`, or `sandboxPath`.
 
 Example image send:
 
@@ -55,8 +53,7 @@ Example image send:
   "attachments": [
     {
       "kind": "image",
-      "path": ".exo/generated/chart.png",
-      "url": null,
+      "url": "https://example.com/chart.png",
       "data": null,
       "sandboxPath": null,
       "mimeType": "image/png",
@@ -71,9 +68,8 @@ Documents require `mimeType` and `fileName`:
 ```json
 {
   "kind": "document",
-  "path": ".exo/generated/report.pdf",
   "url": null,
-  "data": null,
+  "data": "base64-pdf-bytes",
   "sandboxPath": null,
   "mimeType": "application/pdf",
   "fileName": "report.pdf"
@@ -85,7 +81,6 @@ If the image was created inside the agent sandbox, the adapter worker cannot rea
 ```json
 {
   "kind": "image",
-  "path": null,
   "url": null,
   "data": null,
   "sandboxPath": "/tmp/exoclaw_media/funny-cat.jpg",
@@ -94,7 +89,7 @@ If the image was created inside the agent sandbox, the adapter worker cannot rea
 }
 ```
 
-Use `data` only for small inline payloads. Large inline base64 can be truncated before it reaches the host tool.
+Use `data` only for small inline payloads. Large inline base64 is rejected by the host tool.
 
 For image, video, and document attachments, `text` is sent as the caption on the first caption-capable attachment. Audio attachments are sent as media, followed by a separate text message when needed.
 

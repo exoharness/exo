@@ -1,9 +1,7 @@
 import type {
   HarnessToolRegistry,
-  JsonObject,
   ToolDefinition,
   ToolInstance,
-  TurnContext,
 } from "@exo/harness";
 
 export type SchedulerToolName =
@@ -112,7 +110,7 @@ function createScheduleSandboxTaskTool(): ToolInstance {
       execute(args, execution) {
         return execution.context.executeTool({
           functionName: "schedule_sandbox_task",
-          arguments: withConversationScope(execution.context, args),
+          arguments: args,
         });
       },
     },
@@ -143,7 +141,7 @@ function createListScheduledTasksTool(): ToolInstance {
       execute(args, execution) {
         return execution.context.executeTool({
           functionName: "list_scheduled_tasks",
-          arguments: withConversationScope(execution.context, args),
+          arguments: args,
         });
       },
     },
@@ -165,7 +163,7 @@ function createDeleteScheduledTaskTool(): ToolInstance {
       execute(args, execution) {
         return execution.context.executeTool({
           functionName: "delete_scheduled_task",
-          arguments: withConversationScope(execution.context, args),
+          arguments: args,
         });
       },
     },
@@ -186,7 +184,7 @@ function createCancelScheduledTaskTool(): ToolInstance {
       execute(args, execution) {
         return execution.context.executeTool({
           functionName: "cancel_scheduled_task",
-          arguments: withConversationScope(execution.context, args),
+          arguments: args,
         });
       },
     },
@@ -204,17 +202,5 @@ function taskIdParameters(description: string): ToolDefinition["parameters"] {
       },
     },
     required: ["taskId"],
-  };
-}
-
-function withConversationScope(
-  context: TurnContext,
-  args: JsonObject,
-): JsonObject {
-  const { agent, conversation } = context.exoharness.current;
-  return {
-    ...args,
-    agentId: agent.record.id,
-    conversationId: conversation.record.id,
   };
 }

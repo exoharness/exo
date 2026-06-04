@@ -50,18 +50,34 @@ pub async fn run_adapters_watch(
                     if let Err(error) =
                         run_adapter_loop(Arc::clone(&harness), &store, adapter.clone()).await
                     {
-                        eprintln!(
-                            "adapter {} runtime error: {error}; restarting in 5s",
-                            adapter.id
+                        tracing::error!(
+                            adapter_id = %adapter.id,
+                            %error,
+                            "adapter runtime error; restarting in 5s"
                         );
-                        let _ = store.mark_error(&adapter.id, error.to_string()).await;
-                        let _ = store
+                        if let Err(mark_error) =
+                            store.mark_error(&adapter.id, error.to_string()).await
+                        {
+                            tracing::error!(
+                                adapter_id = %adapter.id,
+                                error = %mark_error,
+                                "failed to mark adapter error"
+                            );
+                        }
+                        if let Err(record_error) = store
                             .record_event(
                                 adapter.id.clone(),
                                 AdapterEventType::Error,
                                 error.to_string(),
                             )
-                            .await;
+                            .await
+                        {
+                            tracing::error!(
+                                adapter_id = %adapter.id,
+                                error = %record_error,
+                                "failed to record adapter error"
+                            );
+                        }
                     }
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
@@ -128,6 +144,7 @@ async fn run_adapter_loop(
 ) -> Result<()> {
     let agent = require_agent(harness.as_ref(), &adapter).await?;
     let conversation = require_conversation(agent.as_ref(), &adapter).await?;
+    store.requeue_inflight_messages(&adapter.id).await?;
     let config = &adapter.config;
     let secret_env = worker_secret_env(agent.exoharness_handle().as_ref(), config).await?;
     run_worker_loop(
@@ -148,15 +165,26 @@ async fn run_adapter_loop(
             let adapter_id = adapter.id.clone();
             async move {
                 Ok(store
-                    .take_outbound_messages(&adapter_id)
+                    .claim_outbound_messages(&adapter_id)
                     .await?
                     .into_iter()
                     .map(|message| WorkerCommand::SendMessage {
+                        id: message.id,
                         target: message.target,
                         text: message.text,
                         attachments: message.attachments,
                     })
                     .collect())
+            }
+        },
+        || {
+            let store = store.clone();
+            let adapter_id = adapter.id.clone();
+            async move {
+                Ok(store
+                    .get_adapter(&adapter_id)
+                    .await?
+                    .is_none_or(|adapter| !adapter.enabled))
             }
         },
     )
@@ -213,6 +241,23 @@ async fn handle_worker_event(
                 .await?;
             Ok(())
         }
+        WorkerEvent::CommandAck { command_id } => {
+            store
+                .acknowledge_outbound_message(&adapter.id, &command_id)
+                .await
+        }
+        WorkerEvent::CommandNack {
+            command_id,
+            message,
+        } => {
+            store.mark_error(&adapter.id, message.clone()).await?;
+            store
+                .record_event(adapter.id.clone(), AdapterEventType::Error, message)
+                .await?;
+            store
+                .acknowledge_outbound_message(&adapter.id, &command_id)
+                .await
+        }
         WorkerEvent::Disconnected { reason } => {
             record_worker_lifecycle(
                 store,
@@ -235,9 +280,16 @@ async fn handle_worker_message(
     target: String,
     sender: Option<String>,
     text: String,
-    _message_id: Option<String>,
+    message_id: Option<String>,
     _metadata: serde_json::Value,
 ) -> Result<()> {
+    if let Some(message_id) = &message_id
+        && !store
+            .record_inbound_message_once(&adapter.id, &target, message_id)
+            .await?
+    {
+        return Ok(());
+    }
     // Note: we intentionally do not write a conversation artifact here.
     // The wakeup turn below begins immediately, and any artifact writes
     // through the conversation handle (rather than the active turn) advance

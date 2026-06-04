@@ -106,26 +106,48 @@ impl ToolRuntime for ExoclawToolRuntime {
                 execute_exoclaw_shell_tool(agent, conversation, agent_config, config, request).await
             }
             "schedule_sandbox_task" => {
-                execute_schedule_task_tool(&self.scheduler_store, request).await
+                execute_schedule_task_tool(agent, conversation, &self.scheduler_store, request)
+                    .await
             }
             "list_scheduled_tasks" => {
-                execute_list_scheduled_tasks_tool(&self.scheduler_store, request).await
+                execute_list_scheduled_tasks_tool(
+                    agent,
+                    conversation,
+                    &self.scheduler_store,
+                    request,
+                )
+                .await
             }
             "cancel_scheduled_task" => {
-                execute_cancel_scheduled_task_tool(conversation, &self.scheduler_store, request)
-                    .await
+                execute_cancel_scheduled_task_tool(
+                    agent,
+                    conversation,
+                    &self.scheduler_store,
+                    request,
+                )
+                .await
             }
             "delete_scheduled_task" => {
-                execute_delete_scheduled_task_tool(conversation, &self.scheduler_store, request)
+                execute_delete_scheduled_task_tool(
+                    agent,
+                    conversation,
+                    &self.scheduler_store,
+                    request,
+                )
+                .await
+            }
+            "create_adapter" => {
+                execute_create_adapter_tool(agent, conversation, &self.adapter_store, request).await
+            }
+            "list_adapters" => {
+                execute_list_adapters_tool(agent, conversation, &self.adapter_store, request).await
+            }
+            "disable_adapter" => {
+                execute_disable_adapter_tool(conversation, agent, &self.adapter_store, request)
                     .await
             }
-            "create_adapter" => execute_create_adapter_tool(&self.adapter_store, request).await,
-            "list_adapters" => execute_list_adapters_tool(&self.adapter_store, request).await,
-            "disable_adapter" => {
-                execute_disable_adapter_tool(conversation, &self.adapter_store, request).await
-            }
             "delete_adapter" => {
-                execute_delete_adapter_tool(conversation, &self.adapter_store, request).await
+                execute_delete_adapter_tool(conversation, agent, &self.adapter_store, request).await
             }
             "send_adapter_message" => {
                 execute_send_adapter_message_tool(
@@ -160,8 +182,6 @@ struct ShellToolResult {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ScheduleTaskArguments {
-    agent_id: String,
-    conversation_id: String,
     name: String,
     schedule: String,
     sandbox_mode: Option<ScheduledTaskSandboxMode>,
@@ -174,20 +194,18 @@ struct ScheduleTaskArguments {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ConversationScopedArguments {
-    agent_id: String,
-    conversation_id: String,
     include_disabled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ScheduledTaskIdArguments {
-    agent_id: String,
-    conversation_id: String,
     task_id: String,
 }
 
 async fn execute_schedule_task_tool(
+    agent: &dyn AgentHandle,
+    conversation: &dyn ConversationHandle,
     store: &SchedulerStore,
     request: &ToolRequest,
 ) -> Result<ToolResult> {
@@ -195,8 +213,8 @@ async fn execute_schedule_task_tool(
         serde_json::from_value::<ScheduleTaskArguments>(Value::Object(request.arguments.clone()))?;
     let task = store
         .create_task(NewScheduledTask {
-            agent_id: args.agent_id,
-            conversation_id: args.conversation_id,
+            agent_id: agent.record().id.to_string(),
+            conversation_id: conversation.record().id.to_string(),
             name: args.name,
             schedule: args.schedule,
             sandbox_mode: args.sandbox_mode,
@@ -216,6 +234,8 @@ async fn execute_schedule_task_tool(
 }
 
 async fn execute_list_scheduled_tasks_tool(
+    agent: &dyn AgentHandle,
+    conversation: &dyn ConversationHandle,
     store: &SchedulerStore,
     request: &ToolRequest,
 ) -> Result<ToolResult> {
@@ -224,8 +244,8 @@ async fn execute_list_scheduled_tasks_tool(
     ))?;
     let tasks = store
         .list_tasks_for_conversation(
-            &args.agent_id,
-            &args.conversation_id,
+            &agent.record().id.to_string(),
+            &conversation.record().id.to_string(),
             args.include_disabled.unwrap_or(false),
         )
         .await?;
@@ -236,6 +256,7 @@ async fn execute_list_scheduled_tasks_tool(
 }
 
 async fn execute_cancel_scheduled_task_tool(
+    agent: &dyn AgentHandle,
     conversation: &dyn ConversationHandle,
     store: &SchedulerStore,
     request: &ToolRequest,
@@ -249,7 +270,9 @@ async fn execute_cancel_scheduled_task_tool(
             "error": "scheduled task not found for this conversation",
         }));
     };
-    if task.agent_id != args.agent_id || task.conversation_id != args.conversation_id {
+    if task.agent_id != agent.record().id.to_string()
+        || task.conversation_id != conversation.record().id.to_string()
+    {
         return Ok(serde_json::json!({
             "ok": false,
             "error": "scheduled task not found for this conversation",
@@ -268,6 +291,7 @@ async fn execute_cancel_scheduled_task_tool(
 }
 
 async fn execute_delete_scheduled_task_tool(
+    agent: &dyn AgentHandle,
     conversation: &dyn ConversationHandle,
     store: &SchedulerStore,
     request: &ToolRequest,
@@ -281,7 +305,9 @@ async fn execute_delete_scheduled_task_tool(
             "error": "scheduled task not found for this conversation",
         }));
     };
-    if task.agent_id != args.agent_id || task.conversation_id != args.conversation_id {
+    if task.agent_id != agent.record().id.to_string()
+        || task.conversation_id != conversation.record().id.to_string()
+    {
         return Ok(serde_json::json!({
             "ok": false,
             "error": "scheduled task not found for this conversation",
@@ -501,5 +527,89 @@ async fn latest_shell_sandbox(
             EventKind::SANDBOX_CREATED.as_str(),
             other.kind().as_str(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use exoharness::{BasicExoHarness, ExoHarness, NewAgentRequest, NewConversationRequest};
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::test_support::local_test_config;
+
+    #[tokio::test]
+    async fn schedule_task_tool_uses_current_conversation_scope() {
+        let tempdir = TempDir::new().unwrap();
+        let exoharness = BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
+            .await
+            .unwrap();
+        let agent = exoharness
+            .new_agent(NewAgentRequest {
+                slug: "agent".to_string(),
+                name: "Agent".to_string(),
+            })
+            .await
+            .unwrap();
+        let conversation = agent
+            .new_conversation(NewConversationRequest {
+                slug: Some("conversation".to_string()),
+                name: Some("Conversation".to_string()),
+            })
+            .await
+            .unwrap();
+        let store = SchedulerStore::new(tempdir.path().join("scheduled-tasks"));
+
+        let schedule_result = execute_schedule_task_tool(
+            agent.as_ref(),
+            conversation.as_ref(),
+            &store,
+            &tool_request(
+                "schedule_sandbox_task",
+                serde_json::json!({
+                    "agentId": "spoofed-agent",
+                    "conversationId": "spoofed-conversation",
+                    "name": "check",
+                    "schedule": "@every 1m",
+                    "sandboxMode": null,
+                    "setupCommand": null,
+                    "command": ["true"],
+                    "reportPrompt": "Report.",
+                    "maxOutputBytes": 1024
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(schedule_result["ok"], true);
+
+        let task_id = schedule_result["taskId"].as_str().unwrap();
+        let task = store.get_task(task_id).await.unwrap().unwrap();
+        assert_eq!(task.agent_id, agent.record().id.to_string());
+        assert_eq!(task.conversation_id, conversation.record().id.to_string());
+
+        let list_result = execute_list_scheduled_tasks_tool(
+            agent.as_ref(),
+            conversation.as_ref(),
+            &store,
+            &tool_request(
+                "list_scheduled_tasks",
+                serde_json::json!({
+                    "agentId": "spoofed-agent",
+                    "conversationId": "spoofed-conversation",
+                    "includeDisabled": false
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(list_result["tasks"].as_array().unwrap().len(), 1);
+    }
+
+    fn tool_request(function_name: &str, arguments: serde_json::Value) -> ToolRequest {
+        ToolRequest {
+            function_name: function_name.to_string(),
+            arguments: arguments.as_object().unwrap().clone(),
+        }
     }
 }
