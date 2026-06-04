@@ -15,7 +15,7 @@ use tokio::fs;
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use tokio::time::{sleep, timeout};
 
-use crate::test_support::local_test_config;
+use crate::test_support::{local_test_config, local_test_config_with_daytona};
 use crate::{
     Artifact, ArtifactVersion, BasicExoHarness, BeginTurnRequest, Binding, BoxAsyncRead,
     BoxAsyncWrite, CloseSandboxProcessInputRequest, CreateSandboxRequest, EventData, EventKind,
@@ -876,8 +876,41 @@ async fn basic_backend_rejects_daytona_provider() {
     assert!(
         error
             .to_string()
-            .contains("daytona sandbox provider is not supported")
+            .contains("is not supported by this harness")
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn advertised_daytona_without_secret_errors_at_first_use() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new(local_test_config_with_daytona(tempdir.path()))
+        .await
+        .expect("harness should initialize without any daytona secret set");
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let conversation = agent
+        .new_conversation(NewConversationRequest::default())
+        .await
+        .expect("conversation");
+
+    let error = conversation
+        .create_sandbox(CreateSandboxRequest {
+            provider: SandboxProvider::Daytona,
+            image: "test-sandbox".to_string(),
+            default_workdir: Some("/".to_string()),
+            file_system_mounts: None,
+            enable_networking: Some(true),
+            idle_seconds: Some(60),
+        })
+        .await
+        .expect_err("daytona requires DAYTONA_API_KEY to be set");
+
+    assert!(error.to_string().contains("DAYTONA_API_KEY"));
 }
 
 struct TestSandboxBackend {

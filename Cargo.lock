@@ -2142,6 +2142,7 @@ name = "exo"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "clap",
  "executor",
  "exoharness",

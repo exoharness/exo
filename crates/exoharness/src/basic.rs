@@ -55,11 +55,51 @@ pub enum SecretBackendChoice {
     Static([u8; 32]),
 }
 
-#[derive(Debug, Clone, Copy)]
+/// How to build the backend for a [`SandboxProvider`]. Remote backends carry
+/// secret-name references, resolved from the store on first use.
+#[derive(Debug, Clone)]
 pub enum SandboxBackendChoice {
     AppleContainer,
     Docker,
     LocalProcess,
+    Daytona(DaytonaBackendSpec),
+}
+
+impl SandboxBackendChoice {
+    pub fn provider(&self) -> SandboxProvider {
+        match self {
+            Self::AppleContainer => SandboxProvider::AppleContainer,
+            Self::Docker => SandboxProvider::Docker,
+            Self::LocalProcess => SandboxProvider::LocalProcess,
+            Self::Daytona(_) => SandboxProvider::Daytona,
+        }
+    }
+}
+
+/// Daytona connection config plus the secret-store names for its credentials,
+/// resolved lazily so the harness can advertise Daytona before any are set.
+#[derive(Debug, Clone)]
+pub struct DaytonaBackendSpec {
+    pub api_url: String,
+    pub toolbox_url: String,
+    /// Secret holding the API key (required at first use).
+    pub api_key_secret: String,
+    pub organization_id_secret: Option<String>,
+    pub target_secret: Option<String>,
+}
+
+impl DaytonaBackendSpec {
+    /// Official endpoints; credentials read from the conventional `DAYTONA_*`
+    /// secret names.
+    pub fn with_conventional_secrets() -> Self {
+        Self {
+            api_url: crate::DEFAULT_DAYTONA_API_URL.to_string(),
+            toolbox_url: crate::DEFAULT_DAYTONA_TOOLBOX_URL.to_string(),
+            api_key_secret: "DAYTONA_API_KEY".to_string(),
+            organization_id_secret: Some("DAYTONA_ORGANIZATION_ID".to_string()),
+            target_secret: Some("DAYTONA_TARGET".to_string()),
+        }
+    }
 }
 
 // TODO: as more knobs land here, swap to a builder pattern.
@@ -67,7 +107,10 @@ pub enum SandboxBackendChoice {
 pub struct BasicExoHarnessConfig {
     pub root: PathBuf,
     pub secret_backend: SecretBackendChoice,
-    pub sandbox_backend: SandboxBackendChoice,
+    /// Default when a caller doesn't request a provider. Must be in `sandbox_backends`.
+    pub sandbox_default: SandboxProvider,
+    /// Supported providers; anything not listed is rejected.
+    pub sandbox_backends: Vec<SandboxBackendChoice>,
 }
 
 #[derive(Clone)]
@@ -79,61 +122,107 @@ struct BasicExoHarnessInner {
     storage: BasicObjectStore,
     write_lock: AsyncMutex<()>,
     subscribers: Mutex<HashMap<ConversationId, Vec<mpsc::UnboundedSender<Result<Event>>>>>,
-    sandbox_backend: Arc<dyn ManagedSandboxBackend>,
-    sandbox_backend_choice: SandboxBackendChoice,
+    sandbox_registry: HashMap<SandboxProvider, SandboxBackendChoice>,
+    /// Backends built (and secrets read) lazily on first use, cached by provider.
+    sandbox_backends: AsyncMutex<HashMap<SandboxProvider, Arc<dyn ManagedSandboxBackend>>>,
     running_sandboxes: AsyncMutex<HashMap<SandboxId, Arc<dyn ManagedSandboxHandle>>>,
     running_processes: AsyncMutex<HashMap<SandboxProcessId, Arc<RunningSandboxProcess>>>,
     secret_cipher: SecretCipher,
 }
 
 impl BasicExoHarnessInner {
-    fn sandbox_backend_for_provider(
+    async fn sandbox_backend_for_provider(
         &self,
         provider: SandboxProvider,
     ) -> Result<Arc<dyn ManagedSandboxBackend>> {
-        if matches!(
-            (self.sandbox_backend_choice, provider),
-            (
-                SandboxBackendChoice::AppleContainer,
-                SandboxProvider::AppleContainer
-            ) | (SandboxBackendChoice::Docker, SandboxProvider::Docker)
-                | (
-                    SandboxBackendChoice::LocalProcess,
-                    SandboxProvider::LocalProcess
-                )
-        ) {
-            return Ok(Arc::clone(&self.sandbox_backend));
+        if let Some(backend) = self.sandbox_backends.lock().await.get(&provider) {
+            return Ok(Arc::clone(backend));
         }
+        let choice = self.sandbox_registry.get(&provider).ok_or_else(|| {
+            anyhow!("sandbox provider {provider:?} is not supported by this harness")
+        })?;
+        // Build without the cache lock so a slow build (secret I/O) doesn't
+        // serialize other providers; a concurrent build loses to `or_insert`.
+        let backend = self.build_backend(choice).await?;
+        Ok(Arc::clone(
+            self.sandbox_backends
+                .lock()
+                .await
+                .entry(provider)
+                .or_insert(backend),
+        ))
+    }
 
-        Ok(match provider {
-            SandboxProvider::AppleContainer => {
+    async fn build_backend(
+        &self,
+        choice: &SandboxBackendChoice,
+    ) -> Result<Arc<dyn ManagedSandboxBackend>> {
+        let backend: Arc<dyn ManagedSandboxBackend> = match choice {
+            SandboxBackendChoice::AppleContainer => {
                 Arc::new(CliContainerSandboxBackend::apple_container())
             }
-            SandboxProvider::Docker => Arc::new(CliContainerSandboxBackend::docker()),
-            SandboxProvider::LocalProcess => Arc::new(LocalProcessSandboxBackend::new()),
-            SandboxProvider::Daytona => {
-                bail!("daytona sandbox provider is not supported by BasicExoHarness")
+            SandboxBackendChoice::Docker => Arc::new(CliContainerSandboxBackend::docker()),
+            SandboxBackendChoice::LocalProcess => Arc::new(LocalProcessSandboxBackend::new()),
+            SandboxBackendChoice::Daytona(spec) => {
+                let api_key = self
+                    .secret_key(&spec.api_key_secret)
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "daytona sandbox requested but secret {:?} is not set",
+                            spec.api_key_secret
+                        )
+                    })?;
+                let organization_id = match &spec.organization_id_secret {
+                    Some(name) => self.secret_key(name).await?,
+                    None => None,
+                };
+                let target = match &spec.target_secret {
+                    Some(name) => self.secret_key(name).await?,
+                    None => None,
+                };
+                Arc::new(crate::DaytonaSandboxBackend::new(crate::DaytonaConfig {
+                    api_key,
+                    api_url: spec.api_url.clone(),
+                    toolbox_url: spec.toolbox_url.clone(),
+                    target,
+                    organization_id,
+                })?)
             }
-        })
+        };
+        Ok(backend)
+    }
+
+    /// Decrypt the first stored secret matching `predicate`, if any.
+    async fn find_secret_by(
+        &self,
+        predicate: impl Fn(&StoredSecret) -> bool,
+    ) -> Result<Option<Secret>> {
+        let stored = self
+            .storage
+            .list_json_matching_suffix::<StoredSecret>(Path::new("secrets"), ".json")
+            .await?;
+        match stored.into_iter().find(|s| predicate(s)) {
+            Some(record) => Ok(Some(self.secret_cipher.decrypt_secret(&record.secret)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Decrypt the `Key`-typed secret stored under `name`, if it exists.
+    async fn secret_key(&self, name: &str) -> Result<Option<String>> {
+        match self.find_secret_by(|s| s.metadata.name == name).await? {
+            Some(Secret::Key { value }) => Ok(Some(value)),
+            Some(Secret::Oauth { .. }) => {
+                bail!("secret {name:?} is an OAuth secret; expected an API key")
+            }
+            None => Ok(None),
+        }
     }
 }
 
 impl BasicExoHarness {
     pub async fn new(config: BasicExoHarnessConfig) -> Result<Self> {
-        let BasicExoHarnessConfig {
-            root,
-            secret_backend,
-            sandbox_backend,
-        } = config;
-        let sandbox_backend_choice = sandbox_backend;
-        let sandbox_backend = build_sandbox_backend(sandbox_backend);
-        Self::new_with_backend(
-            root,
-            secret_backend,
-            sandbox_backend_choice,
-            sandbox_backend,
-        )
-        .await
+        Self::new_with_backend(config, None).await
     }
 
     #[cfg(test)]
@@ -141,21 +230,38 @@ impl BasicExoHarness {
         config: BasicExoHarnessConfig,
         sandbox_backend: Arc<dyn ManagedSandboxBackend>,
     ) -> Result<Self> {
-        Self::new_with_backend(
-            config.root,
-            config.secret_backend,
-            config.sandbox_backend,
-            sandbox_backend,
-        )
-        .await
+        Self::new_with_backend(config, Some(sandbox_backend)).await
     }
 
+    /// `seed` pre-populates the cache for the default provider, letting tests
+    /// inject a mock backend.
     async fn new_with_backend(
-        root: PathBuf,
-        secret_backend: SecretBackendChoice,
-        sandbox_backend_choice: SandboxBackendChoice,
-        sandbox_backend: Arc<dyn ManagedSandboxBackend>,
+        config: BasicExoHarnessConfig,
+        seed: Option<Arc<dyn ManagedSandboxBackend>>,
     ) -> Result<Self> {
+        let BasicExoHarnessConfig {
+            root,
+            secret_backend,
+            sandbox_default,
+            sandbox_backends,
+        } = config;
+
+        let mut registry = HashMap::new();
+        for choice in sandbox_backends {
+            let provider = choice.provider();
+            if registry.insert(provider, choice).is_some() {
+                bail!("duplicate sandbox provider {provider:?} in sandbox_backends");
+            }
+        }
+        if !registry.contains_key(&sandbox_default) {
+            bail!("default sandbox provider {sandbox_default:?} is not in the supported set");
+        }
+
+        let mut cache = HashMap::new();
+        if let Some(backend) = seed {
+            cache.insert(sandbox_default, backend);
+        }
+
         let storage = BasicObjectStore::local_filesystem(&root).await?;
         let secret_cipher =
             build_secret_cipher(secret_backend, root.to_string_lossy().to_string())?;
@@ -164,8 +270,8 @@ impl BasicExoHarness {
                 storage,
                 write_lock: AsyncMutex::new(()),
                 subscribers: Mutex::new(HashMap::new()),
-                sandbox_backend,
-                sandbox_backend_choice,
+                sandbox_registry: registry,
+                sandbox_backends: AsyncMutex::new(cache),
                 running_sandboxes: AsyncMutex::new(HashMap::new()),
                 running_processes: AsyncMutex::new(HashMap::new()),
                 secret_cipher,
@@ -659,7 +765,8 @@ impl BasicConversationHandle {
         let handle = self
             .harness
             .inner
-            .sandbox_backend_for_provider(sandbox.provider)?
+            .sandbox_backend_for_provider(sandbox.provider)
+            .await?
             .acquire(sandbox_request(self.record.id, sandbox_id, sandbox))
             .await?;
         self.harness
@@ -1033,7 +1140,8 @@ impl ConversationHandle for BasicConversationHandle {
         let sandbox_handle = self
             .harness
             .inner
-            .sandbox_backend_for_provider(metadata.provider)?
+            .sandbox_backend_for_provider(metadata.provider)
+            .await?
             .acquire(sandbox_request(self.record.id, &sandbox_id, &metadata))
             .await?;
         self.harness
@@ -1188,7 +1296,8 @@ impl ConversationHandle for BasicConversationHandle {
         let sandbox_handle = self
             .harness
             .inner
-            .sandbox_backend_for_provider(sandbox.provider)?
+            .sandbox_backend_for_provider(sandbox.provider)
+            .await?
             .acquire_from_snapshot(
                 sandbox_request(self.record.id, &request.id, &sandbox),
                 payload,
@@ -2578,14 +2687,4 @@ fn build_secret_cipher(
         SecretBackendChoice::Static(key) => Arc::new(StaticSecretKeyProvider::new(key)),
     };
     Ok(SecretCipher::new(provider))
-}
-
-fn build_sandbox_backend(choice: SandboxBackendChoice) -> Arc<dyn ManagedSandboxBackend> {
-    match choice {
-        SandboxBackendChoice::AppleContainer => {
-            Arc::new(CliContainerSandboxBackend::apple_container())
-        }
-        SandboxBackendChoice::Docker => Arc::new(CliContainerSandboxBackend::docker()),
-        SandboxBackendChoice::LocalProcess => Arc::new(LocalProcessSandboxBackend::new()),
-    }
 }

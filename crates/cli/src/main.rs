@@ -23,12 +23,12 @@ use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use executor::{
     AgentHarnessKind, BasicExoHarness, BasicExoHarnessConfig, BasicHarness, BasicToolRuntime,
     Binding, BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig,
-    ConversationModelConfig, CreateAgentRequest, CreateConversationRequest, EventKind, EventQuery,
-    EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions, FileSystemMount,
-    FileSystemMountMode, ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET, Harness,
-    HarnessAgent, HarnessConversation, HttpExoHarness, LocalSandboxExoHarness, PutSecretRequest,
-    RlmHarness, SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxProvider, Secret,
-    SecretBackendChoice, SendRequest, ToolRequest, ToolRuntime, TypeScriptHarness,
+    ConversationModelConfig, CreateAgentRequest, CreateConversationRequest, DaytonaBackendSpec,
+    EventKind, EventQuery, EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions,
+    FileSystemMount, FileSystemMountMode, ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET,
+    Harness, HarnessAgent, HarnessConversation, HttpExoHarness, LocalSandboxExoHarness,
+    PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxProvider,
+    Secret, SecretBackendChoice, SendRequest, ToolRequest, ToolRuntime, TypeScriptHarness,
     TypeScriptHarnessConfig, Uuid7, load_agent_config, serve_exoharness_http_listener_with_options,
 };
 use lingua::Message;
@@ -226,8 +226,19 @@ fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
     Ok(BasicExoHarnessConfig {
         root: cli.root.join("exoharness"),
         secret_backend,
-        sandbox_backend: default_sandbox_backend(),
+        sandbox_default: default_local_sandbox_provider(),
+        sandbox_backends: default_sandbox_backends(),
     })
+}
+
+/// Default providers: the OS-local container backend, local processes, and
+/// Daytona (offered even with no key set — credentials resolve lazily).
+fn default_sandbox_backends() -> Vec<SandboxBackendChoice> {
+    vec![
+        default_sandbox_backend(),
+        SandboxBackendChoice::LocalProcess,
+        SandboxBackendChoice::Daytona(DaytonaBackendSpec::with_conventional_secrets()),
+    ]
 }
 
 #[cfg(target_os = "macos")]

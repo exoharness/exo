@@ -35,8 +35,8 @@ pub use executor_types::{
 };
 pub use exoharness::{
     AgentHandle, BasicExoHarness, BasicExoHarnessConfig, Binding, BindingRecord,
-    ConversationHandle, DEFAULT_SANDBOX_IMAGE, EventData, EventId, EventKind, EventQuery,
-    EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions, FileSystemMount,
+    ConversationHandle, DEFAULT_SANDBOX_IMAGE, DaytonaBackendSpec, EventData, EventId, EventKind,
+    EventQuery, EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions, FileSystemMount,
     FileSystemMountMode, ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET, HttpExoHarness,
     PutSecretRequest, SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxId, SandboxProvider,
     Secret, SecretBackendChoice, SecretMetadata, SessionId, SnapshotId, StartSandboxRequest,
