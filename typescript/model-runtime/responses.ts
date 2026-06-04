@@ -22,6 +22,7 @@ import type {
 
 import {
   messagesEvent,
+  toolResultEvent,
   toolRequestedEvent,
   type AgentConfig,
   type EventData,
@@ -30,7 +31,16 @@ import {
   type PendingToolCall,
   type ToolDefinition,
   type TurnContext,
-} from "@exo/harness";
+} from "../harness";
+import type {
+  ChatCompletion,
+  ChatCompletionChunk,
+  ChatCompletionCreateParamsNonStreaming,
+  ChatCompletionCreateParamsStreaming,
+  ChatCompletionMessageParam,
+  ChatCompletionMessageToolCall,
+  ChatCompletionTool,
+} from "openai/resources/chat/completions";
 
 export interface NativeBraintrustOptions {
   apiKey?: string;
@@ -49,6 +59,7 @@ export interface ResponsesRuntimeOptions {
 }
 
 export interface ResponsesModelBinding {
+  model?: string;
   apiKey?: string;
   baseUrl?: string | null;
 }
@@ -81,6 +92,10 @@ export interface NativeTraceOptions {
 }
 
 export interface ResponsesRuntimeLike {
+  runTurn(
+    context: TurnContext,
+    run: (turnParent: TraceParent) => Promise<string | null>,
+  ): Promise<void>;
   complete(
     request: NativeResponsesRequest,
     options?: NativeTraceOptions,
@@ -305,6 +320,204 @@ export class ResponsesRuntime implements ResponsesRuntimeLike {
   }
 }
 
+export function runtimeFromModelBinding(
+  agentConfig: AgentConfig | undefined,
+  binding: ResponsesModelBinding,
+): ResponsesRuntimeLike {
+  return modelRequiresResponsesApi(binding.model ?? "")
+    ? ResponsesRuntime.fromModelBinding(agentConfig, binding)
+    : ChatCompletionsRuntime.fromModelBinding(agentConfig, binding);
+}
+
+export function modelRequiresResponsesApi(model: string): boolean {
+  const lower = model.toLowerCase();
+  const gpt5Minor = lower.match(/^gpt-5\.(\d+)/)?.[1]?.match(/^\d+$/)?.[0];
+  return (
+    lower.startsWith("o1-pro") ||
+    lower.startsWith("o3-pro") ||
+    lower.startsWith("gpt-5-pro") ||
+    (gpt5Minor !== undefined && Number(gpt5Minor) >= 3) ||
+    (lower.startsWith("gpt-5") && lower.includes("-codex"))
+  );
+}
+
+export class ChatCompletionsRuntime implements ResponsesRuntimeLike {
+  private readonly client: OpenAI;
+
+  constructor(options: ResponsesRuntimeOptions = {}) {
+    ensureBraintrustLogger(options.braintrust ?? null);
+    this.client = new OpenAI({
+      apiKey: options.apiKey,
+      baseURL: options.baseURL,
+      organization: options.organization,
+      project: options.project,
+    });
+  }
+
+  static fromModelBinding(
+    agentConfig: AgentConfig | undefined,
+    binding: ResponsesModelBinding,
+  ): ChatCompletionsRuntime {
+    return new ChatCompletionsRuntime({
+      apiKey: binding.apiKey,
+      baseURL: binding.baseUrl ?? undefined,
+      organization: process.env.OPENAI_ORG_ID,
+      project: process.env.OPENAI_PROJECT,
+      braintrust: braintrustOptionsFromAgentConfig(agentConfig),
+    });
+  }
+
+  async runTurn(
+    context: TurnContext,
+    run: (turnParent: TraceParent) => Promise<string | null>,
+  ): Promise<void> {
+    await traceExecutorTurn(context, run);
+  }
+
+  async complete(
+    request: NativeResponsesRequest,
+    options: NativeTraceOptions = {},
+  ): Promise<Response> {
+    const { response } = await this.runLlmRequest(request, {
+      ...options,
+      streamed: false,
+    });
+    return response;
+  }
+
+  async completeStream(
+    request: NativeResponsesRequest,
+    handlers: NativeStreamHandlers = {},
+    options: NativeTraceOptions = {},
+  ): Promise<Response> {
+    const { response } = await this.runLlmRequest(request, {
+      ...options,
+      streamed: true,
+      handlers,
+    });
+    return response;
+  }
+
+  async traceToolCall(
+    turnParent: TraceParent,
+    context: TurnContext,
+    toolCall: PendingToolCall,
+    roundIndex: number,
+    execute: ToolCallExecutor = (toolCall) =>
+      context.executePendingTools([toolCall]),
+  ): Promise<EventData[]> {
+    return tracedUnderParent(
+      turnParent,
+      async (span) => {
+        try {
+          const events = await execute(toolCall);
+          span.log({ output: toolResultTraceOutput(events) });
+          return events;
+        } catch (error) {
+          span.log({ error: errorMessage(error) });
+          throw error;
+        }
+      },
+      {
+        name: toolCall.request.functionName,
+        type: "tool",
+        spanAttributes: { purpose: "tool_call" },
+        event: {
+          input: toolCall.request,
+          metadata: {
+            round_index: roundIndex,
+          },
+        },
+      },
+    );
+  }
+
+  private async runLlmRequest(
+    request: NativeResponsesRequest,
+    options: NativeLlmTraceOptions,
+  ): Promise<NativeLlmResult> {
+    const toolNames = (request.tools ?? []).map((tool) => tool.name);
+    const run = async (span: Span): Promise<NativeLlmResult> => {
+      try {
+        const result = options.streamed
+          ? await this.completeStreamRaw(
+              buildChatStreamingBody(request),
+              options.handlers,
+            )
+          : {
+              response: chatCompletionToResponse(
+                await this.completeRaw(buildChatNonStreamingBody(request)),
+              ),
+              ttftMs: null,
+            };
+
+        span.log({
+          output: llmOutputTraceValue(result.response),
+          metadata: {
+            response_id: result.response.id,
+          },
+          metrics: responseUsageMetrics(result.response, result.ttftMs),
+        });
+        return result;
+      } catch (error) {
+        span.log({ error: errorMessage(error) });
+        throw error;
+      }
+    };
+    return tracedUnderParent(options.parent, run, {
+      name: `chat:${request.model}`,
+      type: "llm",
+      event: {
+        input: llmInputTraceValue(request),
+        metadata: {
+          round_index: options.roundIndex,
+          runtime: "chat_completions",
+          model: request.model,
+          max_output_tokens: request.maxOutputTokens ?? null,
+          tool_count: toolNames.length,
+          tools: toolNames,
+          streamed: options.streamed,
+        },
+      },
+    });
+  }
+
+  private async completeRaw(
+    body: ChatCompletionCreateParamsNonStreaming,
+  ): Promise<ChatCompletion> {
+    return this.client.chat.completions.create(body);
+  }
+
+  private async completeStreamRaw(
+    body: ChatCompletionCreateParamsStreaming,
+    handlers: NativeStreamHandlers = {},
+  ): Promise<NativeLlmResult> {
+    const startedAt = performance.now();
+    let sawFirstChunk = false;
+    let ttftMs: number | null = null;
+    const accumulator = new ChatCompletionAccumulator();
+    const stream = await this.client.chat.completions.create(body);
+
+    for await (const chunk of stream) {
+      if (!sawFirstChunk) {
+        sawFirstChunk = true;
+        ttftMs = Math.max(0, Math.round(performance.now() - startedAt));
+        await handlers.onFirstChunk?.(ttftMs);
+      }
+      accumulator.push(chunk);
+      const text = chunk.choices[0]?.delta.content;
+      if (text) {
+        await handlers.onTextDelta?.(text);
+      }
+    }
+
+    return {
+      response: accumulator.finalize(),
+      ttftMs,
+    };
+  }
+}
+
 export async function runResponsesTurn(
   context: TurnContext,
   run: (
@@ -424,6 +637,295 @@ function buildStreamingBody(
   };
 }
 
+function buildChatNonStreamingBody(
+  request: NativeResponsesRequest,
+): ChatCompletionCreateParamsNonStreaming {
+  const tools = toolDefinitionsToChatTools(request.tools ?? []);
+  return {
+    model: request.model,
+    messages: messagesToChatMessages(request.messages ?? []),
+    tools: tools.length === 0 ? undefined : tools,
+    tool_choice: tools.length === 0 ? undefined : "auto",
+    max_tokens: request.maxOutputTokens ?? undefined,
+    stream: false,
+  };
+}
+
+function buildChatStreamingBody(
+  request: NativeResponsesRequest,
+): ChatCompletionCreateParamsStreaming {
+  const tools = toolDefinitionsToChatTools(request.tools ?? []);
+  return {
+    model: request.model,
+    messages: messagesToChatMessages(request.messages ?? []),
+    tools: tools.length === 0 ? undefined : tools,
+    tool_choice: tools.length === 0 ? undefined : "auto",
+    max_tokens: request.maxOutputTokens ?? undefined,
+    stream: true,
+    stream_options: { include_usage: true },
+  };
+}
+
+function messagesToChatMessages(
+  messages: Message[],
+): ChatCompletionMessageParam[] {
+  return messages.map(messageToChatMessage);
+}
+
+function messageToChatMessage(message: Message): ChatCompletionMessageParam {
+  if (message.role === "system" || message.role === "developer") {
+    return { role: "system", content: messageContentText(message.content) };
+  }
+  if (message.role === "user") {
+    return { role: "user", content: messageContentText(message.content) };
+  }
+  if (message.role === "tool") {
+    const result = toolResultContent(message.content);
+    return {
+      role: "tool",
+      tool_call_id: result.toolCallId,
+      content: JSON.stringify(result.output),
+    };
+  }
+  const toolCalls = assistantToolCalls(message.content);
+  return {
+    role: "assistant",
+    content: assistantTextContent(message.content),
+    tool_calls: toolCalls.length === 0 ? undefined : toolCalls,
+  };
+}
+
+function toolDefinitionsToChatTools(
+  tools: ToolDefinition[],
+): ChatCompletionTool[] {
+  return tools.map((tool) => ({
+    type: "function",
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters as JsonObject,
+      strict: true,
+    },
+  }));
+}
+
+function chatCompletionToResponse(completion: ChatCompletion): Response {
+  const choice = completion.choices[0];
+  const output: unknown[] = [];
+  if (choice?.message.content) {
+    output.push(
+      responseMessageOutput(`${completion.id}_message`, choice.message.content),
+    );
+  }
+  for (const toolCall of choice?.message.tool_calls ?? []) {
+    if (toolCall.type === "function") {
+      output.push(responseFunctionCallOutput(toolCall));
+    }
+  }
+  return {
+    id: completion.id,
+    object: "response",
+    created_at: completion.created,
+    status: "completed",
+    model: completion.model,
+    output,
+    usage: chatUsageToResponseUsage(completion.usage),
+  } as unknown as Response;
+}
+
+class ChatCompletionAccumulator {
+  private id = `chatcmpl_${Date.now()}`;
+  private created = Math.floor(Date.now() / 1000);
+  private model = "";
+  private content = "";
+  private usage: ChatCompletionChunk["usage"] | null = null;
+  private readonly toolCalls = new Map<
+    number,
+    {
+      id?: string;
+      name?: string;
+      arguments: string;
+    }
+  >();
+
+  push(chunk: ChatCompletionChunk): void {
+    this.id = chunk.id || this.id;
+    this.created = chunk.created || this.created;
+    this.model = chunk.model || this.model;
+    this.usage = chunk.usage ?? this.usage;
+    for (const choice of chunk.choices) {
+      const delta = choice.delta;
+      if (delta.content) {
+        this.content += delta.content;
+      }
+      for (const toolCall of delta.tool_calls ?? []) {
+        const index = toolCall.index;
+        const current = this.toolCalls.get(index) ?? { arguments: "" };
+        current.id = toolCall.id ?? current.id;
+        current.name = toolCall.function?.name ?? current.name;
+        current.arguments += toolCall.function?.arguments ?? "";
+        this.toolCalls.set(index, current);
+      }
+    }
+  }
+
+  finalize(): Response {
+    const output: unknown[] = [];
+    if (this.content.length > 0) {
+      output.push(responseMessageOutput(`${this.id}_message`, this.content));
+    }
+    for (const [, toolCall] of [...this.toolCalls.entries()].sort(
+      ([left], [right]) => left - right,
+    )) {
+      if (!toolCall.id || !toolCall.name) {
+        continue;
+      }
+      output.push(
+        responseFunctionCallOutput({
+          id: toolCall.id,
+          type: "function",
+          function: {
+            name: toolCall.name,
+            arguments: toolCall.arguments,
+          },
+        } as ChatFunctionToolCall),
+      );
+    }
+    return {
+      id: this.id,
+      object: "response",
+      created_at: this.created,
+      status: "completed",
+      model: this.model,
+      output,
+      usage: chatUsageToResponseUsage(this.usage),
+    } as unknown as Response;
+  }
+}
+
+function responseMessageOutput(id: string, text: string): unknown {
+  return {
+    id,
+    type: "message",
+    role: "assistant",
+    status: "completed",
+    content: [
+      {
+        type: "output_text",
+        text,
+        annotations: [],
+      },
+    ],
+  };
+}
+
+type ChatFunctionToolCall = Extract<
+  ChatCompletionMessageToolCall,
+  { type: "function" }
+>;
+
+function responseFunctionCallOutput(toolCall: ChatFunctionToolCall): unknown {
+  return {
+    id: `${toolCall.id}_item`,
+    type: "function_call",
+    call_id: toolCall.id,
+    name: toolCall.function.name,
+    arguments: toolCall.function.arguments,
+    status: "completed",
+  };
+}
+
+function chatUsageToResponseUsage(
+  usage:
+    | ChatCompletion["usage"]
+    | ChatCompletionChunk["usage"]
+    | null
+    | undefined,
+): unknown {
+  if (!usage) {
+    return null;
+  }
+  return {
+    input_tokens: usage.prompt_tokens,
+    output_tokens: usage.completion_tokens,
+    total_tokens: usage.total_tokens,
+    input_tokens_details: {
+      cached_tokens: usage.prompt_tokens_details?.cached_tokens ?? 0,
+    },
+    output_tokens_details: {
+      reasoning_tokens: usage.completion_tokens_details?.reasoning_tokens ?? 0,
+    },
+  };
+}
+
+function assistantToolCalls(content: unknown): ChatCompletionMessageToolCall[] {
+  if (!Array.isArray(content)) {
+    return [];
+  }
+  return content.flatMap((part): ChatCompletionMessageToolCall[] => {
+    if (!isRecord(part) || part.type !== "tool_call") {
+      return [];
+    }
+    if (
+      typeof part.tool_call_id !== "string" ||
+      typeof part.tool_name !== "string"
+    ) {
+      return [];
+    }
+    return [
+      {
+        id: part.tool_call_id,
+        type: "function",
+        function: {
+          name: part.tool_name,
+          arguments: JSON.stringify(
+            isRecord(part.arguments) ? part.arguments : {},
+          ),
+        },
+      },
+    ];
+  });
+}
+
+function assistantTextContent(content: unknown): string | null {
+  if (Array.isArray(content)) {
+    const text = content
+      .filter((part) => isRecord(part) && part.type === "text")
+      .map((part) => messageContentText((part as { text?: unknown }).text))
+      .join("");
+    return text || null;
+  }
+  return messageContentText(content);
+}
+
+function toolResultContent(content: unknown): {
+  toolCallId: string;
+  output: unknown;
+} {
+  const part = Array.isArray(content) ? content.find(isRecord) : null;
+  if (
+    !isRecord(part) ||
+    part.type !== "tool_result" ||
+    typeof part.tool_call_id !== "string"
+  ) {
+    throw new Error("tool message must contain a tool_result content part");
+  }
+  return {
+    toolCallId: part.tool_call_id,
+    output: part.output,
+  };
+}
+
+function messageContentText(content: unknown): string {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (content === null || content === undefined) {
+    return "";
+  }
+  return JSON.stringify(content);
+}
+
 export function tracedUnderParent<R>(
   parent: TraceParent | undefined,
   run: (span: Span) => R,
@@ -452,8 +954,17 @@ export function responseToLinguaEvents(response: Response): EventData[] {
   if (messages.length > 0) {
     events.push(messagesEvent(messages));
   }
-  for (const toolCall of responseToolCalls(response)) {
-    events.push(toolRequestedEvent(toolCall));
+  for (const result of responseToolCallResults(response)) {
+    if (result.type === "tool_call") {
+      events.push(toolRequestedEvent(result.toolCall));
+    } else {
+      events.push(
+        toolResultEvent(result.toolCallId, {
+          ok: false,
+          error: result.error,
+        }),
+      );
+    }
   }
   return events;
 }
@@ -471,15 +982,45 @@ export function responseMessages(response: Response): Message[] {
 }
 
 export function responseToolCalls(response: Response): PendingToolCall[] {
+  return responseToolCallResults(response).flatMap((result) =>
+    result.type === "tool_call" ? [result.toolCall] : [],
+  );
+}
+
+type ResponseToolCallResult =
+  | {
+      type: "tool_call";
+      toolCall: PendingToolCall;
+    }
+  | {
+      type: "parse_error";
+      toolCallId: string;
+      error: string;
+    };
+
+function responseToolCallResults(response: Response): ResponseToolCallResult[] {
   return response.output
     .filter((item) => item.type === "function_call")
-    .map((item) => ({
-      toolCallId: item.call_id,
-      request: {
-        functionName: item.name,
-        arguments: parseJsonObject(item.arguments),
-      },
-    }));
+    .map((item) => {
+      const parsed = parseJsonObject(item.arguments);
+      if (!parsed.ok) {
+        return {
+          type: "parse_error",
+          toolCallId: item.call_id,
+          error: `Invalid JSON arguments for ${item.name}: ${parsed.error}`,
+        };
+      }
+      return {
+        type: "tool_call",
+        toolCall: {
+          toolCallId: item.call_id,
+          request: {
+            functionName: item.name,
+            arguments: parsed.value,
+          },
+        },
+      };
+    });
 }
 
 export function toolDefinitionsToResponsesTools(
@@ -593,12 +1134,26 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function parseJsonObject(json: string): JsonObject {
-  const value = JSON.parse(json) as unknown;
-  if (!isRecord(value)) {
-    throw new Error("Responses function call arguments must be a JSON object");
+type JsonObjectParseResult =
+  | { ok: true; value: JsonObject }
+  | { ok: false; error: string };
+
+function parseJsonObject(json: string): JsonObjectParseResult {
+  try {
+    const value = JSON.parse(json) as unknown;
+    if (!isRecord(value)) {
+      return {
+        ok: false,
+        error: "function call arguments must be a JSON object",
+      };
+    }
+    return { ok: true, value: value as JsonObject };
+  } catch (error) {
+    return {
+      ok: false,
+      error: errorMessage(error),
+    };
   }
-  return value as JsonObject;
 }
 
 function stringField(

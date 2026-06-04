@@ -1,3 +1,4 @@
+mod adapters;
 mod env;
 #[cfg(test)]
 mod env_tests;
@@ -17,6 +18,7 @@ use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow, bail};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
@@ -24,12 +26,13 @@ use executor::{
     AgentHarnessKind, BasicExoHarness, BasicExoHarnessConfig, BasicHarness, BasicToolRuntime,
     Binding, BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig,
     ConversationModelConfig, CreateAgentRequest, CreateConversationRequest, EventKind, EventQuery,
-    EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions, FileSystemMount,
-    FileSystemMountMode, ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET, Harness,
-    HarnessAgent, HarnessConversation, HttpExoHarness, LocalSandboxExoHarness, PutSecretRequest,
-    RlmHarness, SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxProvider, Secret,
-    SecretBackendChoice, SendRequest, ToolRequest, ToolRuntime, TypeScriptHarness,
-    TypeScriptHarnessConfig, Uuid7, load_agent_config, serve_exoharness_http_listener_with_options,
+    EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions, ExoclawToolRuntime,
+    FileSystemMount, FileSystemMountMode, ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET,
+    Harness, HarnessAgent, HarnessConversation, HttpExoHarness, LocalSandboxExoHarness,
+    PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxProvider,
+    SandboxScope, Secret, SecretBackendChoice, ToolRequest, ToolRuntime, TypeScriptHarness,
+    TypeScriptHarnessConfig, Uuid7, effective_sandbox_scope, load_agent_config,
+    send_conversation_wakeup, serve_exoharness_http_listener_with_options,
 };
 use lingua::Message;
 use lingua::universal::{AssistantContent, AssistantContentPart, ToolContentPart, UserContent};
@@ -93,6 +96,7 @@ enum HarnessKind {
     Rlm,
     #[value(name = "typescript")]
     TypeScript,
+    Exoclaw,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +153,7 @@ impl FromStr for HarnessSelection {
             "basic" => Ok(Self::Kind(HarnessKind::Basic)),
             "rlm" => Ok(Self::Kind(HarnessKind::Rlm)),
             "typescript" => Ok(Self::Kind(HarnessKind::TypeScript)),
+            "exoclaw" => Ok(Self::Kind(HarnessKind::Exoclaw)),
             "codex" => Ok(Self::TypeScriptPreset(TypeScriptHarnessPreset::Codex)),
             "claude-code" => Ok(Self::TypeScriptPreset(TypeScriptHarnessPreset::ClaudeCode)),
             "cursor" | "cursor-sdk" => Ok(Self::TypeScriptPreset(TypeScriptHarnessPreset::Cursor)),
@@ -156,7 +161,7 @@ impl FromStr for HarnessSelection {
                 Ok(Self::TypeScriptModule(PathBuf::from(value)))
             }
             _ => Err(format!(
-                "unknown harness `{raw}`; expected basic, rlm, typescript, codex, claude-code, cursor, or a TypeScript module path"
+                "unknown harness `{raw}`; expected basic, rlm, typescript, exoclaw, codex, claude-code, cursor, or a TypeScript module path"
             )),
         }
     }
@@ -272,6 +277,21 @@ impl EnabledDisabled {
     }
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SandboxScopeArg {
+    Agent,
+    Conversation,
+}
+
+impl From<SandboxScopeArg> for SandboxScope {
+    fn from(value: SandboxScopeArg) -> Self {
+        match value {
+            SandboxScopeArg::Agent => SandboxScope::Agent,
+            SandboxScopeArg::Conversation => SandboxScope::Conversation,
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Manage agents and their executor configuration.
@@ -305,6 +325,10 @@ enum Commands {
         /// Conversation slug to use or create (default: a fresh generated slug).
         #[arg(long)]
         conversation: Option<String>,
+    },
+    Adapters {
+        #[command(subcommand)]
+        command: adapters::AdapterCommands,
     },
     Serve {
         #[arg(long, default_value = "127.0.0.1:4766")]
@@ -405,6 +429,8 @@ enum ConversationCommands {
         name: Option<String>,
         #[arg(long)]
         slug: Option<String>,
+        #[arg(long, value_enum)]
+        sandbox_scope: Option<SandboxScopeArg>,
         #[command(flatten)]
         sandbox_runtime: ConversationSandboxRuntimeArgs,
         #[arg(long)]
@@ -426,6 +452,8 @@ enum ConversationCommands {
         conversation: String,
         #[command(flatten)]
         sandbox_runtime: ConversationSandboxRuntimeUpdateArgs,
+        #[arg(long, value_enum)]
+        sandbox_scope: Option<SandboxScopeArg>,
         #[arg(long)]
         model: Option<String>,
         #[arg(long)]
@@ -648,6 +676,8 @@ async fn main() -> Result<()> {
     )
     .await?;
     let harness = instantiate_harness(
+        &cli.root,
+        &exo_config,
         exoharness,
         harness_kind,
         runtime_config.clone(),
@@ -656,6 +686,9 @@ async fn main() -> Result<()> {
     .await?;
 
     match cli.command {
+        Commands::Adapters { command } => {
+            adapters::handle_adapter_command(&cli.root, Arc::clone(&harness), command).await?;
+        }
         Commands::Repl {
             model,
             agent,
@@ -902,8 +935,11 @@ async fn main() -> Result<()> {
                     config.typescript = None;
                     changed = true;
                 } else if let Some(module) = module.as_deref() {
-                    if config.harness != AgentHarnessKind::TypeScript {
-                        bail!("--module is only valid with TypeScript agents");
+                    if !matches!(
+                        config.harness,
+                        AgentHarnessKind::TypeScript | AgentHarnessKind::Exoclaw
+                    ) {
+                        bail!("--module is only valid with TypeScript or Exoclaw agents");
                     }
                     let existing_tool_modules = config
                         .typescript
@@ -931,8 +967,11 @@ async fn main() -> Result<()> {
                         changed = true;
                     }
                 } else if !tool_modules.is_empty() {
-                    if config.harness != AgentHarnessKind::TypeScript {
-                        bail!("--tool-module is only valid with TypeScript agents");
+                    if !matches!(
+                        config.harness,
+                        AgentHarnessKind::TypeScript | AgentHarnessKind::Exoclaw
+                    ) {
+                        bail!("--tool-module is only valid with TypeScript or Exoclaw agents");
                     }
                     let Some(typescript) = config.typescript.as_mut() else {
                         bail!("typescript agents require a module path; pass --module <path>");
@@ -1031,8 +1070,14 @@ async fn main() -> Result<()> {
                 if !changed {
                     bail!("no changes provided");
                 }
-                if config.harness == AgentHarnessKind::TypeScript && config.typescript.is_none() {
-                    bail!("typescript agents require a module path; pass --module <path>");
+                if matches!(
+                    config.harness,
+                    AgentHarnessKind::TypeScript | AgentHarnessKind::Exoclaw
+                ) && config.typescript.is_none()
+                {
+                    bail!(
+                        "TypeScript and Exoclaw agents require a module path; pass --module <path>"
+                    );
                 }
                 agent.put_config(config).await?;
                 println!("updated agent {}", agent.record().slug);
@@ -1127,6 +1172,7 @@ async fn main() -> Result<()> {
                 agent,
                 name,
                 slug,
+                sandbox_scope,
                 sandbox_runtime,
                 repl,
             } => {
@@ -1152,6 +1198,11 @@ async fn main() -> Result<()> {
                         shell_program: sandbox_runtime.shell_program,
                     })
                     .await?;
+                if let Some(sandbox_scope) = sandbox_scope {
+                    let mut config = conversation.config().await?;
+                    config.sandbox_scope = Some(sandbox_scope.into());
+                    conversation.put_config(config).await?;
+                }
                 println!(
                     "created conversation {} ({})",
                     conversation.record().slug,
@@ -1210,6 +1261,7 @@ async fn main() -> Result<()> {
             ConversationCommands::Update {
                 agent,
                 conversation,
+                sandbox_scope,
                 sandbox_runtime,
                 model,
                 max_output_tokens,
@@ -1236,6 +1288,11 @@ async fn main() -> Result<()> {
                     .ok_or_else(|| anyhow!("conversation not found: {}", conversation))?;
                 let mut config = conversation.config().await?;
                 let mut changed = sandbox_runtime.apply(&mut config)?;
+
+                if let Some(sandbox_scope) = sandbox_scope {
+                    config.sandbox_scope = Some(sandbox_scope.into());
+                    changed = true;
+                }
 
                 let updated_model_override = if clear_model_override {
                     changed = true;
@@ -1422,6 +1479,17 @@ async fn main() -> Result<()> {
                     config.shell_program.as_deref().unwrap_or("none")
                 );
                 println!(
+                    "sandbox_scope: {}",
+                    config
+                        .sandbox_scope
+                        .map(sandbox_scope_name)
+                        .unwrap_or("default")
+                );
+                println!(
+                    "effective_sandbox_scope: {}",
+                    sandbox_scope_name(effective_sandbox_scope(&agent_config, &config))
+                );
+                println!(
                     "sandbox_image: {}",
                     config.sandbox_image.as_deref().unwrap_or("inherit")
                 );
@@ -1503,15 +1571,7 @@ async fn main() -> Result<()> {
                 let conversation =
                     must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
                 let previous_messages = conversation.messages().await?;
-                let result = conversation
-                    .send(SendRequest {
-                        input: vec![Message::User {
-                            content: UserContent::String(prompt),
-                        }],
-                        session_id: None,
-                    })
-                    .await?;
-                conversation.close_session(result.session_id).await?;
+                send_conversation_wakeup(conversation.as_ref(), prompt).await?;
                 let messages = conversation.messages().await?;
                 for message in &messages[previous_messages.len()..] {
                     print_message(message);
@@ -1523,9 +1583,10 @@ async fn main() -> Result<()> {
             } => {
                 let agent = must_get_agent(harness.as_ref(), &agent).await?;
                 if !agent.delete_conversation(&conversation).await? {
-                    bail!("conversation not found: {conversation}");
+                    println!("conversation {} not found; nothing to delete", conversation);
+                } else {
+                    println!("deleted conversation {}", conversation);
                 }
-                println!("deleted conversation {}", conversation);
             }
         },
         Commands::Secret { command } => match command {
@@ -1621,7 +1682,6 @@ async fn determine_harness_kind(
     if let Some(selection) = selection {
         return Ok(selection.harness_kind());
     }
-
     let Some(agent_ref) = command_agent_ref(command) else {
         return Ok(HarnessKind::Basic);
     };
@@ -1658,7 +1718,10 @@ fn command_agent_ref(command: &Commands) -> Option<&str> {
             },
         },
         Commands::Repl { agent, .. } => Some(agent.as_deref().unwrap_or(DEFAULT_REPL_SLUG)),
-        Commands::Secret { .. } | Commands::Model { .. } | Commands::Serve { .. } => None,
+        Commands::Secret { .. }
+        | Commands::Model { .. }
+        | Commands::Adapters { .. }
+        | Commands::Serve { .. } => None,
     }
 }
 
@@ -1770,6 +1833,8 @@ async fn instantiate_exoharness(
 }
 
 async fn instantiate_harness(
+    root: &Path,
+    exo_config: &BasicExoHarnessConfig,
     exoharness: Arc<dyn ExoHarness>,
     kind: HarnessKind,
     runtime_config: Option<BraintrustRuntimeConfig>,
@@ -1786,6 +1851,15 @@ async fn instantiate_harness(
             runtime_config,
             env_vars,
         )),
+        HarnessKind::Exoclaw => Arc::new(
+            TypeScriptHarness::<ExoclawToolRuntime>::exoclaw_from_root(
+                root,
+                exo_config.clone(),
+                runtime_config,
+                env_vars,
+            )
+            .await?,
+        ),
         HarnessKind::TypeScript => Arc::new(TypeScriptHarness::from_exoharness(
             exoharness,
             runtime_config,
@@ -1800,6 +1874,7 @@ fn to_agent_harness_kind(kind: HarnessKind) -> AgentHarnessKind {
         HarnessKind::Basic => AgentHarnessKind::Basic,
         HarnessKind::Rlm => AgentHarnessKind::Rlm,
         HarnessKind::TypeScript => AgentHarnessKind::TypeScript,
+        HarnessKind::Exoclaw => AgentHarnessKind::Exoclaw,
     }
 }
 
@@ -1808,6 +1883,7 @@ fn from_agent_harness_kind(kind: AgentHarnessKind) -> HarnessKind {
         AgentHarnessKind::Basic => HarnessKind::Basic,
         AgentHarnessKind::Rlm => HarnessKind::Rlm,
         AgentHarnessKind::TypeScript => HarnessKind::TypeScript,
+        AgentHarnessKind::Exoclaw => HarnessKind::Exoclaw,
     }
 }
 
@@ -1816,6 +1892,7 @@ fn format_harness_kind(kind: AgentHarnessKind) -> &'static str {
         AgentHarnessKind::Basic => "basic",
         AgentHarnessKind::Rlm => "rlm",
         AgentHarnessKind::TypeScript => "typescript",
+        AgentHarnessKind::Exoclaw => "exoclaw",
     }
 }
 
@@ -1836,8 +1913,10 @@ fn build_typescript_harness_config(
     let harness_kind = selection
         .map(HarnessSelection::harness_kind)
         .unwrap_or(HarnessKind::Basic);
-    if !matches!(harness_kind, HarnessKind::TypeScript) && !tool_modules.is_empty() {
-        bail!("--tool-module is only valid with --harness typescript");
+    if !matches!(harness_kind, HarnessKind::TypeScript | HarnessKind::Exoclaw)
+        && !tool_modules.is_empty()
+    {
+        bail!("--tool-module is only valid with --harness typescript or exoclaw");
     }
     match (selection, harness_kind, module) {
         (Some(HarnessSelection::TypeScriptPreset(_)), _, Some(_))
@@ -1856,14 +1935,19 @@ fn build_typescript_harness_config(
                 resolve_typescript_tool_module_paths(tool_modules)?,
             )?))
         }
-        (_, HarnessKind::TypeScript, Some(module)) => Ok(Some(resolve_typescript_harness_config(
-            module,
-            resolve_typescript_tool_module_paths(tool_modules)?,
-        )?)),
+        (_, HarnessKind::TypeScript | HarnessKind::Exoclaw, Some(module)) => {
+            Ok(Some(resolve_typescript_harness_config(
+                module,
+                resolve_typescript_tool_module_paths(tool_modules)?,
+            )?))
+        }
         (_, HarnessKind::TypeScript, None) => Err(anyhow!(
             "typescript agents require --module <path>, or use --harness codex, --harness claude-code, --harness cursor, or --harness <module.ts>"
         )),
-        (_, _, Some(_)) => Err(anyhow!("--module is only valid with --harness typescript")),
+        (_, HarnessKind::Exoclaw, None) => Err(anyhow!("exoclaw agents require --module <path>")),
+        (_, _, Some(_)) => Err(anyhow!(
+            "--module is only valid with --harness typescript or exoclaw"
+        )),
         (_, _, None) => Ok(None),
     }
 }
@@ -1890,10 +1974,15 @@ async fn ensure_agent_matches_harness_selection(
         );
     }
 
-    if matches!(selection.harness_kind(), HarnessKind::TypeScript) && config.typescript.is_none() {
+    if matches!(
+        selection.harness_kind(),
+        HarnessKind::TypeScript | HarnessKind::Exoclaw
+    ) && config.typescript.is_none()
+    {
         bail!(
-            "agent {} is configured for TypeScript but has no module path",
-            agent.record().slug
+            "agent {} is configured for {} but has no module path",
+            agent.record().slug,
+            format_harness_selection(selection)
         );
     }
 
@@ -1951,6 +2040,7 @@ fn format_harness_selection(selection: &HarnessSelection) -> String {
             HarnessKind::Basic => "basic".to_string(),
             HarnessKind::Rlm => "rlm".to_string(),
             HarnessKind::TypeScript => "typescript".to_string(),
+            HarnessKind::Exoclaw => "exoclaw".to_string(),
         },
         HarnessSelection::TypeScriptPreset(preset) => match preset {
             TypeScriptHarnessPreset::Codex => "codex".to_string(),
@@ -2252,6 +2342,7 @@ async fn run_sandbox_shell_command(
             conversation.record().slug
         );
     }
+    let agent_handle = agent.exoharness_handle();
     let conversation_handle = conversation.exoharness_handle();
     let runtime = BasicToolRuntime;
 
@@ -2259,6 +2350,7 @@ async fn run_sandbox_shell_command(
     arguments.insert("command".to_string(), serde_json::Value::String(command));
     let result = runtime
         .execute(
+            agent_handle.as_ref(),
             conversation_handle.as_ref(),
             &agent_config,
             &config,
@@ -2272,26 +2364,41 @@ async fn run_sandbox_shell_command(
 }
 
 pub(crate) fn print_message(message: &Message) {
+    let timestamp = compact_timestamp();
     match message {
         Message::User { content } => {
-            println!("user: {}", render_user_content(content));
+            println!("{timestamp} user: {}", render_user_content(content));
         }
         Message::Assistant { content, .. } => {
-            println!("assistant: {}", render_assistant_content(content));
+            println!(
+                "{timestamp} assistant: {}",
+                render_assistant_content(content)
+            );
         }
         Message::Tool { content } => {
             for part in content {
                 let ToolContentPart::ToolResult(result) = part;
-                println!("tool {}: {}", result.tool_name, result.output);
+                println!("{timestamp} tool {}: {}", result.tool_name, result.output);
             }
         }
         Message::System { content } => {
-            println!("system: {}", render_user_content(content));
+            println!("{timestamp} system: {}", render_user_content(content));
         }
         Message::Developer { content } => {
-            println!("developer: {}", render_user_content(content));
+            println!("{timestamp} developer: {}", render_user_content(content));
         }
     }
+}
+
+pub(crate) fn compact_timestamp() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() % 86_400)
+        .unwrap_or(0);
+    let hours = seconds / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let seconds = seconds % 60;
+    format!("[{hours:02}:{minutes:02}:{seconds:02}]")
 }
 
 fn render_user_content(content: &UserContent) -> String {
@@ -2333,6 +2440,13 @@ pub(crate) fn render_assistant_content(content: &AssistantContent) -> String {
 
 fn repl_command(agent_slug: &str, conversation_slug: &str) -> String {
     format!("exo repl --agent {agent_slug} --conversation {conversation_slug}")
+}
+
+fn sandbox_scope_name(scope: SandboxScope) -> &'static str {
+    match scope {
+        SandboxScope::Agent => "agent",
+        SandboxScope::Conversation => "conversation",
+    }
 }
 
 fn slugify(input: &str) -> String {

@@ -1,0 +1,17 @@
+{
+  "tools": [
+    {
+      "modulePath": "./irc.ts",
+      "initialization": {
+        "server": "irc.libera.chat",
+        "port": 6697,
+        "nick": "exo-demo",
+        "username": "exo-demo",
+        "realname": "Exo Demo",
+        "tls": true,
+        "dryRun": false,
+        "passwordSecretId": null
+      }
+    }
+  ]
+}

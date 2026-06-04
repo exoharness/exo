@@ -107,12 +107,21 @@ and recursive-language-model harness experiments.
 For the coding-agent setup commands, see
 [docs/coding-agent-harnesses.md](./docs/coding-agent-harnesses.md).
 
+## Exoclaw Long-Running Harness
+
+Exoclaw is a long-running claw-type agent built on exoharness. It supports
+scheduled tasks, and a full adapter system including support for WhatsApp,
+Signal, and IRC. See [examples/exoclaw/README.md](./examples/exoclaw/README.md)
+for setup, operation, and debugging commands.
+
 ## Repository Layout
 
 - `crates`: Rust workspace for the CLI, exoharness substrate, and executors.
 - `typescript`: TypeScript harness runtime, model-runtime helpers, and
   adapter-specific support code.
 - `examples/typescript`: runnable TypeScript harness examples.
+- `examples/exoclaw`: long-running TypeScript harness example with scheduled
+  task and adapter support.
 - `containers`: sandbox images used by the coding-agent harness examples.
 - `spec`: core architecture and terminology.
 - `docs`: design notes for in-progress directions.

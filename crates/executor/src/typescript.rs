@@ -30,7 +30,7 @@ use tokio::task::JoinHandle;
 use crate::execution_tracing::TurnExecutionTrace;
 use crate::harness_executor::{ExecutorHarnessRuntime, ExecutorStreamMode, HarnessExecutor};
 use crate::harness_facade::{SharedHarness, SharedHarnessBacked};
-use crate::harness_tool::{BasicToolRuntime, ensure_shell_sandbox};
+use crate::harness_tool::{BasicToolRuntime, ExoclawToolRuntime, ensure_shell_sandbox};
 use crate::shared::try_send_stream_event;
 use crate::{
     AgentConfig, BraintrustRuntimeConfig, ConversationConfig, ExecutionStreamEvent, SendRequest,
@@ -83,12 +83,13 @@ where
 
     async fn prepare_conversation(
         &self,
+        agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
     ) -> Result<()> {
         self.tools
-            .prepare_conversation(conversation, agent_config, conversation_config)
+            .prepare_conversation(agent, conversation, agent_config, conversation_config)
             .await
     }
 
@@ -174,7 +175,7 @@ where
 
     async fn execute_runtime_request(
         &self,
-        _agent: &dyn AgentHandle,
+        agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
@@ -184,7 +185,13 @@ where
             RuntimeRequest::ExecuteTool { request } => Ok(RuntimeResponsePayload::ToolResult {
                 result: self
                     .tools
-                    .execute(conversation, agent_config, conversation_config, &request)
+                    .execute(
+                        agent,
+                        conversation,
+                        agent_config,
+                        conversation_config,
+                        &request,
+                    )
                     .await?,
             }),
             RuntimeRequest::StartSandboxProcess { .. }
@@ -396,6 +403,7 @@ impl TypeScriptRunnerProcess {
                             send_host_message(&self.host_tx, response)?;
                         }
                         GuestToHostMessage::ExoRequest { id, request } => {
+                            let request_kind = request.kind();
                             let response = match exoharness_server.handle_request(request).await {
                                 Ok(response) => HostToGuestMessage::ExoResponse {
                                     id,
@@ -409,7 +417,9 @@ impl TypeScriptRunnerProcess {
                                     response: None,
                                     error: Some(format_error_chain(
                                         &error,
-                                        format_args!("typescript exoharness request failed"),
+                                        format_args!(
+                                            "typescript exoharness request `{request_kind}` failed"
+                                        ),
                                     )),
                                 },
                             };
@@ -825,6 +835,31 @@ impl TypeScriptHarness<BasicToolRuntime> {
             runtime_config,
             env,
         )
+    }
+}
+
+impl TypeScriptHarness<ExoclawToolRuntime> {
+    pub async fn exoclaw_from_root(
+        root: impl AsRef<Path>,
+        exo_config: BasicExoHarnessConfig,
+        runtime_config: Option<BraintrustRuntimeConfig>,
+        env: HashMap<String, String>,
+    ) -> Result<Self> {
+        let workspace_root = std::env::current_dir()
+            .context("failed to resolve current directory for Exoclaw harness")?;
+        let root = root.as_ref();
+        let exoharness: Arc<dyn ExoHarness> = Arc::new(BasicExoHarness::new(exo_config).await?);
+        let tools = Arc::new(ExoclawToolRuntime::with_roots(
+            root.join("scheduled-tasks"),
+            root.join("adapters"),
+        ));
+        let runtime = ExecutorHarnessRuntime::new(
+            TypeScriptExecutor::new(Arc::clone(&exoharness), workspace_root, env, tools),
+            runtime_config,
+        );
+        Ok(Self {
+            inner: SharedHarness::new(exoharness, runtime),
+        })
     }
 }
 
