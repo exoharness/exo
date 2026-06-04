@@ -366,7 +366,7 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
             type: "string",
             enum: ["all_messages", "mentions_only"],
             description:
-              "Wake policy. Use mentions_only unless the user explicitly wants every channel message.",
+              "Wake policy. Use all_messages for test adapters unless the user explicitly wants mention-only wakeups.",
           },
           allowedChannels: {
             anyOf: [

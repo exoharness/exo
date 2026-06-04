@@ -1,9 +1,10 @@
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use exoharness::{AgentHandle, ConversationHandle, Secret, SecretId};
+use tokio::sync::Notify;
 
 use super::store::AdapterStore;
 use super::types::{AdapterAttachment, AdapterConfig, AdapterEventType, AdapterRecord};
@@ -134,6 +135,7 @@ pub async fn send_adapter_message_with_handles(
             attachments,
         )
         .await?;
+    notify_adapter_outbound(&adapter.id);
     Ok(())
 }
 
@@ -145,24 +147,34 @@ async fn run_adapter_loop(
     let agent = require_agent(harness.as_ref(), &adapter).await?;
     let conversation = require_conversation(agent.as_ref(), &adapter).await?;
     store.requeue_inflight_messages(&adapter.id).await?;
-    let config = &adapter.config;
-    let secret_env = worker_secret_env(agent.exoharness_handle().as_ref(), config).await?;
+    let config = adapter.config.clone();
+    let secret_env = worker_secret_env(agent.exoharness_handle().as_ref(), &config).await?;
+    let outbound_notifier = register_adapter_outbound_notifier(&adapter.id);
+    let event_store = store.clone();
+    let event_adapter = adapter.clone();
+    let event_conversation = std::sync::Arc::clone(&conversation);
+    let event_config = config.clone();
+    let outbound_store = store.clone();
+    let outbound_adapter_id = adapter.id.clone();
+    let stop_store = store.clone();
+    let stop_adapter_id = adapter.id.clone();
     run_worker_loop(
         &adapter.id,
-        config,
+        &config,
         secret_env,
-        |event| {
-            let store = store.clone();
-            let adapter = adapter.clone();
-            let conversation = std::sync::Arc::clone(&conversation);
-            let config = config.clone();
+        Arc::clone(&outbound_notifier.notify),
+        move |event| {
+            let store = event_store.clone();
+            let adapter = event_adapter.clone();
+            let conversation = std::sync::Arc::clone(&event_conversation);
+            let config = event_config.clone();
             async move {
                 handle_worker_event(&store, conversation.as_ref(), &adapter, &config, event).await
             }
         },
-        || {
-            let store = store.clone();
-            let adapter_id = adapter.id.clone();
+        move || {
+            let store = outbound_store.clone();
+            let adapter_id = outbound_adapter_id.clone();
             async move {
                 Ok(store
                     .claim_outbound_messages(&adapter_id)
@@ -177,9 +189,9 @@ async fn run_adapter_loop(
                     .collect())
             }
         },
-        || {
-            let store = store.clone();
-            let adapter_id = adapter.id.clone();
+        move || {
+            let store = stop_store.clone();
+            let adapter_id = stop_adapter_id.clone();
             async move {
                 Ok(store
                     .get_adapter(&adapter_id)
@@ -189,6 +201,52 @@ async fn run_adapter_loop(
         },
     )
     .await
+}
+
+struct AdapterOutboundNotifierGuard {
+    adapter_id: String,
+    notify: Arc<Notify>,
+}
+
+impl Drop for AdapterOutboundNotifierGuard {
+    fn drop(&mut self) {
+        let mut notifiers = adapter_outbound_notifiers()
+            .lock()
+            .expect("adapter outbound notifier registry poisoned");
+        if let Some(current) = notifiers.get(&self.adapter_id).and_then(Weak::upgrade)
+            && Arc::ptr_eq(&current, &self.notify)
+        {
+            notifiers.remove(&self.adapter_id);
+        }
+    }
+}
+
+fn register_adapter_outbound_notifier(adapter_id: &str) -> AdapterOutboundNotifierGuard {
+    let notify = Arc::new(Notify::new());
+    adapter_outbound_notifiers()
+        .lock()
+        .expect("adapter outbound notifier registry poisoned")
+        .insert(adapter_id.to_string(), Arc::downgrade(&notify));
+    AdapterOutboundNotifierGuard {
+        adapter_id: adapter_id.to_string(),
+        notify,
+    }
+}
+
+fn notify_adapter_outbound(adapter_id: &str) {
+    let notify = adapter_outbound_notifiers()
+        .lock()
+        .expect("adapter outbound notifier registry poisoned")
+        .get(adapter_id)
+        .and_then(Weak::upgrade);
+    if let Some(notify) = notify {
+        notify.notify_one();
+    }
+}
+
+fn adapter_outbound_notifiers() -> &'static Mutex<HashMap<String, Weak<Notify>>> {
+    static NOTIFIERS: OnceLock<Mutex<HashMap<String, Weak<Notify>>>> = OnceLock::new();
+    NOTIFIERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 async fn handle_worker_event(

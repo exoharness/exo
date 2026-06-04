@@ -64,7 +64,7 @@ The setup prompt at `setup-prompt.md` asks Exoclaw to create a library adapter s
     "type": "discord",
     "botTokenSecretId": "discord-bot-token",
     "defaultChannelId": null,
-    "trigger": "mentions_only",
+    "trigger": "all_messages",
     "allowedChannels": null,
     "allowBots": false
   }
@@ -83,13 +83,11 @@ Ask Exoclaw to send a Discord message with the adapter id returned by setup:
 Send "hello from exo" to Discord using adapter <adapter-id> and target <channel-id>.
 ```
 
-To test inbound wakeups with the default `mentions_only` trigger, mention the bot in the channel:
+To test inbound wakeups with the default `all_messages` trigger, send any normal message in a channel the bot can read. If you configure `mentions_only`, mention the bot instead:
 
 ```text
 @YourBot hello exo
 ```
-
-For `all_messages`, every message in allowed channels can wake the Exoclaw conversation.
 
 ## Configuration
 

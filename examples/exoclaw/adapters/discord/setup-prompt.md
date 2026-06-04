@@ -7,7 +7,7 @@ Create a library Discord adapter if one does not already exist for this conversa
 - type: `discord`
 - botTokenSecretId: `discord-bot-token`
 - defaultChannelId: `null`
-- trigger: `mentions_only`
+- trigger: `all_messages`
 - allowedChannels: `null`
 - allowBots: `false`
 

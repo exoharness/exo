@@ -74,7 +74,7 @@ Options:
   --local-prompt-file <path>    Local profile prompt path (default: .exo/exoclaw-profile.md)
   --setup <adapter>            Send adapters/<adapter>/setup-prompt.md.
                                 May be passed more than once.
-  --setup-all                  Equivalent to --setup signal --setup whatsapp --setup irc
+  --setup-all                  Equivalent to --setup signal --setup whatsapp --setup irc --setup discord
                                 For whatsapp/signal, print pairing QR and pause.
   --initial-prompt-file <path> Send this file as the first message before REPL
   --pull-sandbox               Pull the sandbox image before starting
@@ -937,6 +937,7 @@ while [[ $# -gt 0 ]]; do
       add_setup_adapter "signal"
       add_setup_adapter "whatsapp"
       add_setup_adapter "irc"
+      add_setup_adapter "discord"
       shift
       ;;
     --initial-prompt-file)
