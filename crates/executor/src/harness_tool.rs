@@ -1,9 +1,9 @@
 use crate::{AgentConfig, ConversationConfig, ToolRuntime};
 use async_trait::async_trait;
 use exoharness::{
-    ConversationHandle, CreateSandboxRequest, DEFAULT_SANDBOX_IMAGE, EventData, EventKind,
-    EventQuery, EventQueryDirection, FileSystemMount, FileSystemMountMode, Result,
-    RunInSandboxRequest, SandboxProvider, ToolRequest, ToolResult,
+    ConversationHandle, CreateSandboxRequest, EventData, EventKind, EventQuery,
+    EventQueryDirection, FileSystemMount, FileSystemMountMode, Result, RunInSandboxRequest,
+    SandboxProvider, ToolRequest, ToolResult,
 };
 use futures::io::AsyncReadExt;
 use serde::{Deserialize, Serialize};
@@ -105,15 +105,17 @@ pub(crate) async fn ensure_shell_sandbox(
         .map(|mount| mount.mount_path.clone())
         .unwrap_or_else(|| "/".to_string());
     let desired_mounts = normalize_mounts(&config.mounts);
-    let desired_image = config
-        .effective_sandbox_image(agent_config)
-        .map(str::to_string)
-        .unwrap_or_else(|| DEFAULT_SANDBOX_IMAGE.to_string());
     let desired_provider = config.effective_sandbox_provider(agent_config);
+    // Empty means "unspecified"; the harness fills the provider's default.
+    let requested_image = config.effective_sandbox_image(agent_config);
+    let desired_image = requested_image.map(str::to_string).unwrap_or_default();
     let desired_enable_networking = agent_config.enable_networking;
 
     if let Some(sandbox) = latest_shell_sandbox(conversation, desired_provider).await? {
-        let config_matches = sandbox.image == desired_image
+        // When no image was requested, the stored sandbox holds the provider's
+        // resolved default — don't treat that as a mismatch.
+        let image_matches = requested_image.is_none_or(|img| sandbox.image == img);
+        let config_matches = image_matches
             && sandbox.default_workdir == desired_default_workdir
             && sandbox.file_system_mounts == desired_mounts
             && sandbox.enable_networking == desired_enable_networking

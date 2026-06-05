@@ -260,6 +260,7 @@ impl BasicExoHarnessInner {
                             region,
                             organization_id,
                             api_url,
+                            ..
                         },
                     ..
                 } => Some((api_key_secret_id, region, organization_id, api_url)),
@@ -283,6 +284,19 @@ impl BasicExoHarnessInner {
             toolbox_url: crate::DEFAULT_DAYTONA_TOOLBOX_URL.to_string(),
             target: region,
             organization_id,
+        }))
+    }
+
+    /// The configured default base image for `provider`, from the newest
+    /// `Binding::Sandbox` for it. `None` when no such binding exists, so the
+    /// backend applies its own intrinsic default.
+    async fn binding_default_image(&self, provider: SandboxProvider) -> Result<Option<String>> {
+        let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
+        Ok(bindings.into_iter().rev().find_map(|record| {
+            let Binding::Sandbox { config, .. } = record.binding else {
+                return None;
+            };
+            (config.provider() == provider).then(|| config.default_image().to_string())
         }))
     }
 }
@@ -1200,10 +1214,26 @@ impl ConversationHandle for BasicConversationHandle {
         let _guard = self.harness.inner.write_lock.lock().await;
         let sandbox_id = format!("sandbox-{}", Uuid7::now());
         let conversation_dir = self.conversation_dir();
+
+        // Resolve the base image: an agent's explicit image, else the provider
+        // binding's default_image, else empty (the backend applies its own).
+        let image = if !request.image.trim().is_empty() {
+            request.image.clone()
+        } else if let Some(default) = self
+            .harness
+            .inner
+            .binding_default_image(request.provider)
+            .await?
+        {
+            default
+        } else {
+            request.image.clone()
+        };
+
         let metadata = StoredSandbox {
             id: sandbox_id.clone(),
             provider: request.provider,
-            image: request.image.clone(),
+            image: image.clone(),
             default_workdir: request.default_workdir.clone(),
             file_system_mounts: request.file_system_mounts.clone().unwrap_or_default(),
             enable_networking: request.enable_networking.unwrap_or(true),

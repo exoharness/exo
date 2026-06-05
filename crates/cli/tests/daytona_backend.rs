@@ -15,7 +15,7 @@ use exoharness::{
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::time::Duration;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // ─────────────────────── Test fixtures / helpers ───────────────────────
@@ -75,6 +75,17 @@ async fn mount_find(server: &MockServer, items: Vec<Value>) {
         .await;
 }
 
+/// Mount `GET /sandbox/{id}` returning a `started` sandbox, so `acquire`'s
+/// wait-until-started poll resolves immediately. (`path_regex` matches a single
+/// id segment, so it won't shadow `/sandbox` or `/sandbox/{id}/{action}`.)
+async fn mount_get_started(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/sandbox/[^/]+$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(sandbox_json("sb", "started")))
+        .mount(server)
+        .await;
+}
+
 // ─────────────────────── acquire: find-or-create ───────────────────────
 
 #[tokio::test]
@@ -89,6 +100,8 @@ async fn acquire_creates_when_no_warm_match() {
         .expect(1)
         .mount(&server)
         .await;
+
+    mount_get_started(&server).await;
 
     let request = make_request("conv-1", "sandbox-1");
     let _handle = backend
@@ -118,11 +131,12 @@ async fn acquire_creates_when_no_warm_match() {
         "labels should include exo.sandbox.spec-hash: {labels:?}"
     );
 
-    // Daytona's `snapshot` field refers to a pre-registered named snapshot, not
-    // a docker image — a fresh create must never set it.
-    assert!(
-        body.get("snapshot").is_none() || body["snapshot"].is_null(),
-        "fresh acquire must NOT set `snapshot`: {body:?}"
+    // A fresh create routes the requested image into Daytona's `snapshot`
+    // selector (Daytona's only base-image lever).
+    assert_eq!(
+        body.get("snapshot").and_then(Value::as_str),
+        Some("docker.io/library/ubuntu:24.04"),
+        "fresh acquire should pass the requested image as `snapshot`: {body:?}"
     );
 }
 
@@ -133,6 +147,7 @@ async fn acquire_reuses_running_match_without_create_or_start() {
 
     // A labelled, already-running match: no create and no start should follow.
     mount_find(&server, vec![sandbox_json("sb-running", "started")]).await;
+    mount_get_started(&server).await;
 
     let request = make_request("conv-3", "sandbox-3");
     backend
@@ -162,6 +177,7 @@ async fn acquire_starts_stopped_match_without_creating() {
         .expect(1)
         .mount(&server)
         .await;
+    mount_get_started(&server).await;
 
     let request = make_request("conv-4", "sandbox-4");
     backend
@@ -193,6 +209,7 @@ async fn acquire_does_not_start_transient_match() {
     // A sandbox mid-startup must be left alone: issuing /start on a "starting"
     // sandbox races with Daytona's own transition.
     mount_find(&server, vec![sandbox_json("sb-starting", "starting")]).await;
+    mount_get_started(&server).await;
 
     backend
         .acquire(make_request("conv-12", "sandbox-12"))
@@ -222,6 +239,7 @@ async fn acquire_replaces_dead_match_with_fresh_create() {
         .expect(1)
         .mount(&server)
         .await;
+    mount_get_started(&server).await;
 
     backend
         .acquire(make_request("conv-13", "sandbox-13"))
@@ -292,6 +310,7 @@ async fn acquire_filters_by_label_as_single_json_query_param() {
         .respond_with(ResponseTemplate::new(200).set_body_json(sandbox_json("sb-q", "started")))
         .mount(&server)
         .await;
+    mount_get_started(&server).await;
 
     let request = make_request("conv-6", "sandbox-6");
     backend.acquire(request).await.unwrap();
@@ -351,6 +370,7 @@ async fn stop_calls_stop_endpoint_not_delete() {
         .expect(1)
         .mount(&server)
         .await;
+    mount_get_started(&server).await;
 
     let handle = backend
         .acquire(make_request("conv-7", "sandbox-7"))
@@ -393,6 +413,7 @@ async fn snapshot_returns_daytona_snapshot_payload_with_manifest() {
         .expect(1)
         .mount(&server)
         .await;
+    mount_get_started(&server).await;
 
     let handle = backend
         .acquire(make_request("conv-8", "sandbox-8"))
@@ -446,6 +467,7 @@ async fn acquire_from_snapshot_passes_snapshot_name_in_create_body() {
         .expect(1)
         .mount(&server)
         .await;
+    mount_get_started(&server).await;
 
     let manifest = json!({ "snapshot_name": "exo-snap-canonical-fixture" });
     let payload = SnapshotPayload {
@@ -519,6 +541,7 @@ async fn exec_uses_toolbox_url_not_api_url() {
         .expect(1)
         .mount(&server)
         .await;
+    mount_get_started(&server).await;
 
     let handle = backend
         .acquire(make_request("conv-11", "sandbox-11"))

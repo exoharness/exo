@@ -695,40 +695,62 @@ pub enum Binding {
     },
 }
 
-/// Per-provider connection config for a `Binding::Sandbox`. Providers with no
-/// remote config (Docker, local) have no binding.
+/// Per-provider sandbox config for a `Binding::Sandbox`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "provider", rename_all = "lowercase")]
 pub enum SandboxProviderConfig {
+    Docker {
+        #[serde(default = "default_docker_image")]
+        default_image: String,
+    },
     Daytona {
-        /// Secret-store id of the API key. Pinned by id: re-setting the secret's
-        /// value under the same name won't switch this binding until repointed.
+        /// Secret-store id of the API key.
         api_key_secret_id: SecretId,
-        /// Daytona `target` (`us` / `eu` / `experimental`; CRIU snapshot support
-        /// requires `experimental` as of 6/5/2026).
+        /// Daytona `target` (`us` / `eu` / `experimental`; Note: CRIU snapshot support requires `experimental` as of 6/5/2026).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         region: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         organization_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         api_url: Option<String>,
+        #[serde(default = "default_daytona_image")]
+        default_image: String,
     },
     // To be implemented in followup PRs:
     // E2b {
     //     api_key_secret_id: SecretId,
     //     api_url: Option<String>,
+    //     default_image: String,  // #[serde(default = "default_e2b_image")]
     // },
     // ExeDev {
     //     token_secret_id: SecretId,     // bearer token (SSH-key-signed), not an api key
     //     region: Option<String>,        // datacenter: LAX | NYC | FRA | ...
     //     api_url: Option<String>,
+    //     default_image: String,   // #[serde(default = "default_exedev_image")]
     // },
+}
+
+pub fn default_daytona_image() -> String {
+    "daytonaio/sandbox:0.8.0".to_string()
+}
+pub fn default_docker_image() -> String {
+    "docker.io/library/ubuntu:24.04".to_string()
 }
 
 impl SandboxProviderConfig {
     pub fn provider(&self) -> SandboxProvider {
         match self {
             Self::Daytona { .. } => SandboxProvider::Daytona,
+            Self::Docker { .. } => SandboxProvider::Docker,
+        }
+    }
+
+    /// The binding's configured default base image.
+    pub fn default_image(&self) -> &str {
+        match self {
+            Self::Daytona { default_image, .. } | Self::Docker { default_image, .. } => {
+                default_image
+            }
         }
     }
 }

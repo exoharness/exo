@@ -29,8 +29,8 @@ use executor::{
     Harness, HarnessAgent, HarnessConversation, HttpExoHarness, LocalSandboxExoHarness,
     PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxProvider,
     SandboxProviderConfig, Secret, SecretBackendChoice, SendRequest, ToolRequest, ToolRuntime,
-    TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, load_agent_config,
-    serve_exoharness_http_listener_with_options,
+    TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, default_daytona_image, default_docker_image,
+    load_agent_config, serve_exoharness_http_listener_with_options,
 };
 use lingua::Message;
 use lingua::universal::{AssistantContent, AssistantContentPart, ToolContentPart, UserContent};
@@ -537,9 +537,9 @@ enum ProviderCommands {
         /// Binding name (default: the provider name).
         #[arg(long)]
         name: Option<String>,
-        /// Secret (by name) holding the provider's API key.
+        /// Secret (by name) holding the provider's API key. Required for Daytona.
         #[arg(long)]
-        secret: String,
+        secret: Option<String>,
         /// Region/target. Daytona: us | eu | experimental.
         #[arg(long)]
         region: Option<String>,
@@ -547,6 +547,9 @@ enum ProviderCommands {
         organization_id: Option<String>,
         #[arg(long)]
         api_url: Option<String>,
+        /// Default base image for sandboxes that don't request one.
+        #[arg(long)]
+        default_image: Option<String>,
     },
 }
 
@@ -1660,21 +1663,31 @@ async fn main() -> Result<()> {
                 region,
                 organization_id,
                 api_url,
+                default_image,
             } => {
-                let secret_id = find_secret_id(harness.exoharness_handle().as_ref(), &secret)
-                    .await?
-                    .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
                 let binding_name = name.unwrap_or_else(|| format!("{provider:?}").to_lowercase());
                 let config = match provider {
-                    SandboxProviderArg::Daytona => SandboxProviderConfig::Daytona {
-                        api_key_secret_id: secret_id,
-                        region,
-                        organization_id,
-                        api_url,
+                    SandboxProviderArg::Daytona => {
+                        let secret =
+                            secret.ok_or_else(|| anyhow!("--secret is required for daytona"))?;
+                        let secret_id =
+                            find_secret_id(harness.exoharness_handle().as_ref(), &secret)
+                                .await?
+                                .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
+                        SandboxProviderConfig::Daytona {
+                            api_key_secret_id: secret_id,
+                            region,
+                            organization_id,
+                            api_url,
+                            default_image: default_image.unwrap_or_else(default_daytona_image),
+                        }
+                    }
+                    SandboxProviderArg::Docker => SandboxProviderConfig::Docker {
+                        default_image: default_image.unwrap_or_else(default_docker_image),
                     },
                     other => bail!(
-                        "provider {other:?} has no binding-based config (Docker/local need none; \
-                         E2B and exe.dev are followups)"
+                        "provider {other:?} has no binding-based config yet \
+                         (E2B and exe.dev are followups)"
                     ),
                 };
                 let id = harness

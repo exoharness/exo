@@ -1075,6 +1075,7 @@ async fn daytona_sandbox_binding_drives_provider_config() {
                 region: Some("experimental".to_string()),
                 organization_id: Some("org-1".to_string()),
                 api_url: None,
+                default_image: crate::default_daytona_image(),
             },
         })
         .await
