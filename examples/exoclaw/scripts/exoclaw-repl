@@ -1,0 +1,1005 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+
+EXO_BIN="${EXO_BIN:-$ROOT_DIR/target/debug/exo}"
+SCHEDULER_BIN="${EXOCLAW_SCHEDULER_BIN:-$ROOT_DIR/target/debug/exoclaw-scheduler-runner}"
+ENV_FILE="${EXO_ENV_FILE:-$ROOT_DIR/.env}"
+MODEL="${EXO_MODEL:-gpt-5.4}"
+AGENT="${EXO_AGENT:-exoclaw-agent}"
+AGENT_NAME="${EXO_AGENT_NAME:-Exoclaw Agent}"
+CONVERSATION="${EXO_CONVERSATION:-dev}"
+CONVERSATION_NAME="${EXO_CONVERSATION_NAME:-Dev}"
+MODULE="${EXO_MODULE:-examples/exoclaw/harness.ts}"
+HARNESS="exoclaw"
+LOCAL_PROMPT_FILE="${EXOCLAW_LOCAL_PROMPT_FILE:-$ROOT_DIR/.exo/exoclaw-profile.md}"
+SANDBOX_IMAGE="${EXO_SANDBOX_IMAGE:-ubuntu:24.04}"
+NETWORKING="${EXO_NETWORKING:-enabled}"
+SHELL_PROGRAM="${EXO_SHELL_PROGRAM:-/bin/bash}"
+SANDBOX_SCOPE="${EXO_SANDBOX_SCOPE:-}"
+SCHEDULER_INTERVAL_SECONDS="${EXO_SCHEDULER_INTERVAL_SECONDS:-10}"
+COMMAND="repl"
+USE_SANDBOX=true
+PULL_SANDBOX=false
+START_SCHEDULER="${EXO_START_SCHEDULER:-true}"
+START_ADAPTERS="${EXO_START_ADAPTERS:-true}"
+ADAPTER_LIMIT="${EXO_ADAPTER_LIMIT:-50}"
+CONTROL=false
+SETUP_PROFILE=false
+declare -a CONTROL_PIDS=()
+SETUP_ADAPTER="${EXO_SETUP_ADAPTER:-}"
+declare -a SETUP_ADAPTERS=()
+if [[ -n "$SETUP_ADAPTER" ]]; then
+  SETUP_ADAPTERS+=("$SETUP_ADAPTER")
+fi
+INITIAL_PROMPT_FILE="${EXO_INITIAL_PROMPT_FILE:-}"
+export EXOCLAW_LOCAL_PROMPT_FILE="$LOCAL_PROMPT_FILE"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  examples/exoclaw/scripts/exoclaw-repl [options]
+  examples/exoclaw/scripts/exoclaw-repl list
+  examples/exoclaw/scripts/exoclaw-repl delall all
+  examples/exoclaw/scripts/exoclaw-repl fresh
+  examples/exoclaw/scripts/exoclaw-repl stop-all
+  examples/exoclaw/scripts/exoclaw-repl setup-profile
+  examples/exoclaw/scripts/exoclaw-repl setup-sandbox
+
+Default behavior creates or reuses an Exoclaw agent and conversation, starts the
+local scheduler and adapter loops, then starts a REPL. It reads .env by default
+if present.
+
+Options:
+  --model <model>              Model binding name (default: gpt-5.4)
+  --agent <slug>               Agent slug (default: exoclaw-agent)
+  --conversation <slug>        Conversation slug (default: dev)
+  --convo <slug>               Alias for --conversation
+  --agent-name <name>          Agent display name (default: Exoclaw Agent)
+  --conversation-name <name>   Conversation display name (default: Dev)
+  --module <path>              Exoclaw TypeScript harness module
+  --sandbox-image <image>      Sandbox image (default: ubuntu:24.04)
+  --networking <mode>          enabled or disabled (default: enabled)
+  --shell-program <path>       Shell in the sandbox (default: /bin/bash)
+  --sandbox-scope <scope>      agent or conversation (default: Exoclaw agent)
+  --scheduler-interval <secs>  Scheduler polling interval (default: 10)
+  --no-scheduler               Do not start the local scheduled task runner
+  --scheduler                  Start the local scheduled task runner
+  --no-adapters                Do not start the local adapter runner
+  --adapters                   Start the local adapter runner
+  --adapter-limit <n>          Max adapters supervised by the runner (default: 50)
+  --control                    Show live scheduler and adapter logs beside the REPL
+  --setup-profile              Prompt once and write the ignored local profile prompt
+  --local-prompt-file <path>    Local profile prompt path (default: .exo/exoclaw-profile.md)
+  --setup <adapter>            Send adapters/<adapter>/setup-prompt.md.
+                                May be passed more than once.
+  --setup-all                  Equivalent to --setup signal --setup whatsapp --setup irc --setup discord
+                                For whatsapp/signal, print pairing QR and pause.
+  --initial-prompt-file <path> Send this file as the first message before REPL
+  --pull-sandbox               Pull the sandbox image before starting
+  --no-sandbox                 Do not require or configure sandbox shell support
+  --env-file <path>            Env file to read if present (default: .env)
+  --exo-bin <path>             exo binary path (default: ./target/debug/exo)
+  --scheduler-bin <path>       Scheduler runner path (default: ./target/debug/exoclaw-scheduler-runner)
+  --help                       Show this help
+
+Environment overrides:
+  EXO_MODEL, EXO_AGENT, EXO_CONVERSATION, EXO_AGENT_NAME,
+  EXO_CONVERSATION_NAME, EXO_MODULE, EXO_SANDBOX_IMAGE,
+  EXO_NETWORKING, EXO_SHELL_PROGRAM, EXO_SANDBOX_SCOPE, EXO_ENV_FILE,
+  EXOCLAW_LOCAL_PROMPT_FILE,
+  EXO_BIN, EXO_START_SCHEDULER, EXO_START_ADAPTERS,
+  EXOCLAW_SCHEDULER_BIN, EXO_SCHEDULER_INTERVAL_SECONDS, EXO_ADAPTER_LIMIT,
+  EXO_SETUP_ADAPTER, EXO_INITIAL_PROMPT_FILE
+EOF
+}
+
+die() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+terminate_process_tree() {
+  local pid="$1"
+  kill_process_tree TERM "$pid"
+  sleep 1
+  kill_process_tree KILL "$pid"
+}
+
+kill_process_tree() {
+  local signal="$1"
+  local pid="$2"
+  local child
+  [[ "$pid" =~ ^[0-9]+$ ]] || return
+  if command -v pgrep >/dev/null 2>&1; then
+    while IFS= read -r child; do
+      [[ -n "$child" ]] || continue
+      kill_process_tree "$signal" "$child"
+    done < <(pgrep -P "$pid" 2>/dev/null || true)
+  fi
+  kill "-$signal" "$pid" >/dev/null 2>&1 || true
+}
+
+ensure_exo_bin() {
+  if [[ -x "$EXO_BIN" ]]; then
+    return
+  fi
+  if [[ "$EXO_BIN" != "$ROOT_DIR/target/debug/exo" ]]; then
+    die "exo binary is not executable: $EXO_BIN"
+  fi
+  build_exo
+}
+
+ensure_scheduler_bin() {
+  if [[ -x "$SCHEDULER_BIN" ]] && ! scheduler_source_newer_than "$SCHEDULER_BIN"; then
+    return
+  fi
+  if [[ "$SCHEDULER_BIN" != "$ROOT_DIR/target/debug/exoclaw-scheduler-runner" ]]; then
+    die "scheduler runner is not executable: $SCHEDULER_BIN"
+  fi
+  build_exoclaw_scheduler
+}
+
+ensure_signal_cli() {
+  if ! setup_requested "signal"; then
+    return
+  fi
+  if ! command -v signal-cli >/dev/null 2>&1; then
+    die "signal-cli is required for --setup signal. Install it first, for example: brew install signal-cli"
+  fi
+
+  local signal_cli_path
+  signal_cli_path="$(command -v signal-cli)"
+  if command -v file >/dev/null 2>&1 && file "$signal_cli_path" | grep -q "Mach-O"; then
+    echo "Warning: $signal_cli_path appears to be a native signal-cli executable."
+    echo "If outbound sends fail with NETWORK_FAILURE, use the JVM signal-cli distribution instead."
+  fi
+}
+
+setup_requested() {
+  local adapter="$1"
+  local requested
+  if [[ "${#SETUP_ADAPTERS[@]}" -eq 0 ]]; then
+    return 1
+  fi
+  for requested in "${SETUP_ADAPTERS[@]}"; do
+    if [[ "$requested" == "$adapter" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+add_setup_adapter() {
+  local adapter="$1"
+  [[ -n "$adapter" ]] || die "--setup requires an adapter name"
+  if [[ ! "$adapter" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    die "--setup must be an adapter name, not a path: $adapter"
+  fi
+  if setup_requested "$adapter"; then
+    return
+  fi
+  SETUP_ADAPTERS+=("$adapter")
+}
+
+build_exo() {
+  echo "Building exo binary..."
+  (cd "$ROOT_DIR" && CARGO_TARGET_DIR=target cargo build -p exo --ignore-rust-version)
+}
+
+build_exoclaw_scheduler() {
+  echo "Building Exoclaw scheduler runner..."
+  (cd "$ROOT_DIR" && CARGO_TARGET_DIR=target cargo build \
+    --manifest-path examples/exoclaw/scheduler-runner/Cargo.toml \
+    --ignore-rust-version)
+}
+
+scheduler_source_newer_than() {
+  local target="$1"
+  local path
+  for path in \
+    "$ROOT_DIR/examples/exoclaw/scheduler-runner/Cargo.toml" \
+    "$ROOT_DIR/examples/exoclaw/scheduler-runner/src"/*.rs; do
+    if [[ -e "$path" && "$path" -nt "$target" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+exo() {
+  "$EXO_BIN" --env-file-if-exists "$ENV_FILE" "$@"
+}
+
+scheduler_pid_file() {
+  echo "$ROOT_DIR/.exo/exoclaw-scheduler.pid"
+}
+
+scheduler_log_file() {
+  echo "$ROOT_DIR/.exo/exoclaw-scheduler.log"
+}
+
+adapters_pid_file() {
+  echo "$ROOT_DIR/.exo/exoclaw-adapters.pid"
+}
+
+adapters_log_file() {
+  echo "$ROOT_DIR/.exo/exoclaw-adapters.log"
+}
+
+scheduler_process_running() {
+  local pid_file pid command_line
+  pid_file="$(scheduler_pid_file)"
+  [[ -f "$pid_file" ]] || return 1
+  pid="$(<"$pid_file")"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" >/dev/null 2>&1 || return 1
+  if [[ "$SCHEDULER_BIN" -nt "$pid_file" ]]; then
+    echo "Restarting scheduler because $SCHEDULER_BIN is newer..."
+    terminate_process_tree "$pid"
+    return 1
+  fi
+  command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  [[ "$command_line" == *"exoclaw-scheduler-runner"*"run --watch"* ]]
+}
+
+adapters_process_running() {
+  local pid_file pid command_line
+  pid_file="$(adapters_pid_file)"
+  [[ -f "$pid_file" ]] || return 1
+  pid="$(<"$pid_file")"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" >/dev/null 2>&1 || return 1
+  if [[ "$EXO_BIN" -nt "$pid_file" ]]; then
+    echo "Restarting adapter runner because $EXO_BIN is newer..."
+    terminate_process_tree "$pid"
+    return 1
+  fi
+  if adapter_source_newer_than "$pid_file"; then
+    echo "Restarting adapter runner because adapter code changed..."
+    terminate_process_tree "$pid"
+    return 1
+  fi
+  command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  [[ "$command_line" == *"adapters run"* ]]
+}
+
+adapter_source_newer_than() {
+  local target="$1"
+  local path
+  for path in \
+    "$ROOT_DIR/examples/exoclaw/adapters/protocol.ts" \
+    "$ROOT_DIR/examples/exoclaw/adapters"/*/worker.ts; do
+    if [[ -e "$path" && "$path" -nt "$target" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+ensure_scheduler() {
+  if [[ "$START_SCHEDULER" != true ]]; then
+    return
+  fi
+  ensure_scheduler_bin
+  if scheduler_process_running; then
+    return
+  fi
+
+  mkdir -p "$ROOT_DIR/.exo"
+  local pid_file log_file
+  pid_file="$(scheduler_pid_file)"
+  log_file="$(scheduler_log_file)"
+  echo "Starting scheduler loop..."
+  nohup "$SCHEDULER_BIN" --env-file-if-exists "$ENV_FILE" \
+    run --watch --interval-seconds "$SCHEDULER_INTERVAL_SECONDS" \
+    >>"$log_file" 2>&1 &
+  echo "$!" >"$pid_file"
+  echo "Scheduler log: $log_file"
+}
+
+ensure_adapters() {
+  if [[ "$START_ADAPTERS" != true ]]; then
+    return
+  fi
+  if adapters_process_running; then
+    return
+  fi
+
+  mkdir -p "$ROOT_DIR/.exo"
+  local pid_file log_file
+  pid_file="$(adapters_pid_file)"
+  log_file="$(adapters_log_file)"
+  echo "Starting adapter runner..."
+  nohup "$EXO_BIN" --env-file-if-exists "$ENV_FILE" --harness "$HARNESS" \
+    adapters run --limit "$ADAPTER_LIMIT" \
+    >>"$log_file" 2>&1 &
+  echo "$!" >"$pid_file"
+  echo "Adapter log: $log_file"
+}
+
+container_image_exists() {
+  if command -v docker >/dev/null 2>&1; then
+    docker image inspect "$SANDBOX_IMAGE" >/dev/null 2>&1
+    return
+  fi
+  if command -v podman >/dev/null 2>&1; then
+    podman image exists "$SANDBOX_IMAGE" >/dev/null 2>&1
+    return
+  fi
+  return 2
+}
+
+container_pull_image() {
+  if command -v docker >/dev/null 2>&1; then
+    docker pull "$SANDBOX_IMAGE"
+    return
+  fi
+  if command -v podman >/dev/null 2>&1; then
+    podman pull "$SANDBOX_IMAGE"
+    return
+  fi
+  die "docker or podman is required to pre-pull sandbox images"
+}
+
+ensure_sandbox_image() {
+  local status=0
+  container_image_exists || status=$?
+  case "$status" in
+    0)
+      return
+      ;;
+    1)
+      if [[ "$PULL_SANDBOX" == true ]]; then
+        echo "Pulling missing sandbox image $SANDBOX_IMAGE..."
+        container_pull_image
+      else
+        die "sandbox image $SANDBOX_IMAGE is not present; you have to either --pull-sandbox or use --no-sandbox"
+      fi
+      ;;
+    2)
+      die "docker/podman not found; you have to either install one or use --no-sandbox"
+      ;;
+  esac
+}
+
+setup_sandbox() {
+  ensure_exo_bin
+  container_pull_image
+}
+
+agent_exists() {
+  exo agent show "$AGENT" >/dev/null 2>&1
+}
+
+conversation_exists() {
+  exo conversation show "$AGENT" "$CONVERSATION" >/dev/null 2>&1
+}
+
+ensure_agent() {
+  if agent_exists; then
+    return
+  fi
+
+  echo "Creating agent $AGENT..."
+  local args=(
+    --harness "$HARNESS"
+    agent create "$AGENT_NAME"
+    --slug "$AGENT"
+    --module "$MODULE"
+    --model "$MODEL"
+  )
+  if [[ "$USE_SANDBOX" == true ]]; then
+    args+=(--sandbox-image "$SANDBOX_IMAGE" --networking "$NETWORKING")
+  fi
+  exo "${args[@]}"
+}
+
+ensure_conversation() {
+  if conversation_exists; then
+    if [[ -n "$SANDBOX_SCOPE" ]]; then
+      exo conversation update "$AGENT" "$CONVERSATION" \
+        --sandbox-scope "$SANDBOX_SCOPE" >/dev/null
+    fi
+    return
+  fi
+
+  echo "Creating conversation $CONVERSATION..."
+  local args=(conversation create "$AGENT" "$CONVERSATION_NAME" --slug "$CONVERSATION")
+  if [[ -n "$SANDBOX_SCOPE" ]]; then
+    args+=(--sandbox-scope "$SANDBOX_SCOPE")
+  fi
+  exo "${args[@]}"
+  if [[ "$USE_SANDBOX" == true ]]; then
+    local update_args=(conversation update "$AGENT" "$CONVERSATION" --shell-program "$SHELL_PROGRAM")
+    if [[ -n "$SANDBOX_SCOPE" ]]; then
+      update_args+=(--sandbox-scope "$SANDBOX_SCOPE")
+    fi
+    exo "${update_args[@]}" >/dev/null
+  fi
+}
+
+list_agents_and_conversations() {
+  ensure_exo_bin
+  echo "Agents and conversations:"
+  local agents
+  agents="$(exo agent list | awk 'NR > 1 { print $1 }')"
+  if [[ -z "$agents" ]]; then
+    echo "  none"
+    return
+  fi
+
+  while IFS= read -r agent; do
+    [[ -z "$agent" ]] && continue
+    echo
+    exo agent show "$agent" | awk '
+      /^slug:/ { slug=$2 }
+      /^name:/ { name=substr($0, 7) }
+      END {
+        if (slug != "") {
+          printf "%s", slug
+          if (name != "") {
+            printf " - %s", name
+          }
+          printf "\n"
+        }
+      }
+    '
+    exo conversation list "$agent" | awk 'NR == 1 { next } { printf "  %s - %s\n", $1, $3 }'
+  done <<<"$agents"
+}
+
+stop_scheduler() {
+  local pid_file pid
+  pid_file="$(scheduler_pid_file)"
+  if [[ -f "$pid_file" ]]; then
+    pid="$(<"$pid_file")"
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" >/dev/null 2>&1; then
+      echo "Stopping Exoclaw scheduler..."
+      terminate_process_tree "$pid"
+    fi
+  fi
+  pkill -f "exoclaw-scheduler-runner .*run --watch" >/dev/null 2>&1 || true
+  rm -f "$pid_file"
+}
+
+stop_adapters() {
+  local pid_file pid
+  pid_file="$(adapters_pid_file)"
+  if [[ -f "$pid_file" ]]; then
+    pid="$(<"$pid_file")"
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" >/dev/null 2>&1; then
+      echo "Stopping Exoclaw adapter runner..."
+      terminate_process_tree "$pid"
+    fi
+  fi
+  pkill -f "exo .*adapters run" >/dev/null 2>&1 || true
+  pkill -f "tsx examples/exoclaw/adapters/.*/worker.ts" >/dev/null 2>&1 || true
+  rm -f "$pid_file"
+}
+
+stop_all_processes() {
+  stop_scheduler
+  stop_adapters
+  echo "Stopped Exoclaw scheduler and adapter runners. State in .exo was preserved."
+}
+
+delete_adapter_state() {
+  stop_adapters
+  rm -rf "$ROOT_DIR/.exo/adapters"
+  rm -f \
+    "$ROOT_DIR/.exo/exoclaw-adapters.pid" \
+    "$ROOT_DIR/.exo/exoclaw-adapters.log" \
+    "$ROOT_DIR/.exo/exoclaw-adapters.lock"
+}
+
+delete_all_agents_and_conversations() {
+  ensure_exo_bin
+  stop_scheduler
+  delete_adapter_state
+
+  local agents
+  agents="$(exo agent list | awk 'NR > 1 { print $1 }')"
+  if [[ -z "$agents" ]]; then
+    echo "No agents to delete."
+    return
+  fi
+
+  while IFS= read -r agent; do
+    [[ -z "$agent" ]] && continue
+
+    local conversations
+    conversations="$(exo conversation list "$agent" | awk 'NR > 1 { print $1 }')"
+    while IFS= read -r conversation; do
+      [[ -z "$conversation" ]] && continue
+      echo "Deleting conversation $agent/$conversation..."
+      exo conversation delete "$agent" "$conversation" >/dev/null
+    done <<<"$conversations"
+
+    echo "Deleting agent $agent..."
+    exo agent delete "$agent" >/dev/null
+  done <<<"$agents"
+
+  echo "Deleted all agents and conversations."
+}
+
+setup_local_profile() {
+  mkdir -p "$(dirname "$LOCAL_PROMPT_FILE")"
+
+  if [[ -f "$LOCAL_PROMPT_FILE" ]]; then
+    echo "Local Exoclaw profile already exists: $LOCAL_PROMPT_FILE"
+    read -r -p "Overwrite it? [y/N] " overwrite
+    case "$overwrite" in
+      y|Y|yes|YES) ;;
+      *)
+        echo "Keeping existing local profile."
+        return
+        ;;
+    esac
+  fi
+
+  local user_name extra_instructions
+  echo "Creating local Exoclaw profile: $LOCAL_PROMPT_FILE"
+  read -r -p "Your name, or blank to skip: " user_name
+  read -r -p "Additional local instructions, or blank to skip: " extra_instructions
+
+  {
+    echo "# Local Exoclaw Profile"
+    echo
+    echo "This file is local to this machine and should not be committed."
+    if [[ -n "$user_name" ]]; then
+      echo
+      echo "The user's name is $user_name."
+    fi
+    if [[ -n "$extra_instructions" ]]; then
+      echo
+      echo "$extra_instructions"
+    fi
+  } >"$LOCAL_PROMPT_FILE"
+
+  echo "Wrote local profile prompt. The harness will load it from EXOCLAW_LOCAL_PROMPT_FILE."
+}
+
+fresh_start() {
+  build_exo
+  delete_all_agents_and_conversations
+  if [[ "$USE_SANDBOX" == true ]]; then
+    PULL_SANDBOX=true
+  fi
+  run_repl
+}
+
+run_repl() {
+  ensure_exo_bin
+  if [[ "$SETUP_PROFILE" == true ]]; then
+    setup_local_profile
+  fi
+  ensure_signal_cli
+  if [[ "$USE_SANDBOX" == true ]]; then
+    ensure_sandbox_image
+  fi
+  ensure_agent
+  ensure_conversation
+  local scheduler_log_start_line
+  scheduler_log_start_line="$(scheduler_log_line_count)"
+  ensure_scheduler
+  local adapter_log_start_line
+  adapter_log_start_line="$(adapter_log_line_count)"
+  send_startup_prompt
+  ensure_adapters
+  show_signal_qr_if_needed "$adapter_log_start_line"
+  show_whatsapp_qr_if_needed "$adapter_log_start_line"
+  if [[ "$CONTROL" == true ]]; then
+    run_control_repl "$scheduler_log_start_line" "$adapter_log_start_line"
+  else
+    exec "$EXO_BIN" --env-file-if-exists "$ENV_FILE" repl \
+      --agent "$AGENT" \
+      --conversation "$CONVERSATION"
+  fi
+}
+
+adapter_log_line_count() {
+  local log_file
+  log_file="$(adapters_log_file)"
+  if [[ -f "$log_file" ]]; then
+    wc -l <"$log_file" | tr -d '[:space:]'
+  else
+    echo 0
+  fi
+}
+
+scheduler_log_line_count() {
+  local log_file
+  log_file="$(scheduler_log_file)"
+  if [[ -f "$log_file" ]]; then
+    wc -l <"$log_file" | tr -d '[:space:]'
+  else
+    echo 0
+  fi
+}
+
+run_control_repl() {
+  local scheduler_start_line="$1"
+  local adapter_start_line="$2"
+
+  cleanup_control_logs() {
+    local pid
+    for pid in "${CONTROL_PIDS[@]:-}"; do
+      kill "$pid" >/dev/null 2>&1 || true
+    done
+  }
+  trap cleanup_control_logs EXIT INT TERM
+
+  echo "Control console enabled. Streaming scheduler and adapter logs into this REPL."
+  if [[ "$START_SCHEDULER" == true ]]; then
+    start_control_log_tail "scheduler" "$(scheduler_log_file)" "$scheduler_start_line"
+  fi
+  if [[ "$START_ADAPTERS" == true ]]; then
+    start_control_log_tail "adapters" "$(adapters_log_file)" "$adapter_start_line"
+  fi
+
+  "$EXO_BIN" --env-file-if-exists "$ENV_FILE" repl \
+    --agent "$AGENT" \
+    --conversation "$CONVERSATION"
+}
+
+start_control_log_tail() {
+  local label="$1"
+  local log_file="$2"
+  local start_line="$3"
+  local tail_start=$((start_line + 1))
+
+  mkdir -p "$(dirname "$log_file")"
+  touch "$log_file"
+  echo "[$label] tailing $log_file"
+  tail -n +"$tail_start" -F "$log_file" 2>/dev/null \
+    | awk -v label="$label" '{ print "[" label "] " $0; fflush(); }' &
+  CONTROL_PIDS+=("$!")
+}
+
+startup_prompt_file() {
+  local path="$1"
+  if [[ ! -f "$path" ]]; then
+    die "startup prompt file not found: $path"
+  fi
+  if [[ ! -s "$path" ]]; then
+    die "startup prompt file is empty: $path"
+  fi
+  printf '%s\n' "$path"
+}
+
+adapter_setup_prompt_file() {
+  local adapter="$1"
+  if [[ ! "$adapter" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    die "--setup must be an adapter name, not a path: $adapter"
+  fi
+  startup_prompt_file "$ROOT_DIR/examples/exoclaw/adapters/$adapter/setup-prompt.md"
+}
+
+send_startup_prompt() {
+  if [[ "${#SETUP_ADAPTERS[@]}" -eq 0 && -z "$INITIAL_PROMPT_FILE" ]]; then
+    return
+  fi
+
+  local adapter
+  for adapter in "${SETUP_ADAPTERS[@]}"; do
+    send_prompt_from_files "$(adapter_setup_prompt_file "$adapter")"
+  done
+
+  if [[ -n "$INITIAL_PROMPT_FILE" ]]; then
+    send_prompt_from_files "$(startup_prompt_file "$INITIAL_PROMPT_FILE")"
+  fi
+}
+
+send_prompt_from_files() {
+  local files=("$@")
+  local prompt=""
+  local file
+  for file in "${files[@]}"; do
+    prompt+=$'\n\n'
+    prompt+="$(<"$file")"
+  done
+  prompt="${prompt#$'\n\n'}"
+  if [[ -z "${prompt//[[:space:]]/}" ]]; then
+    die "startup prompt is empty"
+  fi
+
+  echo "Sending startup prompt from: ${files[*]}"
+  exo conversation send "$AGENT" "$CONVERSATION" "$prompt"
+}
+
+show_whatsapp_qr_if_needed() {
+  if ! setup_requested "whatsapp"; then
+    return
+  fi
+
+  local start_line="${1:-0}"
+  local log_file
+  log_file="$(adapters_log_file)"
+  echo "Waiting for WhatsApp QR code in $log_file..."
+
+  local attempt qr
+  for attempt in {1..30}; do
+    if [[ -f "$log_file" ]]; then
+      qr="$(awk -v start="$start_line" '
+        NR <= start { next }
+        /\[whatsapp-adapter\] Scan this QR with WhatsApp:/ {
+          capture = 1
+          block = $0 "\n"
+          next
+        }
+        capture {
+          if ($0 ~ /^\[[^]]+-adapter\]/) {
+            capture = 0
+            next
+          }
+          block = block $0 "\n"
+        }
+        END {
+          if (block != "") {
+            printf "%s", block
+          }
+        }
+      ' "$log_file")"
+      if [[ -n "$qr" ]]; then
+        echo
+        printf '%s\n' "$qr"
+        echo "Scan this QR from WhatsApp: Settings > Linked devices > Link a device."
+        echo
+        read -r -p "Press Enter after WhatsApp finishes linking the device..."
+        return
+      fi
+    fi
+    sleep 1
+  done
+
+  echo "No WhatsApp QR code found yet. The adapter may already be paired, or it may still be starting."
+  echo "Watch the adapter log with: tail -f $log_file"
+  read -r -p "Press Enter to continue to the REPL..."
+}
+
+show_signal_qr_if_needed() {
+  if ! setup_requested "signal"; then
+    return
+  fi
+
+  local start_line="${1:-0}"
+  local log_file
+  log_file="$(adapters_log_file)"
+  echo "Waiting for Signal linked-device QR code in $log_file..."
+
+  local attempt qr
+  for attempt in {1..30}; do
+    if [[ -f "$log_file" ]]; then
+      qr="$(awk -v start="$start_line" '
+        NR <= start { next }
+        /\[signal-adapter\] Scan this QR with Signal:/ {
+          capture = 1
+          block = $0 "\n"
+          next
+        }
+        capture {
+          if ($0 ~ /^\[[^]]+-adapter\]/) {
+            capture = 0
+            next
+          }
+          block = block $0 "\n"
+        }
+        END {
+          if (block != "") {
+            printf "%s", block
+          }
+        }
+      ' "$log_file")"
+      if [[ -n "$qr" ]]; then
+        echo
+        printf '%s\n' "$qr"
+        echo "Scan this QR from Signal: Settings > Linked devices > Link new device."
+        echo
+        read -r -p "Press Enter after Signal finishes linking the device..."
+        return
+      fi
+    fi
+    sleep 1
+  done
+
+  echo "No Signal QR code found yet. The adapter may already be linked, signal-cli may be missing, or it may still be starting."
+  echo "Watch the adapter log with: tail -f $log_file"
+  read -r -p "Press Enter to continue to the REPL..."
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    list)
+      shift
+      [[ $# -eq 0 ]] || die "list does not accept additional arguments"
+      COMMAND="list"
+      ;;
+    delall|delete-all)
+      shift
+      [[ "${1:-}" == "all" ]] || die "delall requires literal argument: all"
+      shift
+      [[ $# -eq 0 ]] || die "delall all does not accept additional arguments"
+      COMMAND="delall"
+      ;;
+    fresh|reset)
+      shift
+      COMMAND="fresh"
+      ;;
+    stop-all|stop)
+      shift
+      [[ $# -eq 0 ]] || die "stop-all does not accept additional arguments"
+      COMMAND="stop-all"
+      ;;
+    setup-profile)
+      shift
+      COMMAND="setup-profile"
+      ;;
+    setup-sandbox)
+      shift
+      COMMAND="setup-sandbox"
+      ;;
+    --model)
+      MODEL="${2:-}"
+      [[ -n "$MODEL" ]] || die "--model requires a value"
+      shift 2
+      ;;
+    --agent)
+      AGENT="${2:-}"
+      [[ -n "$AGENT" ]] || die "--agent requires a value"
+      shift 2
+      ;;
+    --conversation|--convo)
+      CONVERSATION="${2:-}"
+      [[ -n "$CONVERSATION" ]] || die "$1 requires a value"
+      shift 2
+      ;;
+    --agent-name)
+      AGENT_NAME="${2:-}"
+      [[ -n "$AGENT_NAME" ]] || die "--agent-name requires a value"
+      shift 2
+      ;;
+    --conversation-name)
+      CONVERSATION_NAME="${2:-}"
+      [[ -n "$CONVERSATION_NAME" ]] || die "--conversation-name requires a value"
+      shift 2
+      ;;
+    --module)
+      MODULE="${2:-}"
+      [[ -n "$MODULE" ]] || die "--module requires a value"
+      shift 2
+      ;;
+    --sandbox-image)
+      SANDBOX_IMAGE="${2:-}"
+      [[ -n "$SANDBOX_IMAGE" ]] || die "--sandbox-image requires a value"
+      shift 2
+      ;;
+    --networking)
+      NETWORKING="${2:-}"
+      [[ "$NETWORKING" == "enabled" || "$NETWORKING" == "disabled" ]] || die "--networking must be enabled or disabled"
+      shift 2
+      ;;
+    --shell-program)
+      SHELL_PROGRAM="${2:-}"
+      [[ -n "$SHELL_PROGRAM" ]] || die "--shell-program requires a value"
+      shift 2
+      ;;
+    --sandbox-scope)
+      SANDBOX_SCOPE="${2:-}"
+      [[ "$SANDBOX_SCOPE" == "agent" || "$SANDBOX_SCOPE" == "conversation" ]] || die "--sandbox-scope must be agent or conversation"
+      shift 2
+      ;;
+    --scheduler-interval)
+      SCHEDULER_INTERVAL_SECONDS="${2:-}"
+      [[ "$SCHEDULER_INTERVAL_SECONDS" =~ ^[0-9]+$ && "$SCHEDULER_INTERVAL_SECONDS" -gt 0 ]] || die "--scheduler-interval requires a positive integer"
+      shift 2
+      ;;
+    --no-scheduler)
+      START_SCHEDULER=false
+      shift
+      ;;
+    --scheduler)
+      START_SCHEDULER=true
+      shift
+      ;;
+    --no-adapters)
+      START_ADAPTERS=false
+      shift
+      ;;
+    --adapters)
+      START_ADAPTERS=true
+      shift
+      ;;
+    --adapter-limit)
+      ADAPTER_LIMIT="${2:-}"
+      [[ "$ADAPTER_LIMIT" =~ ^[0-9]+$ && "$ADAPTER_LIMIT" -gt 0 ]] || die "--adapter-limit requires a positive integer"
+      shift 2
+      ;;
+    --control)
+      CONTROL=true
+      shift
+      ;;
+    --setup-profile)
+      SETUP_PROFILE=true
+      shift
+      ;;
+    --local-prompt-file)
+      LOCAL_PROMPT_FILE="${2:-}"
+      [[ -n "$LOCAL_PROMPT_FILE" ]] || die "--local-prompt-file requires a value"
+      shift 2
+      ;;
+    --setup)
+      add_setup_adapter "${2:-}"
+      shift 2
+      ;;
+    --setup-all)
+      add_setup_adapter "signal"
+      add_setup_adapter "whatsapp"
+      add_setup_adapter "irc"
+      add_setup_adapter "discord"
+      shift
+      ;;
+    --initial-prompt-file)
+      INITIAL_PROMPT_FILE="${2:-}"
+      [[ -n "$INITIAL_PROMPT_FILE" ]] || die "--initial-prompt-file requires a value"
+      shift 2
+      ;;
+    --pull-sandbox)
+      PULL_SANDBOX=true
+      shift
+      ;;
+    --no-sandbox)
+      USE_SANDBOX=false
+      shift
+      ;;
+    --env-file)
+      ENV_FILE="${2:-}"
+      [[ -n "$ENV_FILE" ]] || die "--env-file requires a value"
+      shift 2
+      ;;
+    --exo-bin)
+      EXO_BIN="${2:-}"
+      [[ -n "$EXO_BIN" ]] || die "--exo-bin requires a value"
+      shift 2
+      ;;
+    --scheduler-bin)
+      SCHEDULER_BIN="${2:-}"
+      [[ -n "$SCHEDULER_BIN" ]] || die "--scheduler-bin requires a value"
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown argument: $1"
+      ;;
+  esac
+done
+
+export EXOCLAW_LOCAL_PROMPT_FILE="$LOCAL_PROMPT_FILE"
+
+case "$COMMAND" in
+  repl)
+    run_repl
+    ;;
+  list)
+    list_agents_and_conversations
+    ;;
+  delall)
+    delete_all_agents_and_conversations
+    ;;
+  fresh)
+    fresh_start
+    ;;
+  stop-all)
+    stop_all_processes
+    ;;
+  setup-profile)
+    setup_local_profile
+    ;;
+  setup-sandbox)
+    setup_sandbox
+    ;;
+esac

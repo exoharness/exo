@@ -14,12 +14,15 @@ use lingua::universal::{UserContent, UserContentPart};
 use lingua::{Message, UniversalStreamChunk};
 use rustyline::error::ReadlineError;
 use rustyline::history::{History, MemHistory, SearchDirection, SearchResult};
-use rustyline::{Cmd, Config, Editor, KeyCode, KeyEvent, Modifiers};
+use rustyline::{Cmd, Config, Editor, ExternalPrinter, KeyCode, KeyEvent, Modifiers};
 use serde_json::{Map, Value};
 use tokio::runtime::Handle;
+use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 
-use crate::{print_message, render_assistant_content, run_sandbox_shell_command};
+use crate::{
+    compact_timestamp, print_message, render_assistant_content, run_sandbox_shell_command,
+};
 
 const DEFAULT_SHELL_PROGRAM: &str = "/bin/bash";
 const REMOTE_HISTORY_BASE: usize = 1_000_000;
@@ -346,6 +349,7 @@ struct ChatRepl {
     conversation: Arc<dyn HarnessConversation>,
     editor: Editor<(), ChatHistory>,
     session_id: Option<SessionId>,
+    watch_after: Arc<Mutex<Option<EventId>>>,
 }
 
 impl ChatRepl {
@@ -353,10 +357,8 @@ impl ChatRepl {
         agent: Arc<dyn HarnessAgent>,
         conversation: Arc<dyn HarnessConversation>,
     ) -> Result<Self> {
-        let history = ChatHistory::new(
-            conversation.exoharness_handle(),
-            conversation.record().latest_event_id,
-        );
+        let latest_event_id = conversation.record().latest_event_id;
+        let history = ChatHistory::new(conversation.exoharness_handle(), latest_event_id);
         let mut editor = Editor::with_history(Config::default(), history)?;
         editor.bind_sequence(KeyEvent(KeyCode::Enter, Modifiers::ALT), Cmd::Newline);
         Ok(Self {
@@ -364,6 +366,7 @@ impl ChatRepl {
             conversation,
             editor,
             session_id: None,
+            watch_after: Arc::new(Mutex::new(latest_event_id)),
         })
     }
 
@@ -377,7 +380,12 @@ impl ChatRepl {
     async fn run(&mut self) -> Result<()> {
         loop {
             let prompt = format!("{}> ", self.conversation.record().slug);
-            match self.editor.readline(&prompt) {
+            let event_printer = self.spawn_event_printer()?;
+            let readline_result = self.editor.readline(&prompt);
+            event_printer.abort();
+            let _ = event_printer.await;
+
+            match readline_result {
                 Ok(line) => {
                     let trimmed = line.trim();
                     if trimmed.is_empty() {
@@ -414,8 +422,11 @@ impl ChatRepl {
                             Ok(snapshot_id) => println!("snapshot {snapshot_id}"),
                             Err(error) => println!("snapshot failed: {error:#}"),
                         },
-                        other if let Some(arg) = other.strip_prefix("/snapshot ") => {
-                            let arg = arg.trim();
+                        other if other.starts_with("/snapshot ") => {
+                            let arg = other
+                                .strip_prefix("/snapshot ")
+                                .expect("prefix checked")
+                                .trim();
                             if arg.is_empty() {
                                 println!("usage: /snapshot [<sandbox-id>]");
                             } else if arg.contains(char::is_whitespace) {
@@ -439,8 +450,11 @@ impl ChatRepl {
                             }
                             Err(error) => println!("listing snapshots failed: {error:#}"),
                         },
-                        other if let Some(arg) = other.strip_prefix("/rewind ") => {
-                            let arg = arg.trim();
+                        other if other.starts_with("/rewind ") => {
+                            let arg = other
+                                .strip_prefix("/rewind ")
+                                .expect("prefix checked")
+                                .trim();
                             if arg.is_empty() {
                                 println!("usage: /rewind <snapshot-id>");
                             } else if arg.contains(char::is_whitespace) {
@@ -546,7 +560,7 @@ impl ChatRepl {
                         continue;
                     }
                     if !printed_assistant {
-                        print!("assistant: ");
+                        print!("{} assistant: ", compact_timestamp());
                         stdout.flush()?;
                         printed_assistant = true;
                     }
@@ -571,6 +585,8 @@ impl ChatRepl {
                 }
                 ExecutionStreamEvent::Completed(result) => {
                     self.session_id = Some(result.session_id);
+                    *self.watch_after.lock().expect("chat event watch poisoned") =
+                        Some(result.latest_event_id);
                 }
             }
         }
@@ -582,11 +598,49 @@ impl ChatRepl {
         {
             let rendered = render_assistant_content(&content);
             if !rendered.is_empty() {
-                println!("assistant: {}", rendered);
+                println!("{} assistant: {}", compact_timestamp(), rendered);
             }
         }
         println!();
         Ok(())
+    }
+
+    fn spawn_event_printer(&mut self) -> Result<JoinHandle<()>> {
+        let conversation = self.conversation.exoharness_handle();
+        let watch_after = Arc::clone(&self.watch_after);
+        let mut printer = self.editor.create_external_printer()?;
+        Ok(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                let cursor = *watch_after.lock().expect("chat event watch poisoned");
+                match conversation
+                    .get_events(Some(EventQuery {
+                        cursor,
+                        direction: Some(EventQueryDirection::Asc),
+                        limit: Some(100),
+                        session_id: None,
+                        turn_id: None,
+                        types: None,
+                    }))
+                    .await
+                {
+                    Ok(result) => {
+                        for event in result.events {
+                            *watch_after.lock().expect("chat event watch poisoned") =
+                                Some(event.id);
+                            for rendered in render_external_event(&event.data) {
+                                let _ = printer.print(format!("{rendered}\n"));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let _ = printer.print(format!("event watcher error: {error}\n"));
+                        break;
+                    }
+                }
+            }
+        }))
     }
 
     async fn run_shell(&self, command: &str) -> Result<()> {
@@ -680,6 +734,35 @@ fn render_value_inline(value: &Value) -> String {
     match value {
         Value::String(text) => format!("{text:?}"),
         other => serde_json::to_string(other).unwrap_or_else(|_| "<unrenderable>".to_string()),
+    }
+}
+
+fn render_external_event(data: &EventData) -> Vec<String> {
+    let EventData::Messages { messages, .. } = data else {
+        return Vec::new();
+    };
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::User { content } => render_external_user_content(content)
+                .map(|rendered| format!("{} user: {rendered}", compact_timestamp())),
+            Message::Assistant { content, .. } => {
+                let rendered = render_assistant_content(content);
+                (!rendered.is_empty())
+                    .then(|| format!("{} assistant: {rendered}", compact_timestamp()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn render_external_user_content(content: &UserContent) -> Option<String> {
+    let rendered = render_user_content_for_history(content);
+    let trimmed = rendered.trim();
+    if trimmed.starts_with("Scheduled task `") {
+        Some(trimmed.to_string())
+    } else {
+        None
     }
 }
 
@@ -794,7 +877,12 @@ async fn sandbox_id_for_snapshot(
 
 #[cfg(test)]
 mod tests {
-    use super::{render_tool_call, render_tool_result, render_user_content_for_history};
+    use super::{
+        render_external_event, render_tool_call, render_tool_result,
+        render_user_content_for_history,
+    };
+    use executor::EventData;
+    use lingua::Message;
     use lingua::universal::UserContent;
     use serde_json::{Map, Value};
 
@@ -829,6 +917,22 @@ mod tests {
             rendered,
             "tool result\n  error: null\n  stdout:\n    line 1\n    line 2"
         );
+    }
+
+    #[test]
+    fn renders_scheduled_task_wakeup_user_messages() {
+        let rendered = render_external_event(&EventData::Messages {
+            messages: vec![Message::User {
+                content: UserContent::String(
+                    "Scheduled task `joke` completed.\n\nstdout preview:\nhello".to_string(),
+                ),
+            }],
+            response_id: None,
+        });
+
+        assert_eq!(rendered.len(), 1);
+        assert!(rendered[0].contains("user: Scheduled task `joke` completed."));
+        assert!(rendered[0].contains("stdout preview:\nhello"));
     }
 
     #[test]

@@ -46,18 +46,23 @@ impl BasicObjectStore {
     }
 
     pub(crate) async fn get_json<T: DeserializeOwned>(&self, key: impl AsRef<Path>) -> Result<T> {
+        let key = key.as_ref();
         let bytes = self.get_bytes(key).await?;
-        serde_json::from_slice(&bytes).map_err(Into::into)
+        serde_json::from_slice(&bytes)
+            .with_context(|| format!("failed to decode JSON {}", key.display()))
     }
 
     pub(crate) async fn get_json_if_exists<T: DeserializeOwned>(
         &self,
         key: impl AsRef<Path>,
     ) -> Result<Option<T>> {
+        let key = key.as_ref();
         let Some(bytes) = self.get_bytes_if_exists(key).await? else {
             return Ok(None);
         };
-        serde_json::from_slice(&bytes).map(Some).map_err(Into::into)
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .with_context(|| format!("failed to decode JSON {}", key.display()))
     }
 
     pub(crate) async fn get_bytes(&self, key: impl AsRef<Path>) -> Result<Vec<u8>> {

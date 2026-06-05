@@ -111,7 +111,14 @@ function createInstallAgentToolInstance(): ToolInstance {
           initialization: {
             type: "object",
             additionalProperties: false,
-            properties: {},
+            properties: {
+              apiKeyEnv: {
+                type: ["string", "null"],
+                description:
+                  "Optional environment variable name containing an API key for generated tools that need one.",
+              },
+            },
+            required: ["apiKeyEnv"],
             description:
               "Initialization arguments for the tool's initializationParameters schema.",
           },
@@ -149,7 +156,9 @@ async function installAgentTool(
     );
   }
   const moduleSource = stringArgument(args, "moduleSource");
-  const initialization = objectArgument(args, "initialization");
+  const initialization = compactInitialization(
+    objectArgument(args, "initialization"),
+  );
   const toolsDirectory = DEFAULT_AGENT_TOOL_DIRECTORY;
   const modulePath = path.join(toolsDirectory, `${name}.ts`);
   const sourcePath = path.join(toolsDirectory, `${name}.source.ts`);
@@ -235,6 +244,12 @@ function objectArgument(args: JsonObject, name: string): JsonObject {
     throw new Error(`install_agent_tool argument ${name} must be an object`);
   }
   return value;
+}
+
+function compactInitialization(initialization: JsonObject): JsonObject {
+  return Object.fromEntries(
+    Object.entries(initialization).filter(([, value]) => value !== null),
+  );
 }
 
 function isRecord(value: unknown): value is JsonObject {

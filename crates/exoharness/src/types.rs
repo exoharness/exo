@@ -449,9 +449,10 @@ pub struct CreateSandboxRequest {
     pub idle_seconds: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxProvider {
+    #[default]
     Daytona,
     AppleContainer,
     Docker,

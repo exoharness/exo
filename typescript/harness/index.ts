@@ -9,6 +9,7 @@ export interface JsonObject {
 export * from "./tools";
 export * from "./built-in-tools";
 export * from "./tool-modules";
+export * from "./adapter-tools";
 
 export type MessageRole =
   | "system"
@@ -25,7 +26,7 @@ export interface Message {
 
 export interface AgentConfig {
   instructions: Message[];
-  harness: "basic" | "rlm" | "typescript";
+  harness: "basic" | "rlm" | "typescript" | "exoclaw";
   typescript?: {
     modulePath: string;
     toolModulePaths: string[];
@@ -96,6 +97,7 @@ export interface ConversationConfig {
     | "local_process"
     | null;
   shellProgram?: string | null;
+  sandboxScope?: "agent" | "conversation" | null;
   mounts: FileSystemMount[];
 }
 
