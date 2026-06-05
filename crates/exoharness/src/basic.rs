@@ -1211,7 +1211,6 @@ impl ConversationHandle for BasicConversationHandle {
     }
 
     async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
-        let _guard = self.harness.inner.write_lock.lock().await;
         let sandbox_id = format!("sandbox-{}", Uuid7::now());
         let conversation_dir = self.conversation_dir();
 
@@ -1248,6 +1247,10 @@ impl ConversationHandle for BasicConversationHandle {
             .await?
             .acquire(sandbox_request(self.record.id, &sandbox_id, &metadata))
             .await?;
+
+        // Hold the write lock only for the local persistence + event append,
+        // not the remote acquire above.
+        let _guard = self.harness.inner.write_lock.lock().await;
         self.harness
             .inner
             .storage
@@ -1380,13 +1383,16 @@ impl ConversationHandle for BasicConversationHandle {
             bytes: Bytes::from(payload_bytes),
         };
 
-        let _guard = self.harness.inner.write_lock.lock().await;
+        // Update the metadata in memory (the read is lock-free).
         let mut sandbox = self.load_sandbox(&request.id).await?;
         sandbox.running = true;
         sandbox.latest_snapshot_id = Some(request.snapshot_id);
         if let Some(idle_seconds) = request.idle_seconds {
             sandbox.idle_seconds = idle_seconds;
         }
+
+        // Remote work before the write lock: stop any previous handle, then boot
+        // the restored sandbox.
         let previous_handle = self
             .harness
             .inner
@@ -1407,6 +1413,9 @@ impl ConversationHandle for BasicConversationHandle {
                 payload,
             )
             .await?;
+
+        // Hold the write lock only for the local persistence + event append.
+        let _guard = self.harness.inner.write_lock.lock().await;
         self.harness
             .inner
             .storage
@@ -1445,11 +1454,8 @@ impl ConversationHandle for BasicConversationHandle {
     }
 
     async fn stop_sandbox(&self, id: SandboxId) -> Result<()> {
-        let _guard = self.harness.inner.write_lock.lock().await;
-        let mut sandbox = self.load_sandbox(&id).await?;
-        if !sandbox.running {
-            return Ok(());
-        }
+        // Take the handle and stop it before the write lock — stop() is a remote
+        // call and must not block other writers.
         let sandbox_handle = self
             .harness
             .inner
@@ -1457,15 +1463,21 @@ impl ConversationHandle for BasicConversationHandle {
             .lock()
             .await
             .remove(&id);
+        if let Some(sandbox_handle) = sandbox_handle {
+            sandbox_handle.stop().await?;
+        }
+
+        let _guard = self.harness.inner.write_lock.lock().await;
+        let mut sandbox = self.load_sandbox(&id).await?;
+        if !sandbox.running {
+            return Ok(());
+        }
         sandbox.running = false;
         self.harness
             .inner
             .storage
             .put_json(self.sandboxes_dir().join(format!("{id}.json")), &sandbox)
             .await?;
-        if let Some(sandbox_handle) = sandbox_handle {
-            sandbox_handle.stop().await?;
-        }
         let mut record = self.load_record().await?;
         append_events_to_conversation(
             &self.harness.inner,

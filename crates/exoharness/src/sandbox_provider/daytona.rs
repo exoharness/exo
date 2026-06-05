@@ -2,9 +2,8 @@
 //! `reqwest`. API reference: <https://www.daytona.io/docs/en/tools/api/>.
 //!
 //! Daytona persists state itself: `stop` keeps the filesystem and the next
-//! `acquire` finds the sandbox by label and `start`s it. Snapshots use
-//! [`SnapshotKind::DaytonaSnapshot`] payloads — a JSON manifest naming a
-//! snapshot in Daytona's registry, not the bytes themselves.
+//! `acquire` finds the sandbox by label and `start`s it. Snapshot/restore is
+//! not implemented yet.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,17 +11,15 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
-use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::io::Cursor;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::sandbox::{
     ManagedSandboxBackend, ManagedSandboxHandle, SandboxCommand, SandboxCommandOutput,
-    SandboxNetworkPolicy, SandboxRequest, SandboxSpec, SnapshotKind, SnapshotPayload,
-    WARM_SANDBOX_KEY_LABEL, WARM_SANDBOX_SPEC_HASH_LABEL, sandbox_spec_hash,
+    SandboxNetworkPolicy, SandboxRequest, SandboxSpec, SnapshotPayload, WARM_SANDBOX_KEY_LABEL,
+    WARM_SANDBOX_SPEC_HASH_LABEL, sandbox_spec_hash,
 };
 
 pub const DEFAULT_DAYTONA_API_URL: &str = "https://app.daytona.io/api";
@@ -46,13 +43,6 @@ pub struct DaytonaConfig {
     /// Scopes requests via `X-Daytona-Organization-ID`; without it Daytona may
     /// default to a "personal" org that lacks credit.
     pub organization_id: Option<String>,
-}
-
-/// Persisted alongside a `SnapshotKind::DaytonaSnapshot`. A Daytona snapshot is
-/// self-contained, so the registered name is all we need to recreate it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct DaytonaSnapshotManifest {
-    snapshot_name: String,
 }
 
 pub struct DaytonaSandboxBackend {
@@ -266,30 +256,11 @@ impl ManagedSandboxBackend for DaytonaSandboxBackend {
 
     async fn acquire_from_snapshot(
         &self,
-        request: SandboxRequest,
-        payload: SnapshotPayload,
+        _request: SandboxRequest,
+        _payload: SnapshotPayload,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        reject_host_mounts(&request)?;
-        if !matches!(payload.kind, SnapshotKind::DaytonaSnapshot) {
-            bail!(
-                "Daytona sandbox backend can only restore from SnapshotKind::DaytonaSnapshot, \
-                 got {:?}",
-                payload.kind
-            );
-        }
-        let manifest: DaytonaSnapshotManifest =
-            serde_json::from_slice(&payload.bytes).context("decoding DaytonaSnapshot manifest")?;
-        let spec_hash = sandbox_spec_hash(&request.spec);
-        let sandbox = self
-            .create_sandbox(&request, &spec_hash, Some(&manifest.snapshot_name))
-            .await?;
-        self.wait_until_started(&sandbox.id).await?;
-        Ok(Arc::new(DaytonaSandboxHandle {
-            id: format!("daytona-restored:{}", request.key),
-            sandbox_id: sandbox.id,
-            request,
-            backend: self.handle_backend(),
-        }))
+        // Restoring needs snapshot-readiness handling that isn't in place yet.
+        bail!("restoring a Daytona sandbox from a snapshot is not implemented yet");
     }
 }
 
@@ -345,7 +316,9 @@ impl ManagedSandboxHandle for DaytonaSandboxHandle {
         // goes to a sink — this endpoint doesn't accept piped input.
         let output =
             exec_in_sandbox(&self.backend, &self.sandbox_id, &self.request.spec, command).await?;
-        let exit_code = output.exit_code.unwrap_or(0);
+        let Some(exit_code) = output.exit_code else {
+            bail!("Daytona exec returned no exit code; refusing to report success");
+        };
         let stdout = Cursor::new(output.stdout.into_bytes());
         let stderr = Cursor::new(output.stderr.into_bytes());
         let stdin = futures::io::sink();
@@ -365,7 +338,9 @@ impl ManagedSandboxHandle for DaytonaSandboxHandle {
     }
 
     async fn snapshot(&self) -> Result<SnapshotPayload> {
-        save_as_snapshot_via_backend(&self.backend, &self.sandbox_id).await
+        // Capturing a snapshot reliably needs readiness handling that isn't in
+        // place yet.
+        bail!("Daytona sandbox snapshots are not implemented yet");
     }
 }
 
@@ -430,34 +405,6 @@ async fn stop_via_backend(backend: &DaytonaBackendHandle, id: &str) -> Result<()
         bail!("Daytona stop-sandbox failed ({status}): {text}");
     }
     Ok(())
-}
-
-async fn save_as_snapshot_via_backend(
-    backend: &DaytonaBackendHandle,
-    id: &str,
-) -> Result<SnapshotPayload> {
-    let snapshot_name = format!("exo-snap-{}", Uuid::new_v4().simple());
-    let body = DaytonaSnapshotRequest {
-        name: snapshot_name.clone(),
-    };
-    let response = backend
-        .client
-        .post(backend.api_endpoint(&format!("/sandbox/{id}/snapshot")))
-        .json(&body)
-        .send()
-        .await
-        .with_context(|| format!("snapshotting Daytona sandbox {id}"))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        bail!("Daytona snapshot failed ({status}): {text}");
-    }
-    let manifest = DaytonaSnapshotManifest { snapshot_name };
-    let bytes = serde_json::to_vec(&manifest).context("serializing Daytona snapshot manifest")?;
-    Ok(SnapshotPayload {
-        kind: SnapshotKind::DaytonaSnapshot,
-        bytes: Bytes::from(bytes),
-    })
 }
 
 fn reject_host_mounts(request: &SandboxRequest) -> Result<()> {
@@ -539,11 +486,6 @@ struct DaytonaExecResponse {
     exit_code: i32,
     #[serde(default)]
     result: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct DaytonaSnapshotRequest {
-    name: String,
 }
 
 #[derive(Debug, Deserialize)]

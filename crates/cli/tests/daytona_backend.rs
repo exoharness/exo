@@ -394,10 +394,10 @@ async fn stop_calls_stop_endpoint_not_delete() {
     );
 }
 
-// ─────────────────────── snapshot ───────────────────────
+// ─────────────────────── snapshot (unimplemented) ───────────────────────
 
 #[tokio::test]
-async fn snapshot_returns_daytona_snapshot_payload_with_manifest() {
+async fn snapshot_is_unimplemented() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
 
@@ -407,115 +407,53 @@ async fn snapshot_returns_daytona_snapshot_payload_with_manifest() {
         .respond_with(ResponseTemplate::new(200).set_body_json(sandbox_json("sb-snap", "started")))
         .mount(&server)
         .await;
-    Mock::given(method("POST"))
-        .and(path("/sandbox/sb-snap/snapshot"))
-        .respond_with(ResponseTemplate::new(200))
-        .expect(1)
-        .mount(&server)
-        .await;
     mount_get_started(&server).await;
 
     let handle = backend
         .acquire(make_request("conv-8", "sandbox-8"))
         .await
         .unwrap();
-    let payload = handle
-        .snapshot()
-        .await
-        .expect("snapshot should succeed against the mock");
-
-    assert!(
-        matches!(payload.kind, SnapshotKind::DaytonaSnapshot),
-        "kind should be DaytonaSnapshot, got {:?}",
-        payload.kind
-    );
-
-    let manifest: Value =
-        serde_json::from_slice(&payload.bytes).expect("payload should be a JSON manifest");
-    assert!(
-        manifest
-            .get("snapshot_name")
-            .and_then(Value::as_str)
-            .is_some_and(|n| n.starts_with("exo-snap-")),
-        "manifest should carry a snapshot_name with the exo-snap- prefix: {manifest:?}"
-    );
-
-    let requests = server.received_requests().await.unwrap_or_default();
-    let snap_call = requests
-        .iter()
-        .find(|r| r.url.path() == "/sandbox/sb-snap/snapshot")
-        .expect("snapshot endpoint should have been called");
-    let body: Value = serde_json::from_slice(&snap_call.body).unwrap();
-    let name = body
-        .get("name")
-        .and_then(Value::as_str)
-        .expect("snapshot request body must contain `name`");
-    assert!(name.starts_with("exo-snap-"));
-}
-
-#[tokio::test]
-async fn acquire_from_snapshot_passes_snapshot_name_in_create_body() {
-    let server = MockServer::start().await;
-    let backend = backend_for_mock(&server);
-
-    // acquire_from_snapshot creates directly (no find step).
-    Mock::given(method("POST"))
-        .and(path("/sandbox"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(sandbox_json("sb-restored", "started")),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-    mount_get_started(&server).await;
-
-    let manifest = json!({ "snapshot_name": "exo-snap-canonical-fixture" });
-    let payload = SnapshotPayload {
-        kind: SnapshotKind::DaytonaSnapshot,
-        bytes: Bytes::from(serde_json::to_vec(&manifest).unwrap()),
-    };
-
-    let request = make_request("conv-9", "sandbox-9");
-    backend
-        .acquire_from_snapshot(request, payload)
-        .await
-        .expect("acquire_from_snapshot should succeed against a 200 mock");
-
-    let requests = server.received_requests().await.unwrap_or_default();
-    let create = requests
-        .iter()
-        .find(|r| r.url.path() == "/sandbox" && r.method.to_string().to_uppercase() == "POST")
-        .expect("POST /sandbox should have been called");
-    let body: Value = serde_json::from_slice(&create.body).unwrap();
-    assert_eq!(
-        body.get("snapshot").and_then(Value::as_str),
-        Some("exo-snap-canonical-fixture"),
-        "create-from-snapshot must pass the manifest's snapshot_name to Daytona: {body:?}"
-    );
-}
-
-#[tokio::test]
-async fn acquire_from_snapshot_rejects_wrong_kind() {
-    let server = MockServer::start().await;
-    let backend = backend_for_mock(&server);
-
-    let payload = SnapshotPayload {
-        kind: SnapshotKind::DockerImageTar,
-        bytes: Bytes::from_static(b"\x00not-a-real-tar"),
-    };
-    let request = make_request("conv-10", "sandbox-10");
-    let error = match backend.acquire_from_snapshot(request, payload).await {
-        Ok(_) => panic!("Daytona backend must reject a DockerImageTar payload"),
+    let error = match handle.snapshot().await {
+        Ok(_) => panic!("Daytona snapshots are not implemented"),
         Err(e) => e,
     };
-    let msg = format!("{error:#}").to_lowercase();
     assert!(
-        msg.contains("daytona") || msg.contains("docker") || msg.contains("kind"),
-        "error should explain the kind mismatch: {msg}"
+        format!("{error:#}")
+            .to_lowercase()
+            .contains("not implemented"),
+        "error should say snapshots are not implemented: {error:#}"
+    );
+}
+
+#[tokio::test]
+async fn acquire_from_snapshot_is_unimplemented() {
+    let server = MockServer::start().await;
+    let backend = backend_for_mock(&server);
+
+    let payload = SnapshotPayload {
+        kind: SnapshotKind::DaytonaSnapshot,
+        bytes: Bytes::from_static(b"{}"),
+    };
+    let error = match backend
+        .acquire_from_snapshot(make_request("conv-9", "sandbox-9"), payload)
+        .await
+    {
+        Ok(_) => panic!("restoring a Daytona snapshot is not implemented"),
+        Err(e) => e,
+    };
+    assert!(
+        format!("{error:#}")
+            .to_lowercase()
+            .contains("not implemented"),
+        "error should say restore is not implemented: {error:#}"
     );
 
     let requests = server.received_requests().await.unwrap_or_default();
-    assert_eq!(requests.len(), 0, "kind-mismatch must not reach the API");
+    assert_eq!(
+        requests.len(),
+        0,
+        "unimplemented restore must not reach the API"
+    );
 }
 
 // ─────────────────────── exec (toolbox URL) ───────────────────────
