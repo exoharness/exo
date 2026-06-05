@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -30,6 +30,9 @@ pub const DEFAULT_DAYTONA_API_URL: &str = "https://app.daytona.io/api";
 /// Per-sandbox operations (exec, fs) go through Daytona's toolbox proxy rather
 /// than the control-plane API. The two have different base hosts.
 pub const DEFAULT_DAYTONA_TOOLBOX_URL: &str = "https://proxy.app.daytona.io";
+
+const START_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const START_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Resolved Daytona connection parameters: assembled from a
 /// [`crate::DaytonaBackendSpec`] plus secrets read on first use.
@@ -139,10 +142,17 @@ impl DaytonaSandboxBackend {
             .map(idle_ttl_to_minutes)
             .unwrap_or(15);
 
-        // `snapshot` is a pre-registered snapshot name, not an image ref; only
-        // the restore path sets it, so fresh creates use Daytona's default image.
+        // Restore uses the saved snapshot; a fresh create falls back to the
+        // requested image as a snapshot name (Daytona's only base selector).
+        let snapshot = match snapshot_name {
+            Some(name) => Some(name.to_string()),
+            None => {
+                let image = request.spec.image.trim();
+                (!image.is_empty()).then(|| image.to_string())
+            }
+        };
         let body = DaytonaCreateRequest {
-            snapshot: snapshot_name.map(str::to_string),
+            snapshot,
             target: self.target.clone(),
             labels,
             env: HashMap::new(),
@@ -183,6 +193,43 @@ impl DaytonaSandboxBackend {
         }
         Ok(())
     }
+
+    async fn get_sandbox(&self, id: &str) -> Result<DaytonaSandbox> {
+        self.client
+            .get(self.api_endpoint(&format!("/sandbox/{id}")))
+            .send()
+            .await
+            .with_context(|| format!("fetching Daytona sandbox {id}"))?
+            .error_for_status()
+            .with_context(|| format!("Daytona get-sandbox {id} returned an error status"))?
+            .json()
+            .await
+            .with_context(|| format!("decoding Daytona sandbox {id}"))
+    }
+
+    /// Poll until the sandbox is `Started`, so the first exec doesn't race a
+    /// still-booting sandbox (create and start are both async on Daytona's side).
+    async fn wait_until_started(&self, id: &str) -> Result<()> {
+        let deadline = Instant::now() + START_TIMEOUT;
+        loop {
+            match self.get_sandbox(id).await?.state {
+                DaytonaSandboxState::Started => return Ok(()),
+                DaytonaSandboxState::Error
+                | DaytonaSandboxState::Destroying
+                | DaytonaSandboxState::Destroyed => {
+                    bail!("Daytona sandbox {id} entered a terminal state before starting")
+                }
+                _ => {}
+            }
+            if Instant::now() >= deadline {
+                bail!(
+                    "Daytona sandbox {id} did not reach `started` within {}s",
+                    START_TIMEOUT.as_secs()
+                );
+            }
+            tokio::time::sleep(START_POLL_INTERVAL).await;
+        }
+    }
 }
 
 #[async_trait]
@@ -208,6 +255,7 @@ impl ManagedSandboxBackend for DaytonaSandboxBackend {
             _ => self.create_sandbox(&request, &spec_hash, None).await?,
         };
 
+        self.wait_until_started(&sandbox.id).await?;
         Ok(Arc::new(DaytonaSandboxHandle {
             id: format!("daytona:{}", request.key),
             sandbox_id: sandbox.id,
@@ -235,6 +283,7 @@ impl ManagedSandboxBackend for DaytonaSandboxBackend {
         let sandbox = self
             .create_sandbox(&request, &spec_hash, Some(&manifest.snapshot_name))
             .await?;
+        self.wait_until_started(&sandbox.id).await?;
         Ok(Arc::new(DaytonaSandboxHandle {
             id: format!("daytona-restored:{}", request.key),
             sandbox_id: sandbox.id,

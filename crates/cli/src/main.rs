@@ -28,8 +28,9 @@ use executor::{
     FileSystemMount, FileSystemMountMode, ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET,
     Harness, HarnessAgent, HarnessConversation, HttpExoHarness, LocalSandboxExoHarness,
     PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxProvider,
-    Secret, SecretBackendChoice, SendRequest, ToolRequest, ToolRuntime, TypeScriptHarness,
-    TypeScriptHarnessConfig, Uuid7, load_agent_config, serve_exoharness_http_listener_with_options,
+    SandboxProviderConfig, Secret, SecretBackendChoice, SendRequest, ToolRequest, ToolRuntime,
+    TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, load_agent_config,
+    serve_exoharness_http_listener_with_options,
 };
 use lingua::Message;
 use lingua::universal::{AssistantContent, AssistantContentPart, ToolContentPart, UserContent};
@@ -300,6 +301,11 @@ enum Commands {
         #[command(subcommand)]
         command: ModelCommands,
     },
+    /// Configure and list sandbox provider bindings.
+    Provider {
+        #[command(subcommand)]
+        command: ProviderCommands,
+    },
     /// Manage local stored secrets.
     Secret {
         #[command(subcommand)]
@@ -517,6 +523,30 @@ enum ModelCommands {
         secret: String,
         #[arg(long)]
         base_url: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProviderCommands {
+    /// List configured sandbox provider bindings.
+    List,
+    /// Configure a sandbox provider (writes a Binding::Sandbox).
+    Configure {
+        #[arg(long, value_enum)]
+        provider: SandboxProviderArg,
+        /// Binding name (default: the provider name).
+        #[arg(long)]
+        name: Option<String>,
+        /// Secret (by name) holding the provider's API key.
+        #[arg(long)]
+        secret: String,
+        /// Region/target. Daytona: us | eu | experimental.
+        #[arg(long)]
+        region: Option<String>,
+        #[arg(long)]
+        organization_id: Option<String>,
+        #[arg(long)]
+        api_url: Option<String>,
     },
 }
 
@@ -1615,6 +1645,48 @@ async fn main() -> Result<()> {
                 println!("registered model {} ({})", name, id);
             }
         },
+        Commands::Provider { command } => match command {
+            ProviderCommands::List => {
+                for record in harness.exoharness_handle().list_bindings().await? {
+                    if let Binding::Sandbox { name, config } = record.binding {
+                        println!("{name}\t{config:?}");
+                    }
+                }
+            }
+            ProviderCommands::Configure {
+                provider,
+                name,
+                secret,
+                region,
+                organization_id,
+                api_url,
+            } => {
+                let secret_id = find_secret_id(harness.exoharness_handle().as_ref(), &secret)
+                    .await?
+                    .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
+                let binding_name = name.unwrap_or_else(|| format!("{provider:?}").to_lowercase());
+                let config = match provider {
+                    SandboxProviderArg::Daytona => SandboxProviderConfig::Daytona {
+                        api_key_secret_id: secret_id,
+                        region,
+                        organization_id,
+                        api_url,
+                    },
+                    other => bail!(
+                        "provider {other:?} has no binding-based config (Docker/local need none; \
+                         E2B and exe.dev are followups)"
+                    ),
+                };
+                let id = harness
+                    .exoharness_handle()
+                    .put_binding(Binding::Sandbox {
+                        name: binding_name.clone(),
+                        config,
+                    })
+                    .await?;
+                println!("configured sandbox provider {binding_name} ({id})");
+            }
+        },
         Commands::Serve { .. } => {
             unreachable!("serve commands are handled before harness instantiation")
         }
@@ -1669,7 +1741,10 @@ fn command_agent_ref(command: &Commands) -> Option<&str> {
             },
         },
         Commands::Repl { agent, .. } => Some(agent.as_deref().unwrap_or(DEFAULT_REPL_SLUG)),
-        Commands::Secret { .. } | Commands::Model { .. } | Commands::Serve { .. } => None,
+        Commands::Secret { .. }
+        | Commands::Model { .. }
+        | Commands::Provider { .. }
+        | Commands::Serve { .. } => None,
     }
 }
 

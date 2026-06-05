@@ -23,8 +23,9 @@ use crate::{
     ManagedSandboxHandle, NewAgentRequest, NewConversationRequest, PutSecretRequest,
     RunInSandboxRequest, SandboxCommand, SandboxCommandOutput, SandboxProcessEvent,
     SandboxProcessEventQuery, SandboxProcessParts, SandboxProcessStatus, SandboxProcessStdin,
-    SandboxProvider, SandboxRequest, Secret, SnapshotPayload, StartSandboxProcessRequest,
-    WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
+    SandboxProvider, SandboxProviderConfig, SandboxRequest, Secret, SnapshotPayload,
+    StartSandboxProcessRequest, WaitSandboxProcessRequest, WriteArtifactRequest,
+    WriteSandboxProcessInputRequest,
 };
 
 #[tokio::test(flavor = "current_thread")]
@@ -1039,4 +1040,53 @@ fn assistant_message(text: &str) -> Message {
         id: None,
         content: AssistantContent::String(text.to_string()),
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn daytona_sandbox_binding_drives_provider_config() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new(local_test_config_with_daytona(tempdir.path()))
+        .await
+        .expect("harness");
+
+    // No binding yet: resolver returns None so the backend falls back to the spec.
+    assert!(
+        harness
+            .daytona_config_from_binding_for_test()
+            .await
+            .expect("resolve")
+            .is_none()
+    );
+
+    let secret_id = harness
+        .put_secret(PutSecretRequest {
+            name: "DAYTONA_API_KEY".to_string(),
+            secret: Secret::Key {
+                value: "key-123".to_string(),
+            },
+        })
+        .await
+        .expect("secret");
+    harness
+        .put_binding(Binding::Sandbox {
+            name: "daytona".to_string(),
+            config: SandboxProviderConfig::Daytona {
+                api_key_secret_id: secret_id,
+                region: Some("experimental".to_string()),
+                organization_id: Some("org-1".to_string()),
+                api_url: None,
+            },
+        })
+        .await
+        .expect("binding");
+
+    let config = harness
+        .daytona_config_from_binding_for_test()
+        .await
+        .expect("resolve")
+        .expect("binding present");
+    assert_eq!(config.api_key, "key-123");
+    assert_eq!(config.target.as_deref(), Some("experimental"));
+    assert_eq!(config.organization_id.as_deref(), Some("org-1"));
+    assert_eq!(config.api_url, crate::DEFAULT_DAYTONA_API_URL);
 }

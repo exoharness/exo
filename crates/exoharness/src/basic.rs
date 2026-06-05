@@ -40,9 +40,10 @@ use crate::{
     NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result, RunInSandboxRequest,
     SandboxId, SandboxProcess, SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessId,
     SandboxProcessMode, SandboxProcessParts, SandboxProcessRecord, SandboxProcessStatus,
-    SandboxProcessStdin, SandboxProvider, Secret, SecretId, SecretMetadata, SecretType, SessionId,
-    SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnHandle, TurnId, TurnRecord,
-    Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
+    SandboxProcessStdin, SandboxProvider, SandboxProviderConfig, Secret, SecretId, SecretMetadata,
+    SecretType, SessionId, SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnHandle,
+    TurnId, TurnRecord, Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest,
+    WriteSandboxProcessInputRequest,
 };
 
 #[derive(Debug, Clone)]
@@ -164,33 +165,47 @@ impl BasicExoHarnessInner {
             SandboxBackendChoice::Docker => Arc::new(CliContainerSandboxBackend::docker()),
             SandboxBackendChoice::LocalProcess => Arc::new(LocalProcessSandboxBackend::new()),
             SandboxBackendChoice::Daytona(spec) => {
-                let api_key = self
-                    .secret_key(&spec.api_key_secret)
-                    .await?
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "daytona sandbox requested but secret {:?} is not set",
-                            spec.api_key_secret
-                        )
-                    })?;
-                let organization_id = match &spec.organization_id_secret {
-                    Some(name) => self.secret_key(name).await?,
-                    None => None,
+                // Prefer a root `Binding::Sandbox` for Daytona; fall back to the
+                // spec's conventional `DAYTONA_*` secret-name lookups.
+                let config = match self.daytona_config_from_binding().await? {
+                    Some(config) => config,
+                    None => self.daytona_config_from_spec(spec).await?,
                 };
-                let target = match &spec.target_secret {
-                    Some(name) => self.secret_key(name).await?,
-                    None => None,
-                };
-                Arc::new(crate::DaytonaSandboxBackend::new(crate::DaytonaConfig {
-                    api_key,
-                    api_url: spec.api_url.clone(),
-                    toolbox_url: spec.toolbox_url.clone(),
-                    target,
-                    organization_id,
-                })?)
+                Arc::new(crate::DaytonaSandboxBackend::new(config)?)
             }
         };
         Ok(backend)
+    }
+
+    /// `DaytonaConfig` from the conventional `DAYTONA_*` secret-name spec.
+    async fn daytona_config_from_spec(
+        &self,
+        spec: &DaytonaBackendSpec,
+    ) -> Result<crate::DaytonaConfig> {
+        let api_key = self
+            .secret_key(&spec.api_key_secret)
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "daytona sandbox requested but secret {:?} is not set",
+                    spec.api_key_secret
+                )
+            })?;
+        let organization_id = match &spec.organization_id_secret {
+            Some(name) => self.secret_key(name).await?,
+            None => None,
+        };
+        let target = match &spec.target_secret {
+            Some(name) => self.secret_key(name).await?,
+            None => None,
+        };
+        Ok(crate::DaytonaConfig {
+            api_key,
+            api_url: spec.api_url.clone(),
+            toolbox_url: spec.toolbox_url.clone(),
+            target,
+            organization_id,
+        })
     }
 
     /// Decrypt the first stored secret matching `predicate`, if any.
@@ -218,6 +233,58 @@ impl BasicExoHarnessInner {
             None => Ok(None),
         }
     }
+
+    /// Decrypt the `Key`-typed secret with the given id, if it exists.
+    async fn secret_key_by_id(&self, id: SecretId) -> Result<Option<String>> {
+        match self.find_secret_by(|s| s.metadata.id == id).await? {
+            Some(Secret::Key { value }) => Ok(Some(value)),
+            Some(Secret::Oauth { .. }) => {
+                bail!("secret {id} is an OAuth secret; expected an API key")
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// `DaytonaConfig` from a root-scoped `Binding::Sandbox` (newest wins), or
+    /// `None` if none is set so callers fall back to the secret-name spec.
+    async fn daytona_config_from_binding(&self) -> Result<Option<crate::DaytonaConfig>> {
+        let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
+        let Some((api_key_secret_id, region, organization_id, api_url)) = bindings
+            .into_iter()
+            .rev()
+            .find_map(|record| match record.binding {
+                Binding::Sandbox {
+                    config:
+                        SandboxProviderConfig::Daytona {
+                            api_key_secret_id,
+                            region,
+                            organization_id,
+                            api_url,
+                        },
+                    ..
+                } => Some((api_key_secret_id, region, organization_id, api_url)),
+                _ => None,
+            })
+        else {
+            return Ok(None);
+        };
+        let api_key = self
+            .secret_key_by_id(api_key_secret_id)
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "daytona sandbox binding references secret id {api_key_secret_id}, \
+                 which is not set"
+                )
+            })?;
+        Ok(Some(crate::DaytonaConfig {
+            api_key,
+            api_url: api_url.unwrap_or_else(|| crate::DEFAULT_DAYTONA_API_URL.to_string()),
+            toolbox_url: crate::DEFAULT_DAYTONA_TOOLBOX_URL.to_string(),
+            target: region,
+            organization_id,
+        }))
+    }
 }
 
 impl BasicExoHarness {
@@ -231,6 +298,13 @@ impl BasicExoHarness {
         sandbox_backend: Arc<dyn ManagedSandboxBackend>,
     ) -> Result<Self> {
         Self::new_with_backend(config, Some(sandbox_backend)).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn daytona_config_from_binding_for_test(
+        &self,
+    ) -> Result<Option<crate::DaytonaConfig>> {
+        self.inner.daytona_config_from_binding().await
     }
 
     /// `seed` pre-populates the cache for the default provider, letting tests
@@ -2617,12 +2691,16 @@ fn binding_type(binding: &Binding) -> BindingType {
         Binding::Env { .. } => BindingType::Env,
         Binding::Mcp { .. } => BindingType::Mcp,
         Binding::Llm { .. } => BindingType::Llm,
+        Binding::Sandbox { .. } => BindingType::Sandbox,
     }
 }
 
 fn binding_name(binding: &Binding) -> &str {
     match binding {
-        Binding::Env { name, .. } | Binding::Mcp { name, .. } | Binding::Llm { name, .. } => name,
+        Binding::Env { name, .. }
+        | Binding::Mcp { name, .. }
+        | Binding::Llm { name, .. }
+        | Binding::Sandbox { name, .. } => name,
     }
 }
 
