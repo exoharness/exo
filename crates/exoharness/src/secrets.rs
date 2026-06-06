@@ -5,7 +5,6 @@ use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{Context, anyhow, bail};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::{Result, Secret};
 
@@ -31,7 +30,7 @@ impl SecretCipher {
         let payload = serde_json::to_vec(secret)?;
         let cipher = Aes256Gcm::new_from_slice(&key)
             .map_err(|_| anyhow!("invalid secret encryption key length"))?;
-        let nonce = random_nonce();
+        let nonce = random_nonce()?;
         let nonce = Nonce::from(nonce);
         let ciphertext = cipher
             .encrypt(&nonce, payload.as_slice())
@@ -114,7 +113,7 @@ impl SecretKeyProvider for AppleKeychainSecretKeyProvider {
         let key = match entry.get_password() {
             Ok(serialized) => deserialize_key(&serialized)?,
             Err(KeyringError::NoEntry) => {
-                let key = random_master_key();
+                let key = random_master_key()?;
                 entry
                     .set_password(&serde_json::to_string(&key.to_vec())?)
                     .context("failed to persist exoharness master key in keychain")?;
@@ -152,7 +151,7 @@ impl SecretKeyProvider for FileBackedSecretKeyProvider {
             Ok(bytes) => parse_master_key_bytes(&bytes)
                 .with_context(|| format!("reading master key at {}", self.path.display()))?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let key = random_master_key();
+                let key = random_master_key()?;
                 write_master_key_file(&self.path, &key)?;
                 key
             }
@@ -190,17 +189,17 @@ fn deserialize_key(serialized: &str) -> Result<[u8; MASTER_KEY_LEN]> {
     Ok(key)
 }
 
-fn random_master_key() -> [u8; MASTER_KEY_LEN] {
+// Key and nonce material must be uniformly random; fill directly from the OS CSPRNG.
+fn random_master_key() -> Result<[u8; MASTER_KEY_LEN]> {
     let mut key = [0u8; MASTER_KEY_LEN];
-    key[..16].copy_from_slice(Uuid::new_v4().as_bytes());
-    key[16..].copy_from_slice(Uuid::new_v4().as_bytes());
-    key
+    getrandom::fill(&mut key).context("failed to generate secret master key")?;
+    Ok(key)
 }
 
-fn random_nonce() -> [u8; NONCE_LEN] {
+fn random_nonce() -> Result<[u8; NONCE_LEN]> {
     let mut nonce = [0u8; NONCE_LEN];
-    nonce.copy_from_slice(&Uuid::new_v4().as_bytes()[..NONCE_LEN]);
-    nonce
+    getrandom::fill(&mut nonce).context("failed to generate secret nonce")?;
+    Ok(nonce)
 }
 
 #[cfg(feature = "apple-keychain")]
@@ -276,4 +275,51 @@ pub(crate) fn default_master_key_path() -> Result<PathBuf> {
         }
     }
     bail!("could not determine config directory: set XDG_CONFIG_HOME or HOME")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn master_keys_are_random_and_distinct() {
+        let a = random_master_key().expect("master key");
+        let b = random_master_key().expect("master key");
+        assert_ne!(a, b, "two generated master keys must differ");
+    }
+
+    #[test]
+    fn nonce_is_full_entropy_not_uuid_derived() {
+        // The old UUIDv4 nonce pinned byte 6 into the version range (0x40..=0x4f)
+        // on every draw (256/256). Under a CSPRNG that range has p=1/16, so over
+        // 256 draws the mean is 16 and the threshold of 64 is ~12 std devs out.
+        let mut pinned = 0;
+        for _ in 0..256 {
+            if (random_nonce().expect("nonce")[6] & 0xf0) == 0x40 {
+                pinned += 1;
+            }
+        }
+        assert!(
+            pinned < 64,
+            "nonce byte 6 looks version-biased: {pinned}/256"
+        );
+    }
+
+    #[test]
+    fn encrypt_decrypt_round_trips_with_distinct_nonces() {
+        let cipher = SecretCipher::new(Arc::new(StaticSecretKeyProvider::new(
+            [7u8; MASTER_KEY_LEN],
+        )));
+        let secret = Secret::Key {
+            value: "s3cr3t".to_string(),
+        };
+        let first = cipher.encrypt_secret(&secret).expect("encrypt");
+        let second = cipher.encrypt_secret(&secret).expect("encrypt");
+        assert_eq!(first.nonce.len(), NONCE_LEN);
+        assert_ne!(
+            first.nonce, second.nonce,
+            "each encryption must use a fresh nonce"
+        );
+        assert_eq!(cipher.decrypt_secret(&first).expect("decrypt"), secret);
+    }
 }
