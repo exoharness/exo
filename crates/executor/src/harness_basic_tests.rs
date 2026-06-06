@@ -503,7 +503,7 @@ async fn harness_exposes_raw_exoharness_handles() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn updating_mounts_recreates_shell_sandbox() {
+async fn updating_mounts_recreates_conversation_sandbox() {
     let tempdir = TempDir::new().expect("tempdir should exist");
     let mount_dir = tempdir.path().join("mount");
     std::fs::create_dir_all(&mount_dir).expect("mount dir should exist");

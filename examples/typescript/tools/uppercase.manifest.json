@@ -1,0 +1,10 @@
+{
+  "tools": [
+    {
+      "modulePath": "./uppercase.ts",
+      "initialization": {
+        "prefix": "UPPER: "
+      }
+    }
+  ]
+}

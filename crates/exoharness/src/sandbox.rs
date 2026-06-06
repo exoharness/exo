@@ -114,6 +114,9 @@ pub enum SnapshotKind {
     /// `docker save` output: a tar of OCI image layers + manifest, loadable
     /// with `docker load`.
     DockerImageTar,
+    /// JSON manifest pointing at a named snapshot in Daytona's registry; the
+    /// filesystem bytes live in Daytona, not in the payload.
+    DaytonaSnapshot,
 }
 
 #[async_trait]
@@ -174,9 +177,9 @@ const DEFAULT_ENABLED_NETWORK_NAME: &str = "exo-default";
 const WARM_SANDBOX_KEEPALIVE_ARGV: &[&str] = &["sleep", "infinity"];
 const WARM_SANDBOX_HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(3);
 const WARM_SANDBOX_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
-const ORPHANED_WARM_SANDBOX_MIN_AGE: Duration = Duration::from_secs(60 * 60);
-const WARM_SANDBOX_KEY_LABEL: &str = "exo.sandbox.key";
-const WARM_SANDBOX_SPEC_HASH_LABEL: &str = "exo.sandbox.spec-hash";
+const ORPHANED_WARM_SANDBOX_MIN_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+pub(crate) const WARM_SANDBOX_KEY_LABEL: &str = "exo.sandbox.key";
+pub(crate) const WARM_SANDBOX_SPEC_HASH_LABEL: &str = "exo.sandbox.spec-hash";
 const WARM_SANDBOX_OWNER_PID_LABEL: &str = "exo.sandbox.owner-pid";
 const APPLE_ABSOLUTE_TIME_UNIX_OFFSET_SECONDS: f64 = 978_307_200.0;
 
@@ -185,6 +188,7 @@ struct WarmSandboxEntry {
     name: String,
     request: SandboxRequest,
     last_used_at: Instant,
+    owned: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -244,7 +248,8 @@ impl CliContainerSandboxBackend {
             .arg("start")
             .kill_on_drop(true)
             .output()
-            .await?;
+            .await
+            .with_context(|| missing_container_cli_message(self.cli, &self.container_bin))?;
         if !output.status.success() {
             return Err(anyhow!(
                 "failed to start container system: {}",
@@ -331,7 +336,7 @@ impl CliContainerSandboxBackend {
                 .iter()
                 .filter_map(|(key, entry)| {
                     let ttl = entry.request.lifecycle.idle_ttl?;
-                    (entry.last_used_at + ttl <= now).then(|| key.clone())
+                    (entry.owned && entry.last_used_at + ttl <= now).then(|| key.clone())
                 })
                 .collect::<Vec<_>>();
 
@@ -342,7 +347,9 @@ impl CliContainerSandboxBackend {
         };
 
         for entry in expired {
-            cleanup_named_container(&self.container_bin, self.cli, &entry.name).await?;
+            if entry.owned {
+                cleanup_named_container(&self.container_bin, self.cli, &entry.name).await?;
+            }
         }
 
         Ok(())
@@ -351,16 +358,9 @@ impl CliContainerSandboxBackend {
 
 impl Drop for CliContainerSandboxBackend {
     fn drop(&mut self) {
-        let Ok(mut warm_sandboxes) = self.warm_sandboxes.try_lock() else {
-            return;
-        };
-        let names = warm_sandboxes
-            .drain()
-            .map(|(_, entry)| entry.name)
-            .collect::<Vec<_>>();
-        for name in names {
-            cleanup_named_container_blocking(&self.container_bin, self.cli, &name);
-        }
+        // Warm sandboxes intentionally outlive a single CLI/REPL process so a
+        // restarted Exoclaw agent can reattach to the same environment. Stale
+        // containers are cleaned by the orphan reaper on later backend startup.
     }
 }
 
@@ -395,11 +395,19 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
                 None => None,
             }
         };
-        if let Some(entry) = replaced {
+        if let Some(entry) = replaced
+            && entry.owned
+        {
             schedule_cleanup_named_container(self.container_bin.clone(), self.cli, entry.name);
         }
 
-        let name = create_unique_warm_sandbox(&self.container_bin, &request).await?;
+        let (name, owned) = match find_running_warm_sandbox(&self.container_bin, &request).await? {
+            Some(name) => (name, false),
+            None => (
+                create_unique_warm_sandbox(&self.container_bin, &request).await?,
+                true,
+            ),
+        };
 
         {
             let mut warm_sandboxes = self.warm_sandboxes.lock().await;
@@ -409,6 +417,7 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
                     name: name.clone(),
                     request: request.clone(),
                     last_used_at: Instant::now(),
+                    owned,
                 },
             );
         }
@@ -435,6 +444,9 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
             (ContainerCliFlavor::AppleContainer, _) => bail!(
                 "restore-from-snapshot is not yet implemented for the apple-container backend"
             ),
+            (_, SnapshotKind::DaytonaSnapshot) => {
+                bail!("restoring a Daytona snapshot on a container backend is not implemented yet")
+            }
         }
 
         let image_tag = docker_load_image(&self.container_bin, &payload.bytes).await?;
@@ -465,6 +477,7 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
                     name: name.clone(),
                     request: request.clone(),
                     last_used_at: Instant::now(),
+                    owned: true,
                 },
             );
         }
@@ -568,7 +581,9 @@ impl ManagedSandboxHandle for WarmSandboxHandle {
             warm_sandboxes.remove(&self.request.key)
         };
 
-        if let Some(entry) = removed {
+        if let Some(entry) = removed
+            && entry.owned
+        {
             cleanup_named_container(&self.container_bin, self.cli, &entry.name).await
         } else {
             Ok(())
@@ -781,6 +796,40 @@ async fn create_unique_warm_sandbox(
     ))
 }
 
+async fn find_running_warm_sandbox(
+    container_bin: &Path,
+    request: &SandboxRequest,
+) -> Result<Option<String>> {
+    let output = run_container_admin_command(
+        container_bin,
+        WARM_SANDBOX_CLEANUP_TIMEOUT,
+        ["list", "--format", "json"],
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "failed to list warm sandboxes: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let spec_hash = sandbox_spec_hash(&request.spec);
+    let containers: Vec<ContainerListItem> = serde_json::from_slice(&output.stdout)?;
+    Ok(containers.into_iter().find_map(|container| {
+        if container.status.as_deref() != Some("running") {
+            return None;
+        }
+        let labels = &container.configuration.labels;
+        let key_matches = labels
+            .get(WARM_SANDBOX_KEY_LABEL)
+            .is_some_and(|value| value == &request.key.to_string());
+        let spec_matches = labels
+            .get(WARM_SANDBOX_SPEC_HASH_LABEL)
+            .is_some_and(|value| value == &spec_hash);
+        (key_matches && spec_matches).then_some(container.configuration.id)
+    }))
+}
+
 async fn ensure_warm_sandbox_ready(
     container_bin: &Path,
     cli: ContainerCliFlavor,
@@ -796,35 +845,51 @@ async fn ensure_warm_sandbox_ready(
     };
 
     let mut warm_sandboxes = warm_sandboxes.lock().await;
-    let current_name = match warm_sandboxes.get_mut(&request.key) {
+    let (current_name, current_owned) = match warm_sandboxes.get_mut(&request.key) {
         Some(entry) if entry.request.spec == request.spec => {
             entry.last_used_at = Instant::now();
-            entry.name.clone()
+            (entry.name.clone(), entry.owned)
         }
         Some(_) => {
             let stale = warm_sandboxes
                 .remove(&request.key)
                 .expect("entry disappeared while locked");
-            schedule_cleanup_named_container(container_bin.to_path_buf(), cli, stale.name);
-            let name = create_unique_warm_sandbox(container_bin, request).await?;
+            if stale.owned {
+                schedule_cleanup_named_container(container_bin.to_path_buf(), cli, stale.name);
+            }
+            let (name, owned) = match find_running_warm_sandbox(container_bin, request).await? {
+                Some(name) => (name, false),
+                None => (
+                    create_unique_warm_sandbox(container_bin, request).await?,
+                    true,
+                ),
+            };
             warm_sandboxes.insert(
                 request.key.clone(),
                 WarmSandboxEntry {
                     name: name.clone(),
                     request: request.clone(),
                     last_used_at: Instant::now(),
+                    owned,
                 },
             );
             return Ok(name);
         }
         None => {
-            let name = create_unique_warm_sandbox(container_bin, request).await?;
+            let (name, owned) = match find_running_warm_sandbox(container_bin, request).await? {
+                Some(name) => (name, false),
+                None => (
+                    create_unique_warm_sandbox(container_bin, request).await?,
+                    true,
+                ),
+            };
             warm_sandboxes.insert(
                 request.key.clone(),
                 WarmSandboxEntry {
                     name: name.clone(),
                     request: request.clone(),
                     last_used_at: Instant::now(),
+                    owned,
                 },
             );
             return Ok(name);
@@ -839,17 +904,26 @@ async fn ensure_warm_sandbox_ready(
         return Ok(current_name);
     }
 
-    let replacement_name = create_unique_warm_sandbox(container_bin, request).await?;
+    let (replacement_name, owned) = match find_running_warm_sandbox(container_bin, request).await? {
+        Some(name) => (name, false),
+        None => (
+            create_unique_warm_sandbox(container_bin, request).await?,
+            true,
+        ),
+    };
     warm_sandboxes.insert(
         request.key.clone(),
         WarmSandboxEntry {
             name: replacement_name.clone(),
             request: request.clone(),
             last_used_at: Instant::now(),
+            owned,
         },
     );
     drop(warm_sandboxes);
-    schedule_cleanup_named_container(container_bin.to_path_buf(), cli, current_name);
+    if current_owned {
+        schedule_cleanup_named_container(container_bin.to_path_buf(), cli, current_name);
+    }
     Ok(replacement_name)
 }
 
@@ -1259,25 +1333,25 @@ fn owner_pid_is_alive(pid: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-fn cleanup_named_container_blocking(container_bin: &Path, cli: ContainerCliFlavor, name: &str) {
-    match cli {
-        ContainerCliFlavor::AppleContainer => {
-            run_container_admin_command_blocking(container_bin, ["stop", name]);
-            run_container_admin_command_blocking(container_bin, ["kill", name]);
-            run_container_admin_command_blocking(container_bin, ["delete", name]);
-        }
-        ContainerCliFlavor::Docker => {
-            run_container_admin_command_blocking(container_bin, ["rm", "-f", name]);
-        }
-    }
-}
-
 fn schedule_cleanup_named_container(container_bin: PathBuf, cli: ContainerCliFlavor, name: String) {
     tokio::spawn(async move {
         if let Err(error) = cleanup_named_container(&container_bin, cli, &name).await {
             tracing::warn!(sandbox = %name, %error, "failed to clean up warm sandbox");
         }
     });
+}
+
+fn missing_container_cli_message(cli: ContainerCliFlavor, container_bin: &Path) -> String {
+    match cli {
+        ContainerCliFlavor::AppleContainer => format!(
+            "apple-container sandbox backend requires the `{}` CLI; install Apple container CLI or use `--sandbox-backend local-process`",
+            container_bin.display()
+        ),
+        ContainerCliFlavor::Docker => format!(
+            "docker sandbox backend requires the `{}` CLI; install Docker or use `--sandbox-backend local-process`",
+            container_bin.display()
+        ),
+    }
 }
 
 async fn run_container_admin_command<const N: usize>(
@@ -1297,35 +1371,6 @@ async fn run_container_admin_command<const N: usize>(
     }
 }
 
-fn run_container_admin_command_blocking<const N: usize>(container_bin: &Path, args: [&str; N]) {
-    let Ok(mut child) = std::process::Command::new(container_bin)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        return;
-    };
-
-    let deadline = Instant::now() + WARM_SANDBOX_CLEANUP_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-            Ok(None) => {
-                if let Err(error) = child.kill() {
-                    tracing::warn!(%error, "failed to kill timed out container admin command");
-                }
-                if let Err(error) = child.wait() {
-                    tracing::warn!(%error, "failed to wait for timed out container admin command");
-                }
-                return;
-            }
-            Err(_) => return,
-        }
-    }
-}
-
 fn is_missing_container_error(stderr: &str) -> bool {
     let lower = stderr.to_ascii_lowercase();
     lower.contains("not found") || lower.contains("no such")
@@ -1342,7 +1387,7 @@ fn is_already_exists_error(message: &str) -> bool {
     lower.contains("already exists")
 }
 
-fn sandbox_spec_hash(spec: &SandboxSpec) -> String {
+pub(crate) fn sandbox_spec_hash(spec: &SandboxSpec) -> String {
     let mut hasher = DefaultHasher::new();
     spec.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
@@ -1428,9 +1473,10 @@ async fn docker_snapshot_container(
     if let Ok(output) = &rm_output
         && !output.status.success()
     {
-        eprintln!(
-            "warning: failed to remove ephemeral snapshot image {snap_tag}: {}",
-            render_command_error(&output.stderr)
+        tracing::warn!(
+            image_tag = %snap_tag,
+            stderr = %render_command_error(&output.stderr),
+            "failed to remove ephemeral snapshot image"
         );
     }
 
@@ -1492,4 +1538,30 @@ async fn docker_load_image(container_bin: &Path, payload: &Bytes) -> Result<Stri
         }
     }
     bail!("docker load completed but no image reference found in output: {stdout}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn apple_container_backend_names_missing_container_cli() {
+        let missing_bin = std::env::temp_dir().join(format!(
+            "exo-missing-container-cli-{}",
+            Uuid::new_v4().simple()
+        ));
+        let backend = CliContainerSandboxBackend {
+            cli: ContainerCliFlavor::AppleContainer,
+            container_bin: missing_bin,
+            system_started: Mutex::new(false),
+            network_created: Mutex::new(false),
+            warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        let error = backend.ensure_system_started().await.unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("apple-container sandbox backend requires"));
+        assert!(message.contains("install Apple container CLI"));
+        assert!(message.contains("--sandbox-backend local-process"));
+    }
 }

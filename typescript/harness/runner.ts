@@ -43,7 +43,7 @@ import {
 
 interface RawAgentConfig {
   instructions: Message[];
-  harness: "basic" | "rlm" | "typescript" | "type_script";
+  harness: "basic" | "rlm" | "typescript" | "type_script" | "exoclaw";
   typescript?: {
     module_path: string;
     tool_module_paths?: string[];
@@ -67,6 +67,7 @@ interface RawConversationConfig {
     | "local_process"
     | null;
   shell_program?: string | null;
+  sandbox_scope?: "agent" | "conversation" | null;
   mounts: Array<{
     host_path: string;
     mount_path: string;
@@ -538,7 +539,12 @@ class ProtocolClient {
       id,
       request,
     });
-    return response;
+    try {
+      return await response;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`exoharness request ${request.type} failed: ${message}`);
+    }
   }
 
   async emitStream(event: RawTypeScriptStreamEvent): Promise<void> {
@@ -843,6 +849,7 @@ function toConversationConfig(raw: RawConversationConfig): ConversationConfig {
     sandboxImage: raw.sandbox_image ?? null,
     sandboxProvider: raw.sandbox_provider ?? null,
     shellProgram: raw.shell_program ?? null,
+    sandboxScope: raw.sandbox_scope ?? null,
     mounts: raw.mounts.map(toFileSystemMount),
   };
 }

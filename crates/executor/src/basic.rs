@@ -107,6 +107,7 @@ where
 
     async fn run_turn_loop(
         &self,
+        agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
         turn: &dyn TurnHandle,
         agent_config: &AgentConfig,
@@ -142,6 +143,7 @@ where
 
             let tool_results = self
                 .execute_tool_round(
+                    agent,
                     conversation,
                     agent_config,
                     conversation_config,
@@ -244,6 +246,7 @@ where
 
     async fn execute_tool_round(
         &self,
+        agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
@@ -277,6 +280,7 @@ where
             let (result, tool_succeeded) = match self
                 .tools
                 .execute(
+                    agent,
                     conversation,
                     agent_config,
                     conversation_config,
@@ -330,12 +334,13 @@ where
 
     async fn prepare_conversation(
         &self,
+        agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
     ) -> Result<()> {
         self.tools
-            .prepare_conversation(conversation, agent_config, conversation_config)
+            .prepare_conversation(agent, conversation, agent_config, conversation_config)
             .await
     }
 
@@ -345,7 +350,7 @@ where
 
     async fn execute_turn(
         &self,
-        _agent: &dyn AgentHandle,
+        agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
         turn: Arc<dyn TurnHandle>,
         agent_config: &AgentConfig,
@@ -355,6 +360,7 @@ where
         turn_trace: Option<&dyn TurnExecutionTrace>,
     ) -> Result<()> {
         self.run_turn_loop(
+            agent,
             conversation,
             turn.as_ref(),
             agent_config,

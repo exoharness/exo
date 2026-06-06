@@ -5,12 +5,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use exoharness::{
-    ConversationHandle, EventId, FileSystemMount, ResponseId, Result, SandboxProvider, SessionId,
-    ToolArguments, ToolCallId, ToolRequest, ToolResult, TurnId,
+    AgentHandle, ConversationHandle, EventId, FileSystemMount, ResponseId, Result, SandboxProvider,
+    SessionId, ToolArguments, ToolCallId, ToolRequest, ToolResult, TurnId,
 };
 use lingua::{Message, UniversalStreamChunk, UniversalUsage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::OwnedMutexGuard;
 use tokio_stream::{Stream, wrappers::UnboundedReceiverStream};
 
 use crate::braintrust::BraintrustTracingConfig;
@@ -43,6 +44,7 @@ pub enum AgentHarnessKind {
     Rlm,
     #[serde(rename = "typescript")]
     TypeScript,
+    Exoclaw,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +67,15 @@ pub struct ConversationConfig {
     pub shell_program: Option<String>,
     #[serde(default)]
     pub mounts: Vec<FileSystemMount>,
+    #[serde(default)]
+    pub sandbox_scope: Option<SandboxScope>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxScope {
+    Agent,
+    Conversation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,8 +104,21 @@ impl Default for ConversationConfig {
             sandbox_provider: None,
             shell_program: Some("/bin/bash".to_string()),
             mounts: Vec::new(),
+            sandbox_scope: None,
         }
     }
+}
+
+pub fn effective_sandbox_scope(
+    agent_config: &AgentConfig,
+    conversation_config: &ConversationConfig,
+) -> SandboxScope {
+    conversation_config
+        .sandbox_scope
+        .unwrap_or(match agent_config.harness {
+            AgentHarnessKind::Exoclaw => SandboxScope::Agent,
+            _ => SandboxScope::Conversation,
+        })
 }
 
 impl ConversationConfig {
@@ -126,6 +150,7 @@ pub trait ModelResponseStream: Send {
 pub trait ToolRuntime: Send + Sync {
     async fn prepare_conversation(
         &self,
+        _agent: &dyn AgentHandle,
         _conversation: &dyn ConversationHandle,
         _agent_config: &AgentConfig,
         _config: &ConversationConfig,
@@ -135,6 +160,7 @@ pub trait ToolRuntime: Send + Sync {
 
     async fn execute(
         &self,
+        agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
         agent_config: &AgentConfig,
         config: &ConversationConfig,
@@ -188,11 +214,20 @@ pub struct SendResult {
 
 pub struct ExecutionStreamHandle {
     event_stream: UnboundedReceiverStream<Result<ExecutionStreamEvent>>,
+    _send_guard: Option<OwnedMutexGuard<()>>,
 }
 
 impl ExecutionStreamHandle {
     pub fn new(event_stream: UnboundedReceiverStream<Result<ExecutionStreamEvent>>) -> Self {
-        Self { event_stream }
+        Self {
+            event_stream,
+            _send_guard: None,
+        }
+    }
+
+    pub(crate) fn with_send_guard(mut self, send_guard: OwnedMutexGuard<()>) -> Self {
+        self._send_guard = Some(send_guard);
+        self
     }
 }
 

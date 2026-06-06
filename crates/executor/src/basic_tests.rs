@@ -61,6 +61,7 @@ async fn send_appends_user_and_assistant_messages() {
 
     executor
         .prepare_conversation(
+            agent.as_ref(),
             conversation.as_ref(),
             &default_agent_config(),
             &ConversationConfig::default(),
@@ -371,6 +372,7 @@ async fn send_stream_emits_chunks_and_persists_final_response() {
 
     executor
         .prepare_conversation(
+            agent.as_ref(),
             conversation.as_ref(),
             &default_agent_config(),
             &ConversationConfig::default(),
@@ -555,6 +557,7 @@ struct FailingToolRuntime {
 impl ToolRuntime for FailingToolRuntime {
     async fn execute(
         &self,
+        _agent: &dyn AgentHandle,
         _conversation: &dyn ConversationHandle,
         _agent_config: &AgentConfig,
         _config: &ConversationConfig,
@@ -568,6 +571,7 @@ impl ToolRuntime for FailingToolRuntime {
 impl ToolRuntime for FakeToolRuntime {
     async fn execute(
         &self,
+        _agent: &dyn AgentHandle,
         _conversation: &dyn ConversationHandle,
         _agent_config: &AgentConfig,
         _config: &ConversationConfig,

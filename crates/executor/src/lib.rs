@@ -1,9 +1,13 @@
+mod adapter;
+mod agent_sandbox;
 mod basic;
 #[cfg(test)]
 mod basic_tests;
 mod braintrust;
 #[cfg(test)]
 mod braintrust_tests;
+mod conversation_sandbox;
+mod conversation_wakeup;
 mod execution_tracing;
 mod executor_types;
 mod harness_basic;
@@ -21,36 +25,51 @@ mod local_sandbox;
 mod rlm;
 #[cfg(test)]
 mod rlm_tests;
+mod scheduler_runtime;
+mod scheduler_store;
+mod scheduler_types;
 mod shared;
 #[cfg(test)]
 mod test_support;
 mod typescript;
 
+pub use adapter::AdapterStore;
+pub use adapter::{
+    AdapterAttachment, AdapterAttachmentKind, AdapterConfig, AdapterEventRecord, AdapterEventType,
+    AdapterRecord, AdapterSource, NewAdapter, WorkerSecretEnvVar,
+};
+pub use adapter::{AdapterRunOptions, run_adapters_watch};
 pub use braintrust::{BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig};
+pub use conversation_wakeup::send_conversation_wakeup;
 pub use executor_types::{
     AgentConfig, AgentHarnessKind, ConversationConfig, ConversationModelConfig,
     ExecutionStreamEvent, ExecutionStreamHandle, ModelClient, ModelRequest, ModelResponse,
-    ModelResponseStream, PendingToolCall, SendRequest, SendResult, ToolDefinition, ToolRuntime,
-    TypeScriptHarnessConfig,
+    ModelResponseStream, PendingToolCall, SandboxScope, SendRequest, SendResult, ToolDefinition,
+    ToolRuntime, TypeScriptHarnessConfig, effective_sandbox_scope,
 };
 pub use exoharness::{
     AgentHandle, BasicExoHarness, BasicExoHarnessConfig, Binding, BindingRecord,
-    ConversationHandle, DEFAULT_SANDBOX_IMAGE, EventData, EventId, EventKind, EventQuery,
-    EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions, FileSystemMount,
+    ConversationHandle, DEFAULT_SANDBOX_IMAGE, DaytonaBackendSpec, EventData, EventId, EventKind,
+    EventQuery, EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions, FileSystemMount,
     FileSystemMountMode, ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET, HttpExoHarness,
     PutSecretRequest, SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxId, SandboxProvider,
-    Secret, SecretBackendChoice, SecretMetadata, SessionId, SnapshotId, StartSandboxRequest,
-    ToolRequest, Uuid7, serve_exoharness_http_listener,
-    serve_exoharness_http_listener_with_options,
+    SandboxProviderConfig, Secret, SecretBackendChoice, SecretMetadata, SessionId, SnapshotId,
+    StartSandboxRequest, ToolRequest, Uuid7, default_daytona_image, default_docker_image,
+    serve_exoharness_http_listener, serve_exoharness_http_listener_with_options,
 };
 pub use harness_basic::BasicHarness;
 pub use harness_config::load_agent_config;
-pub use harness_tool::BasicToolRuntime;
+pub use harness_tool::{BasicToolRuntime, ExoclawToolRuntime};
 pub use harness_types::{
     CreateAgentRequest, CreateConversationRequest, Harness, HarnessAgent, HarnessConversation,
 };
 pub use local_sandbox::LocalSandboxExoHarness;
 pub use rlm::RlmHarness;
+pub use scheduler_runtime::{SchedulerRunOptions, run_due_tasks, run_task};
+pub use scheduler_store::SchedulerStore;
+pub use scheduler_types::{
+    DEFAULT_MAX_OUTPUT_BYTES, NewScheduledTask, ScheduledTaskRecord, ScheduledTaskRunRecord, now_ms,
+};
 pub use typescript::TypeScriptHarness;
 
 pub(crate) use basic::BasicExecutor;

@@ -2121,6 +2121,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "boa_engine",
  "braintrust-llm-router",
  "braintrust-sdk-rust",
@@ -2134,6 +2135,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-stream",
+ "tracing",
  "url",
 ]
 
@@ -2142,6 +2144,7 @@ name = "exo"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "clap",
  "executor",
  "exoharness",
@@ -2157,6 +2160,17 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wiremock",
+]
+
+[[package]]
+name = "exoclaw-scheduler-runner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "executor",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
