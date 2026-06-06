@@ -25,13 +25,14 @@ use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use executor::{
     AgentHarnessKind, BasicExoHarness, BasicExoHarnessConfig, BasicHarness, BasicToolRuntime,
     Binding, BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig,
-    ConversationModelConfig, CreateAgentRequest, CreateConversationRequest, EventKind, EventQuery,
-    EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions, ExoclawToolRuntime,
-    FileSystemMount, FileSystemMountMode, ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET,
-    Harness, HarnessAgent, HarnessConversation, HttpExoHarness, LocalSandboxExoHarness,
-    PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxProvider,
-    SandboxScope, Secret, SecretBackendChoice, ToolRequest, ToolRuntime, TypeScriptHarness,
-    TypeScriptHarnessConfig, Uuid7, effective_sandbox_scope, load_agent_config,
+    ConversationModelConfig, CreateAgentRequest, CreateConversationRequest, DaytonaBackendSpec,
+    EventKind, EventQuery, EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions,
+    ExoclawToolRuntime, FileSystemMount, FileSystemMountMode, ForkConversationRequest,
+    HTTP_EXOHARNESS_TRACING_TARGET, Harness, HarnessAgent, HarnessConversation, HttpExoHarness,
+    LocalSandboxExoHarness, PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR,
+    SandboxBackendChoice, SandboxProvider, SandboxProviderConfig, SandboxScope, Secret,
+    SecretBackendChoice, ToolRequest, ToolRuntime, TypeScriptHarness, TypeScriptHarnessConfig,
+    Uuid7, default_daytona_image, default_docker_image, effective_sandbox_scope, load_agent_config,
     send_conversation_wakeup, serve_exoharness_http_listener_with_options,
 };
 use lingua::Message;
@@ -253,11 +254,30 @@ fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
         .sandbox_backend
         .map(SandboxBackendChoice::from)
         .unwrap_or_else(default_sandbox_backend);
+    let sandbox_default = sandbox_backend.provider();
+    let mut sandbox_backends = default_sandbox_backends();
+    if !sandbox_backends
+        .iter()
+        .any(|backend| backend.provider() == sandbox_default)
+    {
+        sandbox_backends.push(sandbox_backend);
+    }
     Ok(BasicExoHarnessConfig {
         root: cli.root.join("exoharness"),
         secret_backend,
-        sandbox_backend,
+        sandbox_default,
+        sandbox_backends,
     })
+}
+
+/// Default providers: the OS-local container backend, local processes, and
+/// Daytona (offered even with no key set — credentials resolve lazily).
+fn default_sandbox_backends() -> Vec<SandboxBackendChoice> {
+    vec![
+        default_sandbox_backend(),
+        SandboxBackendChoice::LocalProcess,
+        SandboxBackendChoice::Daytona(DaytonaBackendSpec::with_conventional_secrets()),
+    ]
 }
 
 #[cfg(target_os = "macos")]
@@ -333,6 +353,11 @@ enum Commands {
     Model {
         #[command(subcommand)]
         command: ModelCommands,
+    },
+    /// Configure and list sandbox provider bindings.
+    Provider {
+        #[command(subcommand)]
+        command: ProviderCommands,
     },
     /// Manage local stored secrets.
     Secret {
@@ -559,6 +584,33 @@ enum ModelCommands {
         secret: String,
         #[arg(long)]
         base_url: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProviderCommands {
+    /// List configured sandbox provider bindings.
+    List,
+    /// Configure a sandbox provider (writes a Binding::Sandbox).
+    Configure {
+        #[arg(long, value_enum)]
+        provider: SandboxProviderArg,
+        /// Binding name (default: the provider name).
+        #[arg(long)]
+        name: Option<String>,
+        /// Secret (by name) holding the provider's API key. Required for Daytona.
+        #[arg(long)]
+        secret: Option<String>,
+        /// Region/target. Daytona: us | eu | experimental.
+        #[arg(long)]
+        region: Option<String>,
+        #[arg(long)]
+        organization_id: Option<String>,
+        #[arg(long)]
+        api_url: Option<String>,
+        /// Default base image for sandboxes that don't request one.
+        #[arg(long)]
+        default_image: Option<String>,
     },
 }
 
@@ -1690,6 +1742,58 @@ async fn main() -> Result<()> {
                 println!("registered model {} ({})", name, id);
             }
         },
+        Commands::Provider { command } => match command {
+            ProviderCommands::List => {
+                for record in harness.exoharness_handle().list_bindings().await? {
+                    if let Binding::Sandbox { name, config } = record.binding {
+                        println!("{name}\t{config:?}");
+                    }
+                }
+            }
+            ProviderCommands::Configure {
+                provider,
+                name,
+                secret,
+                region,
+                organization_id,
+                api_url,
+                default_image,
+            } => {
+                let binding_name = name.unwrap_or_else(|| format!("{provider:?}").to_lowercase());
+                let config = match provider {
+                    SandboxProviderArg::Daytona => {
+                        let secret =
+                            secret.ok_or_else(|| anyhow!("--secret is required for daytona"))?;
+                        let secret_id =
+                            find_secret_id(harness.exoharness_handle().as_ref(), &secret)
+                                .await?
+                                .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
+                        SandboxProviderConfig::Daytona {
+                            api_key_secret_id: secret_id,
+                            region,
+                            organization_id,
+                            api_url,
+                            default_image: default_image.unwrap_or_else(default_daytona_image),
+                        }
+                    }
+                    SandboxProviderArg::Docker => SandboxProviderConfig::Docker {
+                        default_image: default_image.unwrap_or_else(default_docker_image),
+                    },
+                    other => bail!(
+                        "provider {other:?} has no binding-based config yet \
+                         (E2B and exe.dev are followups)"
+                    ),
+                };
+                let id = harness
+                    .exoharness_handle()
+                    .put_binding(Binding::Sandbox {
+                        name: binding_name.clone(),
+                        config,
+                    })
+                    .await?;
+                println!("configured sandbox provider {binding_name} ({id})");
+            }
+        },
         Commands::Serve { .. } => {
             unreachable!("serve commands are handled before harness instantiation")
         }
@@ -1745,6 +1849,7 @@ fn command_agent_ref(command: &Commands) -> Option<&str> {
         Commands::Repl { agent, .. } => Some(agent.as_deref().unwrap_or(DEFAULT_REPL_SLUG)),
         Commands::Secret { .. }
         | Commands::Model { .. }
+        | Commands::Provider { .. }
         | Commands::Adapters { .. }
         | Commands::Serve { .. } => None,
     }
