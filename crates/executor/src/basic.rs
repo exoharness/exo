@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use exoharness::{
     AgentHandle, ConversationHandle, ConversationId, EventData, EventId, EventKind, EventQuery,
     EventQueryDirection, Result, ToolCallId, ToolRequest, TurnHandle,
+    with_active_sandbox_event_turn,
 };
 use lingua::Message;
 use lingua::universal::{ToolContentPart, ToolResultContentPart};
@@ -109,7 +110,7 @@ where
         &self,
         agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
-        turn: &dyn TurnHandle,
+        turn: Arc<dyn TurnHandle>,
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
         stream_mode: ExecutorStreamMode<'_>,
@@ -145,6 +146,7 @@ where
                 .execute_tool_round(
                     agent,
                     conversation,
+                    Arc::clone(&turn),
                     agent_config,
                     conversation_config,
                     tool_requests,
@@ -248,6 +250,7 @@ where
         &self,
         agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
+        turn: Arc<dyn TurnHandle>,
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
         tool_requests: Vec<ExecutableToolRequest>,
@@ -277,31 +280,29 @@ where
                 }
                 None => None,
             };
-            let (result, tool_succeeded) = match self
-                .tools
-                .execute(
-                    agent,
-                    conversation,
-                    agent_config,
-                    conversation_config,
-                    &tool_request.request,
-                )
-                .await
-            {
-                Ok(response) => (response, true),
-                Err(error) => {
-                    if let Some(tool_trace) = tool_trace.take() {
-                        tool_trace.finish_error(&error).await;
+            let tool_future = self.tools.execute(
+                agent,
+                conversation,
+                agent_config,
+                conversation_config,
+                &tool_request.request,
+            );
+            let (result, tool_succeeded) =
+                match with_active_sandbox_event_turn(Arc::clone(&turn), tool_future).await {
+                    Ok(response) => (response, true),
+                    Err(error) => {
+                        if let Some(tool_trace) = tool_trace.take() {
+                            tool_trace.finish_error(&error).await;
+                        }
+                        (
+                            json!({
+                                "ok": false,
+                                "error": error.to_string(),
+                            }),
+                            false,
+                        )
                     }
-                    (
-                        json!({
-                            "ok": false,
-                            "error": error.to_string(),
-                        }),
-                        false,
-                    )
-                }
-            };
+                };
             if tool_succeeded && let Some(tool_trace) = tool_trace.take() {
                 tool_trace.finish_success(&result).await;
             }
@@ -362,7 +363,7 @@ where
         self.run_turn_loop(
             agent,
             conversation,
-            turn.as_ref(),
+            turn,
             agent_config,
             conversation_config,
             stream_mode,

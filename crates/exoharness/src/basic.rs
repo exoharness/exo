@@ -43,6 +43,7 @@ use crate::{
     SandboxProcessStdin, SandboxProvider, Secret, SecretId, SecretMetadata, SecretType, SessionId,
     SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnHandle, TurnId, TurnRecord,
     Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
+    active_sandbox_event_turn,
 };
 
 #[derive(Debug, Clone)]
@@ -1099,7 +1100,7 @@ impl ConversationHandle for BasicConversationHandle {
             .ok_or_else(|| anyhow!("sandbox {id} is not running; start it before snapshotting"))?;
         let payload = handle.snapshot().await?;
 
-        let _guard = self.harness.inner.write_lock.lock().await;
+        let guard = self.harness.inner.write_lock.lock().await;
         let mut sandbox = self.load_sandbox(&id).await?;
         let snapshot_id = Uuid7::now();
 
@@ -1123,26 +1124,32 @@ impl ConversationHandle for BasicConversationHandle {
             .storage
             .put_json(self.sandboxes_dir().join(format!("{id}.json")), &sandbox)
             .await?;
-        let mut record = self.load_record().await?;
-        append_events_to_conversation(
-            &self.harness.inner,
-            &self.conversation_dir(),
-            self.record.id,
-            None,
-            None,
-            record.latest_event_id,
-            vec![EventData::SandboxSnapshotted {
-                sandbox_id: id,
-                snapshot_id,
-            }],
-            &mut record,
-        )
-        .await?;
-        self.harness
-            .inner
-            .storage
-            .put_json(self.conversation_dir().join("record.json"), &record)
+        let event = EventData::SandboxSnapshotted {
+            sandbox_id: id,
+            snapshot_id,
+        };
+        if let Some(turn) = active_sandbox_event_turn() {
+            drop(guard);
+            turn.add_events(vec![event]).await?;
+        } else {
+            let mut record = self.load_record().await?;
+            append_events_to_conversation(
+                &self.harness.inner,
+                &self.conversation_dir(),
+                self.record.id,
+                None,
+                None,
+                record.latest_event_id,
+                vec![event],
+                &mut record,
+            )
             .await?;
+            self.harness
+                .inner
+                .storage
+                .put_json(self.conversation_dir().join("record.json"), &record)
+                .await?;
+        }
         Ok(snapshot_id)
     }
 
@@ -1168,7 +1175,7 @@ impl ConversationHandle for BasicConversationHandle {
             bytes: Bytes::from(payload_bytes),
         };
 
-        let _guard = self.harness.inner.write_lock.lock().await;
+        let guard = self.harness.inner.write_lock.lock().await;
         let mut sandbox = self.load_sandbox(&request.id).await?;
         sandbox.running = true;
         sandbox.latest_snapshot_id = Some(request.snapshot_id);
@@ -1208,26 +1215,32 @@ impl ConversationHandle for BasicConversationHandle {
             .lock()
             .await
             .insert(request.id.clone(), sandbox_handle);
-        let mut record = self.load_record().await?;
-        append_events_to_conversation(
-            &self.harness.inner,
-            &self.conversation_dir(),
-            self.record.id,
-            None,
-            None,
-            record.latest_event_id,
-            vec![EventData::SandboxStarted {
-                sandbox_id: request.id,
-                snapshot_id: Some(request.snapshot_id),
-            }],
-            &mut record,
-        )
-        .await?;
-        self.harness
-            .inner
-            .storage
-            .put_json(self.conversation_dir().join("record.json"), &record)
+        let event = EventData::SandboxStarted {
+            sandbox_id: request.id,
+            snapshot_id: Some(request.snapshot_id),
+        };
+        if let Some(turn) = active_sandbox_event_turn() {
+            drop(guard);
+            turn.add_events(vec![event]).await?;
+        } else {
+            let mut record = self.load_record().await?;
+            append_events_to_conversation(
+                &self.harness.inner,
+                &self.conversation_dir(),
+                self.record.id,
+                None,
+                None,
+                record.latest_event_id,
+                vec![event],
+                &mut record,
+            )
             .await?;
+            self.harness
+                .inner
+                .storage
+                .put_json(self.conversation_dir().join("record.json"), &record)
+                .await?;
+        }
         Ok(())
     }
 

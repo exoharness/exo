@@ -12,7 +12,8 @@ use exoharness::{
     SandboxId, SandboxProcess, SandboxProcessEventQuery, SandboxProcessRecord,
     SandboxProcessStatus, Secret, SecretId, SecretMetadata, SnapshotId, StartSandboxProcessRequest,
     StartSandboxRequest, TurnHandle, TurnRecord, Uuid7, WaitSandboxProcessRequest,
-    WriteArtifactRequest, WriteSandboxProcessInputRequest,
+    WriteArtifactRequest, WriteSandboxProcessInputRequest, active_sandbox_event_turn,
+    suppress_active_sandbox_events,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -346,14 +347,18 @@ impl LocalSandboxConversation {
     }
 
     async fn append_remote_sandbox_events(&self, data: Vec<EventData>) -> Result<()> {
-        self.remote
-            .add_events(AddEventsRequest {
-                session_id: None,
-                turn_id: None,
-                expected_head: None,
-                data,
-            })
-            .await?;
+        if let Some(turn) = active_sandbox_event_turn() {
+            turn.add_events(data).await?;
+        } else {
+            self.remote
+                .add_events(AddEventsRequest {
+                    session_id: None,
+                    turn_id: None,
+                    expected_head: None,
+                    data,
+                })
+                .await?;
+        }
         Ok(())
     }
 }
@@ -451,11 +456,13 @@ impl ConversationHandle for LocalSandboxConversation {
         let Some(local_id) = self.local_sandbox_id(&id).await? else {
             return self.remote.snapshot_sandbox(id).await;
         };
-        let snapshot_id = self
-            .local_conversation()
-            .await?
-            .snapshot_sandbox(local_id)
-            .await?;
+        let snapshot_id = suppress_active_sandbox_events(async {
+            self.local_conversation()
+                .await?
+                .snapshot_sandbox(local_id)
+                .await
+        })
+        .await?;
         self.append_remote_sandbox_events(vec![EventData::SandboxSnapshotted {
             sandbox_id: id,
             snapshot_id,
@@ -468,17 +475,19 @@ impl ConversationHandle for LocalSandboxConversation {
         let Some(local_id) = self.local_sandbox_id(&request.id).await? else {
             return self.remote.start_sandbox(request).await;
         };
-        let remote_id = request.id;
-        self.local_conversation()
-            .await?
-            .start_sandbox(StartSandboxRequest {
-                id: local_id,
-                snapshot_id: request.snapshot_id,
-                idle_seconds: request.idle_seconds,
-            })
-            .await?;
+        suppress_active_sandbox_events(async {
+            self.local_conversation()
+                .await?
+                .start_sandbox(StartSandboxRequest {
+                    id: local_id,
+                    snapshot_id: request.snapshot_id,
+                    idle_seconds: request.idle_seconds,
+                })
+                .await
+        })
+        .await?;
         self.append_remote_sandbox_events(vec![EventData::SandboxStarted {
-            sandbox_id: remote_id,
+            sandbox_id: request.id,
             snapshot_id: Some(request.snapshot_id),
         }])
         .await

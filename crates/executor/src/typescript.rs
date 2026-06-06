@@ -19,6 +19,7 @@ use exoharness::{
         ConversationHandleInfo, Request as ExoRequest, Response as ExoResponse, TurnHandleInfo,
     },
     server::ExoHarnessServer,
+    with_active_sandbox_event_turn,
 };
 use lingua::UniversalStreamChunk;
 use serde::{Deserialize, Serialize};
@@ -179,20 +180,22 @@ where
         conversation: &dyn ConversationHandle,
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
+        turn: Arc<dyn TurnHandle>,
         request: RuntimeRequest,
     ) -> Result<RuntimeResponsePayload> {
         match request {
             RuntimeRequest::ExecuteTool { request } => Ok(RuntimeResponsePayload::ToolResult {
-                result: self
-                    .tools
-                    .execute(
+                result: with_active_sandbox_event_turn(
+                    turn,
+                    self.tools.execute(
                         agent,
                         conversation,
                         agent_config,
                         conversation_config,
                         &request,
-                    )
-                    .await?,
+                    ),
+                )
+                .await?,
             }),
             RuntimeRequest::StartSandboxProcess { .. }
             | RuntimeRequest::WriteSandboxProcessStdin { .. }
@@ -380,6 +383,7 @@ impl TypeScriptRunnerProcess {
                                     conversation,
                                     agent_config,
                                     conversation_config,
+                                    Arc::clone(&turn),
                                     request,
                                 )
                                 .await;
@@ -456,6 +460,7 @@ impl TypeScriptRunnerProcess {
         conversation: &dyn ConversationHandle,
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
+        turn: Arc<dyn TurnHandle>,
         request: RuntimeRequest,
     ) -> Result<RuntimeResponsePayload>
     where
@@ -469,6 +474,7 @@ impl TypeScriptRunnerProcess {
                         conversation,
                         agent_config,
                         conversation_config,
+                        Arc::clone(&turn),
                         RuntimeRequest::ExecuteTool { request },
                     )
                     .await

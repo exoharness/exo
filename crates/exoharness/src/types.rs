@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::future::Future;
 use std::ops::Bound;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -128,6 +129,44 @@ pub trait TurnHandle: Send + Sync {
     async fn add_events(&self, data: Vec<EventData>) -> Result<AddEventsResult>;
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion>;
     async fn finish(&self) -> Result<EventId>;
+}
+
+#[derive(Clone)]
+enum ActiveSandboxEventSink {
+    Turn(Arc<dyn TurnHandle>),
+    Suppressed,
+}
+
+tokio::task_local! {
+    static ACTIVE_SANDBOX_EVENT_SINK: ActiveSandboxEventSink;
+}
+
+pub async fn with_active_sandbox_event_turn<F, T>(turn: Arc<dyn TurnHandle>, future: F) -> T
+where
+    F: Future<Output = T>,
+{
+    ACTIVE_SANDBOX_EVENT_SINK
+        .scope(ActiveSandboxEventSink::Turn(turn), future)
+        .await
+}
+
+pub async fn suppress_active_sandbox_events<F, T>(future: F) -> T
+where
+    F: Future<Output = T>,
+{
+    ACTIVE_SANDBOX_EVENT_SINK
+        .scope(ActiveSandboxEventSink::Suppressed, future)
+        .await
+}
+
+pub fn active_sandbox_event_turn() -> Option<Arc<dyn TurnHandle>> {
+    ACTIVE_SANDBOX_EVENT_SINK
+        .try_with(|sink| match sink {
+            ActiveSandboxEventSink::Turn(turn) => Some(Arc::clone(turn)),
+            ActiveSandboxEventSink::Suppressed => None,
+        })
+        .ok()
+        .flatten()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

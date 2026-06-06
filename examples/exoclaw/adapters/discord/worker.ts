@@ -4,6 +4,7 @@ import readline from "node:readline/promises";
 import {
   ChannelType,
   Client,
+  Events,
   GatewayIntentBits,
   Partials,
   type Message,
@@ -35,6 +36,17 @@ if (trigger !== "all_messages" && trigger !== "mentions_only") {
   throw new Error("Discord trigger must be all_messages or mentions_only");
 }
 
+process.on("uncaughtException", (error) => {
+  const message = error instanceof Error ? error.message : String(error);
+  if (isTlsAccessDeniedError(error)) {
+    reportWorkerError(`Discord TLS stream error: ${message}`);
+    return;
+  }
+  reportWorkerError(`Discord adapter uncaught exception: ${message}`);
+  process.exitCode = 1;
+  setImmediate(() => process.exit(1));
+});
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -46,10 +58,14 @@ const client = new Client({
 });
 
 client.on("error", (error) => {
-  writeWorkerEvent({ type: "error", message: error.message });
+  reportWorkerError(error.message);
 });
 
-client.once("ready", () => {
+client.on("shardError", (error) => {
+  reportWorkerError(`Discord shard error: ${error.message}`);
+});
+
+client.once(Events.ClientReady, () => {
   writeWorkerEvent({
     type: "connected",
     subject: client.user?.id ?? null,
@@ -98,55 +114,63 @@ const input = readline.createInterface({
   crlfDelay: Number.POSITIVE_INFINITY,
 });
 
-for await (const line of input) {
-  if (line.trim().length === 0) {
-    continue;
-  }
-  let commandId: string | null = null;
-  try {
-    const command = parseWorkerCommand(JSON.parse(line));
-    commandId = command.id;
-    const target = command.target ?? defaultChannelId;
-    if (!target) {
-      throw new Error(
-        "Discord send_message requires a target channel id or configured defaultChannelId",
-      );
+input.on("error", (error) => {
+  reportWorkerError(`Discord adapter command stream error: ${error.message}`);
+});
+
+try {
+  for await (const line of input) {
+    if (line.trim().length === 0) {
+      continue;
     }
-    writeWorkerEvent({
-      type: "lifecycle",
-      name: "send_starting",
-      metadata: {
-        target,
-        attachmentCount: command.attachments.length,
-      },
-    });
-    await sendDiscordMessage(target, {
-      content: command.text,
-      files: await discordAttachmentFiles(command.attachments),
-    });
-    writeWorkerEvent({
-      type: "lifecycle",
-      name: "send_result",
-      metadata: {
-        target,
-        attachmentCount: command.attachments.length,
-      },
-    });
-    writeWorkerEvent({ type: "command_ack", command_id: command.id });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    writeWorkerEvent({
-      type: "error",
-      message,
-    });
-    if (commandId !== null) {
+    let commandId: string | null = null;
+    try {
+      const command = parseWorkerCommand(JSON.parse(line));
+      commandId = command.id;
+      const target = command.target ?? defaultChannelId;
+      if (!target) {
+        throw new Error(
+          "Discord send_message requires a target channel id or configured defaultChannelId",
+        );
+      }
       writeWorkerEvent({
-        type: "command_nack",
-        command_id: commandId,
-        message,
+        type: "lifecycle",
+        name: "send_starting",
+        metadata: {
+          target,
+          attachmentCount: command.attachments.length,
+        },
       });
+      await sendDiscordMessage(target, {
+        content: command.text,
+        files: await discordAttachmentFiles(command.attachments),
+      });
+      writeWorkerEvent({
+        type: "lifecycle",
+        name: "send_result",
+        metadata: {
+          target,
+          attachmentCount: command.attachments.length,
+        },
+      });
+      writeWorkerEvent({ type: "command_ack", command_id: command.id });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      reportWorkerError(message);
+      if (commandId !== null) {
+        writeWorkerEvent({
+          type: "command_nack",
+          command_id: commandId,
+          message,
+        });
+      }
     }
   }
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  reportWorkerError(
+    `Discord adapter command stream closed with error: ${message}`,
+  );
 }
 
 async function sendDiscordMessage(
@@ -256,6 +280,20 @@ function base64Payload(data: string): string {
     return data.slice(dataUrlSeparator + 1);
   }
   return data;
+}
+
+function reportWorkerError(message: string): void {
+  writeWorkerEvent({ type: "error", message });
+}
+
+function isTlsAccessDeniedError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const code = (error as { code?: unknown }).code;
+  return (
+    code === "EPROTO" && error.message.includes("tlsv1 alert access denied")
+  );
 }
 
 function stringArrayOrNull(value: unknown): string[] | null {

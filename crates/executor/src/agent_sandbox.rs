@@ -48,19 +48,8 @@ pub(crate) async fn ensure_agent_sandbox(
     conversation_config: &ConversationConfig,
 ) -> Result<AgentSandboxHandle> {
     let spec = conversation_sandbox_spec(agent_config, conversation_config);
-    if let Some(record) = load_agent_sandbox_record(agent).await?
-        && record.matches_spec(&spec)
-        && let Ok(conversation_id) = record.conversation_id.parse::<Uuid7>()
-        && let Some(owner) = agent.get_conversation(&conversation_id).await?
-    {
-        for sandbox in conversation_sandboxes(owner.as_ref()).await? {
-            if sandbox.id == record.sandbox_id && sandbox.matches_spec(&spec) {
-                return Ok(AgentSandboxHandle {
-                    conversation: owner,
-                    sandbox_id: record.sandbox_id,
-                });
-            }
-        }
+    if let Some(handle) = current_agent_sandbox(agent, &spec).await? {
+        return Ok(handle);
     }
 
     let sandbox_id = current_conversation
@@ -101,6 +90,33 @@ pub(crate) async fn ensure_agent_sandbox(
         conversation: owner,
         sandbox_id,
     })
+}
+
+pub(crate) async fn current_agent_sandbox(
+    agent: &dyn AgentHandle,
+    spec: &ConversationSandboxSpec,
+) -> Result<Option<AgentSandboxHandle>> {
+    let Some(record) = load_agent_sandbox_record(agent).await? else {
+        return Ok(None);
+    };
+    if !record.matches_spec(spec) {
+        return Ok(None);
+    }
+    let Ok(conversation_id) = record.conversation_id.parse::<Uuid7>() else {
+        return Ok(None);
+    };
+    let Some(owner) = agent.get_conversation(&conversation_id).await? else {
+        return Ok(None);
+    };
+    for sandbox in conversation_sandboxes(owner.as_ref()).await? {
+        if sandbox.id == record.sandbox_id && sandbox.matches_spec(spec) {
+            return Ok(Some(AgentSandboxHandle {
+                conversation: owner,
+                sandbox_id: record.sandbox_id,
+            }));
+        }
+    }
+    Ok(None)
 }
 
 async fn load_agent_sandbox_record(agent: &dyn AgentHandle) -> Result<Option<AgentSandboxRecord>> {
