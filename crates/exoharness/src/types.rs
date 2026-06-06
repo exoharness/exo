@@ -454,6 +454,8 @@ pub struct CreateSandboxRequest {
 pub enum SandboxProvider {
     #[default]
     Daytona,
+    E2b,
+    Sprites,
     AppleContainer,
     Docker,
     #[serde(alias = "local")]
@@ -717,18 +719,27 @@ pub enum SandboxProviderConfig {
         #[serde(default = "default_daytona_image")]
         default_image: String,
     },
-    // To be implemented in followup PRs:
-    // E2b {
-    //     api_key_secret_id: SecretId,
-    //     api_url: Option<String>,
-    //     default_image: String,  // #[serde(default = "default_e2b_image")]
-    // },
-    // ExeDev {
-    //     token_secret_id: SecretId,     // bearer token (SSH-key-signed), not an api key
-    //     region: Option<String>,        // datacenter: LAX | NYC | FRA | ...
-    //     api_url: Option<String>,
-    //     default_image: String,   // #[serde(default = "default_exedev_image")]
-    // },
+    E2b {
+        api_key_secret_id: SecretId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_url: Option<String>,
+        #[serde(default = "default_e2b_template")]
+        default_image: String,
+    },
+    Sprites {
+        token_secret_id: SecretId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_url: Option<String>,
+        /// Sprite HTTP URL auth mode: `sprite` (default) or `public`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url_auth: Option<String>,
+        /// Organization slug when the token can access multiple orgs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        organization: Option<String>,
+        /// Extra Sprites labels on create (exo resume labels are added automatically).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        labels: Vec<String>,
+    },
 }
 
 pub fn default_daytona_image() -> String {
@@ -737,21 +748,27 @@ pub fn default_daytona_image() -> String {
 pub fn default_docker_image() -> String {
     "docker.io/library/ubuntu:24.04".to_string()
 }
+pub fn default_e2b_template() -> String {
+    "base".to_string()
+}
 
 impl SandboxProviderConfig {
     pub fn provider(&self) -> SandboxProvider {
         match self {
             Self::Daytona { .. } => SandboxProvider::Daytona,
+            Self::E2b { .. } => SandboxProvider::E2b,
+            Self::Sprites { .. } => SandboxProvider::Sprites,
             Self::Docker { .. } => SandboxProvider::Docker,
         }
     }
 
-    /// The binding's configured default base image.
-    pub fn default_image(&self) -> &str {
+    /// The binding's configured default base image / E2B template id.
+    pub fn default_image(&self) -> Option<&str> {
         match self {
-            Self::Daytona { default_image, .. } | Self::Docker { default_image, .. } => {
-                default_image
-            }
+            Self::Daytona { default_image, .. }
+            | Self::Docker { default_image, .. }
+            | Self::E2b { default_image, .. } => Some(default_image),
+            Self::Sprites { .. } => None,
         }
     }
 }
