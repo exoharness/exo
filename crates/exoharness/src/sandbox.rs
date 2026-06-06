@@ -445,7 +445,7 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
                 "restore-from-snapshot is not yet implemented for the apple-container backend"
             ),
             (_, SnapshotKind::DaytonaSnapshot) => {
-                bail!("container backends cannot restore a Daytona snapshot")
+                bail!("restoring a Daytona snapshot on a container backend is not implemented yet")
             }
         }
 
