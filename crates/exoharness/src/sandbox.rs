@@ -1173,7 +1173,7 @@ async fn kill_named_container_if_present(container_bin: &Path, name: &str) -> Re
             .await?;
     if !kill.status.success() {
         let stderr = String::from_utf8_lossy(&kill.stderr).trim().to_string();
-        if !is_missing_container_error(&stderr) {
+        if !is_missing_container_error(&stderr) && !is_container_not_running_error(&stderr) {
             return Err(anyhow!("failed to kill warm sandbox {}: {}", name, stderr));
         }
     }
@@ -1329,6 +1329,12 @@ fn run_container_admin_command_blocking<const N: usize>(container_bin: &Path, ar
 fn is_missing_container_error(stderr: &str) -> bool {
     let lower = stderr.to_ascii_lowercase();
     lower.contains("not found") || lower.contains("no such")
+}
+
+fn is_container_not_running_error(stderr: &str) -> bool {
+    stderr
+        .to_ascii_lowercase()
+        .contains("container is not running")
 }
 
 fn is_already_exists_error(message: &str) -> bool {
