@@ -26,13 +26,16 @@ use executor::{
     AgentHarnessKind, BasicExoHarness, BasicExoHarnessConfig, BasicHarness, BasicToolRuntime,
     Binding, BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig,
     ConversationModelConfig, CreateAgentRequest, CreateConversationRequest, DaytonaBackendSpec,
+    E2bBackendSpec,
     EventKind, EventQuery, EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions,
     ExoclawToolRuntime, FileSystemMount, FileSystemMountMode, ForkConversationRequest,
     HTTP_EXOHARNESS_TRACING_TARGET, Harness, HarnessAgent, HarnessConversation, HttpExoHarness,
     LocalSandboxExoHarness, PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR,
     SandboxBackendChoice, SandboxProvider, SandboxProviderConfig, SandboxScope, Secret,
+    SpritesBackendSpec,
     SecretBackendChoice, ToolRequest, ToolRuntime, TypeScriptHarness, TypeScriptHarnessConfig,
-    Uuid7, default_daytona_image, default_docker_image, effective_sandbox_scope, load_agent_config,
+    Uuid7, default_daytona_image, default_docker_image, default_e2b_template,
+    effective_sandbox_scope, load_agent_config,
     send_conversation_wakeup, serve_exoharness_http_listener_with_options,
 };
 use lingua::Message;
@@ -204,6 +207,10 @@ enum SecretBackendArg {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum SandboxProviderArg {
     Daytona,
+    #[value(name = "e2b")]
+    E2b,
+    #[value(name = "sprites")]
+    Sprites,
     #[value(name = "apple-container")]
     AppleContainer,
     Docker,
@@ -215,6 +222,8 @@ impl From<SandboxProviderArg> for SandboxProvider {
     fn from(value: SandboxProviderArg) -> Self {
         match value {
             SandboxProviderArg::Daytona => Self::Daytona,
+            SandboxProviderArg::E2b => Self::E2b,
+            SandboxProviderArg::Sprites => Self::Sprites,
             SandboxProviderArg::AppleContainer => Self::AppleContainer,
             SandboxProviderArg::Docker => Self::Docker,
             SandboxProviderArg::LocalProcess => Self::LocalProcess,
@@ -244,6 +253,8 @@ fn default_sandbox_backends() -> Vec<SandboxBackendChoice> {
         default_sandbox_backend(),
         SandboxBackendChoice::LocalProcess,
         SandboxBackendChoice::Daytona(DaytonaBackendSpec::with_conventional_secrets()),
+        SandboxBackendChoice::E2b(E2bBackendSpec::with_conventional_secrets()),
+        SandboxBackendChoice::Sprites(SpritesBackendSpec::with_conventional_secrets()),
     ]
 }
 
@@ -571,6 +582,7 @@ enum ProviderCommands {
         /// Region/target. Daytona: us | eu | experimental.
         #[arg(long)]
         region: Option<String>,
+        /// Daytona organization id, or Sprites organization slug.
         #[arg(long)]
         organization_id: Option<String>,
         #[arg(long)]
@@ -578,6 +590,12 @@ enum ProviderCommands {
         /// Default base image for sandboxes that don't request one.
         #[arg(long)]
         default_image: Option<String>,
+        /// Sprites sprite HTTP URL auth: sprite | public.
+        #[arg(long)]
+        url_auth: Option<String>,
+        /// Extra Sprites labels (repeatable). Exo resume labels are added on create.
+        #[arg(long = "label")]
+        labels: Vec<String>,
     },
 }
 
@@ -1725,6 +1743,8 @@ async fn main() -> Result<()> {
                 organization_id,
                 api_url,
                 default_image,
+                url_auth,
+                labels,
             } => {
                 let binding_name = name.unwrap_or_else(|| format!("{provider:?}").to_lowercase());
                 let config = match provider {
@@ -1746,10 +1766,35 @@ async fn main() -> Result<()> {
                     SandboxProviderArg::Docker => SandboxProviderConfig::Docker {
                         default_image: default_image.unwrap_or_else(default_docker_image),
                     },
-                    other => bail!(
-                        "provider {other:?} has no binding-based config yet \
-                         (E2B and exe.dev are followups)"
-                    ),
+                    SandboxProviderArg::E2b => {
+                        let secret =
+                            secret.ok_or_else(|| anyhow!("--secret is required for e2b"))?;
+                        let secret_id =
+                            find_secret_id(harness.exoharness_handle().as_ref(), &secret)
+                                .await?
+                                .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
+                        SandboxProviderConfig::E2b {
+                            api_key_secret_id: secret_id,
+                            api_url,
+                            default_image: default_image.unwrap_or_else(default_e2b_template),
+                        }
+                    }
+                    SandboxProviderArg::Sprites => {
+                        let secret =
+                            secret.ok_or_else(|| anyhow!("--secret is required for sprites"))?;
+                        let secret_id =
+                            find_secret_id(harness.exoharness_handle().as_ref(), &secret)
+                                .await?
+                                .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
+                        SandboxProviderConfig::Sprites {
+                            token_secret_id: secret_id,
+                            api_url,
+                            url_auth,
+                            organization: organization_id,
+                            labels,
+                        }
+                    }
+                    other => bail!("provider {other:?} has no binding-based config yet"),
                 };
                 let id = harness
                     .exoharness_handle()
@@ -1996,6 +2041,8 @@ fn format_harness_kind(kind: AgentHarnessKind) -> &'static str {
 fn format_sandbox_provider(provider: SandboxProvider) -> &'static str {
     match provider {
         SandboxProvider::Daytona => "daytona",
+        SandboxProvider::E2b => "e2b",
+        SandboxProvider::Sprites => "sprites",
         SandboxProvider::AppleContainer => "apple-container",
         SandboxProvider::Docker => "docker",
         SandboxProvider::LocalProcess => "local-process",
