@@ -93,10 +93,10 @@ pub struct DaytonaBackendSpec {
     pub target_secret: Option<String>,
 }
 
-impl DaytonaBackendSpec {
+impl Default for DaytonaBackendSpec {
     /// Official endpoints; credentials read from the conventional `DAYTONA_*`
     /// secret names.
-    pub fn with_conventional_secrets() -> Self {
+    fn default() -> Self {
         Self {
             api_url: crate::DEFAULT_DAYTONA_API_URL.to_string(),
             toolbox_url: crate::DEFAULT_DAYTONA_TOOLBOX_URL.to_string(),
@@ -116,8 +116,8 @@ pub struct E2bBackendSpec {
     pub template_id: String,
 }
 
-impl E2bBackendSpec {
-    pub fn with_conventional_secrets() -> Self {
+impl Default for E2bBackendSpec {
+    fn default() -> Self {
         Self {
             api_url: crate::DEFAULT_E2B_API_URL.to_string(),
             api_key_secret: "E2B_API_KEY".to_string(),
@@ -137,8 +137,8 @@ pub struct SpritesBackendSpec {
     pub labels: Vec<String>,
 }
 
-impl SpritesBackendSpec {
-    pub fn with_conventional_secrets() -> Self {
+impl Default for SpritesBackendSpec {
+    fn default() -> Self {
         Self {
             api_url: crate::DEFAULT_SPRITES_API_URL.to_string(),
             token_secret: "SPRITES_TOKEN".to_string(),

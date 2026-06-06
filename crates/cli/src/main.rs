@@ -252,9 +252,9 @@ fn default_sandbox_backends() -> Vec<SandboxBackendChoice> {
     vec![
         default_sandbox_backend(),
         SandboxBackendChoice::LocalProcess,
-        SandboxBackendChoice::Daytona(DaytonaBackendSpec::with_conventional_secrets()),
-        SandboxBackendChoice::E2b(E2bBackendSpec::with_conventional_secrets()),
-        SandboxBackendChoice::Sprites(SpritesBackendSpec::with_conventional_secrets()),
+        SandboxBackendChoice::Daytona(DaytonaBackendSpec::default()),
+        SandboxBackendChoice::E2b(E2bBackendSpec::default()),
+        SandboxBackendChoice::Sprites(SpritesBackendSpec::default()),
     ]
 }
 
