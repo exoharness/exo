@@ -512,6 +512,7 @@ async fn basic_backend_runs_commands_in_created_sandbox() {
 
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
+            name: None,
             provider: SandboxProvider::LocalProcess,
             image: "basic-local-process".to_string(),
             default_workdir: Some(tempdir.path().display().to_string()),
@@ -552,6 +553,53 @@ async fn basic_backend_runs_commands_in_created_sandbox() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn basic_backend_reuses_named_sandbox() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
+        .await
+        .expect("harness should initialize");
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let conversation = agent
+        .new_conversation(NewConversationRequest::default())
+        .await
+        .expect("conversation");
+
+    let request = CreateSandboxRequest {
+        name: Some("codex".to_string()),
+        provider: SandboxProvider::LocalProcess,
+        image: "basic-local-process".to_string(),
+        default_workdir: Some(tempdir.path().display().to_string()),
+        file_system_mounts: None,
+        enable_networking: Some(true),
+        idle_seconds: Some(60),
+    };
+
+    let first = conversation
+        .create_sandbox(request.clone())
+        .await
+        .expect("first sandbox should be created");
+    let second = conversation
+        .create_sandbox(request.clone())
+        .await
+        .expect("matching sandbox should be reused");
+    assert_eq!(first, second);
+
+    let mut other_request = request;
+    other_request.name = Some("other".to_string());
+    let third = conversation
+        .create_sandbox(other_request)
+        .await
+        .expect("different name should create a distinct sandbox");
+    assert_ne!(first, third);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn basic_backend_reattaches_running_sandbox_in_new_harness_process() {
     let tempdir = TempDir::new().expect("tempdir");
     let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
@@ -573,6 +621,7 @@ async fn basic_backend_reattaches_running_sandbox_in_new_harness_process() {
 
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
+            name: None,
             provider: SandboxProvider::LocalProcess,
             image: "basic-local-process".to_string(),
             default_workdir: Some(tempdir.path().display().to_string()),
@@ -650,6 +699,7 @@ async fn basic_backend_exposes_process_events_and_input() {
         .expect("conversation");
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
+            name: None,
             provider: SandboxProvider::LocalProcess,
             image: "basic-local-process".to_string(),
             default_workdir: Some(tempdir.path().display().to_string()),
@@ -899,6 +949,7 @@ async fn test_conversation(harness: &BasicExoHarness) -> Arc<dyn crate::Conversa
 async fn test_sandbox(conversation: &Arc<dyn crate::ConversationHandle>) -> String {
     conversation
         .create_sandbox(CreateSandboxRequest {
+            name: None,
             provider: SandboxProvider::LocalProcess,
             image: "test-sandbox".to_string(),
             default_workdir: Some("/".to_string()),
@@ -944,6 +995,7 @@ async fn basic_backend_rejects_daytona_provider() {
 
     let error = conversation
         .create_sandbox(CreateSandboxRequest {
+            name: None,
             provider: SandboxProvider::Daytona,
             image: "test-sandbox".to_string(),
             default_workdir: Some("/".to_string()),
@@ -981,6 +1033,7 @@ async fn advertised_daytona_without_secret_errors_at_first_use() {
 
     let error = conversation
         .create_sandbox(CreateSandboxRequest {
+            name: None,
             provider: SandboxProvider::Daytona,
             image: "test-sandbox".to_string(),
             default_workdir: Some("/".to_string()),

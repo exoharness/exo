@@ -318,6 +318,8 @@ pub enum EventData {
     },
     SandboxCreated {
         sandbox_id: SandboxId,
+        #[serde(default)]
+        name: Option<String>,
         provider: SandboxProvider,
         image: String,
         default_workdir: String,
@@ -448,6 +450,8 @@ pub struct FileSystemMount {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreateSandboxRequest {
+    #[serde(default)]
+    pub name: Option<String>,
     pub provider: SandboxProvider,
     pub image: String,
     pub default_workdir: Option<String>,

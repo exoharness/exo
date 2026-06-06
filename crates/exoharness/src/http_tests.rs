@@ -97,6 +97,7 @@ async fn http_exoharness_runs_noninteractive_sandbox_commands() {
         .expect("conversation");
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
+            name: None,
             provider: SandboxProvider::LocalProcess,
             image: "local".to_string(),
             default_workdir: Some("/".to_string()),
@@ -143,6 +144,7 @@ async fn http_exoharness_supports_sandbox_process_events() {
         .expect("conversation");
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
+            name: None,
             provider: SandboxProvider::LocalProcess,
             image: "local".to_string(),
             default_workdir: Some("/".to_string()),

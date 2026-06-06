@@ -35,7 +35,7 @@ use crate::{
     ArtifactVersion, BeginTurnRequest, Binding, BindingId, BindingRecord, BindingType,
     BoxAsyncRead, BoxAsyncWrite, CancelSandboxProcessRequest, CloseSandboxProcessInputRequest,
     ConversationHandle, ConversationId, ConversationRecord, CreateSandboxRequest, Event, EventData,
-    EventId, EventQuery, EventQueryDirection, EventStream, ExoHarness, FileSystemMount,
+    EventId, EventKind, EventQuery, EventQueryDirection, EventStream, ExoHarness, FileSystemMount,
     ForkConversationRequest, GetEventsResult, GetSandboxProcessEventsResult, NewAgentRequest,
     NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result, RunInSandboxRequest,
     SandboxId, SandboxProcess, SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessId,
@@ -865,6 +865,176 @@ impl BasicConversationHandle {
             .insert(sandbox_id.clone(), Arc::clone(&handle));
         Ok(handle)
     }
+
+    async fn prepare_sandbox_request(
+        &self,
+        request: CreateSandboxRequest,
+    ) -> Result<PreparedSandboxRequest> {
+        let image = if !request.image.trim().is_empty() {
+            request.image.clone()
+        } else if let Some(default) = self
+            .harness
+            .inner
+            .binding_default_image(request.provider)
+            .await?
+        {
+            default
+        } else {
+            request.image.clone()
+        };
+
+        Ok(PreparedSandboxRequest {
+            name: request.name,
+            provider: request.provider,
+            image,
+            default_workdir: request.default_workdir,
+            file_system_mounts: request.file_system_mounts.unwrap_or_default(),
+            enable_networking: request.enable_networking.unwrap_or(true),
+            idle_seconds: request.idle_seconds.unwrap_or(60),
+        })
+    }
+
+    async fn find_matching_sandbox(
+        &self,
+        request: &PreparedSandboxRequest,
+    ) -> Result<Option<(SandboxId, StoredSandbox)>> {
+        let Some(name) = &request.name else {
+            return Ok(None);
+        };
+        let events = self
+            .get_events(Some(EventQuery {
+                cursor: None,
+                direction: Some(EventQueryDirection::Asc),
+                limit: None,
+                session_id: None,
+                turn_id: None,
+                types: Some(vec![EventKind::SANDBOX_CREATED]),
+            }))
+            .await?
+            .events;
+
+        for event in events.into_iter().rev() {
+            let EventData::SandboxCreated {
+                sandbox_id,
+                name: event_name,
+                provider,
+                image,
+                default_workdir,
+                file_system_mounts,
+                enable_networking,
+                idle_seconds,
+                ..
+            } = event.data
+            else {
+                continue;
+            };
+            if event_name.as_ref() != Some(name) {
+                continue;
+            }
+            let sandbox = self.load_sandbox(&sandbox_id).await?;
+            if !sandbox.running {
+                continue;
+            }
+            if provider != request.provider
+                || image != request.image
+                || default_workdir != request.default_workdir.clone().unwrap_or_default()
+                || file_system_mounts != request.file_system_mounts
+                || enable_networking != request.enable_networking
+                || idle_seconds != request.idle_seconds
+            {
+                bail!("sandbox name {name:?} already exists with a different configuration");
+            }
+            return Ok(Some((sandbox_id, sandbox)));
+        }
+        Ok(None)
+    }
+
+    async fn create_new_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
+        let prepared = self.prepare_sandbox_request(request).await?;
+        let sandbox_id = format!("sandbox-{}", Uuid7::now());
+        let sandbox = prepared.stored_sandbox(sandbox_id.clone());
+        let sandbox_handle = self.create_sandbox_handle(&sandbox_id, &sandbox).await?;
+        let _guard = self.harness.inner.write_lock.lock().await;
+        self.persist_created_sandbox(sandbox, sandbox_handle).await
+    }
+
+    async fn create_new_sandbox_locked(
+        &self,
+        request: PreparedSandboxRequest,
+    ) -> Result<SandboxId> {
+        let sandbox_id = format!("sandbox-{}", Uuid7::now());
+        let sandbox = request.stored_sandbox(sandbox_id.clone());
+        let sandbox_handle = self.create_sandbox_handle(&sandbox_id, &sandbox).await?;
+        self.persist_created_sandbox(sandbox, sandbox_handle).await
+    }
+
+    async fn create_sandbox_handle(
+        &self,
+        sandbox_id: &SandboxId,
+        sandbox: &StoredSandbox,
+    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
+        self.harness
+            .inner
+            .sandbox_backend_for_provider(sandbox.provider)
+            .await?
+            .acquire(sandbox_request(self.record.id, sandbox_id, sandbox))
+            .await
+    }
+
+    async fn persist_created_sandbox(
+        &self,
+        sandbox: StoredSandbox,
+        sandbox_handle: Arc<dyn ManagedSandboxHandle>,
+    ) -> Result<SandboxId> {
+        let sandbox_id = sandbox.id.clone();
+        self.harness
+            .inner
+            .storage
+            .put_json(
+                self.sandboxes_dir().join(format!("{sandbox_id}.json")),
+                &sandbox,
+            )
+            .await?;
+        self.harness
+            .inner
+            .running_sandboxes
+            .lock()
+            .await
+            .insert(sandbox_id.clone(), sandbox_handle);
+        let mut record = self.load_record().await?;
+        append_events_to_conversation(
+            &self.harness.inner,
+            &self.conversation_dir(),
+            self.record.id,
+            None,
+            None,
+            record.latest_event_id,
+            vec![
+                EventData::SandboxCreated {
+                    sandbox_id: sandbox_id.clone(),
+                    name: sandbox.name,
+                    provider: sandbox.provider,
+                    image: sandbox.image,
+                    default_workdir: sandbox.default_workdir.unwrap_or_default(),
+                    file_system_mounts: sandbox.file_system_mounts,
+                    enable_networking: sandbox.enable_networking,
+                    idle_seconds: sandbox.idle_seconds,
+                },
+                EventData::SandboxStarted {
+                    sandbox_id: sandbox_id.clone(),
+                    snapshot_id: None,
+                },
+            ],
+            &mut record,
+        )
+        .await?;
+        self.harness
+            .inner
+            .storage
+            .put_json(self.conversation_dir().join("record.json"), &record)
+            .await?;
+        Ok(sandbox_id)
+    }
 }
 
 #[async_trait]
@@ -1211,92 +1381,28 @@ impl ConversationHandle for BasicConversationHandle {
     }
 
     async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
-        let sandbox_id = format!("sandbox-{}", Uuid7::now());
-        let conversation_dir = self.conversation_dir();
-
-        // Resolve the base image: an agent's explicit image, else the provider
-        // binding's default_image, else empty (the backend applies its own).
-        let image = if !request.image.trim().is_empty() {
-            request.image.clone()
-        } else if let Some(default) = self
-            .harness
-            .inner
-            .binding_default_image(request.provider)
-            .await?
-        {
-            default
-        } else {
-            request.image.clone()
-        };
-
-        let metadata = StoredSandbox {
-            id: sandbox_id.clone(),
-            provider: request.provider,
-            image: image.clone(),
-            default_workdir: request.default_workdir.clone(),
-            file_system_mounts: request.file_system_mounts.clone().unwrap_or_default(),
-            enable_networking: request.enable_networking.unwrap_or(true),
-            idle_seconds: request.idle_seconds.unwrap_or(60),
-            running: true,
-            latest_snapshot_id: None,
-        };
-        let sandbox_handle = self
-            .harness
-            .inner
-            .sandbox_backend_for_provider(metadata.provider)
-            .await?
-            .acquire(sandbox_request(self.record.id, &sandbox_id, &metadata))
-            .await?;
-
-        // Hold the write lock only for the local persistence + event append,
-        // not the remote acquire above.
+        if request.name.is_none() {
+            return self.create_new_sandbox(request).await;
+        }
+        let prepared = self.prepare_sandbox_request(request).await?;
         let _guard = self.harness.inner.write_lock.lock().await;
-        self.harness
-            .inner
-            .storage
-            .put_json(
-                self.sandboxes_dir().join(format!("{sandbox_id}.json")),
-                &metadata,
-            )
-            .await?;
-        self.harness
-            .inner
-            .running_sandboxes
-            .lock()
-            .await
-            .insert(sandbox_id.clone(), sandbox_handle);
-        let mut record = self.load_record().await?;
-        append_events_to_conversation(
-            &self.harness.inner,
-            &conversation_dir,
-            self.record.id,
-            None,
-            None,
-            record.latest_event_id,
-            vec![
-                EventData::SandboxCreated {
-                    sandbox_id: sandbox_id.clone(),
-                    provider: request.provider,
-                    image: request.image,
-                    default_workdir: metadata.default_workdir.clone().unwrap_or_default(),
-                    file_system_mounts: metadata.file_system_mounts.clone(),
-                    enable_networking: metadata.enable_networking,
-                    idle_seconds: metadata.idle_seconds,
-                },
-                EventData::SandboxStarted {
-                    sandbox_id: sandbox_id.clone(),
-                    snapshot_id: None,
-                },
-            ],
-            &mut record,
-        )
-        .await?;
-        self.harness
-            .inner
-            .storage
-            .put_json(conversation_dir.join("record.json"), &record)
-            .await?;
-        Ok(sandbox_id)
+        if let Some((sandbox_id, sandbox)) = self.find_matching_sandbox(&prepared).await? {
+            let sandbox_handle = self
+                .harness
+                .inner
+                .sandbox_backend_for_provider(sandbox.provider)
+                .await?
+                .acquire(sandbox_request(self.record.id, &sandbox_id, &sandbox))
+                .await?;
+            self.harness
+                .inner
+                .running_sandboxes
+                .lock()
+                .await
+                .insert(sandbox_id.clone(), sandbox_handle);
+            return Ok(sandbox_id);
+        }
+        self.create_new_sandbox_locked(prepared).await
     }
 
     async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
@@ -2104,6 +2210,8 @@ struct StoredArtifactMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredSandbox {
     id: SandboxId,
+    #[serde(default)]
+    name: Option<String>,
     provider: SandboxProvider,
     image: String,
     default_workdir: Option<String>,
@@ -2112,6 +2220,34 @@ struct StoredSandbox {
     idle_seconds: u64,
     running: bool,
     latest_snapshot_id: Option<SnapshotId>,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedSandboxRequest {
+    name: Option<String>,
+    provider: SandboxProvider,
+    image: String,
+    default_workdir: Option<String>,
+    file_system_mounts: Vec<FileSystemMount>,
+    enable_networking: bool,
+    idle_seconds: u64,
+}
+
+impl PreparedSandboxRequest {
+    fn stored_sandbox(&self, id: SandboxId) -> StoredSandbox {
+        StoredSandbox {
+            id,
+            name: self.name.clone(),
+            provider: self.provider,
+            image: self.image.clone(),
+            default_workdir: self.default_workdir.clone(),
+            file_system_mounts: self.file_system_mounts.clone(),
+            enable_networking: self.enable_networking,
+            idle_seconds: self.idle_seconds,
+            running: true,
+            latest_snapshot_id: None,
+        }
+    }
 }
 
 struct RunningSandboxProcess {
