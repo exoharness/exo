@@ -153,10 +153,12 @@ async fn exoclaw_harness(
     runtime_config: Option<BraintrustRuntimeConfig>,
     env: HashMap<String, String>,
 ) -> Result<Arc<dyn Harness>> {
+    let sandbox_backend = default_sandbox_backend();
     let exo_config = BasicExoHarnessConfig {
         root: root.join("exoharness"),
         secret_backend: default_secret_backend(),
-        sandbox_backend: default_sandbox_backend(),
+        sandbox_default: sandbox_backend.provider(),
+        sandbox_backends: vec![sandbox_backend],
     };
     Ok(Arc::new(
         TypeScriptHarness::<ExoclawToolRuntime>::exoclaw_from_root(

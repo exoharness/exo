@@ -49,13 +49,13 @@ pub use executor_types::{
 };
 pub use exoharness::{
     AgentHandle, BasicExoHarness, BasicExoHarnessConfig, Binding, BindingRecord,
-    ConversationHandle, DEFAULT_SANDBOX_IMAGE, EventData, EventId, EventKind, EventQuery,
-    EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions, FileSystemMount,
+    ConversationHandle, DEFAULT_SANDBOX_IMAGE, DaytonaBackendSpec, EventData, EventId, EventKind,
+    EventQuery, EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions, FileSystemMount,
     FileSystemMountMode, ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET, HttpExoHarness,
     PutSecretRequest, SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxId, SandboxProvider,
-    Secret, SecretBackendChoice, SecretMetadata, SessionId, SnapshotId, StartSandboxRequest,
-    ToolRequest, Uuid7, serve_exoharness_http_listener,
-    serve_exoharness_http_listener_with_options,
+    SandboxProviderConfig, Secret, SecretBackendChoice, SecretMetadata, SessionId, SnapshotId,
+    StartSandboxRequest, ToolRequest, Uuid7, default_daytona_image, default_docker_image,
+    serve_exoharness_http_listener, serve_exoharness_http_listener_with_options,
 };
 pub use harness_basic::BasicHarness;
 pub use harness_config::load_agent_config;

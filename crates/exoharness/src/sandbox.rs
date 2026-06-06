@@ -114,6 +114,9 @@ pub enum SnapshotKind {
     /// `docker save` output: a tar of OCI image layers + manifest, loadable
     /// with `docker load`.
     DockerImageTar,
+    /// JSON manifest pointing at a named snapshot in Daytona's registry; the
+    /// filesystem bytes live in Daytona, not in the payload.
+    DaytonaSnapshot,
 }
 
 #[async_trait]
@@ -175,8 +178,8 @@ const WARM_SANDBOX_KEEPALIVE_ARGV: &[&str] = &["sleep", "infinity"];
 const WARM_SANDBOX_HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(3);
 const WARM_SANDBOX_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const ORPHANED_WARM_SANDBOX_MIN_AGE: Duration = Duration::from_secs(24 * 60 * 60);
-const WARM_SANDBOX_KEY_LABEL: &str = "exo.sandbox.key";
-const WARM_SANDBOX_SPEC_HASH_LABEL: &str = "exo.sandbox.spec-hash";
+pub(crate) const WARM_SANDBOX_KEY_LABEL: &str = "exo.sandbox.key";
+pub(crate) const WARM_SANDBOX_SPEC_HASH_LABEL: &str = "exo.sandbox.spec-hash";
 const WARM_SANDBOX_OWNER_PID_LABEL: &str = "exo.sandbox.owner-pid";
 const APPLE_ABSOLUTE_TIME_UNIX_OFFSET_SECONDS: f64 = 978_307_200.0;
 
@@ -441,6 +444,9 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
             (ContainerCliFlavor::AppleContainer, _) => bail!(
                 "restore-from-snapshot is not yet implemented for the apple-container backend"
             ),
+            (_, SnapshotKind::DaytonaSnapshot) => {
+                bail!("restoring a Daytona snapshot on a container backend is not implemented yet")
+            }
         }
 
         let image_tag = docker_load_image(&self.container_bin, &payload.bytes).await?;
@@ -1339,7 +1345,7 @@ fn is_already_exists_error(message: &str) -> bool {
     lower.contains("already exists")
 }
 
-fn sandbox_spec_hash(spec: &SandboxSpec) -> String {
+pub(crate) fn sandbox_spec_hash(spec: &SandboxSpec) -> String {
     let mut hasher = DefaultHasher::new();
     spec.hash(&mut hasher);
     format!("{:016x}", hasher.finish())

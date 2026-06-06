@@ -46,7 +46,8 @@ async fn filesystem_snapshot_and_rewind_round_trip() {
         // Static cipher key keeps the test off the filesystem for secret state;
         // it's orthogonal to what we're testing (sandbox snapshots).
         secret_backend: SecretBackendChoice::Static([7u8; 32]),
-        sandbox_backend: SandboxBackendChoice::Docker,
+        sandbox_default: SandboxProvider::Docker,
+        sandbox_backends: vec![SandboxBackendChoice::Docker],
     })
     .await
     .expect("BasicExoHarness::new should succeed");
