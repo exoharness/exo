@@ -9,12 +9,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use futures::future::BoxFuture;
-use futures::io::Cursor;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::{mpsc, oneshot};
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use uuid::Uuid;
 
 use crate::sandbox::{
     ManagedSandboxBackend, ManagedSandboxHandle, SandboxCommand, SandboxCommandOutput,
@@ -30,6 +33,9 @@ pub const DEFAULT_DAYTONA_TOOLBOX_URL: &str = "https://proxy.app.daytona.io";
 
 const START_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const START_TIMEOUT: Duration = Duration::from_secs(120);
+const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const PROCESS_PIPE_BUFFER_SIZE: usize = 64 * 1024;
+const PROCESS_ENV_END_MARKER: &str = "__EXO_ENV_END__";
 
 /// Resolved Daytona connection parameters: assembled from a
 /// [`crate::DaytonaBackendSpec`] plus secrets read on first use.
@@ -311,24 +317,7 @@ impl ManagedSandboxHandle for DaytonaSandboxHandle {
     }
 
     async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts> {
-        // Daytona's exec endpoint is request/response, not streaming: run the
-        // command, then hand back already-populated stdout/stderr/wait. stdin
-        // goes to a sink — this endpoint doesn't accept piped input.
-        let output =
-            exec_in_sandbox(&self.backend, &self.sandbox_id, &self.request.spec, command).await?;
-        let Some(exit_code) = output.exit_code else {
-            bail!("Daytona exec returned no exit code; refusing to report success");
-        };
-        let stdout = Cursor::new(output.stdout.into_bytes());
-        let stderr = Cursor::new(output.stderr.into_bytes());
-        let stdin = futures::io::sink();
-        let wait: BoxFuture<'static, crate::Result<i32>> = Box::pin(async move { Ok(exit_code) });
-        Ok(crate::SandboxProcessParts {
-            stdout: Box::pin(stdout),
-            stderr: Box::pin(stderr),
-            stdin: Box::pin(stdin),
-            wait,
-        })
+        start_process_in_sandbox(&self.backend, &self.sandbox_id, &self.request.spec, command).await
     }
 
     async fn stop(&self) -> Result<()> {
@@ -357,28 +346,19 @@ async fn exec_in_sandbox(
         .cwd
         .clone()
         .unwrap_or_else(|| spec.default_workdir.clone());
-    let body = DaytonaExecRequest {
-        command: render_shell_command(&command.argv),
-        cwd: Some(cwd.clone()),
-        env: command.env.clone(),
-        timeout: command.timeout.map(|t| t.as_secs()),
-    };
-    let response = backend
-        .client
-        .post(backend.toolbox_endpoint(&format!("/toolbox/{id}/process/execute")))
-        .json(&body)
-        .send()
-        .await
-        .with_context(|| format!("exec in Daytona sandbox {id}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        let text = response.text().await.unwrap_or_default();
-        bail!("Daytona exec failed ({status}): {text}");
-    }
-    let response: DaytonaExecResponse = response
-        .json()
-        .await
-        .context("decoding Daytona exec response")?;
+    let response = execute_daytona_process(
+        backend,
+        id,
+        DaytonaExecRequest {
+            command: render_shell_command(&command.argv),
+            cwd: Some(cwd.clone()),
+            env: command.env.clone(),
+            timeout: command.timeout.map(|t| t.as_secs()),
+        },
+        "exec",
+    )
+    .await
+    .context("running Daytona exec command")?;
     Ok(SandboxCommandOutput {
         ok: response.exit_code == 0,
         exit_code: Some(response.exit_code),
@@ -390,6 +370,541 @@ async fn exec_in_sandbox(
             .unwrap_or_else(|| command.argv.clone()),
         cwd,
     })
+}
+
+async fn start_process_in_sandbox(
+    backend: &DaytonaBackendHandle,
+    id: &str,
+    spec: &SandboxSpec,
+    command: &SandboxCommand,
+) -> Result<crate::SandboxProcessParts> {
+    if command.argv.is_empty() {
+        bail!("sandbox command requires at least one argv entry");
+    }
+    let cwd = command
+        .cwd
+        .clone()
+        .unwrap_or_else(|| spec.default_workdir.clone());
+    let session_id = format!("exo-process-{}", Uuid::new_v4());
+    tracing::info!(
+        sandbox_id = %id,
+        session_id = %session_id,
+        cwd = %cwd,
+        argv = ?command.display_argv.as_ref().unwrap_or(&command.argv),
+        "daytona_process_debug start_process"
+    );
+
+    create_process_session(backend, id, &session_id).await?;
+    let command_id = match start_session_command(backend, id, &session_id, command, cwd).await {
+        Ok(command_id) => command_id,
+        Err(error) => {
+            if let Err(cleanup_error) = delete_process_session(backend, id, &session_id).await {
+                return Err(error).context(format!(
+                    "also failed to clean up Daytona process session {session_id}: {cleanup_error:#}"
+                ));
+            }
+            return Err(error);
+        }
+    };
+    tracing::info!(
+        sandbox_id = %id,
+        session_id = %session_id,
+        command_id = %command_id,
+        "daytona_process_debug command_started"
+    );
+
+    let process = DaytonaSessionProcess {
+        backend: backend.clone(),
+        sandbox_id: id.to_string(),
+        session_id,
+        command_id,
+    };
+
+    if !command.env.is_empty() {
+        if let Err(error) = send_session_environment_input(&process, &command.env).await {
+            if let Err(cleanup_error) = cleanup_daytona_process(&process).await {
+                return Err(error).context(format!(
+                    "also failed to clean up Daytona process session {}: {cleanup_error:#}",
+                    process.session_id
+                ));
+            }
+            return Err(error);
+        }
+    }
+
+    let (stdout_reader, stdout_writer) = tokio::io::duplex(PROCESS_PIPE_BUFFER_SIZE);
+    let (stderr_reader, stderr_writer) = tokio::io::duplex(PROCESS_PIPE_BUFFER_SIZE);
+    let (stdin_reader, stdin_writer) = tokio::io::duplex(PROCESS_PIPE_BUFFER_SIZE);
+    let (wait_tx, wait_rx) = oneshot::channel();
+    let (stdin_error_tx, stdin_error_rx) = mpsc::unbounded_channel();
+
+    spawn_daytona_process_poller(
+        process.clone(),
+        stdout_writer,
+        stderr_writer,
+        stdin_error_rx,
+        wait_tx,
+    );
+    spawn_daytona_process_stdin_forwarder(process.clone(), stdin_reader, stdin_error_tx);
+
+    let wait: BoxFuture<'static, crate::Result<i32>> = Box::pin(async move {
+        let mut cleanup = DaytonaProcessCleanup::armed(process);
+        match wait_rx.await {
+            Ok(result) => {
+                cleanup.disarm();
+                result
+            }
+            Err(_) => Err(anyhow!("Daytona process poller stopped")),
+        }
+    });
+
+    Ok(crate::SandboxProcessParts {
+        stdout: Box::pin(stdout_reader.compat()),
+        stderr: Box::pin(stderr_reader.compat()),
+        stdin: Box::pin(stdin_writer.compat_write()),
+        wait,
+    })
+}
+
+fn spawn_daytona_process_poller(
+    process: DaytonaSessionProcess,
+    stdout_writer: tokio::io::DuplexStream,
+    stderr_writer: tokio::io::DuplexStream,
+    stdin_error_rx: mpsc::UnboundedReceiver<anyhow::Error>,
+    wait_tx: oneshot::Sender<crate::Result<i32>>,
+) {
+    tokio::spawn(async move {
+        let result = poll_daytona_process(
+            process.clone(),
+            stdout_writer,
+            stderr_writer,
+            stdin_error_rx,
+        )
+        .await;
+        if result.is_err() {
+            if let Err(cleanup_error) = cleanup_daytona_process(&process).await {
+                tracing::warn!(
+                    sandbox_id = %process.sandbox_id,
+                    session_id = %process.session_id,
+                    error = %cleanup_error,
+                    "failed to clean up Daytona process session"
+                );
+            }
+        }
+        if wait_tx.send(result).is_err() {
+            tracing::debug!(
+                sandbox_id = %process.sandbox_id,
+                session_id = %process.session_id,
+                command_id = %process.command_id,
+                "Daytona process waiter dropped before completion"
+            );
+        }
+    });
+}
+
+fn spawn_daytona_process_stdin_forwarder(
+    process: DaytonaSessionProcess,
+    stdin_reader: tokio::io::DuplexStream,
+    stdin_error_tx: mpsc::UnboundedSender<anyhow::Error>,
+) {
+    tokio::spawn(async move {
+        if let Err(error) = forward_daytona_process_stdin(process.clone(), stdin_reader).await {
+            tracing::warn!(
+                sandbox_id = %process.sandbox_id,
+                session_id = %process.session_id,
+                command_id = %process.command_id,
+                error = %error,
+                "Daytona process stdin forwarder stopped"
+            );
+            if stdin_error_tx.send(error).is_err() {
+                tracing::debug!(
+                    sandbox_id = %process.sandbox_id,
+                    session_id = %process.session_id,
+                    command_id = %process.command_id,
+                    "Daytona process poller stopped before stdin error could be reported"
+                );
+            }
+        }
+    });
+}
+
+async fn poll_daytona_process(
+    process: DaytonaSessionProcess,
+    mut stdout_writer: tokio::io::DuplexStream,
+    mut stderr_writer: tokio::io::DuplexStream,
+    mut stdin_error_rx: mpsc::UnboundedReceiver<anyhow::Error>,
+) -> Result<i32> {
+    let mut stdout_offset = 0usize;
+    let mut stderr_offset = 0usize;
+    let mut polls = 0u64;
+    let mut last_report = Instant::now();
+    loop {
+        polls += 1;
+        if let Ok(error) = stdin_error_rx.try_recv() {
+            return Err(error.context("Daytona process stdin forwarding failed"));
+        }
+        let output = get_session_command_logs(&process).await?;
+        write_log_update(&mut stdout_writer, &mut stdout_offset, output.stdout()).await?;
+        write_log_update(&mut stderr_writer, &mut stderr_offset, output.stderr()).await?;
+        let exit_code = get_session_command_exit_code(&process).await?;
+        if polls == 1 || last_report.elapsed() >= Duration::from_secs(2) || exit_code.is_some() {
+            tracing::info!(
+                sandbox_id = %process.sandbox_id,
+                session_id = %process.session_id,
+                command_id = %process.command_id,
+                polls,
+                stdout_len = stdout_offset,
+                stderr_len = stderr_offset,
+                exit_code = ?exit_code,
+                "daytona_process_debug poll"
+            );
+            last_report = Instant::now();
+        }
+        if let Some(exit_code) = exit_code {
+            let output = get_session_command_logs(&process).await?;
+            write_log_update(&mut stdout_writer, &mut stdout_offset, output.stdout()).await?;
+            write_log_update(&mut stderr_writer, &mut stderr_offset, output.stderr()).await?;
+            cleanup_daytona_process(&process).await?;
+            tracing::info!(
+                sandbox_id = %process.sandbox_id,
+                session_id = %process.session_id,
+                command_id = %process.command_id,
+                exit_code,
+                stdout_len = stdout_offset,
+                stderr_len = stderr_offset,
+                "daytona_process_debug exited"
+            );
+            return Ok(exit_code);
+        }
+        tokio::time::sleep(PROCESS_POLL_INTERVAL).await;
+    }
+}
+
+async fn write_log_update(
+    writer: &mut tokio::io::DuplexStream,
+    offset: &mut usize,
+    output: &str,
+) -> Result<()> {
+    if output.len() < *offset {
+        *offset = 0;
+    }
+    if output.len() == *offset {
+        return Ok(());
+    }
+    let new_bytes = output.len() - *offset;
+    writer
+        .write_all(&output.as_bytes()[*offset..])
+        .await
+        .context("writing Daytona process output pipe")?;
+    *offset = output.len();
+    tracing::info!(
+        new_bytes,
+        total_bytes = *offset,
+        "daytona_process_debug output_bytes"
+    );
+    Ok(())
+}
+
+async fn forward_daytona_process_stdin(
+    process: DaytonaSessionProcess,
+    mut stdin_reader: tokio::io::DuplexStream,
+) -> Result<()> {
+    let mut buffer = vec![0; PROCESS_PIPE_BUFFER_SIZE];
+    let mut pending = Vec::new();
+    loop {
+        let bytes_read = stdin_reader
+            .read(&mut buffer)
+            .await
+            .context("reading Daytona process stdin pipe")?;
+        if bytes_read == 0 {
+            if !pending.is_empty() {
+                let data = String::from_utf8(pending)
+                    .context("Daytona process stdin ended with invalid UTF-8")?;
+                tracing::info!(
+                    sandbox_id = %process.sandbox_id,
+                    session_id = %process.session_id,
+                    command_id = %process.command_id,
+                    bytes = data.len(),
+                    "daytona_process_debug stdin_bytes_read"
+                );
+                send_session_command_input(&process, data).await?;
+            }
+            tracing::info!(
+                sandbox_id = %process.sandbox_id,
+                session_id = %process.session_id,
+                command_id = %process.command_id,
+                "daytona_process_debug stdin_closed"
+            );
+            return Ok(());
+        }
+        pending.extend_from_slice(&buffer[..bytes_read]);
+        while let Some(prefix_len) = valid_utf8_prefix_len(&pending)? {
+            let data = String::from_utf8(pending.drain(..prefix_len).collect())
+                .context("validated Daytona process stdin UTF-8 prefix failed to decode")?;
+            tracing::info!(
+                sandbox_id = %process.sandbox_id,
+                session_id = %process.session_id,
+                command_id = %process.command_id,
+                bytes = data.len(),
+                "daytona_process_debug stdin_bytes_read"
+            );
+            send_session_command_input(&process, data).await?;
+        }
+    }
+}
+
+fn valid_utf8_prefix_len(bytes: &[u8]) -> Result<Option<usize>> {
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    match std::str::from_utf8(bytes) {
+        Ok(_) => Ok(Some(bytes.len())),
+        Err(error) if error.error_len().is_none() => {
+            let valid_up_to = error.valid_up_to();
+            if valid_up_to == 0 {
+                Ok(None)
+            } else {
+                Ok(Some(valid_up_to))
+            }
+        }
+        Err(error) => bail!(
+            "Daytona process stdin contains invalid UTF-8 at byte {}",
+            error.valid_up_to()
+        ),
+    }
+}
+
+async fn create_process_session(
+    backend: &DaytonaBackendHandle,
+    id: &str,
+    session_id: &str,
+) -> Result<()> {
+    let body = DaytonaCreateSessionRequest {
+        session_id: session_id.to_string(),
+    };
+    let response = backend
+        .client
+        .post(backend.toolbox_endpoint(&format!("/toolbox/{id}/process/session")))
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("creating Daytona process session {session_id}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        bail!("Daytona create process session failed ({status}): {text}");
+    }
+    tracing::info!(
+        sandbox_id = %id,
+        session_id = %session_id,
+        "daytona_process_debug session_created"
+    );
+    Ok(())
+}
+
+async fn start_session_command(
+    backend: &DaytonaBackendHandle,
+    id: &str,
+    session_id: &str,
+    command: &SandboxCommand,
+    cwd: String,
+) -> Result<String> {
+    let rendered_command = render_shell_command(&command.argv);
+    let body = DaytonaSessionCommandRequest {
+        command: if command.env.is_empty() {
+            rendered_command
+        } else {
+            validate_daytona_env(&command.env)?;
+            wrap_session_command_with_stdin_env(&rendered_command)
+        },
+        cwd: Some(cwd),
+        timeout: command.timeout.map(|t| t.as_secs()),
+        run_async: true,
+        suppress_input_echo: true,
+    };
+    let response = backend
+        .client
+        .post(backend.toolbox_endpoint(&format!("/toolbox/{id}/process/session/{session_id}/exec")))
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("starting Daytona session command in {session_id}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        bail!("Daytona start session command failed ({status}): {text}");
+    }
+    let response: DaytonaSessionCommandResponse = response
+        .json()
+        .await
+        .context("decoding Daytona session command response")?;
+    let command_id = response
+        .command_id
+        .ok_or_else(|| anyhow!("Daytona session command response did not include cmdId"))?;
+    tracing::info!(
+        sandbox_id = %id,
+        session_id = %session_id,
+        command_id = %command_id,
+        "daytona_process_debug session_exec_created"
+    );
+    Ok(command_id)
+}
+
+async fn execute_daytona_process(
+    backend: &DaytonaBackendHandle,
+    id: &str,
+    body: DaytonaExecRequest,
+    operation: &str,
+) -> Result<DaytonaExecResponse> {
+    let response = backend
+        .client
+        .post(backend.toolbox_endpoint(&format!("/toolbox/{id}/process/execute")))
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("{operation} in Daytona sandbox {id}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        bail!("Daytona {operation} failed ({status}): {text}");
+    }
+    response
+        .json()
+        .await
+        .with_context(|| format!("decoding Daytona {operation} response"))
+}
+
+async fn send_session_environment_input(
+    process: &DaytonaSessionProcess,
+    env: &HashMap<String, String>,
+) -> Result<()> {
+    let input = render_session_environment_input(env)?;
+    send_session_command_input(process, input)
+        .await
+        .context("sending Daytona process environment")
+}
+
+async fn cleanup_daytona_process(process: &DaytonaSessionProcess) -> Result<()> {
+    delete_process_session(&process.backend, &process.sandbox_id, &process.session_id).await
+}
+
+async fn get_session_command_logs(process: &DaytonaSessionProcess) -> Result<DaytonaCommandLogs> {
+    let response = process
+        .backend
+        .client
+        .get(process.backend.toolbox_endpoint(&format!(
+            "/toolbox/{}/process/session/{}/command/{}/logs",
+            process.sandbox_id, process.session_id, process.command_id
+        )))
+        .send()
+        .await
+        .with_context(|| {
+            format!(
+                "fetching Daytona process logs for session {} command {}",
+                process.session_id, process.command_id
+            )
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        bail!("Daytona process logs failed ({status}): {text}");
+    }
+    let is_json = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("application/json"));
+    let text = response
+        .text()
+        .await
+        .context("decoding Daytona process log body")?;
+    if is_json {
+        let logs: DaytonaSessionCommandLogsResponse =
+            serde_json::from_str(&text).context("decoding Daytona process log JSON body")?;
+        Ok(DaytonaCommandLogs::Structured(logs))
+    } else {
+        Ok(DaytonaCommandLogs::Raw(text))
+    }
+}
+
+async fn get_session_command_exit_code(process: &DaytonaSessionProcess) -> Result<Option<i32>> {
+    let response = process
+        .backend
+        .client
+        .get(process.backend.toolbox_endpoint(&format!(
+            "/toolbox/{}/process/session/{}",
+            process.sandbox_id, process.session_id
+        )))
+        .send()
+        .await
+        .with_context(|| format!("fetching Daytona process session {}", process.session_id))?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        bail!("Daytona process session status failed ({status}): {text}");
+    }
+    let session: DaytonaSessionStatus = response
+        .json()
+        .await
+        .context("decoding Daytona process session status")?;
+    Ok(session
+        .commands
+        .iter()
+        .find(|command| command.id.as_deref() == Some(process.command_id.as_str()))
+        .and_then(|command| command.exit_code))
+}
+
+async fn send_session_command_input(process: &DaytonaSessionProcess, data: String) -> Result<()> {
+    let bytes = data.len();
+    let body = DaytonaSessionCommandInputRequest { data };
+    let response = process
+        .backend
+        .client
+        .post(process.backend.toolbox_endpoint(&format!(
+            "/toolbox/{}/process/session/{}/command/{}/input",
+            process.sandbox_id, process.session_id, process.command_id
+        )))
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| {
+            format!(
+                "sending Daytona process input for session {} command {}",
+                process.session_id, process.command_id
+            )
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        bail!("Daytona process input failed ({status}): {text}");
+    }
+    tracing::info!(
+        sandbox_id = %process.sandbox_id,
+        session_id = %process.session_id,
+        command_id = %process.command_id,
+        bytes,
+        "daytona_process_debug stdin_bytes_sent"
+    );
+    Ok(())
+}
+
+async fn delete_process_session(
+    backend: &DaytonaBackendHandle,
+    id: &str,
+    session_id: &str,
+) -> Result<()> {
+    let response = backend
+        .client
+        .delete(backend.toolbox_endpoint(&format!("/toolbox/{id}/process/session/{session_id}")))
+        .send()
+        .await
+        .with_context(|| format!("deleting Daytona process session {session_id}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        bail!("Daytona delete process session failed ({status}): {text}");
+    }
+    Ok(())
 }
 
 async fn stop_via_backend(backend: &DaytonaBackendHandle, id: &str) -> Result<()> {
@@ -432,6 +947,55 @@ fn render_shell_command(argv: &[String]) -> String {
         .map(|arg| shell_quote(arg))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn validate_daytona_env(env: &HashMap<String, String>) -> Result<Vec<(&str, &str)>> {
+    let mut entries = env
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+    for (key, value) in &entries {
+        if !is_shell_env_key(key) {
+            bail!("Daytona process env key is not a valid shell identifier: {key}");
+        }
+        if value.contains(['\0', '\n']) {
+            bail!("Daytona streamed process env value contains an unsupported newline or NUL");
+        }
+    }
+    Ok(entries)
+}
+
+fn is_shell_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn render_session_environment_input(env: &HashMap<String, String>) -> Result<String> {
+    let entries = validate_daytona_env(env)?;
+    let mut input = String::new();
+    for (key, value) in entries {
+        input.push_str(key);
+        input.push('\n');
+        input.push_str(value);
+        input.push('\n');
+    }
+    input.push_str(PROCESS_ENV_END_MARKER);
+    input.push('\n');
+    Ok(input)
+}
+
+fn wrap_session_command_with_stdin_env(command: &str) -> String {
+    format!(
+        "set -e; while IFS= read -r key; do [ \"$key\" = {} ] && break; IFS= read -r value; export \"$key=$value\"; done; exec {command}",
+        shell_quote(PROCESS_ENV_END_MARKER)
+    )
 }
 
 fn shell_quote(arg: &str) -> String {
@@ -488,6 +1052,141 @@ struct DaytonaExecResponse {
     result: Option<String>,
 }
 
+#[derive(Clone)]
+struct DaytonaSessionProcess {
+    backend: DaytonaBackendHandle,
+    sandbox_id: String,
+    session_id: String,
+    command_id: String,
+}
+
+struct DaytonaProcessCleanup {
+    process: Option<DaytonaSessionProcess>,
+}
+
+impl DaytonaProcessCleanup {
+    fn armed(process: DaytonaSessionProcess) -> Self {
+        Self {
+            process: Some(process),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.process = None;
+    }
+}
+
+impl Drop for DaytonaProcessCleanup {
+    fn drop(&mut self) {
+        let Some(process) = self.process.take() else {
+            return;
+        };
+        tokio::spawn(async move {
+            match cleanup_daytona_process(&process).await {
+                Ok(()) => {
+                    tracing::info!(
+                        sandbox_id = %process.sandbox_id,
+                        session_id = %process.session_id,
+                        command_id = %process.command_id,
+                        "daytona_process_debug dropped_wait_deleted_session"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        sandbox_id = %process.sandbox_id,
+                        session_id = %process.session_id,
+                        command_id = %process.command_id,
+                        error = %error,
+                        "failed to clean up dropped Daytona process session"
+                    );
+                }
+            }
+        });
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct DaytonaCreateSessionRequest {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DaytonaSessionCommandRequest {
+    command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timeout: Option<u64>,
+    #[serde(rename = "runAsync")]
+    run_async: bool,
+    #[serde(rename = "suppressInputEcho")]
+    suppress_input_echo: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct DaytonaSessionCommandResponse {
+    #[serde(default, rename = "cmdId", alias = "cmd_id", alias = "id")]
+    command_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DaytonaSessionStatus {
+    #[serde(default)]
+    commands: Vec<DaytonaSessionCommandStatus>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DaytonaSessionCommandStatus {
+    #[serde(default, rename = "id", alias = "cmdId", alias = "cmd_id")]
+    id: Option<String>,
+    #[serde(default, rename = "exitCode", alias = "exit_code")]
+    exit_code: Option<i32>,
+}
+
+#[derive(Debug)]
+enum DaytonaCommandLogs {
+    Structured(DaytonaSessionCommandLogsResponse),
+    Raw(String),
+}
+
+impl DaytonaCommandLogs {
+    fn stdout(&self) -> &str {
+        match self {
+            Self::Structured(logs) => {
+                if logs.stdout.is_empty() {
+                    logs.output.as_str()
+                } else {
+                    logs.stdout.as_str()
+                }
+            }
+            Self::Raw(output) => output.as_str(),
+        }
+    }
+
+    fn stderr(&self) -> &str {
+        match self {
+            Self::Structured(logs) => logs.stderr.as_str(),
+            Self::Raw(_) => "",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DaytonaSessionCommandLogsResponse {
+    #[serde(default)]
+    output: String,
+    #[serde(default)]
+    stdout: String,
+    #[serde(default)]
+    stderr: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DaytonaSessionCommandInputRequest {
+    data: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct DaytonaSandboxList {
     #[serde(default)]
@@ -542,5 +1241,29 @@ impl DaytonaSandbox {
                 | DaytonaSandboxState::Archived
                 | DaytonaSandboxState::Unknown
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_utf8_prefix_len;
+
+    #[test]
+    fn utf8_prefix_waits_for_split_multibyte_character() {
+        let mut bytes = "hello ".as_bytes().to_vec();
+        bytes.push(0xc3);
+        assert_eq!(valid_utf8_prefix_len(&bytes).unwrap(), Some(6));
+
+        bytes.push(0xa9);
+        assert_eq!(valid_utf8_prefix_len(&bytes).unwrap(), Some(8));
+    }
+
+    #[test]
+    fn utf8_prefix_rejects_invalid_bytes() {
+        let error = valid_utf8_prefix_len(&[0xff]).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("invalid UTF-8"),
+            "unexpected error: {error:#}"
+        );
     }
 }
