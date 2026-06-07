@@ -2,10 +2,24 @@
 //! selected via the harness's provider registry.
 mod docker;
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod daytona;
+#[cfg(not(all(not(target_arch = "wasm32"), feature = "basic-backend")))]
+mod daytona {
+    pub fn default_daytona_image() -> String {
+        "daytonaio/sandbox:0.8.0".to_string()
+    }
+}
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod process_bridge;
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod vercel;
+#[cfg(not(all(not(target_arch = "wasm32"), feature = "basic-backend")))]
+mod vercel {
+    pub fn default_vercel_image() -> String {
+        "node24".to_string()
+    }
+}
 
 pub use daytona::default_daytona_image;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]

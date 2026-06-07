@@ -232,11 +232,50 @@ async fn stop_stops_vercel_session() {
 }
 
 #[tokio::test]
-async fn start_process_fails_clearly() {
+async fn start_process_reports_bridge_install_failure() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
 
     mount_existing_named_sandbox(&server, "sess_process").await;
+    Mock::given(method("POST"))
+        .and(path("/v2/sandboxes/sessions/sess_process/cmd"))
+        .and(query_param("teamId", "team_1"))
+        .and(body_runs_shell_command_containing(
+            "/tmp/exo-process-bridge.py",
+        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(
+                json!({
+                    "command": {
+                        "id": "cmd_install",
+                        "name": "/bin/sh",
+                        "args": ["-lc", "install bridge"],
+                        "cwd": "/vercel/sandbox",
+                        "sandboxId": "sandbox-id",
+                        "exitCode": 1,
+                        "startedAt": 1
+                    }
+                })
+                .to_string(),
+            ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/v2/sandboxes/sessions/sess_process/cmd/cmd_install/logs",
+        ))
+        .and(query_param("teamId", "team_1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(
+                json!({"stream": "stderr", "data": "python3 missing"}).to_string(),
+            ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
     let handle = backend
         .acquire(make_request("conv-5", "sandbox-5"))
         .await
@@ -251,12 +290,13 @@ async fn start_process_fails_clearly() {
         })
         .await;
     let error = match result {
-        Ok(_) => panic!("Vercel does not support stdin-backed processes yet"),
+        Ok(_) => panic!("start_process should fail during mocked bridge install"),
         Err(error) => error,
     };
+    let error = format!("{error:#}");
     assert!(
-        format!("{error:#}").contains("interactive stdin-backed processes"),
-        "unexpected error: {error:#}"
+        error.contains("installing process bridge failed") && error.contains("python3 missing"),
+        "unexpected error: {error}"
     );
 }
 
@@ -294,6 +334,30 @@ fn body_runs_command_with_env() -> impl wiremock::Match {
         }
     }
     Has
+}
+
+fn body_runs_shell_command_containing(needle: &'static str) -> impl wiremock::Match {
+    struct Has {
+        needle: &'static str,
+    }
+    impl wiremock::Match for Has {
+        fn matches(&self, request: &Request) -> bool {
+            let Ok(body) = serde_json::from_slice::<VercelCommandBody>(&request.body) else {
+                return false;
+            };
+            body.command == "/bin/sh"
+                && body.args.first().map(String::as_str) == Some("-lc")
+                && body
+                    .args
+                    .get(1)
+                    .is_some_and(|command| command.contains(self.needle))
+                && body.cwd.as_deref() == Some("/vercel/sandbox")
+                && body.env.is_empty()
+                && body.sudo == Some(false)
+                && body.wait == Some(true)
+        }
+    }
+    Has { needle }
 }
 
 #[derive(Deserialize)]
