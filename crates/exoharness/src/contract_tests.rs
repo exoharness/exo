@@ -1,11 +1,16 @@
 use std::sync::Arc;
+use std::time::Duration;
 
+use anyhow::{Context, anyhow, bail};
+use futures::io::{AsyncReadExt, AsyncWriteExt};
 use lingua::Message;
 use lingua::universal::{AssistantContent, UserContent};
+use tokio::time::timeout;
 
 use crate::{
     BeginTurnRequest, Binding, EventData, EventKind, EventQuery, EventQueryDirection, ExoHarness,
-    ForkConversationRequest, NewAgentRequest, NewConversationRequest, Uuid7, WriteArtifactRequest,
+    ForkConversationRequest, ManagedSandboxHandle, NewAgentRequest, NewConversationRequest,
+    SandboxCommand, Uuid7, WriteArtifactRequest,
 };
 
 pub async fn supports_agent_and_conversation_crud(harness: Arc<dyn ExoHarness>) {
@@ -262,6 +267,235 @@ pub async fn conversation_scope_overrides_agent_scope_and_fork_copies_bindings(
             .iter()
             .any(|event| matches!(event.data, EventData::ConversationForked { .. }))
     );
+}
+
+pub async fn sandbox_handle_start_process_supports_interactive_stdio_and_env(
+    handle: Arc<dyn ManagedSandboxHandle>,
+) -> crate::Result<()> {
+    let result =
+        sandbox_handle_start_process_supports_interactive_stdio_and_env_inner(Arc::clone(&handle))
+            .await;
+    let stop_result = handle.stop().await.context("stop sandbox after contract");
+    match (result, stop_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(stop_error)) => Err(anyhow!(
+            "{error:#}; also failed to stop sandbox after contract: {stop_error:#}"
+        )),
+    }
+}
+
+pub async fn sandbox_handle_start_process_supports_long_running_request_response_protocol(
+    handle: Arc<dyn ManagedSandboxHandle>,
+) -> crate::Result<()> {
+    let result =
+        sandbox_handle_start_process_supports_long_running_request_response_protocol_inner(
+            Arc::clone(&handle),
+        )
+        .await;
+    let stop_result = handle.stop().await.context("stop sandbox after contract");
+    match (result, stop_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(stop_error)) => Err(anyhow!(
+            "{error:#}; also failed to stop sandbox after contract: {stop_error:#}"
+        )),
+    }
+}
+
+async fn sandbox_handle_start_process_supports_interactive_stdio_and_env_inner(
+    handle: Arc<dyn ManagedSandboxHandle>,
+) -> crate::Result<()> {
+    let mut env = std::collections::HashMap::new();
+    env.insert(
+        "EXO_CONTRACT_ENV".to_string(),
+        "contract-env-value".to_string(),
+    );
+    let mut process = handle
+        .start_process(&SandboxCommand {
+            argv: vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                "printf 'ready\\n'; IFS= read -r line; printf 'env=%s input=%s\\n' \"$EXO_CONTRACT_ENV\" \"$line\"".to_string(),
+            ],
+            env,
+            display_argv: None,
+            cwd: None,
+            timeout: Some(Duration::from_secs(30)),
+        })
+        .await
+        .context("start_process should start before the command exits")?;
+
+    let mut ready = [0u8; 6];
+    timeout(
+        Duration::from_secs(10),
+        process.stdout.read_exact(&mut ready),
+    )
+    .await
+    .context("process should stream initial stdout before stdin is written")?
+    .context("read ready marker")?;
+    if &ready != b"ready\n" {
+        bail!(
+            "unexpected ready marker: {:?}",
+            String::from_utf8_lossy(&ready)
+        );
+    }
+
+    process
+        .stdin
+        .write_all(b"contract-stdin-value\n")
+        .await
+        .context("write process stdin")?;
+    process.stdin.close().await.context("close process stdin")?;
+
+    let expected_stdout = "env=contract-env-value input=contract-stdin-value\n";
+    let mut final_stdout = vec![0u8; expected_stdout.len()];
+    timeout(
+        Duration::from_secs(10),
+        process.stdout.read_exact(&mut final_stdout),
+    )
+    .await
+    .context("process should stream stdout after stdin is written")?
+    .context("read final stdout")?;
+    let final_stdout = String::from_utf8(final_stdout).context("final stdout should be UTF-8")?;
+    if final_stdout != expected_stdout {
+        bail!("unexpected stdout: {final_stdout:?}");
+    }
+
+    let exit_code = timeout(Duration::from_secs(30), process.wait)
+        .await
+        .with_context(|| format!("process wait should finish after final stdout {final_stdout:?}"))?
+        .context("process wait should succeed")?;
+
+    let mut stderr = String::new();
+    timeout(
+        Duration::from_secs(5),
+        process.stderr.read_to_string(&mut stderr),
+    )
+    .await
+    .context("stderr should drain after process exit")?
+    .context("read stderr")?;
+    if exit_code != 0 {
+        bail!("unexpected process exit code: {exit_code}; stderr: {stderr:?}");
+    }
+    if !stderr.is_empty() {
+        bail!("unexpected stderr: {stderr:?}");
+    }
+    Ok(())
+}
+
+async fn sandbox_handle_start_process_supports_long_running_request_response_protocol_inner(
+    handle: Arc<dyn ManagedSandboxHandle>,
+) -> crate::Result<()> {
+    let mut process = handle
+        .start_process(&SandboxCommand {
+            argv: vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                [
+                    "printf 'protocol-ready\\n'",
+                    "while IFS= read -r line; do",
+                    "  case \"$line\" in",
+                    "    request-one) printf 'response-one\\n' ;;",
+                    "    request-two) printf 'protocol-stderr-two\\n' >&2; printf 'response-two\\n' ;;",
+                    "    request-three) printf 'response-three\\n'; exit 0 ;;",
+                    "    *) printf 'unexpected:%s\\n' \"$line\"; exit 9 ;;",
+                    "  esac",
+                    "done",
+                    "exit 8",
+                ]
+                .join("\n"),
+            ],
+            env: std::collections::HashMap::new(),
+            display_argv: None,
+            cwd: None,
+            timeout: Some(Duration::from_secs(30)),
+        })
+        .await
+        .context("start_process should start a long-running protocol process")?;
+
+    read_exact_text(
+        &mut process.stdout,
+        "protocol-ready\n",
+        "read protocol ready marker",
+    )
+    .await?;
+
+    process
+        .stdin
+        .write_all(b"request-one\n")
+        .await
+        .context("write first protocol request")?;
+    read_exact_text(
+        &mut process.stdout,
+        "response-one\n",
+        "read first protocol response",
+    )
+    .await?;
+
+    process
+        .stdin
+        .write_all(b"request-two\n")
+        .await
+        .context("write second protocol request")?;
+    read_exact_text(
+        &mut process.stdout,
+        "response-two\n",
+        "read second protocol response",
+    )
+    .await?;
+
+    process
+        .stdin
+        .write_all(b"request-three\n")
+        .await
+        .context("write shutdown protocol request")?;
+    process.stdin.close().await.context("close process stdin")?;
+    read_exact_text(
+        &mut process.stdout,
+        "response-three\n",
+        "read shutdown protocol response",
+    )
+    .await?;
+
+    let exit_code = timeout(Duration::from_secs(30), process.wait)
+        .await
+        .context("protocol process wait should finish after shutdown")?
+        .context("protocol process wait should succeed")?;
+    let mut stderr = String::new();
+    timeout(
+        Duration::from_secs(5),
+        process.stderr.read_to_string(&mut stderr),
+    )
+    .await
+    .context("stderr should drain after protocol process exit")?
+    .context("read protocol stderr")?;
+    if exit_code != 0 {
+        bail!("unexpected protocol process exit code: {exit_code}; stderr: {stderr:?}");
+    }
+    if stderr != "protocol-stderr-two\n" {
+        bail!("unexpected protocol stderr: {stderr:?}");
+    }
+    Ok(())
+}
+
+async fn read_exact_text(
+    reader: &mut (impl futures::io::AsyncRead + Unpin),
+    expected: &str,
+    context: &str,
+) -> crate::Result<()> {
+    let mut bytes = vec![0u8; expected.len()];
+    timeout(Duration::from_secs(10), reader.read_exact(&mut bytes))
+        .await
+        .with_context(|| context.to_string())?
+        .with_context(|| context.to_string())?;
+    let actual = String::from_utf8(bytes).with_context(|| format!("{context}: invalid UTF-8"))?;
+    if actual != expected {
+        bail!("{context}: expected {expected:?}, got {actual:?}");
+    }
+    Ok(())
 }
 
 fn user_message(text: &str) -> Message {

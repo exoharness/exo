@@ -1,8 +1,9 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::future::Future;
+use std::fmt::{Display, Formatter};
 use std::ops::Bound;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -131,44 +132,6 @@ pub trait TurnHandle: Send + Sync {
     async fn finish(&self) -> Result<EventId>;
 }
 
-#[derive(Clone)]
-enum ActiveSandboxEventSink {
-    Turn(Arc<dyn TurnHandle>),
-    Suppressed,
-}
-
-tokio::task_local! {
-    static ACTIVE_SANDBOX_EVENT_SINK: ActiveSandboxEventSink;
-}
-
-pub async fn with_active_sandbox_event_turn<F, T>(turn: Arc<dyn TurnHandle>, future: F) -> T
-where
-    F: Future<Output = T>,
-{
-    ACTIVE_SANDBOX_EVENT_SINK
-        .scope(ActiveSandboxEventSink::Turn(turn), future)
-        .await
-}
-
-pub async fn suppress_active_sandbox_events<F, T>(future: F) -> T
-where
-    F: Future<Output = T>,
-{
-    ACTIVE_SANDBOX_EVENT_SINK
-        .scope(ActiveSandboxEventSink::Suppressed, future)
-        .await
-}
-
-pub fn active_sandbox_event_turn() -> Option<Arc<dyn TurnHandle>> {
-    ACTIVE_SANDBOX_EVENT_SINK
-        .try_with(|sink| match sink {
-            ActiveSandboxEventSink::Turn(turn) => Some(Arc::clone(turn)),
-            ActiveSandboxEventSink::Suppressed => None,
-        })
-        .ok()
-        .flatten()
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentRecord {
     pub id: AgentId,
@@ -244,6 +207,7 @@ impl EventKind {
     pub const TOOL_REQUESTED: EventKind = EventKind(Cow::Borrowed("tool_requested"));
     pub const TOOL_RESULT: EventKind = EventKind(Cow::Borrowed("tool_result"));
     pub const LINGUA_STREAM_CHUNK: EventKind = EventKind(Cow::Borrowed("lingua_stream_chunk"));
+    pub const ERROR: EventKind = EventKind(Cow::Borrowed("error"));
     pub const ARTIFACT_WRITTEN: EventKind = EventKind(Cow::Borrowed("artifact_written"));
     pub const SANDBOX_CREATED: EventKind = EventKind(Cow::Borrowed("sandbox_created"));
     pub const SANDBOX_STARTED: EventKind = EventKind(Cow::Borrowed("sandbox_started"));
@@ -344,6 +308,9 @@ pub enum EventData {
     LinguaStreamChunk {
         chunk: UniversalStreamChunk,
     },
+    Error {
+        message: String,
+    },
     ArtifactWritten {
         artifact_id: ArtifactId,
         path: String,
@@ -351,6 +318,8 @@ pub enum EventData {
     },
     SandboxCreated {
         sandbox_id: SandboxId,
+        #[serde(default)]
+        name: Option<String>,
         provider: SandboxProvider,
         image: String,
         default_workdir: String,
@@ -372,6 +341,8 @@ pub enum EventData {
     SandboxProcessStarted {
         sandbox_id: SandboxId,
         process_id: SandboxProcessId,
+        #[serde(default)]
+        name: Option<String>,
         command: Vec<String>,
         cwd: Option<String>,
         mode: SandboxProcessMode,
@@ -415,6 +386,7 @@ impl EventData {
             Self::ToolRequested { .. } => EventKind::TOOL_REQUESTED,
             Self::ToolResult { .. } => EventKind::TOOL_RESULT,
             Self::LinguaStreamChunk { .. } => EventKind::LINGUA_STREAM_CHUNK,
+            Self::Error { .. } => EventKind::ERROR,
             Self::ArtifactWritten { .. } => EventKind::ARTIFACT_WRITTEN,
             Self::SandboxCreated { .. } => EventKind::SANDBOX_CREATED,
             Self::SandboxStarted { .. } => EventKind::SANDBOX_STARTED,
@@ -480,6 +452,8 @@ pub struct FileSystemMount {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreateSandboxRequest {
+    #[serde(default)]
+    pub name: Option<String>,
     pub provider: SandboxProvider,
     pub image: String,
     pub default_workdir: Option<String>,
@@ -493,6 +467,7 @@ pub struct CreateSandboxRequest {
 pub enum SandboxProvider {
     #[default]
     Daytona,
+    Vercel,
     AppleContainer,
     Docker,
     #[serde(alias = "local")]
@@ -505,6 +480,37 @@ impl SandboxProvider {
             self,
             Self::AppleContainer | Self::Docker | Self::LocalProcess
         )
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Daytona => "daytona",
+            Self::Vercel => "vercel",
+            Self::AppleContainer => "apple-container",
+            Self::Docker => "docker",
+            Self::LocalProcess => "local-process",
+        }
+    }
+}
+
+impl Display for SandboxProvider {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for SandboxProvider {
+    type Err = crate::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value.trim() {
+            "daytona" => Ok(Self::Daytona),
+            "vercel" => Ok(Self::Vercel),
+            "apple-container" | "apple_container" => Ok(Self::AppleContainer),
+            "docker" => Ok(Self::Docker),
+            "local" | "local-process" | "local_process" => Ok(Self::LocalProcess),
+            provider => Err(anyhow::anyhow!("unsupported sandbox provider: {provider}")),
+        }
     }
 }
 
@@ -526,6 +532,8 @@ pub struct RunInSandboxRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StartSandboxProcessRequest {
     pub sandbox_id: SandboxId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub command: Vec<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
@@ -576,6 +584,8 @@ pub enum SandboxProcessLifecycle {
 pub struct SandboxProcessRecord {
     pub id: SandboxProcessId,
     pub sandbox_id: SandboxId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub status: SandboxProcessStatus,
 }
 
@@ -740,7 +750,7 @@ pub enum Binding {
 #[serde(tag = "provider", rename_all = "lowercase")]
 pub enum SandboxProviderConfig {
     Docker {
-        #[serde(default = "default_docker_image")]
+        #[serde(default = "crate::sandbox_provider::default_docker_image")]
         default_image: String,
     },
     Daytona {
@@ -753,34 +763,26 @@ pub enum SandboxProviderConfig {
         organization_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         api_url: Option<String>,
-        #[serde(default = "default_daytona_image")]
+        #[serde(default = "crate::sandbox_provider::default_daytona_image")]
         default_image: String,
     },
-    // To be implemented in followup PRs:
-    // E2b {
-    //     api_key_secret_id: SecretId,
-    //     api_url: Option<String>,
-    //     default_image: String,  // #[serde(default = "default_e2b_image")]
-    // },
-    // ExeDev {
-    //     token_secret_id: SecretId,     // bearer token (SSH-key-signed), not an api key
-    //     region: Option<String>,        // datacenter: LAX | NYC | FRA | ...
-    //     api_url: Option<String>,
-    //     default_image: String,   // #[serde(default = "default_exedev_image")]
-    // },
-}
-
-pub fn default_daytona_image() -> String {
-    "daytonaio/sandbox:0.8.0".to_string()
-}
-pub fn default_docker_image() -> String {
-    "docker.io/library/ubuntu:24.04".to_string()
+    Vercel {
+        /// Secret-store id of the Vercel API/access token.
+        api_token_secret_id: SecretId,
+        team_id: String,
+        project_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_url: Option<String>,
+        #[serde(default = "crate::sandbox_provider::default_vercel_image")]
+        default_image: String,
+    },
 }
 
 impl SandboxProviderConfig {
     pub fn provider(&self) -> SandboxProvider {
         match self {
             Self::Daytona { .. } => SandboxProvider::Daytona,
+            Self::Vercel { .. } => SandboxProvider::Vercel,
             Self::Docker { .. } => SandboxProvider::Docker,
         }
     }
@@ -788,9 +790,9 @@ impl SandboxProviderConfig {
     /// The binding's configured default base image.
     pub fn default_image(&self) -> &str {
         match self {
-            Self::Daytona { default_image, .. } | Self::Docker { default_image, .. } => {
-                default_image
-            }
+            Self::Daytona { default_image, .. }
+            | Self::Vercel { default_image, .. }
+            | Self::Docker { default_image, .. } => default_image,
         }
     }
 }
@@ -856,5 +858,31 @@ mod tests {
             serde_json::to_value(FileSystemMountMode::ReadWrite).expect("mode should serialize");
         assert_eq!(ro, Value::String("ro".to_string()));
         assert_eq!(rw, Value::String("rw".to_string()));
+    }
+
+    #[test]
+    fn parses_and_formats_sandbox_providers() {
+        assert_eq!(
+            "apple-container".parse::<SandboxProvider>().unwrap(),
+            SandboxProvider::AppleContainer
+        );
+        assert_eq!(
+            "apple_container".parse::<SandboxProvider>().unwrap(),
+            SandboxProvider::AppleContainer
+        );
+        assert_eq!(
+            "local".parse::<SandboxProvider>().unwrap(),
+            SandboxProvider::LocalProcess
+        );
+        assert_eq!(
+            "vercel".parse::<SandboxProvider>().unwrap(),
+            SandboxProvider::Vercel
+        );
+        assert_eq!(
+            SandboxProvider::AppleContainer.to_string(),
+            "apple-container"
+        );
+        assert_eq!(SandboxProvider::Vercel.to_string(), "vercel");
+        assert_eq!(SandboxProvider::LocalProcess.to_string(), "local-process");
     }
 }

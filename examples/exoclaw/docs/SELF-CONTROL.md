@@ -42,6 +42,8 @@ The important safety boundary is that inbound adapter messages wake the conversa
 
 Exoclaw's shell tool runs inside a sandbox. By default, Exoclaw conversations use `sandboxScope: "agent"`, so shell commands share one persistent agent sandbox across conversations. A conversation can opt into `sandboxScope: "conversation"` when it needs an isolated sandbox for that conversation.
 
+The shared agent sandbox is implemented as an agent-owned named reusable sandbox. Exoclaw stores the owner conversation and sandbox name in an agent artifact, then reacquires the sandbox through `create_sandbox` with that name. The harness handles reuse when the named sandbox is still running and recreates it when needed, so Exoclaw does not need to scan raw sandbox lifecycle events to find its current environment.
+
 The sandbox control tools expose filesystem checkpointing:
 
 - `list_sandbox_snapshots` lists snapshots for the selected sandbox scope and reports the current snapshot id when one is known.
