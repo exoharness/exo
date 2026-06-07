@@ -74,8 +74,10 @@ class BridgeState:
         )
         self.events = queue.Queue()
         self.write_lock = threading.Lock()
-        threading.Thread(target=self._read_stream, args=("stdout", self.process.stdout), daemon=True).start()
-        threading.Thread(target=self._read_stream, args=("stderr", self.process.stderr), daemon=True).start()
+        self.stdout_thread = threading.Thread(target=self._read_stream, args=("stdout", self.process.stdout), daemon=True)
+        self.stderr_thread = threading.Thread(target=self._read_stream, args=("stderr", self.process.stderr), daemon=True)
+        self.stdout_thread.start()
+        self.stderr_thread.start()
         threading.Thread(target=self._wait, daemon=True).start()
 
     def _read_stream(self, stream, handle):
@@ -94,6 +96,8 @@ class BridgeState:
     def _wait(self):
         try:
             exit_code = self.process.wait()
+            self.stdout_thread.join()
+            self.stderr_thread.join()
             self.events.put({"type": "exit", "exit_code": exit_code})
         except Exception as exc:
             self.events.put({"type": "error", "message": f"wait failed: {exc}"})
@@ -151,6 +155,8 @@ class Handler(socketserver.BaseRequestHandler):
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}
         self.request.sendall(json.dumps(response, separators=(",", ":")).encode("utf-8"))
+        if response.get("event", {}).get("type") == "exit":
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
 
 
 class Server(socketserver.ThreadingTCPServer):
@@ -436,5 +442,153 @@ async fn forward_stdin(
             .request(Request::write(&buffer[..bytes_read]))
             .await
             .context("writing process bridge stdin")?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::TcpListener;
+    use std::path::{Path, PathBuf};
+    use std::process::Stdio;
+
+    use serde_json::json;
+    use tempfile::{TempDir, tempdir};
+    use tokio::process::Command;
+
+    use super::*;
+
+    struct BridgeFixture {
+        _temp: TempDir,
+        script_path: PathBuf,
+    }
+
+    #[tokio::test]
+    async fn bridge_reports_stdout_before_exit_for_fast_process() {
+        let bridge =
+            start_bridge_for_python_command("import sys; sys.stdout.write('final output')").await;
+
+        let mut output = String::new();
+        let exit_code = recv_until_exit(&bridge.script_path, &mut output).await;
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(output, "final output");
+    }
+
+    #[tokio::test]
+    async fn bridge_server_stops_after_exit_is_observed() {
+        let bridge = start_bridge_for_python_command("import sys; sys.stdout.write('done')").await;
+        let mut output = String::new();
+        assert_eq!(recv_until_exit(&bridge.script_path, &mut output).await, 0);
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let ping = bridge_ping(&bridge.script_path).await;
+
+        assert!(
+            !ping.status.success(),
+            "bridge server still accepted ping after child exit"
+        );
+    }
+
+    async fn start_bridge_for_python_command(source: &str) -> BridgeFixture {
+        let port = unused_local_port();
+        let temp = tempdir().expect("create temp dir");
+        let script_path = temp.path().join("exo-process-bridge.py");
+        let script = SCRIPT.replace("PORT = 48765", &format!("PORT = {port}"));
+        tokio::fs::write(&script_path, script)
+            .await
+            .expect("write bridge script");
+
+        let argv_json = serde_json::to_string(&vec!["python3", "-c", source]).expect("encode argv");
+        let mut server = Command::new("python3")
+            .arg(&script_path)
+            .arg("server")
+            .env("EXO_PROCESS_BRIDGE_ARGV_JSON", argv_json)
+            .env("EXO_PROCESS_BRIDGE_ENV_JSON", "{}")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start bridge server");
+
+        wait_for_ping(&script_path).await;
+        tokio::spawn(async move {
+            match server.wait().await {
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, "process bridge test server wait failed"),
+            }
+        });
+        BridgeFixture {
+            _temp: temp,
+            script_path,
+        }
+    }
+
+    async fn recv_until_exit(script_path: &Path, output: &mut String) -> i32 {
+        for _ in 0..10 {
+            let response = bridge_client(
+                script_path,
+                json!({"type": "recv", "timeout_seconds": 1.0}).to_string(),
+            )
+            .await;
+            let response: Response =
+                serde_json::from_slice(&response.stdout).expect("decode bridge recv response");
+            match response.event {
+                Some(Event::Stdout { data }) => {
+                    let decoded = STANDARD.decode(data).expect("decode stdout event");
+                    output.push_str(
+                        std::str::from_utf8(&decoded).expect("stdout event should be utf8"),
+                    );
+                }
+                Some(Event::Stderr { data }) => {
+                    let decoded = STANDARD.decode(data).expect("decode stderr event");
+                    panic!(
+                        "unexpected stderr event: {}",
+                        String::from_utf8_lossy(&decoded)
+                    );
+                }
+                Some(Event::Exit { exit_code }) => return exit_code,
+                None => {}
+            }
+        }
+        panic!("bridge did not report process exit");
+    }
+
+    async fn wait_for_ping(script_path: &Path) {
+        for _ in 0..50 {
+            if bridge_ping(script_path).await.status.success() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("bridge server did not become ready");
+    }
+
+    async fn bridge_ping(script_path: &Path) -> std::process::Output {
+        Command::new("python3")
+            .arg(script_path)
+            .arg("ping")
+            .output()
+            .await
+            .expect("run bridge ping")
+    }
+
+    async fn bridge_client(script_path: &Path, request: String) -> std::process::Output {
+        let output = Command::new("python3")
+            .arg(script_path)
+            .arg("client")
+            .arg(request)
+            .output()
+            .await
+            .expect("run bridge client");
+        assert!(
+            output.status.success(),
+            "bridge client failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    }
+
+    fn unused_local_port() -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind local port");
+        listener.local_addr().expect("read local addr").port()
     }
 }

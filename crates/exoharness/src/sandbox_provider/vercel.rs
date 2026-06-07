@@ -255,6 +255,15 @@ async fn start_process_in_sandbox(
         argv = ?command.display_argv.as_ref().unwrap_or(&command.argv),
         "vercel_process_bridge start_process"
     );
+    // Vercel exposes one-shot command execution, but not a native streaming
+    // process handle. We emulate one with a single in-sandbox bridge per
+    // sandbox session, so starting another long-running process would sever
+    // the existing handle.
+    if process_bridge_ping(backend, session_id, &cwd).await? {
+        bail!(
+            "Vercel sandbox backend supports only one active long-running process per sandbox session"
+        );
+    }
     install_process_bridge_script(backend, session_id, &cwd).await?;
     ensure_process_bridge_running(backend, session_id, &cwd, command).await?;
     let client = VercelProcessBridgeClient {

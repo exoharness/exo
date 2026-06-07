@@ -300,6 +300,80 @@ async fn start_process_reports_bridge_install_failure() {
     );
 }
 
+#[tokio::test]
+async fn start_process_rejects_existing_vercel_bridge() {
+    let server = MockServer::start().await;
+    let backend = backend_for_mock(&server);
+
+    mount_existing_named_sandbox(&server, "sess_process_busy").await;
+    Mock::given(method("POST"))
+        .and(path("/v2/sandboxes/sessions/sess_process_busy/cmd"))
+        .and(query_param("teamId", "team_1"))
+        .and(body_runs_bridge_request("ping"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(
+                json!({
+                    "command": {
+                        "id": "cmd_ping",
+                        "name": "python3",
+                        "args": ["/tmp/exo-process-bridge.py", "client", "{\"type\":\"ping\"}"],
+                        "cwd": "/vercel/sandbox",
+                        "sandboxId": "sandbox-id",
+                        "exitCode": 0,
+                        "startedAt": 1
+                    }
+                })
+                .to_string(),
+            ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/v2/sandboxes/sessions/sess_process_busy/cmd/cmd_ping/logs",
+        ))
+        .and(query_param("teamId", "team_1"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(json!({"stream": "stdout", "data": "{\"ok\":true}"}).to_string()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let handle = backend
+        .acquire(make_request("conv-6", "sandbox-6"))
+        .await
+        .unwrap();
+    let result = handle
+        .start_process(&SandboxCommand {
+            argv: vec!["codex".into(), "app-server".into()],
+            env: HashMap::new(),
+            display_argv: None,
+            cwd: None,
+            timeout: None,
+        })
+        .await;
+    let error = match result {
+        Ok(_) => panic!("start_process should reject a second active bridge"),
+        Err(error) => error,
+    };
+    let error = format!("{error:#}");
+    assert!(
+        error.contains("only one active long-running process"),
+        "unexpected error: {error}"
+    );
+
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert!(
+        !requests
+            .iter()
+            .any(|request| String::from_utf8_lossy(&request.body).contains("pkill")),
+        "second start_process must not stop the existing Vercel bridge"
+    );
+}
+
 fn body_creates_named_sandbox() -> impl wiremock::Match {
     struct Has;
     impl wiremock::Match for Has {
@@ -360,6 +434,34 @@ fn body_runs_shell_command_containing(needle: &'static str) -> impl wiremock::Ma
     Has { needle }
 }
 
+fn body_runs_bridge_request(kind: &'static str) -> impl wiremock::Match {
+    struct Has {
+        kind: &'static str,
+    }
+    impl wiremock::Match for Has {
+        fn matches(&self, request: &Request) -> bool {
+            let Ok(body) = serde_json::from_slice::<VercelCommandBody>(&request.body) else {
+                return false;
+            };
+            let Some(request_arg) = body.args.get(2) else {
+                return false;
+            };
+            let Ok(bridge_request) = serde_json::from_str::<BridgeRequestBody>(request_arg) else {
+                return false;
+            };
+            body.command == "python3"
+                && body.args.first().map(String::as_str) == Some("/tmp/exo-process-bridge.py")
+                && body.args.get(1).map(String::as_str) == Some("client")
+                && bridge_request.kind == self.kind
+                && body.cwd.as_deref() == Some("/vercel/sandbox")
+                && body.env.is_empty()
+                && body.sudo == Some(false)
+                && body.wait == Some(true)
+        }
+    }
+    Has { kind }
+}
+
 #[derive(Deserialize)]
 struct VercelCreateBody {
     #[serde(rename = "projectId")]
@@ -378,4 +480,10 @@ struct VercelCommandBody {
     env: HashMap<String, String>,
     sudo: Option<bool>,
     wait: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct BridgeRequestBody {
+    #[serde(rename = "type")]
+    kind: String,
 }
