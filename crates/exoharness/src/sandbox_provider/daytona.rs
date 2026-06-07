@@ -14,8 +14,7 @@ use async_trait::async_trait;
 use futures::future::BoxFuture;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use uuid::Uuid;
@@ -37,161 +36,6 @@ const START_TIMEOUT: Duration = Duration::from_secs(120);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const PROCESS_PIPE_BUFFER_SIZE: usize = 64 * 1024;
 const PROCESS_ENV_END_MARKER: &str = "__EXO_ENV_END__";
-const CODEX_RELAY_PATH: &str = "/tmp/exo-codex-relay.py";
-const CODEX_RELAY_RECV_TIMEOUT: Duration = Duration::from_secs(30);
-const CODEX_RELAY_CLIENT_TIMEOUT: Duration = Duration::from_secs(40);
-const CODEX_RELAY_SCRIPT: &str = r###"
-import json
-import os
-import queue
-import socket
-import socketserver
-import subprocess
-import sys
-import threading
-import time
-
-HOST = "127.0.0.1"
-PORT = 48765
-LOG_PATH = "/tmp/exo-codex-relay.log"
-APP_STDERR_PATH = "/tmp/codex-app-server.stderr"
-
-
-class RelayState:
-    def __init__(self):
-        home = os.environ.get("HOME") or "/tmp/exo-home"
-        codex_home = os.environ.get("CODEX_HOME") or "/tmp/exo-codex-home"
-        workdir = os.environ.get("CODEX_WORKDIR") or os.path.join(home, "workspace")
-        os.makedirs(home, exist_ok=True)
-        os.makedirs(codex_home, exist_ok=True)
-        os.makedirs(workdir, exist_ok=True)
-        env = os.environ.copy()
-        env["HOME"] = home
-        env["CODEX_HOME"] = codex_home
-        env["CODEX_WORKDIR"] = workdir
-        env.setdefault("SHELL", "/bin/bash")
-        stderr = open(APP_STDERR_PATH, "a", buffering=1)
-        self.process = subprocess.Popen(
-            ["codex", "app-server", "--listen", "stdio://"],
-            cwd=workdir,
-            env=env,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=stderr,
-            text=True,
-            bufsize=1,
-        )
-        self.messages = queue.Queue()
-        self.write_lock = threading.Lock()
-        threading.Thread(target=self._read_stdout, daemon=True).start()
-
-    def _read_stdout(self):
-        try:
-            for line in self.process.stdout:
-                line = line.rstrip("\r\n")
-                if line:
-                    self.messages.put({"message": json.loads(line)})
-        except Exception as exc:
-            self.messages.put({"error": f"Codex relay stdout reader failed: {exc}"})
-        finally:
-            code = self.process.poll()
-            self.messages.put({"error": f"Codex app-server exited: {code}"})
-
-    def send(self, message):
-        if self.process.poll() is not None:
-            raise RuntimeError(f"Codex app-server is not running: {self.process.returncode}")
-        payload = json.dumps(message, separators=(",", ":")) + "\n"
-        with self.write_lock:
-            self.process.stdin.write(payload)
-            self.process.stdin.flush()
-
-    def recv(self, timeout):
-        if self.process.poll() is not None:
-            raise RuntimeError(f"Codex app-server is not running: {self.process.returncode}")
-        try:
-            item = self.messages.get(timeout=timeout)
-        except queue.Empty:
-            return {"ok": True, "timeout": True}
-        if "error" in item:
-            raise RuntimeError(item["error"])
-        return {"ok": True, "message": item["message"]}
-
-
-STATE = None
-
-
-class Handler(socketserver.BaseRequestHandler):
-    def handle(self):
-        global STATE
-        data = b""
-        while True:
-            chunk = self.request.recv(1024 * 1024)
-            if not chunk:
-                break
-            data += chunk
-        try:
-            request = json.loads(data.decode("utf-8") or "{}")
-            kind = request.get("type")
-            if kind == "ping":
-                response = {"ok": True}
-            elif kind == "send":
-                STATE.send(request["message"])
-                response = {"ok": True}
-            elif kind == "recv":
-                response = STATE.recv(float(request.get("timeout_seconds", 30)))
-            else:
-                response = {"ok": False, "error": f"unknown relay request type: {kind}"}
-        except Exception as exc:
-            response = {"ok": False, "error": str(exc)}
-        self.request.sendall(json.dumps(response, separators=(",", ":")).encode("utf-8"))
-
-
-class Server(socketserver.ThreadingTCPServer):
-    allow_reuse_address = True
-
-
-def server():
-    global STATE
-    with open(LOG_PATH, "a", buffering=1) as log:
-        print("starting exo codex relay", file=log)
-    STATE = RelayState()
-    with Server((HOST, PORT), Handler) as srv:
-        srv.serve_forever()
-
-
-def client():
-    request = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("EXO_CODEX_RELAY_REQUEST")
-    if not request:
-        raise SystemExit("EXO_CODEX_RELAY_REQUEST is required")
-    with socket.create_connection((HOST, PORT), timeout=35) as sock:
-        sock.sendall(request.encode("utf-8"))
-        sock.shutdown(socket.SHUT_WR)
-        chunks = []
-        while True:
-            chunk = sock.recv(1024 * 1024)
-            if not chunk:
-                break
-            chunks.append(chunk)
-    sys.stdout.write(b"".join(chunks).decode("utf-8"))
-
-
-def ping():
-    request = json.dumps({"type": "ping"}, separators=(",", ":"))
-    os.environ["EXO_CODEX_RELAY_REQUEST"] = request
-    client()
-
-
-if __name__ == "__main__":
-    mode = sys.argv[1] if len(sys.argv) > 1 else "client"
-    if mode == "server":
-        server()
-    elif mode == "ping":
-        ping()
-    elif mode == "client":
-        client()
-    else:
-        raise SystemExit(f"unknown mode: {mode}")
-"###;
 
 /// Resolved Daytona connection parameters: assembled from a
 /// [`crate::DaytonaBackendSpec`] plus secrets read on first use.
@@ -537,7 +381,7 @@ async fn start_process_in_sandbox(
     if command.argv.is_empty() {
         bail!("sandbox command requires at least one argv entry");
     }
-    if is_codex_app_server_command(command) {
+    if super::codex_relay::is_codex_app_server_command(command) {
         return start_codex_relay_process(backend, id, spec, command).await;
     }
     let cwd = command
@@ -625,12 +469,6 @@ async fn start_process_in_sandbox(
     })
 }
 
-fn is_codex_app_server_command(command: &SandboxCommand) -> bool {
-    command.argv.iter().any(|arg| {
-        arg.contains("codex app-server") && arg.contains("--listen") && arg.contains("stdio://")
-    })
-}
-
 async fn start_codex_relay_process(
     backend: &DaytonaBackendHandle,
     id: &str,
@@ -649,35 +487,12 @@ async fn start_codex_relay_process(
     );
     install_codex_relay_script(backend, id, &cwd).await?;
     ensure_codex_relay_running(backend, id, &cwd, &command.env).await?;
-
-    let (stdout_reader, stdout_writer) = tokio::io::duplex(PROCESS_PIPE_BUFFER_SIZE);
-    let (stderr_reader, stderr_writer) = tokio::io::duplex(PROCESS_PIPE_BUFFER_SIZE);
-    let (stdin_reader, stdin_writer) = tokio::io::duplex(PROCESS_PIPE_BUFFER_SIZE);
-    let (error_tx, mut error_rx) = mpsc::unbounded_channel();
-
-    spawn_codex_relay_stdout_poller(
-        backend.clone(),
-        id.to_string(),
-        cwd.clone(),
-        stdout_writer,
-        stderr_writer,
-        error_tx.clone(),
-    );
-    spawn_codex_relay_stdin_forwarder(backend.clone(), id.to_string(), cwd, stdin_reader, error_tx);
-
-    let wait: BoxFuture<'static, crate::Result<i32>> = Box::pin(async move {
-        match error_rx.recv().await {
-            Some(error) => Err(error),
-            None => Ok(0),
-        }
-    });
-
-    Ok(crate::SandboxProcessParts {
-        stdout: Box::pin(stdout_reader.compat()),
-        stderr: Box::pin(stderr_reader.compat()),
-        stdin: Box::pin(stdin_writer.compat_write()),
-        wait,
-    })
+    let client = DaytonaCodexRelayClient {
+        backend: backend.clone(),
+        sandbox_id: id.to_string(),
+        cwd,
+    };
+    Ok(super::codex_relay::process_parts(Arc::new(client)))
 }
 
 async fn install_codex_relay_script(
@@ -685,19 +500,11 @@ async fn install_codex_relay_script(
     id: &str,
     cwd: &str,
 ) -> Result<()> {
-    let command = format!(
-        "python3 -c {} {} {}",
-        shell_quote(
-            "import pathlib,sys; path=pathlib.Path(sys.argv[1]); path.write_text(sys.argv[2]); path.chmod(0o700)"
-        ),
-        shell_quote(CODEX_RELAY_PATH),
-        shell_quote(CODEX_RELAY_SCRIPT),
-    );
     let response = execute_daytona_process(
         backend,
         id,
         DaytonaExecRequest {
-            command,
+            command: super::codex_relay::install_script_shell_command(),
             cwd: Some(cwd.to_string()),
             env: HashMap::new(),
             timeout: Some(10),
@@ -746,7 +553,7 @@ async fn stop_existing_codex_relay(
         backend,
         id,
         DaytonaExecRequest {
-            command: "pkill -f '[e]xo-codex-relay.py' >/dev/null 2>&1 || true; pkill -f '[c]odex app-server --listen stdio://' >/dev/null 2>&1 || true".to_string(),
+            command: super::codex_relay::stop_shell_command(),
             cwd: Some(cwd.to_string()),
             env: HashMap::new(),
             timeout: Some(5),
@@ -772,18 +579,11 @@ async fn start_codex_relay_session(
 ) -> Result<DaytonaSessionProcess> {
     let session_id = format!("exo-codex-relay-{}", Uuid::new_v4());
     create_process_session(backend, id, &session_id).await?;
+    let server_argv = super::codex_relay::server_argv();
     let command = SandboxCommand {
-        argv: vec![
-            "python3".to_string(),
-            CODEX_RELAY_PATH.to_string(),
-            "server".to_string(),
-        ],
+        argv: server_argv.clone(),
         env: env.clone(),
-        display_argv: Some(vec![
-            "python3".to_string(),
-            CODEX_RELAY_PATH.to_string(),
-            "server".to_string(),
-        ]),
+        display_argv: Some(server_argv),
         cwd: Some(cwd.to_string()),
         timeout: None,
     };
@@ -827,186 +627,63 @@ async fn start_codex_relay_session(
 }
 
 async fn codex_relay_ping(backend: &DaytonaBackendHandle, id: &str, cwd: &str) -> Result<bool> {
-    match codex_relay_request(
-        backend,
-        id,
-        cwd,
-        &CodexRelayRequest {
-            kind: "ping",
-            message: None,
-            timeout_seconds: None,
-        },
-    )
-    .await
-    {
+    let client = DaytonaCodexRelayClient {
+        backend: backend.clone(),
+        sandbox_id: id.to_string(),
+        cwd: cwd.to_string(),
+    };
+    match super::codex_relay::Client::request(&client, super::codex_relay::Request::ping()).await {
         Ok(_) => Ok(true),
         Err(_) => Ok(false),
     }
 }
 
-fn spawn_codex_relay_stdout_poller(
+struct DaytonaCodexRelayClient {
     backend: DaytonaBackendHandle,
     sandbox_id: String,
     cwd: String,
-    stdout_writer: tokio::io::DuplexStream,
-    stderr_writer: tokio::io::DuplexStream,
-    error_tx: mpsc::UnboundedSender<anyhow::Error>,
-) {
-    tokio::spawn(async move {
-        if let Err(error) =
-            poll_codex_relay_stdout(backend, sandbox_id, cwd, stdout_writer, stderr_writer).await
-        {
-            if error_tx.send(error).is_err() {
-                tracing::debug!("Codex relay waiter stopped before stdout error could be reported");
-            }
-        }
-    });
 }
 
-fn spawn_codex_relay_stdin_forwarder(
-    backend: DaytonaBackendHandle,
-    sandbox_id: String,
-    cwd: String,
-    stdin_reader: tokio::io::DuplexStream,
-    error_tx: mpsc::UnboundedSender<anyhow::Error>,
-) {
-    tokio::spawn(async move {
-        if let Err(error) = forward_codex_relay_stdin(backend, sandbox_id, cwd, stdin_reader).await
-        {
-            if error_tx.send(error).is_err() {
-                tracing::debug!("Codex relay waiter stopped before stdin error could be reported");
-            }
-        }
-    });
-}
-
-async fn poll_codex_relay_stdout(
-    backend: DaytonaBackendHandle,
-    sandbox_id: String,
-    cwd: String,
-    mut stdout_writer: tokio::io::DuplexStream,
-    mut stderr_writer: tokio::io::DuplexStream,
-) -> Result<()> {
-    loop {
-        let response = codex_relay_request(
-            &backend,
-            &sandbox_id,
-            &cwd,
-            &CodexRelayRequest {
-                kind: "recv",
-                message: None,
-                timeout_seconds: Some(CODEX_RELAY_RECV_TIMEOUT.as_secs_f64()),
+#[async_trait]
+impl super::codex_relay::Client for DaytonaCodexRelayClient {
+    async fn request(
+        &self,
+        request: super::codex_relay::Request,
+    ) -> Result<super::codex_relay::Response> {
+        let request = serde_json::to_string(&request).context("encoding Codex relay request")?;
+        let response = execute_daytona_process(
+            &self.backend,
+            &self.sandbox_id,
+            DaytonaExecRequest {
+                command: super::codex_relay::client_shell_command(&request),
+                cwd: Some(self.cwd.clone()),
+                env: HashMap::new(),
+                timeout: Some(super::codex_relay::CLIENT_TIMEOUT.as_secs()),
             },
+            "codex relay request",
         )
         .await?;
-        if response.timeout {
-            continue;
+        let output = response.result.unwrap_or_default();
+        if response.exit_code != 0 {
+            bail!(
+                "Codex relay request failed with exit code {}: {}",
+                response.exit_code,
+                output
+            );
         }
-        let Some(message) = response.message else {
-            continue;
-        };
-        let mut line = serde_json::to_vec(&message).context("encoding Codex relay message")?;
-        line.push(b'\n');
-        match stdout_writer.write_all(&line).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
-            Err(error) => return Err(error).context("writing Codex relay stdout"),
+        let decoded: super::codex_relay::Response =
+            serde_json::from_str(output.trim()).context("decoding Codex relay response")?;
+        if !decoded.ok {
+            bail!(
+                "Codex relay request failed: {}",
+                decoded
+                    .error
+                    .as_deref()
+                    .unwrap_or("unknown Codex relay error")
+            );
         }
-        if let Err(error) = stdout_writer.flush().await {
-            if error.kind() == std::io::ErrorKind::BrokenPipe {
-                return Ok(());
-            }
-            return Err(error).context("flushing Codex relay stdout");
-        }
-        if let Err(error) = stderr_writer.flush().await {
-            if error.kind() == std::io::ErrorKind::BrokenPipe {
-                return Ok(());
-            }
-            return Err(error).context("flushing Codex relay stderr");
-        }
+        Ok(decoded)
     }
-}
-
-async fn forward_codex_relay_stdin(
-    backend: DaytonaBackendHandle,
-    sandbox_id: String,
-    cwd: String,
-    stdin_reader: tokio::io::DuplexStream,
-) -> Result<()> {
-    let mut reader = BufReader::new(stdin_reader);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let bytes_read = reader
-            .read_line(&mut line)
-            .await
-            .context("reading Codex relay stdin")?;
-        if bytes_read == 0 {
-            return Ok(());
-        }
-        let message = line.trim_end_matches(['\r', '\n']);
-        if message.trim().is_empty() {
-            continue;
-        }
-        let message: Value =
-            serde_json::from_str(message).context("decoding Codex relay stdin message")?;
-        codex_relay_request(
-            &backend,
-            &sandbox_id,
-            &cwd,
-            &CodexRelayRequest {
-                kind: "send",
-                message: Some(&message),
-                timeout_seconds: None,
-            },
-        )
-        .await?;
-    }
-}
-
-async fn codex_relay_request(
-    backend: &DaytonaBackendHandle,
-    id: &str,
-    cwd: &str,
-    request: &CodexRelayRequest<'_>,
-) -> Result<CodexRelayResponse> {
-    let request = serde_json::to_string(request).context("encoding Codex relay request")?;
-    let response = execute_daytona_process(
-        backend,
-        id,
-        DaytonaExecRequest {
-            command: format!(
-                "python3 {} client {}",
-                shell_quote(CODEX_RELAY_PATH),
-                shell_quote(&request),
-            ),
-            cwd: Some(cwd.to_string()),
-            env: HashMap::new(),
-            timeout: Some(CODEX_RELAY_CLIENT_TIMEOUT.as_secs()),
-        },
-        "codex relay request",
-    )
-    .await?;
-    let output = response.result.unwrap_or_default();
-    if response.exit_code != 0 {
-        bail!(
-            "Codex relay request failed with exit code {}: {}",
-            response.exit_code,
-            output
-        );
-    }
-    let decoded: CodexRelayResponse =
-        serde_json::from_str(output.trim()).context("decoding Codex relay response")?;
-    if !decoded.ok {
-        bail!(
-            "Codex relay request failed: {}",
-            decoded
-                .error
-                .as_deref()
-                .unwrap_or("unknown Codex relay error")
-        );
-    }
-    Ok(decoded)
 }
 
 fn spawn_daytona_process_poller(
@@ -1593,27 +1270,6 @@ struct DaytonaExecResponse {
     exit_code: i32,
     #[serde(default)]
     result: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct CodexRelayRequest<'a> {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<&'a Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    timeout_seconds: Option<f64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CodexRelayResponse {
-    ok: bool,
-    #[serde(default)]
-    timeout: bool,
-    #[serde(default)]
-    message: Option<Value>,
-    #[serde(default)]
-    error: Option<String>,
 }
 
 #[derive(Clone)]

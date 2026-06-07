@@ -1,8 +1,8 @@
 //! Vercel remote sandbox backend, speaking the Vercel Sandbox REST API.
 //!
 //! This backend supports named acquire/resume and one-shot command execution.
-//! Interactive stdin-backed processes are a separate Vercel terminal/session
-//! surface and are intentionally not emulated here.
+//! Interactive stdin-backed processes are limited to the Codex app-server relay
+//! path; arbitrary interactive process streaming is intentionally not emulated.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -215,9 +215,18 @@ impl ManagedSandboxHandle for VercelSandboxHandle {
         exec_in_sandbox(&self.backend, &self.session_id, &self.request.spec, command).await
     }
 
-    async fn start_process(&self, _command: &SandboxCommand) -> Result<crate::SandboxProcessParts> {
+    async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts> {
+        if super::codex_relay::is_codex_app_server_command(command) {
+            return start_codex_relay_process(
+                &self.backend,
+                &self.session_id,
+                &self.request.spec,
+                command,
+            )
+            .await;
+        }
         bail!(
-            "Vercel sandbox backend does not support interactive stdin-backed processes yet; use exec commands or add a Vercel interactive session transport"
+            "Vercel sandbox backend does not support interactive stdin-backed processes except the Codex app-server relay yet; use exec commands or add a Vercel interactive session transport"
         );
     }
 
@@ -238,16 +247,25 @@ async fn exec_in_sandbox(
     spec: &SandboxSpec,
     command: &SandboxCommand,
 ) -> Result<SandboxCommandOutput> {
+    let cwd = command
+        .cwd
+        .clone()
+        .unwrap_or_else(|| spec.default_workdir.clone());
+    exec_command_in_sandbox(backend, session_id, cwd, command).await
+}
+
+async fn exec_command_in_sandbox(
+    backend: &VercelBackendHandle,
+    session_id: &str,
+    cwd: String,
+    command: &SandboxCommand,
+) -> Result<SandboxCommandOutput> {
     if command.argv.is_empty() {
         bail!("sandbox command requires at least one argv entry");
     }
     if command.timeout.is_some() {
         bail!("Vercel sandbox exec does not support per-command timeout yet");
     }
-    let cwd = command
-        .cwd
-        .clone()
-        .unwrap_or_else(|| spec.default_workdir.clone());
     let body = VercelCommandRequest {
         command: command.argv[0].clone(),
         args: command.argv[1..].to_vec(),
@@ -286,6 +304,228 @@ async fn exec_in_sandbox(
             .unwrap_or_else(|| command.argv.clone()),
         cwd,
     })
+}
+
+async fn start_codex_relay_process(
+    backend: &VercelBackendHandle,
+    session_id: &str,
+    spec: &SandboxSpec,
+    command: &SandboxCommand,
+) -> Result<crate::SandboxProcessParts> {
+    let cwd = command
+        .cwd
+        .clone()
+        .unwrap_or_else(|| spec.default_workdir.clone());
+    tracing::info!(
+        session_id = %session_id,
+        cwd = %cwd,
+        argv = ?command.display_argv.as_ref().unwrap_or(&command.argv),
+        "vercel_codex_relay start_process"
+    );
+    install_codex_relay_script(backend, session_id, &cwd).await?;
+    ensure_codex_relay_running(backend, session_id, &cwd, &command.env).await?;
+    let client = VercelCodexRelayClient {
+        backend: backend.clone(),
+        session_id: session_id.to_string(),
+        cwd,
+    };
+    Ok(super::codex_relay::process_parts(Arc::new(client)))
+}
+
+async fn install_codex_relay_script(
+    backend: &VercelBackendHandle,
+    session_id: &str,
+    cwd: &str,
+) -> Result<()> {
+    let output = exec_command_in_sandbox(
+        backend,
+        session_id,
+        cwd.to_string(),
+        &SandboxCommand {
+            argv: vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                super::codex_relay::install_script_shell_command(),
+            ],
+            env: HashMap::new(),
+            display_argv: None,
+            cwd: Some(cwd.to_string()),
+            timeout: None,
+        },
+    )
+    .await?;
+    if output.ok {
+        return Ok(());
+    }
+    bail!(
+        "installing Codex relay failed with exit code {:?}: {}{}",
+        output.exit_code,
+        output.stdout,
+        output.stderr
+    )
+}
+
+async fn ensure_codex_relay_running(
+    backend: &VercelBackendHandle,
+    session_id: &str,
+    cwd: &str,
+    env: &HashMap<String, String>,
+) -> Result<()> {
+    stop_existing_codex_relay(backend, session_id, cwd).await?;
+    let command = format!(
+        "set -e; nohup {} >/tmp/exo-codex-relay.out 2>&1 </dev/null &",
+        super::codex_relay::server_shell_command(),
+    );
+    let output = exec_command_in_sandbox(
+        backend,
+        session_id,
+        cwd.to_string(),
+        &SandboxCommand {
+            argv: vec!["/bin/sh".to_string(), "-lc".to_string(), command],
+            env: env.clone(),
+            display_argv: None,
+            cwd: Some(cwd.to_string()),
+            timeout: None,
+        },
+    )
+    .await?;
+    if !output.ok {
+        bail!(
+            "starting Codex relay failed with exit code {:?}: {}{}",
+            output.exit_code,
+            output.stdout,
+            output.stderr
+        );
+    }
+    for _ in 0..600 {
+        if codex_relay_ping(backend, session_id, cwd).await? {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let logs = relay_logs(backend, session_id, cwd)
+        .await
+        .unwrap_or_default();
+    bail!("Codex relay did not become ready in Vercel sandbox: {logs}");
+}
+
+async fn stop_existing_codex_relay(
+    backend: &VercelBackendHandle,
+    session_id: &str,
+    cwd: &str,
+) -> Result<()> {
+    let output = exec_command_in_sandbox(
+        backend,
+        session_id,
+        cwd.to_string(),
+        &SandboxCommand {
+            argv: vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                super::codex_relay::stop_shell_command(),
+            ],
+            env: HashMap::new(),
+            display_argv: None,
+            cwd: Some(cwd.to_string()),
+            timeout: None,
+        },
+    )
+    .await?;
+    if output.ok {
+        return Ok(());
+    }
+    bail!(
+        "stopping existing Codex relay failed with exit code {:?}: {}{}",
+        output.exit_code,
+        output.stdout,
+        output.stderr
+    )
+}
+
+async fn codex_relay_ping(
+    backend: &VercelBackendHandle,
+    session_id: &str,
+    cwd: &str,
+) -> Result<bool> {
+    let client = VercelCodexRelayClient {
+        backend: backend.clone(),
+        session_id: session_id.to_string(),
+        cwd: cwd.to_string(),
+    };
+    match super::codex_relay::Client::request(&client, super::codex_relay::Request::ping()).await {
+        Ok(_) => Ok(true),
+        Err(_) => Ok(false),
+    }
+}
+
+async fn relay_logs(backend: &VercelBackendHandle, session_id: &str, cwd: &str) -> Result<String> {
+    let output = exec_command_in_sandbox(
+        backend,
+        session_id,
+        cwd.to_string(),
+        &SandboxCommand {
+            argv: vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                "cat /tmp/exo-codex-relay.out /tmp/exo-codex-relay.log /tmp/codex-app-server.stderr 2>/dev/null || true".to_string(),
+            ],
+            env: HashMap::new(),
+            display_argv: None,
+            cwd: Some(cwd.to_string()),
+            timeout: None,
+        },
+    )
+    .await?;
+    Ok(format!("{}{}", output.stdout, output.stderr))
+}
+
+struct VercelCodexRelayClient {
+    backend: VercelBackendHandle,
+    session_id: String,
+    cwd: String,
+}
+
+#[async_trait]
+impl super::codex_relay::Client for VercelCodexRelayClient {
+    async fn request(
+        &self,
+        request: super::codex_relay::Request,
+    ) -> Result<super::codex_relay::Response> {
+        let request = serde_json::to_string(&request).context("encoding Codex relay request")?;
+        let output = exec_command_in_sandbox(
+            &self.backend,
+            &self.session_id,
+            self.cwd.clone(),
+            &SandboxCommand {
+                argv: super::codex_relay::client_argv(request),
+                env: HashMap::new(),
+                display_argv: None,
+                cwd: Some(self.cwd.clone()),
+                timeout: None,
+            },
+        )
+        .await?;
+        if !output.ok {
+            bail!(
+                "Codex relay request failed with exit code {:?}: {}{}",
+                output.exit_code,
+                output.stdout,
+                output.stderr
+            );
+        }
+        let decoded: super::codex_relay::Response =
+            serde_json::from_str(output.stdout.trim()).context("decoding Codex relay response")?;
+        if !decoded.ok {
+            bail!(
+                "Codex relay request failed: {}",
+                decoded
+                    .error
+                    .as_deref()
+                    .unwrap_or("unknown Codex relay error")
+            );
+        }
+        Ok(decoded)
+    }
 }
 
 async fn collect_command_logs(

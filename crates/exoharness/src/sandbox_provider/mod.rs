@@ -1,5 +1,6 @@
 //! Per-provider [`crate::sandbox::ManagedSandboxBackend`] implementations,
 //! selected via the harness's provider registry.
+mod codex_relay;
 mod daytona;
 mod vercel;
 
