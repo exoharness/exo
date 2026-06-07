@@ -465,6 +465,7 @@ pub struct CreateSandboxRequest {
 pub enum SandboxProvider {
     #[default]
     Daytona,
+    Vercel,
     AppleContainer,
     Docker,
     #[serde(alias = "local")]
@@ -482,6 +483,7 @@ impl SandboxProvider {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Daytona => "daytona",
+            Self::Vercel => "vercel",
             Self::AppleContainer => "apple-container",
             Self::Docker => "docker",
             Self::LocalProcess => "local-process",
@@ -501,6 +503,7 @@ impl FromStr for SandboxProvider {
     fn from_str(value: &str) -> Result<Self> {
         match value.trim() {
             "daytona" => Ok(Self::Daytona),
+            "vercel" => Ok(Self::Vercel),
             "apple-container" | "apple_container" => Ok(Self::AppleContainer),
             "docker" => Ok(Self::Docker),
             "local" | "local-process" | "local_process" => Ok(Self::LocalProcess),
@@ -757,6 +760,16 @@ pub enum SandboxProviderConfig {
         #[serde(default = "default_daytona_image")]
         default_image: String,
     },
+    Vercel {
+        /// Secret-store id of the Vercel API/access token.
+        api_token_secret_id: SecretId,
+        team_id: String,
+        project_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_url: Option<String>,
+        #[serde(default = "default_vercel_image")]
+        default_image: String,
+    },
     // To be implemented in followup PRs:
     // E2b {
     //     api_key_secret_id: SecretId,
@@ -774,6 +787,9 @@ pub enum SandboxProviderConfig {
 pub fn default_daytona_image() -> String {
     "daytonaio/sandbox:0.8.0".to_string()
 }
+pub fn default_vercel_image() -> String {
+    "node24".to_string()
+}
 pub fn default_docker_image() -> String {
     "docker.io/library/ubuntu:24.04".to_string()
 }
@@ -782,6 +798,7 @@ impl SandboxProviderConfig {
     pub fn provider(&self) -> SandboxProvider {
         match self {
             Self::Daytona { .. } => SandboxProvider::Daytona,
+            Self::Vercel { .. } => SandboxProvider::Vercel,
             Self::Docker { .. } => SandboxProvider::Docker,
         }
     }
@@ -789,9 +806,9 @@ impl SandboxProviderConfig {
     /// The binding's configured default base image.
     pub fn default_image(&self) -> &str {
         match self {
-            Self::Daytona { default_image, .. } | Self::Docker { default_image, .. } => {
-                default_image
-            }
+            Self::Daytona { default_image, .. }
+            | Self::Vercel { default_image, .. }
+            | Self::Docker { default_image, .. } => default_image,
         }
     }
 }
@@ -874,9 +891,14 @@ mod tests {
             SandboxProvider::LocalProcess
         );
         assert_eq!(
+            "vercel".parse::<SandboxProvider>().unwrap(),
+            SandboxProvider::Vercel
+        );
+        assert_eq!(
             SandboxProvider::AppleContainer.to_string(),
             "apple-container"
         );
+        assert_eq!(SandboxProvider::Vercel.to_string(), "vercel");
         assert_eq!(SandboxProvider::LocalProcess.to_string(), "local-process");
     }
 }

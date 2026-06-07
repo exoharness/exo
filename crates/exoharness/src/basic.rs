@@ -64,6 +64,7 @@ pub enum SandboxBackendChoice {
     Docker,
     LocalProcess,
     Daytona(DaytonaBackendSpec),
+    Vercel(VercelBackendSpec),
 }
 
 impl SandboxBackendChoice {
@@ -73,6 +74,7 @@ impl SandboxBackendChoice {
             Self::Docker => SandboxProvider::Docker,
             Self::LocalProcess => SandboxProvider::LocalProcess,
             Self::Daytona(_) => SandboxProvider::Daytona,
+            Self::Vercel(_) => SandboxProvider::Vercel,
         }
     }
 }
@@ -99,6 +101,29 @@ impl DaytonaBackendSpec {
             api_key_secret: "DAYTONA_API_KEY".to_string(),
             organization_id_secret: Some("DAYTONA_ORGANIZATION_ID".to_string()),
             target_secret: Some("DAYTONA_TARGET".to_string()),
+        }
+    }
+}
+
+/// Vercel connection config plus the secret-store names for its credentials,
+/// resolved lazily so the harness can advertise Vercel before any are set.
+#[derive(Debug, Clone)]
+pub struct VercelBackendSpec {
+    pub api_url: String,
+    pub api_token_secret: String,
+    pub team_id_secret: String,
+    pub project_id_secret: String,
+}
+
+impl VercelBackendSpec {
+    /// Official endpoint; credentials read from conventional `VERCEL_*` secret
+    /// names.
+    pub fn with_conventional_secrets() -> Self {
+        Self {
+            api_url: crate::DEFAULT_VERCEL_API_URL.to_string(),
+            api_token_secret: "VERCEL_TOKEN".to_string(),
+            team_id_secret: "VERCEL_TEAM_ID".to_string(),
+            project_id_secret: "VERCEL_PROJECT_ID".to_string(),
         }
     }
 }
@@ -173,6 +198,13 @@ impl BasicExoHarnessInner {
                 };
                 Arc::new(crate::DaytonaSandboxBackend::new(config)?)
             }
+            SandboxBackendChoice::Vercel(spec) => {
+                let config = match self.vercel_config_from_binding().await? {
+                    Some(config) => config,
+                    None => self.vercel_config_from_spec(spec).await?,
+                };
+                Arc::new(crate::VercelSandboxBackend::new(config)?)
+            }
         };
         Ok(backend)
     }
@@ -205,6 +237,46 @@ impl BasicExoHarnessInner {
             toolbox_url: spec.toolbox_url.clone(),
             target,
             organization_id,
+        })
+    }
+
+    /// `VercelConfig` from the conventional `VERCEL_*` secret-name spec.
+    async fn vercel_config_from_spec(
+        &self,
+        spec: &VercelBackendSpec,
+    ) -> Result<crate::VercelConfig> {
+        let api_token = self
+            .secret_key(&spec.api_token_secret)
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "vercel sandbox requested but secret {:?} is not set",
+                    spec.api_token_secret
+                )
+            })?;
+        let team_id = self
+            .secret_key(&spec.team_id_secret)
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "vercel sandbox requested but secret {:?} is not set",
+                    spec.team_id_secret
+                )
+            })?;
+        let project_id = self
+            .secret_key(&spec.project_id_secret)
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "vercel sandbox requested but secret {:?} is not set",
+                    spec.project_id_secret
+                )
+            })?;
+        Ok(crate::VercelConfig {
+            api_token,
+            api_url: spec.api_url.clone(),
+            team_id,
+            project_id,
         })
     }
 
@@ -284,6 +356,45 @@ impl BasicExoHarnessInner {
             toolbox_url: crate::DEFAULT_DAYTONA_TOOLBOX_URL.to_string(),
             target: region,
             organization_id,
+        }))
+    }
+
+    async fn vercel_config_from_binding(&self) -> Result<Option<crate::VercelConfig>> {
+        let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
+        let Some((api_token_secret_id, team_id, project_id, api_url)) = bindings
+            .into_iter()
+            .rev()
+            .find_map(|record| match record.binding {
+                Binding::Sandbox {
+                    config:
+                        SandboxProviderConfig::Vercel {
+                            api_token_secret_id,
+                            team_id,
+                            project_id,
+                            api_url,
+                            ..
+                        },
+                    ..
+                } => Some((api_token_secret_id, team_id, project_id, api_url)),
+                _ => None,
+            })
+        else {
+            return Ok(None);
+        };
+        let api_token = self
+            .secret_key_by_id(api_token_secret_id)
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "vercel sandbox binding references secret id {api_token_secret_id}, \
+                 which is not set"
+                )
+            })?;
+        Ok(Some(crate::VercelConfig {
+            api_token,
+            api_url: api_url.unwrap_or_else(|| crate::DEFAULT_VERCEL_API_URL.to_string()),
+            team_id,
+            project_id,
         }))
     }
 
