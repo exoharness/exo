@@ -5,7 +5,7 @@
 //! `acquire` finds the sandbox by label and `start`s it. Snapshot/restore is
 //! not implemented yet.
 
-pub const DEFAULT_DAYTONA_IMAGE: &str = "daytonaio/sandbox:0.8.0";
+const DEFAULT_DAYTONA_IMAGE: &str = "daytonaio/sandbox:0.8.0";
 
 pub fn default_daytona_image() -> String {
     DEFAULT_DAYTONA_IMAGE.to_string()

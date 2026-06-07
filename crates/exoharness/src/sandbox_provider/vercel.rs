@@ -3,7 +3,7 @@
 //! This backend supports named acquire/resume, one-shot command execution, and
 //! stdin/stdout-backed processes through a small generic in-sandbox bridge.
 
-pub const DEFAULT_VERCEL_IMAGE: &str = "node24";
+const DEFAULT_VERCEL_IMAGE: &str = "node24";
 
 pub fn default_vercel_image() -> String {
     DEFAULT_VERCEL_IMAGE.to_string()
