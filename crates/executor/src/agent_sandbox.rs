@@ -65,6 +65,7 @@ pub(crate) async fn ensure_agent_sandbox(
 
     let sandbox_id = current_conversation
         .create_sandbox(CreateSandboxRequest {
+            name: None,
             provider: spec.provider,
             image: spec.image.clone(),
             default_workdir: Some(spec.default_workdir.clone()),

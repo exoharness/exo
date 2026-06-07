@@ -1,3 +1,4 @@
+use std::env;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -21,11 +22,11 @@ use crate::{
     BoxAsyncWrite, CloseSandboxProcessInputRequest, CreateSandboxRequest, EventData, EventKind,
     EventQuery, EventQueryDirection, ExoHarness, ForkConversationRequest, ManagedSandboxBackend,
     ManagedSandboxHandle, NewAgentRequest, NewConversationRequest, PutSecretRequest,
-    RunInSandboxRequest, SandboxCommand, SandboxCommandOutput, SandboxProcessEvent,
-    SandboxProcessEventQuery, SandboxProcessParts, SandboxProcessStatus, SandboxProcessStdin,
-    SandboxProvider, SandboxProviderConfig, SandboxRequest, Secret, SnapshotPayload,
-    StartSandboxProcessRequest, WaitSandboxProcessRequest, WriteArtifactRequest,
-    WriteSandboxProcessInputRequest,
+    RunInSandboxRequest, SandboxCommand, SandboxCommandOutput, SandboxKey, SandboxLifecycleConfig,
+    SandboxNetworkPolicy, SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessParts,
+    SandboxProcessStatus, SandboxProcessStdin, SandboxProvider, SandboxProviderConfig,
+    SandboxRequest, SandboxSpec, Secret, SnapshotPayload, StartSandboxProcessRequest, Uuid7,
+    WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
 #[tokio::test(flavor = "current_thread")]
@@ -73,6 +74,198 @@ async fn basic_backend_contract_conversation_scope_overrides_and_forks() {
         harness,
     )
     .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn local_process_sandbox_contract_start_process_stdio_and_env() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let handle = local_process_contract_handle(&tempdir, "stdio-and-env").await;
+    crate::contract_tests::sandbox_handle_start_process_supports_interactive_stdio_and_env(handle)
+        .await
+        .expect("sandbox start_process contract");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn local_process_sandbox_contract_start_process_long_running_protocol() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let handle = local_process_contract_handle(&tempdir, "long-running-protocol").await;
+    crate::contract_tests::sandbox_handle_start_process_supports_long_running_request_response_protocol(
+        handle,
+    )
+    .await
+    .expect("sandbox long-running protocol contract");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "uses a real Daytona sandbox; source sandbox-vars.sh and run this test explicitly"]
+async fn daytona_sandbox_contract_start_process_stdio_and_env() {
+    let Some(handle) = daytona_contract_handle("stdio-and-env").await else {
+        return;
+    };
+    crate::contract_tests::sandbox_handle_start_process_supports_interactive_stdio_and_env(handle)
+        .await
+        .expect("Daytona sandbox start_process contract");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "uses a real Daytona sandbox; source sandbox-vars.sh and run this test explicitly"]
+async fn daytona_sandbox_contract_start_process_long_running_protocol() {
+    let Some(handle) = daytona_contract_handle("long-running-protocol").await else {
+        return;
+    };
+    crate::contract_tests::sandbox_handle_start_process_supports_long_running_request_response_protocol(
+        handle,
+    )
+    .await
+    .expect("Daytona sandbox long-running protocol contract");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "uses a real Vercel sandbox; source sandbox-vars.sh and run this test explicitly"]
+async fn vercel_sandbox_contract_start_process_stdio_and_env() {
+    let Some(handle) = vercel_contract_handle("stdio-and-env").await else {
+        return;
+    };
+    crate::contract_tests::sandbox_handle_start_process_supports_interactive_stdio_and_env(handle)
+        .await
+        .expect("Vercel sandbox start_process contract");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "uses a real Vercel sandbox; source sandbox-vars.sh and run this test explicitly"]
+async fn vercel_sandbox_contract_start_process_long_running_protocol() {
+    let Some(handle) = vercel_contract_handle("long-running-protocol").await else {
+        return;
+    };
+    crate::contract_tests::sandbox_handle_start_process_supports_long_running_request_response_protocol(
+        handle,
+    )
+    .await
+    .expect("Vercel sandbox long-running protocol contract");
+}
+
+async fn local_process_contract_handle(
+    tempdir: &TempDir,
+    sandbox_id: &str,
+) -> Arc<dyn ManagedSandboxHandle> {
+    let backend: Arc<dyn ManagedSandboxBackend> =
+        Arc::new(crate::LocalProcessSandboxBackend::new());
+    backend
+        .acquire(SandboxRequest {
+            key: SandboxKey::ConversationSandbox {
+                conversation_id: Uuid7::now().to_string(),
+                sandbox_id: sandbox_id.to_string(),
+            },
+            spec: SandboxSpec {
+                image: "local-process".to_string(),
+                mounts: Vec::new(),
+                network: SandboxNetworkPolicy::Enabled,
+                default_workdir: tempdir.path().display().to_string(),
+            },
+            lifecycle: SandboxLifecycleConfig::default(),
+        })
+        .await
+        .expect("acquire sandbox")
+}
+
+async fn daytona_contract_handle(contract: &str) -> Option<Arc<dyn ManagedSandboxHandle>> {
+    let Some(api_key) = nonempty_env("DAYTONA_API_KEY") else {
+        eprintln!("skipping real Daytona sandbox contract: DAYTONA_API_KEY is not set");
+        return None;
+    };
+    let backend: Arc<dyn ManagedSandboxBackend> = Arc::new(
+        crate::DaytonaSandboxBackend::new(crate::DaytonaConfig {
+            api_key,
+            api_url: env_or("DAYTONA_API_URL", crate::DEFAULT_DAYTONA_API_URL),
+            toolbox_url: env_or("DAYTONA_TOOLBOX_URL", crate::DEFAULT_DAYTONA_TOOLBOX_URL),
+            target: nonempty_env("DAYTONA_TARGET"),
+            organization_id: nonempty_env("DAYTONA_ORGANIZATION_ID"),
+        })
+        .expect("DaytonaSandboxBackend::new"),
+    );
+    Some(
+        backend
+            .acquire(provider_contract_request(
+                "daytona",
+                contract,
+                env_or("DAYTONA_IMAGE", &crate::default_daytona_image()),
+                "/",
+            ))
+            .await
+            .expect("acquire Daytona sandbox"),
+    )
+}
+
+async fn vercel_contract_handle(contract: &str) -> Option<Arc<dyn ManagedSandboxHandle>> {
+    let Some(api_token) = nonempty_env("VERCEL_API_TOKEN").or_else(|| nonempty_env("VERCEL_TOKEN"))
+    else {
+        eprintln!(
+            "skipping real Vercel sandbox contract: VERCEL_API_TOKEN or VERCEL_TOKEN is not set"
+        );
+        return None;
+    };
+    let Some(team_id) = nonempty_env("VERCEL_TEAM_ID") else {
+        eprintln!("skipping real Vercel sandbox contract: VERCEL_TEAM_ID is not set");
+        return None;
+    };
+    let Some(project_id) = nonempty_env("VERCEL_PROJECT_ID") else {
+        eprintln!("skipping real Vercel sandbox contract: VERCEL_PROJECT_ID is not set");
+        return None;
+    };
+    let backend: Arc<dyn ManagedSandboxBackend> = Arc::new(
+        crate::VercelSandboxBackend::new(crate::VercelConfig {
+            api_token,
+            api_url: env_or("VERCEL_API_URL", crate::DEFAULT_VERCEL_API_URL),
+            team_id,
+            project_id,
+        })
+        .expect("VercelSandboxBackend::new"),
+    );
+    Some(
+        backend
+            .acquire(provider_contract_request(
+                "vercel",
+                contract,
+                env_or("VERCEL_IMAGE", &crate::default_vercel_image()),
+                "/vercel/sandbox",
+            ))
+            .await
+            .expect("acquire Vercel sandbox"),
+    )
+}
+
+fn nonempty_env(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn env_or(name: &str, default: &str) -> String {
+    nonempty_env(name).unwrap_or_else(|| default.to_string())
+}
+
+fn provider_contract_request(
+    provider: &str,
+    contract: &str,
+    image: String,
+    default_workdir: &str,
+) -> SandboxRequest {
+    SandboxRequest {
+        key: SandboxKey::ConversationSandbox {
+            conversation_id: Uuid7::now().to_string(),
+            sandbox_id: format!("{provider}-{contract}-contract"),
+        },
+        spec: SandboxSpec {
+            image,
+            mounts: Vec::new(),
+            network: SandboxNetworkPolicy::Enabled,
+            default_workdir: default_workdir.to_string(),
+        },
+        lifecycle: SandboxLifecycleConfig {
+            idle_ttl: Some(Duration::from_secs(300)),
+        },
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -512,6 +705,7 @@ async fn basic_backend_runs_commands_in_created_sandbox() {
 
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
+            name: None,
             provider: SandboxProvider::LocalProcess,
             image: "basic-local-process".to_string(),
             default_workdir: Some(tempdir.path().display().to_string()),
@@ -552,6 +746,53 @@ async fn basic_backend_runs_commands_in_created_sandbox() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn basic_backend_reuses_named_sandbox() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
+        .await
+        .expect("harness should initialize");
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let conversation = agent
+        .new_conversation(NewConversationRequest::default())
+        .await
+        .expect("conversation");
+
+    let request = CreateSandboxRequest {
+        name: Some("worker".to_string()),
+        provider: SandboxProvider::LocalProcess,
+        image: "basic-local-process".to_string(),
+        default_workdir: Some(tempdir.path().display().to_string()),
+        file_system_mounts: None,
+        enable_networking: Some(true),
+        idle_seconds: Some(60),
+    };
+
+    let first = conversation
+        .create_sandbox(request.clone())
+        .await
+        .expect("first sandbox should be created");
+    let second = conversation
+        .create_sandbox(request.clone())
+        .await
+        .expect("matching sandbox should be reused");
+    assert_eq!(first, second);
+
+    let mut other_request = request;
+    other_request.name = Some("other".to_string());
+    let third = conversation
+        .create_sandbox(other_request)
+        .await
+        .expect("different name should create a distinct sandbox");
+    assert_ne!(first, third);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn basic_backend_reattaches_running_sandbox_in_new_harness_process() {
     let tempdir = TempDir::new().expect("tempdir");
     let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
@@ -573,6 +814,7 @@ async fn basic_backend_reattaches_running_sandbox_in_new_harness_process() {
 
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
+            name: None,
             provider: SandboxProvider::LocalProcess,
             image: "basic-local-process".to_string(),
             default_workdir: Some(tempdir.path().display().to_string()),
@@ -650,6 +892,7 @@ async fn basic_backend_exposes_process_events_and_input() {
         .expect("conversation");
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
+            name: None,
             provider: SandboxProvider::LocalProcess,
             image: "basic-local-process".to_string(),
             default_workdir: Some(tempdir.path().display().to_string()),
@@ -662,6 +905,7 @@ async fn basic_backend_exposes_process_events_and_input() {
     let process = conversation
         .start_sandbox_process(StartSandboxProcessRequest {
             sandbox_id: sandbox_id.clone(),
+            name: None,
             command: vec!["/bin/sh".to_string(), "-lc".to_string(), "cat".to_string()],
             env: Default::default(),
             cwd: None,
@@ -754,6 +998,83 @@ async fn basic_backend_exposes_process_events_and_input() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn basic_backend_records_process_name_metadata() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
+        .await
+        .expect("harness should initialize");
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let conversation = agent
+        .new_conversation(NewConversationRequest::default())
+        .await
+        .expect("conversation");
+    let sandbox_id = conversation
+        .create_sandbox(CreateSandboxRequest {
+            name: Some("service-test".to_string()),
+            provider: SandboxProvider::LocalProcess,
+            image: "basic-local-process".to_string(),
+            default_workdir: Some(tempdir.path().display().to_string()),
+            file_system_mounts: None,
+            enable_networking: Some(true),
+            idle_seconds: Some(60),
+        })
+        .await
+        .expect("sandbox should be created");
+
+    let process = conversation
+        .start_sandbox_process(StartSandboxProcessRequest {
+            sandbox_id: sandbox_id.clone(),
+            name: Some("echo-service".to_string()),
+            command: vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                "printf service-ready".to_string(),
+            ],
+            env: Default::default(),
+            cwd: None,
+            mode: Default::default(),
+            stdin: SandboxProcessStdin::None,
+            output: Default::default(),
+            lifecycle: Default::default(),
+        })
+        .await
+        .expect("named process should start");
+    assert_eq!(process.name.as_deref(), Some("echo-service"));
+
+    let status = conversation
+        .wait_sandbox_process(WaitSandboxProcessRequest {
+            sandbox_id: sandbox_id.clone(),
+            process_id: process.id.clone(),
+        })
+        .await
+        .expect("named process should wait");
+    assert_eq!(status, SandboxProcessStatus::Exited { exit_code: 0 });
+
+    let events = conversation
+        .get_events(None)
+        .await
+        .expect("conversation events should read")
+        .events;
+    assert!(events.iter().any(|event| matches!(
+        &event.data,
+        EventData::SandboxProcessStarted {
+            sandbox_id: event_sandbox_id,
+            process_id,
+            name: Some(name),
+            ..
+        } if event_sandbox_id == &sandbox_id
+            && process_id == &process.id
+            && name == "echo-service"
+    )));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn sandbox_process_terminal_event_waits_for_output_drain() {
     let tempdir = TempDir::new().expect("tempdir");
     let harness = BasicExoHarness::new_with_sandbox_backend(
@@ -775,6 +1096,7 @@ async fn sandbox_process_terminal_event_waits_for_output_drain() {
     let process = conversation
         .start_sandbox_process(StartSandboxProcessRequest {
             sandbox_id: sandbox_id.clone(),
+            name: None,
             command: vec!["test".to_string()],
             env: Default::default(),
             cwd: None,
@@ -850,6 +1172,7 @@ async fn wait_sandbox_process_returns_after_concurrent_completion() {
     let process = conversation
         .start_sandbox_process(StartSandboxProcessRequest {
             sandbox_id: sandbox_id.clone(),
+            name: None,
             command: vec!["test".to_string()],
             env: Default::default(),
             cwd: None,
@@ -899,6 +1222,7 @@ async fn test_conversation(harness: &BasicExoHarness) -> Arc<dyn crate::Conversa
 async fn test_sandbox(conversation: &Arc<dyn crate::ConversationHandle>) -> String {
     conversation
         .create_sandbox(CreateSandboxRequest {
+            name: None,
             provider: SandboxProvider::LocalProcess,
             image: "test-sandbox".to_string(),
             default_workdir: Some("/".to_string()),
@@ -944,6 +1268,7 @@ async fn basic_backend_rejects_daytona_provider() {
 
     let error = conversation
         .create_sandbox(CreateSandboxRequest {
+            name: None,
             provider: SandboxProvider::Daytona,
             image: "test-sandbox".to_string(),
             default_workdir: Some("/".to_string()),
@@ -981,6 +1306,7 @@ async fn advertised_daytona_without_secret_errors_at_first_use() {
 
     let error = conversation
         .create_sandbox(CreateSandboxRequest {
+            name: None,
             provider: SandboxProvider::Daytona,
             image: "test-sandbox".to_string(),
             default_workdir: Some("/".to_string()),

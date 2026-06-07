@@ -448,6 +448,7 @@ pub(crate) async fn ensure_shell_sandbox(
 
     conversation
         .create_sandbox(CreateSandboxRequest {
+            name: None,
             provider: desired_provider,
             image: desired_image,
             default_workdir: Some(desired_default_workdir),
@@ -511,6 +512,7 @@ async fn latest_shell_sandbox(
             file_system_mounts,
             enable_networking,
             idle_seconds,
+            ..
         } => {
             if provider != desired_provider {
                 return Ok(None);
