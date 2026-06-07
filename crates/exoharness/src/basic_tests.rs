@@ -79,13 +79,82 @@ async fn basic_backend_contract_conversation_scope_overrides_and_forks() {
 #[tokio::test(flavor = "current_thread")]
 async fn local_process_sandbox_contract_start_process_stdio_and_env() {
     let tempdir = TempDir::new().expect("tempdir");
+    let handle = local_process_contract_handle(&tempdir, "stdio-and-env").await;
+    crate::contract_tests::sandbox_handle_start_process_supports_interactive_stdio_and_env(handle)
+        .await
+        .expect("sandbox start_process contract");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn local_process_sandbox_contract_start_process_long_running_protocol() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let handle = local_process_contract_handle(&tempdir, "long-running-protocol").await;
+    crate::contract_tests::sandbox_handle_start_process_supports_long_running_request_response_protocol(
+        handle,
+    )
+    .await
+    .expect("sandbox long-running protocol contract");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "uses a real Daytona sandbox; source sandbox-vars.sh and run this test explicitly"]
+async fn daytona_sandbox_contract_start_process_stdio_and_env() {
+    let Some(handle) = daytona_contract_handle("stdio-and-env").await else {
+        return;
+    };
+    crate::contract_tests::sandbox_handle_start_process_supports_interactive_stdio_and_env(handle)
+        .await
+        .expect("Daytona sandbox start_process contract");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "uses a real Daytona sandbox; source sandbox-vars.sh and run this test explicitly"]
+async fn daytona_sandbox_contract_start_process_long_running_protocol() {
+    let Some(handle) = daytona_contract_handle("long-running-protocol").await else {
+        return;
+    };
+    crate::contract_tests::sandbox_handle_start_process_supports_long_running_request_response_protocol(
+        handle,
+    )
+    .await
+    .expect("Daytona sandbox long-running protocol contract");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "uses a real Vercel sandbox; source sandbox-vars.sh and run this test explicitly"]
+async fn vercel_sandbox_contract_start_process_stdio_and_env() {
+    let Some(handle) = vercel_contract_handle("stdio-and-env").await else {
+        return;
+    };
+    crate::contract_tests::sandbox_handle_start_process_supports_interactive_stdio_and_env(handle)
+        .await
+        .expect("Vercel sandbox start_process contract");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "uses a real Vercel sandbox; source sandbox-vars.sh and run this test explicitly"]
+async fn vercel_sandbox_contract_start_process_long_running_protocol() {
+    let Some(handle) = vercel_contract_handle("long-running-protocol").await else {
+        return;
+    };
+    crate::contract_tests::sandbox_handle_start_process_supports_long_running_request_response_protocol(
+        handle,
+    )
+    .await
+    .expect("Vercel sandbox long-running protocol contract");
+}
+
+async fn local_process_contract_handle(
+    tempdir: &TempDir,
+    sandbox_id: &str,
+) -> Arc<dyn ManagedSandboxHandle> {
     let backend: Arc<dyn ManagedSandboxBackend> =
         Arc::new(crate::LocalProcessSandboxBackend::new());
-    let handle = backend
+    backend
         .acquire(SandboxRequest {
             key: SandboxKey::ConversationSandbox {
                 conversation_id: Uuid7::now().to_string(),
-                sandbox_id: "contract".to_string(),
+                sandbox_id: sandbox_id.to_string(),
             },
             spec: SandboxSpec {
                 image: "local-process".to_string(),
@@ -96,18 +165,13 @@ async fn local_process_sandbox_contract_start_process_stdio_and_env() {
             lifecycle: SandboxLifecycleConfig::default(),
         })
         .await
-        .expect("acquire sandbox");
-    crate::contract_tests::sandbox_handle_start_process_supports_interactive_stdio_and_env(handle)
-        .await
-        .expect("sandbox start_process contract");
+        .expect("acquire sandbox")
 }
 
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "uses a real Daytona sandbox; source sandbox-vars.sh and run this test explicitly"]
-async fn daytona_sandbox_contract_start_process_stdio_and_env() {
+async fn daytona_contract_handle(contract: &str) -> Option<Arc<dyn ManagedSandboxHandle>> {
     let Some(api_key) = nonempty_env("DAYTONA_API_KEY") else {
         eprintln!("skipping real Daytona sandbox contract: DAYTONA_API_KEY is not set");
-        return;
+        return None;
     };
     let backend: Arc<dyn ManagedSandboxBackend> = Arc::new(
         crate::DaytonaSandboxBackend::new(crate::DaytonaConfig {
@@ -119,36 +183,34 @@ async fn daytona_sandbox_contract_start_process_stdio_and_env() {
         })
         .expect("DaytonaSandboxBackend::new"),
     );
-    let handle = backend
-        .acquire(provider_contract_request(
-            "daytona",
-            env_or("DAYTONA_IMAGE", &crate::default_daytona_image()),
-            "/",
-        ))
-        .await
-        .expect("acquire Daytona sandbox");
-    crate::contract_tests::sandbox_handle_start_process_supports_interactive_stdio_and_env(handle)
-        .await
-        .expect("Daytona sandbox start_process contract");
+    Some(
+        backend
+            .acquire(provider_contract_request(
+                "daytona",
+                contract,
+                env_or("DAYTONA_IMAGE", &crate::default_daytona_image()),
+                "/",
+            ))
+            .await
+            .expect("acquire Daytona sandbox"),
+    )
 }
 
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "uses a real Vercel sandbox; source sandbox-vars.sh and run this test explicitly"]
-async fn vercel_sandbox_contract_start_process_stdio_and_env() {
+async fn vercel_contract_handle(contract: &str) -> Option<Arc<dyn ManagedSandboxHandle>> {
     let Some(api_token) = nonempty_env("VERCEL_API_TOKEN").or_else(|| nonempty_env("VERCEL_TOKEN"))
     else {
         eprintln!(
             "skipping real Vercel sandbox contract: VERCEL_API_TOKEN or VERCEL_TOKEN is not set"
         );
-        return;
+        return None;
     };
     let Some(team_id) = nonempty_env("VERCEL_TEAM_ID") else {
         eprintln!("skipping real Vercel sandbox contract: VERCEL_TEAM_ID is not set");
-        return;
+        return None;
     };
     let Some(project_id) = nonempty_env("VERCEL_PROJECT_ID") else {
         eprintln!("skipping real Vercel sandbox contract: VERCEL_PROJECT_ID is not set");
-        return;
+        return None;
     };
     let backend: Arc<dyn ManagedSandboxBackend> = Arc::new(
         crate::VercelSandboxBackend::new(crate::VercelConfig {
@@ -159,17 +221,17 @@ async fn vercel_sandbox_contract_start_process_stdio_and_env() {
         })
         .expect("VercelSandboxBackend::new"),
     );
-    let handle = backend
-        .acquire(provider_contract_request(
-            "vercel",
-            env_or("VERCEL_IMAGE", &crate::default_vercel_image()),
-            "/vercel/sandbox",
-        ))
-        .await
-        .expect("acquire Vercel sandbox");
-    crate::contract_tests::sandbox_handle_start_process_supports_interactive_stdio_and_env(handle)
-        .await
-        .expect("Vercel sandbox start_process contract");
+    Some(
+        backend
+            .acquire(provider_contract_request(
+                "vercel",
+                contract,
+                env_or("VERCEL_IMAGE", &crate::default_vercel_image()),
+                "/vercel/sandbox",
+            ))
+            .await
+            .expect("acquire Vercel sandbox"),
+    )
 }
 
 fn nonempty_env(name: &str) -> Option<String> {
@@ -185,13 +247,14 @@ fn env_or(name: &str, default: &str) -> String {
 
 fn provider_contract_request(
     provider: &str,
+    contract: &str,
     image: String,
     default_workdir: &str,
 ) -> SandboxRequest {
     SandboxRequest {
         key: SandboxKey::ConversationSandbox {
             conversation_id: Uuid7::now().to_string(),
-            sandbox_id: format!("{provider}-contract"),
+            sandbox_id: format!("{provider}-{contract}-contract"),
         },
         spec: SandboxSpec {
             image,

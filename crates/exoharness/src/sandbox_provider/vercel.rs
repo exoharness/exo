@@ -249,12 +249,6 @@ async fn start_process_in_sandbox(
         .cwd
         .clone()
         .unwrap_or_else(|| spec.default_workdir.clone());
-    tracing::info!(
-        session_id = %session_id,
-        cwd = %cwd,
-        argv = ?command.display_argv.as_ref().unwrap_or(&command.argv),
-        "vercel_process_bridge start_process"
-    );
     // Vercel exposes one-shot command execution, but not a native streaming
     // process handle. We emulate one with a single in-sandbox bridge per
     // sandbox session, so starting another long-running process would sever

@@ -286,6 +286,25 @@ pub async fn sandbox_handle_start_process_supports_interactive_stdio_and_env(
     }
 }
 
+pub async fn sandbox_handle_start_process_supports_long_running_request_response_protocol(
+    handle: Arc<dyn ManagedSandboxHandle>,
+) -> crate::Result<()> {
+    let result =
+        sandbox_handle_start_process_supports_long_running_request_response_protocol_inner(
+            Arc::clone(&handle),
+        )
+        .await;
+    let stop_result = handle.stop().await.context("stop sandbox after contract");
+    match (result, stop_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(stop_error)) => Err(anyhow!(
+            "{error:#}; also failed to stop sandbox after contract: {stop_error:#}"
+        )),
+    }
+}
+
 async fn sandbox_handle_start_process_supports_interactive_stdio_and_env_inner(
     handle: Arc<dyn ManagedSandboxHandle>,
 ) -> crate::Result<()> {
@@ -363,6 +382,118 @@ async fn sandbox_handle_start_process_supports_interactive_stdio_and_env_inner(
     }
     if !stderr.is_empty() {
         bail!("unexpected stderr: {stderr:?}");
+    }
+    Ok(())
+}
+
+async fn sandbox_handle_start_process_supports_long_running_request_response_protocol_inner(
+    handle: Arc<dyn ManagedSandboxHandle>,
+) -> crate::Result<()> {
+    let mut process = handle
+        .start_process(&SandboxCommand {
+            argv: vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                [
+                    "printf 'protocol-ready\\n'",
+                    "while IFS= read -r line; do",
+                    "  case \"$line\" in",
+                    "    request-one) printf 'response-one\\n' ;;",
+                    "    request-two) printf 'protocol-stderr-two\\n' >&2; printf 'response-two\\n' ;;",
+                    "    request-three) printf 'response-three\\n'; exit 0 ;;",
+                    "    *) printf 'unexpected:%s\\n' \"$line\"; exit 9 ;;",
+                    "  esac",
+                    "done",
+                    "exit 8",
+                ]
+                .join("\n"),
+            ],
+            env: std::collections::HashMap::new(),
+            display_argv: None,
+            cwd: None,
+            timeout: Some(Duration::from_secs(30)),
+        })
+        .await
+        .context("start_process should start a long-running protocol process")?;
+
+    read_exact_text(
+        &mut process.stdout,
+        "protocol-ready\n",
+        "read protocol ready marker",
+    )
+    .await?;
+
+    process
+        .stdin
+        .write_all(b"request-one\n")
+        .await
+        .context("write first protocol request")?;
+    read_exact_text(
+        &mut process.stdout,
+        "response-one\n",
+        "read first protocol response",
+    )
+    .await?;
+
+    process
+        .stdin
+        .write_all(b"request-two\n")
+        .await
+        .context("write second protocol request")?;
+    read_exact_text(
+        &mut process.stdout,
+        "response-two\n",
+        "read second protocol response",
+    )
+    .await?;
+
+    process
+        .stdin
+        .write_all(b"request-three\n")
+        .await
+        .context("write shutdown protocol request")?;
+    process.stdin.close().await.context("close process stdin")?;
+    read_exact_text(
+        &mut process.stdout,
+        "response-three\n",
+        "read shutdown protocol response",
+    )
+    .await?;
+
+    let exit_code = timeout(Duration::from_secs(30), process.wait)
+        .await
+        .context("protocol process wait should finish after shutdown")?
+        .context("protocol process wait should succeed")?;
+    let mut stderr = String::new();
+    timeout(
+        Duration::from_secs(5),
+        process.stderr.read_to_string(&mut stderr),
+    )
+    .await
+    .context("stderr should drain after protocol process exit")?
+    .context("read protocol stderr")?;
+    if exit_code != 0 {
+        bail!("unexpected protocol process exit code: {exit_code}; stderr: {stderr:?}");
+    }
+    if stderr != "protocol-stderr-two\n" {
+        bail!("unexpected protocol stderr: {stderr:?}");
+    }
+    Ok(())
+}
+
+async fn read_exact_text(
+    reader: &mut (impl futures::io::AsyncRead + Unpin),
+    expected: &str,
+    context: &str,
+) -> crate::Result<()> {
+    let mut bytes = vec![0u8; expected.len()];
+    timeout(Duration::from_secs(10), reader.read_exact(&mut bytes))
+        .await
+        .with_context(|| context.to_string())?
+        .with_context(|| context.to_string())?;
+    let actual = String::from_utf8(bytes).with_context(|| format!("{context}: invalid UTF-8"))?;
+    if actual != expected {
+        bail!("{context}: expected {expected:?}, got {actual:?}");
     }
     Ok(())
 }
