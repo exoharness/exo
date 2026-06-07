@@ -316,6 +316,16 @@ impl ExoHarnessServer {
                 conversation.stop_sandbox(sandbox_id).await?;
                 Ok(Response::Unit)
             }
+            Request::ConversationGetSandboxCapabilities {
+                agent_id,
+                conversation_id,
+                request,
+            } => {
+                let conversation = self.require_conversation(agent_id, conversation_id).await?;
+                Ok(Response::SandboxCapabilities {
+                    capabilities: conversation.get_sandbox_capabilities(request).await?,
+                })
+            }
             Request::ConversationStartSandboxProcess {
                 agent_id,
                 conversation_id,
@@ -324,6 +334,16 @@ impl ExoHarnessServer {
                 let conversation = self.require_conversation(agent_id, conversation_id).await?;
                 Ok(Response::SandboxProcess {
                     process: conversation.start_sandbox_process(request).await?,
+                })
+            }
+            Request::ConversationStartSandboxService {
+                agent_id,
+                conversation_id,
+                request,
+            } => {
+                let conversation = self.require_conversation(agent_id, conversation_id).await?;
+                Ok(Response::SandboxService {
+                    service: conversation.start_sandbox_service(request).await?,
                 })
             }
             Request::ConversationWriteSandboxProcessInput {

@@ -24,6 +24,7 @@ use crate::sandbox::{
     SandboxNetworkPolicy, SandboxRequest, SandboxSpec, SnapshotPayload, WARM_SANDBOX_KEY_LABEL,
     WARM_SANDBOX_SPEC_HASH_LABEL, sandbox_spec_hash,
 };
+use crate::{SandboxCapabilities, SandboxEnvMode};
 
 pub const DEFAULT_DAYTONA_API_URL: &str = "https://app.daytona.io/api";
 
@@ -230,6 +231,10 @@ impl DaytonaSandboxBackend {
 
 #[async_trait]
 impl ManagedSandboxBackend for DaytonaSandboxBackend {
+    fn capabilities(&self) -> SandboxCapabilities {
+        daytona_capabilities()
+    }
+
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
         reject_host_mounts(&request)?;
         let spec_hash = sandbox_spec_hash(&request.spec);
@@ -312,6 +317,10 @@ impl ManagedSandboxHandle for DaytonaSandboxHandle {
         &self.id
     }
 
+    fn capabilities(&self) -> SandboxCapabilities {
+        daytona_capabilities()
+    }
+
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {
         exec_in_sandbox(&self.backend, &self.sandbox_id, &self.request.spec, command).await
     }
@@ -330,6 +339,21 @@ impl ManagedSandboxHandle for DaytonaSandboxHandle {
         // Capturing a snapshot reliably needs readiness handling that isn't in
         // place yet.
         bail!("Daytona sandbox snapshots are not implemented yet");
+    }
+}
+
+fn daytona_capabilities() -> SandboxCapabilities {
+    SandboxCapabilities {
+        named_acquire: true,
+        exec: true,
+        exec_env: true,
+        process_env: SandboxEnvMode::ProcessLaunch,
+        process_stdin: true,
+        process_output_stream: true,
+        detached_process: false,
+        process_reconnect: false,
+        private_service_tunnel: false,
+        snapshots: false,
     }
 }
 
@@ -380,9 +404,6 @@ async fn start_process_in_sandbox(
 ) -> Result<crate::SandboxProcessParts> {
     if command.argv.is_empty() {
         bail!("sandbox command requires at least one argv entry");
-    }
-    if super::codex_relay::is_codex_app_server_command(command) {
-        return start_codex_relay_process(backend, id, spec, command).await;
     }
     let cwd = command
         .cwd
@@ -467,223 +488,6 @@ async fn start_process_in_sandbox(
         stdin: Box::pin(stdin_writer.compat_write()),
         wait,
     })
-}
-
-async fn start_codex_relay_process(
-    backend: &DaytonaBackendHandle,
-    id: &str,
-    spec: &SandboxSpec,
-    command: &SandboxCommand,
-) -> Result<crate::SandboxProcessParts> {
-    let cwd = command
-        .cwd
-        .clone()
-        .unwrap_or_else(|| spec.default_workdir.clone());
-    tracing::info!(
-        sandbox_id = %id,
-        cwd = %cwd,
-        argv = ?command.display_argv.as_ref().unwrap_or(&command.argv),
-        "daytona_codex_relay start_process"
-    );
-    install_codex_relay_script(backend, id, &cwd).await?;
-    ensure_codex_relay_running(backend, id, &cwd, &command.env).await?;
-    let client = DaytonaCodexRelayClient {
-        backend: backend.clone(),
-        sandbox_id: id.to_string(),
-        cwd,
-    };
-    Ok(super::codex_relay::process_parts(Arc::new(client)))
-}
-
-async fn install_codex_relay_script(
-    backend: &DaytonaBackendHandle,
-    id: &str,
-    cwd: &str,
-) -> Result<()> {
-    let response = execute_daytona_process(
-        backend,
-        id,
-        DaytonaExecRequest {
-            command: super::codex_relay::install_script_shell_command(),
-            cwd: Some(cwd.to_string()),
-            env: HashMap::new(),
-            timeout: Some(10),
-        },
-        "install codex relay",
-    )
-    .await?;
-    if response.exit_code != 0 {
-        bail!(
-            "installing Codex relay failed with exit code {}: {}",
-            response.exit_code,
-            response.result.unwrap_or_default()
-        );
-    }
-    Ok(())
-}
-
-async fn ensure_codex_relay_running(
-    backend: &DaytonaBackendHandle,
-    id: &str,
-    cwd: &str,
-    env: &HashMap<String, String>,
-) -> Result<()> {
-    stop_existing_codex_relay(backend, id, cwd).await?;
-    let process = start_codex_relay_session(backend, id, cwd, env).await?;
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline {
-        if codex_relay_ping(backend, id, cwd).await.unwrap_or(false) {
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    let logs = get_session_command_logs(&process)
-        .await
-        .map(|logs| logs.stdout().to_string())
-        .unwrap_or_default();
-    bail!("starting Codex relay timed out: {logs}");
-}
-
-async fn stop_existing_codex_relay(
-    backend: &DaytonaBackendHandle,
-    id: &str,
-    cwd: &str,
-) -> Result<()> {
-    let response = execute_daytona_process(
-        backend,
-        id,
-        DaytonaExecRequest {
-            command: super::codex_relay::stop_shell_command(),
-            cwd: Some(cwd.to_string()),
-            env: HashMap::new(),
-            timeout: Some(5),
-        },
-        "stop existing codex relay",
-    )
-    .await?;
-    if response.exit_code != 0 {
-        bail!(
-            "stopping existing Codex relay failed with exit code {}: {}",
-            response.exit_code,
-            response.result.unwrap_or_default()
-        );
-    }
-    Ok(())
-}
-
-async fn start_codex_relay_session(
-    backend: &DaytonaBackendHandle,
-    id: &str,
-    cwd: &str,
-    env: &HashMap<String, String>,
-) -> Result<DaytonaSessionProcess> {
-    let session_id = format!("exo-codex-relay-{}", Uuid::new_v4());
-    create_process_session(backend, id, &session_id).await?;
-    let server_argv = super::codex_relay::server_argv();
-    let command = SandboxCommand {
-        argv: server_argv.clone(),
-        env: env.clone(),
-        display_argv: Some(server_argv),
-        cwd: Some(cwd.to_string()),
-        timeout: None,
-    };
-    let command_id = match start_session_command(
-        backend,
-        id,
-        &session_id,
-        &command,
-        cwd.to_string(),
-    )
-    .await
-    {
-        Ok(command_id) => command_id,
-        Err(error) => {
-            if let Err(cleanup_error) = delete_process_session(backend, id, &session_id).await {
-                return Err(error).context(format!(
-                    "also failed to clean up Daytona Codex relay session {session_id}: {cleanup_error:#}"
-                ));
-            }
-            return Err(error);
-        }
-    };
-    let process = DaytonaSessionProcess {
-        backend: backend.clone(),
-        sandbox_id: id.to_string(),
-        session_id,
-        command_id,
-    };
-    if !env.is_empty() {
-        if let Err(error) = send_session_environment_input(&process, env).await {
-            if let Err(cleanup_error) = cleanup_daytona_process(&process).await {
-                return Err(error).context(format!(
-                    "also failed to clean up Daytona Codex relay session {}: {cleanup_error:#}",
-                    process.session_id
-                ));
-            }
-            return Err(error);
-        }
-    }
-    Ok(process)
-}
-
-async fn codex_relay_ping(backend: &DaytonaBackendHandle, id: &str, cwd: &str) -> Result<bool> {
-    let client = DaytonaCodexRelayClient {
-        backend: backend.clone(),
-        sandbox_id: id.to_string(),
-        cwd: cwd.to_string(),
-    };
-    match super::codex_relay::Client::request(&client, super::codex_relay::Request::ping()).await {
-        Ok(_) => Ok(true),
-        Err(_) => Ok(false),
-    }
-}
-
-struct DaytonaCodexRelayClient {
-    backend: DaytonaBackendHandle,
-    sandbox_id: String,
-    cwd: String,
-}
-
-#[async_trait]
-impl super::codex_relay::Client for DaytonaCodexRelayClient {
-    async fn request(
-        &self,
-        request: super::codex_relay::Request,
-    ) -> Result<super::codex_relay::Response> {
-        let request = serde_json::to_string(&request).context("encoding Codex relay request")?;
-        let response = execute_daytona_process(
-            &self.backend,
-            &self.sandbox_id,
-            DaytonaExecRequest {
-                command: super::codex_relay::client_shell_command(&request),
-                cwd: Some(self.cwd.clone()),
-                env: HashMap::new(),
-                timeout: Some(super::codex_relay::CLIENT_TIMEOUT.as_secs()),
-            },
-            "codex relay request",
-        )
-        .await?;
-        let output = response.result.unwrap_or_default();
-        if response.exit_code != 0 {
-            bail!(
-                "Codex relay request failed with exit code {}: {}",
-                response.exit_code,
-                output
-            );
-        }
-        let decoded: super::codex_relay::Response =
-            serde_json::from_str(output.trim()).context("decoding Codex relay response")?;
-        if !decoded.ok {
-            bail!(
-                "Codex relay request failed: {}",
-                decoded
-                    .error
-                    .as_deref()
-                    .unwrap_or("unknown Codex relay error")
-            );
-        }
-        Ok(decoded)
-    }
 }
 
 fn spawn_daytona_process_poller(
@@ -1164,7 +968,7 @@ fn render_shell_command(argv: &[String]) -> String {
     // Daytona's execute endpoint takes a single shell-interpreted string. Quote
     // each argv element so spaces / metacharacters survive.
     argv.iter()
-        .map(|arg| shell_quote(arg))
+        .map(|arg| super::shell_quote(arg))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -1214,29 +1018,8 @@ fn render_session_environment_input(env: &HashMap<String, String>) -> Result<Str
 fn wrap_session_command_with_stdin_env(command: &str) -> String {
     format!(
         "set -e; while IFS= read -r key; do [ \"$key\" = {} ] && break; IFS= read -r value; export \"$key=$value\"; done; exec {command}",
-        shell_quote(PROCESS_ENV_END_MARKER)
+        super::shell_quote(PROCESS_ENV_END_MARKER)
     )
-}
-
-fn shell_quote(arg: &str) -> String {
-    if !arg.is_empty()
-        && arg.chars().all(|c| {
-            c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '=' | ',')
-        })
-    {
-        return arg.to_string();
-    }
-    let mut quoted = String::with_capacity(arg.len() + 2);
-    quoted.push('\'');
-    for c in arg.chars() {
-        if c == '\'' {
-            quoted.push_str("'\\''");
-        } else {
-            quoted.push(c);
-        }
-    }
-    quoted.push('\'');
-    quoted
 }
 
 #[derive(Debug, Serialize)]

@@ -17,6 +17,8 @@ use tokio::time;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use uuid::Uuid;
 
+use crate::{SandboxCapabilities, SandboxEnvMode};
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SandboxKey {
     ConversationSandbox {
@@ -123,6 +125,8 @@ pub enum SnapshotKind {
 pub trait ManagedSandboxHandle: Send + Sync {
     fn id(&self) -> &str;
 
+    fn capabilities(&self) -> SandboxCapabilities;
+
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput>;
 
     async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts>;
@@ -136,6 +140,8 @@ pub trait ManagedSandboxHandle: Send + Sync {
 
 #[async_trait]
 pub trait ManagedSandboxBackend: Send + Sync {
+    fn capabilities(&self) -> SandboxCapabilities;
+
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>>;
 
     /// Acquire a sandbox initialised from a previously-captured snapshot.
@@ -364,14 +370,34 @@ impl Drop for CliContainerSandboxBackend {
     }
 }
 
+fn cli_container_capabilities(_cli: ContainerCliFlavor, snapshots: bool) -> SandboxCapabilities {
+    SandboxCapabilities {
+        named_acquire: true,
+        exec: true,
+        exec_env: true,
+        process_env: SandboxEnvMode::ProcessLaunch,
+        process_stdin: true,
+        process_output_stream: true,
+        detached_process: false,
+        process_reconnect: false,
+        private_service_tunnel: false,
+        snapshots,
+    }
+}
+
 #[async_trait]
 impl ManagedSandboxBackend for CliContainerSandboxBackend {
+    fn capabilities(&self) -> SandboxCapabilities {
+        cli_container_capabilities(self.cli, matches!(self.cli, ContainerCliFlavor::Docker))
+    }
+
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
         let request = self.prepare_request(request).await?;
 
         if request.lifecycle.idle_ttl.is_none() {
             return Ok(Arc::new(OneShotSandboxHandle {
                 id: format!("oneshot:{}", request.key),
+                cli: self.cli,
                 container_bin: self.container_bin.clone(),
                 request,
             }));
@@ -494,6 +520,7 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
 
 struct OneShotSandboxHandle {
     id: String,
+    cli: ContainerCliFlavor,
     container_bin: PathBuf,
     request: SandboxRequest,
 }
@@ -502,6 +529,10 @@ struct OneShotSandboxHandle {
 impl ManagedSandboxHandle for OneShotSandboxHandle {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    fn capabilities(&self) -> SandboxCapabilities {
+        cli_container_capabilities(self.cli, false)
     }
 
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {
@@ -547,6 +578,10 @@ struct WarmSandboxHandle {
 impl ManagedSandboxHandle for WarmSandboxHandle {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    fn capabilities(&self) -> SandboxCapabilities {
+        cli_container_capabilities(self.cli, matches!(self.cli, ContainerCliFlavor::Docker))
     }
 
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {
@@ -627,8 +662,27 @@ impl LocalProcessSandboxBackend {
     }
 }
 
+fn local_process_capabilities() -> SandboxCapabilities {
+    SandboxCapabilities {
+        named_acquire: true,
+        exec: true,
+        exec_env: true,
+        process_env: SandboxEnvMode::ProcessLaunch,
+        process_stdin: true,
+        process_output_stream: true,
+        detached_process: false,
+        process_reconnect: false,
+        private_service_tunnel: false,
+        snapshots: false,
+    }
+}
+
 #[async_trait]
 impl ManagedSandboxBackend for LocalProcessSandboxBackend {
+    fn capabilities(&self) -> SandboxCapabilities {
+        local_process_capabilities()
+    }
+
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
         Ok(Arc::new(LocalProcessSandboxHandle {
             id: format!("local:{}", request.key),
@@ -654,6 +708,10 @@ struct LocalProcessSandboxHandle {
 impl ManagedSandboxHandle for LocalProcessSandboxHandle {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    fn capabilities(&self) -> SandboxCapabilities {
+        local_process_capabilities()
     }
 
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {

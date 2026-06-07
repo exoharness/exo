@@ -1,8 +1,7 @@
 //! Vercel remote sandbox backend, speaking the Vercel Sandbox REST API.
 //!
-//! This backend supports named acquire/resume and one-shot command execution.
-//! Interactive stdin-backed processes are limited to the Codex app-server relay
-//! path; arbitrary interactive process streaming is intentionally not emulated.
+//! This backend supports named acquire/resume, one-shot command execution, and
+//! stdin/stdout-backed processes through a small generic in-sandbox bridge.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,6 +18,7 @@ use crate::sandbox::{
     SandboxNetworkPolicy, SandboxRequest, SandboxSpec, SnapshotPayload, WARM_SANDBOX_KEY_LABEL,
     WARM_SANDBOX_SPEC_HASH_LABEL, sandbox_spec_hash,
 };
+use crate::{SandboxCapabilities, SandboxEnvMode};
 
 pub const DEFAULT_VERCEL_API_URL: &str = "https://vercel.com/api";
 
@@ -144,6 +144,10 @@ impl VercelSandboxBackend {
 
 #[async_trait]
 impl ManagedSandboxBackend for VercelSandboxBackend {
+    fn capabilities(&self) -> SandboxCapabilities {
+        vercel_capabilities()
+    }
+
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
         reject_host_mounts(&request)?;
         let spec_hash = sandbox_spec_hash(&request.spec);
@@ -211,23 +215,16 @@ impl ManagedSandboxHandle for VercelSandboxHandle {
         &self.id
     }
 
+    fn capabilities(&self) -> SandboxCapabilities {
+        vercel_capabilities()
+    }
+
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {
         exec_in_sandbox(&self.backend, &self.session_id, &self.request.spec, command).await
     }
 
     async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts> {
-        if super::codex_relay::is_codex_app_server_command(command) {
-            return start_codex_relay_process(
-                &self.backend,
-                &self.session_id,
-                &self.request.spec,
-                command,
-            )
-            .await;
-        }
-        bail!(
-            "Vercel sandbox backend does not support interactive stdin-backed processes except the Codex app-server relay yet; use exec commands or add a Vercel interactive session transport"
-        );
+        start_process_in_sandbox(&self.backend, &self.session_id, &self.request.spec, command).await
     }
 
     async fn stop(&self) -> Result<()> {
@@ -239,6 +236,50 @@ impl ManagedSandboxHandle for VercelSandboxHandle {
     async fn snapshot(&self) -> Result<SnapshotPayload> {
         bail!("Vercel sandbox snapshots are not implemented yet");
     }
+}
+
+fn vercel_capabilities() -> SandboxCapabilities {
+    SandboxCapabilities {
+        named_acquire: true,
+        exec: true,
+        exec_env: true,
+        process_env: SandboxEnvMode::ProcessLaunch,
+        process_stdin: true,
+        process_output_stream: true,
+        detached_process: true,
+        process_reconnect: false,
+        private_service_tunnel: false,
+        snapshots: false,
+    }
+}
+
+async fn start_process_in_sandbox(
+    backend: &VercelBackendHandle,
+    session_id: &str,
+    spec: &SandboxSpec,
+    command: &SandboxCommand,
+) -> Result<crate::SandboxProcessParts> {
+    if command.argv.is_empty() {
+        bail!("sandbox command requires at least one argv entry");
+    }
+    let cwd = command
+        .cwd
+        .clone()
+        .unwrap_or_else(|| spec.default_workdir.clone());
+    tracing::info!(
+        session_id = %session_id,
+        cwd = %cwd,
+        argv = ?command.display_argv.as_ref().unwrap_or(&command.argv),
+        "vercel_process_bridge start_process"
+    );
+    install_process_bridge_script(backend, session_id, &cwd).await?;
+    ensure_process_bridge_running(backend, session_id, &cwd, command).await?;
+    let client = VercelProcessBridgeClient {
+        backend: backend.clone(),
+        session_id: session_id.to_string(),
+        cwd,
+    };
+    Ok(super::process_bridge::process_parts(Arc::new(client)))
 }
 
 async fn exec_in_sandbox(
@@ -306,33 +347,7 @@ async fn exec_command_in_sandbox(
     })
 }
 
-async fn start_codex_relay_process(
-    backend: &VercelBackendHandle,
-    session_id: &str,
-    spec: &SandboxSpec,
-    command: &SandboxCommand,
-) -> Result<crate::SandboxProcessParts> {
-    let cwd = command
-        .cwd
-        .clone()
-        .unwrap_or_else(|| spec.default_workdir.clone());
-    tracing::info!(
-        session_id = %session_id,
-        cwd = %cwd,
-        argv = ?command.display_argv.as_ref().unwrap_or(&command.argv),
-        "vercel_codex_relay start_process"
-    );
-    install_codex_relay_script(backend, session_id, &cwd).await?;
-    ensure_codex_relay_running(backend, session_id, &cwd, &command.env).await?;
-    let client = VercelCodexRelayClient {
-        backend: backend.clone(),
-        session_id: session_id.to_string(),
-        cwd,
-    };
-    Ok(super::codex_relay::process_parts(Arc::new(client)))
-}
-
-async fn install_codex_relay_script(
+async fn install_process_bridge_script(
     backend: &VercelBackendHandle,
     session_id: &str,
     cwd: &str,
@@ -345,7 +360,7 @@ async fn install_codex_relay_script(
             argv: vec![
                 "/bin/sh".to_string(),
                 "-lc".to_string(),
-                super::codex_relay::install_script_shell_command(),
+                super::process_bridge::install_script_shell_command(),
             ],
             env: HashMap::new(),
             display_argv: None,
@@ -358,23 +373,28 @@ async fn install_codex_relay_script(
         return Ok(());
     }
     bail!(
-        "installing Codex relay failed with exit code {:?}: {}{}",
+        "installing process bridge failed with exit code {:?}: {}{}",
         output.exit_code,
         output.stdout,
         output.stderr
     )
 }
 
-async fn ensure_codex_relay_running(
+async fn ensure_process_bridge_running(
     backend: &VercelBackendHandle,
     session_id: &str,
     cwd: &str,
-    env: &HashMap<String, String>,
+    command: &SandboxCommand,
 ) -> Result<()> {
-    stop_existing_codex_relay(backend, session_id, cwd).await?;
+    stop_existing_process_bridge(backend, session_id, cwd).await?;
+    let argv_json = serde_json::to_string(&command.argv).context("encoding bridge argv")?;
+    let env_json = serde_json::to_string(&command.env).context("encoding bridge env")?;
     let command = format!(
-        "set -e; nohup {} >/tmp/exo-codex-relay.out 2>&1 </dev/null &",
-        super::codex_relay::server_shell_command(),
+        "set -e; export EXO_PROCESS_BRIDGE_ARGV_JSON={}; export EXO_PROCESS_BRIDGE_ENV_JSON={}; export EXO_PROCESS_BRIDGE_CWD={}; nohup {} >/tmp/exo-process-bridge.out 2>&1 </dev/null &",
+        super::shell_quote(&argv_json),
+        super::shell_quote(&env_json),
+        super::shell_quote(cwd),
+        super::process_bridge::server_shell_command(),
     );
     let output = exec_command_in_sandbox(
         backend,
@@ -382,7 +402,7 @@ async fn ensure_codex_relay_running(
         cwd.to_string(),
         &SandboxCommand {
             argv: vec!["/bin/sh".to_string(), "-lc".to_string(), command],
-            env: env.clone(),
+            env: HashMap::new(),
             display_argv: None,
             cwd: Some(cwd.to_string()),
             timeout: None,
@@ -391,25 +411,25 @@ async fn ensure_codex_relay_running(
     .await?;
     if !output.ok {
         bail!(
-            "starting Codex relay failed with exit code {:?}: {}{}",
+            "starting process bridge failed with exit code {:?}: {}{}",
             output.exit_code,
             output.stdout,
             output.stderr
         );
     }
     for _ in 0..600 {
-        if codex_relay_ping(backend, session_id, cwd).await? {
+        if process_bridge_ping(backend, session_id, cwd).await? {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let logs = relay_logs(backend, session_id, cwd)
+    let logs = process_bridge_logs(backend, session_id, cwd)
         .await
         .unwrap_or_default();
-    bail!("Codex relay did not become ready in Vercel sandbox: {logs}");
+    bail!("process bridge did not become ready in Vercel sandbox: {logs}");
 }
 
-async fn stop_existing_codex_relay(
+async fn stop_existing_process_bridge(
     backend: &VercelBackendHandle,
     session_id: &str,
     cwd: &str,
@@ -422,7 +442,7 @@ async fn stop_existing_codex_relay(
             argv: vec![
                 "/bin/sh".to_string(),
                 "-lc".to_string(),
-                super::codex_relay::stop_shell_command(),
+                super::process_bridge::stop_shell_command(),
             ],
             env: HashMap::new(),
             display_argv: None,
@@ -435,30 +455,36 @@ async fn stop_existing_codex_relay(
         return Ok(());
     }
     bail!(
-        "stopping existing Codex relay failed with exit code {:?}: {}{}",
+        "stopping existing process bridge failed with exit code {:?}: {}{}",
         output.exit_code,
         output.stdout,
         output.stderr
     )
 }
 
-async fn codex_relay_ping(
+async fn process_bridge_ping(
     backend: &VercelBackendHandle,
     session_id: &str,
     cwd: &str,
 ) -> Result<bool> {
-    let client = VercelCodexRelayClient {
+    let client = VercelProcessBridgeClient {
         backend: backend.clone(),
         session_id: session_id.to_string(),
         cwd: cwd.to_string(),
     };
-    match super::codex_relay::Client::request(&client, super::codex_relay::Request::ping()).await {
+    match super::process_bridge::Client::request(&client, super::process_bridge::Request::ping())
+        .await
+    {
         Ok(_) => Ok(true),
         Err(_) => Ok(false),
     }
 }
 
-async fn relay_logs(backend: &VercelBackendHandle, session_id: &str, cwd: &str) -> Result<String> {
+async fn process_bridge_logs(
+    backend: &VercelBackendHandle,
+    session_id: &str,
+    cwd: &str,
+) -> Result<String> {
     let output = exec_command_in_sandbox(
         backend,
         session_id,
@@ -467,7 +493,8 @@ async fn relay_logs(backend: &VercelBackendHandle, session_id: &str, cwd: &str) 
             argv: vec![
                 "/bin/sh".to_string(),
                 "-lc".to_string(),
-                "cat /tmp/exo-codex-relay.out /tmp/exo-codex-relay.log /tmp/codex-app-server.stderr 2>/dev/null || true".to_string(),
+                "cat /tmp/exo-process-bridge.out /tmp/exo-process-bridge.log 2>/dev/null || true"
+                    .to_string(),
             ],
             env: HashMap::new(),
             display_argv: None,
@@ -479,25 +506,25 @@ async fn relay_logs(backend: &VercelBackendHandle, session_id: &str, cwd: &str) 
     Ok(format!("{}{}", output.stdout, output.stderr))
 }
 
-struct VercelCodexRelayClient {
+struct VercelProcessBridgeClient {
     backend: VercelBackendHandle,
     session_id: String,
     cwd: String,
 }
 
 #[async_trait]
-impl super::codex_relay::Client for VercelCodexRelayClient {
+impl super::process_bridge::Client for VercelProcessBridgeClient {
     async fn request(
         &self,
-        request: super::codex_relay::Request,
-    ) -> Result<super::codex_relay::Response> {
-        let request = serde_json::to_string(&request).context("encoding Codex relay request")?;
+        request: super::process_bridge::Request,
+    ) -> Result<super::process_bridge::Response> {
+        let request = serde_json::to_string(&request).context("encoding process bridge request")?;
         let output = exec_command_in_sandbox(
             &self.backend,
             &self.session_id,
             self.cwd.clone(),
             &SandboxCommand {
-                argv: super::codex_relay::client_argv(request),
+                argv: super::process_bridge::client_argv(request),
                 env: HashMap::new(),
                 display_argv: None,
                 cwd: Some(self.cwd.clone()),
@@ -507,21 +534,22 @@ impl super::codex_relay::Client for VercelCodexRelayClient {
         .await?;
         if !output.ok {
             bail!(
-                "Codex relay request failed with exit code {:?}: {}{}",
+                "process bridge request failed with exit code {:?}: {}{}",
                 output.exit_code,
                 output.stdout,
                 output.stderr
             );
         }
-        let decoded: super::codex_relay::Response =
-            serde_json::from_str(output.stdout.trim()).context("decoding Codex relay response")?;
+        let decoded: super::process_bridge::Response =
+            serde_json::from_str(output.stdout.trim())
+                .context("decoding process bridge response")?;
         if !decoded.ok {
             bail!(
-                "Codex relay request failed: {}",
+                "process bridge request failed: {}",
                 decoded
                     .error
                     .as_deref()
-                    .unwrap_or("unknown Codex relay error")
+                    .unwrap_or("unknown process bridge error")
             );
         }
         Ok(decoded)
