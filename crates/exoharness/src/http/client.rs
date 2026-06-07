@@ -782,6 +782,7 @@ impl ConversationHandle for HttpConversationHandle {
         let process = self
             .start_sandbox_process(StartSandboxProcessRequest {
                 sandbox_id: sandbox_id.clone(),
+                name: None,
                 command: request.command,
                 env: request.env,
                 cwd: None,

@@ -431,6 +431,7 @@ impl ConversationHandle for LocalSandboxConversation {
         self.append_remote_sandbox_events(vec![
             EventData::SandboxCreated {
                 sandbox_id: remote_id.clone(),
+                name: request.name,
                 provider: request.provider,
                 image: request.image,
                 default_workdir: request.default_workdir.unwrap_or_default(),
@@ -677,6 +678,7 @@ mod tests {
             .expect("conversation should be created");
         let sandbox_id = conversation
             .create_sandbox(CreateSandboxRequest {
+                name: None,
                 provider: SandboxProvider::LocalProcess,
                 image: "local-image".to_string(),
                 default_workdir: Some("/workspace".to_string()),

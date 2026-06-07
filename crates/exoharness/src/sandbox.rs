@@ -156,7 +156,7 @@ pub trait ManagedSandboxBackend: Send + Sync {
     ) -> Result<Arc<dyn ManagedSandboxHandle>>;
 }
 
-pub const DEFAULT_SANDBOX_IMAGE: &str = "docker.io/library/ubuntu:24.04";
+pub const DEFAULT_SANDBOX_IMAGE: &str = crate::sandbox_provider::DEFAULT_DOCKER_IMAGE;
 pub const SANDBOX_HOME_DIR: &str = "/home/exo";
 pub const SANDBOX_MAIN_MOUNT_DIR: &str = "/home/exo/workspace";
 
@@ -1176,16 +1176,39 @@ async fn cleanup_named_container(
 ) -> Result<()> {
     match cli {
         ContainerCliFlavor::AppleContainer => {
-            let stop = run_container_admin_command(
+            match run_container_admin_command(
                 container_bin,
                 WARM_SANDBOX_CLEANUP_TIMEOUT,
                 ["stop", name],
             )
-            .await?;
-            if !stop.status.success() {
-                let stderr = String::from_utf8_lossy(&stop.stderr).trim().to_string();
-                if !is_missing_container_error(&stderr) {
-                    return Err(anyhow!("failed to stop warm sandbox {}: {}", name, stderr));
+            .await
+            {
+                Ok(stop) if stop.status.success() => {}
+                Ok(stop) => {
+                    let stderr = String::from_utf8_lossy(&stop.stderr).trim().to_string();
+                    if !is_missing_container_error(&stderr)
+                        && let Err(kill_error) =
+                            kill_named_container_if_present(container_bin, name).await
+                    {
+                        return Err(anyhow!(
+                            "failed to stop warm sandbox {}: {}; {}",
+                            name,
+                            stderr,
+                            kill_error
+                        ));
+                    }
+                }
+                Err(stop_error) => {
+                    if let Err(kill_error) =
+                        kill_named_container_if_present(container_bin, name).await
+                    {
+                        return Err(anyhow!(
+                            "failed to stop warm sandbox {}: {}; {}",
+                            name,
+                            stop_error,
+                            kill_error
+                        ));
+                    }
                 }
             }
 
@@ -1229,6 +1252,19 @@ async fn cleanup_named_container(
         }
     }
 
+    Ok(())
+}
+
+async fn kill_named_container_if_present(container_bin: &Path, name: &str) -> Result<()> {
+    let kill =
+        run_container_admin_command(container_bin, WARM_SANDBOX_CLEANUP_TIMEOUT, ["kill", name])
+            .await?;
+    if !kill.status.success() {
+        let stderr = String::from_utf8_lossy(&kill.stderr).trim().to_string();
+        if !is_missing_container_error(&stderr) && !is_container_not_running_error(&stderr) {
+            return Err(anyhow!("failed to kill warm sandbox {}: {}", name, stderr));
+        }
+    }
     Ok(())
 }
 
@@ -1352,6 +1388,12 @@ async fn run_container_admin_command<const N: usize>(
 fn is_missing_container_error(stderr: &str) -> bool {
     let lower = stderr.to_ascii_lowercase();
     lower.contains("not found") || lower.contains("no such")
+}
+
+fn is_container_not_running_error(stderr: &str) -> bool {
+    stderr
+        .to_ascii_lowercase()
+        .contains("container is not running")
 }
 
 fn is_already_exists_error(message: &str) -> bool {

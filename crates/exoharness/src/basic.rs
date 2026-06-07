@@ -35,7 +35,7 @@ use crate::{
     ArtifactVersion, BeginTurnRequest, Binding, BindingId, BindingRecord, BindingType,
     BoxAsyncRead, BoxAsyncWrite, CancelSandboxProcessRequest, CloseSandboxProcessInputRequest,
     ConversationHandle, ConversationId, ConversationRecord, CreateSandboxRequest, Event, EventData,
-    EventId, EventQuery, EventQueryDirection, EventStream, ExoHarness, FileSystemMount,
+    EventId, EventKind, EventQuery, EventQueryDirection, EventStream, ExoHarness, FileSystemMount,
     ForkConversationRequest, GetEventsResult, GetSandboxProcessEventsResult, NewAgentRequest,
     NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result, RunInSandboxRequest,
     SandboxId, SandboxProcess, SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessId,
@@ -66,6 +66,7 @@ pub enum SandboxBackendChoice {
     Daytona(DaytonaBackendSpec),
     E2b(E2bBackendSpec),
     Sprites(SpritesBackendSpec),
+    Vercel(VercelBackendSpec),
 }
 
 impl SandboxBackendChoice {
@@ -77,6 +78,7 @@ impl SandboxBackendChoice {
             Self::Daytona(_) => SandboxProvider::Daytona,
             Self::E2b(_) => SandboxProvider::E2b,
             Self::Sprites(_) => SandboxProvider::Sprites,
+            Self::Vercel(_) => SandboxProvider::Vercel,
         }
     }
 }
@@ -145,6 +147,29 @@ impl Default for SpritesBackendSpec {
             url_auth: None,
             organization: None,
             labels: Vec::new(),
+        }
+    }
+}
+
+/// Vercel connection config plus the secret-store names for its credentials,
+/// resolved lazily so the harness can advertise Vercel before any are set.
+#[derive(Debug, Clone)]
+pub struct VercelBackendSpec {
+    pub api_url: String,
+    pub api_token_secret: String,
+    pub team_id_secret: String,
+    pub project_id_secret: String,
+}
+
+impl VercelBackendSpec {
+    /// Official endpoint; credentials read from conventional `VERCEL_*` secret
+    /// names.
+    pub fn with_conventional_secrets() -> Self {
+        Self {
+            api_url: crate::DEFAULT_VERCEL_API_URL.to_string(),
+            api_token_secret: "VERCEL_TOKEN".to_string(),
+            team_id_secret: "VERCEL_TEAM_ID".to_string(),
+            project_id_secret: "VERCEL_PROJECT_ID".to_string(),
         }
     }
 }
@@ -233,6 +258,13 @@ impl BasicExoHarnessInner {
                 };
                 Arc::new(crate::SpritesSandboxBackend::new(config)?)
             }
+            SandboxBackendChoice::Vercel(spec) => {
+                let config = match self.vercel_config_from_binding().await? {
+                    Some(config) => config,
+                    None => self.vercel_config_from_spec(spec).await?,
+                };
+                Arc::new(crate::VercelSandboxBackend::new(config)?)
+            }
         };
         Ok(backend)
     }
@@ -265,6 +297,46 @@ impl BasicExoHarnessInner {
             toolbox_url: spec.toolbox_url.clone(),
             target,
             organization_id,
+        })
+    }
+
+    /// `VercelConfig` from the conventional `VERCEL_*` secret-name spec.
+    async fn vercel_config_from_spec(
+        &self,
+        spec: &VercelBackendSpec,
+    ) -> Result<crate::VercelConfig> {
+        let api_token = self
+            .secret_key(&spec.api_token_secret)
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "vercel sandbox requested but secret {:?} is not set",
+                    spec.api_token_secret
+                )
+            })?;
+        let team_id = self
+            .secret_key(&spec.team_id_secret)
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "vercel sandbox requested but secret {:?} is not set",
+                    spec.team_id_secret
+                )
+            })?;
+        let project_id = self
+            .secret_key(&spec.project_id_secret)
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "vercel sandbox requested but secret {:?} is not set",
+                    spec.project_id_secret
+                )
+            })?;
+        Ok(crate::VercelConfig {
+            api_token,
+            api_url: spec.api_url.clone(),
+            team_id,
+            project_id,
         })
     }
 
@@ -469,6 +541,45 @@ impl BasicExoHarnessInner {
             url_auth,
             organization,
             extra_labels: labels,
+        }))
+    }
+
+    async fn vercel_config_from_binding(&self) -> Result<Option<crate::VercelConfig>> {
+        let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
+        let Some((api_token_secret_id, team_id, project_id, api_url)) = bindings
+            .into_iter()
+            .rev()
+            .find_map(|record| match record.binding {
+                Binding::Sandbox {
+                    config:
+                        SandboxProviderConfig::Vercel {
+                            api_token_secret_id,
+                            team_id,
+                            project_id,
+                            api_url,
+                            ..
+                        },
+                    ..
+                } => Some((api_token_secret_id, team_id, project_id, api_url)),
+                _ => None,
+            })
+        else {
+            return Ok(None);
+        };
+        let api_token = self
+            .secret_key_by_id(api_token_secret_id)
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "vercel sandbox binding references secret id {api_token_secret_id}, \
+                 which is not set"
+                )
+            })?;
+        Ok(Some(crate::VercelConfig {
+            api_token,
+            api_url: api_url.unwrap_or_else(|| crate::DEFAULT_VERCEL_API_URL.to_string()),
+            team_id,
+            project_id,
         }))
     }
 
@@ -1053,6 +1164,176 @@ impl BasicConversationHandle {
             .insert(sandbox_id.clone(), Arc::clone(&handle));
         Ok(handle)
     }
+
+    async fn prepare_sandbox_request(
+        &self,
+        request: CreateSandboxRequest,
+    ) -> Result<PreparedSandboxRequest> {
+        let image = if !request.image.trim().is_empty() {
+            request.image.clone()
+        } else if let Some(default) = self
+            .harness
+            .inner
+            .binding_default_image(request.provider)
+            .await?
+        {
+            default
+        } else {
+            request.image.clone()
+        };
+
+        Ok(PreparedSandboxRequest {
+            name: request.name,
+            provider: request.provider,
+            image,
+            default_workdir: request.default_workdir,
+            file_system_mounts: request.file_system_mounts.unwrap_or_default(),
+            enable_networking: request.enable_networking.unwrap_or(true),
+            idle_seconds: request.idle_seconds.unwrap_or(60),
+        })
+    }
+
+    async fn find_matching_sandbox(
+        &self,
+        request: &PreparedSandboxRequest,
+    ) -> Result<Option<(SandboxId, StoredSandbox)>> {
+        let Some(name) = &request.name else {
+            return Ok(None);
+        };
+        let events = self
+            .get_events(Some(EventQuery {
+                cursor: None,
+                direction: Some(EventQueryDirection::Asc),
+                limit: None,
+                session_id: None,
+                turn_id: None,
+                types: Some(vec![EventKind::SANDBOX_CREATED]),
+            }))
+            .await?
+            .events;
+
+        for event in events.into_iter().rev() {
+            let EventData::SandboxCreated {
+                sandbox_id,
+                name: event_name,
+                provider,
+                image,
+                default_workdir,
+                file_system_mounts,
+                enable_networking,
+                idle_seconds,
+                ..
+            } = event.data
+            else {
+                continue;
+            };
+            if event_name.as_ref() != Some(name) {
+                continue;
+            }
+            let sandbox = self.load_sandbox(&sandbox_id).await?;
+            if !sandbox.running {
+                continue;
+            }
+            if provider != request.provider
+                || image != request.image
+                || default_workdir != request.default_workdir.clone().unwrap_or_default()
+                || file_system_mounts != request.file_system_mounts
+                || enable_networking != request.enable_networking
+                || idle_seconds != request.idle_seconds
+            {
+                bail!("sandbox name {name:?} already exists with a different configuration");
+            }
+            return Ok(Some((sandbox_id, sandbox)));
+        }
+        Ok(None)
+    }
+
+    async fn create_new_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
+        let prepared = self.prepare_sandbox_request(request).await?;
+        let sandbox_id = format!("sandbox-{}", Uuid7::now());
+        let sandbox = prepared.stored_sandbox(sandbox_id.clone());
+        let sandbox_handle = self.create_sandbox_handle(&sandbox_id, &sandbox).await?;
+        let _guard = self.harness.inner.write_lock.lock().await;
+        self.persist_created_sandbox(sandbox, sandbox_handle).await
+    }
+
+    async fn create_new_sandbox_locked(
+        &self,
+        request: PreparedSandboxRequest,
+    ) -> Result<SandboxId> {
+        let sandbox_id = format!("sandbox-{}", Uuid7::now());
+        let sandbox = request.stored_sandbox(sandbox_id.clone());
+        let sandbox_handle = self.create_sandbox_handle(&sandbox_id, &sandbox).await?;
+        self.persist_created_sandbox(sandbox, sandbox_handle).await
+    }
+
+    async fn create_sandbox_handle(
+        &self,
+        sandbox_id: &SandboxId,
+        sandbox: &StoredSandbox,
+    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
+        self.harness
+            .inner
+            .sandbox_backend_for_provider(sandbox.provider)
+            .await?
+            .acquire(sandbox_request(self.record.id, sandbox_id, sandbox))
+            .await
+    }
+
+    async fn persist_created_sandbox(
+        &self,
+        sandbox: StoredSandbox,
+        sandbox_handle: Arc<dyn ManagedSandboxHandle>,
+    ) -> Result<SandboxId> {
+        let sandbox_id = sandbox.id.clone();
+        self.harness
+            .inner
+            .storage
+            .put_json(
+                self.sandboxes_dir().join(format!("{sandbox_id}.json")),
+                &sandbox,
+            )
+            .await?;
+        self.harness
+            .inner
+            .running_sandboxes
+            .lock()
+            .await
+            .insert(sandbox_id.clone(), sandbox_handle);
+        let mut record = self.load_record().await?;
+        append_events_to_conversation(
+            &self.harness.inner,
+            &self.conversation_dir(),
+            self.record.id,
+            None,
+            None,
+            record.latest_event_id,
+            vec![
+                EventData::SandboxCreated {
+                    sandbox_id: sandbox_id.clone(),
+                    name: sandbox.name,
+                    provider: sandbox.provider,
+                    image: sandbox.image,
+                    default_workdir: sandbox.default_workdir.unwrap_or_default(),
+                    file_system_mounts: sandbox.file_system_mounts,
+                    enable_networking: sandbox.enable_networking,
+                    idle_seconds: sandbox.idle_seconds,
+                },
+                EventData::SandboxStarted {
+                    sandbox_id: sandbox_id.clone(),
+                    snapshot_id: None,
+                },
+            ],
+            &mut record,
+        )
+        .await?;
+        self.harness
+            .inner
+            .storage
+            .put_json(self.conversation_dir().join("record.json"), &record)
+            .await?;
+        Ok(sandbox_id)
+    }
 }
 
 #[async_trait]
@@ -1399,92 +1680,28 @@ impl ConversationHandle for BasicConversationHandle {
     }
 
     async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
-        let sandbox_id = format!("sandbox-{}", Uuid7::now());
-        let conversation_dir = self.conversation_dir();
-
-        // Resolve the base image: an agent's explicit image, else the provider
-        // binding's default_image, else empty (the backend applies its own).
-        let image = if !request.image.trim().is_empty() {
-            request.image.clone()
-        } else if let Some(default) = self
-            .harness
-            .inner
-            .binding_default_image(request.provider)
-            .await?
-        {
-            default
-        } else {
-            request.image.clone()
-        };
-
-        let metadata = StoredSandbox {
-            id: sandbox_id.clone(),
-            provider: request.provider,
-            image: image.clone(),
-            default_workdir: request.default_workdir.clone(),
-            file_system_mounts: request.file_system_mounts.clone().unwrap_or_default(),
-            enable_networking: request.enable_networking.unwrap_or(true),
-            idle_seconds: request.idle_seconds.unwrap_or(60),
-            running: true,
-            latest_snapshot_id: None,
-        };
-        let sandbox_handle = self
-            .harness
-            .inner
-            .sandbox_backend_for_provider(metadata.provider)
-            .await?
-            .acquire(sandbox_request(self.record.id, &sandbox_id, &metadata))
-            .await?;
-
-        // Hold the write lock only for the local persistence + event append,
-        // not the remote acquire above.
+        if request.name.is_none() {
+            return self.create_new_sandbox(request).await;
+        }
+        let prepared = self.prepare_sandbox_request(request).await?;
         let _guard = self.harness.inner.write_lock.lock().await;
-        self.harness
-            .inner
-            .storage
-            .put_json(
-                self.sandboxes_dir().join(format!("{sandbox_id}.json")),
-                &metadata,
-            )
-            .await?;
-        self.harness
-            .inner
-            .running_sandboxes
-            .lock()
-            .await
-            .insert(sandbox_id.clone(), sandbox_handle);
-        let mut record = self.load_record().await?;
-        append_events_to_conversation(
-            &self.harness.inner,
-            &conversation_dir,
-            self.record.id,
-            None,
-            None,
-            record.latest_event_id,
-            vec![
-                EventData::SandboxCreated {
-                    sandbox_id: sandbox_id.clone(),
-                    provider: request.provider,
-                    image: request.image,
-                    default_workdir: metadata.default_workdir.clone().unwrap_or_default(),
-                    file_system_mounts: metadata.file_system_mounts.clone(),
-                    enable_networking: metadata.enable_networking,
-                    idle_seconds: metadata.idle_seconds,
-                },
-                EventData::SandboxStarted {
-                    sandbox_id: sandbox_id.clone(),
-                    snapshot_id: None,
-                },
-            ],
-            &mut record,
-        )
-        .await?;
-        self.harness
-            .inner
-            .storage
-            .put_json(conversation_dir.join("record.json"), &record)
-            .await?;
-        Ok(sandbox_id)
+        if let Some((sandbox_id, sandbox)) = self.find_matching_sandbox(&prepared).await? {
+            let sandbox_handle = self
+                .harness
+                .inner
+                .sandbox_backend_for_provider(sandbox.provider)
+                .await?
+                .acquire(sandbox_request(self.record.id, &sandbox_id, &sandbox))
+                .await?;
+            self.harness
+                .inner
+                .running_sandboxes
+                .lock()
+                .await
+                .insert(sandbox_id.clone(), sandbox_handle);
+            return Ok(sandbox_id);
+        }
+        self.create_new_sandbox_locked(prepared).await
     }
 
     async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
@@ -1711,6 +1928,7 @@ impl ConversationHandle for BasicConversationHandle {
         let stdin_mode = request.stdin;
         let output = request.output;
         let lifecycle = request.lifecycle;
+        let name = request.name.clone();
         let parts = sandbox_handle
             .start_process(&SandboxCommand {
                 argv: command.clone(),
@@ -1748,6 +1966,7 @@ impl ConversationHandle for BasicConversationHandle {
             vec![EventData::SandboxProcessStarted {
                 sandbox_id: sandbox_id.clone(),
                 process_id: process_id.clone(),
+                name: name.clone(),
                 command,
                 cwd,
                 mode,
@@ -1787,6 +2006,7 @@ impl ConversationHandle for BasicConversationHandle {
         Ok(SandboxProcessRecord {
             id: process_id,
             sandbox_id,
+            name,
             status: SandboxProcessStatus::Running,
         })
     }
@@ -2292,6 +2512,8 @@ struct StoredArtifactMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredSandbox {
     id: SandboxId,
+    #[serde(default)]
+    name: Option<String>,
     provider: SandboxProvider,
     image: String,
     default_workdir: Option<String>,
@@ -2300,6 +2522,34 @@ struct StoredSandbox {
     idle_seconds: u64,
     running: bool,
     latest_snapshot_id: Option<SnapshotId>,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedSandboxRequest {
+    name: Option<String>,
+    provider: SandboxProvider,
+    image: String,
+    default_workdir: Option<String>,
+    file_system_mounts: Vec<FileSystemMount>,
+    enable_networking: bool,
+    idle_seconds: u64,
+}
+
+impl PreparedSandboxRequest {
+    fn stored_sandbox(&self, id: SandboxId) -> StoredSandbox {
+        StoredSandbox {
+            id,
+            name: self.name.clone(),
+            provider: self.provider,
+            image: self.image.clone(),
+            default_workdir: self.default_workdir.clone(),
+            file_system_mounts: self.file_system_mounts.clone(),
+            enable_networking: self.enable_networking,
+            idle_seconds: self.idle_seconds,
+            running: true,
+            latest_snapshot_id: None,
+        }
+    }
 }
 
 struct RunningSandboxProcess {

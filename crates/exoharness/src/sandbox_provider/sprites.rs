@@ -259,7 +259,7 @@ impl ManagedSandboxHandle for SpritesSandboxHandle {
 
     async fn stop(&self) -> Result<()> {
         // Sprites hibernate when idle; do not DELETE — the next session resumes the
-        // same sprite by deterministic name via `try_resume`.
+        // same sprite by deterministic name via `acquire`.
         Ok(())
     }
 
@@ -513,8 +513,7 @@ fn reject_host_mounts(request: &SandboxRequest) -> Result<()> {
     }
     bail!(
         "Sprites sandbox backend does not support host bind-mounts; \
-         remove conversation mounts or switch to --sandbox-backend docker. \
-         A remote-workspace provisioner is planned as a follow-up."
+         remove conversation mounts or use a local sandbox provider"
     )
 }
 

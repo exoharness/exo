@@ -66,6 +66,7 @@ pub(crate) async fn create_conversation_sandbox(
     let spec = conversation_sandbox_spec(agent_config, config);
     conversation
         .create_sandbox(CreateSandboxRequest {
+            name: None,
             provider: spec.provider,
             image: spec.image,
             default_workdir: Some(spec.default_workdir),
@@ -101,6 +102,7 @@ pub(crate) async fn conversation_sandboxes(
             file_system_mounts,
             enable_networking,
             idle_seconds,
+            ..
         } = event.data
         {
             sandboxes.push(ConversationSandboxInfo {

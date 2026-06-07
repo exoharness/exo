@@ -34,9 +34,9 @@ use executor::{
     SandboxBackendChoice, SandboxProvider, SandboxProviderConfig, SandboxScope, Secret,
     SpritesBackendSpec,
     SecretBackendChoice, ToolRequest, ToolRuntime, TypeScriptHarness, TypeScriptHarnessConfig,
-    Uuid7, default_daytona_image, default_docker_image, default_e2b_template,
-    effective_sandbox_scope, load_agent_config,
-    send_conversation_wakeup, serve_exoharness_http_listener_with_options,
+    Uuid7, VercelBackendSpec, default_daytona_image, default_docker_image, default_e2b_template,
+    default_vercel_image, effective_sandbox_scope, load_agent_config, send_conversation_wakeup,
+    serve_exoharness_http_listener_with_options,
 };
 use lingua::Message;
 use lingua::universal::{AssistantContent, AssistantContentPart, ToolContentPart, UserContent};
@@ -211,6 +211,7 @@ enum SandboxProviderArg {
     E2b,
     #[value(name = "sprites")]
     Sprites,
+    Vercel,
     #[value(name = "apple-container")]
     AppleContainer,
     Docker,
@@ -224,6 +225,7 @@ impl From<SandboxProviderArg> for SandboxProvider {
             SandboxProviderArg::Daytona => Self::Daytona,
             SandboxProviderArg::E2b => Self::E2b,
             SandboxProviderArg::Sprites => Self::Sprites,
+            SandboxProviderArg::Vercel => Self::Vercel,
             SandboxProviderArg::AppleContainer => Self::AppleContainer,
             SandboxProviderArg::Docker => Self::Docker,
             SandboxProviderArg::LocalProcess => Self::LocalProcess,
@@ -255,6 +257,7 @@ fn default_sandbox_backends() -> Vec<SandboxBackendChoice> {
         SandboxBackendChoice::Daytona(DaytonaBackendSpec::default()),
         SandboxBackendChoice::E2b(E2bBackendSpec::default()),
         SandboxBackendChoice::Sprites(SpritesBackendSpec::default()),
+        SandboxBackendChoice::Vercel(VercelBackendSpec::with_conventional_secrets()),
     ]
 }
 
@@ -576,7 +579,7 @@ enum ProviderCommands {
         /// Binding name (default: the provider name).
         #[arg(long)]
         name: Option<String>,
-        /// Secret (by name) holding the provider's API key. Required for Daytona.
+        /// Secret (by name) holding the provider's API key/token. Required for remote providers.
         #[arg(long)]
         secret: Option<String>,
         /// Region/target. Daytona: us | eu | experimental.
@@ -585,6 +588,8 @@ enum ProviderCommands {
         /// Daytona organization id, or Sprites organization slug.
         #[arg(long)]
         organization_id: Option<String>,
+        #[arg(long)]
+        project_id: Option<String>,
         #[arg(long)]
         api_url: Option<String>,
         /// Default base image for sandboxes that don't request one.
@@ -1741,6 +1746,7 @@ async fn main() -> Result<()> {
                 secret,
                 region,
                 organization_id,
+                project_id,
                 api_url,
                 default_image,
                 url_auth,
@@ -1761,6 +1767,25 @@ async fn main() -> Result<()> {
                             organization_id,
                             api_url,
                             default_image: default_image.unwrap_or_else(default_daytona_image),
+                        }
+                    }
+                    SandboxProviderArg::Vercel => {
+                        let secret =
+                            secret.ok_or_else(|| anyhow!("--secret is required for vercel"))?;
+                        let secret_id =
+                            find_secret_id(harness.exoharness_handle().as_ref(), &secret)
+                                .await?
+                                .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
+                        let team_id = organization_id
+                            .ok_or_else(|| anyhow!("--organization-id is required for vercel"))?;
+                        let project_id = project_id
+                            .ok_or_else(|| anyhow!("--project-id is required for vercel"))?;
+                        SandboxProviderConfig::Vercel {
+                            api_token_secret_id: secret_id,
+                            team_id,
+                            project_id,
+                            api_url,
+                            default_image: default_image.unwrap_or_else(default_vercel_image),
                         }
                     }
                     SandboxProviderArg::Docker => SandboxProviderConfig::Docker {
@@ -2039,14 +2064,7 @@ fn format_harness_kind(kind: AgentHarnessKind) -> &'static str {
 }
 
 fn format_sandbox_provider(provider: SandboxProvider) -> &'static str {
-    match provider {
-        SandboxProvider::Daytona => "daytona",
-        SandboxProvider::E2b => "e2b",
-        SandboxProvider::Sprites => "sprites",
-        SandboxProvider::AppleContainer => "apple-container",
-        SandboxProvider::Docker => "docker",
-        SandboxProvider::LocalProcess => "local-process",
-    }
+    provider.as_str()
 }
 
 fn build_typescript_harness_config(

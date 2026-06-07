@@ -634,8 +634,7 @@ fn reject_host_mounts(request: &SandboxRequest) -> Result<()> {
     }
     bail!(
         "E2B sandbox backend does not support host bind-mounts; \
-         remove conversation mounts or switch to --sandbox-backend docker. \
-         A remote-workspace provisioner is planned as a follow-up."
+         remove conversation mounts or use a local sandbox provider"
     )
 }
 
