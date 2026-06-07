@@ -562,6 +562,16 @@ async fn start_process_streams_raw_daytona_session_logs() {
         .expect(1)
         .mount(&server)
         .await;
+    Mock::given(method("POST"))
+        .and(path("/toolbox/sb-process/process/execute"))
+        .and(body_json_reads_exit_status_file())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "exitCode": 0,
+            "result": "0\n",
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
     Mock::given(method("DELETE"))
         .and(path_regex(r"^/toolbox/sb-process/process/session/[^/]+$"))
         .respond_with(ResponseTemplate::new(200))
@@ -649,6 +659,16 @@ async fn start_process_streams_structured_daytona_session_logs() {
                     "exitCode": 0,
                 },
             ],
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/toolbox/sb-structured/process/execute"))
+        .and(body_json_reads_exit_status_file())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "exitCode": 0,
+            "result": "0\n",
         })))
         .expect(1)
         .mount(&server)
@@ -758,6 +778,16 @@ async fn start_process_seeds_env_for_daytona_session_without_leaking_secret_in_c
         .expect(1)
         .mount(&server)
         .await;
+    Mock::given(method("POST"))
+        .and(path("/toolbox/sb-env/process/execute"))
+        .and(body_json_reads_exit_status_file())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "exitCode": 0,
+            "result": "0\n",
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
     Mock::given(method("DELETE"))
         .and(path_regex(r"^/toolbox/sb-env/process/session/[^/]+$"))
         .respond_with(ResponseTemplate::new(200))
@@ -838,6 +868,14 @@ async fn start_process_reports_daytona_stdin_errors() {
                     "id": "cmd-1",
                 },
             ],
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/toolbox/sb-stdin/process/execute"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "exitCode": 0,
+            "result": "",
         })))
         .mount(&server)
         .await;
@@ -939,6 +977,14 @@ async fn start_process_deletes_daytona_session_when_wait_is_aborted() {
         })))
         .mount(&server)
         .await;
+    Mock::given(method("POST"))
+        .and(path("/toolbox/sb-abort/process/execute"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "exitCode": 0,
+            "result": "",
+        })))
+        .mount(&server)
+        .await;
     Mock::given(method("DELETE"))
         .and(path_regex(r"^/toolbox/sb-abort/process/session/[^/]+$"))
         .respond_with(ResponseTemplate::new(200))
@@ -971,6 +1017,101 @@ async fn start_process_deletes_daytona_session_when_wait_is_aborted() {
     assert!(join_error.is_cancelled());
 
     wait_for_delete_request(&server, "/toolbox/sb-abort/process/session/").await;
+}
+
+#[tokio::test]
+async fn start_process_waits_on_exit_status_file_when_session_status_omits_exit_code() {
+    let server = MockServer::start().await;
+    let backend = backend_for_mock(&server);
+
+    mount_find(&server, Vec::new()).await;
+    Mock::given(method("POST"))
+        .and(path("/sandbox"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(sandbox_json("sb-exit-file", "started")),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/toolbox/sb-exit-file/process/session"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path_regex(
+            r"^/toolbox/sb-exit-file/process/session/[^/]+/exec$",
+        ))
+        .and(body_json_includes_async_session_command())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "cmdId": "cmd-1",
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(
+            r"^/toolbox/sb-exit-file/process/session/[^/]+/command/cmd-1/logs$",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_string("done\n"))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/toolbox/sb-exit-file/process/session/[^/]+$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "commands": [
+                {
+                    "id": "cmd-1",
+                },
+            ],
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/toolbox/sb-exit-file/process/execute"))
+        .and(body_json_reads_exit_status_file())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "exitCode": 0,
+            "result": "0\n",
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path_regex(r"^/toolbox/sb-exit-file/process/session/[^/]+$"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    mount_get_started(&server).await;
+
+    let handle = backend
+        .acquire(make_request("conv-19", "sandbox-19"))
+        .await
+        .unwrap();
+    let mut parts = handle
+        .start_process(&exoharness::SandboxCommand {
+            argv: vec!["/usr/bin/codex-app-server".into()],
+            env: HashMap::new(),
+            display_argv: None,
+            cwd: None,
+            timeout: None,
+        })
+        .await
+        .expect("start_process should use Daytona process sessions");
+
+    let mut stdout = String::new();
+    parts
+        .stdout
+        .read_to_string(&mut stdout)
+        .await
+        .expect("stdout should be readable");
+    let exit_code = parts.wait.await.expect("wait should resolve");
+
+    assert_eq!(stdout, "done\n");
+    assert_eq!(exit_code, 0);
 }
 
 /// Match any POST body that has a `command` field — keeps the test from
@@ -1044,6 +1185,22 @@ fn body_json_includes_async_session_command_without_secret(
         }
     }
     Has { secret }
+}
+
+fn body_json_reads_exit_status_file() -> impl wiremock::Match {
+    struct Has;
+    impl wiremock::Match for Has {
+        fn matches(&self, request: &wiremock::Request) -> bool {
+            let Ok(body) = serde_json::from_slice::<DaytonaSessionExecBody>(&request.body) else {
+                return false;
+            };
+            body.command.contains("/tmp/exo-process-exit-")
+                && body.command.contains("cat")
+                && body.run_async.is_none()
+                && body.suppress_input_echo.is_none()
+        }
+    }
+    Has
 }
 
 #[derive(serde::Deserialize)]

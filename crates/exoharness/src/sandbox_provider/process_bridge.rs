@@ -29,6 +29,8 @@ import threading
 HOST = "127.0.0.1"
 PORT = 48765
 LOG_PATH = "/tmp/exo-process-bridge.log"
+MAX_RECV_EVENTS = 64
+MAX_RECV_BYTES = 1024 * 1024
 
 
 def log(message):
@@ -120,9 +122,22 @@ class BridgeState:
             event = self.events.get(timeout=timeout)
         except queue.Empty:
             return {"ok": True, "timeout": True}
-        if event.get("type") == "error":
-            raise RuntimeError(event.get("message") or "bridged process failed")
-        return {"ok": True, "event": event}
+        events = []
+        total_bytes = 0
+        while True:
+            if event.get("type") == "error":
+                raise RuntimeError(event.get("message") or "bridged process failed")
+            events.append(event)
+            total_bytes += len(event.get("data", ""))
+            if event.get("type") == "exit":
+                break
+            if len(events) >= MAX_RECV_EVENTS or total_bytes >= MAX_RECV_BYTES:
+                break
+            try:
+                event = self.events.get_nowait()
+            except queue.Empty:
+                break
+        return {"ok": True, "events": events}
 
 
 STATE = None
@@ -155,7 +170,7 @@ class Handler(socketserver.BaseRequestHandler):
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}
         self.request.sendall(json.dumps(response, separators=(",", ":")).encode("utf-8"))
-        if response.get("event", {}).get("type") == "exit":
+        if any(event.get("type") == "exit" for event in response.get("events", [])):
             threading.Thread(target=self.server.shutdown, daemon=True).start()
 
 
@@ -255,7 +270,7 @@ pub(crate) struct Response {
     #[serde(default)]
     pub(crate) timeout: bool,
     #[serde(default)]
-    pub(crate) event: Option<Event>,
+    pub(crate) events: Vec<Event>,
     #[serde(default)]
     pub(crate) error: Option<String>,
 }
@@ -321,15 +336,21 @@ pub(crate) fn process_parts(client: Arc<dyn Client>) -> crate::SandboxProcessPar
     spawn_stdin_forwarder(client, stdin_reader, error_tx);
 
     let wait: BoxFuture<'static, crate::Result<i32>> = Box::pin(async move {
-        tokio::select! {
-            result = wait_rx => match result {
-                Ok(exit_code) => Ok(exit_code),
-                Err(_) => Err(anyhow::anyhow!("process bridge output poller stopped")),
-            },
-            error = error_rx.recv() => match error {
-                Some(error) => Err(error),
-                None => Err(anyhow::anyhow!("process bridge stopped before exit")),
-            },
+        tokio::pin!(wait_rx);
+        let mut errors_open = true;
+        loop {
+            tokio::select! {
+                result = &mut wait_rx => {
+                    return match result {
+                        Ok(exit_code) => Ok(exit_code),
+                        Err(_) => Err(anyhow::anyhow!("process bridge output poller stopped")),
+                    };
+                }
+                error = error_rx.recv(), if errors_open => match error {
+                    Some(error) => return Err(error),
+                    None => errors_open = false,
+                },
+            }
         }
     });
 
@@ -382,21 +403,22 @@ async fn poll_output(
         if response.timeout {
             continue;
         }
-        let Some(event) = response.event else {
-            continue;
-        };
-        match event {
-            Event::Stdout { data } => {
-                write_bridge_output(&mut stdout_writer, &data, "stdout").await?;
-            }
-            Event::Stderr { data } => {
-                write_bridge_output(&mut stderr_writer, &data, "stderr").await?;
-            }
-            Event::Exit { exit_code } => {
-                if wait_tx.send(exit_code).is_err() {
-                    tracing::debug!("process bridge waiter dropped before exit could be reported");
+        for event in response.events {
+            match event {
+                Event::Stdout { data } => {
+                    write_bridge_output(&mut stdout_writer, &data, "stdout").await?;
                 }
-                return Ok(());
+                Event::Stderr { data } => {
+                    write_bridge_output(&mut stderr_writer, &data, "stderr").await?;
+                }
+                Event::Exit { exit_code } => {
+                    if wait_tx.send(exit_code).is_err() {
+                        tracing::debug!(
+                            "process bridge waiter dropped before exit could be reported"
+                        );
+                    }
+                    return Ok(());
+                }
             }
         }
     }
@@ -447,19 +469,79 @@ async fn forward_stdin(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
     use std::process::Stdio;
+    use std::sync::Arc;
 
+    use futures::AsyncReadExt;
     use serde_json::json;
     use tempfile::{TempDir, tempdir};
     use tokio::process::Command;
+    use tokio::sync::Mutex;
 
     use super::*;
+
+    struct FakeClient {
+        responses: Mutex<VecDeque<Response>>,
+    }
+
+    #[async_trait]
+    impl Client for FakeClient {
+        async fn request(&self, request: Request) -> Result<Response> {
+            if request.kind != "recv" {
+                return Ok(Response {
+                    ok: true,
+                    timeout: false,
+                    events: Vec::new(),
+                    error: None,
+                });
+            }
+            let mut responses = self.responses.lock().await;
+            Ok(responses.pop_front().unwrap_or(Response {
+                ok: true,
+                timeout: true,
+                events: Vec::new(),
+                error: None,
+            }))
+        }
+    }
 
     struct BridgeFixture {
         _temp: TempDir,
         script_path: PathBuf,
+    }
+
+    #[tokio::test]
+    async fn process_parts_writes_batched_stdout_and_exit() {
+        let client = FakeClient {
+            responses: Mutex::new(VecDeque::from([Response {
+                ok: true,
+                timeout: false,
+                events: vec![
+                    Event::Stdout {
+                        data: STANDARD.encode("hello "),
+                    },
+                    Event::Stdout {
+                        data: STANDARD.encode("world"),
+                    },
+                    Event::Exit { exit_code: 0 },
+                ],
+                error: None,
+            }])),
+        };
+        let parts = process_parts(Arc::new(client));
+        let mut stdout = parts.stdout;
+        let exit_code = parts.wait.await.expect("bridge wait should succeed");
+        let mut output = String::new();
+        stdout
+            .read_to_string(&mut output)
+            .await
+            .expect("read bridge stdout");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(output, "hello world");
     }
 
     #[tokio::test]
@@ -531,22 +613,23 @@ mod tests {
             .await;
             let response: Response =
                 serde_json::from_slice(&response.stdout).expect("decode bridge recv response");
-            match response.event {
-                Some(Event::Stdout { data }) => {
-                    let decoded = STANDARD.decode(data).expect("decode stdout event");
-                    output.push_str(
-                        std::str::from_utf8(&decoded).expect("stdout event should be utf8"),
-                    );
+            for event in response.events {
+                match event {
+                    Event::Stdout { data } => {
+                        let decoded = STANDARD.decode(data).expect("decode stdout event");
+                        output.push_str(
+                            std::str::from_utf8(&decoded).expect("stdout event should be utf8"),
+                        );
+                    }
+                    Event::Stderr { data } => {
+                        let decoded = STANDARD.decode(data).expect("decode stderr event");
+                        panic!(
+                            "unexpected stderr event: {}",
+                            String::from_utf8_lossy(&decoded)
+                        );
+                    }
+                    Event::Exit { exit_code } => return exit_code,
                 }
-                Some(Event::Stderr { data }) => {
-                    let decoded = STANDARD.decode(data).expect("decode stderr event");
-                    panic!(
-                        "unexpected stderr event: {}",
-                        String::from_utf8_lossy(&decoded)
-                    );
-                }
-                Some(Event::Exit { exit_code }) => return exit_code,
-                None => {}
             }
         }
         panic!("bridge did not report process exit");

@@ -1,3 +1,4 @@
+use std::env;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -21,11 +22,11 @@ use crate::{
     BoxAsyncWrite, CloseSandboxProcessInputRequest, CreateSandboxRequest, EventData, EventKind,
     EventQuery, EventQueryDirection, ExoHarness, ForkConversationRequest, ManagedSandboxBackend,
     ManagedSandboxHandle, NewAgentRequest, NewConversationRequest, PutSecretRequest,
-    RunInSandboxRequest, SandboxCommand, SandboxCommandOutput, SandboxProcessEvent,
-    SandboxProcessEventQuery, SandboxProcessParts, SandboxProcessStatus, SandboxProcessStdin,
-    SandboxProvider, SandboxProviderConfig, SandboxRequest, Secret, SnapshotPayload,
-    StartSandboxProcessRequest, WaitSandboxProcessRequest, WriteArtifactRequest,
-    WriteSandboxProcessInputRequest,
+    RunInSandboxRequest, SandboxCommand, SandboxCommandOutput, SandboxKey, SandboxLifecycleConfig,
+    SandboxNetworkPolicy, SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessParts,
+    SandboxProcessStatus, SandboxProcessStdin, SandboxProvider, SandboxProviderConfig,
+    SandboxRequest, SandboxSpec, Secret, SnapshotPayload, StartSandboxProcessRequest, Uuid7,
+    WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
 #[tokio::test(flavor = "current_thread")]
@@ -73,6 +74,135 @@ async fn basic_backend_contract_conversation_scope_overrides_and_forks() {
         harness,
     )
     .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn local_process_sandbox_contract_start_process_stdio_and_env() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let backend: Arc<dyn ManagedSandboxBackend> =
+        Arc::new(crate::LocalProcessSandboxBackend::new());
+    let handle = backend
+        .acquire(SandboxRequest {
+            key: SandboxKey::ConversationSandbox {
+                conversation_id: Uuid7::now().to_string(),
+                sandbox_id: "contract".to_string(),
+            },
+            spec: SandboxSpec {
+                image: "local-process".to_string(),
+                mounts: Vec::new(),
+                network: SandboxNetworkPolicy::Enabled,
+                default_workdir: tempdir.path().display().to_string(),
+            },
+            lifecycle: SandboxLifecycleConfig::default(),
+        })
+        .await
+        .expect("acquire sandbox");
+    crate::contract_tests::sandbox_handle_start_process_supports_interactive_stdio_and_env(handle)
+        .await
+        .expect("sandbox start_process contract");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "uses a real Daytona sandbox; source sandbox-vars.sh and run this test explicitly"]
+async fn daytona_sandbox_contract_start_process_stdio_and_env() {
+    let Some(api_key) = nonempty_env("DAYTONA_API_KEY") else {
+        eprintln!("skipping real Daytona sandbox contract: DAYTONA_API_KEY is not set");
+        return;
+    };
+    let backend: Arc<dyn ManagedSandboxBackend> = Arc::new(
+        crate::DaytonaSandboxBackend::new(crate::DaytonaConfig {
+            api_key,
+            api_url: env_or("DAYTONA_API_URL", crate::DEFAULT_DAYTONA_API_URL),
+            toolbox_url: env_or("DAYTONA_TOOLBOX_URL", crate::DEFAULT_DAYTONA_TOOLBOX_URL),
+            target: nonempty_env("DAYTONA_TARGET"),
+            organization_id: nonempty_env("DAYTONA_ORGANIZATION_ID"),
+        })
+        .expect("DaytonaSandboxBackend::new"),
+    );
+    let handle = backend
+        .acquire(provider_contract_request(
+            "daytona",
+            env_or("DAYTONA_IMAGE", &crate::default_daytona_image()),
+            "/",
+        ))
+        .await
+        .expect("acquire Daytona sandbox");
+    crate::contract_tests::sandbox_handle_start_process_supports_interactive_stdio_and_env(handle)
+        .await
+        .expect("Daytona sandbox start_process contract");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "uses a real Vercel sandbox; source sandbox-vars.sh and run this test explicitly"]
+async fn vercel_sandbox_contract_start_process_stdio_and_env() {
+    let Some(api_token) = nonempty_env("VERCEL_API_TOKEN").or_else(|| nonempty_env("VERCEL_TOKEN"))
+    else {
+        eprintln!(
+            "skipping real Vercel sandbox contract: VERCEL_API_TOKEN or VERCEL_TOKEN is not set"
+        );
+        return;
+    };
+    let Some(team_id) = nonempty_env("VERCEL_TEAM_ID") else {
+        eprintln!("skipping real Vercel sandbox contract: VERCEL_TEAM_ID is not set");
+        return;
+    };
+    let Some(project_id) = nonempty_env("VERCEL_PROJECT_ID") else {
+        eprintln!("skipping real Vercel sandbox contract: VERCEL_PROJECT_ID is not set");
+        return;
+    };
+    let backend: Arc<dyn ManagedSandboxBackend> = Arc::new(
+        crate::VercelSandboxBackend::new(crate::VercelConfig {
+            api_token,
+            api_url: env_or("VERCEL_API_URL", crate::DEFAULT_VERCEL_API_URL),
+            team_id,
+            project_id,
+        })
+        .expect("VercelSandboxBackend::new"),
+    );
+    let handle = backend
+        .acquire(provider_contract_request(
+            "vercel",
+            env_or("VERCEL_IMAGE", &crate::default_vercel_image()),
+            "/vercel/sandbox",
+        ))
+        .await
+        .expect("acquire Vercel sandbox");
+    crate::contract_tests::sandbox_handle_start_process_supports_interactive_stdio_and_env(handle)
+        .await
+        .expect("Vercel sandbox start_process contract");
+}
+
+fn nonempty_env(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn env_or(name: &str, default: &str) -> String {
+    nonempty_env(name).unwrap_or_else(|| default.to_string())
+}
+
+fn provider_contract_request(
+    provider: &str,
+    image: String,
+    default_workdir: &str,
+) -> SandboxRequest {
+    SandboxRequest {
+        key: SandboxKey::ConversationSandbox {
+            conversation_id: Uuid7::now().to_string(),
+            sandbox_id: format!("{provider}-contract"),
+        },
+        spec: SandboxSpec {
+            image,
+            mounts: Vec::new(),
+            network: SandboxNetworkPolicy::Enabled,
+            default_workdir: default_workdir.to_string(),
+        },
+        lifecycle: SandboxLifecycleConfig {
+            idle_ttl: Some(Duration::from_secs(300)),
+        },
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

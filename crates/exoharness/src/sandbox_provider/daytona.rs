@@ -402,7 +402,17 @@ async fn start_process_in_sandbox(
     );
 
     create_process_session(backend, id, &session_id).await?;
-    let command_id = match start_session_command(backend, id, &session_id, command, cwd).await {
+    let exit_status_path = format!("/tmp/exo-process-exit-{}.status", Uuid::new_v4());
+    let command_id = match start_session_command(
+        backend,
+        id,
+        &session_id,
+        command,
+        cwd,
+        &exit_status_path,
+    )
+    .await
+    {
         Ok(command_id) => command_id,
         Err(error) => {
             if let Err(cleanup_error) = delete_process_session(backend, id, &session_id).await {
@@ -425,6 +435,7 @@ async fn start_process_in_sandbox(
         sandbox_id: id.to_string(),
         session_id,
         command_id,
+        exit_status_path,
     };
 
     if !command.env.is_empty()
@@ -715,15 +726,19 @@ async fn start_session_command(
     session_id: &str,
     command: &SandboxCommand,
     cwd: String,
+    exit_status_path: &str,
 ) -> Result<String> {
     let rendered_command = render_shell_command(&command.argv);
+    if !command.env.is_empty() {
+        validate_daytona_env(&command.env)?;
+    }
+    let wrapped_command = wrap_session_command_with_exit_status(
+        &rendered_command,
+        !command.env.is_empty(),
+        exit_status_path,
+    );
     let body = DaytonaSessionCommandRequest {
-        command: if command.env.is_empty() {
-            rendered_command
-        } else {
-            validate_daytona_env(&command.env)?;
-            wrap_session_command_with_stdin_env(&rendered_command)
-        },
+        command: wrapped_command,
         cwd: Some(cwd),
         timeout: command.timeout.map(|t| t.as_secs()),
         run_async: true,
@@ -835,6 +850,47 @@ async fn get_session_command_logs(process: &DaytonaSessionProcess) -> Result<Day
 }
 
 async fn get_session_command_exit_code(process: &DaytonaSessionProcess) -> Result<Option<i32>> {
+    let status_exit_code = get_session_status_exit_code(process).await?;
+    let file_exit_code = match get_session_exit_status_file(process).await {
+        Ok(exit_code) => exit_code,
+        Err(error) if status_exit_code.is_some() => {
+            tracing::debug!(
+                sandbox_id = %process.sandbox_id,
+                session_id = %process.session_id,
+                command_id = %process.command_id,
+                error = %error,
+                "failed to read Daytona process exit status file; falling back to session status"
+            );
+            None
+        }
+        Err(error) => return Err(error),
+    };
+    if let Some(file_exit_code) = file_exit_code {
+        if status_exit_code.is_some_and(|status_exit_code| status_exit_code != file_exit_code) {
+            tracing::debug!(
+                sandbox_id = %process.sandbox_id,
+                session_id = %process.session_id,
+                command_id = %process.command_id,
+                status_exit_code = ?status_exit_code,
+                file_exit_code,
+                "Daytona process status disagreed with exit status file"
+            );
+        }
+        return Ok(Some(file_exit_code));
+    }
+    if let Some(status_exit_code) = status_exit_code {
+        tracing::debug!(
+            sandbox_id = %process.sandbox_id,
+            session_id = %process.session_id,
+            command_id = %process.command_id,
+            status_exit_code,
+            "Daytona process status reported an exit before the exit status file was visible"
+        );
+    }
+    Ok(None)
+}
+
+async fn get_session_status_exit_code(process: &DaytonaSessionProcess) -> Result<Option<i32>> {
     let response = process
         .backend
         .client
@@ -859,6 +915,33 @@ async fn get_session_command_exit_code(process: &DaytonaSessionProcess) -> Resul
         .iter()
         .find(|command| command.id.as_deref() == Some(process.command_id.as_str()))
         .and_then(|command| command.exit_code))
+}
+
+async fn get_session_exit_status_file(process: &DaytonaSessionProcess) -> Result<Option<i32>> {
+    let path = shell_quote(&process.exit_status_path);
+    let response = execute_daytona_process(
+        &process.backend,
+        &process.sandbox_id,
+        DaytonaExecRequest {
+            command: format!("if [ -f {path} ]; then cat {path}; fi"),
+            cwd: None,
+            env: HashMap::new(),
+            timeout: Some(5),
+        },
+        "reading Daytona process exit status",
+    )
+    .await?;
+    let output = response.result.unwrap_or_default();
+    let output = output.trim();
+    if output.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(output.parse::<i32>().with_context(|| {
+        format!(
+            "decoding Daytona process exit status from {}",
+            process.exit_status_path
+        )
+    })?))
 }
 
 async fn send_session_command_input(process: &DaytonaSessionProcess, data: String) -> Result<()> {
@@ -998,10 +1081,22 @@ fn render_session_environment_input(env: &HashMap<String, String>) -> Result<Str
     Ok(input)
 }
 
-fn wrap_session_command_with_stdin_env(command: &str) -> String {
+fn wrap_session_command_with_exit_status(
+    command: &str,
+    needs_stdin_env: bool,
+    exit_status_path: &str,
+) -> String {
+    let env_prelude = if needs_stdin_env {
+        format!(
+            "while IFS= read -r key; do [ \"$key\" = {} ] && break; IFS= read -r value; export \"$key=$value\"; done; ",
+            shell_quote(PROCESS_ENV_END_MARKER)
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "set -e; while IFS= read -r key; do [ \"$key\" = {} ] && break; IFS= read -r value; export \"$key=$value\"; done; exec {command}",
-        shell_quote(PROCESS_ENV_END_MARKER)
+        "set -e; {env_prelude}set +e; {command}; status=$?; printf '%s\\n' \"$status\" > {}; exit \"$status\"",
+        shell_quote(exit_status_path)
     )
 }
 
@@ -1044,6 +1139,7 @@ struct DaytonaSessionProcess {
     sandbox_id: String,
     session_id: String,
     command_id: String,
+    exit_status_path: String,
 }
 
 struct DaytonaProcessCleanup {
