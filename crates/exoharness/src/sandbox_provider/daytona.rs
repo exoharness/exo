@@ -434,16 +434,16 @@ mod backend {
             command_id,
         };
 
-        if !command.env.is_empty() {
-            if let Err(error) = send_session_environment_input(&process, &command.env).await {
-                if let Err(cleanup_error) = cleanup_daytona_process(&process).await {
-                    return Err(error).context(format!(
-                        "also failed to clean up Daytona process session {}: {cleanup_error:#}",
-                        process.session_id
-                    ));
-                }
-                return Err(error);
+        if !command.env.is_empty()
+            && let Err(error) = send_session_environment_input(&process, &command.env).await
+        {
+            if let Err(cleanup_error) = cleanup_daytona_process(&process).await {
+                return Err(error).context(format!(
+                    "also failed to clean up Daytona process session {}: {cleanup_error:#}",
+                    process.session_id
+                ));
             }
+            return Err(error);
         }
 
         let (stdout_reader, stdout_writer) = tokio::io::duplex(PROCESS_PIPE_BUFFER_SIZE);
@@ -495,15 +495,15 @@ mod backend {
                 stdin_error_rx,
             )
             .await;
-            if result.is_err() {
-                if let Err(cleanup_error) = cleanup_daytona_process(&process).await {
-                    tracing::warn!(
-                        sandbox_id = %process.sandbox_id,
-                        session_id = %process.session_id,
-                        error = %cleanup_error,
-                        "failed to clean up Daytona process session"
-                    );
-                }
+            if result.is_err()
+                && let Err(cleanup_error) = cleanup_daytona_process(&process).await
+            {
+                tracing::warn!(
+                    sandbox_id = %process.sandbox_id,
+                    session_id = %process.session_id,
+                    error = %cleanup_error,
+                    "failed to clean up Daytona process session"
+                );
             }
             if wait_tx.send(result).is_err() {
                 tracing::debug!(
@@ -979,7 +979,7 @@ mod backend {
             .iter()
             .map(|(key, value)| (key.as_str(), value.as_str()))
             .collect::<Vec<_>>();
-        entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+        entries.sort_by_key(|(key, _)| *key);
         for (key, value) in &entries {
             if !is_shell_env_key(key) {
                 bail!("Daytona process env key is not a valid shell identifier: {key}");
