@@ -20,13 +20,12 @@ use crate::{
     CancelSandboxProcessRequest, CloseSandboxProcessInputRequest, ConversationHandle,
     ConversationId, ConversationRecord, CreateSandboxRequest, Event, EventData, EventId,
     EventQuery, EventStream, ExoHarness, ForkConversationRequest, GetEventsResult,
-    GetSandboxCapabilitiesRequest, GetSandboxProcessEventsResult, NewAgentRequest,
-    NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result, RunInSandboxRequest,
-    SandboxCapabilities, SandboxId, SandboxProcess, SandboxProcessEventQuery, SandboxProcessParts,
-    SandboxProcessRecord, SandboxProcessStatus, SandboxServiceRecord, Secret, SecretId,
-    SecretMetadata, SessionId, SnapshotId, StartSandboxProcessRequest, StartSandboxRequest,
-    StartSandboxServiceRequest, TurnHandle, TurnRecord, WaitSandboxProcessRequest,
-    WriteArtifactRequest, WriteSandboxProcessInputRequest,
+    GetSandboxProcessEventsResult, NewAgentRequest, NewConversationRequest, PutSecretRequest,
+    ReadArtifactRequest, Result, RunInSandboxRequest, SandboxId, SandboxProcess,
+    SandboxProcessEventQuery, SandboxProcessParts, SandboxProcessRecord, SandboxProcessStatus,
+    Secret, SecretId, SecretMetadata, SessionId, SnapshotId, StartSandboxProcessRequest,
+    StartSandboxRequest, TurnHandle, TurnRecord, WaitSandboxProcessRequest, WriteArtifactRequest,
+    WriteSandboxProcessInputRequest,
 };
 
 #[derive(Clone)]
@@ -667,24 +666,6 @@ impl ConversationHandle for HttpConversationHandle {
         }
     }
 
-    async fn get_sandbox_capabilities(
-        &self,
-        request: GetSandboxCapabilitiesRequest,
-    ) -> Result<SandboxCapabilities> {
-        match self
-            .harness
-            .request(Request::ConversationGetSandboxCapabilities {
-                agent_id: self.agent_id,
-                conversation_id: self.record.id,
-                request,
-            })
-            .await?
-        {
-            Response::SandboxCapabilities { capabilities } => Ok(capabilities),
-            response => unexpected_response(response, "sandbox_capabilities"),
-        }
-    }
-
     async fn start_sandbox_process(
         &self,
         request: StartSandboxProcessRequest,
@@ -700,24 +681,6 @@ impl ConversationHandle for HttpConversationHandle {
         {
             Response::SandboxProcess { process } => Ok(process),
             response => unexpected_response(response, "sandbox_process"),
-        }
-    }
-
-    async fn start_sandbox_service(
-        &self,
-        request: StartSandboxServiceRequest,
-    ) -> Result<SandboxServiceRecord> {
-        match self
-            .harness
-            .request(Request::ConversationStartSandboxService {
-                agent_id: self.agent_id,
-                conversation_id: self.record.id,
-                request,
-            })
-            .await?
-        {
-            Response::SandboxService { service } => Ok(service),
-            response => unexpected_response(response, "sandbox_service"),
         }
     }
 
@@ -819,6 +782,7 @@ impl ConversationHandle for HttpConversationHandle {
         let process = self
             .start_sandbox_process(StartSandboxProcessRequest {
                 sandbox_id: sandbox_id.clone(),
+                name: None,
                 command: request.command,
                 env: request.env,
                 cwd: None,

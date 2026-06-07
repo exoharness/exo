@@ -570,6 +570,7 @@ impl TypeScriptRunnerProcess {
                 let process = conversation
                     .start_sandbox_process(StartSandboxProcessRequest {
                         sandbox_id: sandbox_id.clone(),
+                        name: None,
                         command,
                         env,
                         cwd: None,

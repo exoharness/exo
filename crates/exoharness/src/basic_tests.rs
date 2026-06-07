@@ -19,15 +19,13 @@ use crate::test_support::{local_test_config, local_test_config_with_daytona};
 use crate::{
     Artifact, ArtifactVersion, BasicExoHarness, BeginTurnRequest, Binding, BoxAsyncRead,
     BoxAsyncWrite, CloseSandboxProcessInputRequest, CreateSandboxRequest, EventData, EventKind,
-    EventQuery, EventQueryDirection, ExoHarness, ForkConversationRequest,
-    GetSandboxCapabilitiesRequest, ManagedSandboxBackend, ManagedSandboxHandle, NewAgentRequest,
-    NewConversationRequest, PutSecretRequest, RunInSandboxRequest, SandboxCapabilities,
-    SandboxCommand, SandboxCommandOutput, SandboxEnvMode, SandboxProcessEvent,
+    EventQuery, EventQueryDirection, ExoHarness, ForkConversationRequest, ManagedSandboxBackend,
+    ManagedSandboxHandle, NewAgentRequest, NewConversationRequest, PutSecretRequest,
+    RunInSandboxRequest, SandboxCommand, SandboxCommandOutput, SandboxProcessEvent,
     SandboxProcessEventQuery, SandboxProcessParts, SandboxProcessStatus, SandboxProcessStdin,
-    SandboxProvider, SandboxProviderConfig, SandboxRequest, SandboxServicePort,
-    SandboxServiceProtocol, SandboxServiceStatus, Secret, SnapshotPayload,
-    StartSandboxProcessRequest, StartSandboxServiceRequest, WaitSandboxProcessRequest,
-    WriteArtifactRequest, WriteSandboxProcessInputRequest,
+    SandboxProvider, SandboxProviderConfig, SandboxRequest, Secret, SnapshotPayload,
+    StartSandboxProcessRequest, WaitSandboxProcessRequest, WriteArtifactRequest,
+    WriteSandboxProcessInputRequest,
 };
 
 #[tokio::test(flavor = "current_thread")]
@@ -714,6 +712,7 @@ async fn basic_backend_exposes_process_events_and_input() {
     let process = conversation
         .start_sandbox_process(StartSandboxProcessRequest {
             sandbox_id: sandbox_id.clone(),
+            name: None,
             command: vec!["/bin/sh".to_string(), "-lc".to_string(), "cat".to_string()],
             env: Default::default(),
             cwd: None,
@@ -806,7 +805,7 @@ async fn basic_backend_exposes_process_events_and_input() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn basic_backend_exposes_sandbox_capabilities_and_services() {
+async fn basic_backend_records_process_name_metadata() {
     let tempdir = TempDir::new().expect("tempdir");
     let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
         .await
@@ -835,20 +834,10 @@ async fn basic_backend_exposes_sandbox_capabilities_and_services() {
         .await
         .expect("sandbox should be created");
 
-    let capabilities = conversation
-        .get_sandbox_capabilities(GetSandboxCapabilitiesRequest {
+    let process = conversation
+        .start_sandbox_process(StartSandboxProcessRequest {
             sandbox_id: sandbox_id.clone(),
-        })
-        .await
-        .expect("capabilities should read");
-    assert!(capabilities.named_acquire);
-    assert!(capabilities.process_stdin);
-    assert_eq!(capabilities.process_env, SandboxEnvMode::ProcessLaunch);
-
-    let service = conversation
-        .start_sandbox_service(StartSandboxServiceRequest {
-            sandbox_id: sandbox_id.clone(),
-            name: "echo-service".to_string(),
+            name: Some("echo-service".to_string()),
             command: vec![
                 "/bin/sh".to_string(),
                 "-lc".to_string(),
@@ -856,24 +845,22 @@ async fn basic_backend_exposes_sandbox_capabilities_and_services() {
             ],
             env: Default::default(),
             cwd: None,
-            ports: vec![SandboxServicePort {
-                name: Some("http".to_string()),
-                port: 8080,
-                protocol: SandboxServiceProtocol::Http,
-            }],
+            mode: Default::default(),
+            stdin: SandboxProcessStdin::None,
+            output: Default::default(),
+            lifecycle: Default::default(),
         })
         .await
-        .expect("service should start");
-    assert_eq!(service.name, "echo-service");
-    assert_eq!(service.status, SandboxServiceStatus::Starting);
+        .expect("named process should start");
+    assert_eq!(process.name.as_deref(), Some("echo-service"));
 
     let status = conversation
         .wait_sandbox_process(WaitSandboxProcessRequest {
             sandbox_id: sandbox_id.clone(),
-            process_id: service.process_id.clone(),
+            process_id: process.id.clone(),
         })
         .await
-        .expect("service process should wait");
+        .expect("named process should wait");
     assert_eq!(status, SandboxProcessStatus::Exited { exit_code: 0 });
 
     let events = conversation
@@ -883,22 +870,14 @@ async fn basic_backend_exposes_sandbox_capabilities_and_services() {
         .events;
     assert!(events.iter().any(|event| matches!(
         &event.data,
-        EventData::SandboxCapabilitiesReported {
+        EventData::SandboxProcessStarted {
             sandbox_id: event_sandbox_id,
-            capabilities,
-        } if event_sandbox_id == &sandbox_id
-            && capabilities.process_env == SandboxEnvMode::ProcessLaunch
-    )));
-    assert!(events.iter().any(|event| matches!(
-        &event.data,
-        EventData::SandboxServiceStarted {
-            sandbox_id: event_sandbox_id,
-            service_id,
             process_id,
+            name: Some(name),
             ..
         } if event_sandbox_id == &sandbox_id
-            && service_id == &service.id
-            && process_id == &service.process_id
+            && process_id == &process.id
+            && name == "echo-service"
     )));
 }
 
@@ -924,6 +903,7 @@ async fn sandbox_process_terminal_event_waits_for_output_drain() {
     let process = conversation
         .start_sandbox_process(StartSandboxProcessRequest {
             sandbox_id: sandbox_id.clone(),
+            name: None,
             command: vec!["test".to_string()],
             env: Default::default(),
             cwd: None,
@@ -999,6 +979,7 @@ async fn wait_sandbox_process_returns_after_concurrent_completion() {
     let process = conversation
         .start_sandbox_process(StartSandboxProcessRequest {
             sandbox_id: sandbox_id.clone(),
+            name: None,
             command: vec!["test".to_string()],
             env: Default::default(),
             cwd: None,
@@ -1160,10 +1141,6 @@ impl TestSandboxBackend {
 
 #[async_trait]
 impl ManagedSandboxBackend for TestSandboxBackend {
-    fn capabilities(&self) -> SandboxCapabilities {
-        test_sandbox_capabilities()
-    }
-
     async fn acquire(
         &self,
         _request: SandboxRequest,
@@ -1192,10 +1169,6 @@ impl ManagedSandboxHandle for TestSandboxHandle {
         "test-sandbox"
     }
 
-    fn capabilities(&self) -> SandboxCapabilities {
-        test_sandbox_capabilities()
-    }
-
     async fn exec(&self, _command: &SandboxCommand) -> crate::Result<SandboxCommandOutput> {
         bail!("test sandbox handle only supports start_process")
     }
@@ -1221,21 +1194,6 @@ impl ManagedSandboxHandle for TestSandboxHandle {
 
     async fn snapshot(&self) -> crate::Result<SnapshotPayload> {
         bail!("test sandbox handle does not support snapshots")
-    }
-}
-
-fn test_sandbox_capabilities() -> SandboxCapabilities {
-    SandboxCapabilities {
-        named_acquire: true,
-        exec: true,
-        exec_env: true,
-        process_env: SandboxEnvMode::ProcessLaunch,
-        process_stdin: true,
-        process_output_stream: true,
-        detached_process: false,
-        process_reconnect: false,
-        private_service_tunnel: false,
-        snapshots: false,
     }
 }
 

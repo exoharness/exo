@@ -87,18 +87,10 @@ pub trait ConversationHandle: Send + Sync {
     async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId>;
     async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()>;
     async fn stop_sandbox(&self, id: SandboxId) -> Result<()>;
-    async fn get_sandbox_capabilities(
-        &self,
-        request: GetSandboxCapabilitiesRequest,
-    ) -> Result<SandboxCapabilities>;
     async fn start_sandbox_process(
         &self,
         request: StartSandboxProcessRequest,
     ) -> Result<SandboxProcessRecord>;
-    async fn start_sandbox_service(
-        &self,
-        request: StartSandboxServiceRequest,
-    ) -> Result<SandboxServiceRecord>;
     async fn write_sandbox_process_input(
         &self,
         request: WriteSandboxProcessInputRequest,
@@ -220,18 +212,12 @@ impl EventKind {
     pub const SANDBOX_CREATED: EventKind = EventKind(Cow::Borrowed("sandbox_created"));
     pub const SANDBOX_STARTED: EventKind = EventKind(Cow::Borrowed("sandbox_started"));
     pub const SANDBOX_STOPPED: EventKind = EventKind(Cow::Borrowed("sandbox_stopped"));
-    pub const SANDBOX_CAPABILITIES_REPORTED: EventKind =
-        EventKind(Cow::Borrowed("sandbox_capabilities_reported"));
     pub const SANDBOX_SNAPSHOTTED: EventKind = EventKind(Cow::Borrowed("sandbox_snapshotted"));
     pub const SANDBOX_PROCESS_STARTED: EventKind =
         EventKind(Cow::Borrowed("sandbox_process_started"));
     pub const SANDBOX_PROCESS_STATE_UPDATED: EventKind =
         EventKind(Cow::Borrowed("sandbox_process_state_updated"));
     pub const SANDBOX_PROCESS_EVENT: EventKind = EventKind(Cow::Borrowed("sandbox_process_event"));
-    pub const SANDBOX_SERVICE_STARTED: EventKind =
-        EventKind(Cow::Borrowed("sandbox_service_started"));
-    pub const SANDBOX_SERVICE_STATE_UPDATED: EventKind =
-        EventKind(Cow::Borrowed("sandbox_service_state_updated"));
 
     pub fn custom(name: impl Into<Cow<'static, str>>) -> Self {
         Self(name.into())
@@ -348,10 +334,6 @@ pub enum EventData {
     SandboxStopped {
         sandbox_id: SandboxId,
     },
-    SandboxCapabilitiesReported {
-        sandbox_id: SandboxId,
-        capabilities: SandboxCapabilities,
-    },
     SandboxSnapshotted {
         sandbox_id: SandboxId,
         snapshot_id: SnapshotId,
@@ -359,6 +341,8 @@ pub enum EventData {
     SandboxProcessStarted {
         sandbox_id: SandboxId,
         process_id: SandboxProcessId,
+        #[serde(default)]
+        name: Option<String>,
         command: Vec<String>,
         cwd: Option<String>,
         mode: SandboxProcessMode,
@@ -378,21 +362,6 @@ pub enum EventData {
         sandbox_id: SandboxId,
         process_id: SandboxProcessId,
         event: SandboxProcessEvent,
-    },
-    SandboxServiceStarted {
-        sandbox_id: SandboxId,
-        service_id: SandboxServiceId,
-        name: String,
-        process_id: SandboxProcessId,
-        ports: Vec<SandboxServicePort>,
-        status: SandboxServiceStatus,
-        provider_state: Option<Value>,
-    },
-    SandboxServiceStateUpdated {
-        sandbox_id: SandboxId,
-        service_id: SandboxServiceId,
-        status: SandboxServiceStatus,
-        provider_state: Option<Value>,
     },
     Custom {
         event_type: String,
@@ -422,13 +391,10 @@ impl EventData {
             Self::SandboxCreated { .. } => EventKind::SANDBOX_CREATED,
             Self::SandboxStarted { .. } => EventKind::SANDBOX_STARTED,
             Self::SandboxStopped { .. } => EventKind::SANDBOX_STOPPED,
-            Self::SandboxCapabilitiesReported { .. } => EventKind::SANDBOX_CAPABILITIES_REPORTED,
             Self::SandboxSnapshotted { .. } => EventKind::SANDBOX_SNAPSHOTTED,
             Self::SandboxProcessStarted { .. } => EventKind::SANDBOX_PROCESS_STARTED,
             Self::SandboxProcessStateUpdated { .. } => EventKind::SANDBOX_PROCESS_STATE_UPDATED,
             Self::SandboxProcessEvent { .. } => EventKind::SANDBOX_PROCESS_EVENT,
-            Self::SandboxServiceStarted { .. } => EventKind::SANDBOX_SERVICE_STARTED,
-            Self::SandboxServiceStateUpdated { .. } => EventKind::SANDBOX_SERVICE_STATE_UPDATED,
             Self::Custom { event_type, .. } => EventKind::custom(event_type.clone()),
         }
     }
@@ -494,34 +460,6 @@ pub struct CreateSandboxRequest {
     pub file_system_mounts: Option<Vec<FileSystemMount>>,
     pub enable_networking: Option<bool>,
     pub idle_seconds: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct GetSandboxCapabilitiesRequest {
-    pub sandbox_id: SandboxId,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SandboxEnvMode {
-    None,
-    ExecOnly,
-    ProcessLaunch,
-    PersistentSandbox,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SandboxCapabilities {
-    pub named_acquire: bool,
-    pub exec: bool,
-    pub exec_env: bool,
-    pub process_env: SandboxEnvMode,
-    pub process_stdin: bool,
-    pub process_output_stream: bool,
-    pub detached_process: bool,
-    pub process_reconnect: bool,
-    pub private_service_tunnel: bool,
-    pub snapshots: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -594,6 +532,8 @@ pub struct RunInSandboxRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StartSandboxProcessRequest {
     pub sandbox_id: SandboxId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub command: Vec<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
@@ -606,52 +546,6 @@ pub struct StartSandboxProcessRequest {
     pub output: SandboxProcessOutput,
     #[serde(default)]
     pub lifecycle: SandboxProcessLifecycle,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct StartSandboxServiceRequest {
-    pub sandbox_id: SandboxId,
-    pub name: String,
-    pub command: Vec<String>,
-    #[serde(default)]
-    pub env: HashMap<String, String>,
-    pub cwd: Option<String>,
-    #[serde(default)]
-    pub ports: Vec<SandboxServicePort>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SandboxServicePort {
-    pub name: Option<String>,
-    pub port: u16,
-    pub protocol: SandboxServiceProtocol,
-}
-
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SandboxServiceProtocol {
-    #[default]
-    Http,
-    Tcp,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SandboxServiceRecord {
-    pub id: SandboxServiceId,
-    pub sandbox_id: SandboxId,
-    pub name: String,
-    pub process_id: SandboxProcessId,
-    pub ports: Vec<SandboxServicePort>,
-    pub status: SandboxServiceStatus,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum SandboxServiceStatus {
-    Starting,
-    Ready,
-    Failed { message: String },
-    Stopped,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -690,6 +584,8 @@ pub enum SandboxProcessLifecycle {
 pub struct SandboxProcessRecord {
     pub id: SandboxProcessId,
     pub sandbox_id: SandboxId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub status: SandboxProcessStatus,
 }
 
@@ -854,7 +750,7 @@ pub enum Binding {
 #[serde(tag = "provider", rename_all = "lowercase")]
 pub enum SandboxProviderConfig {
     Docker {
-        #[serde(default = "default_docker_image")]
+        #[serde(default = "crate::sandbox_provider::default_docker_image")]
         default_image: String,
     },
     Daytona {
@@ -867,7 +763,7 @@ pub enum SandboxProviderConfig {
         organization_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         api_url: Option<String>,
-        #[serde(default = "default_daytona_image")]
+        #[serde(default = "crate::sandbox_provider::default_daytona_image")]
         default_image: String,
     },
     Vercel {
@@ -877,31 +773,9 @@ pub enum SandboxProviderConfig {
         project_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         api_url: Option<String>,
-        #[serde(default = "default_vercel_image")]
+        #[serde(default = "crate::sandbox_provider::default_vercel_image")]
         default_image: String,
     },
-    // To be implemented in followup PRs:
-    // E2b {
-    //     api_key_secret_id: SecretId,
-    //     api_url: Option<String>,
-    //     default_image: String,  // #[serde(default = "default_e2b_image")]
-    // },
-    // ExeDev {
-    //     token_secret_id: SecretId,     // bearer token (SSH-key-signed), not an api key
-    //     region: Option<String>,        // datacenter: LAX | NYC | FRA | ...
-    //     api_url: Option<String>,
-    //     default_image: String,   // #[serde(default = "default_exedev_image")]
-    // },
-}
-
-pub fn default_daytona_image() -> String {
-    "daytonaio/sandbox:0.8.0".to_string()
-}
-pub fn default_vercel_image() -> String {
-    "node24".to_string()
-}
-pub fn default_docker_image() -> String {
-    "docker.io/library/ubuntu:24.04".to_string()
 }
 
 impl SandboxProviderConfig {
@@ -945,7 +819,6 @@ pub type ToolCallId = String;
 pub type ArtifactId = Uuid7;
 pub type SandboxId = String;
 pub type SandboxProcessId = String;
-pub type SandboxServiceId = String;
 pub type SnapshotId = Uuid7;
 pub type BindingId = Uuid7;
 pub type SecretId = Uuid7;

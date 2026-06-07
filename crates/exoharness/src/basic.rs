@@ -36,16 +36,14 @@ use crate::{
     BoxAsyncRead, BoxAsyncWrite, CancelSandboxProcessRequest, CloseSandboxProcessInputRequest,
     ConversationHandle, ConversationId, ConversationRecord, CreateSandboxRequest, Event, EventData,
     EventId, EventKind, EventQuery, EventQueryDirection, EventStream, ExoHarness, FileSystemMount,
-    ForkConversationRequest, GetEventsResult, GetSandboxCapabilitiesRequest,
-    GetSandboxProcessEventsResult, NewAgentRequest, NewConversationRequest, PutSecretRequest,
-    ReadArtifactRequest, Result, RunInSandboxRequest, SandboxCapabilities, SandboxId,
-    SandboxProcess, SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessId,
-    SandboxProcessLifecycle, SandboxProcessMode, SandboxProcessOutput, SandboxProcessParts,
-    SandboxProcessRecord, SandboxProcessStatus, SandboxProcessStdin, SandboxProvider,
-    SandboxProviderConfig, SandboxServiceRecord, SandboxServiceStatus, Secret, SecretId,
-    SecretMetadata, SecretType, SessionId, SnapshotId, StartSandboxProcessRequest,
-    StartSandboxRequest, StartSandboxServiceRequest, TurnHandle, TurnId, TurnRecord, Uuid7,
-    WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
+    ForkConversationRequest, GetEventsResult, GetSandboxProcessEventsResult, NewAgentRequest,
+    NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result, RunInSandboxRequest,
+    SandboxId, SandboxProcess, SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessId,
+    SandboxProcessMode, SandboxProcessParts, SandboxProcessRecord, SandboxProcessStatus,
+    SandboxProcessStdin, SandboxProvider, SandboxProviderConfig, Secret, SecretId, SecretMetadata,
+    SecretType, SessionId, SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnHandle,
+    TurnId, TurnRecord, Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest,
+    WriteSandboxProcessInputRequest,
 };
 
 #[derive(Debug, Clone)]
@@ -1717,28 +1715,6 @@ impl ConversationHandle for BasicConversationHandle {
         Ok(())
     }
 
-    async fn get_sandbox_capabilities(
-        &self,
-        request: GetSandboxCapabilitiesRequest,
-    ) -> Result<SandboxCapabilities> {
-        let sandbox = self.load_sandbox(&request.sandbox_id).await?;
-        let sandbox_handle = self
-            .active_sandbox_handle(&request.sandbox_id, &sandbox)
-            .await?;
-        let capabilities = sandbox_handle.capabilities();
-        self.append_events_internal(
-            None,
-            None,
-            None,
-            vec![EventData::SandboxCapabilitiesReported {
-                sandbox_id: request.sandbox_id,
-                capabilities: capabilities.clone(),
-            }],
-        )
-        .await?;
-        Ok(capabilities)
-    }
-
     async fn start_sandbox_process(
         &self,
         request: StartSandboxProcessRequest,
@@ -1764,6 +1740,7 @@ impl ConversationHandle for BasicConversationHandle {
         let stdin_mode = request.stdin;
         let output = request.output;
         let lifecycle = request.lifecycle;
+        let name = request.name.clone();
         let parts = sandbox_handle
             .start_process(&SandboxCommand {
                 argv: command.clone(),
@@ -1801,6 +1778,7 @@ impl ConversationHandle for BasicConversationHandle {
             vec![EventData::SandboxProcessStarted {
                 sandbox_id: sandbox_id.clone(),
                 process_id: process_id.clone(),
+                name: name.clone(),
                 command,
                 cwd,
                 mode,
@@ -1840,50 +1818,9 @@ impl ConversationHandle for BasicConversationHandle {
         Ok(SandboxProcessRecord {
             id: process_id,
             sandbox_id,
+            name,
             status: SandboxProcessStatus::Running,
         })
-    }
-
-    async fn start_sandbox_service(
-        &self,
-        request: StartSandboxServiceRequest,
-    ) -> Result<SandboxServiceRecord> {
-        let process = self
-            .start_sandbox_process(StartSandboxProcessRequest {
-                sandbox_id: request.sandbox_id.clone(),
-                command: request.command,
-                env: request.env,
-                cwd: request.cwd,
-                mode: SandboxProcessMode::Exec,
-                stdin: SandboxProcessStdin::None,
-                output: SandboxProcessOutput::Stream,
-                lifecycle: SandboxProcessLifecycle::Detached,
-            })
-            .await?;
-        let service = SandboxServiceRecord {
-            id: format!("service-{}", Uuid7::now()),
-            sandbox_id: request.sandbox_id.clone(),
-            name: request.name,
-            process_id: process.id,
-            ports: request.ports,
-            status: SandboxServiceStatus::Starting,
-        };
-        self.append_events_internal(
-            None,
-            None,
-            None,
-            vec![EventData::SandboxServiceStarted {
-                sandbox_id: service.sandbox_id.clone(),
-                service_id: service.id.clone(),
-                name: service.name.clone(),
-                process_id: service.process_id.clone(),
-                ports: service.ports.clone(),
-                status: service.status.clone(),
-                provider_state: None,
-            }],
-        )
-        .await?;
-        Ok(service)
     }
 
     async fn write_sandbox_process_input(

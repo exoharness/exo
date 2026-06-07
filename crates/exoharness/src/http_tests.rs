@@ -157,6 +157,7 @@ async fn http_exoharness_supports_sandbox_process_events() {
     let process = conversation
         .start_sandbox_process(StartSandboxProcessRequest {
             sandbox_id: sandbox_id.clone(),
+            name: None,
             command: vec!["/bin/sh".to_string(), "-lc".to_string(), "cat".to_string()],
             env: Default::default(),
             cwd: None,

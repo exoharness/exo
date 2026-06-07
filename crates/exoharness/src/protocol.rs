@@ -5,11 +5,10 @@ use crate::{
     BeginTurnRequest, Binding, BindingId, BindingRecord, CancelSandboxProcessRequest,
     CloseSandboxProcessInputRequest, ConversationId, ConversationRecord, CreateSandboxRequest,
     Event, EventData, EventId, EventQuery, ForkConversationRequest, GetEventsResult,
-    GetSandboxCapabilitiesRequest, GetSandboxProcessEventsResult, NewAgentRequest,
-    NewConversationRequest, PutSecretRequest, ReadArtifactRequest, SandboxCapabilities, SandboxId,
-    SandboxProcessEventQuery, SandboxProcessRecord, SandboxProcessStatus, SandboxServiceRecord,
-    Secret, SecretId, SecretMetadata, SessionId, SnapshotId, StartSandboxProcessRequest,
-    StartSandboxRequest, StartSandboxServiceRequest, TurnId, TurnRecord, WaitSandboxProcessRequest,
+    GetSandboxProcessEventsResult, NewAgentRequest, NewConversationRequest, PutSecretRequest,
+    ReadArtifactRequest, SandboxId, SandboxProcessEventQuery, SandboxProcessRecord,
+    SandboxProcessStatus, Secret, SecretId, SecretMetadata, SessionId, SnapshotId,
+    StartSandboxProcessRequest, StartSandboxRequest, TurnId, TurnRecord, WaitSandboxProcessRequest,
     WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
@@ -185,20 +184,10 @@ pub enum Request {
         conversation_id: ConversationId,
         sandbox_id: SandboxId,
     },
-    ConversationGetSandboxCapabilities {
-        agent_id: AgentId,
-        conversation_id: ConversationId,
-        request: GetSandboxCapabilitiesRequest,
-    },
     ConversationStartSandboxProcess {
         agent_id: AgentId,
         conversation_id: ConversationId,
         request: StartSandboxProcessRequest,
-    },
-    ConversationStartSandboxService {
-        agent_id: AgentId,
-        conversation_id: ConversationId,
-        request: StartSandboxServiceRequest,
     },
     ConversationWriteSandboxProcessInput {
         agent_id: AgentId,
@@ -315,11 +304,7 @@ impl Request {
             Self::ConversationSnapshotSandbox { .. } => "conversation_snapshot_sandbox",
             Self::ConversationStartSandbox { .. } => "conversation_start_sandbox",
             Self::ConversationStopSandbox { .. } => "conversation_stop_sandbox",
-            Self::ConversationGetSandboxCapabilities { .. } => {
-                "conversation_get_sandbox_capabilities"
-            }
             Self::ConversationStartSandboxProcess { .. } => "conversation_start_sandbox_process",
-            Self::ConversationStartSandboxService { .. } => "conversation_start_sandbox_service",
             Self::ConversationWriteSandboxProcessInput { .. } => {
                 "conversation_write_sandbox_process_input"
             }
@@ -389,14 +374,8 @@ pub enum Response {
     SnapshotId {
         snapshot_id: SnapshotId,
     },
-    SandboxCapabilities {
-        capabilities: SandboxCapabilities,
-    },
     SandboxProcess {
         process: SandboxProcessRecord,
-    },
-    SandboxService {
-        service: SandboxServiceRecord,
     },
     SandboxProcessEvents {
         result: GetSandboxProcessEventsResult,
@@ -448,9 +427,7 @@ impl Response {
             Self::ArtifactVersion { .. } => "artifact_version",
             Self::SandboxId { .. } => "sandbox_id",
             Self::SnapshotId { .. } => "snapshot_id",
-            Self::SandboxCapabilities { .. } => "sandbox_capabilities",
             Self::SandboxProcess { .. } => "sandbox_process",
-            Self::SandboxService { .. } => "sandbox_service",
             Self::SandboxProcessEvents { .. } => "sandbox_process_events",
             Self::SandboxProcessStatus { .. } => "sandbox_process_status",
             Self::Bindings { .. } => "bindings",
