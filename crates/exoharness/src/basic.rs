@@ -1537,19 +1537,7 @@ impl ConversationHandle for BasicConversationHandle {
         let prepared = self.prepare_sandbox_request(request).await?;
         let _guard = self.harness.inner.write_lock.lock().await;
         if let Some((sandbox_id, sandbox)) = self.find_matching_sandbox(&prepared).await? {
-            let sandbox_handle = self
-                .harness
-                .inner
-                .sandbox_backend_for_provider(sandbox.provider)
-                .await?
-                .acquire(sandbox_request(self.record.id, &sandbox_id, &sandbox))
-                .await?;
-            self.harness
-                .inner
-                .running_sandboxes
-                .lock()
-                .await
-                .insert(sandbox_id.clone(), sandbox_handle);
+            self.active_sandbox_handle(&sandbox_id, &sandbox).await?;
             return Ok(sandbox_id);
         }
         self.create_new_sandbox_locked(prepared).await

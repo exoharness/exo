@@ -42,7 +42,7 @@ The important safety boundary is that inbound adapter messages wake the conversa
 
 Exoclaw's shell tool runs inside a sandbox. By default, Exoclaw conversations use `sandboxScope: "agent"`, so shell commands share one persistent agent sandbox across conversations. A conversation can opt into `sandboxScope: "conversation"` when it needs an isolated sandbox for that conversation.
 
-The shared agent sandbox is implemented as an agent-owned named reusable sandbox. Exoclaw stores the owner conversation and sandbox name in an agent artifact, then reacquires the sandbox through `create_sandbox` with that name. The harness handles reuse when the named sandbox is still running and recreates it when needed, so Exoclaw does not need to scan raw sandbox lifecycle events to find its current environment.
+The shared agent sandbox is implemented as an agent-owned named reusable sandbox. Exoclaw stores the owner conversation and sandbox name in an agent artifact, then resolves the sandbox through `create_sandbox` with that name. The harness reuses an active sandbox handle when one exists, including a handle restored from a snapshot, and recreates the sandbox when needed. Exoclaw does not need to scan raw sandbox lifecycle events to find its current environment.
 
 The sandbox control tools expose filesystem checkpointing:
 
@@ -52,9 +52,9 @@ The sandbox control tools expose filesystem checkpointing:
 
 The default scope is the shared agent sandbox. Use conversation scope only when the conversation was configured to use its own sandbox. Tool results return the selected scope, sandbox id, owner conversation id, and snapshot id so later actions can target the same environment explicitly.
 
-Snapshot and rewind availability depends on the sandbox backend. Docker warm sandboxes support this flow; one-shot or unsupported backends should report clear errors from the underlying sandbox implementation. For local Exoclaw testing on macOS, the repl wrapper can set both the conversation provider and process backend with `--sandbox-provider docker`.
+Snapshot and rewind availability depends on the sandbox backend. Docker warm sandboxes support this flow; one-shot or unsupported backends should report clear errors from the underlying sandbox implementation. For local Exoclaw testing on macOS, the REPL wrapper can set both the conversation provider and process backend with `--sandbox-provider docker`.
 
-Sandbox lifecycle history remains canonical. `snapshot_sandbox` records a `sandbox_snapshotted` event, and `rewind_sandbox` records a snapshot-backed `sandbox_started` event in the same active turn as the corresponding tool request and result. This lets later history readers reconstruct what happened from conversation events instead of relying only on tool-result artifacts.
+Sandbox lifecycle history remains canonical and append-only. `snapshot_sandbox` records a `sandbox_snapshotted` event, and `rewind_sandbox` records a snapshot-backed `sandbox_started` event in the same active turn as the corresponding tool request and result. Rewind restores sandbox filesystem state; it does not roll back conversation events, artifacts, adapter records, scheduler records, secrets, or other host-side harness state. This lets later history readers reconstruct what happened from conversation events instead of relying only on tool-result artifacts.
 
 `list_sandbox_snapshots` reads Exoclaw's known snapshot registry, stored as an agent-owned artifact at `config/exoclaw-sandbox-snapshots.json`. That registry is useful for self-control because it lists snapshots created or selected through these tools and tracks the current known snapshot. It is not intended to be a complete inventory of every backend snapshot ever created outside Exoclaw.
 
