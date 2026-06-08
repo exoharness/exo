@@ -1,29 +1,50 @@
 # Exoclaw Harness
 
-Exoclaw is a persistent agent built on exoclaw designed to be helpful wherever
-there is a task to do from a computer. It supports task scheuling, a full
+Exoclaw is a persistent agent built on Exo designed to be helpful wherever
+there is a task to do from a computer. It supports task scheduling, a full
 sandbox where it can install its own tools and integrations, and right now
-supports WhatsApp, Signal, and IRC out of the box.
+supports IRC, WhatsApp, Signal, and Discord out of the box.
 
 Exoclaw includes a helper script to start up all the subservices (task
 scheduling and adapters). To get started, simply run:
 
 ```bash
-  examples/exoclaw/scripts/exoclaw-repl fresh \
-  --pull-sandbox \
-  --agent exoclaw \
-  --agent-name "exoclaw" \
-  --conversation dev \
-  --setup-all \
-  --setup-profile
+examples/exoclaw/scripts/exoclaw-control canonical
 ```
 
-Or for a minimal start (just REPL, pull sandbox):
-`examples/exoclaw/scripts/exoclaw-repl --pull-sandbox`
+This canonical local setup uses the Docker sandbox backend, mounts this repo
+into the sandbox at `/workspace/exo`, configures the scheduler and service
+guardian for Docker-backed work, starts scheduler and adapter services, sends
+IRC and Discord setup prompts, and drops into a control REPL where you can chat
+with Exoclaw.
 
-## Guardian
+For a fresh canonical setup that deletes existing agents/conversations first:
 
-`examples/exoclaw/scripts/exoclaw-guardian` is a host-side helper for
+```bash
+examples/exoclaw/scripts/exoclaw-control fresh --canonical
+```
+
+Or for a minimal start without adapter setup:
+`examples/exoclaw/scripts/exoclaw-control --pull-sandbox`
+
+## Self Introspection
+
+Exoclaw starts with sandbox shell support by default. The startup script mounts
+this repository into the sandbox at `/workspace/exo` and makes that path
+available to the harness as `EXOCLAW_REPO`. The self map lives at:
+
+```text
+/workspace/exo/examples/exoclaw/SELF.md
+```
+
+The checked-in source for that map is `examples/exoclaw/SELF.md`. It points
+Exoclaw to the harness, prompts, adapter runtime, scheduler, sandbox tools, and
+service guardian. Use `--self-repo-mount <path>` or `EXOCLAW_REPO` to choose a
+different sandbox mount path.
+
+## Service Guardian
+
+`examples/exoclaw/scripts/exoclaw-service-guardian` is a host-side helper for
 self-maintenance. It owns build and service-control actions that should happen
 outside the agent's sandbox, while preserving `.exo` state such as adapter
 pairing data, conversations, artifacts, and sandbox records.
@@ -31,25 +52,33 @@ pairing data, conversations, artifacts, and sandbox records.
 Common commands:
 
 ```bash
-examples/exoclaw/scripts/exoclaw-guardian status
-examples/exoclaw/scripts/exoclaw-guardian build
-examples/exoclaw/scripts/exoclaw-guardian restart-adapters
-examples/exoclaw/scripts/exoclaw-guardian restart-scheduler
-examples/exoclaw/scripts/exoclaw-guardian restart-all --build
+examples/exoclaw/scripts/exoclaw-service-guardian status
+examples/exoclaw/scripts/exoclaw-service-guardian build
+examples/exoclaw/scripts/exoclaw-service-guardian restart-adapters
+examples/exoclaw/scripts/exoclaw-service-guardian restart-scheduler
+examples/exoclaw/scripts/exoclaw-service-guardian restart-all --build
 ```
 
 Save local launch settings for later restarts with:
 
 ```bash
-examples/exoclaw/scripts/exoclaw-guardian configure --sandbox-backend docker
+examples/exoclaw/scripts/exoclaw-service-guardian configure --sandbox-backend docker
 ```
 
-The guardian manages only the scheduler and adapter runners. Start or reconnect
-an interactive REPL with `examples/exoclaw/scripts/exoclaw-repl`.
+The service guardian manages only the scheduler and adapter runners. Start or
+reconnect an interactive REPL with `examples/exoclaw/scripts/exoclaw-control`.
 
 Exoclaw can call the same host-side surface through the `guardian_action` tool.
 That tool exposes only allowlisted actions such as `status`, `build`,
 `restart_adapters`, `restart_scheduler`, `restart_all`, and `logs`.
+Restart actions are handed off to a detached guardian process after a short
+delay so the current agent turn can finish before services stop. Detached
+restart output is written to `.exo/exoclaw-service-guardian-actions.log`.
+
+When `examples/exoclaw/scripts/exoclaw-control --control` is running, it also acts
+as the foreground REPL supervisor. Guardian builds write
+`.exo/exoclaw-control.restart`; the control wrapper sees that marker, restarts only
+the child `exo repl`, and keeps your terminal open.
 
 ## Setting up the identity
 
@@ -62,7 +91,7 @@ it as an additional developer prompt when it exists, and `.exo` is ignored by
 git. To create it interactively:
 
 ```bash
-examples/exoclaw/scripts/exoclaw-repl setup-profile
+examples/exoclaw/scripts/exoclaw-control setup-profile
 ```
 
 The script asks for the user's name and any extra local instructions. To use a
@@ -105,21 +134,26 @@ Adapters are host-owned long-running runtimes for external applications. They
 are intentionally separate from scheduled sandbox commands: adapters own sockets,
 reconnect behavior, inbound message parsing, event history, and conversation
 wake-ups. Agents configure adapters with tools, and the local adapter runner
-started by `examples/exoclaw/scripts/exoclaw-repl` keeps them connected.
+started by `examples/exoclaw/scripts/exoclaw-control` keeps them connected.
 
-Exoclaw ships with three adapters: IRC, WhatsApp, and Signal. The easiest way to
-use them is to have the script send all three setup prompts before opening the
-REPL:
+Exoclaw ships with IRC, WhatsApp, Signal, and Discord adapters. The canonical
+local setup turns on IRC and Discord:
 
 ```bash
-examples/exoclaw/scripts/exoclaw-repl --setup-all
+examples/exoclaw/scripts/exoclaw-control canonical
+```
+
+To send every setup prompt before opening the REPL:
+
+```bash
+examples/exoclaw/scripts/exoclaw-control --setup-all
 ```
 
 For a fresh control agent with a local profile prompt and all adapters:
 
 ```bash
 PATH="/opt/homebrew/opt/openjdk/bin:$PATH" \
-  examples/exoclaw/scripts/exoclaw-repl fresh \
+  examples/exoclaw/scripts/exoclaw-control fresh \
   --agent spooky \
   --agent-name Spooky \
   --conversation dev \
@@ -185,13 +219,13 @@ the cli. The following command will create a REPL with the agent and a
 persistent sandbox that will be durable across conversations
 
 ```bash
-examples/exoclaw/scripts/exoclaw-repl --pull-sandbox
+examples/exoclaw/scripts/exoclaw-control --pull-sandbox
 ```
 
 If you want a conversation to have its own sandbox, use `sandboxScope: "conversation"`:
 
 ```bash
-examples/exoclaw/scripts/exoclaw-repl --conversation isolated-dev --sandbox-scope conversation
+examples/exoclaw/scripts/exoclaw-control --conversation isolated-dev --sandbox-scope conversation
 exo --harness exoclaw conversation update exoclaw-agent isolated-dev --sandbox-scope conversation
 ```
 

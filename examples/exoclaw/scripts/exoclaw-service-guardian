@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 STATE_DIR="$ROOT_DIR/.exo"
-CONFIG_FILE="${EXOCLAW_GUARDIAN_CONFIG:-$STATE_DIR/exoclaw-guardian.env}"
+CONFIG_FILE="${EXOCLAW_SERVICE_GUARDIAN_CONFIG:-$STATE_DIR/exoclaw-service-guardian.env}"
 
 HARNESS="exoclaw"
 EXO_BIN="${EXO_BIN:-$ROOT_DIR/target/debug/exo}"
@@ -29,12 +29,13 @@ fi
 usage() {
   cat <<'EOF'
 Usage:
-  examples/exoclaw/scripts/exoclaw-guardian <command> [options]
+  examples/exoclaw/scripts/exoclaw-service-guardian <command> [options]
 
 Commands:
   status                    Show guardian-managed service status and logs
-  configure [options]       Save launch settings in .exo/exoclaw-guardian.env
-  build                     Build exo and the Exoclaw scheduler runner
+  configure [options]       Save launch settings in .exo/exoclaw-service-guardian.env
+  build                     Build exo and the Exoclaw scheduler runner, then ask
+                            the control REPL wrapper to refresh its child
   start-services            Start scheduler and adapter runners
   stop-services             Stop scheduler and adapter runners, preserving .exo state
   restart-services          Restart scheduler and adapter runners
@@ -50,11 +51,11 @@ Options:
   --sandbox-backend <name>  apple-container, docker, or local-process
   --scheduler-interval <n>  Scheduler polling interval seconds (default: 10)
   --adapter-limit <n>       Max adapters supervised by the runner (default: 50)
-  --config <path>           Guardian config path (default: .exo/exoclaw-guardian.env)
+  --config <path>           Service guardian config path (default: .exo/exoclaw-service-guardian.env)
   --build                   For restart-all, build before restarting services
   --help                    Show this help
 
-The guardian owns host-side services only. It never deletes .exo state, adapter
+The service guardian owns host-side services only. It never deletes .exo state, adapter
 pairing data, conversations, artifacts, or sandbox records.
 EOF
 }
@@ -87,7 +88,7 @@ write_config() {
     quote_var "SCHEDULER_INTERVAL_SECONDS" "$SCHEDULER_INTERVAL_SECONDS"
     quote_var "ADAPTER_LIMIT" "$ADAPTER_LIMIT"
   } >"$CONFIG_FILE"
-  echo "Wrote guardian config: $CONFIG_FILE"
+  echo "Wrote service guardian config: $CONFIG_FILE"
 }
 
 run_cargo() {
@@ -103,10 +104,28 @@ build_all() {
   run_cargo build -p exo --ignore-rust-version
   echo "Building Exoclaw scheduler runner..."
   run_cargo build --manifest-path examples/exoclaw/scheduler-runner/Cargo.toml --ignore-rust-version
+  request_repl_restart
+}
+
+request_repl_restart() {
+  ensure_state_dir
+  {
+    printf 'requested_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'reason=guardian-build\n'
+  } >"$(repl_restart_file)"
+  echo "Requested control REPL child restart: $(repl_restart_file)"
 }
 
 scheduler_pid_file() {
   echo "$STATE_DIR/exoclaw-scheduler.pid"
+}
+
+scheduler_lock_file() {
+  echo "$STATE_DIR/exoclaw-scheduler.lock"
+}
+
+repl_restart_file() {
+  echo "$STATE_DIR/exoclaw-control.restart"
 }
 
 adapters_pid_file() {
@@ -187,10 +206,14 @@ start_scheduler() {
     echo "Scheduler already running: $(<"$pid_file")"
     return
   fi
+  rm -f "$(scheduler_lock_file)"
   echo "Starting scheduler..."
-  nohup "$SCHEDULER_BIN" --env-file-if-exists "$ENV_FILE" \
-    run --watch --interval-seconds "$SCHEDULER_INTERVAL_SECONDS" \
-    >>"$log_file" 2>&1 &
+  local scheduler_args=(--env-file-if-exists "$ENV_FILE")
+  if [[ -n "$SANDBOX_BACKEND" ]]; then
+    scheduler_args+=(--sandbox-backend "$SANDBOX_BACKEND")
+  fi
+  nohup "$SCHEDULER_BIN" "${scheduler_args[@]}" run --watch \
+    --interval-seconds "$SCHEDULER_INTERVAL_SECONDS" >>"$log_file" 2>&1 &
   echo "$!" >"$pid_file"
   echo "Scheduler log: $log_file"
 }
@@ -231,6 +254,7 @@ stop_pid_file() {
 stop_scheduler() {
   stop_pid_file "Exoclaw scheduler" "$(scheduler_pid_file)"
   pkill -f "exoclaw-scheduler-runner .*run --watch" >/dev/null 2>&1 || true
+  rm -f "$(scheduler_lock_file)"
 }
 
 stop_adapters() {
@@ -279,7 +303,7 @@ service_status() {
 }
 
 status() {
-  echo "Guardian config: $CONFIG_FILE"
+  echo "Service guardian config: $CONFIG_FILE"
   echo "exo: $EXO_BIN"
   echo "scheduler: $SCHEDULER_BIN"
   echo "env file: $ENV_FILE"
@@ -288,6 +312,11 @@ status() {
   fi
   service_status "scheduler" "$(scheduler_pid_file)" "$(scheduler_log_file)"
   service_status "adapters" "$(adapters_pid_file)" "$(adapters_log_file)"
+  if [[ -f "$(repl_restart_file)" ]]; then
+    echo "repl restart: pending ($(repl_restart_file))"
+  else
+    echo "repl restart: none pending"
+  fi
 }
 
 show_logs() {

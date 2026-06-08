@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { closeSync, mkdirSync, openSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 import type {
   HarnessToolRegistry,
@@ -8,10 +10,19 @@ import type {
   ToolResult,
 } from "@exo/harness";
 
-const GUARDIAN_SCRIPT = new URL("./scripts/exoclaw-guardian", import.meta.url)
-  .pathname;
+const GUARDIAN_SCRIPT = new URL(
+  "./scripts/exoclaw-service-guardian",
+  import.meta.url,
+).pathname;
+const ROOT_DIR = new URL("../..", import.meta.url).pathname;
+const STATE_DIR = join(ROOT_DIR, ".exo");
+const DEFERRED_LOG_PATH = join(
+  STATE_DIR,
+  "exoclaw-service-guardian-actions.log",
+);
 const MAX_OUTPUT_CHARS = 20_000;
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
+const DEFERRED_RESTART_DELAY_SECONDS = 2;
 
 type GuardianAction =
   | "status"
@@ -48,7 +59,7 @@ function guardianActionTool(): ToolInstance {
     definition: {
       name: "guardian_action",
       description:
-        "Ask the host-side Exoclaw guardian to build Exoclaw, inspect service status/logs, or restart the scheduler and adapter runners while preserving .exo state. Use this instead of manually killing host processes.",
+        "Ask the host-side Exoclaw guardian to build Exoclaw, inspect service status/logs, or restart the scheduler and adapter runners while preserving .exo state. Builds request the control REPL wrapper to refresh its child process. Restart actions are deferred briefly so the current turn can finish before services are stopped. Use this instead of manually killing host processes.",
       parameters: guardianParameters(),
     },
     handler: {
@@ -68,7 +79,7 @@ function guardianParameters(): ToolDefinition["parameters"] {
         type: "string",
         enum: Object.keys(ACTION_TO_COMMAND),
         description:
-          "Guardian action to run. restart_all restarts scheduler and adapters; set build=true to compile first.",
+          "Guardian action to run. restart_all restarts scheduler and adapters after a short deferred handoff; set build=true to compile first.",
       },
       build: {
         type: ["boolean", "null"],
@@ -134,6 +145,21 @@ async function executeGuardianAction(
     commandArgs.push(args.logTarget);
   }
 
+  if (shouldDeferAction(args.action)) {
+    const result = runGuardianDeferred(commandArgs);
+    return {
+      ok: true,
+      action: args.action,
+      deferred: true,
+      pid: result.pid,
+      delaySeconds: DEFERRED_RESTART_DELAY_SECONDS,
+      command: result.command,
+      logPath: result.logPath,
+      stdout: `Scheduled guardian ${args.action} in ${DEFERRED_RESTART_DELAY_SECONDS}s. Follow ${result.logPath} for build/restart output, then call guardian_action logs or status after services come back.`,
+      stderr: "",
+    };
+  }
+
   const result = await runGuardian(commandArgs);
   return {
     ok: result.exitCode === 0,
@@ -146,6 +172,16 @@ async function executeGuardianAction(
   };
 }
 
+function shouldDeferAction(action: GuardianAction): boolean {
+  return (
+    action === "restart_all" ||
+    action === "restart_services" ||
+    action === "restart_adapters" ||
+    action === "restart_scheduler" ||
+    action === "stop_services"
+  );
+}
+
 type ProcessResult = {
   exitCode: number;
   timedOut: boolean;
@@ -156,7 +192,7 @@ type ProcessResult = {
 function runGuardian(args: string[]): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(GUARDIAN_SCRIPT, args, {
-      cwd: new URL("../..", import.meta.url).pathname,
+      cwd: ROOT_DIR,
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
@@ -190,6 +226,38 @@ function runGuardian(args: string[]): Promise<ProcessResult> {
       });
     });
   });
+}
+
+function runGuardianDeferred(args: string[]): {
+  command: string[];
+  logPath: string;
+  pid: number | null;
+} {
+  mkdirSync(dirname(DEFERRED_LOG_PATH), { recursive: true });
+  const logFd = openSync(DEFERRED_LOG_PATH, "a");
+  const command = [GUARDIAN_SCRIPT, ...args];
+  const child = spawn(
+    "bash",
+    [
+      "-lc",
+      'delay="$1"; shift; printf "\\n[%s] deferred guardian command:" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; for arg in "$@"; do printf " %q" "$arg"; done; printf "\\n"; sleep "$delay"; exec "$@"',
+      "exoclaw-service-guardian-deferred",
+      String(DEFERRED_RESTART_DELAY_SECONDS),
+      ...command,
+    ],
+    {
+      cwd: ROOT_DIR,
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+    },
+  );
+  child.unref();
+  closeSync(logFd);
+  return {
+    command,
+    logPath: DEFERRED_LOG_PATH,
+    pid: child.pid ?? null,
+  };
 }
 
 function clampOutput(output: string): string {

@@ -17,6 +17,8 @@ LOCAL_PROMPT_FILE="${EXOCLAW_LOCAL_PROMPT_FILE:-$ROOT_DIR/.exo/exoclaw-profile.m
 SANDBOX_IMAGE="${EXO_SANDBOX_IMAGE:-ubuntu:24.04}"
 SANDBOX_PROVIDER="${EXO_SANDBOX_PROVIDER:-}"
 SANDBOX_BACKEND="${EXO_SANDBOX_BACKEND:-}"
+SELF_REPO_MOUNT_PATH="${EXOCLAW_REPO:-/workspace/exo}"
+SELF_MAP_PATH="$SELF_REPO_MOUNT_PATH/examples/exoclaw/SELF.md"
 NETWORKING="${EXO_NETWORKING:-enabled}"
 SHELL_PROGRAM="${EXO_SHELL_PROGRAM:-/bin/bash}"
 SANDBOX_SCOPE="${EXO_SANDBOX_SCOPE:-}"
@@ -29,6 +31,9 @@ START_ADAPTERS="${EXO_START_ADAPTERS:-true}"
 ADAPTER_LIMIT="${EXO_ADAPTER_LIMIT:-50}"
 CONTROL=false
 SETUP_PROFILE=false
+CANONICAL_SETUP=false
+SANDBOX_PROVIDER_EXPLICIT=false
+SANDBOX_BACKEND_EXPLICIT=false
 declare -a CONTROL_PIDS=()
 SETUP_ADAPTER="${EXO_SETUP_ADAPTER:-}"
 declare -a SETUP_ADAPTERS=()
@@ -41,13 +46,14 @@ export EXOCLAW_LOCAL_PROMPT_FILE="$LOCAL_PROMPT_FILE"
 usage() {
   cat <<'EOF'
 Usage:
-  examples/exoclaw/scripts/exoclaw-repl [options]
-  examples/exoclaw/scripts/exoclaw-repl list
-  examples/exoclaw/scripts/exoclaw-repl delall all
-  examples/exoclaw/scripts/exoclaw-repl fresh
-  examples/exoclaw/scripts/exoclaw-repl stop-all
-  examples/exoclaw/scripts/exoclaw-repl setup-profile
-  examples/exoclaw/scripts/exoclaw-repl setup-sandbox
+  examples/exoclaw/scripts/exoclaw-control [options]
+  examples/exoclaw/scripts/exoclaw-control list
+  examples/exoclaw/scripts/exoclaw-control delall all
+  examples/exoclaw/scripts/exoclaw-control fresh
+  examples/exoclaw/scripts/exoclaw-control canonical
+  examples/exoclaw/scripts/exoclaw-control stop-all
+  examples/exoclaw/scripts/exoclaw-control setup-profile
+  examples/exoclaw/scripts/exoclaw-control setup-sandbox
 
 Default behavior creates or reuses an Exoclaw agent and conversation, starts the
 local scheduler and adapter loops, then starts a REPL. It reads .env by default
@@ -61,11 +67,14 @@ Options:
   --agent-name <name>          Agent display name (default: Exoclaw Agent)
   --conversation-name <name>   Conversation display name (default: Dev)
   --module <path>              Exoclaw TypeScript harness module
+  --canonical                  Docker sandbox, repo self-map mount, IRC+Discord setup,
+                               control logs, and guardian config
   --sandbox-image <image>      Sandbox image (default: ubuntu:24.04)
   --sandbox-provider <provider>
                                 Sandbox provider: daytona, apple-container, docker, or local-process
   --sandbox-backend <backend>   Local sandbox backend: apple-container, docker, or local-process.
                                 Defaults to --sandbox-provider when that provider is local.
+  --self-repo-mount <path>      Sandbox path for this repo (default: /workspace/exo)
   --networking <mode>          enabled or disabled (default: enabled)
   --shell-program <path>       Shell in the sandbox (default: /bin/bash)
   --sandbox-scope <scope>      agent or conversation (default: Exoclaw agent)
@@ -95,7 +104,7 @@ Environment overrides:
   EXO_CONVERSATION_NAME, EXO_MODULE, EXO_SANDBOX_IMAGE,
   EXO_SANDBOX_PROVIDER, EXO_SANDBOX_BACKEND, EXO_NETWORKING,
   EXO_SHELL_PROGRAM, EXO_SANDBOX_SCOPE, EXO_ENV_FILE, EXOCLAW_LOCAL_PROMPT_FILE,
-  EXO_BIN, EXO_START_SCHEDULER, EXO_START_ADAPTERS,
+  EXO_BIN, EXO_START_SCHEDULER, EXO_START_ADAPTERS, EXOCLAW_REPO,
   EXOCLAW_SCHEDULER_BIN, EXO_SCHEDULER_INTERVAL_SECONDS, EXO_ADAPTER_LIMIT,
   EXO_SETUP_ADAPTER, EXO_INITIAL_PROMPT_FILE
 EOF
@@ -189,6 +198,41 @@ add_setup_adapter() {
   SETUP_ADAPTERS+=("$adapter")
 }
 
+apply_canonical_setup_defaults() {
+  if [[ "$CANONICAL_SETUP" != true ]]; then
+    return
+  fi
+
+  USE_SANDBOX=true
+  PULL_SANDBOX=true
+  START_SCHEDULER=true
+  START_ADAPTERS=true
+  CONTROL=true
+  if [[ "$SANDBOX_PROVIDER_EXPLICIT" != true ]]; then
+    SANDBOX_PROVIDER="docker"
+  fi
+  if [[ "$SANDBOX_BACKEND_EXPLICIT" != true ]]; then
+    SANDBOX_BACKEND="docker"
+  fi
+  add_setup_adapter "irc"
+  add_setup_adapter "discord"
+}
+
+configure_guardian_for_current_launch() {
+  if [[ "$CANONICAL_SETUP" != true ]]; then
+    return
+  fi
+
+  "$ROOT_DIR/examples/exoclaw/scripts/exoclaw-service-guardian" configure \
+    --env-file "$ENV_FILE" \
+    --exo-bin "$EXO_BIN" \
+    --scheduler-bin "$SCHEDULER_BIN" \
+    --sandbox-backend "$SANDBOX_BACKEND" \
+    --scheduler-interval "$SCHEDULER_INTERVAL_SECONDS" \
+    --adapter-limit "$ADAPTER_LIMIT" >/dev/null
+  echo "Configured guardian for Docker-backed Exoclaw services."
+}
+
 build_exo() {
   echo "Building exo binary..."
   (cd "$ROOT_DIR" && CARGO_TARGET_DIR=target cargo build -p exo --ignore-rust-version)
@@ -245,8 +289,16 @@ scheduler_pid_file() {
   echo "$ROOT_DIR/.exo/exoclaw-scheduler.pid"
 }
 
+scheduler_lock_file() {
+  echo "$ROOT_DIR/.exo/exoclaw-scheduler.lock"
+}
+
 scheduler_log_file() {
   echo "$ROOT_DIR/.exo/exoclaw-scheduler.log"
+}
+
+repl_restart_file() {
+  echo "$ROOT_DIR/.exo/exoclaw-control.restart"
 }
 
 adapters_pid_file() {
@@ -321,9 +373,15 @@ ensure_scheduler() {
   pid_file="$(scheduler_pid_file)"
   log_file="$(scheduler_log_file)"
   echo "Starting scheduler loop..."
-  nohup "$SCHEDULER_BIN" --env-file-if-exists "$ENV_FILE" \
-    run --watch --interval-seconds "$SCHEDULER_INTERVAL_SECONDS" \
-    >>"$log_file" 2>&1 &
+  rm -f "$(scheduler_lock_file)"
+  local scheduler_args=(--env-file-if-exists "$ENV_FILE")
+  local backend
+  backend="$(effective_sandbox_backend)"
+  if [[ -n "$backend" ]]; then
+    scheduler_args+=(--sandbox-backend "$backend")
+  fi
+  nohup "$SCHEDULER_BIN" "${scheduler_args[@]}" run --watch \
+    --interval-seconds "$SCHEDULER_INTERVAL_SECONDS" >>"$log_file" 2>&1 &
   echo "$!" >"$pid_file"
   echo "Scheduler log: $log_file"
 }
@@ -466,6 +524,20 @@ ensure_conversation() {
   fi
 }
 
+ensure_self_repo_mount() {
+  if [[ "$USE_SANDBOX" != true ]]; then
+    return
+  fi
+  if [[ ! "$SELF_REPO_MOUNT_PATH" = /* ]]; then
+    die "self repo mount path must be absolute: $SELF_REPO_MOUNT_PATH"
+  fi
+  if [[ ! -f "$ROOT_DIR/examples/exoclaw/SELF.md" ]]; then
+    die "Exoclaw self map is missing: examples/exoclaw/SELF.md"
+  fi
+
+  exo conversation mount add "$AGENT" "$CONVERSATION" "$ROOT_DIR" "$SELF_REPO_MOUNT_PATH" --rw >/dev/null
+}
+
 list_agents_and_conversations() {
   ensure_exo_bin
   echo "Agents and conversations:"
@@ -507,6 +579,7 @@ stop_scheduler() {
     fi
   fi
   pkill -f "exoclaw-scheduler-runner .*run --watch" >/dev/null 2>&1 || true
+  rm -f "$(scheduler_lock_file)"
   rm -f "$pid_file"
 }
 
@@ -627,6 +700,8 @@ run_repl() {
   fi
   ensure_agent
   ensure_conversation
+  ensure_self_repo_mount
+  configure_guardian_for_current_launch
   local scheduler_log_start_line
   scheduler_log_start_line="$(scheduler_log_line_count)"
   ensure_scheduler
@@ -670,16 +745,25 @@ scheduler_log_line_count() {
 run_control_repl() {
   local scheduler_start_line="$1"
   local adapter_start_line="$2"
+  local repl_pid=""
+  local restart_watcher_pid=""
 
   cleanup_control_logs() {
     local pid
     for pid in "${CONTROL_PIDS[@]:-}"; do
       kill "$pid" >/dev/null 2>&1 || true
     done
+    if [[ -n "${restart_watcher_pid:-}" ]]; then
+      kill "$restart_watcher_pid" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "${repl_pid:-}" ]]; then
+      kill "$repl_pid" >/dev/null 2>&1 || true
+    fi
   }
   trap cleanup_control_logs EXIT INT TERM
 
-  echo "Control console enabled. Streaming scheduler and adapter logs into this REPL."
+  echo "Control console enabled. Streaming scheduler and adapter logs beside the REPL."
+  echo "The control wrapper will restart the REPL child when $(repl_restart_file) appears."
   if [[ "$START_SCHEDULER" == true ]]; then
     start_control_log_tail "scheduler" "$(scheduler_log_file)" "$scheduler_start_line"
   fi
@@ -689,9 +773,47 @@ run_control_repl() {
 
   EXO_GLOBAL_ARGS=()
   append_exo_global_args
-  "$EXO_BIN" "${EXO_GLOBAL_ARGS[@]}" repl \
-    --agent "$AGENT" \
-    --conversation "$CONVERSATION"
+  while true; do
+    rm -f "$(repl_restart_file)"
+    "$EXO_BIN" "${EXO_GLOBAL_ARGS[@]}" repl \
+      --agent "$AGENT" \
+      --conversation "$CONVERSATION" &
+    repl_pid="$!"
+    watch_repl_restart_request "$repl_pid" &
+    restart_watcher_pid="$!"
+
+    local repl_exit
+    if wait "$repl_pid"; then
+      repl_exit=0
+    else
+      repl_exit=$?
+    fi
+    kill "$restart_watcher_pid" >/dev/null 2>&1 || true
+    wait "$restart_watcher_pid" >/dev/null 2>&1 || true
+    restart_watcher_pid=""
+    repl_pid=""
+
+    if [[ -f "$(repl_restart_file)" ]]; then
+      rm -f "$(repl_restart_file)"
+      echo "Restarting Exoclaw REPL child after guardian rebuild request..."
+      continue
+    fi
+    return "$repl_exit"
+  done
+}
+
+watch_repl_restart_request() {
+  local child_pid="$1"
+  local marker
+  marker="$(repl_restart_file)"
+  while kill -0 "$child_pid" >/dev/null 2>&1; do
+    if [[ -f "$marker" ]]; then
+      echo "Guardian requested REPL child restart; stopping current child..."
+      kill "$child_pid" >/dev/null 2>&1 || true
+      return
+    fi
+    sleep 2
+  done
 }
 
 start_control_log_tail() {
@@ -877,6 +999,11 @@ while [[ $# -gt 0 ]]; do
       shift
       COMMAND="fresh"
       ;;
+    canonical|dev|docker-dev)
+      shift
+      COMMAND="repl"
+      CANONICAL_SETUP=true
+      ;;
     stop-all|stop)
       shift
       [[ $# -eq 0 ]] || die "stop-all does not accept additional arguments"
@@ -931,6 +1058,7 @@ while [[ $# -gt 0 ]]; do
         daytona|apple-container|docker|local-process) ;;
         *) die "--sandbox-provider must be daytona, apple-container, docker, or local-process" ;;
       esac
+      SANDBOX_PROVIDER_EXPLICIT=true
       shift 2
       ;;
     --sandbox-backend)
@@ -939,6 +1067,17 @@ while [[ $# -gt 0 ]]; do
         apple-container|docker|local-process) ;;
         *) die "--sandbox-backend must be apple-container, docker, or local-process" ;;
       esac
+      SANDBOX_BACKEND_EXPLICIT=true
+      shift 2
+      ;;
+    --canonical)
+      CANONICAL_SETUP=true
+      shift
+      ;;
+    --self-repo-mount)
+      SELF_REPO_MOUNT_PATH="${2:-}"
+      [[ -n "$SELF_REPO_MOUNT_PATH" ]] || die "--self-repo-mount requires a value"
+      SELF_MAP_PATH="$SELF_REPO_MOUNT_PATH/examples/exoclaw/SELF.md"
       shift 2
       ;;
     --networking)
@@ -1044,7 +1183,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+apply_canonical_setup_defaults
+
 export EXOCLAW_LOCAL_PROMPT_FILE="$LOCAL_PROMPT_FILE"
+export EXOCLAW_REPO="$SELF_REPO_MOUNT_PATH"
+export EXOCLAW_SELF_MAP="$SELF_MAP_PATH"
 
 case "$COMMAND" in
   repl)

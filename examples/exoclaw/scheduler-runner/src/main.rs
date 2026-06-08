@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use executor::{
     BasicExoHarnessConfig, BraintrustRuntimeConfig, ExoclawToolRuntime, Harness,
     SandboxBackendChoice, SchedulerRunOptions, SchedulerStore, SecretBackendChoice,
@@ -23,6 +23,8 @@ struct Cli {
     env_file_if_exists: Option<PathBuf>,
     #[arg(long, global = true)]
     env_file: Option<PathBuf>,
+    #[arg(long, global = true, value_enum, env = "EXO_SANDBOX_BACKEND")]
+    sandbox_backend: Option<SandboxBackendArg>,
     #[arg(long, global = true, env = "BRAINTRUST_API_KEY", hide = true)]
     braintrust_api_key: Option<String>,
     #[arg(long, global = true, env = "BRAINTRUST_APP_URL", hide = true)]
@@ -55,7 +57,7 @@ async fn main() -> Result<()> {
         cli.braintrust_app_url,
         cli.braintrust_api_url,
     );
-    let harness = exoclaw_harness(&cli.root, runtime_config, env).await?;
+    let harness = exoclaw_harness(&cli.root, runtime_config, env, cli.sandbox_backend).await?;
 
     match cli.command {
         Commands::Run {
@@ -94,6 +96,25 @@ async fn main() -> Result<()> {
 
 struct SchedulerRunnerLock {
     path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SandboxBackendArg {
+    #[value(name = "apple-container")]
+    AppleContainer,
+    Docker,
+    #[value(name = "local-process")]
+    LocalProcess,
+}
+
+impl From<SandboxBackendArg> for SandboxBackendChoice {
+    fn from(value: SandboxBackendArg) -> Self {
+        match value {
+            SandboxBackendArg::AppleContainer => Self::AppleContainer,
+            SandboxBackendArg::Docker => Self::Docker,
+            SandboxBackendArg::LocalProcess => Self::LocalProcess,
+        }
+    }
 }
 
 impl SchedulerRunnerLock {
@@ -144,6 +165,8 @@ fn process_is_running(pid: &str) -> bool {
         && Command::new("kill")
             .arg("-0")
             .arg(pid)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .is_ok_and(|status| status.success())
 }
@@ -152,8 +175,11 @@ async fn exoclaw_harness(
     root: &Path,
     runtime_config: Option<BraintrustRuntimeConfig>,
     env: HashMap<String, String>,
+    sandbox_backend_arg: Option<SandboxBackendArg>,
 ) -> Result<Arc<dyn Harness>> {
-    let sandbox_backend = default_sandbox_backend();
+    let sandbox_backend = sandbox_backend_arg
+        .map(SandboxBackendChoice::from)
+        .unwrap_or_else(default_sandbox_backend);
     let exo_config = BasicExoHarnessConfig {
         root: root.join("exoharness"),
         secret_backend: default_secret_backend(),

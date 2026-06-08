@@ -13,7 +13,7 @@ The worker handles `PING` with `PONG`, parses `PRIVMSG` lines, and emits Exoclaw
 Use the Exoclaw setup flow:
 
 ```bash
-examples/exoclaw/scripts/exoclaw-repl fresh --pull-sandbox --setup irc
+examples/exoclaw/scripts/exoclaw-control fresh --pull-sandbox --setup irc
 ```
 
 The setup prompt at `setup-prompt.md` asks Exoclaw to create a built-in adapter similar to:

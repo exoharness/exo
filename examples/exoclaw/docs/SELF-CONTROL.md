@@ -2,7 +2,7 @@
 
 Exoclaw is meant to be a long-running agent that can understand and adjust the system it is operating inside.
 
-This document describes the self-control surfaces we want Exoclaw to have: creating tools, managing adapters, and controlling its sandbox environment.
+This document describes the self-control surfaces we want Exoclaw to have: understanding its own code, creating tools, managing adapters, controlling its sandbox environment, and restarting host-side services.
 
 ## Design Principles
 
@@ -11,6 +11,23 @@ This document describes the self-control surfaces we want Exoclaw to have: creat
 - Return inspectable records after mutations: ids, names, enabled state, owner conversation ids, and any follow-up constraints the agent needs.
 - Preserve history by default. Prefer disabling or checkpointing over deletion or irreversible rewrites unless the user asks for a permanent change.
 - Use the existing harness APIs as the source of truth. Tools should wrap `exoharness` and executor primitives rather than parsing storage files or reimplementing persistence.
+
+## Self Introspection
+
+Exoclaw should always be able to inspect the code that defines its own behavior. Local startup with `examples/exoclaw/scripts/exoclaw-control` keeps sandbox support enabled by default and mounts the repository into the sandbox at `/workspace/exo`. The path can be changed with `--self-repo-mount` or `EXOCLAW_REPO`, but the invariant is the same: Exoclaw's shell tool should start with a stable view of this source tree.
+
+`examples/exoclaw/SELF.md` is the checked-in self map. In the sandbox it is available at `/workspace/exo/examples/exoclaw/SELF.md` by default. The harness also tells Exoclaw this path each turn through `EXOCLAW_SELF_MAP`, so the agent has a compact navigation guide before it edits or explains itself.
+
+The self map should stay concise and navigational. It should point to:
+
+- prompt and harness assembly files,
+- scheduler and adapter code,
+- sandbox and service guardian tools,
+- host-side scripts,
+- durable local state such as `.exo`,
+- common build, restart, and inspection commands.
+
+This is intentionally not a full architecture document. It is a starting point for self-directed inspection.
 
 ## Tool Creation
 
@@ -44,6 +61,10 @@ Exoclaw's shell tool runs inside a sandbox. By default, Exoclaw conversations us
 
 The shared agent sandbox is implemented as an agent-owned named reusable sandbox. Exoclaw stores the owner conversation and sandbox name in an agent artifact, then resolves the sandbox through `create_sandbox` with that name. The harness reuses an active sandbox handle when one exists, including a handle restored from a snapshot, and recreates the sandbox when needed. Exoclaw does not need to scan raw sandbox lifecycle events to find its current environment.
 
+The repo mount is part of the sandbox spec. Changing the mount path or mode changes the desired sandbox configuration, so the next shell use may resolve or create a sandbox matching the new spec. The default workdir is the first configured mount, so Exoclaw starts shell inspection in its own source tree when the standard mount is present.
+
+The canonical local startup is `examples/exoclaw/scripts/exoclaw-control canonical`. It selects the Docker sandbox provider/backend for the REPL, adapters, service guardian, and scheduler runner; pulls the sandbox image when needed; ensures the repo self-map mount; configures the service guardian for Docker-backed restarts; sends IRC and Discord setup prompts; starts services; and opens the control REPL. Use `examples/exoclaw/scripts/exoclaw-control fresh --canonical` when the user wants the same shape from a clean agent/conversation state.
+
 The sandbox control tools expose filesystem checkpointing:
 
 - `list_sandbox_snapshots` lists snapshots for the selected sandbox scope and reports the current snapshot id when one is known.
@@ -58,6 +79,19 @@ Sandbox lifecycle history remains canonical and append-only. `snapshot_sandbox` 
 
 `list_sandbox_snapshots` reads Exoclaw's known snapshot registry, stored as an agent-owned artifact at `config/exoclaw-sandbox-snapshots.json`. That registry is useful for self-control because it lists snapshots created or selected through these tools and tracks the current known snapshot. It is not intended to be a complete inventory of every backend snapshot ever created outside Exoclaw.
 
+## Host Supervisors
+
+Some self-control actions must happen outside the sandbox because they affect the host process that is running Exoclaw. Exoclaw uses two cooperating supervisors for this:
+
+- `examples/exoclaw/scripts/exoclaw-service-guardian` is the host service supervisor. It builds Exoclaw, shows service status, prints scheduler and adapter logs, and restarts scheduler or adapter runners while preserving `.exo` state.
+- `examples/exoclaw/scripts/exoclaw-control --control` is the terminal supervisor. It keeps the user's terminal open, streams service logs, runs the interactive `exo repl` as a child process, and can restart only that child after a rebuild.
+
+The model-visible `guardian_action` tool wraps the script with a strict allowlist. It exposes actions such as `status`, `build`, `restart_adapters`, `restart_scheduler`, `restart_all`, and `logs`; it does not accept arbitrary shell commands. Exoclaw should use `guardian_action` for host-side maintenance instead of manually killing processes.
+
+Restart actions are deferred briefly and handed off to a detached service guardian process. That lets the current model turn finish and report that the restart was scheduled before the adapter or scheduler runner is stopped. The detached output goes to `.exo/exoclaw-service-guardian-actions.log`; after services come back, Exoclaw can use `guardian_action` with `status` or `logs` to inspect the result.
+
+Builds request a control REPL refresh by writing `.exo/exoclaw-control.restart`. The control wrapper notices this marker, stops the current `exo repl` child, removes the marker, and starts a fresh child. This picks up rebuilt `exoharness`, `executor`, and TypeScript harness code without closing the user's terminal. If no control wrapper is running, the marker remains pending and `guardian status` reports it.
+
 ## Prompting Exoclaw
 
 Prompts should teach the agent the same model:
@@ -66,7 +100,10 @@ Prompts should teach the agent the same model:
 - Prefer reversible operations where possible.
 - Include ids returned by inspection tools in follow-up actions.
 - Explain destructive actions before taking them.
+- Start self-maintenance work by reading `/workspace/exo/examples/exoclaw/SELF.md` unless the user points to a more specific file.
 - Use sandbox snapshots before risky filesystem experiments.
+- Use `guardian_action` for host builds, logs, and service restarts.
+- Treat self-restart as a supervisor handoff: the service guardian owns scheduler/adapters, while the control REPL wrapper owns the interactive REPL child.
 
 The goal is not for Exoclaw to have unlimited self-modification. The goal is for it to have enough structured visibility and control to maintain its own working environment with user-directed, auditable actions.
 
@@ -75,8 +112,9 @@ The goal is not for Exoclaw to have unlimited self-modification. The goal is for
 Self-control behavior is taught in a few different prompt surfaces:
 
 - `examples/exoclaw/prompts/me.md` is the durable Exoclaw identity prompt. Put broad behavioral rules here, such as when to inspect state first, when to prefer reversible operations, and how to think about external side effects.
-- `examples/exoclaw/harness.ts` assembles the Exoclaw developer prompt for each turn. It describes the available self-control surfaces at a high level: scheduled tasks, adapters, sandbox snapshots, and the default sandbox scope.
-- `examples/exoclaw/sandbox-tools.ts`, `examples/exoclaw/scheduler-tools.ts`, and `typescript/harness/adapter-tools.ts` provide model-visible tool descriptions and JSON schemas. These are the most direct prompts for when and how Exoclaw should call each self-control tool.
+- `examples/exoclaw/harness.ts` assembles the Exoclaw developer prompt for each turn. It describes the available self-control surfaces at a high level: scheduled tasks, adapters, sandbox snapshots, guardian actions, the self map, and the default sandbox scope.
+- `examples/exoclaw/SELF.md` is the compact self map for navigating Exoclaw's own code from the sandbox.
+- `examples/exoclaw/sandbox-tools.ts`, `examples/exoclaw/scheduler-tools.ts`, `examples/exoclaw/guardian-tools.ts`, and `typescript/harness/adapter-tools.ts` provide model-visible tool descriptions and JSON schemas. These are the most direct prompts for when and how Exoclaw should call each self-control tool.
 - `typescript/harness/built-in-tools.ts` describes built-in tools such as `shell` and `install_agent_tool`, including the generated-tool installation contract.
 - `examples/exoclaw/adapters/*/setup-prompt.md` files guide Exoclaw through creating specific adapters. These are setup-time prompts, not always-on behavioral rules.
 - `crates/executor/src/adapter/runtime.rs` creates adapter wakeup prompts for inbound external messages. Those prompts tell Exoclaw when a response should go back through `send_adapter_message`.
