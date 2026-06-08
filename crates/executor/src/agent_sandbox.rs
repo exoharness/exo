@@ -4,12 +4,11 @@ use exoharness::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::conversation_sandbox::{
-    ConversationSandboxSpec, conversation_sandbox_spec, conversation_sandboxes,
-};
+use crate::conversation_sandbox::{ConversationSandboxSpec, conversation_sandbox_spec};
 use crate::{AgentConfig, ConversationConfig};
 
 const AGENT_SANDBOX_ARTIFACT_PATH: &str = "config/exoclaw-agent-sandbox.json";
+const AGENT_SANDBOX_NAME_PREFIX: &str = "exoclaw-agent";
 
 #[derive(Clone)]
 pub(crate) struct AgentSandboxHandle {
@@ -21,7 +20,7 @@ pub(crate) struct AgentSandboxHandle {
 #[serde(rename_all = "camelCase")]
 struct AgentSandboxRecord {
     conversation_id: String,
-    sandbox_id: String,
+    sandbox_name: String,
     provider: SandboxProvider,
     image: String,
     default_workdir: String,
@@ -48,24 +47,14 @@ pub(crate) async fn ensure_agent_sandbox(
     conversation_config: &ConversationConfig,
 ) -> Result<AgentSandboxHandle> {
     let spec = conversation_sandbox_spec(agent_config, conversation_config);
-    if let Some(record) = load_agent_sandbox_record(agent).await?
-        && record.matches_spec(&spec)
-        && let Ok(conversation_id) = record.conversation_id.parse::<Uuid7>()
-        && let Some(owner) = agent.get_conversation(&conversation_id).await?
-    {
-        for sandbox in conversation_sandboxes(owner.as_ref()).await? {
-            if sandbox.id == record.sandbox_id && sandbox.matches_spec(&spec) {
-                return Ok(AgentSandboxHandle {
-                    conversation: owner,
-                    sandbox_id: record.sandbox_id,
-                });
-            }
-        }
+    if let Some(handle) = current_agent_sandbox(agent, &spec).await? {
+        return Ok(handle);
     }
 
+    let sandbox_name = new_agent_sandbox_name();
     let sandbox_id = current_conversation
         .create_sandbox(CreateSandboxRequest {
-            name: None,
+            name: Some(sandbox_name.clone()),
             provider: spec.provider,
             image: spec.image.clone(),
             default_workdir: Some(spec.default_workdir.clone()),
@@ -78,7 +67,7 @@ pub(crate) async fn ensure_agent_sandbox(
         agent,
         &AgentSandboxRecord {
             conversation_id: current_conversation.record().id.to_string(),
-            sandbox_id: sandbox_id.clone(),
+            sandbox_name,
             provider: spec.provider,
             image: spec.image,
             default_workdir: spec.default_workdir,
@@ -102,6 +91,39 @@ pub(crate) async fn ensure_agent_sandbox(
         conversation: owner,
         sandbox_id,
     })
+}
+
+pub(crate) async fn current_agent_sandbox(
+    agent: &dyn AgentHandle,
+    spec: &ConversationSandboxSpec,
+) -> Result<Option<AgentSandboxHandle>> {
+    let Some(record) = load_agent_sandbox_record(agent).await? else {
+        return Ok(None);
+    };
+    if !record.matches_spec(spec) {
+        return Ok(None);
+    }
+    let Ok(conversation_id) = record.conversation_id.parse::<Uuid7>() else {
+        return Ok(None);
+    };
+    let Some(owner) = agent.get_conversation(&conversation_id).await? else {
+        return Ok(None);
+    };
+    let sandbox_id = owner
+        .create_sandbox(CreateSandboxRequest {
+            name: Some(record.sandbox_name),
+            provider: spec.provider,
+            image: spec.image.clone(),
+            default_workdir: Some(spec.default_workdir.clone()),
+            file_system_mounts: Some(spec.file_system_mounts.clone()),
+            enable_networking: Some(spec.enable_networking),
+            idle_seconds: Some(spec.idle_seconds),
+        })
+        .await?;
+    Ok(Some(AgentSandboxHandle {
+        conversation: owner,
+        sandbox_id,
+    }))
 }
 
 async fn load_agent_sandbox_record(agent: &dyn AgentHandle) -> Result<Option<AgentSandboxRecord>> {
@@ -141,4 +163,8 @@ fn latest_artifact_version(artifacts: Vec<ArtifactVersion>, path: &str) -> Optio
         .into_iter()
         .filter(|artifact| artifact.path == path)
         .max_by_key(|artifact| artifact.version)
+}
+
+fn new_agent_sandbox_name() -> String {
+    format!("{AGENT_SANDBOX_NAME_PREFIX}-{}", Uuid7::now())
 }

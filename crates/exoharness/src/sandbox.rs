@@ -401,13 +401,14 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
             schedule_cleanup_named_container(self.container_bin.clone(), self.cli, entry.name);
         }
 
-        let (name, owned) = match find_running_warm_sandbox(&self.container_bin, &request).await? {
-            Some(name) => (name, false),
-            None => (
-                create_unique_warm_sandbox(&self.container_bin, &request).await?,
-                true,
-            ),
-        };
+        let (name, owned) =
+            match find_running_warm_sandbox(&self.container_bin, self.cli, &request).await? {
+                Some(name) => (name, false),
+                None => (
+                    create_unique_warm_sandbox(&self.container_bin, &request).await?,
+                    true,
+                ),
+            };
 
         {
             let mut warm_sandboxes = self.warm_sandboxes.lock().await;
@@ -798,6 +799,21 @@ async fn create_unique_warm_sandbox(
 
 async fn find_running_warm_sandbox(
     container_bin: &Path,
+    cli: ContainerCliFlavor,
+    request: &SandboxRequest,
+) -> Result<Option<String>> {
+    match cli {
+        ContainerCliFlavor::AppleContainer => {
+            find_running_apple_container_warm_sandbox(container_bin, request).await
+        }
+        ContainerCliFlavor::Docker => {
+            find_running_docker_warm_sandbox(container_bin, request).await
+        }
+    }
+}
+
+async fn find_running_apple_container_warm_sandbox(
+    container_bin: &Path,
     request: &SandboxRequest,
 ) -> Result<Option<String>> {
     let output = run_container_admin_command(
@@ -830,6 +846,38 @@ async fn find_running_warm_sandbox(
     }))
 }
 
+async fn find_running_docker_warm_sandbox(
+    container_bin: &Path,
+    request: &SandboxRequest,
+) -> Result<Option<String>> {
+    let spec_hash = sandbox_spec_hash(&request.spec);
+    let output = Command::new(container_bin)
+        .arg("ps")
+        .arg("--filter")
+        .arg(format!("label={WARM_SANDBOX_KEY_LABEL}={}", request.key))
+        .arg("--filter")
+        .arg(format!("label={WARM_SANDBOX_SPEC_HASH_LABEL}={spec_hash}"))
+        .arg("--filter")
+        .arg("status=running")
+        .arg("--format")
+        .arg("{{.Names}}")
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "failed to list warm sandboxes: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToOwned::to_owned))
+}
+
 async fn ensure_warm_sandbox_ready(
     container_bin: &Path,
     cli: ContainerCliFlavor,
@@ -857,7 +905,8 @@ async fn ensure_warm_sandbox_ready(
             if stale.owned {
                 schedule_cleanup_named_container(container_bin.to_path_buf(), cli, stale.name);
             }
-            let (name, owned) = match find_running_warm_sandbox(container_bin, request).await? {
+            let (name, owned) = match find_running_warm_sandbox(container_bin, cli, request).await?
+            {
                 Some(name) => (name, false),
                 None => (
                     create_unique_warm_sandbox(container_bin, request).await?,
@@ -876,7 +925,8 @@ async fn ensure_warm_sandbox_ready(
             return Ok(name);
         }
         None => {
-            let (name, owned) = match find_running_warm_sandbox(container_bin, request).await? {
+            let (name, owned) = match find_running_warm_sandbox(container_bin, cli, request).await?
+            {
                 Some(name) => (name, false),
                 None => (
                     create_unique_warm_sandbox(container_bin, request).await?,
@@ -904,13 +954,14 @@ async fn ensure_warm_sandbox_ready(
         return Ok(current_name);
     }
 
-    let (replacement_name, owned) = match find_running_warm_sandbox(container_bin, request).await? {
-        Some(name) => (name, false),
-        None => (
-            create_unique_warm_sandbox(container_bin, request).await?,
-            true,
-        ),
-    };
+    let (replacement_name, owned) =
+        match find_running_warm_sandbox(container_bin, cli, request).await? {
+            Some(name) => (name, false),
+            None => (
+                create_unique_warm_sandbox(container_bin, request).await?,
+                true,
+            ),
+        };
     warm_sandboxes.insert(
         request.key.clone(),
         WarmSandboxEntry {
@@ -1429,6 +1480,7 @@ async fn docker_snapshot_container(
         .arg("-p")
         .arg(container_name)
         .arg(&snap_tag)
+        .kill_on_drop(true)
         .output()
         .await
         .with_context(|| format!("running `docker commit` for {container_name}"))?;
@@ -1444,6 +1496,7 @@ async fn docker_snapshot_container(
         .arg(&snap_tag)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .output()
         .await
         .with_context(|| format!("running `docker save {snap_tag}`"))?;
@@ -1453,6 +1506,7 @@ async fn docker_snapshot_container(
             .arg("image")
             .arg("rm")
             .arg(&snap_tag)
+            .kill_on_drop(true)
             .output()
             .await;
         bail!(
@@ -1468,6 +1522,7 @@ async fn docker_snapshot_container(
         .arg("image")
         .arg("rm")
         .arg(&snap_tag)
+        .kill_on_drop(true)
         .output()
         .await;
     if let Ok(output) = &rm_output

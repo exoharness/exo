@@ -6,7 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use exoharness::{
     AgentHandle, ConversationHandle, EventId, FileSystemMount, ResponseId, Result, SandboxProvider,
-    SessionId, ToolArguments, ToolCallId, ToolRequest, ToolResult, TurnId,
+    SessionId, ToolArguments, ToolCallId, ToolRequest, ToolResult, TurnHandle, TurnId,
 };
 use lingua::{Message, UniversalStreamChunk, UniversalUsage};
 use serde::{Deserialize, Serialize};
@@ -162,6 +162,7 @@ pub trait ToolRuntime: Send + Sync {
         &self,
         agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
+        turn: Option<&dyn TurnHandle>,
         agent_config: &AgentConfig,
         config: &ConversationConfig,
         request: &ToolRequest,

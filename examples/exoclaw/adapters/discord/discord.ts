@@ -11,6 +11,16 @@ export function errorMessage(value: unknown): string {
   }
 }
 
+export function isTlsAccessDeniedError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const code = (error as { code?: unknown }).code;
+  return (
+    code === "EPROTO" && error.message.includes("tlsv1 alert access denied")
+  );
+}
+
 // Gateway close codes discord.js will not reconnect from. Each is a
 // configuration problem that a worker restart cannot fix. discord.js emits the
 // Client "shardDisconnect" event only for these codes; every other close is
@@ -66,6 +76,13 @@ export function createResilienceHandlers(
       deps.exit(1);
     },
     onUncaughtException(error) {
+      if (isTlsAccessDeniedError(error)) {
+        deps.emit({
+          type: "error",
+          message: `Discord TLS stream error: ${errorMessage(error)}`,
+        });
+        return;
+      }
       deps.emit({
         type: "error",
         message: `uncaught exception: ${errorMessage(error)}`,

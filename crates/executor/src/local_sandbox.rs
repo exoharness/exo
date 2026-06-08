@@ -215,64 +215,127 @@ fn wrap_conversation(
     Arc::new(LocalSandboxConversation { state, remote })
 }
 
+async fn local_conversation_for(
+    state: &Arc<LocalSandboxState>,
+    remote_conversation_id: ConversationId,
+    remote_slug: &str,
+) -> Result<Arc<dyn ConversationHandle>> {
+    {
+        let conversations = state.conversations.lock().await;
+        if let Some(conversation) = conversations.get(&remote_conversation_id) {
+            return Ok(Arc::clone(conversation));
+        }
+    }
+
+    let _init_guard = state.conversation_init.lock().await;
+    {
+        let conversations = state.conversations.lock().await;
+        if let Some(conversation) = conversations.get(&remote_conversation_id) {
+            return Ok(Arc::clone(conversation));
+        }
+    }
+
+    let local_agent = match state
+        .local
+        .list_agents()
+        .await?
+        .into_iter()
+        .find(|agent| agent.record().slug == LOCAL_SANDBOX_AGENT_SLUG)
+    {
+        Some(agent) => agent,
+        None => {
+            state
+                .local
+                .new_agent(NewAgentRequest {
+                    slug: LOCAL_SANDBOX_AGENT_SLUG.to_string(),
+                    name: "Local sandbox".to_string(),
+                })
+                .await?
+        }
+    };
+
+    let slug = format!("remote-{remote_conversation_id}");
+    let local_conversation = match local_agent
+        .list_conversations()
+        .await?
+        .into_iter()
+        .find(|conversation| conversation.record().slug == slug)
+    {
+        Some(conversation) => conversation,
+        None => {
+            local_agent
+                .new_conversation(NewConversationRequest {
+                    slug: Some(slug),
+                    name: Some(format!("Local sandbox for {remote_slug}")),
+                })
+                .await?
+        }
+    };
+
+    let mut conversations = state.conversations.lock().await;
+    conversations.insert(remote_conversation_id, Arc::clone(&local_conversation));
+    Ok(local_conversation)
+}
+
+async fn local_sandbox_id_for(
+    state: &Arc<LocalSandboxState>,
+    remote_conversation_id: ConversationId,
+    sandbox_id: &SandboxId,
+) -> Result<Option<SandboxId>> {
+    if let Some(local_id) = state.sandboxes.lock().await.get(sandbox_id).cloned() {
+        return Ok(Some(local_id));
+    }
+
+    let local_conversation = local_conversation_for(
+        state,
+        remote_conversation_id,
+        &remote_conversation_id.to_string(),
+    )
+    .await?;
+    let events = local_conversation
+        .get_events(Some(exoharness::EventQuery {
+            cursor: None,
+            direction: Some(exoharness::EventQueryDirection::Desc),
+            limit: None,
+            session_id: None,
+            turn_id: None,
+            types: Some(vec![EventKind::custom(LOCAL_SANDBOX_MAP_EVENT)]),
+        }))
+        .await?
+        .events;
+
+    for event in events {
+        let EventData::Custom {
+            event_type,
+            payload,
+        } = event.data
+        else {
+            continue;
+        };
+        if event_type != LOCAL_SANDBOX_MAP_EVENT {
+            continue;
+        }
+        let mapping: LocalSandboxMapEvent = serde_json::from_value(payload)?;
+        state.sandboxes.lock().await.insert(
+            mapping.remote_sandbox_id.clone(),
+            mapping.local_sandbox_id.clone(),
+        );
+        if mapping.remote_sandbox_id == *sandbox_id {
+            return Ok(Some(mapping.local_sandbox_id));
+        }
+    }
+
+    Ok(None)
+}
+
 impl LocalSandboxConversation {
     async fn local_conversation(&self) -> Result<Arc<dyn ConversationHandle>> {
-        {
-            let conversations = self.state.conversations.lock().await;
-            if let Some(conversation) = conversations.get(&self.remote.record().id) {
-                return Ok(Arc::clone(conversation));
-            }
-        }
-
-        let _init_guard = self.state.conversation_init.lock().await;
-        {
-            let conversations = self.state.conversations.lock().await;
-            if let Some(conversation) = conversations.get(&self.remote.record().id) {
-                return Ok(Arc::clone(conversation));
-            }
-        }
-
-        let local_agent = match self
-            .state
-            .local
-            .list_agents()
-            .await?
-            .into_iter()
-            .find(|agent| agent.record().slug == LOCAL_SANDBOX_AGENT_SLUG)
-        {
-            Some(agent) => agent,
-            None => {
-                self.state
-                    .local
-                    .new_agent(NewAgentRequest {
-                        slug: LOCAL_SANDBOX_AGENT_SLUG.to_string(),
-                        name: "Local sandbox".to_string(),
-                    })
-                    .await?
-            }
-        };
-
-        let slug = format!("remote-{}", self.remote.record().id);
-        let local_conversation = match local_agent
-            .list_conversations()
-            .await?
-            .into_iter()
-            .find(|conversation| conversation.record().slug == slug)
-        {
-            Some(conversation) => conversation,
-            None => {
-                local_agent
-                    .new_conversation(NewConversationRequest {
-                        slug: Some(slug),
-                        name: Some(format!("Local sandbox for {}", self.remote.record().slug)),
-                    })
-                    .await?
-            }
-        };
-
-        let mut conversations = self.state.conversations.lock().await;
-        conversations.insert(self.remote.record().id, Arc::clone(&local_conversation));
-        Ok(local_conversation)
+        local_conversation_for(
+            &self.state,
+            self.remote.record().id,
+            self.remote.record().slug.as_str(),
+        )
+        .await
     }
 
     fn wants_local_sandbox(&self, request: &CreateSandboxRequest) -> bool {
@@ -280,45 +343,7 @@ impl LocalSandboxConversation {
     }
 
     async fn local_sandbox_id(&self, sandbox_id: &SandboxId) -> Result<Option<SandboxId>> {
-        if let Some(local_id) = self.state.sandboxes.lock().await.get(sandbox_id).cloned() {
-            return Ok(Some(local_id));
-        }
-
-        let local_conversation = self.local_conversation().await?;
-        let events = local_conversation
-            .get_events(Some(exoharness::EventQuery {
-                cursor: None,
-                direction: Some(exoharness::EventQueryDirection::Desc),
-                limit: None,
-                session_id: None,
-                turn_id: None,
-                types: Some(vec![EventKind::custom(LOCAL_SANDBOX_MAP_EVENT)]),
-            }))
-            .await?
-            .events;
-
-        for event in events {
-            let EventData::Custom {
-                event_type,
-                payload,
-            } = event.data
-            else {
-                continue;
-            };
-            if event_type != LOCAL_SANDBOX_MAP_EVENT {
-                continue;
-            }
-            let mapping: LocalSandboxMapEvent = serde_json::from_value(payload)?;
-            self.state.sandboxes.lock().await.insert(
-                mapping.remote_sandbox_id.clone(),
-                mapping.local_sandbox_id.clone(),
-            );
-            if mapping.remote_sandbox_id == *sandbox_id {
-                return Ok(Some(mapping.local_sandbox_id));
-            }
-        }
-
-        Ok(None)
+        local_sandbox_id_for(&self.state, self.remote.record().id, sandbox_id).await
     }
 
     async fn map_local_sandbox(&self, remote_id: SandboxId, local_id: SandboxId) -> Result<()> {
@@ -376,11 +401,17 @@ impl ConversationHandle for LocalSandboxConversation {
         &self,
         request: exoharness::BeginTurnRequest,
     ) -> Result<Arc<dyn TurnHandle>> {
-        self.remote.begin_turn(request).await
+        Ok(Arc::new(LocalSandboxTurnHandle {
+            state: Arc::clone(&self.state),
+            remote: self.remote.begin_turn(request).await?,
+        }))
     }
 
     async fn turn_handle(&self, record: TurnRecord) -> Result<Arc<dyn TurnHandle>> {
-        self.remote.turn_handle(record).await
+        Ok(Arc::new(LocalSandboxTurnHandle {
+            state: Arc::clone(&self.state),
+            remote: self.remote.turn_handle(record).await?,
+        }))
     }
 
     async fn get_events(&self, query: Option<exoharness::EventQuery>) -> Result<GetEventsResult> {
@@ -469,7 +500,6 @@ impl ConversationHandle for LocalSandboxConversation {
         let Some(local_id) = self.local_sandbox_id(&request.id).await? else {
             return self.remote.start_sandbox(request).await;
         };
-        let remote_id = request.id;
         self.local_conversation()
             .await?
             .start_sandbox(StartSandboxRequest {
@@ -479,7 +509,7 @@ impl ConversationHandle for LocalSandboxConversation {
             })
             .await?;
         self.append_remote_sandbox_events(vec![EventData::SandboxStarted {
-            sandbox_id: remote_id,
+            sandbox_id: request.id,
             snapshot_id: Some(request.snapshot_id),
         }])
         .await
@@ -635,6 +665,79 @@ impl ConversationHandle for LocalSandboxConversation {
 
     async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>> {
         self.remote.get_secret(id).await
+    }
+}
+
+struct LocalSandboxTurnHandle {
+    state: Arc<LocalSandboxState>,
+    remote: Arc<dyn TurnHandle>,
+}
+
+#[async_trait]
+impl TurnHandle for LocalSandboxTurnHandle {
+    fn record(&self) -> &TurnRecord {
+        self.remote.record()
+    }
+
+    async fn add_events(&self, data: Vec<EventData>) -> Result<AddEventsResult> {
+        self.remote.add_events(data).await
+    }
+
+    async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion> {
+        self.remote.write_artifact(request).await
+    }
+
+    async fn snapshot_sandbox(
+        &self,
+        conversation_id: ConversationId,
+        id: SandboxId,
+    ) -> Result<SnapshotId> {
+        let Some(local_id) = local_sandbox_id_for(&self.state, conversation_id, &id).await? else {
+            return self.remote.snapshot_sandbox(conversation_id, id).await;
+        };
+        let snapshot_id =
+            local_conversation_for(&self.state, conversation_id, &conversation_id.to_string())
+                .await?
+                .snapshot_sandbox(local_id)
+                .await?;
+        self.remote
+            .add_events(vec![EventData::SandboxSnapshotted {
+                sandbox_id: id,
+                snapshot_id,
+            }])
+            .await?;
+        Ok(snapshot_id)
+    }
+
+    async fn start_sandbox(
+        &self,
+        conversation_id: ConversationId,
+        request: StartSandboxRequest,
+    ) -> Result<()> {
+        let Some(local_id) =
+            local_sandbox_id_for(&self.state, conversation_id, &request.id).await?
+        else {
+            return self.remote.start_sandbox(conversation_id, request).await;
+        };
+        local_conversation_for(&self.state, conversation_id, &conversation_id.to_string())
+            .await?
+            .start_sandbox(StartSandboxRequest {
+                id: local_id,
+                snapshot_id: request.snapshot_id,
+                idle_seconds: request.idle_seconds,
+            })
+            .await?;
+        self.remote
+            .add_events(vec![EventData::SandboxStarted {
+                sandbox_id: request.id,
+                snapshot_id: Some(request.snapshot_id),
+            }])
+            .await?;
+        Ok(())
+    }
+
+    async fn finish(&self) -> Result<EventId> {
+        self.remote.finish().await
     }
 }
 

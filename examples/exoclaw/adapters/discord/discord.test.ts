@@ -67,6 +67,22 @@ describe("createResilienceHandlers", () => {
     expect(exit).toHaveBeenCalledWith(1);
   });
 
+  it("reports TLS access denied exceptions without exiting", () => {
+    const emit = vi.fn();
+    const exit = vi.fn();
+    const error = Object.assign(
+      new Error("write EPROTO tlsv1 alert access denied"),
+      { code: "EPROTO" },
+    );
+    createResilienceHandlers({ emit, exit }).onUncaughtException(error);
+    expect(emit).toHaveBeenCalledWith({
+      type: "error",
+      message:
+        "Discord TLS stream error: write EPROTO tlsv1 alert access denied",
+    });
+    expect(exit).not.toHaveBeenCalled();
+  });
+
   it("reports a shard disconnect without exiting into a restart loop", () => {
     const emit = vi.fn();
     const exit = vi.fn();
