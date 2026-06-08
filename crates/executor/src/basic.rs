@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use exoharness::{
     AgentHandle, ConversationHandle, ConversationId, EventData, EventId, EventKind, EventQuery,
     EventQueryDirection, Result, ToolCallId, ToolRequest, TurnHandle,
-    with_active_sandbox_event_turn,
 };
 use lingua::Message;
 use lingua::universal::{ToolContentPart, ToolResultContentPart};
@@ -289,16 +288,12 @@ where
             let tool_future = self.tools.execute(
                 context.agent,
                 context.conversation,
+                Some(context.turn.as_ref()),
                 context.agent_config,
                 context.conversation_config,
                 &tool_request.request,
             );
-            let (result, tool_succeeded) = match with_active_sandbox_event_turn(
-                Arc::clone(&context.turn),
-                tool_future,
-            )
-            .await
-            {
+            let (result, tool_succeeded) = match tool_future.await {
                 Ok(response) => (response, true),
                 Err(error) => {
                     if let Some(tool_trace) = tool_trace.take() {

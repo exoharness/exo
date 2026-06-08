@@ -2503,6 +2503,7 @@ async fn run_sandbox_shell_command(
         .execute(
             agent_handle.as_ref(),
             conversation_handle.as_ref(),
+            None,
             &agent_config,
             &config,
             &ToolRequest {

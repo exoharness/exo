@@ -19,7 +19,6 @@ use exoharness::{
         ConversationHandleInfo, Request as ExoRequest, Response as ExoResponse, TurnHandleInfo,
     },
     server::ExoHarnessServer,
-    with_active_sandbox_event_turn,
 };
 use lingua::UniversalStreamChunk;
 use serde::{Deserialize, Serialize};
@@ -185,17 +184,17 @@ where
     ) -> Result<RuntimeResponsePayload> {
         match request {
             RuntimeRequest::ExecuteTool { request } => Ok(RuntimeResponsePayload::ToolResult {
-                result: with_active_sandbox_event_turn(
-                    turn,
-                    self.tools.execute(
+                result: self
+                    .tools
+                    .execute(
                         agent,
                         conversation,
+                        Some(turn.as_ref()),
                         agent_config,
                         conversation_config,
                         &request,
-                    ),
-                )
-                .await?,
+                    )
+                    .await?,
             }),
             RuntimeRequest::StartSandboxProcess { .. }
             | RuntimeRequest::WriteSandboxProcessStdin { .. }

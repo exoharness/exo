@@ -20,7 +20,7 @@ use exoharness::{
     AgentHandle, Artifact, ArtifactVersion, ConversationHandle, CreateSandboxRequest, EventData,
     EventKind, EventQuery, EventQueryDirection, FileSystemMount, FileSystemMountMode,
     ReadArtifactRequest, Result, RunInSandboxRequest, SandboxProcess, SandboxProvider, SnapshotId,
-    StartSandboxRequest, ToolRequest, ToolResult, WriteArtifactRequest,
+    StartSandboxRequest, ToolRequest, ToolResult, TurnHandle, WriteArtifactRequest,
 };
 use futures::io::AsyncReadExt;
 use serde::{Deserialize, Serialize};
@@ -65,6 +65,7 @@ impl ToolRuntime for BasicToolRuntime {
         &self,
         _agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
+        _turn: Option<&dyn TurnHandle>,
         agent_config: &AgentConfig,
         config: &ConversationConfig,
         request: &ToolRequest,
@@ -102,6 +103,7 @@ impl ToolRuntime for ExoclawToolRuntime {
         &self,
         agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
+        turn: Option<&dyn TurnHandle>,
         agent_config: &AgentConfig,
         config: &ConversationConfig,
         request: &ToolRequest,
@@ -176,12 +178,32 @@ impl ToolRuntime for ExoclawToolRuntime {
                 .await
             }
             "snapshot_sandbox" => {
-                execute_snapshot_sandbox_tool(agent, conversation, agent_config, config, request)
-                    .await
+                let turn = turn.ok_or_else(|| {
+                    anyhow::anyhow!("snapshot_sandbox must run inside an active turn")
+                })?;
+                execute_snapshot_sandbox_tool(
+                    agent,
+                    conversation,
+                    turn,
+                    agent_config,
+                    config,
+                    request,
+                )
+                .await
             }
             "rewind_sandbox" => {
-                execute_rewind_sandbox_tool(agent, conversation, agent_config, config, request)
-                    .await
+                let turn = turn.ok_or_else(|| {
+                    anyhow::anyhow!("rewind_sandbox must run inside an active turn")
+                })?;
+                execute_rewind_sandbox_tool(
+                    agent,
+                    conversation,
+                    turn,
+                    agent_config,
+                    config,
+                    request,
+                )
+                .await
             }
             other => Err(anyhow::anyhow!(
                 "tool execution is not configured for {other}"
@@ -466,6 +488,7 @@ async fn execute_list_sandbox_snapshots_tool(
 async fn execute_snapshot_sandbox_tool(
     agent: &dyn AgentHandle,
     conversation: &dyn ConversationHandle,
+    turn: &dyn TurnHandle,
     agent_config: &AgentConfig,
     config: &ConversationConfig,
     request: &ToolRequest,
@@ -476,14 +499,14 @@ async fn execute_snapshot_sandbox_tool(
     match scope {
         SandboxControlScope::Agent => {
             let handle = ensure_agent_sandbox(agent, conversation, agent_config, config).await?;
-            let snapshot_id = handle
-                .conversation
-                .snapshot_sandbox(handle.sandbox_id.clone())
+            let owner_conversation_id = handle.conversation.record().id;
+            let snapshot_id = turn
+                .snapshot_sandbox(owner_conversation_id, handle.sandbox_id.clone())
                 .await?;
             record_sandbox_snapshot(
                 agent,
                 scope,
-                handle.conversation.record().id.to_string(),
+                owner_conversation_id.to_string(),
                 handle.sandbox_id.clone(),
                 snapshot_id.to_string(),
             )
@@ -492,14 +515,16 @@ async fn execute_snapshot_sandbox_tool(
                 "ok": true,
                 "scope": scope.as_str(),
                 "sandboxId": handle.sandbox_id,
-                "ownerConversationId": handle.conversation.record().id.to_string(),
+                "ownerConversationId": owner_conversation_id.to_string(),
                 "snapshotId": snapshot_id.to_string(),
             }))
         }
         SandboxControlScope::Conversation => {
             let sandbox_id =
                 ensure_conversation_sandbox(conversation, agent_config, config).await?;
-            let snapshot_id = conversation.snapshot_sandbox(sandbox_id.clone()).await?;
+            let snapshot_id = turn
+                .snapshot_sandbox(conversation.record().id, sandbox_id.clone())
+                .await?;
             record_sandbox_snapshot(
                 agent,
                 scope,
@@ -522,6 +547,7 @@ async fn execute_snapshot_sandbox_tool(
 async fn execute_rewind_sandbox_tool(
     agent: &dyn AgentHandle,
     conversation: &dyn ConversationHandle,
+    turn: &dyn TurnHandle,
     agent_config: &AgentConfig,
     config: &ConversationConfig,
     request: &ToolRequest,
@@ -534,18 +560,20 @@ async fn execute_rewind_sandbox_tool(
     match scope {
         SandboxControlScope::Agent => {
             let handle = ensure_agent_sandbox(agent, conversation, agent_config, config).await?;
-            handle
-                .conversation
-                .start_sandbox(StartSandboxRequest {
+            let owner_conversation_id = handle.conversation.record().id;
+            turn.start_sandbox(
+                owner_conversation_id,
+                StartSandboxRequest {
                     id: handle.sandbox_id.clone(),
                     snapshot_id,
                     idle_seconds: Some(spec.idle_seconds),
-                })
-                .await?;
+                },
+            )
+            .await?;
             record_current_sandbox_snapshot(
                 agent,
                 scope,
-                handle.conversation.record().id.to_string(),
+                owner_conversation_id.to_string(),
                 handle.sandbox_id.clone(),
                 args.snapshot_id.clone(),
             )
@@ -554,7 +582,7 @@ async fn execute_rewind_sandbox_tool(
                 "ok": true,
                 "scope": scope.as_str(),
                 "sandboxId": handle.sandbox_id,
-                "ownerConversationId": handle.conversation.record().id.to_string(),
+                "ownerConversationId": owner_conversation_id.to_string(),
                 "snapshotId": args.snapshot_id,
                 "rewound": true,
             }))
@@ -562,13 +590,15 @@ async fn execute_rewind_sandbox_tool(
         SandboxControlScope::Conversation => {
             let sandbox_id =
                 ensure_conversation_sandbox(conversation, agent_config, config).await?;
-            conversation
-                .start_sandbox(StartSandboxRequest {
+            turn.start_sandbox(
+                conversation.record().id,
+                StartSandboxRequest {
                     id: sandbox_id.clone(),
                     snapshot_id,
                     idle_seconds: Some(spec.idle_seconds),
-                })
-                .await?;
+                },
+            )
+            .await?;
             record_current_sandbox_snapshot(
                 agent,
                 scope,
