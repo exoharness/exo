@@ -756,9 +756,7 @@ run_control_repl() {
     if [[ -n "${restart_watcher_pid:-}" ]]; then
       kill "$restart_watcher_pid" >/dev/null 2>&1 || true
     fi
-    if [[ -n "${repl_pid:-}" ]]; then
-      kill "$repl_pid" >/dev/null 2>&1 || true
-    fi
+    kill_repl_children "$$"
   }
   trap cleanup_control_logs EXIT INT TERM
 
@@ -775,23 +773,23 @@ run_control_repl() {
   append_exo_global_args
   while true; do
     rm -f "$(repl_restart_file)"
-    "$EXO_BIN" "${EXO_GLOBAL_ARGS[@]}" repl \
-      --agent "$AGENT" \
-      --conversation "$CONVERSATION" &
-    repl_pid="$!"
-    watch_repl_restart_request "$repl_pid" &
+    watch_repl_restart_request "$$" &
     restart_watcher_pid="$!"
 
     local repl_exit
-    if wait "$repl_pid"; then
+    if "$EXO_BIN" "${EXO_GLOBAL_ARGS[@]}" repl \
+      --agent "$AGENT" \
+      --conversation "$CONVERSATION"; then
       repl_exit=0
     else
       repl_exit=$?
     fi
-    kill "$restart_watcher_pid" >/dev/null 2>&1 || true
-    wait "$restart_watcher_pid" >/dev/null 2>&1 || true
-    restart_watcher_pid=""
-    repl_pid=""
+
+    if [[ -n "${restart_watcher_pid:-}" ]]; then
+      kill "$restart_watcher_pid" >/dev/null 2>&1 || true
+      wait "$restart_watcher_pid" >/dev/null 2>&1 || true
+      restart_watcher_pid=""
+    fi
 
     if [[ -f "$(repl_restart_file)" ]]; then
       rm -f "$(repl_restart_file)"
@@ -802,14 +800,31 @@ run_control_repl() {
   done
 }
 
+kill_repl_children() {
+  local control_pid="$1"
+  local child_pid
+  while IFS= read -r child_pid; do
+    if [[ -n "$child_pid" ]]; then
+      kill "$child_pid" >/dev/null 2>&1 || true
+    fi
+  done < <(find_repl_children "$control_pid")
+}
+
+find_repl_children() {
+  local control_pid="$1"
+  ps ax -o pid= -o ppid= -o command= | awk -v ppid="$control_pid" -v exo="$EXO_BIN" '
+    $2 == ppid && index($0, exo) > 0 && index($0, " repl") > 0 { print $1 }
+  '
+}
+
 watch_repl_restart_request() {
-  local child_pid="$1"
+  local control_pid="$1"
   local marker
   marker="$(repl_restart_file)"
-  while kill -0 "$child_pid" >/dev/null 2>&1; do
+  while true; do
     if [[ -f "$marker" ]]; then
       echo "Guardian requested REPL child restart; stopping current child..."
-      kill "$child_pid" >/dev/null 2>&1 || true
+      kill_repl_children "$control_pid"
       return
     fi
     sleep 2

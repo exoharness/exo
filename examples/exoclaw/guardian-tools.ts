@@ -23,6 +23,7 @@ const DEFERRED_LOG_PATH = join(
 const MAX_OUTPUT_CHARS = 20_000;
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFERRED_RESTART_DELAY_SECONDS = 2;
+const BUILD_MARKER = "EXO_BUILD_MARKER_2026_06_08_A";
 
 type GuardianAction =
   | "status"
@@ -164,6 +165,7 @@ async function executeGuardianAction(
   return {
     ok: result.exitCode === 0,
     action: args.action,
+    buildMarker: BUILD_MARKER,
     command: [GUARDIAN_SCRIPT, ...commandArgs],
     exitCode: result.exitCode,
     timedOut: result.timedOut,
