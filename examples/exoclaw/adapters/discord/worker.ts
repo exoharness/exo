@@ -18,6 +18,7 @@ import {
   parseWorkerCommand,
   writeWorkerEvent,
 } from "../protocol";
+import { createResilienceHandlers } from "./discord";
 
 const SEND_TIMEOUT_MS = 60_000;
 
@@ -36,15 +37,17 @@ if (trigger !== "all_messages" && trigger !== "mentions_only") {
   throw new Error("Discord trigger must be all_messages or mentions_only");
 }
 
+const resilience = createResilienceHandlers({
+  emit: writeWorkerEvent,
+  exit: (code) => process.exit(code),
+});
+
+process.on("unhandledRejection", (reason) => {
+  resilience.onUnhandledRejection(reason);
+});
+
 process.on("uncaughtException", (error) => {
-  const message = error instanceof Error ? error.message : String(error);
-  if (isTlsAccessDeniedError(error)) {
-    reportWorkerError(`Discord TLS stream error: ${message}`);
-    return;
-  }
-  reportWorkerError(`Discord adapter uncaught exception: ${message}`);
-  process.exitCode = 1;
-  setImmediate(() => process.exit(1));
+  resilience.onUncaughtException(error);
 });
 
 const client = new Client({
@@ -61,10 +64,6 @@ client.on("error", (error) => {
   reportWorkerError(error.message);
 });
 
-client.on("shardError", (error) => {
-  reportWorkerError(`Discord shard error: ${error.message}`);
-});
-
 client.once(Events.ClientReady, () => {
   writeWorkerEvent({
     type: "connected",
@@ -76,10 +75,11 @@ client.once(Events.ClientReady, () => {
 });
 
 client.on("shardDisconnect", (event) => {
-  writeWorkerEvent({
-    type: "disconnected",
-    reason: event.reason || String(event.code),
-  });
+  resilience.onShardDisconnect(event.code);
+});
+
+client.on("shardError", (error) => {
+  resilience.onShardError(error);
 });
 
 client.on("messageCreate", (message) => {
@@ -107,7 +107,11 @@ client.on("messageCreate", (message) => {
   });
 });
 
-await client.login(token);
+try {
+  await client.login(token);
+} catch (error) {
+  resilience.onLoginFailure(error);
+}
 
 const input = readline.createInterface({
   input: process.stdin,
@@ -284,16 +288,6 @@ function base64Payload(data: string): string {
 
 function reportWorkerError(message: string): void {
   writeWorkerEvent({ type: "error", message });
-}
-
-function isTlsAccessDeniedError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-  const code = (error as { code?: unknown }).code;
-  return (
-    code === "EPROTO" && error.message.includes("tlsv1 alert access denied")
-  );
 }
 
 function stringArrayOrNull(value: unknown): string[] | null {
