@@ -21,6 +21,36 @@ scheduling and adapters). To get started, simply run:
 Or for a minimal start (just REPL, pull sandbox):
 `examples/exoclaw/scripts/exoclaw-repl --pull-sandbox`
 
+## Guardian
+
+`examples/exoclaw/scripts/exoclaw-guardian` is a host-side helper for
+self-maintenance. It owns build and service-control actions that should happen
+outside the agent's sandbox, while preserving `.exo` state such as adapter
+pairing data, conversations, artifacts, and sandbox records.
+
+Common commands:
+
+```bash
+examples/exoclaw/scripts/exoclaw-guardian status
+examples/exoclaw/scripts/exoclaw-guardian build
+examples/exoclaw/scripts/exoclaw-guardian restart-adapters
+examples/exoclaw/scripts/exoclaw-guardian restart-scheduler
+examples/exoclaw/scripts/exoclaw-guardian restart-all --build
+```
+
+Save local launch settings for later restarts with:
+
+```bash
+examples/exoclaw/scripts/exoclaw-guardian configure --sandbox-backend docker
+```
+
+The guardian manages only the scheduler and adapter runners. Start or reconnect
+an interactive REPL with `examples/exoclaw/scripts/exoclaw-repl`.
+
+Exoclaw can call the same host-side surface through the `guardian_action` tool.
+That tool exposes only allowlisted actions such as `status`, `build`,
+`restart_adapters`, `restart_scheduler`, `restart_all`, and `logs`.
+
 ## Setting up the identity
 
 `examples/exoclaw/prompts/me.md` is the committed, generic Exoclaw identity
