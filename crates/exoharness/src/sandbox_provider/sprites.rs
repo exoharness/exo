@@ -1,7 +1,8 @@
 //! Sprites.dev remote sandbox backend.
 //!
 //! Uses the Sprites platform REST API (`api.sprites.dev`) for lifecycle, HTTP
-//! exec, and checkpoint/restore snapshots. Cross-process resume uses a
+//! exec for one-shot commands, WebSocket exec for streaming processes, and
+//! checkpoint/restore snapshots. Cross-process resume uses a
 //! deterministic sprite name derived from [`SandboxKey`] + spec hash (same role
 //! as Docker labels / E2B metadata). Snapshots are bytes-by-reference via
 //! [`SnapshotKind::SpritesSnapshot`] manifests pointing at a checkpoint id.
@@ -14,9 +15,16 @@ use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use futures::io::Cursor;
+use futures::{SinkExt, StreamExt};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::oneshot;
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use url::Url;
 
 use crate::sandbox::{
     ManagedSandboxBackend, ManagedSandboxHandle, SandboxCommand, SandboxCommandOutput,
@@ -25,6 +33,13 @@ use crate::sandbox::{
 };
 
 pub const DEFAULT_SPRITES_API_URL: &str = "https://api.sprites.dev";
+
+const PROCESS_PIPE_BUFFER_SIZE: usize = 64 * 1024;
+const SPRITES_STREAM_STDIN: u8 = 0;
+const SPRITES_STREAM_STDOUT: u8 = 1;
+const SPRITES_STREAM_STDERR: u8 = 2;
+const SPRITES_STREAM_EXIT: u8 = 3;
+const SPRITES_STREAM_STDIN_EOF: u8 = 4;
 
 #[derive(Debug, Clone)]
 pub struct SpritesConfig {
@@ -49,6 +64,7 @@ struct SpritesSnapshotManifest {
 pub struct SpritesSandboxBackend {
     client: reqwest::Client,
     api_url: String,
+    token: String,
     url_auth: Option<String>,
     organization: Option<String>,
     extra_labels: Vec<String>,
@@ -73,6 +89,7 @@ impl SpritesSandboxBackend {
         Ok(Self {
             client,
             api_url: config.api_url.trim_end_matches('/').to_string(),
+            token: config.token,
             url_auth: config.url_auth,
             organization: config.organization,
             extra_labels: config.extra_labels,
@@ -144,6 +161,7 @@ impl SpritesSandboxBackend {
         SpritesBackendHandle {
             client: self.client.clone(),
             api_url: self.api_url.clone(),
+            token: self.token.clone(),
         }
     }
 }
@@ -205,11 +223,23 @@ impl ManagedSandboxBackend for SpritesSandboxBackend {
 struct SpritesBackendHandle {
     client: reqwest::Client,
     api_url: String,
+    token: String,
 }
 
 impl SpritesBackendHandle {
     fn api_endpoint(&self, path: &str) -> String {
         format!("{}{}", self.api_url, path)
+    }
+
+    fn websocket_endpoint(&self, path: &str) -> Result<Url> {
+        let origin = if let Some(rest) = self.api_url.strip_prefix("https://") {
+            format!("wss://{rest}")
+        } else if let Some(rest) = self.api_url.strip_prefix("http://") {
+            format!("ws://{rest}")
+        } else {
+            bail!("Sprites api_url must be an http(s) URL, got {}", self.api_url);
+        };
+        Url::parse(&format!("{origin}{path}")).context("parsing Sprites WebSocket URL")
     }
 }
 
@@ -237,24 +267,13 @@ impl ManagedSandboxHandle for SpritesSandboxHandle {
     }
 
     async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts> {
-        let output = exec_in_sprite(
+        start_process_in_sprite(
             &self.backend,
             &self.sprite_name,
             &self.request.spec,
             command,
         )
-        .await?;
-        let exit_code = output.exit_code.unwrap_or(0);
-        let stdout = Cursor::new(output.stdout.into_bytes());
-        let stderr = Cursor::new(output.stderr.into_bytes());
-        let stdin = futures::io::sink();
-        let wait: BoxFuture<'static, crate::Result<i32>> = Box::pin(async move { Ok(exit_code) });
-        Ok(crate::SandboxProcessParts {
-            stdout: Box::pin(stdout),
-            stderr: Box::pin(stderr),
-            stdin: Box::pin(stdin),
-            wait,
-        })
+        .await
     }
 
     async fn stop(&self) -> Result<()> {
@@ -268,12 +287,12 @@ impl ManagedSandboxHandle for SpritesSandboxHandle {
     }
 }
 
-async fn exec_in_sprite(
+async fn start_process_in_sprite(
     backend: &SpritesBackendHandle,
     sprite_name: &str,
     spec: &SandboxSpec,
     command: &SandboxCommand,
-) -> Result<SandboxCommandOutput> {
+) -> Result<crate::SandboxProcessParts> {
     if command.argv.is_empty() {
         bail!("sandbox command requires at least one argv entry");
     }
@@ -281,6 +300,214 @@ async fn exec_in_sprite(
         .cwd
         .clone()
         .unwrap_or_else(|| spec.default_workdir.clone());
+
+    let mut url = backend.websocket_endpoint(&format!("/v1/sprites/{sprite_name}/exec"))?;
+    {
+        let mut query = url.query_pairs_mut();
+        for arg in &command.argv {
+            query.append_pair("cmd", arg);
+        }
+        query.append_pair("stdin", "true");
+        if !cwd.is_empty() {
+            query.append_pair("dir", &cwd);
+        }
+        for (key, value) in &command.env {
+            query.append_pair("env", &format!("{key}={value}"));
+        }
+    }
+
+    let mut request = url
+        .as_str()
+        .into_client_request()
+        .context("building Sprites exec WebSocket request")?;
+    let auth = HeaderValue::from_str(&format!("Bearer {}", backend.token)).context(
+        "SPRITES_TOKEN contains characters that aren't valid in an HTTP header",
+    )?;
+    request
+        .headers_mut()
+        .insert(AUTHORIZATION, auth);
+
+    let (ws_stream, _) = connect_async(request)
+        .await
+        .with_context(|| format!("connecting Sprites exec WebSocket for sprite {sprite_name}"))?;
+
+    let (stdout_reader, stdout_writer) = tokio::io::duplex(PROCESS_PIPE_BUFFER_SIZE);
+    let (stderr_reader, stderr_writer) = tokio::io::duplex(PROCESS_PIPE_BUFFER_SIZE);
+    let (stdin_reader, stdin_writer) = tokio::io::duplex(PROCESS_PIPE_BUFFER_SIZE);
+    let (wait_tx, wait_rx) = oneshot::channel();
+
+    let sprite_name_owned = sprite_name.to_string();
+    tokio::spawn(async move {
+        let result = run_sprites_exec_websocket(
+            ws_stream,
+            stdin_reader,
+            stdout_writer,
+            stderr_writer,
+        )
+        .await;
+        if wait_tx.send(result).is_err() {
+            tracing::debug!(
+                sprite_name = %sprite_name_owned,
+                "Sprites process waiter dropped before completion"
+            );
+        }
+    });
+
+    let wait: BoxFuture<'static, crate::Result<i32>> = Box::pin(async move {
+        match wait_rx.await {
+            Ok(result) => result,
+            Err(_) => Err(anyhow!(
+                "Sprites exec WebSocket stopped before reporting exit"
+            )),
+        }
+    });
+
+    Ok(crate::SandboxProcessParts {
+        stdout: Box::pin(stdout_reader.compat()),
+        stderr: Box::pin(stderr_reader.compat()),
+        stdin: Box::pin(stdin_writer.compat_write()),
+        wait,
+    })
+}
+
+async fn run_sprites_exec_websocket(
+    ws_stream: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    mut stdin_reader: tokio::io::DuplexStream,
+    mut stdout_writer: tokio::io::DuplexStream,
+    mut stderr_writer: tokio::io::DuplexStream,
+) -> crate::Result<i32> {
+    let (mut ws_write, mut ws_read) = ws_stream.split();
+    let mut exit_code = None;
+    let mut stdin_buffer = vec![0u8; PROCESS_PIPE_BUFFER_SIZE];
+    let mut stdin_closed = false;
+
+    loop {
+        if exit_code.is_some() {
+            break;
+        }
+
+        tokio::select! {
+            message = ws_read.next() => {
+                let Some(message) = message else {
+                    break;
+                };
+                let message = message.context("reading Sprites exec WebSocket message")?;
+                match message {
+                    Message::Binary(data) => {
+                        if data.is_empty() {
+                            continue;
+                        }
+                        let stream_id = data[0];
+                        let payload = &data[1..];
+                        match stream_id {
+                            SPRITES_STREAM_STDOUT => {
+                                stdout_writer
+                                    .write_all(payload)
+                                    .await
+                                    .context("writing Sprites process stdout pipe")?;
+                            }
+                            SPRITES_STREAM_STDERR => {
+                                stderr_writer
+                                    .write_all(payload)
+                                    .await
+                                    .context("writing Sprites process stderr pipe")?;
+                            }
+                            SPRITES_STREAM_EXIT => {
+                                exit_code = Some(parse_sprites_binary_exit_code(payload));
+                            }
+                            _ => {}
+                        }
+                    }
+                    Message::Text(text) => {
+                        if let Ok(event) = serde_json::from_str::<SpritesExecJsonMessage>(&text) {
+                            if event.message_type == "exit" {
+                                if let Some(code) = event.exit_code {
+                                    exit_code = Some(code);
+                                }
+                            }
+                        }
+                    }
+                    Message::Close(_) => break,
+                    Message::Ping(payload) => {
+                        ws_write
+                            .send(Message::Pong(payload))
+                            .await
+                            .context("responding to Sprites exec WebSocket ping")?;
+                    }
+                    Message::Pong(_) | Message::Frame(_) => {}
+                }
+            }
+            read_result = stdin_reader.read(&mut stdin_buffer), if !stdin_closed => {
+                let bytes_read = read_result.context("reading Sprites process stdin pipe")?;
+                if bytes_read == 0 {
+                    ws_write
+                        .send(Message::Binary(Bytes::from_static(&[
+                            SPRITES_STREAM_STDIN_EOF,
+                        ])))
+                        .await
+                        .context("sending Sprites stdin EOF")?;
+                    stdin_closed = true;
+                } else {
+                    let mut frame = Vec::with_capacity(1 + bytes_read);
+                    frame.push(SPRITES_STREAM_STDIN);
+                    frame.extend_from_slice(&stdin_buffer[..bytes_read]);
+                    ws_write
+                        .send(Message::Binary(Bytes::from(frame)))
+                        .await
+                        .context("sending Sprites process stdin")?;
+                }
+            }
+        }
+    }
+
+    exit_code.ok_or_else(|| anyhow!("Sprites exec WebSocket closed without an exit event"))
+}
+
+fn parse_sprites_binary_exit_code(payload: &[u8]) -> i32 {
+    if payload.is_empty() {
+        return 0;
+    }
+    if payload.len() == 1 {
+        return payload[0] as i32;
+    }
+    if let Ok(text) = std::str::from_utf8(payload) {
+        if let Ok(code) = text.trim().parse::<i32>() {
+            return code;
+        }
+    }
+    payload.last().copied().unwrap_or(0) as i32
+}
+
+#[derive(Debug, Deserialize)]
+struct SpritesExecJsonMessage {
+    #[serde(rename = "type")]
+    message_type: String,
+    #[serde(rename = "exit_code")]
+    exit_code: Option<i32>,
+}
+
+async fn exec_in_sprite(
+    backend: &SpritesBackendHandle,
+    sprite_name: &str,
+    spec: &SandboxSpec,
+    command: &SandboxCommand,
+) -> Result<SandboxCommandOutput> {
+    let cwd = command
+        .cwd
+        .clone()
+        .unwrap_or_else(|| spec.default_workdir.clone());
+    exec_command_in_sprite(backend, sprite_name, cwd, command).await
+}
+
+async fn exec_command_in_sprite(
+    backend: &SpritesBackendHandle,
+    sprite_name: &str,
+    cwd: String,
+    command: &SandboxCommand,
+) -> Result<SandboxCommandOutput> {
+    if command.argv.is_empty() {
+        bail!("sandbox command requires at least one argv entry");
+    }
 
     let mut query: Vec<(&str, String)> = Vec::new();
     for arg in &command.argv {
