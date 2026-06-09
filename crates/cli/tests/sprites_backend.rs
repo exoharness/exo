@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use exoharness::{
-    ManagedSandboxBackend, SandboxKey, SandboxLifecycleConfig, SandboxMount, SandboxMountAccess,
-    SandboxNetworkPolicy, SandboxRequest, SandboxSpec, SnapshotKind, SnapshotPayload,
-    SpritesConfig, SpritesSandboxBackend,
+    ManagedSandboxBackend, SandboxKey, SandboxLifecycleConfig, SandboxMount,
+    SandboxMountAccess, SandboxNetworkPolicy, SandboxRequest, SandboxSpec, SnapshotKind,
+    SnapshotPayload, SpritesConfig, SpritesSandboxBackend,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path, path_regex};
@@ -454,3 +454,4 @@ async fn acquire_from_snapshot_rejects_wrong_kind() {
         "unexpected: {msg}"
     );
 }
+
