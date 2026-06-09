@@ -15,9 +15,12 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use futures::io::Cursor;
+use futures::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::{mpsc, oneshot};
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use uuid::Uuid;
 
 use crate::sandbox::{
@@ -28,6 +31,8 @@ use crate::sandbox::{
 
 pub const DEFAULT_E2B_API_URL: &str = "https://api.e2b.app";
 pub const DEFAULT_E2B_ENVD_PORT: u16 = 49_983;
+
+const PROCESS_PIPE_BUFFER_SIZE: usize = 64 * 1024;
 
 /// Connect envelope flag: payload is gzip-compressed (unsupported here).
 const CONNECT_FLAG_COMPRESSED: u8 = 0x01;
@@ -338,25 +343,14 @@ impl ManagedSandboxHandle for E2bSandboxHandle {
     }
 
     async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts> {
-        let output = exec_in_sandbox(
+        start_process_in_sandbox(
             &self.backend,
             &self.sandbox_id,
             self.envd_access_token.as_deref(),
             &self.request.spec,
             command,
         )
-        .await?;
-        let exit_code = output.exit_code.unwrap_or(0);
-        let stdout = Cursor::new(output.stdout.into_bytes());
-        let stderr = Cursor::new(output.stderr.into_bytes());
-        let stdin = futures::io::sink();
-        let wait: BoxFuture<'static, crate::Result<i32>> = Box::pin(async move { Ok(exit_code) });
-        Ok(crate::SandboxProcessParts {
-            stdout: Box::pin(stdout),
-            stderr: Box::pin(stderr),
-            stdin: Box::pin(stdin),
-            wait,
-        })
+        .await
     }
 
     async fn stop(&self) -> Result<()> {
@@ -370,6 +364,64 @@ impl ManagedSandboxHandle for E2bSandboxHandle {
     }
 }
 
+async fn start_process_in_sandbox(
+    backend: &E2bBackendHandle,
+    sandbox_id: &str,
+    envd_access_token: Option<&str>,
+    spec: &SandboxSpec,
+    command: &SandboxCommand,
+) -> Result<crate::SandboxProcessParts> {
+    if command.argv.is_empty() {
+        bail!("sandbox command requires at least one argv entry");
+    }
+    let cwd = command
+        .cwd
+        .clone()
+        .unwrap_or_else(|| spec.default_workdir.clone());
+    let (cmd, args) = command.argv.split_first().expect("checked non-empty");
+
+    let (stdout_reader, stdout_writer) = tokio::io::duplex(PROCESS_PIPE_BUFFER_SIZE);
+    let (stderr_reader, stderr_writer) = tokio::io::duplex(PROCESS_PIPE_BUFFER_SIZE);
+    let (stdin_reader, stdin_writer) = tokio::io::duplex(PROCESS_PIPE_BUFFER_SIZE);
+    let (wait_tx, wait_rx) = oneshot::channel();
+    let (pid_tx, pid_rx) = oneshot::channel();
+    let (stdin_error_tx, stdin_error_rx) = mpsc::unbounded_channel();
+
+    let process = E2bRunningProcess {
+        backend: backend.clone(),
+        sandbox_id: sandbox_id.to_string(),
+        envd_access_token: envd_access_token.map(str::to_string),
+    };
+
+    spawn_e2b_process_stream_poller(
+        process.clone(),
+        cmd.to_string(),
+        args.to_vec(),
+        cwd,
+        command.env.clone(),
+        stdout_writer,
+        stderr_writer,
+        stdin_error_rx,
+        pid_tx,
+        wait_tx,
+    );
+    spawn_e2b_process_stdin_forwarder(process, stdin_reader, pid_rx, stdin_error_tx);
+
+    let wait: BoxFuture<'static, crate::Result<i32>> = Box::pin(async move {
+        match wait_rx.await {
+            Ok(result) => result,
+            Err(_) => Err(anyhow!("E2B process stream stopped before reporting exit")),
+        }
+    });
+
+    Ok(crate::SandboxProcessParts {
+        stdout: Box::pin(stdout_reader.compat()),
+        stderr: Box::pin(stderr_reader.compat()),
+        stdin: Box::pin(stdin_writer.compat_write()),
+        wait,
+    })
+}
+
 async fn exec_in_sandbox(
     backend: &E2bBackendHandle,
     sandbox_id: &str,
@@ -377,14 +429,24 @@ async fn exec_in_sandbox(
     spec: &SandboxSpec,
     command: &SandboxCommand,
 ) -> Result<SandboxCommandOutput> {
-    if command.argv.is_empty() {
-        bail!("sandbox command requires at least one argv entry");
-    }
-    let (cmd, args) = command.argv.split_first().expect("checked non-empty");
     let cwd = command
         .cwd
         .clone()
         .unwrap_or_else(|| spec.default_workdir.clone());
+    exec_command_in_sandbox(backend, sandbox_id, envd_access_token, cwd, command).await
+}
+
+async fn exec_command_in_sandbox(
+    backend: &E2bBackendHandle,
+    sandbox_id: &str,
+    envd_access_token: Option<&str>,
+    cwd: String,
+    command: &SandboxCommand,
+) -> Result<SandboxCommandOutput> {
+    if command.argv.is_empty() {
+        bail!("sandbox command requires at least one argv entry");
+    }
+    let (cmd, args) = command.argv.split_first().expect("checked non-empty");
 
     let start_request = serde_json::json!({
         "process": {
@@ -439,6 +501,336 @@ async fn exec_in_sandbox(
             .unwrap_or_else(|| command.argv.clone()),
         cwd,
     })
+}
+
+#[derive(Clone)]
+struct E2bRunningProcess {
+    backend: E2bBackendHandle,
+    sandbox_id: String,
+    envd_access_token: Option<String>,
+}
+
+fn spawn_e2b_process_stream_poller(
+    process: E2bRunningProcess,
+    cmd: String,
+    args: Vec<String>,
+    cwd: String,
+    env: HashMap<String, String>,
+    stdout_writer: tokio::io::DuplexStream,
+    stderr_writer: tokio::io::DuplexStream,
+    mut stdin_error_rx: mpsc::UnboundedReceiver<anyhow::Error>,
+    pid_tx: oneshot::Sender<i32>,
+    wait_tx: oneshot::Sender<crate::Result<i32>>,
+) {
+    tokio::spawn(async move {
+        let sandbox_id = process.sandbox_id.clone();
+        let result = poll_e2b_process_stream(
+            process,
+            cmd,
+            args,
+            cwd,
+            env,
+            stdout_writer,
+            stderr_writer,
+            &mut stdin_error_rx,
+            pid_tx,
+        )
+        .await;
+        if wait_tx.send(result).is_err() {
+            tracing::debug!(
+                sandbox_id = %sandbox_id,
+                "E2B process waiter dropped before completion"
+            );
+        }
+    });
+}
+
+fn spawn_e2b_process_stdin_forwarder(
+    process: E2bRunningProcess,
+    stdin_reader: tokio::io::DuplexStream,
+    pid_rx: oneshot::Receiver<i32>,
+    stdin_error_tx: mpsc::UnboundedSender<anyhow::Error>,
+) {
+    tokio::spawn(async move {
+        let sandbox_id = process.sandbox_id.clone();
+        if let Err(error) = forward_e2b_process_stdin(process, stdin_reader, pid_rx).await {
+            tracing::warn!(
+                sandbox_id = %sandbox_id,
+                error = %error,
+                "E2B process stdin forwarder stopped"
+            );
+            if stdin_error_tx.send(error).is_err() {
+                tracing::debug!(
+                    sandbox_id = %sandbox_id,
+                    "E2B process stream stopped before stdin error could be reported"
+                );
+            }
+        }
+    });
+}
+
+async fn poll_e2b_process_stream(
+    process: E2bRunningProcess,
+    cmd: String,
+    args: Vec<String>,
+    cwd: String,
+    env: HashMap<String, String>,
+    mut stdout_writer: tokio::io::DuplexStream,
+    mut stderr_writer: tokio::io::DuplexStream,
+    stdin_error_rx: &mut mpsc::UnboundedReceiver<anyhow::Error>,
+    pid_tx: oneshot::Sender<i32>,
+) -> crate::Result<i32> {
+    let start_request = serde_json::json!({
+        "process": {
+            "cmd": cmd,
+            "args": args,
+            "envs": env,
+            "cwd": cwd,
+        },
+        "stdin": true,
+    });
+    let request_payload = serde_json::to_vec(&start_request).context("encoding E2B StartRequest")?;
+    let request_body = connect_encode_envelope(0, &request_payload)?;
+
+    let mut request = process
+        .backend
+        .client
+        .post(
+            process
+                .backend
+                .envd_endpoint(&process.sandbox_id, "/process.Process/Start"),
+        )
+        .header("Connect-Protocol-Version", "1")
+        .header("Content-Type", "application/connect+json")
+        .body(request_body);
+    request = apply_envd_access_token(
+        request,
+        &process.backend,
+        &process.sandbox_id,
+        process.envd_access_token.as_deref(),
+    )?;
+
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("starting E2B process in sandbox {}", process.sandbox_id))?;
+    let status = response.status();
+    if !status.is_success() {
+        let bytes = response.bytes().await.unwrap_or_default();
+        bail!(
+            "E2B process start failed ({status}): {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    let mut reader = ConnectEnvelopeReader::default();
+    let mut pid_tx = Some(pid_tx);
+    let mut exit_code = None;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        if let Ok(error) = stdin_error_rx.try_recv() {
+            return Err(error.context("E2B process stdin forwarding failed"));
+        }
+        let chunk = chunk.context("reading E2B process stream chunk")?;
+        reader.push(&chunk);
+        while let Some((flags, payload)) = reader.pop_envelope()? {
+            if flags & CONNECT_FLAG_END_STREAM != 0 {
+                let end: serde_json::Value = serde_json::from_slice(&payload)
+                    .context("decoding Connect end-stream message")?;
+                if let Some(err) = end.get("error") {
+                    let code = err
+                        .get("code")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let message = err
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown error");
+                    bail!("E2B process stream error ({code}): {message}");
+                }
+                continue;
+            }
+
+            let message: serde_json::Value =
+                serde_json::from_slice(&payload).context("decoding Connect stream message")?;
+            let Some(event) = message.get("event") else {
+                continue;
+            };
+            if let Some(start) = event.get("start") {
+                if let Some(pid) = start.get("pid").and_then(|v| v.as_i64()) {
+                    if let Some(sender) = pid_tx.take() {
+                        if sender.send(pid as i32).is_err() {
+                            tracing::debug!(
+                                sandbox_id = %process.sandbox_id,
+                                pid,
+                                "E2B process stdin forwarder dropped before pid was delivered"
+                            );
+                        }
+                    }
+                }
+            }
+            if let Some(data) = event.get("data") {
+                if let Some(chunk) = data.get("stdout").and_then(|v| v.as_str()) {
+                    let decoded = decode_process_bytes(chunk);
+                    stdout_writer
+                        .write_all(decoded.as_bytes())
+                        .await
+                        .context("writing E2B process stdout pipe")?;
+                }
+                if let Some(chunk) = data.get("stderr").and_then(|v| v.as_str()) {
+                    let decoded = decode_process_bytes(chunk);
+                    stderr_writer
+                        .write_all(decoded.as_bytes())
+                        .await
+                        .context("writing E2B process stderr pipe")?;
+                }
+            }
+            if let Some(end) = event.get("end") {
+                exit_code = Some(parse_exit_code(end));
+            }
+        }
+    }
+
+    exit_code.ok_or_else(|| anyhow!("E2B process stream ended without an exit event"))
+}
+
+async fn forward_e2b_process_stdin(
+    process: E2bRunningProcess,
+    mut stdin_reader: tokio::io::DuplexStream,
+    pid_rx: oneshot::Receiver<i32>,
+) -> Result<()> {
+    let pid = pid_rx
+        .await
+        .map_err(|_| anyhow!("E2B process stream stopped before reporting pid"))?;
+    let mut buffer = vec![0u8; PROCESS_PIPE_BUFFER_SIZE];
+    loop {
+        let bytes_read = stdin_reader
+            .read(&mut buffer)
+            .await
+            .context("reading E2B process stdin pipe")?;
+        if bytes_read == 0 {
+            e2b_close_stdin(&process, pid).await?;
+            return Ok(());
+        }
+        e2b_send_stdin(&process, pid, &buffer[..bytes_read]).await?;
+    }
+}
+
+async fn e2b_send_stdin(process: &E2bRunningProcess, pid: i32, data: &[u8]) -> Result<()> {
+    let body = serde_json::json!({
+        "process": { "pid": pid },
+        "input": { "stdin": BASE64.encode(data) },
+    });
+    let mut request = process
+        .backend
+        .client
+        .post(
+            process
+                .backend
+                .envd_endpoint(&process.sandbox_id, "/process.Process/SendInput"),
+        )
+        .header("Connect-Protocol-Version", "1")
+        .header("Content-Type", "application/json")
+        .json(&body);
+    request = apply_envd_access_token(
+        request,
+        &process.backend,
+        &process.sandbox_id,
+        process.envd_access_token.as_deref(),
+    )?;
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("sending stdin to E2B process {pid}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        bail!("E2B SendInput failed ({status}): {text}");
+    }
+    Ok(())
+}
+
+async fn e2b_close_stdin(process: &E2bRunningProcess, pid: i32) -> Result<()> {
+    let body = serde_json::json!({
+        "process": { "pid": pid },
+    });
+    let mut request = process
+        .backend
+        .client
+        .post(
+            process
+                .backend
+                .envd_endpoint(&process.sandbox_id, "/process.Process/CloseStdin"),
+        )
+        .header("Connect-Protocol-Version", "1")
+        .header("Content-Type", "application/json")
+        .json(&body);
+    request = apply_envd_access_token(
+        request,
+        &process.backend,
+        &process.sandbox_id,
+        process.envd_access_token.as_deref(),
+    )?;
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("closing stdin for E2B process {pid}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        bail!("E2B CloseStdin failed ({status}): {text}");
+    }
+    Ok(())
+}
+
+fn apply_envd_access_token(
+    request: reqwest::RequestBuilder,
+    backend: &E2bBackendHandle,
+    sandbox_id: &str,
+    envd_access_token: Option<&str>,
+) -> Result<reqwest::RequestBuilder> {
+    if !backend.secure {
+        return Ok(request);
+    }
+    let token = envd_access_token.ok_or_else(|| {
+        anyhow!(
+            "E2B sandbox {sandbox_id} requires envdAccessToken for command execution \
+             (create with secure: false via E2B_SECURE=0, or reconnect to refresh the token)"
+        )
+    })?;
+    Ok(request.header("X-Access-Token", token))
+}
+
+#[derive(Default)]
+struct ConnectEnvelopeReader {
+    buffer: Vec<u8>,
+}
+
+impl ConnectEnvelopeReader {
+    fn push(&mut self, chunk: &[u8]) {
+        self.buffer.extend_from_slice(chunk);
+    }
+
+    fn pop_envelope(&mut self) -> Result<Option<(u8, Vec<u8>)>> {
+        if self.buffer.len() < 5 {
+            return Ok(None);
+        }
+        let len = u32::from_be_bytes(self.buffer[1..5].try_into().expect("four length bytes"))
+            as usize;
+        if len > CONNECT_MAX_ENVELOPE_BYTES {
+            bail!("connect envelope length {len} exceeds max {CONNECT_MAX_ENVELOPE_BYTES}");
+        }
+        if self.buffer.len() < 5 + len {
+            return Ok(None);
+        }
+        let flags = self.buffer[0];
+        if flags & CONNECT_FLAG_COMPRESSED != 0 {
+            bail!("compressed Connect envelopes are not supported");
+        }
+        let payload = self.buffer[5..5 + len].to_vec();
+        self.buffer.drain(..5 + len);
+        Ok(Some((flags, payload)))
+    }
 }
 
 /// Wrap a JSON payload in a Connect binary envelope (1-byte flags + 4-byte BE length).
