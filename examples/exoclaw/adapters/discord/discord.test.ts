@@ -1,9 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   createResilienceHandlers,
   describeCloseCode,
   errorMessage,
+  startConnectionWatchdog,
 } from "./discord";
 
 describe("errorMessage", () => {
@@ -83,17 +84,18 @@ describe("createResilienceHandlers", () => {
     expect(exit).not.toHaveBeenCalled();
   });
 
-  it("reports a shard disconnect without exiting into a restart loop", () => {
+  it("exits after a shard disconnect instead of lingering as a zombie", () => {
     const emit = vi.fn();
     const exit = vi.fn();
-    // 4014 (disallowed intents) is a config error a restart cannot fix; the
-    // worker must stay up rather than churn.
+    // shardDisconnect means discord.js gave up reconnecting; a worker that
+    // stays up will never receive another message. The runner's exponential
+    // backoff bounds the restart churn for persistent config errors.
     createResilienceHandlers({ emit, exit }).onShardDisconnect(4014);
     expect(emit).toHaveBeenCalledWith({
       type: "disconnected",
       reason: expect.stringContaining("privileged intents"),
     });
-    expect(exit).not.toHaveBeenCalled();
+    expect(exit).toHaveBeenCalledWith(1);
   });
 
   it("keeps the worker alive on a shard error", () => {
@@ -118,5 +120,57 @@ describe("createResilienceHandlers", () => {
       message: "discord login failed: invalid token",
     });
     expect(exit).toHaveBeenCalledWith(1);
+  });
+});
+
+describe("startConnectionWatchdog", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("exits when the client stays not-ready past the timeout", () => {
+    vi.useFakeTimers();
+    const emit = vi.fn();
+    const exit = vi.fn();
+    const stop = startConnectionWatchdog({
+      isReady: () => false,
+      emit,
+      exit,
+      intervalMs: 1_000,
+      timeoutMs: 5_000,
+    });
+    vi.advanceTimersByTime(4_000);
+    expect(exit).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(2_000);
+    expect(emit).toHaveBeenCalledWith({
+      type: "error",
+      message: expect.stringContaining("discord gateway not ready"),
+    });
+    expect(exit).toHaveBeenCalledWith(1);
+    stop();
+  });
+
+  it("stays quiet while the client is ready and recovers after blips", () => {
+    vi.useFakeTimers();
+    const emit = vi.fn();
+    const exit = vi.fn();
+    let ready = true;
+    const stop = startConnectionWatchdog({
+      isReady: () => ready,
+      emit,
+      exit,
+      intervalMs: 1_000,
+      timeoutMs: 5_000,
+    });
+    vi.advanceTimersByTime(60_000);
+    expect(exit).not.toHaveBeenCalled();
+    // A short blip below the timeout must not kill the worker.
+    ready = false;
+    vi.advanceTimersByTime(3_000);
+    ready = true;
+    vi.advanceTimersByTime(60_000);
+    expect(exit).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
+    stop();
   });
 });

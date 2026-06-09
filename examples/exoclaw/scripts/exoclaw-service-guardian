@@ -116,8 +116,33 @@ request_repl_restart() {
   echo "Requested control REPL child restart: $(repl_restart_file)"
 }
 
+DRAIN_CLAIM_SECONDS="${EXOCLAW_DRAIN_CLAIM_SECONDS:-15}"
+DRAIN_GRACE_SECONDS="${EXOCLAW_DRAIN_GRACE_SECONDS:-300}"
+
 scheduler_pid_file() {
   echo "$STATE_DIR/exoclaw-scheduler.pid"
+}
+
+scheduler_restart_file() {
+  echo "$STATE_DIR/exoclaw-scheduler.restart"
+}
+
+adapters_restart_file() {
+  echo "$STATE_DIR/exoclaw-adapters.restart"
+}
+
+reboot_notice_file() {
+  echo "$STATE_DIR/exoclaw-reboot-notice.json"
+}
+
+# Tell the next adapter runner that this start is part of a reboot. The runner
+# claims the notice and wakes the adapter conversations so the agent can
+# announce externally that it is back up.
+write_reboot_notice() {
+  local reason="$1"
+  ensure_state_dir
+  printf '{"requestedAt":"%s","reason":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$reason" >"$(reboot_notice_file)"
 }
 
 scheduler_lock_file() {
@@ -206,7 +231,7 @@ start_scheduler() {
     echo "Scheduler already running: $(<"$pid_file")"
     return
   fi
-  rm -f "$(scheduler_lock_file)"
+  rm -f "$(scheduler_lock_file)" "$(scheduler_restart_file)"
   echo "Starting scheduler..."
   local scheduler_args=(--env-file-if-exists "$ENV_FILE")
   if [[ -n "$SANDBOX_BACKEND" ]]; then
@@ -228,6 +253,7 @@ start_adapters() {
     echo "Adapter runner already running: $(<"$pid_file")"
     return
   fi
+  rm -f "$(adapters_restart_file)"
   read_exo_global_args
   echo "Starting adapter runner..."
   nohup "$EXO_BIN" "${EXO_GLOBAL_ARGS[@]}" --harness "$HARNESS" \
@@ -251,14 +277,59 @@ stop_pid_file() {
   rm -f "$pid_file"
 }
 
+# Ask a runner to drain via its restart marker before falling back to a kill.
+# The runner claims the request by deleting the marker, finishes in-flight
+# work, and exits on its own. A runner that never claims the marker (an old
+# build, or one wedged mid-task) gets the process tree treatment instead.
+drain_pid_file() {
+  local label="$1"
+  local pid_file="$2"
+  local marker="$3"
+  local pid waited
+  if [[ ! -f "$pid_file" ]]; then
+    rm -f "$pid_file"
+    return
+  fi
+  pid="$(<"$pid_file")"
+  if ! [[ "$pid" =~ ^[0-9]+$ ]] || ! kill -0 "$pid" >/dev/null 2>&1; then
+    rm -f "$pid_file"
+    return
+  fi
+  echo "Requesting graceful $label drain..."
+  : >"$marker"
+  waited=0
+  while [[ -f "$marker" && "$waited" -lt "$DRAIN_CLAIM_SECONDS" ]]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if [[ -f "$marker" ]]; then
+    rm -f "$marker"
+    echo "$label did not claim the drain request; stopping process tree..."
+    terminate_process_tree "$pid"
+  else
+    waited=0
+    while kill -0 "$pid" >/dev/null 2>&1 && [[ "$waited" -lt "$DRAIN_GRACE_SECONDS" ]]; do
+      sleep 1
+      waited=$((waited + 1))
+    done
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      echo "$label still running after ${DRAIN_GRACE_SECONDS}s drain grace; stopping process tree..."
+      terminate_process_tree "$pid"
+    else
+      echo "$label drained and exited cleanly."
+    fi
+  fi
+  rm -f "$pid_file"
+}
+
 stop_scheduler() {
-  stop_pid_file "Exoclaw scheduler" "$(scheduler_pid_file)"
+  drain_pid_file "Exoclaw scheduler" "$(scheduler_pid_file)" "$(scheduler_restart_file)"
   pkill -f "exoclaw-scheduler-runner .*run --watch" >/dev/null 2>&1 || true
   rm -f "$(scheduler_lock_file)"
 }
 
 stop_adapters() {
-  stop_pid_file "Exoclaw adapter runner" "$(adapters_pid_file)"
+  drain_pid_file "Exoclaw adapter runner" "$(adapters_pid_file)" "$(adapters_restart_file)"
   pkill -f "exo .*adapters run" >/dev/null 2>&1 || true
   pkill -f "tsx examples/exoclaw/adapters/.*/worker.ts" >/dev/null 2>&1 || true
 }
@@ -281,11 +352,13 @@ restart_scheduler() {
 
 restart_adapters() {
   stop_adapters
+  write_reboot_notice "restart-adapters"
   start_adapters
 }
 
 restart_services() {
   stop_services
+  write_reboot_notice "$RESTART_REASON"
   start_services
 }
 
@@ -351,6 +424,7 @@ fi
 shift
 
 BUILD_BEFORE_RESTART=false
+RESTART_REASON="restart-services"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -439,6 +513,9 @@ case "$COMMAND" in
   restart-all)
     if [[ "$BUILD_BEFORE_RESTART" == true ]]; then
       build_all
+      RESTART_REASON="restart-all with fresh build"
+    else
+      RESTART_REASON="restart-all"
     fi
     restart_services
     ;;

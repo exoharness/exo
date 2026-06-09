@@ -17,11 +17,13 @@ Use this map before changing Exoclaw itself.
 - `examples/exoclaw/scripts/exoclaw-service-guardian`: host-side build and service control.
 - `examples/exoclaw/scripts/exoclaw-control`: local startup script for REPL, scheduler, adapters, sandbox, and repo mount.
 - `examples/exoclaw/sandbox-tools.ts`: sandbox snapshot and rewind tool definitions.
+- `examples/exoclaw/host-tools.ts`: `registerHostTool` helper that bridges TypeScript tool definitions to Rust execution.
 - `examples/exoclaw/scheduler-tools.ts`: scheduled task tool definitions.
 - `examples/exoclaw/scheduler-runner/`: host scheduler runner binary.
 - `examples/exoclaw/adapters/`: adapter setup prompts and worker implementations.
 - `typescript/harness/adapter-tools.ts`: model-visible adapter tool definitions.
 - `crates/executor/src/adapter/`: Rust adapter runtime and supervision.
+- `crates/executor/src/harness_tool.rs`: Rust tool execution runtime (`execute_tool` match arms).
 - `crates/executor/src/agent_sandbox.rs`: shared agent sandbox selection.
 - `crates/executor/src/conversation_sandbox.rs`: conversation sandbox selection.
 - `crates/exoharness/`: durable harness API, conversation state, events, artifacts, and sandbox lifecycle.
@@ -55,6 +57,37 @@ pwd
 ls examples/exoclaw
 ```
 
+## Tool Architecture
+
+Tools have two layers, and both matter:
+
+1. **Definition (TypeScript)**: the model only sees tools registered in the
+   TypeScript registry each turn (`examples/exoclaw/harness.ts`). Sources are
+   built-in tools, library tool modules, and agent-installed tools in
+   `.exo/agent-tools/` (managed with `install_agent_tool` /
+   `uninstall_agent_tool`).
+2. **Execution (TypeScript or Rust)**: a tool's handler can run entirely in
+   TypeScript, or delegate to the Rust runtime via
+   `execution.context.executeTool(...)`, which dispatches on the function name
+   in `crates/executor/src/harness_tool.rs`.
+
+### Adding a Rust-backed tool
+
+A Rust match arm alone is invisible to the model; it always needs a TypeScript
+definition that delegates to it:
+
+1. Implement the tool logic as a match arm in `execute_tool` in
+   `crates/executor/src/harness_tool.rs` (see `list_sandbox_snapshots` for a
+   full example).
+2. Register a TypeScript definition with the same name using
+   `registerHostTool` from `examples/exoclaw/host-tools.ts`, wired into the
+   registry in `examples/exoclaw/harness.ts` (see `sandbox-tools.ts` for the
+   pattern).
+3. Rebuild and restart with `guardian_action restart_all` (with build) so both
+   the Rust binary and the harness pick up the change.
+4. Never create an agent-installed tool with the same name as a Rust-backed
+   tool; the registry conflict makes calls ambiguous.
+
 ## Maintenance Rules
 
 - Prefer `guardian_action` for host-side build, status, logs, and service restarts.
@@ -66,4 +99,13 @@ ls examples/exoclaw
 - In control mode, service guardian builds write `.exo/exoclaw-control.restart`;
   the `exoclaw-control --control` wrapper restarts only the child `exo repl` and
   keeps the user's terminal open.
+- Service restarts drain gracefully: the guardian writes
+  `.exo/exoclaw-adapters.restart` / `.exo/exoclaw-scheduler.restart`, the
+  runner claims the marker, finishes in-flight work, and exits so the guardian
+  can start the new build. Runners that do not claim the marker are killed
+  after a short wait.
+- Adapter restarts also write `.exo/exoclaw-reboot-notice.json`; the fresh
+  adapter runner claims it and wakes the adapter conversations so you can
+  announce externally that you are back. Announce planned downtime with
+  `send_adapter_message` before requesting the restart.
 - Preserve `.exo` state unless the user explicitly asks to delete state.

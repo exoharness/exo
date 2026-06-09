@@ -85,6 +85,10 @@ async fn main() -> Result<()> {
                 if !watch {
                     break;
                 }
+                if claim_restart_marker(&cli.root) {
+                    println!("restart marker claimed; exiting so the guardian can restart us");
+                    break;
+                }
                 tokio::time::sleep(Duration::from_secs(interval_seconds)).await;
             }
         }
@@ -158,6 +162,13 @@ impl Drop for SchedulerRunnerLock {
             );
         }
     }
+}
+
+/// The guardian writes this marker to request a graceful restart: finish the
+/// current scheduler pass, claim the marker (remove it), and exit so the
+/// guardian can start a fresh build.
+fn claim_restart_marker(root: &Path) -> bool {
+    fs::remove_file(root.join("exoclaw-scheduler.restart")).is_ok()
 }
 
 fn process_is_running(pid: &str) -> bool {

@@ -53,7 +53,16 @@ pub async fn handle_adapter_command(
         }
         AdapterCommands::Run { limit } => {
             let _lock = AdapterRunnerLock::acquire(root)?;
-            run_adapters_watch(harness, store, AdapterRunOptions { limit }).await?;
+            run_adapters_watch(
+                harness,
+                store,
+                AdapterRunOptions {
+                    limit,
+                    drain_marker: Some(root.join("exoclaw-adapters.restart")),
+                    reboot_notice: Some(root.join("exoclaw-reboot-notice.json")),
+                },
+            )
+            .await?;
         }
         AdapterCommands::Disable { adapter_id } => {
             if store.disable_adapter(&adapter_id).await?.is_some() {

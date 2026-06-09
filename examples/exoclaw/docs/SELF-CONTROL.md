@@ -39,7 +39,9 @@ Exoclaw should eventually be able to create reusable tools for itself when a use
 
 This keeps tool creation auditable and avoids giving arbitrary runtime authority to generated code. Generated tools should use stable platform APIs, avoid extra npm dependencies by default, and declare any required initialization such as environment variable names for API keys.
 
-Current status: `install_agent_tool` provides the host-validated installation path for generated TypeScript tools.
+Current status: `install_agent_tool` provides the host-validated installation path for generated TypeScript tools, and `uninstall_agent_tool` removes them again.
+
+Tools are layered: the TypeScript registry defines what the model can see and call, and a tool handler either runs in TypeScript or delegates execution to the Rust tool runtime (`crates/executor/src/harness_tool.rs`) by calling `execution.context.executeTool(...)` with the same function name. Rust-backed tools therefore always need a TypeScript definition; `registerHostTool` in `examples/exoclaw/host-tools.ts` is the standard bridge, and the sandbox tools in `examples/exoclaw/sandbox-tools.ts` are the reference example. A Rust match arm without a registered TypeScript definition is unreachable, and an agent-installed tool must never reuse the name of a Rust-backed tool.
 
 ## Adapter Control
 
@@ -90,6 +92,10 @@ The model-visible `guardian_action` tool wraps the script with a strict allowlis
 
 Restart actions are deferred briefly and handed off to a detached service guardian process. That lets the current model turn finish and report that the restart was scheduled before the adapter or scheduler runner is stopped. The detached output goes to `.exo/exoclaw-service-guardian-actions.log`; after services come back, Exoclaw can use `guardian_action` with `status` or `logs` to inspect the result.
 
+Reboots are announced through the adapters. Because restart actions are deferred, the agent can post a "going down" message with `send_adapter_message` in the same turn that requests the restart. When the guardian restarts the adapter runner it also writes `.exo/exoclaw-reboot-notice.json`; the fresh runner claims the notice and sends one wakeup per adapter conversation telling the agent services are back, so it can announce its return. The announcement reply queues in the durable adapter outbox and delivers as soon as the worker reconnects, so the wakeup does not need to wait for the external connection. Stale notices (older than 15 minutes) are discarded instead of announced.
+
+Service restarts drain instead of killing blindly. The guardian writes a restart marker (`.exo/exoclaw-adapters.restart` or `.exo/exoclaw-scheduler.restart`); the runner claims the marker by deleting it, finishes in-flight wakeup turns or scheduler passes, and exits on its own so the guardian can start the new build. A runner that never claims the marker (an old build, or one wedged mid-task) is stopped with the process-tree kill after a short wait. Adapter workers themselves run in their own process groups, so stopping a worker also terminates the `pnpm`/`tsx`/`node` children that hold the external connection.
+
 Builds request a control REPL refresh by writing `.exo/exoclaw-control.restart`. The control wrapper notices this marker, stops the current `exo repl` child, removes the marker, and starts a fresh child. This picks up rebuilt `exoharness`, `executor`, and TypeScript harness code without closing the user's terminal. If no control wrapper is running, the marker remains pending and `guardian status` reports it.
 
 ## Prompting Exoclaw
@@ -115,7 +121,7 @@ Self-control behavior is taught in a few different prompt surfaces:
 - `examples/exoclaw/harness.ts` assembles the Exoclaw developer prompt for each turn. It describes the available self-control surfaces at a high level: scheduled tasks, adapters, sandbox snapshots, guardian actions, the self map, and the default sandbox scope.
 - `examples/exoclaw/SELF.md` is the compact self map for navigating Exoclaw's own code from the sandbox.
 - `examples/exoclaw/sandbox-tools.ts`, `examples/exoclaw/scheduler-tools.ts`, `examples/exoclaw/guardian-tools.ts`, and `typescript/harness/adapter-tools.ts` provide model-visible tool descriptions and JSON schemas. These are the most direct prompts for when and how Exoclaw should call each self-control tool.
-- `typescript/harness/built-in-tools.ts` describes built-in tools such as `shell` and `install_agent_tool`, including the generated-tool installation contract.
+- `typescript/harness/built-in-tools.ts` describes built-in tools such as `shell`, `install_agent_tool`, and `uninstall_agent_tool`, including the generated-tool installation contract.
 - `examples/exoclaw/adapters/*/setup-prompt.md` files guide Exoclaw through creating specific adapters. These are setup-time prompts, not always-on behavioral rules.
 - `crates/executor/src/adapter/runtime.rs` creates adapter wakeup prompts for inbound external messages. Those prompts tell Exoclaw when a response should go back through `send_adapter_message`.
 - `crates/executor/src/scheduler_runtime.rs` creates scheduled-task wakeup prompts from each task's `reportPrompt`. Use those prompts to preserve adapter targets or other reporting instructions across future runs.

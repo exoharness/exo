@@ -60,7 +60,7 @@ function guardianActionTool(): ToolInstance {
     definition: {
       name: "guardian_action",
       description:
-        "Ask the host-side Exoclaw guardian to build Exoclaw, inspect service status/logs, or restart the scheduler and adapter runners while preserving .exo state. Builds request the control REPL wrapper to refresh its child process. Restart actions are deferred briefly so the current turn can finish before services are stopped. Use this instead of manually killing host processes.",
+        "Ask the host-side Exoclaw guardian to build Exoclaw, inspect service status/logs, or restart the scheduler and adapter runners while preserving .exo state. Builds request the control REPL wrapper to refresh its child process. Restart actions are deferred briefly so the current turn can finish before services are stopped. Before requesting a restart, consider announcing the brief downtime on active external adapters with send_adapter_message in the same turn; after adapters come back you will receive a wakeup prompting you to announce your return. Use this instead of manually killing host processes.",
       parameters: guardianParameters(),
     },
     handler: {

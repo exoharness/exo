@@ -11,7 +11,10 @@ import type {
 import type { HarnessToolRegistry, ToolInstance } from "./tools";
 import { DEFAULT_AGENT_TOOL_DIRECTORY, loadAgentTool } from "./tool-modules";
 
-export type BuiltInToolName = "shell" | "install_agent_tool";
+export type BuiltInToolName =
+  | "shell"
+  | "install_agent_tool"
+  | "uninstall_agent_tool";
 
 export function registerBuiltInTools(
   registry: HarnessToolRegistry,
@@ -26,6 +29,8 @@ export function registerBuiltInTools(
       }
     } else if (name === "install_agent_tool") {
       registry.register(createInstallAgentToolInstance());
+    } else if (name === "uninstall_agent_tool") {
+      registry.register(createUninstallAgentToolInstance());
     }
   }
 }
@@ -145,6 +150,67 @@ function createInstallAgentToolInstance(): ToolInstance {
   };
 }
 
+function createUninstallAgentToolInstance(): ToolInstance {
+  return {
+    source: "built_in",
+    definition: {
+      name: "uninstall_agent_tool",
+      description:
+        "Remove an agent-created tool that was previously installed with install_agent_tool, so it is no longer registered in later model rounds. The name is the module name used at install time.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          name: {
+            type: "string",
+            description:
+              "Module name passed to install_agent_tool, for example curl-tool or grab_webpage.",
+          },
+        },
+        required: ["name"],
+      },
+      outputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ok: { type: "boolean" },
+          removed: { type: "boolean" },
+          modulePath: { type: "string" },
+        },
+        required: ["ok", "removed", "modulePath"],
+      },
+    },
+    handler: {
+      execute(args) {
+        return uninstallAgentTool(args);
+      },
+    },
+  };
+}
+
+async function uninstallAgentTool(args: JsonObject): Promise<ToolResult> {
+  const name = stringArgument(args, "name");
+  if (!/^[A-Za-z0-9_-]+$/.test(name)) {
+    throw new Error(
+      "agent tool name must contain only letters, numbers, underscores, and dashes",
+    );
+  }
+  const toolsDirectory = DEFAULT_AGENT_TOOL_DIRECTORY;
+  const modulePath = path.join(toolsDirectory, `${name}.ts`);
+  const sourcePath = path.join(toolsDirectory, `${name}.source.ts`);
+  const existed = await fs
+    .access(modulePath)
+    .then(() => true)
+    .catch(() => false);
+  await fs.rm(modulePath, { force: true });
+  await fs.rm(sourcePath, { force: true });
+  return {
+    ok: true,
+    removed: existed,
+    modulePath,
+  };
+}
+
 async function installAgentTool(
   context: TurnContext,
   args: JsonObject,
@@ -186,7 +252,8 @@ async function installAgentTool(
     tool = await loadAgentTool(context, path.resolve(tempModulePath));
     if (
       tool.definition.name === "shell" ||
-      tool.definition.name === "install_agent_tool"
+      tool.definition.name === "install_agent_tool" ||
+      tool.definition.name === "uninstall_agent_tool"
     ) {
       throw new Error(
         `agent tool cannot replace built-in tool: ${tool.definition.name}`,
@@ -231,9 +298,7 @@ export default {
 function stringArgument(args: JsonObject, name: string): string {
   const value = args[name];
   if (typeof value !== "string" || value.length === 0) {
-    throw new Error(
-      `install_agent_tool argument ${name} must be a non-empty string`,
-    );
+    throw new Error(`tool argument ${name} must be a non-empty string`);
   }
   return value;
 }
@@ -241,7 +306,7 @@ function stringArgument(args: JsonObject, name: string): string {
 function objectArgument(args: JsonObject, name: string): JsonObject {
   const value = args[name];
   if (!isRecord(value)) {
-    throw new Error(`install_agent_tool argument ${name} must be an object`);
+    throw new Error(`tool argument ${name} must be an object`);
   }
   return value;
 }

@@ -108,9 +108,13 @@ pub struct AdapterOutboundMessageRecord {
 #[serde(rename_all = "snake_case")]
 pub enum AdapterEventType {
     Connected,
+    Disconnected,
     Inbound,
     Outbound,
     Error,
+    /// Worker lifecycle notices (send progress, reconnect attempts, ...) that
+    /// are neither traffic nor errors.
+    Lifecycle,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

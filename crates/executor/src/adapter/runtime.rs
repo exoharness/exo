@@ -1,10 +1,14 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use exoharness::{AgentHandle, ConversationHandle, Secret, SecretId};
+use serde::Deserialize;
 use tokio::sync::Notify;
+use tokio::task::JoinSet;
 
 use super::store::AdapterStore;
 use super::types::{AdapterAttachment, AdapterConfig, AdapterEventType, AdapterRecord};
@@ -12,15 +16,46 @@ use super::worker::{WorkerCommand, WorkerEvent, run_worker_loop};
 use crate::conversation_wakeup::send_conversation_wakeup;
 use crate::{Harness, HarnessAgent, HarnessConversation};
 
-#[derive(Debug, Clone, Copy)]
+const INITIAL_RESTART_DELAY: Duration = Duration::from_secs(5);
+const MAX_RESTART_DELAY: Duration = Duration::from_secs(300);
+// A worker that survived this long was healthy; its next failure starts the
+// backoff schedule over instead of inheriting a stale long delay.
+const STABLE_RUN_THRESHOLD: Duration = Duration::from_secs(60);
+
+// A reboot notice older than this is stale (e.g. left behind by a runner that
+// crashed before claiming it) and should be dropped rather than announced.
+const REBOOT_NOTICE_MAX_AGE: Duration = Duration::from_secs(15 * 60);
+
+#[derive(Debug, Clone)]
 pub struct AdapterRunOptions {
     pub limit: usize,
+    /// When this file appears, the runner claims it (removes the file), stops
+    /// starting new work, lets in-flight wakeup turns finish, and exits so a
+    /// supervisor can restart it on a fresh build.
+    pub drain_marker: Option<PathBuf>,
+    /// Written by the service guardian when it restarts the adapter runner.
+    /// A fresh runner claims it and wakes the adapter conversations so the
+    /// agent can announce externally that it is back up.
+    pub reboot_notice: Option<PathBuf>,
 }
 
 impl Default for AdapterRunOptions {
     fn default() -> Self {
-        Self { limit: 10 }
+        Self {
+            limit: 10,
+            drain_marker: None,
+            reboot_notice: None,
+        }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebootNotice {
+    #[serde(default)]
+    pub requested_at: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 pub async fn run_adapters_watch(
@@ -28,63 +63,215 @@ pub async fn run_adapters_watch(
     store: AdapterStore,
     options: AdapterRunOptions,
 ) -> Result<()> {
-    let mut running = HashSet::new();
+    let running = Arc::new(Mutex::new(HashSet::<String>::new()));
+    let drain = Arc::new(AtomicBool::new(false));
+    let mut supervisors = JoinSet::new();
+    if let Some(notice) = claim_reboot_notice(options.reboot_notice.as_deref()) {
+        // The wakeup turn can take minutes; run it in the background so the
+        // adapter workers (and the connections the agent will announce on)
+        // start immediately. The durable outbox holds any announcement until
+        // the relevant worker is connected.
+        let harness = Arc::clone(&harness);
+        let store = store.clone();
+        tokio::spawn(async move {
+            if let Err(error) = announce_reboot(harness, store, notice).await {
+                tracing::error!(%error, "failed to announce adapter runner reboot");
+            }
+        });
+    }
     loop {
+        if claim_drain_marker(options.drain_marker.as_deref()) {
+            tracing::info!("adapter runner drain requested; waiting for in-flight work");
+            drain.store(true, Ordering::SeqCst);
+            break;
+        }
         let adapters = store.enabled_adapters().await?;
         for adapter in adapters.into_iter().take(options.limit) {
-            if !running.insert(adapter.id.clone()) {
+            if !running
+                .lock()
+                .expect("adapter running set poisoned")
+                .insert(adapter.id.clone())
+            {
                 continue;
             }
             let harness = Arc::clone(&harness);
             let store = store.clone();
-            tokio::spawn(async move {
-                loop {
-                    match store.get_adapter(&adapter.id).await {
-                        Ok(Some(current)) if current.enabled => {}
-                        Ok(Some(_)) => {
-                            tokio::time::sleep(Duration::from_secs(5)).await;
-                            continue;
-                        }
-                        Ok(_) => break,
-                        Err(_) => break,
-                    }
-                    if let Err(error) =
-                        run_adapter_loop(Arc::clone(&harness), &store, adapter.clone()).await
-                    {
-                        tracing::error!(
-                            adapter_id = %adapter.id,
-                            %error,
-                            "adapter runtime error; restarting in 5s"
-                        );
-                        if let Err(mark_error) =
-                            store.mark_error(&adapter.id, error.to_string()).await
-                        {
-                            tracing::error!(
-                                adapter_id = %adapter.id,
-                                error = %mark_error,
-                                "failed to mark adapter error"
-                            );
-                        }
-                        if let Err(record_error) = store
-                            .record_event(
-                                adapter.id.clone(),
-                                AdapterEventType::Error,
-                                error.to_string(),
-                            )
-                            .await
-                        {
-                            tracing::error!(
-                                adapter_id = %adapter.id,
-                                error = %record_error,
-                                "failed to record adapter error"
-                            );
-                        }
-                    }
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                }
+            let running = Arc::clone(&running);
+            let drain = Arc::clone(&drain);
+            supervisors.spawn(async move {
+                let adapter_id = adapter.id.clone();
+                supervise_adapter(harness, store, adapter, drain).await;
+                running
+                    .lock()
+                    .expect("adapter running set poisoned")
+                    .remove(&adapter_id);
             });
         }
+        // Reap finished supervision tasks so the JoinSet does not grow
+        // unboundedly while the runner stays up.
+        while supervisors.try_join_next().is_some() {}
         tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+    while supervisors.join_next().await.is_some() {}
+    tracing::info!("adapter runner drained; exiting for restart");
+    Ok(())
+}
+
+fn claim_drain_marker(marker: Option<&std::path::Path>) -> bool {
+    let Some(marker) = marker else {
+        return false;
+    };
+    std::fs::remove_file(marker).is_ok()
+}
+
+fn claim_reboot_notice(notice_path: Option<&std::path::Path>) -> Option<RebootNotice> {
+    let notice_path = notice_path?;
+    let contents = std::fs::read_to_string(notice_path).ok()?;
+    let age = std::fs::metadata(notice_path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok());
+    if std::fs::remove_file(notice_path).is_err() {
+        // Another claimant got there first.
+        return None;
+    }
+    match age {
+        Some(age) if age <= REBOOT_NOTICE_MAX_AGE => {}
+        _ => {
+            tracing::warn!(
+                path = %notice_path.display(),
+                "ignoring stale reboot notice"
+            );
+            return None;
+        }
+    }
+    match serde_json::from_str::<RebootNotice>(&contents) {
+        Ok(notice) => Some(notice),
+        Err(error) => {
+            tracing::warn!(
+                path = %notice_path.display(),
+                %error,
+                "failed to parse reboot notice"
+            );
+            None
+        }
+    }
+}
+
+async fn announce_reboot(
+    harness: Arc<dyn Harness>,
+    store: AdapterStore,
+    notice: RebootNotice,
+) -> Result<()> {
+    let adapters = store.enabled_adapters().await?;
+    let mut woken = HashSet::new();
+    let reason = notice.reason.as_deref().unwrap_or("unspecified");
+    let requested_at = notice.requested_at.as_deref().unwrap_or("unknown time");
+    for adapter in &adapters {
+        if !woken.insert((adapter.agent_id.clone(), adapter.conversation_id.clone())) {
+            continue;
+        }
+        let adapter_names = adapters
+            .iter()
+            .filter(|candidate| {
+                candidate.agent_id == adapter.agent_id
+                    && candidate.conversation_id == adapter.conversation_id
+            })
+            .map(|candidate| format!("`{}` ({})", candidate.name, candidate.config.adapter_type))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let agent = require_agent(harness.as_ref(), adapter).await?;
+        let conversation = require_conversation(agent.as_ref(), adapter).await?;
+        send_conversation_wakeup(
+            conversation.as_ref(),
+            format!(
+                "Host services were restarted (reason: {reason}, requested at {requested_at}) and the adapter runner is back up. Adapter workers for {adapter_names} are reconnecting now. If you announced this reboot externally, or external users should know you are back, announce your return with send_adapter_message on the relevant adapters and targets; outbound messages queue durably and deliver once the adapter reconnects. If no announcement is appropriate, do nothing.",
+            ),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "reboot announcement wakeup failed for conversation {}",
+                adapter.conversation_id
+            )
+        })?;
+    }
+    Ok(())
+}
+
+async fn supervise_adapter(
+    harness: Arc<dyn Harness>,
+    store: AdapterStore,
+    adapter: AdapterRecord,
+    drain: Arc<AtomicBool>,
+) {
+    let mut restart_delay = INITIAL_RESTART_DELAY;
+    loop {
+        if drain.load(Ordering::SeqCst) {
+            break;
+        }
+        match store.get_adapter(&adapter.id).await {
+            Ok(Some(current)) if current.enabled => {}
+            Ok(Some(_)) => {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+            Ok(_) => break,
+            Err(error) => {
+                tracing::error!(
+                    adapter_id = %adapter.id,
+                    %error,
+                    "failed to read adapter record; retrying"
+                );
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+        }
+        let started_at = Instant::now();
+        if let Err(error) = run_adapter_loop(
+            Arc::clone(&harness),
+            &store,
+            adapter.clone(),
+            Arc::clone(&drain),
+        )
+        .await
+        {
+            if started_at.elapsed() >= STABLE_RUN_THRESHOLD {
+                restart_delay = INITIAL_RESTART_DELAY;
+            }
+            tracing::error!(
+                adapter_id = %adapter.id,
+                %error,
+                "adapter runtime error; restarting in {}s",
+                restart_delay.as_secs()
+            );
+            if let Err(mark_error) = store.mark_error(&adapter.id, error.to_string()).await {
+                tracing::error!(
+                    adapter_id = %adapter.id,
+                    error = %mark_error,
+                    "failed to mark adapter error"
+                );
+            }
+            if let Err(record_error) = store
+                .record_event(
+                    adapter.id.clone(),
+                    AdapterEventType::Error,
+                    error.to_string(),
+                )
+                .await
+            {
+                tracing::error!(
+                    adapter_id = %adapter.id,
+                    error = %record_error,
+                    "failed to record adapter error"
+                );
+            }
+            tokio::time::sleep(restart_delay).await;
+            restart_delay = (restart_delay * 2).min(MAX_RESTART_DELAY);
+            continue;
+        }
+        restart_delay = INITIAL_RESTART_DELAY;
+        tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
 
@@ -143,6 +330,7 @@ async fn run_adapter_loop(
     harness: Arc<dyn Harness>,
     store: &AdapterStore,
     adapter: AdapterRecord,
+    drain: Arc<AtomicBool>,
 ) -> Result<()> {
     let agent = require_agent(harness.as_ref(), &adapter).await?;
     let conversation = require_conversation(agent.as_ref(), &adapter).await?;
@@ -192,7 +380,11 @@ async fn run_adapter_loop(
         move || {
             let store = stop_store.clone();
             let adapter_id = stop_adapter_id.clone();
+            let drain = Arc::clone(&drain);
             async move {
+                if drain.load(Ordering::SeqCst) {
+                    return Ok(true);
+                }
                 Ok(store
                     .get_adapter(&adapter_id)
                     .await?
@@ -366,7 +558,7 @@ async fn handle_worker_message(
             ),
         )
         .await?;
-    send_conversation_wakeup(
+    let wakeup_result = send_conversation_wakeup(
         conversation,
         format!(
             "{} message received at target `{}` from {} via adapter `{}`:\n\n{}\n\nThis message came from an external adapter. If you answer this message, you MUST reply externally with send_adapter_message using adapterId `{}` and target `{}`. Do not answer only in the REPL unless you are explicitly deciding that no external reply should be sent. If this asks you to schedule future work whose results should be posted back externally, include adapterId `{}` and target `{}` in the scheduled task reportPrompt.",
@@ -381,7 +573,27 @@ async fn handle_worker_message(
             target,
         ),
     )
-    .await?;
+    .await;
+    // A failed model turn must not tear down the worker: the external
+    // connection is healthy and dropping it loses every queued message.
+    // Record the failure and keep processing events.
+    if let Err(error) = wakeup_result {
+        tracing::error!(
+            adapter_id = %adapter.id,
+            %error,
+            "adapter wakeup turn failed; worker stays up"
+        );
+        store
+            .mark_error(&adapter.id, format!("wakeup turn failed: {error}"))
+            .await?;
+        store
+            .record_event(
+                adapter.id.clone(),
+                AdapterEventType::Error,
+                format!("wakeup turn failed: {error}"),
+            )
+            .await?;
+    }
     Ok(())
 }
 
@@ -401,8 +613,9 @@ async fn record_worker_lifecycle(
             adapter.id.clone(),
             match event_type {
                 "connected" => AdapterEventType::Connected,
+                "disconnected" => AdapterEventType::Disconnected,
                 "error" => AdapterEventType::Error,
-                _ => AdapterEventType::Inbound,
+                _ => AdapterEventType::Lifecycle,
             },
             format!("{} worker {event_type}", config.adapter_type),
         )
@@ -465,4 +678,39 @@ async fn resolve_secret_id(agent: &dyn AgentHandle, reference: &str) -> Result<S
         .find(|secret| secret.name == reference)
         .map(|secret| secret.id)
         .ok_or_else(|| anyhow!("adapter secret not found: {reference}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claims_and_parses_fresh_reboot_notice() {
+        let tempdir = tempfile::TempDir::new().unwrap();
+        let path = tempdir.path().join("exoclaw-reboot-notice.json");
+        std::fs::write(
+            &path,
+            r#"{"requestedAt":"2026-06-09T19:39:02Z","reason":"restart-all"}"#,
+        )
+        .unwrap();
+
+        let notice = claim_reboot_notice(Some(&path)).expect("notice should be claimed");
+        assert_eq!(notice.reason.as_deref(), Some("restart-all"));
+        assert_eq!(notice.requested_at.as_deref(), Some("2026-06-09T19:39:02Z"));
+        assert!(!path.exists(), "claiming must remove the notice file");
+
+        assert!(claim_reboot_notice(Some(&path)).is_none());
+    }
+
+    #[test]
+    fn ignores_missing_and_malformed_reboot_notices() {
+        let tempdir = tempfile::TempDir::new().unwrap();
+        let path = tempdir.path().join("exoclaw-reboot-notice.json");
+        assert!(claim_reboot_notice(Some(&path)).is_none());
+        assert!(claim_reboot_notice(None).is_none());
+
+        std::fs::write(&path, "not json").unwrap();
+        assert!(claim_reboot_notice(Some(&path)).is_none());
+        assert!(!path.exists(), "malformed notices are still consumed");
+    }
 }

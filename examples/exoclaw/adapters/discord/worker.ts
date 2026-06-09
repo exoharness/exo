@@ -18,7 +18,7 @@ import {
   parseWorkerCommand,
   writeWorkerEvent,
 } from "../protocol";
-import { createResilienceHandlers } from "./discord";
+import { createResilienceHandlers, startConnectionWatchdog } from "./discord";
 
 const SEND_TIMEOUT_MS = 60_000;
 
@@ -76,6 +76,12 @@ client.once(Events.ClientReady, () => {
 
 client.on("shardDisconnect", (event) => {
   resilience.onShardDisconnect(event.code);
+});
+
+startConnectionWatchdog({
+  isReady: () => client.isReady(),
+  emit: writeWorkerEvent,
+  exit: (code) => process.exit(code),
 });
 
 client.on("shardError", (error) => {

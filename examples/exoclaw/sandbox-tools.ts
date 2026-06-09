@@ -4,6 +4,8 @@ import type {
   ToolInstance,
 } from "@exo/harness";
 
+import { hostTool } from "./host-tools";
+
 export type SandboxToolName =
   | "list_sandbox_snapshots"
   | "snapshot_sandbox"
@@ -70,29 +72,6 @@ function rewindSandboxTool(): ToolInstance {
       required: ["scope", "snapshotId"],
     },
   });
-}
-
-function hostTool(args: {
-  name: SandboxToolName;
-  description: string;
-  parameters: ToolDefinition["parameters"];
-}): ToolInstance {
-  return {
-    source: "built_in",
-    definition: {
-      name: args.name,
-      description: args.description,
-      parameters: args.parameters,
-    },
-    handler: {
-      execute(toolArgs, execution) {
-        return execution.context.executeTool({
-          functionName: args.name,
-          arguments: toolArgs,
-        });
-      },
-    },
-  };
 }
 
 function scopeParameters(): ToolDefinition["parameters"] {
