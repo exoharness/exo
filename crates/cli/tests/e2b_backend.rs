@@ -6,13 +6,13 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use exoharness::{
-    E2bConfig, E2bSandboxBackend, ManagedSandboxBackend, SandboxKey, SandboxLifecycleConfig,
-    SandboxMount, SandboxMountAccess, SandboxNetworkPolicy, SandboxRequest, SandboxSpec,
-    SnapshotKind, SnapshotPayload,
+    E2bConfig, E2bSandboxBackend, ManagedSandboxBackend, SandboxCommand, SandboxKey,
+    SandboxLifecycleConfig, SandboxMount, SandboxMountAccess, SandboxNetworkPolicy,
+    SandboxRequest, SandboxSpec, SnapshotKind, SnapshotPayload,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
 fn make_request(conversation_id: &str, sandbox_id: &str) -> SandboxRequest {
     SandboxRequest {
@@ -406,6 +406,7 @@ async fn exec_uses_envd_process_start() {
 
     Mock::given(method("POST"))
         .and(path("/process.Process/Start"))
+        .and(exec_start_request_with_stdin(false))
         .respond_with(ResponseTemplate::new(200).set_body_raw(connect_stream, "application/connect+json"))
         .expect(1)
         .mount(&server)
@@ -431,6 +432,86 @@ async fn exec_uses_envd_process_start() {
         requests.iter().any(|r| r.url.path() == "/process.Process/Start"),
         "exec must hit envd process start"
     );
+}
+
+#[tokio::test]
+async fn start_process_streams_envd_process_stdout() {
+    use futures::io::AsyncReadExt;
+
+    let server = MockServer::start().await;
+    let backend = backend_for_mock(&server);
+
+    mount_empty_sandbox_list(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/sandboxes"))
+        .respond_with(
+            ResponseTemplate::new(201).set_body_json(sandbox_created_json("sb-stream")),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/process.Process/Start"))
+        .and(exec_start_request_with_stdin(true))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            connect_enveloped_stream(&[
+                (0, json!({"event": {"start": {"pid": 42}}})),
+                (
+                    0,
+                    json!({"event": {"data": {"stdout": "streamed-line\n"}}}),
+                ),
+                (
+                    0,
+                    json!({"event": {"end": {"status": "exit status 0"}}}),
+                ),
+            ]),
+            "application/connect+json",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let handle = backend
+        .acquire(make_request("conv-stream", "sandbox-stream"))
+        .await
+        .unwrap();
+    let mut process = handle
+        .start_process(&SandboxCommand {
+            argv: vec!["/bin/echo".into(), "ignored".into()],
+            env: HashMap::new(),
+            display_argv: None,
+            cwd: None,
+            timeout: None,
+        })
+        .await
+        .expect("start_process should stream envd output");
+
+    let mut stdout = String::new();
+    process
+        .stdout
+        .read_to_string(&mut stdout)
+        .await
+        .expect("read streamed stdout");
+    let exit_code = process.wait.await.expect("wait for process exit");
+
+    assert_eq!(stdout, "streamed-line\n");
+    assert_eq!(exit_code, 0);
+}
+
+fn exec_start_request_with_stdin(enabled: bool) -> impl Match {
+    struct HasStdin {
+        enabled: bool,
+    }
+    impl Match for HasStdin {
+        fn matches(&self, request: &Request) -> bool {
+            let body = String::from_utf8_lossy(&request.body);
+            if self.enabled {
+                body.contains("\"stdin\":true")
+            } else {
+                body.contains("\"stdin\":false")
+            }
+        }
+    }
+    HasStdin { enabled }
 }
 
 /// Build a Connect server-stream body (5-byte framed JSON messages).
