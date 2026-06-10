@@ -686,12 +686,18 @@ impl AgentHandle for FakeAgentHandle {
         &self.record
     }
 
-    async fn list_conversations(&self) -> Result<Vec<Arc<dyn ConversationHandle>>> {
+    async fn list_conversations(
+        &self,
+        _request: exoharness::ListConversationsRequest,
+    ) -> Result<exoharness::ListConversationsResult<Arc<dyn ConversationHandle>>> {
         let state = self.state.lock().expect("state poisoned");
-        Ok(vec![Arc::new(FakeConversationHandle {
-            state: Arc::clone(&self.state),
-            record: state.conversation.record.clone(),
-        })])
+        Ok(exoharness::ListConversationsResult {
+            conversations: vec![Arc::new(FakeConversationHandle {
+                state: Arc::clone(&self.state),
+                record: state.conversation.record.clone(),
+            })],
+            next_cursor: None,
+        })
     }
 
     async fn get_conversation(

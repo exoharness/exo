@@ -20,12 +20,12 @@ use crate::{
     CancelSandboxProcessRequest, CloseSandboxProcessInputRequest, ConversationHandle,
     ConversationId, ConversationRecord, CreateSandboxRequest, Event, EventData, EventId,
     EventQuery, EventStream, ExoHarness, ForkConversationRequest, GetEventsResult,
-    GetSandboxProcessEventsResult, NewAgentRequest, NewConversationRequest, PutSecretRequest,
-    ReadArtifactRequest, Result, RunInSandboxRequest, SandboxId, SandboxProcess,
-    SandboxProcessEventQuery, SandboxProcessParts, SandboxProcessRecord, SandboxProcessStatus,
-    Secret, SecretId, SecretMetadata, SessionId, SnapshotId, StartSandboxProcessRequest,
-    StartSandboxRequest, TurnHandle, TurnRecord, WaitSandboxProcessRequest, WriteArtifactRequest,
-    WriteSandboxProcessInputRequest,
+    GetSandboxProcessEventsResult, ListConversationsRequest, ListConversationsResult,
+    NewAgentRequest, NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result,
+    RunInSandboxRequest, SandboxId, SandboxProcess, SandboxProcessEventQuery, SandboxProcessParts,
+    SandboxProcessRecord, SandboxProcessStatus, Secret, SecretId, SecretMetadata, SessionId,
+    SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnHandle, TurnRecord,
+    WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
 #[derive(Clone)]
@@ -199,23 +199,31 @@ impl AgentHandle for HttpAgentHandle {
         &self.record
     }
 
-    async fn list_conversations(&self) -> Result<Vec<Arc<dyn ConversationHandle>>> {
+    async fn list_conversations(
+        &self,
+        request: ListConversationsRequest,
+    ) -> Result<ListConversationsResult<Arc<dyn ConversationHandle>>> {
         match self
             .harness
             .request(Request::ListConversations {
                 agent_id: self.record.id,
+                request,
             })
             .await?
         {
-            Response::Conversations { conversations } => Ok(conversations
-                .into_iter()
-                .map(|conversation| {
-                    Arc::new(HttpConversationHandle::new(
-                        self.harness.clone(),
-                        conversation,
-                    )) as _
-                })
-                .collect()),
+            Response::Conversations { result } => Ok(ListConversationsResult {
+                conversations: result
+                    .conversations
+                    .into_iter()
+                    .map(|conversation| {
+                        Arc::new(HttpConversationHandle::new(
+                            self.harness.clone(),
+                            conversation,
+                        )) as _
+                    })
+                    .collect(),
+                next_cursor: result.next_cursor,
+            }),
             response => unexpected_response(response, "conversations"),
         }
     }

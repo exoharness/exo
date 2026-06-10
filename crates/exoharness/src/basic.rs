@@ -36,13 +36,14 @@ use crate::{
     BoxAsyncRead, BoxAsyncWrite, CancelSandboxProcessRequest, CloseSandboxProcessInputRequest,
     ConversationHandle, ConversationId, ConversationRecord, CreateSandboxRequest, Event, EventData,
     EventId, EventKind, EventQuery, EventQueryDirection, EventStream, ExoHarness, FileSystemMount,
-    ForkConversationRequest, GetEventsResult, GetSandboxProcessEventsResult, NewAgentRequest,
-    NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result, RunInSandboxRequest,
-    SandboxId, SandboxProcess, SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessId,
-    SandboxProcessMode, SandboxProcessParts, SandboxProcessRecord, SandboxProcessStatus,
-    SandboxProcessStdin, SandboxProvider, SandboxProviderConfig, Secret, SecretId, SecretMetadata,
-    SecretType, SessionId, SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnHandle,
-    TurnId, TurnRecord, Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest,
+    ForkConversationRequest, GetEventsResult, GetSandboxProcessEventsResult,
+    ListConversationsRequest, ListConversationsResult, NewAgentRequest, NewConversationRequest,
+    PutSecretRequest, ReadArtifactRequest, Result, RunInSandboxRequest, SandboxId, SandboxProcess,
+    SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessId, SandboxProcessMode,
+    SandboxProcessParts, SandboxProcessRecord, SandboxProcessStatus, SandboxProcessStdin,
+    SandboxProvider, SandboxProviderConfig, Secret, SecretId, SecretMetadata, SecretType,
+    SessionId, SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnHandle, TurnId,
+    TurnRecord, Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest,
     WriteSandboxProcessInputRequest,
 };
 
@@ -645,16 +646,23 @@ impl AgentHandle for BasicAgentHandle {
         &self.record
     }
 
-    async fn list_conversations(&self) -> Result<Vec<Arc<dyn ConversationHandle>>> {
+    async fn list_conversations(
+        &self,
+        request: ListConversationsRequest,
+    ) -> Result<ListConversationsResult<Arc<dyn ConversationHandle>>> {
         let mut handles: Vec<Arc<dyn ConversationHandle>> = Vec::new();
-        for record in self.list_conversation_records().await? {
+        let result = self.list_conversation_records(request).await?;
+        for record in result.conversations {
             handles.push(Arc::new(BasicConversationHandle {
                 harness: self.harness.clone(),
                 agent_id: self.record.id,
                 record,
             }));
         }
-        Ok(handles)
+        Ok(ListConversationsResult {
+            conversations: handles,
+            next_cursor: result.next_cursor,
+        })
     }
 
     async fn get_conversation(
@@ -686,7 +694,10 @@ impl AgentHandle for BasicAgentHandle {
         request: NewConversationRequest,
     ) -> Result<Arc<dyn ConversationHandle>> {
         let _guard = self.harness.inner.write_lock.lock().await;
-        let existing = self.list_conversation_records().await?;
+        let existing = self
+            .list_conversation_records(ListConversationsRequest::default())
+            .await?
+            .conversations;
         let slug = match request.slug {
             Some(slug) => {
                 if existing
@@ -912,7 +923,10 @@ impl BasicAgentHandle {
         self.agent_dir().join("artifacts")
     }
 
-    async fn list_conversation_records(&self) -> Result<Vec<ConversationRecord>> {
+    async fn list_conversation_records(
+        &self,
+        request: ListConversationsRequest,
+    ) -> Result<ListConversationsResult<ConversationRecord>> {
         let mut conversations = Vec::new();
         for key in self
             .harness
@@ -932,9 +946,46 @@ impl BasicAgentHandle {
                     .await?,
             );
         }
-        conversations.sort_by_key(|record| record.id);
-        Ok(conversations)
+        conversations.sort_by_key(conversation_recency_key);
+        conversations.reverse();
+        paginate_conversation_records(conversations, request)
     }
+}
+
+fn conversation_recency_key(record: &ConversationRecord) -> Uuid7 {
+    record.latest_event_id.unwrap_or(record.id)
+}
+
+fn paginate_conversation_records(
+    conversations: Vec<ConversationRecord>,
+    request: ListConversationsRequest,
+) -> Result<ListConversationsResult<ConversationRecord>> {
+    let start = match request.cursor {
+        Some(cursor) => conversations
+            .iter()
+            .position(|conversation| conversation_recency_key(conversation) == cursor)
+            .map(|index| index + 1)
+            .ok_or_else(|| anyhow!("conversation cursor not found: {cursor}"))?,
+        None => 0,
+    };
+    let remaining = conversations.len().saturating_sub(start);
+    let Some(limit) = request.limit.filter(|limit| *limit > 0) else {
+        return Ok(ListConversationsResult {
+            conversations: conversations.into_iter().skip(start).collect(),
+            next_cursor: None,
+        });
+    };
+    let has_more = remaining > limit;
+    let page: Vec<_> = conversations.into_iter().skip(start).take(limit).collect();
+    let next_cursor = if has_more {
+        page.last().map(conversation_recency_key)
+    } else {
+        None
+    };
+    Ok(ListConversationsResult {
+        conversations: page,
+        next_cursor,
+    })
 }
 
 struct BasicConversationHandle {
@@ -1341,7 +1392,10 @@ impl ConversationHandle for BasicConversationHandle {
                 .get_json::<AgentRecord>(self.agent_dir().join("record.json"))
                 .await?,
         };
-        let existing = agent.list_conversation_records().await?;
+        let existing = agent
+            .list_conversation_records(ListConversationsRequest::default())
+            .await?
+            .conversations;
         let slug = match request.slug {
             Some(slug) => {
                 if existing

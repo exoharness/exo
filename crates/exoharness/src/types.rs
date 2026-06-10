@@ -37,7 +37,10 @@ pub trait ExoHarness: Send + Sync {
 pub trait AgentHandle: Send + Sync {
     fn record(&self) -> &AgentRecord;
 
-    async fn list_conversations(&self) -> Result<Vec<Arc<dyn ConversationHandle>>>;
+    async fn list_conversations(
+        &self,
+        request: ListConversationsRequest,
+    ) -> Result<ListConversationsResult<Arc<dyn ConversationHandle>>>;
     async fn get_conversation(
         &self,
         id: &ConversationId,
@@ -157,6 +160,18 @@ pub struct ConversationRecord {
 pub struct NewConversationRequest {
     pub slug: Option<String>,
     pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ListConversationsRequest {
+    pub cursor: Option<EventId>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ListConversationsResult<T> {
+    pub conversations: Vec<T>,
+    pub next_cursor: Option<EventId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
