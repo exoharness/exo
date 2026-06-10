@@ -6,8 +6,8 @@ Create a built-in IRC adapter if one does not already exist for this conversatio
 - server: `irc.libera.chat`
 - port: `6697`
 - tls: `true`
-- nick: `exospooky`
-- username: `exospooky`
+- nick: `""` (leave blank to auto-generate `exoclawNNNN`)
+- username: `""` (leave blank to default to `exoclaw`)
 - realname: `Exoclaw Test Bot`
 - channel: `#exoclaw`
 - passwordSecretId: `null`

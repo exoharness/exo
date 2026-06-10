@@ -15,12 +15,15 @@ use tokio::fs;
 use super::runtime::send_adapter_message_with_handles;
 use super::store::AdapterStore;
 use super::types::{
-    AdapterAttachment, AdapterConfig, AdapterSource, NewAdapter, WorkerSecretEnvVar,
+    AdapterAttachment, AdapterConfig, AdapterEventType, AdapterSource, NewAdapter,
+    WorkerSecretEnvVar,
 };
 use crate::agent_sandbox::ensure_agent_sandbox;
 use crate::conversation_sandbox::ensure_conversation_sandbox;
 use crate::{AgentConfig, ConversationConfig, SandboxScope, effective_sandbox_scope};
 
+const DEFAULT_EVENT_LIMIT: usize = 50;
+const MAX_EVENT_LIMIT: usize = 200;
 const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_ATTACHMENT_BASE64_BYTES: usize = MAX_ATTACHMENT_BYTES.div_ceil(3) * 4 + 4;
 const ATTACHMENT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
@@ -44,6 +47,15 @@ struct ConversationScopedArguments {
 #[serde(rename_all = "camelCase")]
 struct AdapterIdArguments {
     adapter_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListAdapterEventsArguments {
+    adapter_id: String,
+    event_type: Option<AdapterEventType>,
+    since_ms: Option<u64>,
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,6 +181,16 @@ enum DiscordTrigger {
     MentionsOnly,
 }
 
+fn default_irc_nick() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() % 10_000)
+        .unwrap_or(0);
+    format!("exoclaw{:04}", suffix)
+}
+
 impl AdapterCreationConfig {
     fn adapter_type(&self) -> &'static str {
         match self {
@@ -192,8 +214,8 @@ impl AdapterCreationConfig {
                         "server": config.server,
                         "port": config.port,
                         "tls": config.tls,
-                        "nick": config.nick,
-                        "username": config.username,
+                        "nick": if config.nick.trim().is_empty() { default_irc_nick() } else { config.nick },
+                        "username": if config.username.trim().is_empty() { "exoclaw".to_string() } else { config.username },
                         "realname": config.realname,
                         "channel": config.channel,
                         "trigger": config.trigger.as_str(),
@@ -384,6 +406,38 @@ pub async fn execute_list_adapters_tool(
     Ok(serde_json::json!({
         "ok": true,
         "adapters": adapters,
+    }))
+}
+
+pub async fn execute_list_adapter_events_tool(
+    agent: &dyn AgentHandle,
+    conversation: &dyn ConversationHandle,
+    store: &AdapterStore,
+    request: &ToolRequest,
+) -> Result<ToolResult> {
+    let args = serde_json::from_value::<ListAdapterEventsArguments>(Value::Object(
+        request.arguments.clone(),
+    ))?;
+    let Some(adapter) = store.get_adapter(&args.adapter_id).await? else {
+        return Ok(not_found());
+    };
+    if adapter.agent_id != agent.record().id.to_string()
+        || adapter.conversation_id != conversation.record().id.to_string()
+    {
+        return Ok(not_found());
+    }
+    let limit = args
+        .limit
+        .unwrap_or(DEFAULT_EVENT_LIMIT)
+        .clamp(1, MAX_EVENT_LIMIT);
+    let events = store
+        .list_events(&args.adapter_id, args.event_type, args.since_ms, limit)
+        .await?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "adapterId": args.adapter_id,
+        "adapterName": adapter.name,
+        "events": events,
     }))
 }
 
@@ -856,6 +910,108 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(list_result["adapters"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_adapter_events_is_conversation_scoped() {
+        let tempdir = TempDir::new().unwrap();
+        let exoharness = BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
+            .await
+            .unwrap();
+        let agent = exoharness
+            .new_agent(NewAgentRequest {
+                slug: "agent".to_string(),
+                name: "Agent".to_string(),
+            })
+            .await
+            .unwrap();
+        let conversation = agent
+            .new_conversation(NewConversationRequest {
+                slug: Some("conversation".to_string()),
+                name: Some("Conversation".to_string()),
+            })
+            .await
+            .unwrap();
+        let store = AdapterStore::new(tempdir.path().join("adapters"));
+        let owned = store
+            .create_adapter(NewAdapter {
+                agent_id: agent.record().id.to_string(),
+                conversation_id: conversation.record().id.to_string(),
+                name: "discord".to_string(),
+                source: AdapterSource::Library,
+                config: AdapterConfig {
+                    adapter_type: "discord".to_string(),
+                    worker_command: vec!["pnpm".to_string(), "tsx".to_string()],
+                    initialization: serde_json::json!({}),
+                    state_dir: None,
+                    secret_env: Vec::new(),
+                },
+            })
+            .await
+            .unwrap();
+        store
+            .record_event(
+                owned.id.clone(),
+                AdapterEventType::Error,
+                "shard error".to_string(),
+            )
+            .await
+            .unwrap();
+        let foreign = store
+            .create_adapter(NewAdapter {
+                agent_id: "other-agent".to_string(),
+                conversation_id: "other-conversation".to_string(),
+                name: "foreign".to_string(),
+                source: AdapterSource::Library,
+                config: AdapterConfig {
+                    adapter_type: "discord".to_string(),
+                    worker_command: vec!["pnpm".to_string(), "tsx".to_string()],
+                    initialization: serde_json::json!({}),
+                    state_dir: None,
+                    secret_env: Vec::new(),
+                },
+            })
+            .await
+            .unwrap();
+
+        let result = execute_list_adapter_events_tool(
+            agent.as_ref(),
+            conversation.as_ref(),
+            &store,
+            &tool_request(
+                "list_adapter_events",
+                serde_json::json!({
+                    "adapterId": owned.id,
+                    "eventType": "error",
+                    "sinceMs": null,
+                    "limit": null
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["ok"], true);
+        let events = result["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["summary"], "shard error");
+
+        let foreign_result = execute_list_adapter_events_tool(
+            agent.as_ref(),
+            conversation.as_ref(),
+            &store,
+            &tool_request(
+                "list_adapter_events",
+                serde_json::json!({
+                    "adapterId": foreign.id,
+                    "eventType": null,
+                    "sinceMs": null,
+                    "limit": null
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(foreign_result["ok"], false);
     }
 
     #[tokio::test]
