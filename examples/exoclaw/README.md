@@ -203,8 +203,8 @@ For a fresh control agent with a local profile prompt and all adapters:
 ```bash
 PATH="/opt/homebrew/opt/openjdk/bin:$PATH" \
   examples/exoclaw/scripts/exoclaw-control fresh \
-  --agent spooky \
-  --agent-name Spooky \
+  --agent exoclaw-agent \
+  --agent-name "Exoclaw" \
   --conversation dev \
   --setup-profile \
   --setup-all
