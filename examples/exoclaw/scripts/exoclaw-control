@@ -19,6 +19,8 @@ SANDBOX_PROVIDER="${EXO_SANDBOX_PROVIDER:-}"
 SANDBOX_BACKEND="${EXO_SANDBOX_BACKEND:-}"
 SELF_REPO_MOUNT_PATH="${EXOCLAW_REPO:-/workspace/exo}"
 SELF_MAP_PATH="$SELF_REPO_MOUNT_PATH/examples/exoclaw/SELF.md"
+AGENT_CLI_MOUNT_ROOT="${EXOCLAW_AGENT_CLI_ROOT:-}"
+AGENT_CLI_MOUNT_PATH="${EXOCLAW_AGENT_CLI_MOUNT:-/agent-cli}"
 NETWORKING="${EXO_NETWORKING:-enabled}"
 SHELL_PROGRAM="${EXO_SHELL_PROGRAM:-/bin/bash}"
 SANDBOX_SCOPE="${EXO_SANDBOX_SCOPE:-}"
@@ -75,6 +77,9 @@ Options:
   --sandbox-backend <backend>   Local sandbox backend: apple-container, docker, or local-process.
                                 Defaults to --sandbox-provider when that provider is local.
   --self-repo-mount <path>      Sandbox path for this repo (default: /workspace/exo)
+  --agent-cli-mount <host-dir>  Bind-mount this host directory read-write into the
+                                sandbox for the agent-cli adapter (default: none)
+  --agent-cli-mount-path <path> Sandbox path for the agent-cli mount (default: /agent-cli)
   --networking <mode>          enabled or disabled (default: enabled)
   --shell-program <path>       Shell in the sandbox (default: /bin/bash)
   --sandbox-scope <scope>      agent or conversation (default: Exoclaw agent)
@@ -105,6 +110,7 @@ Environment overrides:
   EXO_SANDBOX_PROVIDER, EXO_SANDBOX_BACKEND, EXO_NETWORKING,
   EXO_SHELL_PROGRAM, EXO_SANDBOX_SCOPE, EXO_ENV_FILE, EXOCLAW_LOCAL_PROMPT_FILE,
   EXO_BIN, EXO_START_SCHEDULER, EXO_START_ADAPTERS, EXOCLAW_REPO,
+  EXOCLAW_AGENT_CLI_ROOT, EXOCLAW_AGENT_CLI_MOUNT,
   EXOCLAW_SCHEDULER_BIN, EXO_SCHEDULER_INTERVAL_SECONDS, EXO_ADAPTER_LIMIT,
   EXO_SETUP_ADAPTER, EXO_INITIAL_PROMPT_FILE
 EOF
@@ -538,6 +544,23 @@ ensure_self_repo_mount() {
   exo conversation mount add "$AGENT" "$CONVERSATION" "$ROOT_DIR" "$SELF_REPO_MOUNT_PATH" --rw >/dev/null
 }
 
+ensure_agent_cli_mount() {
+  if [[ "$USE_SANDBOX" != true || -z "$AGENT_CLI_MOUNT_ROOT" ]]; then
+    return
+  fi
+  if [[ ! "$AGENT_CLI_MOUNT_ROOT" = /* ]]; then
+    die "agent-cli mount root must be absolute: $AGENT_CLI_MOUNT_ROOT"
+  fi
+  if [[ ! -d "$AGENT_CLI_MOUNT_ROOT" ]]; then
+    die "agent-cli mount root does not exist: $AGENT_CLI_MOUNT_ROOT"
+  fi
+  if [[ ! "$AGENT_CLI_MOUNT_PATH" = /* ]]; then
+    die "agent-cli mount path must be absolute: $AGENT_CLI_MOUNT_PATH"
+  fi
+
+  exo conversation mount add "$AGENT" "$CONVERSATION" "$AGENT_CLI_MOUNT_ROOT" "$AGENT_CLI_MOUNT_PATH" --rw >/dev/null
+}
+
 list_agents_and_conversations() {
   ensure_exo_bin
   echo "Agents and conversations:"
@@ -701,6 +724,7 @@ run_repl() {
   ensure_agent
   ensure_conversation
   ensure_self_repo_mount
+  ensure_agent_cli_mount
   configure_guardian_for_current_launch
   local scheduler_log_start_line
   scheduler_log_start_line="$(scheduler_log_line_count)"
@@ -871,12 +895,35 @@ send_startup_prompt() {
 
   local adapter
   for adapter in "${SETUP_ADAPTERS[@]}"; do
-    send_prompt_from_files "$(adapter_setup_prompt_file "$adapter")"
+    send_adapter_setup_prompt "$adapter"
   done
 
   if [[ -n "$INITIAL_PROMPT_FILE" ]]; then
     send_prompt_from_files "$(startup_prompt_file "$INITIAL_PROMPT_FILE")"
   fi
+}
+
+send_adapter_setup_prompt() {
+  local adapter="$1"
+  local file prompt
+  file="$(adapter_setup_prompt_file "$adapter")"
+  prompt="$(<"$file")"
+
+  # The agent-cli setup prompt asks for the host workspace root, which the
+  # sandboxed agent cannot determine on its own. Inject it when known so the
+  # non-interactive setup can complete without waiting for an answer.
+  if [[ "$adapter" == "agent-cli" ]]; then
+    if [[ -z "$AGENT_CLI_MOUNT_ROOT" ]]; then
+      die "--setup agent-cli requires --agent-cli-mount <host-dir> so the host workspace root can be provided to the agent"
+    fi
+    prompt+=$'\n\n'"The host workspace root bind-mounted at $AGENT_CLI_MOUNT_PATH is: $AGENT_CLI_MOUNT_ROOT"
+  fi
+
+  if [[ -z "${prompt//[[:space:]]/}" ]]; then
+    die "startup prompt is empty: $file"
+  fi
+  echo "Sending startup prompt from: $file"
+  exo conversation send "$AGENT" "$CONVERSATION" "$prompt"
 }
 
 send_prompt_from_files() {
@@ -1093,6 +1140,16 @@ while [[ $# -gt 0 ]]; do
       SELF_REPO_MOUNT_PATH="${2:-}"
       [[ -n "$SELF_REPO_MOUNT_PATH" ]] || die "--self-repo-mount requires a value"
       SELF_MAP_PATH="$SELF_REPO_MOUNT_PATH/examples/exoclaw/SELF.md"
+      shift 2
+      ;;
+    --agent-cli-mount)
+      AGENT_CLI_MOUNT_ROOT="${2:-}"
+      [[ -n "$AGENT_CLI_MOUNT_ROOT" ]] || die "--agent-cli-mount requires a value"
+      shift 2
+      ;;
+    --agent-cli-mount-path)
+      AGENT_CLI_MOUNT_PATH="${2:-}"
+      [[ -n "$AGENT_CLI_MOUNT_PATH" ]] || die "--agent-cli-mount-path requires a value"
       shift 2
       ;;
     --networking)

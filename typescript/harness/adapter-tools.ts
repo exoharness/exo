@@ -42,7 +42,7 @@ function createAdapterTool(): ToolInstance {
     definition: {
       name: "create_adapter",
       description:
-        "Create and enable a long-running Exoclaw adapter for this conversation. Use source 'built_in' only with config type 'irc'. Use source 'library' with config type 'whatsapp', 'signal', or 'discord' for shipped library adapters.",
+        "Create and enable a long-running Exoclaw adapter for this conversation. Use source 'built_in' with config type 'irc' or 'agent-cli'. Use source 'library' with config type 'whatsapp', 'signal', or 'discord' for shipped library adapters.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -391,6 +391,29 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
           "allowBots",
         ],
       },
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          type: { type: "string", enum: ["agent-cli"] },
+          socketPath: {
+            type: ["string", "null"],
+            description:
+              "Host unix socket path the worker listens on for exo-cli clients. Use null for the default ~/.exoclaw/agent-cli.sock.",
+          },
+          mountRoot: {
+            type: "string",
+            description:
+              "Absolute host directory that is bind-mounted read-write into the agent sandbox (e.g. /Users/me/projects). exo-cli invocations from directories outside this root cannot access files.",
+          },
+          mountPath: {
+            type: ["string", "null"],
+            description:
+              "Sandbox path where mountRoot is mounted. Use null for the default /agent-cli. Must match the sandbox mount configured on the conversation.",
+          },
+        },
+        required: ["type", "socketPath", "mountRoot", "mountPath"],
+      },
     ],
   } as ToolDefinition["parameters"];
 }
@@ -405,8 +428,8 @@ function transformCreateAdapterArguments(args: JsonObject): JsonObject {
 }
 
 function validateAdapterSource(source: string, type: string): void {
-  if (type === "irc" && source !== "built_in") {
-    throw new Error("IRC adapters must use source 'built_in'");
+  if ((type === "irc" || type === "agent-cli") && source !== "built_in") {
+    throw new Error(`${type} adapters must use source 'built_in'`);
   }
   if (
     (type === "whatsapp" || type === "signal" || type === "discord") &&

@@ -20,13 +20,13 @@ The setup prompt at `setup-prompt.md` asks Exoclaw to create a built-in adapter 
 
 ```json
 {
-  "name": "libera-exo-test",
+  "name": "undernet-exo-test-plain",
   "source": "built_in",
   "config": {
     "type": "irc",
-    "server": "irc.libera.chat",
-    "port": 6697,
-    "tls": true,
+    "server": "irc.undernet.org",
+    "port": 6667,
+    "tls": false,
     "nick": "",
     "username": "",
     "realname": "Exoclaw Test Bot",

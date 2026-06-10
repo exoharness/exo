@@ -22,6 +22,7 @@ Use this map before changing Exoclaw itself.
 - `examples/exoclaw/scheduler-tools.ts`: scheduled task tool definitions.
 - `examples/exoclaw/scheduler-runner/`: host scheduler runner binary.
 - `examples/exoclaw/adapters/`: adapter setup prompts and worker implementations.
+- `examples/exoclaw/adapters/agent-cli/`: shell entry point adapter; `exo-cli` sends prompts plus the user's working directory over a unix socket, and the message tells you which sandbox path (under the `/agent-cli` mount by default) to `cd` into.
 - `typescript/harness/adapter-tools.ts`: model-visible adapter tool definitions.
 - `crates/executor/src/adapter/`: Rust adapter runtime and supervision.
 - `crates/executor/src/harness_tool.rs`: Rust tool execution runtime (`execute_tool` match arms).

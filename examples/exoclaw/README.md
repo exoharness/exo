@@ -3,29 +3,77 @@
 Exoclaw is a persistent agent built on Exo designed to be helpful wherever
 there is a task to do from a computer. It supports task scheduling, a full
 sandbox where it can install its own tools and integrations, and right now
-supports IRC, WhatsApp, Signal, and Discord out of the box.
+supports IRC, WhatsApp, Signal, Discord, and a shell CLI (`exo-cli`) out of
+the box.
 
-Exoclaw includes a helper script to start up all the subservices (task
-scheduling and adapters). To get started, simply run:
+## Quickstart
 
-```bash
-examples/exoclaw/scripts/exoclaw-control canonical
-```
+The simplest path from a fresh checkout to a running Exoclaw.
 
-This canonical local setup uses the Docker sandbox backend, mounts this repo
-into the sandbox at `/workspace/exo`, configures the scheduler and service
-guardian for Docker-backed work, starts scheduler and adapter services, sends
-IRC and Discord setup prompts, and drops into a control REPL where you can chat
-with Exoclaw.
+**Prerequisites:** Docker running, a Rust toolchain, and Node with pnpm.
 
-For a fresh canonical setup that deletes existing agents/conversations first:
+1. Install JS dependencies and configure your model key:
 
 ```bash
-examples/exoclaw/scripts/exoclaw-control fresh --canonical
+pnpm install
+cp .env.example .env   # then fill in OPENAI_API_KEY
 ```
 
-Or for a minimal start without adapter setup:
-`examples/exoclaw/scripts/exoclaw-control --pull-sandbox`
+2. Tell Exoclaw who you are (optional but recommended):
+
+```bash
+examples/exoclaw/scripts/exoclaw-control setup-profile
+```
+
+This interactively asks for your name and any local instructions, and writes
+them to `.exo/exoclaw-profile.md` (git-ignored). The harness loads it as an
+extra prompt on every turn, so the agent greets you by name from its first
+reply. You can rerun this or edit the file directly at any time.
+
+3. Build and start everything with one command (run from the repo root):
+
+```bash
+examples/exoclaw/scripts/exoclaw-control fresh --canonical \
+  --agent-cli-mount "$HOME/projects" --setup agent-cli
+```
+
+This builds the `exo` binary, creates the agent and a `dev` conversation,
+pulls the Docker sandbox image, mounts this repo at `/workspace/exo` and your
+workspace at `/agent-cli`, starts the scheduler and adapter runner, sets up
+the IRC, Discord, and agent-cli adapters, and drops you into a REPL.
+
+4. Chat with Exoclaw in the REPL:
+
+```text
+dev> hello! what can you do?
+```
+
+5. Talk to it from any shell. Put the CLI on your PATH once:
+
+```bash
+ln -s "$PWD/examples/exoclaw/scripts/exo-cli" ~/bin/exo-cli
+```
+
+Then from any directory under `~/projects`:
+
+```bash
+cd ~/projects/some-repo
+exo-cli "set up a simple node environment in this directory"
+```
+
+The agent has read-write access to the directory you call it from and replies
+to your terminal when it finishes.
+
+Notes:
+
+- The Discord adapter needs a bot token to connect. Create the secret once
+  with `exo secret set discord-bot-token --env DISCORD_BOT_TOKEN` after
+  exporting your token, or ignore it; the other adapters work without it.
+- `fresh` deletes existing agents, conversations, and adapters first. For
+  day-to-day restarts that keep state, drop `fresh`:
+  `examples/exoclaw/scripts/exoclaw-control canonical`
+- For a minimal start without adapter setup:
+  `examples/exoclaw/scripts/exoclaw-control --pull-sandbox`
 
 ## Self Introspection
 
@@ -136,8 +184,9 @@ reconnect behavior, inbound message parsing, event history, and conversation
 wake-ups. Agents configure adapters with tools, and the local adapter runner
 started by `examples/exoclaw/scripts/exoclaw-control` keeps them connected.
 
-Exoclaw ships with IRC, WhatsApp, Signal, and Discord adapters. The canonical
-local setup turns on IRC and Discord:
+Exoclaw ships with IRC, WhatsApp, Signal, Discord, and agent-cli adapters
+(see `adapters/agent-cli/README.md` for the shell CLI). The canonical local
+setup turns on IRC and Discord:
 
 ```bash
 examples/exoclaw/scripts/exoclaw-control canonical

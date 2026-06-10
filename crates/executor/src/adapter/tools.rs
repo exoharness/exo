@@ -75,6 +75,7 @@ enum AdapterCreationConfig {
     Whatsapp(WhatsappAdapterCreationConfig),
     Signal(SignalAdapterCreationConfig),
     Discord(DiscordAdapterCreationConfig),
+    AgentCli(AgentCliAdapterCreationConfig),
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,9 +131,25 @@ struct DiscordAdapterCreationConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentCliAdapterCreationConfig {
+    #[serde(rename = "type")]
+    _adapter_type: AgentCliAdapterType,
+    socket_path: Option<String>,
+    mount_root: String,
+    mount_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum IrcAdapterType {
     Irc,
+}
+
+#[derive(Debug, Deserialize)]
+enum AgentCliAdapterType {
+    #[serde(rename = "agent-cli")]
+    AgentCli,
 }
 
 #[derive(Debug, Deserialize)]
@@ -198,6 +215,7 @@ impl AdapterCreationConfig {
             Self::Whatsapp(_) => "whatsapp",
             Self::Signal(_) => "signal",
             Self::Discord(_) => "discord",
+            Self::AgentCli(_) => "agent-cli",
         }
     }
 
@@ -295,6 +313,31 @@ impl AdapterCreationConfig {
                         env: "EXO_DISCORD_BOT_TOKEN".to_string(),
                         secret_id: config.bot_token_secret_id,
                     }],
+                })
+            }
+            Self::AgentCli(config) => {
+                require_source(source, AdapterSource::BuiltIn, "agent-cli")?;
+                if !config.mount_root.starts_with('/') {
+                    bail!("agent-cli mountRoot must be an absolute host path");
+                }
+                let mount_path = config
+                    .mount_path
+                    .unwrap_or_else(|| "/agent-cli".to_string());
+                if !mount_path.starts_with('/') {
+                    bail!("agent-cli mountPath must be an absolute sandbox path");
+                }
+                Ok(AdapterConfig {
+                    adapter_type: "agent-cli".to_string(),
+                    worker_command: bundled_worker_command(
+                        "examples/exoclaw/adapters/agent-cli/worker.ts",
+                    ),
+                    initialization: serde_json::json!({
+                        "socketPath": config.socket_path,
+                        "mountRoot": config.mount_root,
+                        "mountPath": mount_path,
+                    }),
+                    state_dir: None,
+                    secret_env: Vec::new(),
                 })
             }
         }
@@ -910,6 +953,54 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(list_result["adapters"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn agent_cli_config_applies_defaults() {
+        let config: AdapterCreationConfig = serde_json::from_value(serde_json::json!({
+            "type": "agent-cli",
+            "socketPath": null,
+            "mountRoot": "/Users/me/projects",
+            "mountPath": null,
+        }))
+        .unwrap();
+        assert_eq!(config.adapter_type(), "agent-cli");
+        let adapter_config = config.into_adapter_config(AdapterSource::BuiltIn).unwrap();
+        assert_eq!(adapter_config.adapter_type, "agent-cli");
+        assert!(
+            adapter_config.worker_command[2]
+                .ends_with("examples/exoclaw/adapters/agent-cli/worker.ts")
+        );
+        assert_eq!(
+            adapter_config.initialization,
+            serde_json::json!({
+                "socketPath": null,
+                "mountRoot": "/Users/me/projects",
+                "mountPath": "/agent-cli",
+            })
+        );
+        assert!(adapter_config.secret_env.is_empty());
+    }
+
+    #[test]
+    fn agent_cli_config_rejects_relative_mount_root_and_wrong_source() {
+        let parse = |mount_root: &str| -> AdapterCreationConfig {
+            serde_json::from_value(serde_json::json!({
+                "type": "agent-cli",
+                "socketPath": null,
+                "mountRoot": mount_root,
+                "mountPath": null,
+            }))
+            .unwrap()
+        };
+        let error = parse("projects")
+            .into_adapter_config(AdapterSource::BuiltIn)
+            .unwrap_err();
+        assert!(error.to_string().contains("absolute host path"));
+        let error = parse("/Users/me/projects")
+            .into_adapter_config(AdapterSource::Library)
+            .unwrap_err();
+        assert!(error.to_string().contains("source"));
     }
 
     #[tokio::test]
