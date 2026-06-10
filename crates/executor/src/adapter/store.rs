@@ -173,6 +173,58 @@ impl AdapterStore {
         Ok(event)
     }
 
+    pub async fn list_events(
+        &self,
+        adapter_id: &str,
+        event_type: Option<AdapterEventType>,
+        since_ms: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<AdapterEventRecord>> {
+        let events_dir = self.events_dir(adapter_id);
+        match fs::metadata(&events_dir).await {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Vec::new());
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let mut entries = fs::read_dir(&events_dir)
+            .await
+            .with_context(|| format!("failed to read adapter events directory {events_dir:?}"))?;
+        let mut events = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let bytes = fs::read(&path)
+                .await
+                .with_context(|| format!("failed to read adapter event {}", path.display()))?;
+            let event = serde_json::from_slice::<AdapterEventRecord>(&bytes)?;
+            if let Some(event_type) = event_type
+                && event.event_type != event_type
+            {
+                continue;
+            }
+            if let Some(since_ms) = since_ms
+                && event.created_at_ms < since_ms
+            {
+                continue;
+            }
+            events.push(event);
+        }
+        // Newest first; event ids are time-ordered UUIDv7s, so they break
+        // same-millisecond ties deterministically.
+        events.sort_by(|left, right| {
+            right
+                .created_at_ms
+                .cmp(&left.created_at_ms)
+                .then(right.id.cmp(&left.id))
+        });
+        events.truncate(limit);
+        Ok(events)
+    }
+
     pub async fn enqueue_outbound_message(
         &self,
         adapter_id: String,
@@ -544,6 +596,73 @@ mod tests {
         let claimed_again = store.claim_outbound_messages("adapter").await.unwrap();
         assert_eq!(claimed_again.len(), 1);
         assert_eq!(claimed_again[0].id, message.id);
+    }
+
+    #[tokio::test]
+    async fn lists_events_newest_first_with_filters() {
+        let tempdir = TempDir::new().unwrap();
+        let store = AdapterStore::new(tempdir.path());
+
+        let connected = store
+            .record_event(
+                "adapter".to_string(),
+                AdapterEventType::Connected,
+                "worker connected".to_string(),
+            )
+            .await
+            .unwrap();
+        let error = store
+            .record_event(
+                "adapter".to_string(),
+                AdapterEventType::Error,
+                "shard error".to_string(),
+            )
+            .await
+            .unwrap();
+        let inbound = store
+            .record_event(
+                "adapter".to_string(),
+                AdapterEventType::Inbound,
+                "message received".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let all = store.list_events("adapter", None, None, 10).await.unwrap();
+        assert_eq!(
+            all.iter().map(|event| &event.id).collect::<Vec<_>>(),
+            vec![&inbound.id, &error.id, &connected.id],
+            "events must be newest first"
+        );
+
+        let errors = store
+            .list_events("adapter", Some(AdapterEventType::Error), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].id, error.id);
+
+        let limited = store.list_events("adapter", None, None, 2).await.unwrap();
+        assert_eq!(limited.len(), 2);
+        assert_eq!(limited[0].id, inbound.id);
+
+        let since = store
+            .list_events("adapter", None, Some(inbound.created_at_ms), 10)
+            .await
+            .unwrap();
+        assert!(
+            since
+                .iter()
+                .all(|event| event.created_at_ms >= inbound.created_at_ms)
+        );
+
+        assert!(
+            store
+                .list_events("missing-adapter", None, None, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

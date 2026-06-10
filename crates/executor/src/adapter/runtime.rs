@@ -13,6 +13,10 @@ use tokio::task::JoinSet;
 use super::store::AdapterStore;
 use super::types::{AdapterAttachment, AdapterConfig, AdapterEventType, AdapterRecord};
 use super::worker::{WorkerCommand, WorkerEvent, run_worker_loop};
+use crate::conversation_events::{
+    HOST_EVENT_ADAPTER_RUNNER_DRAINING, HOST_EVENT_ADAPTER_RUNNER_STARTED, HOST_EVENT_REBOOT,
+    record_host_event,
+};
 use crate::conversation_wakeup::send_conversation_wakeup;
 use crate::{Harness, HarnessAgent, HarnessConversation};
 
@@ -79,10 +83,33 @@ pub async fn run_adapters_watch(
             }
         });
     }
+    {
+        // Record the runner start in the canonical conversation event log. A
+        // start without a preceding host_reboot event implies an unplanned
+        // restart. Background so worker startup is not delayed.
+        let harness = Arc::clone(&harness);
+        let store = store.clone();
+        tokio::spawn(async move {
+            record_host_event_for_adapter_conversations(
+                harness.as_ref(),
+                &store,
+                HOST_EVENT_ADAPTER_RUNNER_STARTED,
+                serde_json::json!({ "pid": std::process::id() }),
+            )
+            .await;
+        });
+    }
     loop {
         if claim_drain_marker(options.drain_marker.as_deref()) {
             tracing::info!("adapter runner drain requested; waiting for in-flight work");
             drain.store(true, Ordering::SeqCst);
+            record_host_event_for_adapter_conversations(
+                harness.as_ref(),
+                &store,
+                HOST_EVENT_ADAPTER_RUNNER_DRAINING,
+                serde_json::json!({ "pid": std::process::id() }),
+            )
+            .await;
             break;
         }
         let adapters = store.enabled_adapters().await?;
@@ -158,6 +185,50 @@ fn claim_reboot_notice(notice_path: Option<&std::path::Path>) -> Option<RebootNo
     }
 }
 
+/// Appends a host event to the canonical event log of each distinct
+/// conversation that has an enabled adapter. Failures are logged per
+/// conversation rather than propagated: a missing conversation must not block
+/// the event from reaching the others.
+async fn record_host_event_for_adapter_conversations(
+    harness: &dyn Harness,
+    store: &AdapterStore,
+    event_type: &str,
+    payload: serde_json::Value,
+) {
+    let adapters = match store.enabled_adapters().await {
+        Ok(adapters) => adapters,
+        Err(error) => {
+            tracing::error!(%error, event_type, "failed to list adapters for host event");
+            return;
+        }
+    };
+    let mut seen = HashSet::new();
+    for adapter in &adapters {
+        if !seen.insert((adapter.agent_id.clone(), adapter.conversation_id.clone())) {
+            continue;
+        }
+        let result = async {
+            let agent = require_agent(harness, adapter).await?;
+            let conversation = require_conversation(agent.as_ref(), adapter).await?;
+            record_host_event(
+                conversation.exoharness_handle().as_ref(),
+                event_type,
+                payload.clone(),
+            )
+            .await
+        }
+        .await;
+        if let Err(error) = result {
+            tracing::error!(
+                conversation_id = %adapter.conversation_id,
+                %error,
+                event_type,
+                "failed to record host event"
+            );
+        }
+    }
+}
+
 async fn announce_reboot(
     harness: Arc<dyn Harness>,
     store: AdapterStore,
@@ -182,6 +253,24 @@ async fn announce_reboot(
             .join(", ");
         let agent = require_agent(harness.as_ref(), adapter).await?;
         let conversation = require_conversation(agent.as_ref(), adapter).await?;
+        // Record the reboot in the canonical event log before the wakeup turn
+        // so the immutable history exists even if the announcement turn fails.
+        if let Err(error) = record_host_event(
+            conversation.exoharness_handle().as_ref(),
+            HOST_EVENT_REBOOT,
+            serde_json::json!({
+                "reason": notice.reason,
+                "requestedAt": notice.requested_at,
+            }),
+        )
+        .await
+        {
+            tracing::error!(
+                conversation_id = %adapter.conversation_id,
+                %error,
+                "failed to record host_reboot event"
+            );
+        }
         send_conversation_wakeup(
             conversation.as_ref(),
             format!(

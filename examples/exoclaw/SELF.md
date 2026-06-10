@@ -17,6 +17,7 @@ Use this map before changing Exoclaw itself.
 - `examples/exoclaw/scripts/exoclaw-service-guardian`: host-side build and service control.
 - `examples/exoclaw/scripts/exoclaw-control`: local startup script for REPL, scheduler, adapters, sandbox, and repo mount.
 - `examples/exoclaw/sandbox-tools.ts`: sandbox snapshot and rewind tool definitions.
+- `examples/exoclaw/introspection-tools.ts`: `list_adapter_events` and `list_conversation_events` introspection tools.
 - `examples/exoclaw/host-tools.ts`: `registerHostTool` helper that bridges TypeScript tool definitions to Rust execution.
 - `examples/exoclaw/scheduler-tools.ts`: scheduled task tool definitions.
 - `examples/exoclaw/scheduler-runner/`: host scheduler runner binary.
@@ -87,6 +88,29 @@ definition that delegates to it:
    the Rust binary and the harness pick up the change.
 4. Never create an agent-installed tool with the same name as a Rust-backed
    tool; the registry conflict makes calls ambiguous.
+
+## Diagnosing Adapters and Restarts
+
+When an adapter seems quiet, broken, or recently restarted, diagnose it from
+inside the conversation before touching host services:
+
+1. `list_adapters` shows each adapter's `enabled` state plus health fields
+   `last_connected_at_ms` and `last_error`.
+2. `list_adapter_events` returns the adapter's recent telemetry newest first:
+   `connected`, `disconnected`, `inbound`, `outbound`, `error`, and
+   `lifecycle` records. Filter with `eventType` and `sinceMs` to narrow in
+   (for example `eventType: "error"` after a reboot, or `sinceMs` set to the
+   restart time).
+3. `list_conversation_events` reads the canonical conversation event log,
+   which host components also write to. `host_reboot` records a planned host
+   restart with its reason; `adapter_runner_started` records every adapter
+   runner start (without a preceding `host_reboot` it implies a crash or
+   manual restart); `adapter_runner_draining` records a graceful shutdown
+   beginning. This is the immutable history of what happened to you — use it
+   to answer "was I restarted, when, and why?".
+4. Only escalate to `guardian_action` logs or restarts once the event history
+   shows a host-side problem (worker crash loops, repeated disconnects, send
+   failures).
 
 ## Maintenance Rules
 

@@ -3,9 +3,11 @@ use std::path::PathBuf;
 use crate::adapter::AdapterStore;
 use crate::adapter::tools::{
     execute_create_adapter_tool, execute_delete_adapter_tool, execute_disable_adapter_tool,
-    execute_list_adapters_tool, execute_send_adapter_message_tool,
+    execute_list_adapter_events_tool, execute_list_adapters_tool,
+    execute_send_adapter_message_tool,
 };
 use crate::agent_sandbox::{current_agent_sandbox, ensure_agent_sandbox};
+use crate::conversation_events::execute_list_conversation_events_tool;
 use crate::conversation_sandbox::{
     conversation_sandbox_spec, conversation_sandboxes, ensure_conversation_sandbox,
 };
@@ -148,6 +150,13 @@ impl ToolRuntime for ExoclawToolRuntime {
             }
             "list_adapters" => {
                 execute_list_adapters_tool(agent, conversation, &self.adapter_store, request).await
+            }
+            "list_adapter_events" => {
+                execute_list_adapter_events_tool(agent, conversation, &self.adapter_store, request)
+                    .await
+            }
+            "list_conversation_events" => {
+                execute_list_conversation_events_tool(conversation, request).await
             }
             "disable_adapter" => {
                 execute_disable_adapter_tool(conversation, agent, &self.adapter_store, request)

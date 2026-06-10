@@ -6,6 +6,7 @@ mod basic_tests;
 mod braintrust;
 #[cfg(test)]
 mod braintrust_tests;
+mod conversation_events;
 mod conversation_sandbox;
 mod conversation_wakeup;
 mod execution_tracing;
