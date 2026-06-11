@@ -43,7 +43,7 @@ pub use aws_agentcore::default_aws_agentcore_image;
     feature = "basic-backend",
     feature = "aws-agentcore"
 ))]
-pub use aws_agentcore::{AwsAgentCoreConfig, AwsAgentCoreSandboxBackend};
+pub use aws_agentcore::{AwsAgentCoreConfig, AwsAgentCoreCredentials, AwsAgentCoreSandboxBackend};
 pub use daytona::default_daytona_image;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub use daytona::{

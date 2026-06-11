@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use aws_config::{BehaviorVersion, Region};
+use aws_credential_types::Credentials;
 use aws_sdk_bedrockagentcore::Client;
 use aws_sdk_bedrockagentcore::primitives::Blob;
 use serde::{Deserialize, Serialize};
@@ -22,11 +23,21 @@ pub struct AwsAgentCoreConfig {
     pub runtime_arn: String,
     pub region: String,
     pub qualifier: Option<String>,
+    pub endpoint_url: Option<String>,
+    pub credentials: Option<AwsAgentCoreCredentials>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AwsAgentCoreCredentials {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub session_token: Option<String>,
 }
 
 pub struct AwsAgentCoreSandboxBackend {
     client: Client,
     runtime_arn: String,
+    invoke_target: AwsAgentCoreInvokeTarget,
     qualifier: Option<String>,
 }
 
@@ -38,13 +49,32 @@ impl AwsAgentCoreSandboxBackend {
         if config.region.trim().is_empty() {
             bail!("AgentCore region must not be empty");
         }
-        let sdk_config = aws_config::defaults(BehaviorVersion::latest())
-            .region(Region::new(config.region))
-            .load()
-            .await;
+        let region = config.region;
+        let mut sdk_config_loader =
+            aws_config::defaults(BehaviorVersion::latest()).region(Region::new(region.clone()));
+        if let Some(credentials) = config.credentials {
+            sdk_config_loader = sdk_config_loader.credentials_provider(Credentials::new(
+                credentials.access_key_id,
+                credentials.secret_access_key,
+                credentials.session_token,
+                None,
+                "aws-agentcore",
+            ));
+        }
+        let sdk_config = sdk_config_loader.load().await;
+        let mut service_config_builder =
+            aws_sdk_bedrockagentcore::config::Builder::from(&sdk_config);
+        if let Some(endpoint_url) = config.endpoint_url {
+            service_config_builder = service_config_builder.endpoint_url(endpoint_url);
+        } else {
+            service_config_builder.set_endpoint_url(None);
+        }
+        let service_config = service_config_builder.build();
+        let invoke_target = agentcore_invoke_target(&config.runtime_arn)?;
         Ok(Self {
-            client: Client::new(&sdk_config),
+            client: Client::from_conf(service_config),
             runtime_arn: config.runtime_arn,
+            invoke_target,
             qualifier: config.qualifier,
         })
     }
@@ -63,6 +93,7 @@ impl ManagedSandboxBackend for AwsAgentCoreSandboxBackend {
             backend: AwsAgentCoreBackendHandle {
                 client: self.client.clone(),
                 runtime_arn: self.runtime_arn.clone(),
+                invoke_target: self.invoke_target.clone(),
                 qualifier: self.qualifier.clone(),
             },
         }))
@@ -81,7 +112,14 @@ impl ManagedSandboxBackend for AwsAgentCoreSandboxBackend {
 struct AwsAgentCoreBackendHandle {
     client: Client,
     runtime_arn: String,
+    invoke_target: AwsAgentCoreInvokeTarget,
     qualifier: Option<String>,
+}
+
+#[derive(Clone)]
+struct AwsAgentCoreInvokeTarget {
+    runtime_identifier: String,
+    account_id: String,
 }
 
 struct AwsAgentCoreSandboxHandle {
@@ -247,7 +285,8 @@ where
     let mut request = backend
         .client
         .invoke_agent_runtime()
-        .agent_runtime_arn(backend.runtime_arn.clone())
+        .agent_runtime_arn(backend.invoke_target.runtime_identifier.clone())
+        .account_id(backend.invoke_target.account_id.clone())
         .runtime_session_id(runtime_session_id.to_string())
         .content_type("application/json")
         .accept("application/json")
@@ -255,10 +294,12 @@ where
     if let Some(qualifier) = &backend.qualifier {
         request = request.qualifier(qualifier.clone());
     }
-    let output = request
-        .send()
-        .await
-        .with_context(|| format!("invoking AgentCore runtime session {runtime_session_id}"))?;
+    let output = request.send().await.with_context(|| {
+        format!(
+            "invoking AgentCore runtime session {runtime_session_id} with runtime {} in account {}",
+            backend.invoke_target.runtime_identifier, backend.invoke_target.account_id,
+        )
+    })?;
     let status_code = output.status_code.unwrap_or(200);
     let bytes = output
         .response
@@ -274,6 +315,30 @@ where
         let text = String::from_utf8_lossy(&bytes);
         format!("decoding AgentCore runtime JSON response: {text}")
     })
+}
+
+fn agentcore_invoke_target(runtime_arn: &str) -> Result<AwsAgentCoreInvokeTarget> {
+    let mut parts = runtime_arn.splitn(6, ':');
+    let arn = parts.next();
+    let _partition = parts.next();
+    let service = parts.next();
+    let _region = parts.next();
+    let account_id = parts.next();
+    let resource = parts.next();
+    let runtime_identifier = resource.and_then(|resource| resource.strip_prefix("runtime/"));
+    match (arn, service, account_id, runtime_identifier) {
+        (Some("arn"), Some("bedrock-agentcore"), Some(account_id), Some(runtime_identifier))
+            if !account_id.is_empty() && !runtime_identifier.is_empty() =>
+        {
+            Ok(AwsAgentCoreInvokeTarget {
+                runtime_identifier: runtime_identifier.to_string(),
+                account_id: account_id.to_string(),
+            })
+        }
+        _ => bail!(
+            "AgentCore runtime ARN must have the form arn:...:bedrock-agentcore:...:<account-id>:runtime/<runtime-id>"
+        ),
+    }
 }
 
 fn reject_unsupported_request(request: &SandboxRequest) -> Result<()> {

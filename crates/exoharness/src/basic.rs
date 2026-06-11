@@ -421,23 +421,23 @@ impl BasicExoHarnessInner {
     #[cfg(feature = "aws-agentcore")]
     async fn aws_agentcore_config_from_binding(&self) -> Result<Option<crate::AwsAgentCoreConfig>> {
         let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
-        let Some((runtime_arn, region, qualifier)) =
-            bindings
-                .into_iter()
-                .rev()
-                .find_map(|record| match record.binding {
-                    Binding::Sandbox {
-                        config:
-                            SandboxProviderConfig::AwsAgentCore {
-                                runtime_arn,
-                                region,
-                                qualifier,
-                                ..
-                            },
-                        ..
-                    } => Some((runtime_arn, region, qualifier)),
-                    _ => None,
-                })
+        let Some((runtime_arn, region, qualifier, endpoint_url)) = bindings
+            .into_iter()
+            .rev()
+            .find_map(|record| match record.binding {
+                Binding::Sandbox {
+                    config:
+                        SandboxProviderConfig::AwsAgentCore {
+                            runtime_arn,
+                            region,
+                            qualifier,
+                            endpoint_url,
+                            ..
+                        },
+                    ..
+                } => Some((runtime_arn, region, qualifier, endpoint_url)),
+                _ => None,
+            })
         else {
             return Ok(None);
         };
@@ -445,6 +445,8 @@ impl BasicExoHarnessInner {
             runtime_arn,
             region,
             qualifier,
+            endpoint_url,
+            credentials: None,
         }))
     }
 
