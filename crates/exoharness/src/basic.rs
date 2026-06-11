@@ -446,7 +446,7 @@ impl BasicExoHarnessInner {
             region,
             qualifier,
             endpoint_url,
-            credentials: None,
+            credentials: aws_agentcore_credentials_from_env(),
         }))
     }
 
@@ -462,6 +462,25 @@ impl BasicExoHarnessInner {
             (config.provider() == provider).then(|| config.default_image().to_string())
         }))
     }
+}
+
+#[cfg(feature = "aws-agentcore")]
+fn aws_agentcore_credentials_from_env() -> Option<crate::AwsAgentCoreCredentials> {
+    let access_key_id = std::env::var("AWS_AGENTCORE_ACCESS_KEY_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())?;
+    let secret_access_key = std::env::var("AWS_AGENTCORE_SECRET_ACCESS_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())?;
+    let session_token = std::env::var("AWS_AGENTCORE_SESSION_TOKEN")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+
+    Some(crate::AwsAgentCoreCredentials {
+        access_key_id,
+        secret_access_key,
+        session_token,
+    })
 }
 
 impl BasicExoHarness {

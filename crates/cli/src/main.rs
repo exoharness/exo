@@ -1808,6 +1808,7 @@ async fn main() -> Result<()> {
                             runtime_arn,
                             region,
                             qualifier,
+                            endpoint_url: api_url,
                             default_image: default_image
                                 .unwrap_or_else(default_aws_agentcore_image),
                         }
