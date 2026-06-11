@@ -66,6 +66,7 @@ pub enum SandboxBackendChoice {
     LocalProcess,
     Daytona(DaytonaBackendSpec),
     Vercel(VercelBackendSpec),
+    AwsAgentCore,
 }
 
 impl SandboxBackendChoice {
@@ -76,6 +77,7 @@ impl SandboxBackendChoice {
             Self::LocalProcess => SandboxProvider::LocalProcess,
             Self::Daytona(_) => SandboxProvider::Daytona,
             Self::Vercel(_) => SandboxProvider::Vercel,
+            Self::AwsAgentCore => SandboxProvider::AwsAgentCore,
         }
     }
 }
@@ -205,6 +207,23 @@ impl BasicExoHarnessInner {
                     None => self.vercel_config_from_spec(spec).await?,
                 };
                 Arc::new(crate::VercelSandboxBackend::new(config)?)
+            }
+            SandboxBackendChoice::AwsAgentCore => {
+                #[cfg(feature = "aws-agentcore")]
+                {
+                    let config = self.aws_agentcore_config_from_binding().await?.ok_or_else(|| {
+                        anyhow!(
+                            "aws-agentcore sandbox requested but no sandbox provider binding is configured; run `exo provider configure --provider aws-agentcore --runtime-arn <arn>`"
+                        )
+                    })?;
+                    Arc::new(crate::AwsAgentCoreSandboxBackend::new(config).await?)
+                }
+                #[cfg(not(feature = "aws-agentcore"))]
+                {
+                    bail!(
+                        "aws-agentcore sandbox backend requires building exoharness with the aws-agentcore feature"
+                    );
+                }
             }
         };
         Ok(backend)
@@ -396,6 +415,36 @@ impl BasicExoHarnessInner {
             api_url: api_url.unwrap_or_else(|| crate::DEFAULT_VERCEL_API_URL.to_string()),
             team_id,
             project_id,
+        }))
+    }
+
+    #[cfg(feature = "aws-agentcore")]
+    async fn aws_agentcore_config_from_binding(&self) -> Result<Option<crate::AwsAgentCoreConfig>> {
+        let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
+        let Some((runtime_arn, region, qualifier)) =
+            bindings
+                .into_iter()
+                .rev()
+                .find_map(|record| match record.binding {
+                    Binding::Sandbox {
+                        config:
+                            SandboxProviderConfig::AwsAgentCore {
+                                runtime_arn,
+                                region,
+                                qualifier,
+                                ..
+                            },
+                        ..
+                    } => Some((runtime_arn, region, qualifier)),
+                    _ => None,
+                })
+        else {
+            return Ok(None);
+        };
+        Ok(Some(crate::AwsAgentCoreConfig {
+            runtime_arn,
+            region,
+            qualifier,
         }))
     }
 

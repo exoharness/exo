@@ -54,9 +54,9 @@ pub use exoharness::{
     FileSystemMountMode, ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET, HttpExoHarness,
     PutSecretRequest, SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxId, SandboxProvider,
     SandboxProviderConfig, Secret, SecretBackendChoice, SecretMetadata, SessionId, SnapshotId,
-    StartSandboxRequest, ToolRequest, Uuid7, VercelBackendSpec, default_daytona_image,
-    default_docker_image, default_vercel_image, serve_exoharness_http_listener,
-    serve_exoharness_http_listener_with_options,
+    StartSandboxRequest, ToolRequest, Uuid7, VercelBackendSpec, default_aws_agentcore_image,
+    default_daytona_image, default_docker_image, default_vercel_image,
+    serve_exoharness_http_listener, serve_exoharness_http_listener_with_options,
 };
 pub use harness_basic::BasicHarness;
 pub use harness_config::load_agent_config;
