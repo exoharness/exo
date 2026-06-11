@@ -579,32 +579,35 @@ enum ProviderCommands {
     /// List configured sandbox provider bindings.
     List,
     /// Configure a sandbox provider (writes a Binding::Sandbox).
-    Configure {
-        #[arg(long, value_enum)]
-        provider: SandboxProviderArg,
-        /// Binding name (default: the provider name).
-        #[arg(long)]
-        name: Option<String>,
-        /// Secret (by name) holding the provider's API key/token. Required for Daytona and Vercel.
-        #[arg(long)]
-        secret: Option<String>,
-        /// Region/target. Daytona: us | eu | experimental.
-        #[arg(long)]
-        region: Option<String>,
-        #[arg(long)]
-        organization_id: Option<String>,
-        #[arg(long)]
-        project_id: Option<String>,
-        #[arg(long)]
-        api_url: Option<String>,
-        #[arg(long = "runtime-arn")]
-        runtime_arn: Option<String>,
-        #[arg(long)]
-        qualifier: Option<String>,
-        /// Default base image for sandboxes that don't request one.
-        #[arg(long)]
-        default_image: Option<String>,
-    },
+    Configure(Box<ProviderConfigureArgs>),
+}
+
+#[derive(Debug, Args)]
+struct ProviderConfigureArgs {
+    #[arg(long, value_enum)]
+    provider: SandboxProviderArg,
+    /// Binding name (default: the provider name).
+    #[arg(long)]
+    name: Option<String>,
+    /// Secret (by name) holding the provider's API key/token. Required for Daytona and Vercel.
+    #[arg(long)]
+    secret: Option<String>,
+    /// Region/target. Daytona: us | eu | experimental.
+    #[arg(long)]
+    region: Option<String>,
+    #[arg(long)]
+    organization_id: Option<String>,
+    #[arg(long)]
+    project_id: Option<String>,
+    #[arg(long)]
+    api_url: Option<String>,
+    #[arg(long = "runtime-arn")]
+    runtime_arn: Option<String>,
+    #[arg(long)]
+    qualifier: Option<String>,
+    /// Default base image for sandboxes that don't request one.
+    #[arg(long)]
+    default_image: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Args)]
@@ -1743,18 +1746,19 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            ProviderCommands::Configure {
-                provider,
-                name,
-                secret,
-                region,
-                organization_id,
-                project_id,
-                api_url,
-                runtime_arn,
-                qualifier,
-                default_image,
-            } => {
+            ProviderCommands::Configure(args) => {
+                let ProviderConfigureArgs {
+                    provider,
+                    name,
+                    secret,
+                    region,
+                    organization_id,
+                    project_id,
+                    api_url,
+                    runtime_arn,
+                    qualifier,
+                    default_image,
+                } = *args;
                 let binding_name =
                     name.unwrap_or_else(|| SandboxProvider::from(provider).as_str().to_string());
                 let config = match provider {
