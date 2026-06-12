@@ -483,9 +483,10 @@ async fn harness_exposes_raw_exoharness_handles() {
     assert_eq!(
         agent
             .exoharness_handle()
-            .list_conversations()
+            .list_conversations(exoharness::ListConversationsRequest::default())
             .await
             .expect("list conversations through agent handle")
+            .conversations
             .len(),
         1
     );

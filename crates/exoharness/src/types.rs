@@ -37,7 +37,10 @@ pub trait ExoHarness: Send + Sync {
 pub trait AgentHandle: Send + Sync {
     fn record(&self) -> &AgentRecord;
 
-    async fn list_conversations(&self) -> Result<Vec<Arc<dyn ConversationHandle>>>;
+    async fn list_conversations(
+        &self,
+        request: ListConversationsRequest,
+    ) -> Result<ListConversationsResult<Arc<dyn ConversationHandle>>>;
     async fn get_conversation(
         &self,
         id: &ConversationId,
@@ -157,6 +160,18 @@ pub struct ConversationRecord {
 pub struct NewConversationRequest {
     pub slug: Option<String>,
     pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ListConversationsRequest {
+    pub cursor: Option<EventId>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ListConversationsResult<T> {
+    pub conversations: Vec<T>,
+    pub next_cursor: Option<EventId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -468,6 +483,8 @@ pub enum SandboxProvider {
     #[default]
     Daytona,
     Vercel,
+    #[serde(rename = "aws_agentcore", alias = "aws-agentcore")]
+    AwsAgentCore,
     AppleContainer,
     Docker,
     #[serde(alias = "local")]
@@ -486,6 +503,7 @@ impl SandboxProvider {
         match self {
             Self::Daytona => "daytona",
             Self::Vercel => "vercel",
+            Self::AwsAgentCore => "aws-agentcore",
             Self::AppleContainer => "apple-container",
             Self::Docker => "docker",
             Self::LocalProcess => "local-process",
@@ -506,6 +524,7 @@ impl FromStr for SandboxProvider {
         match value.trim() {
             "daytona" => Ok(Self::Daytona),
             "vercel" => Ok(Self::Vercel),
+            "aws-agentcore" | "aws_agentcore" => Ok(Self::AwsAgentCore),
             "apple-container" | "apple_container" => Ok(Self::AppleContainer),
             "docker" => Ok(Self::Docker),
             "local" | "local-process" | "local_process" => Ok(Self::LocalProcess),
@@ -776,6 +795,17 @@ pub enum SandboxProviderConfig {
         #[serde(default = "crate::sandbox_provider::default_vercel_image")]
         default_image: String,
     },
+    #[serde(rename = "aws_agentcore", alias = "aws-agentcore")]
+    AwsAgentCore {
+        runtime_arn: String,
+        region: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        qualifier: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint_url: Option<String>,
+        #[serde(default = "crate::sandbox_provider::default_aws_agentcore_image")]
+        default_image: String,
+    },
 }
 
 impl SandboxProviderConfig {
@@ -784,6 +814,7 @@ impl SandboxProviderConfig {
             Self::Daytona { .. } => SandboxProvider::Daytona,
             Self::Vercel { .. } => SandboxProvider::Vercel,
             Self::Docker { .. } => SandboxProvider::Docker,
+            Self::AwsAgentCore { .. } => SandboxProvider::AwsAgentCore,
         }
     }
 
@@ -792,7 +823,8 @@ impl SandboxProviderConfig {
         match self {
             Self::Daytona { default_image, .. }
             | Self::Vercel { default_image, .. }
-            | Self::Docker { default_image, .. } => default_image,
+            | Self::Docker { default_image, .. }
+            | Self::AwsAgentCore { default_image, .. } => default_image,
         }
     }
 }
@@ -878,11 +910,13 @@ mod tests {
             "vercel".parse::<SandboxProvider>().unwrap(),
             SandboxProvider::Vercel
         );
+        assert!("agentcore".parse::<SandboxProvider>().is_err());
         assert_eq!(
             SandboxProvider::AppleContainer.to_string(),
             "apple-container"
         );
         assert_eq!(SandboxProvider::Vercel.to_string(), "vercel");
+        assert_eq!(SandboxProvider::AwsAgentCore.to_string(), "aws-agentcore");
         assert_eq!(SandboxProvider::LocalProcess.to_string(), "local-process");
     }
 }

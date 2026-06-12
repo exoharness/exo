@@ -49,6 +49,15 @@ async fn http_exoharness_supports_agent_and_conversation_crud() {
 }
 
 #[actix_web::test]
+async fn http_exoharness_lists_conversations_recent_first_and_paginates() {
+    let fixture = http_harness().await;
+    crate::contract_tests::list_conversations_returns_recent_first_and_paginates(Arc::clone(
+        &fixture.harness,
+    ))
+    .await;
+}
+
+#[actix_web::test]
 async fn http_exoharness_begin_turn_tracks_events_through_finish() {
     let fixture = http_harness().await;
     crate::contract_tests::begin_turn_tracks_events_through_finish(Arc::clone(&fixture.harness))

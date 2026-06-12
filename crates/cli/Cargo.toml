@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+aws-agentcore = ["executor/aws-agentcore"]
+
 [[bin]]
 name = "exo"
 path = "src/main.rs"
