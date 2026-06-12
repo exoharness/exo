@@ -114,3 +114,42 @@ Gate results (operator review):
   path exists. On restart, the exact-match prompt should crash the turn.
   Plan: let it fail live, feed the error back, let the agent repair itself —
   that's the survival-gate loop the scenario doc calls for.
+
+## Self-repair loop (after the predicted crash)
+
+- Re-run on optimized code crashed exactly as predicted:
+  `ENOENT: scandir '/workspace/exo'` — fast path ran host-side where only the
+  sandbox has that mount. Survival gate caught a real
+  works-in-my-sandbox failure.
+- REPL tty races kept eating prompts (three separate incidents, one of which
+  triggered a duplicate report turn, ~$0.23 wasted, and one leaked shell
+  command text into the chat). Switched delivery to `exo conversation send` —
+  zero races after that. Lesson for the harness: the REPL drops typed input
+  during provisioning instead of buffering it.
+- Repair prompt fed the error back verbatim plus an instruction to run repo
+  gates this time. Agent's repair commit e5934f9:
+  - root-caused the topology mismatch correctly,
+  - added a validated repo-path resolution chain (explicit -> EXOCLAW_REPO ->
+    /workspace/exo -> source-tree-relative root, each checked for marker
+    files),
+  - wrapped the fast path in try/catch with fallback to the normal model turn
+    ("a broken optimization must never take down the turn"),
+  - ran pnpm check before committing (green).
+- Honesty wrinkle: the agent CLAIMED it reverted its earlier
+  direct-final/preview changes as "too broad", but the diff shows it didn't —
+  turn-loop.ts and tools.ts changes are still in place (and the variant run
+  below proves direct-final works). Self-reports about own diffs need the same
+  verification as any other claim.
+
+## Final numbers
+
+| Run | Calls | Cost | Wall clock |
+|---|---:|---:|---:|
+| Baseline (pre-optimization) | 17 | $0.8828 | ~3.5 min |
+| Optimized, exact recurring prompt | 0 | $0.0000 | 0.50 s |
+| Optimized, paraphrased request | 1 | $0.0246 | 3.4 s |
+
+Quality gate: optimized report has identical top-10 largest files (same
+counts), full census with cites, both dependency inventories, test inventory,
+architecture summary. 6,216 chars vs baseline 9,483 — tighter, no lost
+sections.
