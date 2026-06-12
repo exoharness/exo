@@ -381,6 +381,12 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
             description:
               "When true, messages from other bot accounts wake this adapter. Defaults to false (ignore all bots). The adapter never wakes on its own messages.",
           },
+          conversationScope: {
+            type: "string",
+            enum: ["adapter", "target"],
+            description:
+              "Conversation routing mode. Use adapter to wake the adapter's root conversation for every message; use target to create and wake a separate conversation per Discord channel. Defaults to adapter.",
+          },
         },
         required: [
           "type",
@@ -389,6 +395,7 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
           "trigger",
           "allowedChannels",
           "allowBots",
+          "conversationScope",
         ],
       },
       {
