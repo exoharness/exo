@@ -243,13 +243,32 @@ impl CliContainerSandboxBackend {
             return Ok(());
         }
 
-        let output = Command::new(&self.container_bin)
+        let output = match Command::new(&self.container_bin)
             .arg("system")
             .arg("start")
             .kill_on_drop(true)
             .output()
             .await
-            .with_context(|| missing_container_cli_message(self.cli, &self.container_bin))?;
+        {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(anyhow!(missing_container_cli_message(
+                    self.cli,
+                    &self.container_bin
+                )));
+            }
+            Err(error) => {
+                return Err(anyhow!(
+                    "failed to run {} CLI `{}` with args `system start`: {}",
+                    match self.cli {
+                        ContainerCliFlavor::AppleContainer => "apple-container",
+                        ContainerCliFlavor::Docker => "docker",
+                    },
+                    self.container_bin.display(),
+                    error
+                ));
+            }
+        };
         if !output.status.success() {
             return Err(anyhow!(
                 "failed to start container system: {}",
@@ -1563,5 +1582,29 @@ mod tests {
         assert!(message.contains("apple-container sandbox backend requires"));
         assert!(message.contains("install Apple container CLI"));
         assert!(message.contains("--sandbox-backend local-process"));
+    }
+
+    #[tokio::test]
+    async fn apple_container_backend_preserves_non_not_found_spawn_errors() {
+        let non_executable_bin = std::env::temp_dir().join(format!(
+            "exo-non-executable-container-cli-{}",
+            Uuid::new_v4().simple()
+        ));
+        std::fs::write(&non_executable_bin, "#!/bin/sh\nexit 0\n").unwrap();
+        let backend = CliContainerSandboxBackend {
+            cli: ContainerCliFlavor::AppleContainer,
+            container_bin: non_executable_bin.clone(),
+            system_started: Mutex::new(false),
+            network_created: Mutex::new(false),
+            warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        let error = backend.ensure_system_started().await.unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("failed to run apple-container CLI"));
+        assert!(message.contains("system start"));
+        assert!(!message.contains("install Apple container CLI"));
+
+        std::fs::remove_file(non_executable_bin).ok();
     }
 }
