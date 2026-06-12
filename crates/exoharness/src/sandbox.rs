@@ -205,10 +205,65 @@ struct WarmSandboxEntry {
 
 #[derive(Debug, Deserialize)]
 struct ContainerListItem {
-    status: Option<String>,
+    status: Option<ContainerStatus>,
     #[serde(rename = "startedDate")]
     started_date: Option<f64>,
     configuration: ContainerListConfiguration,
+}
+
+impl ContainerListItem {
+    fn is_running(&self) -> bool {
+        self.status
+            .as_ref()
+            .and_then(ContainerStatus::state)
+            .is_some_and(|state| state == "running")
+    }
+
+    fn started_at(&self) -> Option<f64> {
+        self.started_date.or_else(|| {
+            self.status
+                .as_ref()
+                .and_then(ContainerStatus::started_at_apple_absolute_time)
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ContainerStatus {
+    State(String),
+    Detailed(ContainerStatusDetails),
+}
+
+impl ContainerStatus {
+    fn state(&self) -> Option<&str> {
+        match self {
+            Self::State(state) => Some(state.as_str()),
+            Self::Detailed(details) => details.state.as_deref(),
+        }
+    }
+
+    fn started_at_apple_absolute_time(&self) -> Option<f64> {
+        match self {
+            Self::State(_) => None,
+            Self::Detailed(details) => details.started_at_apple_absolute_time(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ContainerStatusDetails {
+    state: Option<String>,
+    #[serde(rename = "startedDate")]
+    started_date: Option<String>,
+}
+
+impl ContainerStatusDetails {
+    fn started_at_apple_absolute_time(&self) -> Option<f64> {
+        let started_date = self.started_date.as_deref()?;
+        let timestamp = DateTime::parse_from_rfc3339(started_date).ok()?;
+        Some(timestamp.timestamp_millis() as f64 / 1000.0 - APPLE_ABSOLUTE_TIME_UNIX_OFFSET_SECONDS)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1028,11 +1083,7 @@ async fn find_running_apple_warm_sandbox(
     let spec_hash = sandbox_spec_hash(&request.spec);
     let containers: Vec<ContainerListItem> = serde_json::from_slice(&output.stdout)?;
     Ok(containers.into_iter().find_map(|container| {
-        if !container
-            .status
-            .as_deref()
-            .is_some_and(is_running_container_status)
-        {
+        if !container.is_running() {
             return None;
         }
         let labels = &container.configuration.labels;
@@ -1569,7 +1620,11 @@ async fn apple_container_status(container_bin: &Path, name: &str) -> Result<Opti
     Ok(containers
         .into_iter()
         .find(|container| container.configuration.id == name)
-        .and_then(|container| container.status))
+        .and_then(|container| {
+            container
+                .status
+                .and_then(|status| status.state().map(str::to_owned))
+        }))
 }
 
 async fn reap_orphaned_apple_warm_sandboxes(container_bin: &Path) -> Result<()> {
@@ -1604,14 +1659,10 @@ async fn reap_orphaned_apple_warm_sandboxes(container_bin: &Path) -> Result<()> 
         {
             continue;
         }
-        if !container
-            .status
-            .as_deref()
-            .is_some_and(is_running_container_status)
-        {
+        if !container.is_running() {
             continue;
         }
-        let Some(started_date) = container.started_date else {
+        let Some(started_date) = container.started_at() else {
             continue;
         };
         if now - started_date < ORPHANED_WARM_SANDBOX_MIN_AGE.as_secs_f64() {
@@ -1969,6 +2020,7 @@ async fn docker_load_image(container_bin: &Path, payload: &Bytes) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::DateTime;
 
     #[cfg(unix)]
     #[tokio::test]
@@ -2129,5 +2181,44 @@ mod tests {
         assert!(message.contains("apple-container sandbox backend requires"));
         assert!(message.contains("install Apple container CLI"));
         assert!(message.contains("--sandbox-backend local-process"));
+    }
+
+    #[test]
+    fn container_list_item_parses_old_and_new_apple_container_shapes() {
+        let old_shape = r#"[
+            {
+                "status": "running",
+                "startedDate": 1234.5,
+                "configuration": {
+                    "id": "old-shape",
+                    "labels": {}
+                }
+            }
+        ]"#;
+        let new_shape = r#"[
+            {
+                "status": {
+                    "state": "running",
+                    "startedDate": "2026-06-11T23:22:39Z"
+                },
+                "configuration": {
+                    "id": "new-shape",
+                    "labels": {}
+                }
+            }
+        ]"#;
+
+        let old_items: Vec<ContainerListItem> = serde_json::from_str(old_shape).unwrap();
+        assert!(old_items[0].is_running());
+        assert_eq!(old_items[0].started_at(), Some(1234.5));
+
+        let new_items: Vec<ContainerListItem> = serde_json::from_str(new_shape).unwrap();
+        assert!(new_items[0].is_running());
+        let expected = DateTime::parse_from_rfc3339("2026-06-11T23:22:39Z")
+            .unwrap()
+            .timestamp_millis() as f64
+            / 1000.0
+            - APPLE_ABSOLUTE_TIME_UNIX_OFFSET_SECONDS;
+        assert_eq!(new_items[0].started_at(), Some(expected));
     }
 }
