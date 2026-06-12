@@ -12,7 +12,7 @@ use exoharness::{
     ToolRequest, Uuid7,
 };
 use lingua::universal::{AssistantContent, UserContent};
-use lingua::{Message, UniversalStreamChunk};
+use lingua::{Message, UniversalStreamChunk, UniversalUsage};
 use serde_json::{Map, Value};
 use tempfile::TempDir;
 
@@ -113,6 +113,9 @@ async fn send_persists_messages_through_harness() {
             messages: vec![assistant_message("pong")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         }])),
         Arc::new(BasicToolRuntime),
     );
@@ -173,6 +176,390 @@ async fn send_persists_messages_through_harness() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn usage_record_is_persisted_with_computed_cost() {
+    // Use an inline LiteLLM-schema fixture so the assertion is hermetic
+    // and doesn't depend on whatever rates the upstream JSON happens to
+    // ship today.
+    const PRICING_FIXTURE: &str = r#"{
+        "claude-sonnet-4-6": {
+            "litellm_provider": "anthropic",
+            "mode": "chat",
+            "input_cost_per_token": 3e-06,
+            "output_cost_per_token": 1.5e-05,
+            "cache_read_input_token_cost": 3e-07,
+            "cache_creation_input_token_cost": 3.75e-06
+        }
+    }"#;
+    let pricing =
+        Arc::new(cost::PricingTable::from_json_str(PRICING_FIXTURE).expect("fixture should parse"));
+
+    let tempdir = TempDir::new().expect("tempdir should exist");
+    let exoharness = Arc::new(
+        BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
+            .await
+            .expect("basic exoharness should initialize"),
+    ) as Arc<dyn ExoHarness>;
+    let harness = BasicHarness::with_pricing_table(
+        Arc::clone(&exoharness),
+        Arc::new(FakeModelClient::new(vec![ModelResponse {
+            response_id: Some(Uuid7::now()),
+            messages: vec![assistant_message("pong")],
+            tool_calls: Vec::new(),
+            usage: Some(UniversalUsage {
+                prompt_tokens: Some(1_000),
+                completion_tokens: Some(500),
+                prompt_cached_tokens: None,
+                prompt_cache_creation_tokens: None,
+                completion_reasoning_tokens: None,
+            }),
+            model: Some("claude-sonnet-4-6".to_string()),
+            ttft: None,
+            duration: None,
+        }])),
+        Arc::new(BasicToolRuntime),
+        pricing,
+    );
+
+    let secret_id = exoharness
+        .put_secret(PutSecretRequest {
+            name: "cost-test-key".to_string(),
+            secret: Secret::Key {
+                value: "test-key".to_string(),
+            },
+        })
+        .await
+        .expect("test secret should register");
+    exoharness
+        .put_binding(Binding::Llm {
+            name: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
+            base_url: None,
+            secret_id: Some(secret_id),
+        })
+        .await
+        .expect("binding should register");
+
+    let agent = harness
+        .create_agent(CreateAgentRequest {
+            slug: "cost-demo".to_string(),
+            name: None,
+            harness: crate::AgentHarnessKind::Basic,
+            typescript: None,
+            enable_agent_tool_creation: true,
+            sandbox_image: None,
+            sandbox_provider: SandboxProvider::LocalProcess,
+            enable_networking: false,
+            model: "claude-sonnet-4-6".to_string(),
+            max_output_tokens: None,
+            max_tool_round_trips: Some(2),
+            braintrust: None,
+        })
+        .await
+        .expect("agent should be created");
+    let conversation = agent
+        .create_conversation(CreateConversationRequest::default())
+        .await
+        .expect("conversation should be created");
+
+    conversation
+        .send(SendRequest {
+            input: vec![user_message("ping")],
+            session_id: None,
+        })
+        .await
+        .expect("send should succeed");
+
+    let events = conversation
+        .exoharness_handle()
+        .get_events(Some(EventQuery {
+            cursor: None,
+            direction: Some(EventQueryDirection::Asc),
+            limit: None,
+            session_id: None,
+            turn_id: None,
+            types: None,
+        }))
+        .await
+        .expect("get events should succeed")
+        .events;
+
+    let assistant_usage = events
+        .iter()
+        .find_map(|event| match &event.data {
+            EventData::Messages {
+                messages,
+                usage: Some(usage),
+                ..
+            } if messages
+                .iter()
+                .any(|m| matches!(m, Message::Assistant { .. })) =>
+            {
+                Some(usage)
+            }
+            _ => None,
+        })
+        .expect("assistant message event should carry a UsageRecord");
+
+    assert_eq!(assistant_usage.model, "claude-sonnet-4-6");
+    assert_eq!(assistant_usage.prompt_tokens, Some(1_000));
+    assert_eq!(assistant_usage.completion_tokens, Some(500));
+    // 1000 prompt @ $3/M + 500 completion @ $15/M = $0.003 + $0.0075 = $0.0105
+    let cost = assistant_usage.cost_usd.expect("cost should be computed");
+    assert!(
+        (cost - 0.0105).abs() < 1e-9,
+        "expected cost ~0.0105, got {cost}"
+    );
+    // Non-streaming path measures total duration.
+    assert!(
+        assistant_usage.duration_ms.is_some(),
+        "duration should be recorded"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn usage_record_with_anthropic_cache_hits() {
+    // Anthropic accounting is additive: prompt_tokens is the fresh slice,
+    // and cache_read / cache_creation are billed separately on top. The
+    // pricing math is unit-tested in exoharness::pricing; this test is the
+    // end-to-end proof that cached counts (a) reach the persisted
+    // UsageRecord and (b) hit the discounted cache-read rate when
+    // compute_cost_usd is invoked through the executor.
+    const PRICING_FIXTURE: &str = r#"{
+        "claude-sonnet-4-6": {
+            "litellm_provider": "anthropic",
+            "mode": "chat",
+            "input_cost_per_token": 3e-06,
+            "output_cost_per_token": 1.5e-05,
+            "cache_read_input_token_cost": 3e-07,
+            "cache_creation_input_token_cost": 3.75e-06
+        }
+    }"#;
+    let pricing =
+        Arc::new(cost::PricingTable::from_json_str(PRICING_FIXTURE).expect("fixture should parse"));
+
+    let tempdir = TempDir::new().expect("tempdir should exist");
+    let exoharness = Arc::new(
+        BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
+            .await
+            .expect("basic exoharness should initialize"),
+    ) as Arc<dyn ExoHarness>;
+    let harness = BasicHarness::with_pricing_table(
+        Arc::clone(&exoharness),
+        Arc::new(FakeModelClient::new(vec![ModelResponse {
+            response_id: Some(Uuid7::now()),
+            messages: vec![assistant_message("pong")],
+            tool_calls: Vec::new(),
+            usage: Some(UniversalUsage {
+                prompt_tokens: Some(500),
+                completion_tokens: Some(200),
+                prompt_cached_tokens: Some(10_000),
+                prompt_cache_creation_tokens: Some(2_000),
+                completion_reasoning_tokens: None,
+            }),
+            model: Some("claude-sonnet-4-6".to_string()),
+            ttft: None,
+            duration: None,
+        }])),
+        Arc::new(BasicToolRuntime),
+        pricing,
+    );
+
+    let secret_id = exoharness
+        .put_secret(PutSecretRequest {
+            name: "anthropic-cache-key".to_string(),
+            secret: Secret::Key {
+                value: "test-key".to_string(),
+            },
+        })
+        .await
+        .expect("test secret should register");
+    exoharness
+        .put_binding(Binding::Llm {
+            name: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
+            base_url: None,
+            secret_id: Some(secret_id),
+        })
+        .await
+        .expect("binding should register");
+
+    let agent = harness
+        .create_agent(CreateAgentRequest {
+            slug: "anthropic-cache".to_string(),
+            name: None,
+            harness: crate::AgentHarnessKind::Basic,
+            typescript: None,
+            enable_agent_tool_creation: true,
+            sandbox_image: None,
+            sandbox_provider: SandboxProvider::LocalProcess,
+            enable_networking: false,
+            model: "claude-sonnet-4-6".to_string(),
+            max_output_tokens: None,
+            max_tool_round_trips: Some(2),
+            braintrust: None,
+        })
+        .await
+        .expect("agent should be created");
+    let conversation = agent
+        .create_conversation(CreateConversationRequest::default())
+        .await
+        .expect("conversation should be created");
+
+    conversation
+        .send(SendRequest {
+            input: vec![user_message("ping")],
+            session_id: None,
+        })
+        .await
+        .expect("send should succeed");
+
+    let usage = assistant_usage_record(&conversation).await;
+
+    assert_eq!(usage.model, "claude-sonnet-4-6");
+    assert_eq!(usage.prompt_tokens, Some(500));
+    assert_eq!(usage.completion_tokens, Some(200));
+    assert_eq!(usage.prompt_cached_tokens, Some(10_000));
+    assert_eq!(usage.prompt_cache_creation_tokens, Some(2_000));
+    // Anthropic-style additive:
+    //   500    fresh prompt    @ $3/M     = 0.0015
+    //   10000  cache read      @ $0.30/M  = 0.003
+    //   2000   cache creation  @ $3.75/M  = 0.0075
+    //   200    completion      @ $15/M    = 0.003
+    // total = 0.015
+    let cost = usage.cost_usd.expect("cost should be computed");
+    assert!(
+        (cost - 0.015).abs() < 1e-9,
+        "expected cost ~0.015, got {cost}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn usage_record_with_openai_inclusive_accounting() {
+    // OpenAI accounting is inclusive: prompt_tokens is the *total* input
+    // including any cache hits, so the executor must subtract
+    // prompt_cached_tokens before billing the fresh-input rate. Getting
+    // this wrong silently double-bills cached tokens. This test pins the
+    // behavior at the conversation-log level — the same accounting that
+    // pricing.rs exercises in isolation now also has to survive the round
+    // trip through ModelResponse → UsageRecord → persisted event.
+    const PRICING_FIXTURE: &str = r#"{
+        "gpt-4o-mini": {
+            "litellm_provider": "openai",
+            "mode": "chat",
+            "input_cost_per_token": 1.5e-07,
+            "output_cost_per_token": 6e-07,
+            "cache_read_input_token_cost": 7.5e-08
+        }
+    }"#;
+    let pricing =
+        Arc::new(cost::PricingTable::from_json_str(PRICING_FIXTURE).expect("fixture should parse"));
+
+    let tempdir = TempDir::new().expect("tempdir should exist");
+    let exoharness = Arc::new(
+        BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
+            .await
+            .expect("basic exoharness should initialize"),
+    ) as Arc<dyn ExoHarness>;
+    let harness = BasicHarness::with_pricing_table(
+        Arc::clone(&exoharness),
+        Arc::new(FakeModelClient::new(vec![ModelResponse {
+            response_id: Some(Uuid7::now()),
+            messages: vec![assistant_message("pong")],
+            tool_calls: Vec::new(),
+            usage: Some(UniversalUsage {
+                // prompt_tokens here *includes* the 500 cached — OpenAI
+                // convention.
+                prompt_tokens: Some(2_000),
+                completion_tokens: Some(1_000),
+                prompt_cached_tokens: Some(500),
+                prompt_cache_creation_tokens: None,
+                completion_reasoning_tokens: None,
+            }),
+            model: Some("gpt-4o-mini".to_string()),
+            ttft: None,
+            duration: None,
+        }])),
+        Arc::new(BasicToolRuntime),
+        pricing,
+    );
+
+    let secret_id = exoharness
+        .put_secret(PutSecretRequest {
+            name: "openai-cache-key".to_string(),
+            secret: Secret::Key {
+                value: "test-key".to_string(),
+            },
+        })
+        .await
+        .expect("test secret should register");
+    exoharness
+        .put_binding(Binding::Llm {
+            name: "gpt-4o-mini".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            base_url: None,
+            secret_id: Some(secret_id),
+        })
+        .await
+        .expect("binding should register");
+
+    let agent = harness
+        .create_agent(CreateAgentRequest {
+            slug: "openai-cache".to_string(),
+            name: None,
+            harness: crate::AgentHarnessKind::Basic,
+            typescript: None,
+            enable_agent_tool_creation: true,
+            sandbox_image: None,
+            sandbox_provider: SandboxProvider::LocalProcess,
+            enable_networking: false,
+            model: "gpt-4o-mini".to_string(),
+            max_output_tokens: None,
+            max_tool_round_trips: Some(2),
+            braintrust: None,
+        })
+        .await
+        .expect("agent should be created");
+    let conversation = agent
+        .create_conversation(CreateConversationRequest::default())
+        .await
+        .expect("conversation should be created");
+
+    conversation
+        .send(SendRequest {
+            input: vec![user_message("ping")],
+            session_id: None,
+        })
+        .await
+        .expect("send should succeed");
+
+    let usage = assistant_usage_record(&conversation).await;
+
+    assert_eq!(usage.model, "gpt-4o-mini");
+    // Raw counts are preserved as the provider reported them — the
+    // inclusive convention only matters for the cost computation, not for
+    // the stored tokens.
+    assert_eq!(usage.prompt_tokens, Some(2_000));
+    assert_eq!(usage.completion_tokens, Some(1_000));
+    assert_eq!(usage.prompt_cached_tokens, Some(500));
+    // OpenAI-style inclusive:
+    //   non_cached = 2000 - 500       = 1500
+    //   1500   fresh prompt @ $0.15/M = 0.000225
+    //   500    cache read   @ $0.075/M = 0.0000375
+    //   1000   completion   @ $0.60/M = 0.0006
+    // total = 0.0008625
+    // If the executor mistakenly used the Anthropic-style additive
+    // formula here, it would bill all 2000 prompt tokens at the fresh
+    // rate and the total would be 0.0009375 — ~9% high — so this
+    // assertion catches the provider-classification bug the PR
+    // description calls out.
+    let cost = usage.cost_usd.expect("cost should be computed");
+    assert!(
+        (cost - 0.0008625).abs() < 1e-9,
+        "expected cost ~0.0008625, got {cost}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn close_session_appends_session_ended_event() {
     let tempdir = TempDir::new().expect("tempdir should exist");
     let exoharness: Arc<dyn ExoHarness> = Arc::new(
@@ -187,6 +574,9 @@ async fn close_session_appends_session_ended_event() {
             messages: vec![assistant_message("pong")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         }])),
         Arc::new(BasicToolRuntime),
     );
@@ -262,12 +652,18 @@ async fn updating_agent_config_refreshes_executor_cache() {
             messages: vec![assistant_message("pong-1")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
         ModelResponse {
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("pong-2")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
     ]));
     let harness = BasicHarness::new(exoharness, Arc::clone(&model), Arc::new(BasicToolRuntime));
@@ -344,12 +740,18 @@ async fn send_executes_shell_tool_when_enabled() {
                 },
             }],
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
         ModelResponse {
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("done")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
     ]));
     let harness = BasicHarness::new(exoharness, Arc::clone(&model), Arc::new(BasicToolRuntime));
@@ -526,12 +928,18 @@ async fn updating_mounts_recreates_conversation_sandbox() {
                 },
             }],
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
         ModelResponse {
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("done-1")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
         ModelResponse {
             response_id: Some(Uuid7::now()),
@@ -544,12 +952,18 @@ async fn updating_mounts_recreates_conversation_sandbox() {
                 },
             }],
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
         ModelResponse {
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("done-2")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
     ]));
     let harness = BasicHarness::new(exoharness, model, Arc::new(BasicToolRuntime));
@@ -762,18 +1176,27 @@ async fn conversation_model_override_changes_effective_model() {
             messages: vec![assistant_message("first")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
         ModelResponse {
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("second")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
         ModelResponse {
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("third")],
             tool_calls: Vec::new(),
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
     ]));
     let harness = BasicHarness::new(exoharness, Arc::clone(&model), Arc::new(BasicToolRuntime));
@@ -923,6 +1346,45 @@ fn assistant_message(text: &str) -> Message {
         content: AssistantContent::String(text.to_string()),
         id: None,
     }
+}
+
+/// Fetch the UsageRecord attached to the first Messages event that
+/// contains an assistant message. Mirrors the pattern in
+/// `usage_record_is_persisted_with_computed_cost` so the new tests stay
+/// readable.
+async fn assistant_usage_record(
+    conversation: &Arc<dyn crate::HarnessConversation>,
+) -> exoharness::UsageRecord {
+    let events = conversation
+        .exoharness_handle()
+        .get_events(Some(EventQuery {
+            cursor: None,
+            direction: Some(EventQueryDirection::Asc),
+            limit: None,
+            session_id: None,
+            turn_id: None,
+            types: None,
+        }))
+        .await
+        .expect("get events should succeed")
+        .events;
+
+    events
+        .into_iter()
+        .find_map(|event| match event.data {
+            EventData::Messages {
+                messages,
+                usage: Some(usage),
+                ..
+            } if messages
+                .iter()
+                .any(|m| matches!(m, Message::Assistant { .. })) =>
+            {
+                Some(*usage)
+            }
+            _ => None,
+        })
+        .expect("assistant message event should carry a UsageRecord")
 }
 
 fn shell_command_arguments(command: &str) -> Map<String, Value> {
