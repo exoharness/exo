@@ -41,17 +41,6 @@ async fn basic_backend_supports_agent_and_conversation_crud() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn basic_backend_lists_conversations_recent_first_and_paginates() {
-    let tempdir = TempDir::new().expect("tempdir");
-    let harness: std::sync::Arc<dyn ExoHarness> = std::sync::Arc::new(
-        BasicExoHarness::new(local_test_config(tempdir.path()))
-            .await
-            .expect("harness should initialize"),
-    );
-    crate::contract_tests::list_conversations_returns_recent_first_and_paginates(harness).await;
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn basic_backend_contract_begin_turn_tracks_events_through_finish() {
     let tempdir = TempDir::new().expect("tempdir");
     let harness: std::sync::Arc<dyn ExoHarness> = std::sync::Arc::new(
@@ -313,6 +302,7 @@ async fn turn_events_continue_after_artifact_writes() {
     turn.add_events(vec![EventData::Messages {
         messages: vec![assistant_message("pong")],
         response_id: None,
+        usage: None,
     }])
     .await
     .expect("append after artifact write");

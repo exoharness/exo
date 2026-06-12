@@ -536,6 +536,7 @@ async fn append_final_answer(
     turn.add_events(vec![EventData::Messages {
         messages: vec![assistant_message(final_answer)],
         response_id,
+        usage: None,
     }])
     .await?;
     append_custom_event(

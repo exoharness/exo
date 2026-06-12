@@ -48,6 +48,9 @@ async fn send_appends_user_and_assistant_messages() {
             messages: vec![assistant_message("pong")],
             tool_calls: vec![],
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         }])),
         Arc::new(FakeToolRuntime::default()),
     );
@@ -136,12 +139,18 @@ async fn send_executes_tool_round_trip() {
                 },
             }],
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
         ModelResponse {
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("done")],
             tool_calls: vec![],
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
     ]));
     let executor = BasicExecutor::new(
@@ -249,12 +258,18 @@ async fn send_records_tool_result_when_tool_execution_fails() {
                 },
             }],
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
         ModelResponse {
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("recovered")],
             tool_calls: vec![],
             usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
         },
     ]));
     let executor = BasicExecutor::new(
@@ -357,6 +372,9 @@ async fn send_stream_emits_chunks_and_persists_final_response() {
                 messages: vec![assistant_message("hello")],
                 tool_calls: vec![],
                 usage: None,
+                model: None,
+                ttft: None,
+                duration: None,
             },
         }])),
         Arc::new(FakeToolRuntime::default()),
@@ -686,18 +704,12 @@ impl AgentHandle for FakeAgentHandle {
         &self.record
     }
 
-    async fn list_conversations(
-        &self,
-        _request: exoharness::ListConversationsRequest,
-    ) -> Result<exoharness::ListConversationsResult<Arc<dyn ConversationHandle>>> {
+    async fn list_conversations(&self) -> Result<Vec<Arc<dyn ConversationHandle>>> {
         let state = self.state.lock().expect("state poisoned");
-        Ok(exoharness::ListConversationsResult {
-            conversations: vec![Arc::new(FakeConversationHandle {
-                state: Arc::clone(&self.state),
-                record: state.conversation.record.clone(),
-            })],
-            next_cursor: None,
-        })
+        Ok(vec![Arc::new(FakeConversationHandle {
+            state: Arc::clone(&self.state),
+            record: state.conversation.record.clone(),
+        })])
     }
 
     async fn get_conversation(
@@ -806,6 +818,7 @@ impl ConversationHandle for FakeConversationHandle {
                 EventData::Messages {
                     messages: request.input,
                     response_id: None,
+                    usage: None,
                 },
             ));
         }

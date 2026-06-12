@@ -68,10 +68,7 @@ pub(crate) async fn resolve_conversation_handle(
         return Ok(Some(conversation));
     }
 
-    let conversations = agent
-        .list_conversations(exoharness::ListConversationsRequest::default())
-        .await?
-        .conversations;
+    let conversations = agent.list_conversations().await?;
     Ok(conversations
         .into_iter()
         .find(|conversation| conversation.record().slug == conversation_ref))

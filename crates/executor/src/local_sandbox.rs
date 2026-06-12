@@ -7,13 +7,12 @@ use exoharness::{
     AddEventsRequest, AddEventsResult, AgentHandle, AgentId, Artifact, ArtifactVersion, Binding,
     BindingId, BindingRecord, CancelSandboxProcessRequest, CloseSandboxProcessInputRequest,
     ConversationHandle, ConversationId, CreateSandboxRequest, Event, EventData, EventId, EventKind,
-    EventStream, ExoHarness, ForkConversationRequest, GetEventsResult, ListConversationsRequest,
-    ListConversationsResult, NewAgentRequest, NewConversationRequest, PutSecretRequest,
-    ReadArtifactRequest, Result, RunInSandboxRequest, SandboxId, SandboxProcess,
-    SandboxProcessEventQuery, SandboxProcessRecord, SandboxProcessStatus, Secret, SecretId,
-    SecretMetadata, SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnHandle,
-    TurnRecord, Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest,
-    WriteSandboxProcessInputRequest,
+    EventStream, ExoHarness, ForkConversationRequest, GetEventsResult, NewAgentRequest,
+    NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result, RunInSandboxRequest,
+    SandboxId, SandboxProcess, SandboxProcessEventQuery, SandboxProcessRecord,
+    SandboxProcessStatus, Secret, SecretId, SecretMetadata, SnapshotId, StartSandboxProcessRequest,
+    StartSandboxRequest, TurnHandle, TurnRecord, Uuid7, WaitSandboxProcessRequest,
+    WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -134,19 +133,14 @@ impl AgentHandle for LocalSandboxAgent {
         self.remote.record()
     }
 
-    async fn list_conversations(
-        &self,
-        request: ListConversationsRequest,
-    ) -> Result<ListConversationsResult<Arc<dyn ConversationHandle>>> {
-        let result = self.remote.list_conversations(request).await?;
-        Ok(ListConversationsResult {
-            conversations: result
-                .conversations
-                .into_iter()
-                .map(|remote| wrap_conversation(Arc::clone(&self.state), remote))
-                .collect(),
-            next_cursor: result.next_cursor,
-        })
+    async fn list_conversations(&self) -> Result<Vec<Arc<dyn ConversationHandle>>> {
+        Ok(self
+            .remote
+            .list_conversations()
+            .await?
+            .into_iter()
+            .map(|remote| wrap_conversation(Arc::clone(&self.state), remote))
+            .collect())
     }
 
     async fn get_conversation(
@@ -260,9 +254,8 @@ impl LocalSandboxConversation {
 
         let slug = format!("remote-{}", self.remote.record().id);
         let local_conversation = match local_agent
-            .list_conversations(ListConversationsRequest::default())
+            .list_conversations()
             .await?
-            .conversations
             .into_iter()
             .find(|conversation| conversation.record().slug == slug)
         {

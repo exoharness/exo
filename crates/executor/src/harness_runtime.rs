@@ -400,6 +400,9 @@ fn normalize_model_response(response: UniversalResponse) -> Result<ModelResponse
         messages: response.messages,
         tool_calls,
         usage: response.usage,
+        model: response.model,
+        ttft: None,
+        duration: None,
     })
 }
 

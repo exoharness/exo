@@ -8,10 +8,9 @@ use lingua::universal::{AssistantContent, UserContent};
 use tokio::time::timeout;
 
 use crate::{
-    AddEventsRequest, BeginTurnRequest, Binding, EventData, EventKind, EventQuery,
-    EventQueryDirection, ExoHarness, ForkConversationRequest, ListConversationsRequest,
-    ManagedSandboxHandle, NewAgentRequest, NewConversationRequest, SandboxCommand, Uuid7,
-    WriteArtifactRequest,
+    BeginTurnRequest, Binding, EventData, EventKind, EventQuery, EventQueryDirection, ExoHarness,
+    ForkConversationRequest, ManagedSandboxHandle, NewAgentRequest, NewConversationRequest,
+    SandboxCommand, Uuid7, WriteArtifactRequest,
 };
 
 pub async fn supports_agent_and_conversation_crud(harness: Arc<dyn ExoHarness>) {
@@ -52,10 +51,9 @@ pub async fn supports_agent_and_conversation_crud(harness: Arc<dyn ExoHarness>) 
     );
     assert!(
         agent
-            .list_conversations(crate::ListConversationsRequest::default())
+            .list_conversations()
             .await
             .expect("list conversations")
-            .conversations
             .iter()
             .any(|candidate| candidate.record().id == conversation.record().id)
     );
@@ -72,85 +70,6 @@ pub async fn supports_agent_and_conversation_crud(harness: Arc<dyn ExoHarness>) 
             .await
             .expect("delete agent")
     );
-}
-
-pub async fn list_conversations_returns_recent_first_and_paginates(harness: Arc<dyn ExoHarness>) {
-    let agent = harness
-        .new_agent(NewAgentRequest {
-            slug: unique_slug("agent"),
-            name: "Agent".to_string(),
-        })
-        .await
-        .expect("agent should be created");
-    let first = agent
-        .new_conversation(NewConversationRequest {
-            slug: Some(unique_slug("first")),
-            name: Some("First".to_string()),
-        })
-        .await
-        .expect("first conversation");
-    tokio::time::sleep(Duration::from_millis(2)).await;
-    let second = agent
-        .new_conversation(NewConversationRequest {
-            slug: Some(unique_slug("second")),
-            name: Some("Second".to_string()),
-        })
-        .await
-        .expect("second conversation");
-    tokio::time::sleep(Duration::from_millis(2)).await;
-    let third = agent
-        .new_conversation(NewConversationRequest {
-            slug: Some(unique_slug("third")),
-            name: Some("Third".to_string()),
-        })
-        .await
-        .expect("third conversation");
-    tokio::time::sleep(Duration::from_millis(2)).await;
-    first
-        .add_events(AddEventsRequest {
-            session_id: None,
-            turn_id: None,
-            expected_head: None,
-            data: vec![EventData::Custom {
-                event_type: "touch".to_string(),
-                payload: serde_json::Value::Null,
-            }],
-        })
-        .await
-        .expect("touch first conversation");
-
-    let page = agent
-        .list_conversations(ListConversationsRequest {
-            cursor: None,
-            limit: Some(2),
-        })
-        .await
-        .expect("first page");
-    let page_ids: Vec<_> = page
-        .conversations
-        .iter()
-        .map(|conversation| conversation.record().id)
-        .collect();
-    assert_eq!(page_ids, vec![first.record().id, third.record().id]);
-    assert_eq!(
-        page.next_cursor,
-        Some(third.record().latest_event_id.unwrap_or(third.record().id))
-    );
-
-    let next_page = agent
-        .list_conversations(ListConversationsRequest {
-            cursor: page.next_cursor,
-            limit: Some(2),
-        })
-        .await
-        .expect("second page");
-    let next_page_ids: Vec<_> = next_page
-        .conversations
-        .iter()
-        .map(|conversation| conversation.record().id)
-        .collect();
-    assert_eq!(next_page_ids, vec![second.record().id]);
-    assert_eq!(next_page.next_cursor, None);
 }
 
 pub async fn begin_turn_tracks_events_through_finish(harness: Arc<dyn ExoHarness>) {
@@ -176,6 +95,7 @@ pub async fn begin_turn_tracks_events_through_finish(harness: Arc<dyn ExoHarness
     turn.add_events(vec![EventData::Messages {
         messages: vec![assistant_message("pong")],
         response_id: None,
+        usage: None,
     }])
     .await
     .expect("append assistant message");
@@ -248,6 +168,7 @@ pub async fn turn_events_continue_after_artifact_writes(harness: Arc<dyn ExoHarn
     turn.add_events(vec![EventData::Messages {
         messages: vec![assistant_message("pong")],
         response_id: None,
+        usage: None,
     }])
     .await
     .expect("append after artifact write");

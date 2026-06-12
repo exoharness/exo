@@ -36,14 +36,13 @@ use crate::{
     BoxAsyncRead, BoxAsyncWrite, CancelSandboxProcessRequest, CloseSandboxProcessInputRequest,
     ConversationHandle, ConversationId, ConversationRecord, CreateSandboxRequest, Event, EventData,
     EventId, EventKind, EventQuery, EventQueryDirection, EventStream, ExoHarness, FileSystemMount,
-    ForkConversationRequest, GetEventsResult, GetSandboxProcessEventsResult,
-    ListConversationsRequest, ListConversationsResult, NewAgentRequest, NewConversationRequest,
-    PutSecretRequest, ReadArtifactRequest, Result, RunInSandboxRequest, SandboxId, SandboxProcess,
-    SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessId, SandboxProcessMode,
-    SandboxProcessParts, SandboxProcessRecord, SandboxProcessStatus, SandboxProcessStdin,
-    SandboxProvider, SandboxProviderConfig, Secret, SecretId, SecretMetadata, SecretType,
-    SessionId, SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnHandle, TurnId,
-    TurnRecord, Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest,
+    ForkConversationRequest, GetEventsResult, GetSandboxProcessEventsResult, NewAgentRequest,
+    NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result, RunInSandboxRequest,
+    SandboxId, SandboxProcess, SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessId,
+    SandboxProcessMode, SandboxProcessParts, SandboxProcessRecord, SandboxProcessStatus,
+    SandboxProcessStdin, SandboxProvider, SandboxProviderConfig, Secret, SecretId, SecretMetadata,
+    SecretType, SessionId, SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnHandle,
+    TurnId, TurnRecord, Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest,
     WriteSandboxProcessInputRequest,
 };
 
@@ -66,7 +65,6 @@ pub enum SandboxBackendChoice {
     LocalProcess,
     Daytona(DaytonaBackendSpec),
     Vercel(VercelBackendSpec),
-    AwsAgentCore,
 }
 
 impl SandboxBackendChoice {
@@ -77,7 +75,6 @@ impl SandboxBackendChoice {
             Self::LocalProcess => SandboxProvider::LocalProcess,
             Self::Daytona(_) => SandboxProvider::Daytona,
             Self::Vercel(_) => SandboxProvider::Vercel,
-            Self::AwsAgentCore => SandboxProvider::AwsAgentCore,
         }
     }
 }
@@ -207,23 +204,6 @@ impl BasicExoHarnessInner {
                     None => self.vercel_config_from_spec(spec).await?,
                 };
                 Arc::new(crate::VercelSandboxBackend::new(config)?)
-            }
-            SandboxBackendChoice::AwsAgentCore => {
-                #[cfg(feature = "aws-agentcore")]
-                {
-                    let config = self.aws_agentcore_config_from_binding().await?.ok_or_else(|| {
-                        anyhow!(
-                            "aws-agentcore sandbox requested but no sandbox provider binding is configured; run `exo provider configure --provider aws-agentcore --runtime-arn <arn>`"
-                        )
-                    })?;
-                    Arc::new(crate::AwsAgentCoreSandboxBackend::new(config).await?)
-                }
-                #[cfg(not(feature = "aws-agentcore"))]
-                {
-                    bail!(
-                        "aws-agentcore sandbox backend requires building exoharness with the aws-agentcore feature"
-                    );
-                }
             }
         };
         Ok(backend)
@@ -418,38 +398,6 @@ impl BasicExoHarnessInner {
         }))
     }
 
-    #[cfg(feature = "aws-agentcore")]
-    async fn aws_agentcore_config_from_binding(&self) -> Result<Option<crate::AwsAgentCoreConfig>> {
-        let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
-        let Some((runtime_arn, region, qualifier, endpoint_url)) = bindings
-            .into_iter()
-            .rev()
-            .find_map(|record| match record.binding {
-                Binding::Sandbox {
-                    config:
-                        SandboxProviderConfig::AwsAgentCore {
-                            runtime_arn,
-                            region,
-                            qualifier,
-                            endpoint_url,
-                            ..
-                        },
-                    ..
-                } => Some((runtime_arn, region, qualifier, endpoint_url)),
-                _ => None,
-            })
-        else {
-            return Ok(None);
-        };
-        Ok(Some(crate::AwsAgentCoreConfig {
-            runtime_arn,
-            region,
-            qualifier,
-            endpoint_url,
-            credentials: aws_agentcore_credentials_from_env(),
-        }))
-    }
-
     /// The configured default base image for `provider`, from the newest
     /// `Binding::Sandbox` for it. `None` when no such binding exists, so the
     /// backend applies its own intrinsic default.
@@ -462,25 +410,6 @@ impl BasicExoHarnessInner {
             (config.provider() == provider).then(|| config.default_image().to_string())
         }))
     }
-}
-
-#[cfg(feature = "aws-agentcore")]
-fn aws_agentcore_credentials_from_env() -> Option<crate::AwsAgentCoreCredentials> {
-    let access_key_id = std::env::var("AWS_AGENTCORE_ACCESS_KEY_ID")
-        .ok()
-        .filter(|value| !value.trim().is_empty())?;
-    let secret_access_key = std::env::var("AWS_AGENTCORE_SECRET_ACCESS_KEY")
-        .ok()
-        .filter(|value| !value.trim().is_empty())?;
-    let session_token = std::env::var("AWS_AGENTCORE_SESSION_TOKEN")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
-
-    Some(crate::AwsAgentCoreCredentials {
-        access_key_id,
-        secret_access_key,
-        session_token,
-    })
 }
 
 impl BasicExoHarness {
@@ -716,23 +645,16 @@ impl AgentHandle for BasicAgentHandle {
         &self.record
     }
 
-    async fn list_conversations(
-        &self,
-        request: ListConversationsRequest,
-    ) -> Result<ListConversationsResult<Arc<dyn ConversationHandle>>> {
+    async fn list_conversations(&self) -> Result<Vec<Arc<dyn ConversationHandle>>> {
         let mut handles: Vec<Arc<dyn ConversationHandle>> = Vec::new();
-        let result = self.list_conversation_records(request).await?;
-        for record in result.conversations {
+        for record in self.list_conversation_records().await? {
             handles.push(Arc::new(BasicConversationHandle {
                 harness: self.harness.clone(),
                 agent_id: self.record.id,
                 record,
             }));
         }
-        Ok(ListConversationsResult {
-            conversations: handles,
-            next_cursor: result.next_cursor,
-        })
+        Ok(handles)
     }
 
     async fn get_conversation(
@@ -764,10 +686,7 @@ impl AgentHandle for BasicAgentHandle {
         request: NewConversationRequest,
     ) -> Result<Arc<dyn ConversationHandle>> {
         let _guard = self.harness.inner.write_lock.lock().await;
-        let existing = self
-            .list_conversation_records(ListConversationsRequest::default())
-            .await?
-            .conversations;
+        let existing = self.list_conversation_records().await?;
         let slug = match request.slug {
             Some(slug) => {
                 if existing
@@ -993,10 +912,7 @@ impl BasicAgentHandle {
         self.agent_dir().join("artifacts")
     }
 
-    async fn list_conversation_records(
-        &self,
-        request: ListConversationsRequest,
-    ) -> Result<ListConversationsResult<ConversationRecord>> {
+    async fn list_conversation_records(&self) -> Result<Vec<ConversationRecord>> {
         let mut conversations = Vec::new();
         for key in self
             .harness
@@ -1016,46 +932,9 @@ impl BasicAgentHandle {
                     .await?,
             );
         }
-        conversations.sort_by_key(conversation_recency_key);
-        conversations.reverse();
-        paginate_conversation_records(conversations, request)
+        conversations.sort_by_key(|record| record.id);
+        Ok(conversations)
     }
-}
-
-fn conversation_recency_key(record: &ConversationRecord) -> Uuid7 {
-    record.latest_event_id.unwrap_or(record.id)
-}
-
-fn paginate_conversation_records(
-    conversations: Vec<ConversationRecord>,
-    request: ListConversationsRequest,
-) -> Result<ListConversationsResult<ConversationRecord>> {
-    let start = match request.cursor {
-        Some(cursor) => conversations
-            .iter()
-            .position(|conversation| conversation_recency_key(conversation) == cursor)
-            .map(|index| index + 1)
-            .ok_or_else(|| anyhow!("conversation cursor not found: {cursor}"))?,
-        None => 0,
-    };
-    let remaining = conversations.len().saturating_sub(start);
-    let Some(limit) = request.limit.filter(|limit| *limit > 0) else {
-        return Ok(ListConversationsResult {
-            conversations: conversations.into_iter().skip(start).collect(),
-            next_cursor: None,
-        });
-    };
-    let has_more = remaining > limit;
-    let page: Vec<_> = conversations.into_iter().skip(start).take(limit).collect();
-    let next_cursor = if has_more {
-        page.last().map(conversation_recency_key)
-    } else {
-        None
-    };
-    Ok(ListConversationsResult {
-        conversations: page,
-        next_cursor,
-    })
 }
 
 struct BasicConversationHandle {
@@ -1313,6 +1192,7 @@ impl ConversationHandle for BasicConversationHandle {
             events_to_append.push(EventData::Messages {
                 messages: request.input,
                 response_id: None,
+                usage: None,
             });
         }
 
@@ -1462,10 +1342,7 @@ impl ConversationHandle for BasicConversationHandle {
                 .get_json::<AgentRecord>(self.agent_dir().join("record.json"))
                 .await?,
         };
-        let existing = agent
-            .list_conversation_records(ListConversationsRequest::default())
-            .await?
-            .conversations;
+        let existing = agent.list_conversation_records().await?;
         let slug = match request.slug {
             Some(slug) => {
                 if existing

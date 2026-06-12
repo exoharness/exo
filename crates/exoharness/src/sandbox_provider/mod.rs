@@ -10,22 +10,6 @@ mod daytona {
         "daytonaio/sandbox:0.8.0".to_string()
     }
 }
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    feature = "basic-backend",
-    feature = "aws-agentcore"
-))]
-mod aws_agentcore;
-#[cfg(not(all(
-    not(target_arch = "wasm32"),
-    feature = "basic-backend",
-    feature = "aws-agentcore"
-)))]
-mod aws_agentcore {
-    pub fn default_aws_agentcore_image() -> String {
-        String::new()
-    }
-}
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod process_bridge;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
@@ -37,13 +21,6 @@ mod vercel {
     }
 }
 
-pub use aws_agentcore::default_aws_agentcore_image;
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    feature = "basic-backend",
-    feature = "aws-agentcore"
-))]
-pub use aws_agentcore::{AwsAgentCoreConfig, AwsAgentCoreCredentials, AwsAgentCoreSandboxBackend};
 pub use daytona::default_daytona_image;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub use daytona::{

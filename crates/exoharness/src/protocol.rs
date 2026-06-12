@@ -5,11 +5,11 @@ use crate::{
     BeginTurnRequest, Binding, BindingId, BindingRecord, CancelSandboxProcessRequest,
     CloseSandboxProcessInputRequest, ConversationId, ConversationRecord, CreateSandboxRequest,
     Event, EventData, EventId, EventQuery, ForkConversationRequest, GetEventsResult,
-    GetSandboxProcessEventsResult, ListConversationsRequest, ListConversationsResult,
-    NewAgentRequest, NewConversationRequest, PutSecretRequest, ReadArtifactRequest, SandboxId,
-    SandboxProcessEventQuery, SandboxProcessRecord, SandboxProcessStatus, Secret, SecretId,
-    SecretMetadata, SessionId, SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnId,
-    TurnRecord, WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
+    GetSandboxProcessEventsResult, NewAgentRequest, NewConversationRequest, PutSecretRequest,
+    ReadArtifactRequest, SandboxId, SandboxProcessEventQuery, SandboxProcessRecord,
+    SandboxProcessStatus, Secret, SecretId, SecretMetadata, SessionId, SnapshotId,
+    StartSandboxProcessRequest, StartSandboxRequest, TurnId, TurnRecord, WaitSandboxProcessRequest,
+    WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -70,7 +70,6 @@ pub enum Request {
     },
     ListConversations {
         agent_id: AgentId,
-        request: ListConversationsRequest,
     },
     GetConversation {
         agent_id: AgentId,
@@ -343,7 +342,7 @@ pub enum Response {
         value: bool,
     },
     Conversations {
-        result: ListConversationsResult<ConversationHandleInfo>,
+        conversations: Vec<ConversationHandleInfo>,
     },
     Conversation {
         conversation: Option<ConversationHandleInfo>,

@@ -196,11 +196,7 @@ where
     }
 
     async fn list_conversations(&self) -> Result<Vec<ConversationRecord>> {
-        let conversations = self
-            .agent
-            .list_conversations(exoharness::ListConversationsRequest::default())
-            .await?
-            .conversations;
+        let conversations = self.agent.list_conversations().await?;
         Ok(conversations
             .into_iter()
             .map(|conversation| conversation.record().clone())
