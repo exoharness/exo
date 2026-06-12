@@ -1,5 +1,6 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type {
   HarnessToolRegistry,
@@ -9,6 +10,10 @@ import type {
 } from "@exo/harness";
 
 const DEFAULT_REPO_PATH = "/workspace/exo";
+const SOURCE_REPO_ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../..",
+);
 const EXCLUDED_DIRS = new Set([
   ".git",
   ".exo",
@@ -87,10 +92,16 @@ function createRepoHealthTool(): ToolInstance {
     },
     handler: {
       async execute(args) {
-        const repoPath =
-          typeof args.repoPath === "string" && args.repoPath.length > 0
-            ? args.repoPath
-            : DEFAULT_REPO_PATH;
+        const repoPath = resolveRepoHealthRepoPath(
+          typeof args.repoPath === "string" ? args.repoPath : null,
+        );
+        if (repoPath === null) {
+          return {
+            ok: false,
+            error:
+              "Could not locate the exo repository; tried repoPath, EXOCLAW_REPO, /workspace/exo, and the harness source tree.",
+          };
+        }
         const data = buildRepoHealthData(repoPath);
         return {
           _exoDirectFinal: markdownReport(data),
@@ -100,6 +111,34 @@ function createRepoHealthTool(): ToolInstance {
       },
     },
   };
+}
+
+export function resolveRepoHealthRepoPath(
+  preferredPath: string | null = null,
+): string | null {
+  const candidates = [
+    preferredPath,
+    process.env.EXOCLAW_REPO ?? null,
+    DEFAULT_REPO_PATH,
+    SOURCE_REPO_ROOT,
+  ];
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    if (!candidate || seen.has(candidate)) {
+      continue;
+    }
+    seen.add(candidate);
+    if (isExoRepoRoot(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function isExoRepoRoot(candidate: string): boolean {
+  return existsSync(path.join(candidate, "Cargo.toml")) &&
+    existsSync(path.join(candidate, "package.json")) &&
+    existsSync(path.join(candidate, "examples", "exoclaw", "SELF.md"));
 }
 
 export function buildRepoHealthData(repoPath: string): JsonObject {
@@ -483,7 +522,13 @@ function architectureSummary(): string {
 }
 
 export function buildRepoHealthMarkdownReport(
-  repoPath = DEFAULT_REPO_PATH,
+  repoPath: string | null = null,
 ): string {
-  return markdownReport(buildRepoHealthData(repoPath));
+  const resolvedRepoPath = resolveRepoHealthRepoPath(repoPath);
+  if (resolvedRepoPath === null) {
+    throw new Error(
+      "Could not locate the exo repository; tried repoPath, EXOCLAW_REPO, /workspace/exo, and the harness source tree.",
+    );
+  }
+  return markdownReport(buildRepoHealthData(resolvedRepoPath));
 }

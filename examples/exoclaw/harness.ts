@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { inspect } from "node:util";
 
 import {
   defineHarness,
@@ -16,7 +17,11 @@ import { registerSchedulerTools } from "./scheduler-tools";
 import { registerSandboxTools } from "./sandbox-tools";
 import { registerGuardianTools } from "./guardian-tools";
 import { registerIntrospectionTools } from "./introspection-tools";
-import { buildRepoHealthMarkdownReport, registerRepoHealthTool } from "./repo-health-tool";
+import {
+  buildRepoHealthMarkdownReport,
+  registerRepoHealthTool,
+  resolveRepoHealthRepoPath,
+} from "./repo-health-tool";
 import {
   basicHarnessInstructions,
   defaultBuiltInToolNames,
@@ -115,19 +120,32 @@ async function tryDirectRepoHealthTurn(context: TurnContext): Promise<boolean> {
   if (!latestUserText || !isRepoHealthReportRequest(latestUserText)) {
     return false;
   }
-  const repoPath = process.env.EXOCLAW_REPO ?? DEFAULT_EXOCLAW_REPO;
-  const report = buildRepoHealthMarkdownReport(repoPath);
-  if (context.streaming) {
-    await context.stream.text(report);
+  try {
+    const repoPath = resolveRepoHealthRepoPath(
+      process.env.EXOCLAW_REPO ?? DEFAULT_EXOCLAW_REPO,
+    );
+    if (repoPath === null) {
+      return false;
+    }
+    const report = buildRepoHealthMarkdownReport(repoPath);
+    if (context.streaming) {
+      await context.stream.text(report);
+    }
+    await context.exoharness.current.turn.addEvents([
+      {
+        type: "messages",
+        messages: [{ role: "assistant", content: report }],
+        response_id: null,
+      },
+    ]);
+    return true;
+  } catch (error) {
+    console.warn(
+      "repo health fast path failed; falling back to model turn",
+      inspect(error),
+    );
+    return false;
   }
-  await context.exoharness.current.turn.addEvents([
-    {
-      type: "messages",
-      messages: [{ role: "assistant", content: report }],
-      response_id: null,
-    },
-  ]);
-  return true;
 }
 
 function isRepoHealthReportRequest(text: string): boolean {
