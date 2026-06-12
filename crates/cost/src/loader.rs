@@ -19,9 +19,10 @@ pub async fn load(path: Option<PathBuf>, url: Option<String>) -> PricingTable {
         return match std::fs::read_to_string(&path) {
             Ok(body) => parse_or_empty(&body),
             Err(err) => {
-                eprintln!(
-                    "[exo] reading pricing path {}: {err}; cost unavailable",
-                    path.display()
+                tracing::error!(
+                    path = %path.display(),
+                    %err,
+                    "reading pricing path failed; cost unavailable"
                 );
                 PricingTable::empty()
             }
@@ -43,16 +44,16 @@ pub async fn load(path: Option<PathBuf>, url: Option<String>) -> PricingTable {
             parse_or_empty(&body)
         }
         Ok(_) => {
-            eprintln!("[exo] fetched pricing was unparseable; cost unavailable");
+            tracing::error!("fetched pricing was unparseable; cost unavailable");
             PricingTable::empty()
         }
         Err(err) => match cached {
             Some((body, _)) => {
-                eprintln!("[exo] pricing fetch failed ({err}); using stale cache");
+                tracing::warn!(%err, "pricing fetch failed; using stale cache");
                 parse_or_empty(&body)
             }
             None => {
-                eprintln!("[exo] pricing fetch failed ({err}); cost unavailable");
+                tracing::error!(%err, "pricing fetch failed; cost unavailable");
                 PricingTable::empty()
             }
         },
@@ -62,7 +63,7 @@ pub async fn load(path: Option<PathBuf>, url: Option<String>) -> PricingTable {
 /// A corrupt or truncated document degrades to an empty table rather than erroring.
 fn parse_or_empty(body: &str) -> PricingTable {
     PricingTable::from_json_str(body).unwrap_or_else(|_| {
-        eprintln!("[exo] cached pricing is unparseable; cost unavailable until it refreshes");
+        tracing::error!("cached pricing is unparseable; cost unavailable until it refreshes");
         PricingTable::empty()
     })
 }
