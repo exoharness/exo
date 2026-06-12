@@ -95,8 +95,63 @@ To test inbound wakeups with the default `all_messages` trigger, send any normal
 - `defaultChannelId` is used when `send_adapter_message` is called with `target: null`.
 - `trigger` is either `mentions_only` or `all_messages`. Direct messages always trigger.
 - `allowedChannels` optionally restricts inbound wakeups to specific Discord channel ids.
+- `voice` enables voice chat (default `false`). See below.
+- `openaiSecretId` is the secret holding the OpenAI API key used for voice STT/TTS. Defaults to `openai` when `voice` is enabled.
 
 Outbound messages support text plus the shared adapter attachment forms: `sandboxPath`, HTTPS `url`, or base64/data URL `data`.
+
+## Voice
+
+With `voice: true` the bot can join a Discord voice channel and hold a spoken
+conversation: it transcribes what you say, runs it through the normal Exoclaw
+agent turn (tools, identity, history), and speaks the reply back. STT and TTS
+both use the existing OpenAI secret — no extra API key. See
+[`docs/discord-voice-design.md`](../../../../docs/discord-voice-design.md) for
+the architecture.
+
+Extra requirements vs. the text-only adapter:
+
+1. Invite the bot with the `applications.commands` scope in addition to `bot`,
+   and grant the **Connect** and **Speak** permissions.
+2. The adapter adds the `Guild Voice States` gateway intent automatically when
+   `voice` is enabled (not a privileged intent).
+3. Bind the OpenAI key as a secret (defaults to the id `openai`):
+
+   ```bash
+   exo secret set openai --env OPENAI_API_KEY
+   ```
+
+Create the adapter with voice on:
+
+```json
+{
+  "name": "discord-dev",
+  "source": "library",
+  "config": {
+    "type": "discord",
+    "botTokenSecretId": "discord-bot-token",
+    "defaultChannelId": null,
+    "trigger": "all_messages",
+    "allowedChannels": null,
+    "allowBots": false,
+    "voice": true,
+    "openaiSecretId": "openai"
+  }
+}
+```
+
+Then, in Discord:
+
+- Join a voice channel and run `/voice join`. The bot joins your channel.
+- Talk. Each utterance (ended by a short silence) is transcribed, handled by the
+  agent, and the reply is spoken back. The transcript and reply are also posted
+  as text in the channel.
+- Run `/voice leave` to disconnect. The bot also leaves automatically when the
+  channel empties.
+
+Voice is assistant-grade latency (a few seconds per turn, more when the agent
+runs tools), not a low-latency phone call. Replies are kept short and plain so
+they read well as speech.
 
 ## Rich Attachments
 
