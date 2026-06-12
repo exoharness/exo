@@ -1,4 +1,5 @@
 use std::collections::{HashMap, hash_map::DefaultHasher};
+use std::ffi::OsString;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -401,13 +402,14 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
             schedule_cleanup_named_container(self.container_bin.clone(), self.cli, entry.name);
         }
 
-        let (name, owned) = match find_running_warm_sandbox(&self.container_bin, &request).await? {
-            Some(name) => (name, false),
-            None => (
-                create_unique_warm_sandbox(&self.container_bin, &request).await?,
-                true,
-            ),
-        };
+        let (name, owned) =
+            match find_running_warm_sandbox(&self.container_bin, self.cli, &request).await? {
+                Some(name) => (name, false),
+                None => (
+                    create_unique_warm_sandbox(&self.container_bin, &request).await?,
+                    true,
+                ),
+            };
 
         {
             let mut warm_sandboxes = self.warm_sandboxes.lock().await;
@@ -798,6 +800,21 @@ async fn create_unique_warm_sandbox(
 
 async fn find_running_warm_sandbox(
     container_bin: &Path,
+    cli: ContainerCliFlavor,
+    request: &SandboxRequest,
+) -> Result<Option<String>> {
+    match cli {
+        ContainerCliFlavor::AppleContainer => {
+            find_running_apple_warm_sandbox(container_bin, request).await
+        }
+        ContainerCliFlavor::Docker => {
+            find_running_docker_warm_sandbox(container_bin, request).await
+        }
+    }
+}
+
+async fn find_running_apple_warm_sandbox(
+    container_bin: &Path,
     request: &SandboxRequest,
 ) -> Result<Option<String>> {
     let output = run_container_admin_command(
@@ -830,6 +847,41 @@ async fn find_running_warm_sandbox(
     }))
 }
 
+async fn find_running_docker_warm_sandbox(
+    container_bin: &Path,
+    request: &SandboxRequest,
+) -> Result<Option<String>> {
+    let spec_hash = sandbox_spec_hash(&request.spec);
+    let key_filter = format!("label={WARM_SANDBOX_KEY_LABEL}={}", request.key);
+    let spec_filter = format!("label={WARM_SANDBOX_SPEC_HASH_LABEL}={spec_hash}");
+    let output = run_container_admin_command(
+        container_bin,
+        WARM_SANDBOX_CLEANUP_TIMEOUT,
+        [
+            "ps",
+            "--filter",
+            key_filter.as_str(),
+            "--filter",
+            spec_filter.as_str(),
+            "--format",
+            "{{.Names}}",
+        ],
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "failed to list warm sandboxes: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|name| !name.is_empty())
+        .map(ToOwned::to_owned))
+}
+
 async fn ensure_warm_sandbox_ready(
     container_bin: &Path,
     cli: ContainerCliFlavor,
@@ -857,7 +909,8 @@ async fn ensure_warm_sandbox_ready(
             if stale.owned {
                 schedule_cleanup_named_container(container_bin.to_path_buf(), cli, stale.name);
             }
-            let (name, owned) = match find_running_warm_sandbox(container_bin, request).await? {
+            let (name, owned) = match find_running_warm_sandbox(container_bin, cli, request).await?
+            {
                 Some(name) => (name, false),
                 None => (
                     create_unique_warm_sandbox(container_bin, request).await?,
@@ -876,7 +929,8 @@ async fn ensure_warm_sandbox_ready(
             return Ok(name);
         }
         None => {
-            let (name, owned) = match find_running_warm_sandbox(container_bin, request).await? {
+            let (name, owned) = match find_running_warm_sandbox(container_bin, cli, request).await?
+            {
                 Some(name) => (name, false),
                 None => (
                     create_unique_warm_sandbox(container_bin, request).await?,
@@ -904,13 +958,14 @@ async fn ensure_warm_sandbox_ready(
         return Ok(current_name);
     }
 
-    let (replacement_name, owned) = match find_running_warm_sandbox(container_bin, request).await? {
-        Some(name) => (name, false),
-        None => (
-            create_unique_warm_sandbox(container_bin, request).await?,
-            true,
-        ),
-    };
+    let (replacement_name, owned) =
+        match find_running_warm_sandbox(container_bin, cli, request).await? {
+            Some(name) => (name, false),
+            None => (
+                create_unique_warm_sandbox(container_bin, request).await?,
+                true,
+            ),
+        };
     warm_sandboxes.insert(
         request.key.clone(),
         WarmSandboxEntry {
@@ -1354,18 +1409,31 @@ fn missing_container_cli_message(cli: ContainerCliFlavor, container_bin: &Path) 
     }
 }
 
-async fn run_container_admin_command<const N: usize>(
+async fn run_container_admin_command<I, S>(
     container_bin: &Path,
     timeout: Duration,
-    args: [&str; N],
-) -> Result<std::process::Output> {
+    args: I,
+) -> Result<std::process::Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let args = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_os_string())
+        .collect::<Vec<OsString>>();
+    let display_args = args
+        .iter()
+        .map(|arg| arg.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ");
     let mut command = Command::new(container_bin);
-    command.args(args).kill_on_drop(true);
+    command.args(&args).kill_on_drop(true);
     match time::timeout(timeout, command.output()).await {
         Ok(output) => Ok(output?),
         Err(_) => Err(anyhow!(
             "container {} timed out after {}s",
-            args.join(" "),
+            display_args,
             timeout.as_secs()
         )),
     }
@@ -1543,6 +1611,68 @@ async fn docker_load_image(container_bin: &Path, payload: &Bytes) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn docker_warm_sandbox_lookup_uses_docker_ps_filters() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let script_path = temp_dir.path().join("docker");
+        let args_path = temp_dir.path().join("args");
+        fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\n{{\n  for arg in \"$@\"; do\n    printf '%s\\n' \"$arg\"\n  done\n}} > '{}'\nprintf 'warm-name\\n'\n",
+                args_path.display()
+            ),
+        )
+        .expect("write fake docker script");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("fake docker metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("chmod fake docker");
+
+        let request = SandboxRequest {
+            key: SandboxKey::ConversationSandbox {
+                conversation_id: "conversation".to_string(),
+                sandbox_id: "sandbox".to_string(),
+            },
+            spec: SandboxSpec {
+                image: "docker.io/library/ubuntu:24.04".to_string(),
+                mounts: Vec::new(),
+                network: SandboxNetworkPolicy::Disabled,
+                default_workdir: "/".to_string(),
+            },
+            lifecycle: SandboxLifecycleConfig {
+                idle_ttl: Some(Duration::from_secs(60)),
+            },
+        };
+        let spec_hash = sandbox_spec_hash(&request.spec);
+
+        let name = find_running_warm_sandbox(&script_path, ContainerCliFlavor::Docker, &request)
+            .await
+            .expect("find warm sandbox");
+        assert_eq!(name.as_deref(), Some("warm-name"));
+
+        let key_filter = format!("label={WARM_SANDBOX_KEY_LABEL}={}", request.key);
+        let spec_filter = format!("label={WARM_SANDBOX_SPEC_HASH_LABEL}={spec_hash}");
+        let args = fs::read_to_string(&args_path).expect("read fake docker args");
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            vec![
+                "ps",
+                "--filter",
+                key_filter.as_str(),
+                "--filter",
+                spec_filter.as_str(),
+                "--format",
+                "{{.Names}}",
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn apple_container_backend_names_missing_container_cli() {
