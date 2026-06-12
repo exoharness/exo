@@ -944,9 +944,22 @@ export function tracedUnderParent<R>(
 export function linguaMessagesToResponsesInput(
   messages: Message[] | undefined,
 ): ResponseInput {
-  return linguaToResponsesMessages<ResponseInput>(
+  const items = linguaToResponsesMessages<ResponseInput>(
     (messages ?? []) as LinguaMessage[],
   );
+  // Requests are sent with `store: false`, so server-side item ids from prior
+  // rounds (rs_/fc_/msg_) don't resolve — replaying them 404s on reasoning
+  // models. Replay statelessly: drop reasoning items (lingua doesn't preserve
+  // encrypted_content, so a bare id is all we'd have) and strip item ids.
+  return items.flatMap((item) => {
+    if (!isRecord(item)) return [item];
+    if (item.type === "reasoning") return [];
+    if (typeof item.id === "string") {
+      const { id: _id, ...rest } = item;
+      return [rest as typeof item];
+    }
+    return [item];
+  }) as ResponseInput;
 }
 
 export function responseToLinguaEvents(response: Response): EventData[] {
