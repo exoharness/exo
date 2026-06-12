@@ -387,6 +387,16 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
             description:
               "Conversation routing mode. Use adapter to wake the adapter's root conversation for every message; use target to create and wake a separate conversation per Discord channel. Defaults to adapter.",
           },
+          voice: {
+            type: "boolean",
+            description:
+              "Enable voice chat: the bot can join a voice channel and hold a spoken conversation (STT -> agent -> TTS). Defaults to false. When true, set openaiSecretId and ensure the bot has the applications.commands scope plus Connect/Speak permissions.",
+          },
+          openaiSecretId: {
+            type: ["string", "null"],
+            description:
+              'Secret id holding the OpenAI API key used for voice STT/TTS. Use "openai" when voice is true; null when voice is false.',
+          },
         },
         required: [
           "type",
@@ -396,6 +406,8 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
           "allowedChannels",
           "allowBots",
           "conversationScope",
+          "voice",
+          "openaiSecretId",
         ],
       },
       {
