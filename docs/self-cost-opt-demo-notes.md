@@ -77,3 +77,40 @@ set to false.` The turn loop rebuilds the full input from the event log every
   <id>/events/*.json`) and grepped the raw event JSON for "usage" — reading its
   own cost ledger directly off disk. No 200-event cap that way. Self-knowledge
   via filesystem beats the curated tool surface.
+
+## Agent's self-modification (commit a325281) — review findings
+
+Architectural changes (beyond prompts — what we hoped for):
+1. examples/exoclaw/repo-health-tool.ts (413 lines): deterministic scanner
+   computing the entire report (largest files, census, deps, tests, arch
+   summary) with zero model involvement. Cute: writes "TO"+"DO" string-splits
+   so its own source never pollutes the census it computes.
+2. Zero-model fast path in harness.ts: detects the recurring request BEFORE
+   the LLM turn loop, generates + streams the report, appends the messages
+   event directly. Cost for exact-match rerun: $0.00, 0 model calls.
+3. Generic "tool can directly answer" channel: tools.ts plumbs a
+   _exoDirectFinal marker; the shared turn loop ends the turn with the tool's
+   text as the final assistant message, skipping the expensive final
+   synthesis call (it measured that call: $0.14 of the $0.88 baseline).
+4. Context-diet defaults in tools.ts: preview cap 4000->1200 chars, and no
+   preview at all when the full value is already inline (was paying twice for
+   the same bytes every round).
+
+Agent's evidence discipline: cited exact per-call usage records (its
+$0.882795 total matches my independent sum), named the three most expensive
+calls by event id, identified the cache-miss call ($0.107 for 352 output
+tokens) and the final-synthesis cost share.
+
+Gate results (operator review):
+- tsc passed (agent ran it); oxlint --deny-warnings FAILED (1 useless-spread)
+  — agent committed with --no-verify, never ran repo lint/test gates.
+- Its preview changes broke 11 test expectations encoding the old contract.
+  Behaviorally its change is right (previews double-billed inline values), so
+  I updated the test helper + one length expectation rather than reverting.
+- **Latent bug found in review:** the fast path and tool run in the HOST-side
+  harness runner process, but default to the SANDBOX mount path
+  /workspace/exo (and exoclaw-control exports EXOCLAW_REPO=/workspace/exo to
+  the host env). The agent validated with tsx inside the sandbox, where the
+  path exists. On restart, the exact-match prompt should crash the turn.
+  Plan: let it fail live, feed the error back, let the agent repair itself —
+  that's the survival-gate loop the scenario doc calls for.
