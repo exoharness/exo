@@ -8,9 +8,9 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
 use executor::{
-    BasicExoHarnessConfig, BraintrustRuntimeConfig, ExoclawToolRuntime, Harness,
-    SandboxBackendChoice, SchedulerRunOptions, SchedulerStore, SecretBackendChoice,
-    TypeScriptHarness, run_due_tasks,
+    BasicExoHarnessConfig, BraintrustRuntimeConfig, DaytonaBackendSpec, ExoclawToolRuntime,
+    Harness, SandboxBackendChoice, SandboxProvider, SchedulerRunOptions, SchedulerStore,
+    SecretBackendChoice, TypeScriptHarness, VercelBackendSpec, run_due_tasks,
 };
 
 #[derive(Debug, Parser)]
@@ -25,6 +25,10 @@ struct Cli {
     env_file: Option<PathBuf>,
     #[arg(long, global = true, value_enum, env = "EXO_SANDBOX_BACKEND")]
     sandbox_backend: Option<SandboxBackendArg>,
+    /// Default sandbox provider for tasks. Must match a registered backend.
+    /// Defaults to the `--sandbox-backend` provider when unset.
+    #[arg(long, global = true, value_enum, env = "EXO_SANDBOX_PROVIDER")]
+    sandbox_provider: Option<SandboxProviderArg>,
     #[arg(long, global = true, env = "BRAINTRUST_API_KEY", hide = true)]
     braintrust_api_key: Option<String>,
     #[arg(long, global = true, env = "BRAINTRUST_APP_URL", hide = true)]
@@ -57,7 +61,14 @@ async fn main() -> Result<()> {
         cli.braintrust_app_url,
         cli.braintrust_api_url,
     );
-    let harness = exoclaw_harness(&cli.root, runtime_config, env, cli.sandbox_backend).await?;
+    let harness = exoclaw_harness(
+        &cli.root,
+        runtime_config,
+        env,
+        cli.sandbox_backend,
+        cli.sandbox_provider,
+    )
+    .await?;
 
     match cli.command {
         Commands::Run {
@@ -119,6 +130,43 @@ impl From<SandboxBackendArg> for SandboxBackendChoice {
             SandboxBackendArg::LocalProcess => Self::LocalProcess,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SandboxProviderArg {
+    Daytona,
+    Vercel,
+    #[value(name = "apple-container")]
+    AppleContainer,
+    Docker,
+    #[value(name = "local-process")]
+    LocalProcess,
+}
+
+impl From<SandboxProviderArg> for SandboxProvider {
+    fn from(value: SandboxProviderArg) -> Self {
+        match value {
+            SandboxProviderArg::Daytona => Self::Daytona,
+            SandboxProviderArg::Vercel => Self::Vercel,
+            SandboxProviderArg::AppleContainer => Self::AppleContainer,
+            SandboxProviderArg::Docker => Self::Docker,
+            SandboxProviderArg::LocalProcess => Self::LocalProcess,
+        }
+    }
+}
+
+/// Backends every scheduler harness registers, mirroring the main CLI so a task
+/// whose conversation resolves to any local provider (or Daytona) can run. The
+/// scheduler previously registered only the single `--sandbox-backend`, so a
+/// task in a `LocalProcess`-scoped conversation failed with "sandbox provider
+/// LocalProcess is not supported by this harness" under a Docker backend.
+fn default_sandbox_backends() -> Vec<SandboxBackendChoice> {
+    vec![
+        default_sandbox_backend(),
+        SandboxBackendChoice::LocalProcess,
+        SandboxBackendChoice::Daytona(DaytonaBackendSpec::with_conventional_secrets()),
+        SandboxBackendChoice::Vercel(VercelBackendSpec::with_conventional_secrets()),
+    ]
 }
 
 impl SchedulerRunnerLock {
@@ -187,15 +235,29 @@ async fn exoclaw_harness(
     runtime_config: Option<BraintrustRuntimeConfig>,
     env: HashMap<String, String>,
     sandbox_backend_arg: Option<SandboxBackendArg>,
+    sandbox_provider_arg: Option<SandboxProviderArg>,
 ) -> Result<Arc<dyn Harness>> {
     let sandbox_backend = sandbox_backend_arg
         .map(SandboxBackendChoice::from)
         .unwrap_or_else(default_sandbox_backend);
+    // The default provider is the chosen backend's, unless overridden. Register
+    // the full backend set (not just the chosen one) so a task can run in a
+    // conversation scoped to any provider, matching the main CLI/adapter runner.
+    let sandbox_default = sandbox_provider_arg
+        .map(SandboxProvider::from)
+        .unwrap_or_else(|| sandbox_backend.provider());
+    let mut sandbox_backends = default_sandbox_backends();
+    if !sandbox_backends
+        .iter()
+        .any(|backend| backend.provider() == sandbox_backend.provider())
+    {
+        sandbox_backends.push(sandbox_backend);
+    }
     let exo_config = BasicExoHarnessConfig {
         root: root.join("exoharness"),
         secret_backend: default_secret_backend(),
-        sandbox_default: sandbox_backend.provider(),
-        sandbox_backends: vec![sandbox_backend],
+        sandbox_default,
+        sandbox_backends,
     };
     Ok(Arc::new(
         TypeScriptHarness::<ExoclawToolRuntime>::exoclaw_from_root(
