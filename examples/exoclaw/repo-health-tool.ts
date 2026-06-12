@@ -163,7 +163,10 @@ function lineCount(text: string): number {
 function largestSourceFiles(root: string, files: string[]): JsonValue[] {
   return files
     .filter((file) => SOURCE_EXTENSIONS.has(path.extname(file)))
-    .map((file) => ({ path: rel(root, file), lines: lineCount(readText(file)) }))
+    .map((file) => ({
+      path: rel(root, file),
+      lines: lineCount(readText(file)),
+    }))
     .sort((a, b) => b.lines - a.lines || a.path.localeCompare(b.path))
     .slice(0, 10) as JsonValue[];
 }
@@ -193,12 +196,12 @@ function todoCensus(root: string, files: string[]): JsonValue[] {
 
 function dependencyInventory(root: string): JsonObject {
   const workspaceMembers = workspaceMembersFromRoot(root);
-  const crateManifests = [
-    ...workspaceMembers
-      .map((member) => path.join(root, member, "Cargo.toml"))
-      .filter((manifest) => existsFile(manifest)),
-  ];
-  const rustCrates = crateManifests.map((manifest) => rustCrateDeps(root, manifest));
+  const crateManifests = workspaceMembers
+    .map((member) => path.join(root, member, "Cargo.toml"))
+    .filter((manifest) => existsFile(manifest));
+  const rustCrates = crateManifests.map((manifest) =>
+    rustCrateDeps(root, manifest),
+  );
   return {
     rustWorkspaceMembers: workspaceMembers,
     rustCrates,
@@ -222,8 +225,13 @@ function workspaceMembersFromRoot(root: string): string[] {
 
 function rustCrateDeps(root: string, manifest: string): JsonObject {
   const toml = readText(manifest);
-  const crate = toml.match(/^name\s*=\s*"([^"]+)"/m)?.[1] ?? path.basename(path.dirname(manifest));
-  const normal = dependenciesInSections(toml, /^(dependencies|target\..*\.dependencies)$/);
+  const crate =
+    toml.match(/^name\s*=\s*"([^"]+)"/m)?.[1] ??
+    path.basename(path.dirname(manifest));
+  const normal = dependenciesInSections(
+    toml,
+    /^(dependencies|target\..*\.dependencies)$/,
+  );
   const dev = dependenciesInSections(toml, /^dev-dependencies$/);
   const build = dependenciesInSections(toml, /^build-dependencies$/);
   return {
@@ -239,7 +247,10 @@ function rustCrateDeps(root: string, manifest: string): JsonObject {
   };
 }
 
-function dependenciesInSections(toml: string, sectionPattern: RegExp): string[] {
+function dependenciesInSections(
+  toml: string,
+  sectionPattern: RegExp,
+): string[] {
   const deps: string[] = [];
   let inSection = false;
   for (const rawLine of toml.split(/\n/)) {
@@ -274,7 +285,10 @@ function nodeDependencies(root: string): JsonObject {
     );
     return {
       count: entries.length,
-      dependencies: entries.map(([dependency, version]) => ({ dependency, version })),
+      dependencies: entries.map(([dependency, version]) => ({
+        dependency,
+        version,
+      })),
     };
   };
   return {
@@ -289,10 +303,13 @@ function nodeDependencies(root: string): JsonObject {
 
 function testInventory(root: string, files: string[]): JsonObject {
   const rustItems = files
-    .filter((file) => /\/(?:crates|tests)\/.*\.rs$/.test(file.replaceAll(path.sep, "/")))
+    .filter((file) =>
+      /\/(?:crates|tests)\/.*\.rs$/.test(file.replaceAll(path.sep, "/")),
+    )
     .map((file) => {
       const text = readText(file);
-      const testCount = text.match(/#\s*\[\s*(?:[A-Za-z0-9_]+::)?test\b/g)?.length ?? 0;
+      const testCount =
+        text.match(/#\s*\[\s*(?:[A-Za-z0-9_]+::)?test\b/g)?.length ?? 0;
       const hasTestsModule = /mod\s+tests\b/.test(text);
       return { path: rel(root, file), testCount, hasTestsModule };
     })
@@ -314,7 +331,10 @@ function testInventory(root: string, files: string[]): JsonObject {
   return {
     rust: {
       fileCount: rustItems.length,
-      testFunctionCount: rustItems.reduce((sum, item) => sum + item.testCount, 0),
+      testFunctionCount: rustItems.reduce(
+        (sum, item) => sum + item.testCount,
+        0,
+      ),
       files: rustItems,
     },
     typescript: {
@@ -325,32 +345,64 @@ function testInventory(root: string, files: string[]): JsonObject {
   };
 }
 
-
 export function markdownReport(data: JsonObject): string {
-  const largest = data.largestSourceFiles as Array<{ path: string; lines: number }>;
-  const issueCensus = data.todoFixmeCensus as { count: number; items: Array<{ path: string; line: number; text: string }> };
+  const largest = data.largestSourceFiles as Array<{
+    path: string;
+    lines: number;
+  }>;
+  const issueCensus = data.todoFixmeCensus as {
+    count: number;
+    items: Array<{ path: string; line: number; text: string }>;
+  };
   const deps = data.dependencyInventory as {
     rustWorkspaceMembers: string[];
-    rustCrates: Array<{ crate: string; manifest: string; dependencyCount: number; devDependencyCount: number; buildDependencyCount: number; totalDependencyCount: number }>;
+    rustCrates: Array<{
+      crate: string;
+      manifest: string;
+      dependencyCount: number;
+      devDependencyCount: number;
+      buildDependencyCount: number;
+      totalDependencyCount: number;
+    }>;
     node: {
-      dependencies: { count: number; dependencies: Array<{ dependency: string; version: string }> };
-      devDependencies: { count: number; dependencies: Array<{ dependency: string; version: string }> };
+      dependencies: {
+        count: number;
+        dependencies: Array<{ dependency: string; version: string }>;
+      };
+      devDependencies: {
+        count: number;
+        dependencies: Array<{ dependency: string; version: string }>;
+      };
       peerDependencies: { count: number };
       optionalDependencies: { count: number };
     };
   };
   const tests = data.testInventory as {
-    rust: { fileCount: number; testFunctionCount: number; files: Array<{ path: string; testCount: number }> };
-    typescript: { fileCount: number; testCaseCount: number; files: Array<{ path: string; testCount: number; describeCount: number }> };
+    rust: {
+      fileCount: number;
+      testFunctionCount: number;
+      files: Array<{ path: string; testCount: number }>;
+    };
+    typescript: {
+      fileCount: number;
+      testCaseCount: number;
+      files: Array<{ path: string; testCount: number; describeCount: number }>;
+    };
   };
   const lines: string[] = [];
   lines.push(`Repo health report for \`${data.repoPath as string}\``);
-  lines.push(`Scope: static scan excluding \`${(data.scanExcludes as string[]).join("`, `")}\`.`);
+  lines.push(
+    `Scope: static scan excluding \`${(data.scanExcludes as string[]).join("`, `")}\`.`,
+  );
   lines.push("");
   lines.push("## 1) Ten largest source files by line count");
   lines.push("| Rank | Lines | Path |");
   lines.push("|---:|---:|---|");
-  largest.forEach((item, index) => lines.push(`| ${index + 1} | ${item.lines.toLocaleString("en-US")} | \`${item.path}\` |`));
+  largest.forEach((item, index) =>
+    lines.push(
+      `| ${index + 1} | ${item.lines.toLocaleString("en-US")} | \`${item.path}\` |`,
+    ),
+  );
   lines.push("");
   lines.push(`## 2) ${issueMarkerLabel()} census`);
   lines.push(`Found ${issueCensus.count} ${issueMarkerLabel()} references:`);
@@ -361,38 +413,60 @@ export function markdownReport(data: JsonObject): string {
   lines.push("");
   lines.push("## 3) Dependency inventory");
   lines.push("### Rust workspace crates");
-  lines.push("Workspace members: " + deps.rustWorkspaceMembers.map((m) => `\`${m}\``).join(", ") + ".");
+  lines.push(
+    "Workspace members: " +
+      deps.rustWorkspaceMembers.map((m) => `\`${m}\``).join(", ") +
+      ".",
+  );
   lines.push("");
-  lines.push("| Crate | Manifest | Normal deps | Dev deps | Build deps | Total |");
+  lines.push(
+    "| Crate | Manifest | Normal deps | Dev deps | Build deps | Total |",
+  );
   lines.push("|---|---|---:|---:|---:|---:|");
   for (const crate of deps.rustCrates) {
-    lines.push(`| \`${crate.crate}\` | \`${crate.manifest}\` | ${crate.dependencyCount} | ${crate.devDependencyCount} | ${crate.buildDependencyCount} | ${crate.totalDependencyCount} |`);
+    lines.push(
+      `| \`${crate.crate}\` | \`${crate.manifest}\` | ${crate.dependencyCount} | ${crate.devDependencyCount} | ${crate.buildDependencyCount} | ${crate.totalDependencyCount} |`,
+    );
   }
   lines.push("");
   lines.push("### Node dependencies from `package.json`");
   lines.push(`Runtime dependencies: ${deps.node.dependencies.count}`);
-  deps.node.dependencies.dependencies.forEach((dep) => lines.push(`- \`${dep.dependency}\`: \`${dep.version}\``));
+  deps.node.dependencies.dependencies.forEach((dep) =>
+    lines.push(`- \`${dep.dependency}\`: \`${dep.version}\``),
+  );
   lines.push("");
   lines.push(`Dev dependencies: ${deps.node.devDependencies.count}`);
-  deps.node.devDependencies.dependencies.forEach((dep) => lines.push(`- \`${dep.dependency}\`: \`${dep.version}\``));
+  deps.node.devDependencies.dependencies.forEach((dep) =>
+    lines.push(`- \`${dep.dependency}\`: \`${dep.version}\``),
+  );
   lines.push("");
   lines.push(`Peer dependencies: ${deps.node.peerDependencies.count}`);
   lines.push(`Optional dependencies: ${deps.node.optionalDependencies.count}`);
   lines.push("");
   lines.push("## 4) Test inventory");
   lines.push(`### Rust files containing tests`);
-  lines.push(`Total: ${tests.rust.fileCount} Rust files containing tests, with ${tests.rust.testFunctionCount} test functions.`);
+  lines.push(
+    `Total: ${tests.rust.fileCount} Rust files containing tests, with ${tests.rust.testFunctionCount} test functions.`,
+  );
   lines.push("");
   lines.push("| Test count | Path |");
   lines.push("|---:|---|");
-  tests.rust.files.forEach((file) => lines.push(`| ${file.testCount} | \`${file.path}\` |`));
+  tests.rust.files.forEach((file) =>
+    lines.push(`| ${file.testCount} | \`${file.path}\` |`),
+  );
   lines.push("");
   lines.push("### TypeScript `*.test.ts` files");
-  lines.push(`Total: ${tests.typescript.fileCount} TS test files, with ${tests.typescript.testCaseCount} test cases.`);
+  lines.push(
+    `Total: ${tests.typescript.fileCount} TS test files, with ${tests.typescript.testCaseCount} test cases.`,
+  );
   lines.push("");
   lines.push("| Test cases | `describe(...)` blocks | Path |");
   lines.push("|---:|---:|---|");
-  tests.typescript.files.forEach((file) => lines.push(`| ${file.testCount} | ${file.describeCount} | \`${file.path}\` |`));
+  tests.typescript.files.forEach((file) =>
+    lines.push(
+      `| ${file.testCount} | ${file.describeCount} | \`${file.path}\` |`,
+    ),
+  );
   lines.push("");
   lines.push("## 5) Architecture summary");
   lines.push(data.architectureSummary as string);
@@ -408,6 +482,8 @@ function architectureSummary(): string {
   ].join(" ");
 }
 
-export function buildRepoHealthMarkdownReport(repoPath = DEFAULT_REPO_PATH): string {
+export function buildRepoHealthMarkdownReport(
+  repoPath = DEFAULT_REPO_PATH,
+): string {
   return markdownReport(buildRepoHealthData(repoPath));
 }

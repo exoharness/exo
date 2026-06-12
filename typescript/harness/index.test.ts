@@ -223,7 +223,7 @@ describe("HarnessToolRegistry", () => {
           },
           null,
           2,
-        ).slice(0, 4_000)}\n...[truncated]`,
+        ).slice(0, 1_200)}\n...[truncated]`,
         value: null,
       }),
     ]);
@@ -785,7 +785,9 @@ function wrappedToolResult(
     resultArtifact: artifact,
     artifacts: [artifact],
     truncated: false,
-    preview: serialized,
+    // Inline results carry no preview: the value itself is in context, and a
+    // preview would re-bill the same bytes on every later model call.
+    preview: "",
     value,
   };
 }
