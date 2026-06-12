@@ -16,6 +16,7 @@ import { registerSchedulerTools } from "./scheduler-tools";
 import { registerSandboxTools } from "./sandbox-tools";
 import { registerGuardianTools } from "./guardian-tools";
 import { registerIntrospectionTools } from "./introspection-tools";
+import { buildRepoHealthMarkdownReport, registerRepoHealthTool } from "./repo-health-tool";
 import {
   basicHarnessInstructions,
   defaultBuiltInToolNames,
@@ -32,6 +33,10 @@ const DEFAULT_EXOCLAW_SELF_MAP = `${DEFAULT_EXOCLAW_REPO}/examples/exoclaw/SELF.
 
 export default defineHarness({
   async runTurn(context) {
+    const directRepoHealth = await tryDirectRepoHealthTurn(context);
+    if (directRepoHealth) {
+      return;
+    }
     await runResponsesHarnessTurn(context, {
       instructions: exoclawInstructions,
       registerTools: registerExoclawTools,
@@ -49,6 +54,7 @@ async function registerExoclawTools(
   registerIntrospectionTools(tools);
   registerSandboxTools(tools);
   registerGuardianTools(tools);
+  registerRepoHealthTool(tools);
   for (const modulePath of context.agentConfig.typescript?.toolModulePaths ??
     []) {
     await registerLibraryToolModulePath(tools, context, modulePath);
@@ -99,4 +105,38 @@ function readLocalPrompt(): string | null {
   }
   const contents = readFileSync(path, "utf8").trim();
   return contents.length === 0 ? null : contents;
+}
+
+async function tryDirectRepoHealthTurn(context: TurnContext): Promise<boolean> {
+  const latestUserText = [...context.request.input]
+    .reverse()
+    .find((message) => message.role === "user" && typeof message.content === "string")
+    ?.content as string | undefined;
+  if (!latestUserText || !isRepoHealthReportRequest(latestUserText)) {
+    return false;
+  }
+  const repoPath = process.env.EXOCLAW_REPO ?? DEFAULT_EXOCLAW_REPO;
+  const report = buildRepoHealthMarkdownReport(repoPath);
+  if (context.streaming) {
+    await context.stream.text(report);
+  }
+  await context.exoharness.current.turn.addEvents([
+    {
+      type: "messages",
+      messages: [{ role: "assistant", content: report }],
+      response_id: null,
+    },
+  ]);
+  return true;
+}
+
+function isRepoHealthReportRequest(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return normalized.includes("repo health report") &&
+    normalized.includes("ten largest source files") &&
+    normalized.includes("to" + "do/fix" + "me") &&
+    normalized.includes("dependency inventory") &&
+    normalized.includes("test inventory") &&
+    normalized.includes("architecture summary") &&
+    normalized.includes("/workspace/exo");
 }

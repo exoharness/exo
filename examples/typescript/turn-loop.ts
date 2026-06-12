@@ -6,6 +6,8 @@ import {
   registerLibraryToolModulePath,
   turnMetadata,
   type BuiltInToolName,
+  assistantTextMessage,
+  messagesEvent,
   type EventData,
   type HarnessToolRegistry,
   type Message,
@@ -170,6 +172,16 @@ async function runResponsesTurnLoop(
       );
       if (toolResultEvents.length > 0) {
         latestEventId = await appendTurnEvents(context, toolResultEvents);
+        const directFinal = directFinalFromToolResultEvents(toolResultEvents);
+        if (directFinal !== null) {
+          if (context.streaming) {
+            await context.stream.text(directFinal);
+          }
+          latestEventId = await appendTurnEvents(context, [
+            messagesEvent([assistantTextMessage(directFinal)]),
+          ]);
+          return latestEventId;
+        }
       }
     }
   }
@@ -180,4 +192,26 @@ async function appendTurnEvents(
   data: EventData[],
 ): Promise<string> {
   return (await context.exoharness.current.turn.addEvents(data)).latestEventId;
+}
+
+function directFinalFromToolResultEvents(events: EventData[]): string | null {
+  for (const event of events) {
+    if (event.type !== "tool_result") {
+      continue;
+    }
+    const result = event.result;
+    if (!isRecord(result)) {
+      continue;
+    }
+    const directFinal = result.directFinal ??
+      (isRecord(result.value) ? result.value._exoDirectFinal : undefined);
+    if (typeof directFinal === "string" && directFinal.length > 0) {
+      return directFinal;
+    }
+  }
+  return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

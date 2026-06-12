@@ -12,7 +12,7 @@ import type {
 export type HarnessToolSource = "built_in" | "library" | "agent";
 
 const TOOL_RESULT_INLINE_LIMIT_CHARS = 8_000;
-const TOOL_RESULT_PREVIEW_CHARS = 4_000;
+const TOOL_RESULT_PREVIEW_CHARS = 1_200;
 
 export interface ToolExecutionContext {
   readonly context: TurnContext;
@@ -177,6 +177,7 @@ async function compactToolResult(
   const shellArtifacts = await writeShellOutputArtifacts(context, args);
   const value =
     serialized.length <= TOOL_RESULT_INLINE_LIMIT_CHARS ? args.result : null;
+  const directFinal = directFinalText(args.result);
   return {
     ok: resultOk(args.result),
     toolName: args.toolName,
@@ -185,8 +186,9 @@ async function compactToolResult(
     resultArtifact: fullResultArtifact,
     artifacts: [fullResultArtifact, ...shellArtifacts],
     truncated: serialized.length > TOOL_RESULT_INLINE_LIMIT_CHARS,
-    preview: previewText(serialized),
+    preview: serialized.length > TOOL_RESULT_INLINE_LIMIT_CHARS ? previewText(serialized) : "",
     value,
+    ...(directFinal ? { directFinal } : {}),
   };
 }
 
@@ -241,6 +243,12 @@ function artifactReference(
     sizeBytes: artifact.sizeBytes,
     mimeType,
   };
+}
+
+function directFinalText(result: ToolResult): string | null {
+  return isRecord(result) && typeof result._exoDirectFinal === "string"
+    ? result._exoDirectFinal
+    : null;
 }
 
 function resultOk(result: ToolResult): boolean {
