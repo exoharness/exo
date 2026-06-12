@@ -47,3 +47,33 @@ set to false.` The turn loop rebuilds the full input from the event log every
    existed. Cost angle: a single failed turn still billed one full call
    ($0.0306) and persisted its usage record — the cost tracking captured the
    failure, which is itself a nice demo data point.
+
+3. **Fix applied (commit dc20c4b):** stateless Responses replay — drop
+   reasoning items, strip rs_/fc_/msg_ item ids in
+   `linguaMessagesToResponsesInput`. Unit test uses the exact message shapes
+   pulled from the real failed conversation. After the fix, the same gpt-5.5
+   task ran 17 rounds to completion.
+
+## Baseline run (conversation report1, gpt-5.5, after fix)
+
+- 17 model calls, **total $0.8828**, final report 9,483 chars (saved to
+  /tmp/baseline-report.md for the quality gate).
+- Textbook staircase: prompt grows 5,739 -> 33,682 tokens over the turn as
+  tool outputs accumulate; the single final-report call alone cost $0.14.
+- Caching mostly engaged (e.g. 31,232 of 33,682 cached on the last call) but
+  two calls missed entirely (cached=0) — worth seeing if the agent notices.
+- The expensive shape: many exploratory shell rounds, each re-billing the
+  whole growing context.
+
+## Audit phase (live)
+
+- tmux/REPL input race struck twice more: a buffered duplicate of the task
+  prompt submitted itself before the audit prompt, burning a partial duplicate
+  report turn (~$0.23) before I attempted to kill it. Both prompts had queued:
+  the REPL ran the duplicate task turn, then started the audit turn.
+- **Unprompted agent move:** instead of (or before) using its
+  list_conversation_events tool, the agent located the host event store through
+  the repo mount (`/workspace/exo/.exo/exoharness/agents/<id>/conversations/
+  <id>/events/*.json`) and grepped the raw event JSON for "usage" — reading its
+  own cost ledger directly off disk. No 200-event cap that way. Self-knowledge
+  via filesystem beats the curated tool surface.
