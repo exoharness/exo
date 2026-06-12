@@ -66,7 +66,8 @@ The setup prompt at `setup-prompt.md` asks Exoclaw to create a library adapter s
     "defaultChannelId": null,
     "trigger": "all_messages",
     "allowedChannels": null,
-    "allowBots": false
+    "allowBots": false,
+    "conversationScope": "adapter"
   }
 }
 ```
@@ -74,6 +75,8 @@ The setup prompt at `setup-prompt.md` asks Exoclaw to create a library adapter s
 Use `defaultChannelId` when you want outbound messages to go to one channel by default. Otherwise, pass the copied Discord channel id as `target` when calling `send_adapter_message`.
 
 Set `allowBots: true` if you want the adapter to wake on messages from other bot accounts (useful for bot-to-bot integrations). The adapter never wakes on its own messages regardless of this flag.
+
+Set `conversationScope: "target"` to wake a separate Exoclaw conversation per Discord channel id. The default, `"adapter"`, preserves the historical behavior where every channel for an adapter shares the adapter's root conversation.
 
 ### 5. Test It
 

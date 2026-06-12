@@ -8,7 +8,8 @@ use tokio::io::AsyncWriteExt;
 
 use super::types::{
     AdapterAttachment, AdapterEventRecord, AdapterEventType, AdapterInboundMessageRecord,
-    AdapterOutboundMessageRecord, AdapterRecord, NewAdapter, now_ms,
+    AdapterOutboundMessageRecord, AdapterRecord, AdapterTargetConversationRecord, NewAdapter,
+    now_ms,
 };
 
 #[derive(Debug, Clone)]
@@ -122,6 +123,7 @@ impl AdapterStore {
         remove_dir_if_exists(self.outbox_dir(adapter_id)).await?;
         remove_dir_if_exists(self.inflight_dir(adapter_id)).await?;
         remove_dir_if_exists(self.inbound_seen_dir(adapter_id)).await?;
+        remove_dir_if_exists(self.target_conversations_dir(adapter_id)).await?;
         Ok(Some(adapter))
     }
 
@@ -339,6 +341,68 @@ impl AdapterStore {
         Ok(())
     }
 
+    pub async fn get_target_conversation(
+        &self,
+        adapter_id: &str,
+        target: &str,
+    ) -> Result<Option<AdapterTargetConversationRecord>> {
+        let path = self.target_conversation_path(adapter_id, target);
+        match fs::read(&path).await {
+            Ok(bytes) => Ok(Some(serde_json::from_slice::<
+                AdapterTargetConversationRecord,
+            >(&bytes)?)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).with_context(|| {
+                format!(
+                    "failed to read adapter target conversation {}",
+                    path.display()
+                )
+            }),
+        }
+    }
+
+    pub async fn put_target_conversation(
+        &self,
+        record: &AdapterTargetConversationRecord,
+    ) -> Result<()> {
+        let dir = self.target_conversations_dir(&record.adapter_id);
+        fs::create_dir_all(&dir).await?;
+        let path = self.target_conversation_path(&record.adapter_id, &record.target);
+        write_json_file(&path, record).await
+    }
+
+    pub async fn list_target_conversations(
+        &self,
+        adapter_id: &str,
+    ) -> Result<Vec<AdapterTargetConversationRecord>> {
+        let dir = self.target_conversations_dir(adapter_id);
+        match fs::metadata(&dir).await {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to stat target conversation dir {}", dir.display())
+                });
+            }
+        }
+        let mut records = Vec::new();
+        let mut entries = fs::read_dir(&dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let bytes = fs::read(&path).await.with_context(|| {
+                format!("failed to read target conversation {}", path.display())
+            })?;
+            records.push(serde_json::from_slice::<AdapterTargetConversationRecord>(
+                &bytes,
+            )?);
+        }
+        records.sort_by_key(|record| record.updated_at_ms);
+        Ok(records)
+    }
+
     pub async fn record_inbound_message_once(
         &self,
         adapter_id: &str,
@@ -411,6 +475,15 @@ impl AdapterStore {
             .join(format!("{message_id}.json"))
     }
 
+    fn target_conversations_dir(&self, adapter_id: &str) -> PathBuf {
+        self.root.join("target-conversations").join(adapter_id)
+    }
+
+    fn target_conversation_path(&self, adapter_id: &str, target: &str) -> PathBuf {
+        self.target_conversations_dir(adapter_id)
+            .join(format!("{}.json", stable_target_key(target)))
+    }
+
     fn inbound_seen_dir(&self, adapter_id: &str) -> PathBuf {
         self.root.join("inbound-seen").join(adapter_id)
     }
@@ -448,6 +521,17 @@ async fn remove_dir_if_exists(path: PathBuf) -> Result<()> {
             Err(error).with_context(|| format!("failed to delete directory {}", path.display()))
         }
     }
+}
+/// FNV-1a of an adapter target, used for both the target-conversation mapping
+/// filename and the derived conversation slug. `pub(crate)` so the runtime
+/// derives the same slug the store keys by — they must agree.
+pub(crate) fn stable_target_key(target: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in target.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 fn stable_message_key(target: &str, message_id: &str) -> String {
@@ -517,6 +601,79 @@ mod tests {
         );
         assert!(store.delete_adapter(&adapter.id).await.unwrap().is_some());
         assert!(store.get_adapter(&adapter.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn target_conversation_mapping_round_trips() {
+        use super::super::types::AdapterTargetConversationRecord;
+
+        let tempdir = TempDir::new().unwrap();
+        let store = AdapterStore::new(tempdir.path());
+        // A real adapter record so delete_adapter reaches the mapping cleanup.
+        let adapter = store
+            .create_adapter(NewAdapter {
+                agent_id: "agent".to_string(),
+                conversation_id: "root".to_string(),
+                name: "discord".to_string(),
+                source: AdapterSource::BuiltIn,
+                config: AdapterConfig {
+                    adapter_type: "discord".to_string(),
+                    worker_command: vec!["node".to_string()],
+                    initialization: serde_json::json!({}),
+                    state_dir: None,
+                    secret_env: Vec::new(),
+                },
+            })
+            .await
+            .unwrap();
+
+        // Missing mapping reads as None.
+        assert!(
+            store
+                .get_target_conversation(&adapter.id, "channel-A")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let rec_a = AdapterTargetConversationRecord::new(
+            adapter.id.clone(),
+            "channel-A".into(),
+            "conv-A".into(),
+            1,
+        )
+        .unwrap();
+        let rec_b = AdapterTargetConversationRecord::new(
+            adapter.id.clone(),
+            "channel-B".into(),
+            "conv-B".into(),
+            2,
+        )
+        .unwrap();
+        store.put_target_conversation(&rec_a).await.unwrap();
+        store.put_target_conversation(&rec_b).await.unwrap();
+
+        assert_eq!(
+            store
+                .get_target_conversation(&adapter.id, "channel-A")
+                .await
+                .unwrap(),
+            Some(rec_a.clone())
+        );
+        let listed = store.list_target_conversations(&adapter.id).await.unwrap();
+        assert_eq!(listed.len(), 2);
+        // Distinct targets must not collide on the hashed filename.
+        assert_ne!(rec_a.conversation_id, rec_b.conversation_id);
+
+        // Deleting the adapter removes its target-conversation mappings.
+        store.delete_adapter(&adapter.id).await.unwrap();
+        assert!(
+            store
+                .list_target_conversations(&adapter.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

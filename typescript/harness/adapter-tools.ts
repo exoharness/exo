@@ -391,6 +391,12 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
             description:
               'Secret id holding the OpenAI API key used for voice STT/TTS. Use "openai" when voice is true; null when voice is false.',
           },
+          conversationScope: {
+            type: "string",
+            enum: ["adapter", "target"],
+            description:
+              "Conversation routing mode. Use adapter to wake the adapter's root conversation for every message; use target to create and wake a separate conversation per Discord channel. Defaults to adapter.",
+          },
         },
         required: [
           "type",
@@ -401,6 +407,7 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
           "allowBots",
           "voice",
           "openaiSecretId",
+          "conversationScope",
         ],
       },
       {

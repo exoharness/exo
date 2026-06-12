@@ -136,6 +136,8 @@ struct DiscordAdapterCreationConfig {
     /// `openai` when voice is enabled and no id is given.
     #[serde(default)]
     openai_secret_id: Option<String>,
+    #[serde(default)]
+    conversation_scope: Option<AdapterConversationScope>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -204,6 +206,22 @@ enum ChatTrigger {
 enum DiscordTrigger {
     AllMessages,
     MentionsOnly,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AdapterConversationScope {
+    Adapter,
+    Target,
+}
+
+impl AdapterConversationScope {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Adapter => "adapter",
+            Self::Target => "target",
+        }
+    }
 }
 
 fn default_irc_nick() -> String {
@@ -331,6 +349,10 @@ impl AdapterCreationConfig {
                         "allowedChannels": config.allowed_channels,
                         "allowBots": config.allow_bots,
                         "voice": config.voice,
+                        "conversationScope": config
+                            .conversation_scope
+                            .map(|scope| scope.as_str())
+                            .unwrap_or("adapter"),
                     }),
                     state_dir: None,
                     secret_env,
@@ -568,11 +590,11 @@ pub async fn execute_send_adapter_message_tool(
     let Some(adapter) = store.get_adapter(&args.adapter_id).await? else {
         return Ok(not_found());
     };
-    if adapter.agent_id != agent.record().id.to_string()
-        || adapter.conversation_id != conversation.record().id.to_string()
-    {
+    let Some(scoped_target) = adapter_access_target(store, agent, conversation, &adapter).await?
+    else {
         return Ok(not_found());
-    }
+    };
+    let target = resolve_send_target(scoped_target.as_deref(), args.target.as_deref())?;
     let attachments = args.attachments.unwrap_or_default();
     if !attachments.is_empty()
         && adapter.config.adapter_type != "whatsapp"
@@ -600,7 +622,7 @@ pub async fn execute_send_adapter_message_tool(
         store,
         &adapter,
         &args.text,
-        args.target.as_deref(),
+        target.as_deref(),
         attachments,
     )
     .await?;
@@ -609,6 +631,71 @@ pub async fn execute_send_adapter_message_tool(
         "adapterId": args.adapter_id,
         "sent": true,
     }))
+}
+
+/// Determine whether `conversation` may send through `adapter`, gathering the
+/// target-conversation mappings from the store and delegating the decision to
+/// the pure [`classify_adapter_access`]. The outer `Option` is authorization
+/// (None = denied); the inner `Option` is the send constraint (None = root
+/// conversation, any target allowed; `Some(target)` = scoped, that target only).
+async fn adapter_access_target(
+    store: &AdapterStore,
+    agent: &dyn AgentHandle,
+    conversation: &dyn ConversationHandle,
+    adapter: &super::types::AdapterRecord,
+) -> Result<Option<Option<String>>> {
+    let conversation_id = conversation.record().id.to_string();
+    let mappings = store.list_target_conversations(&adapter.id).await?;
+    Ok(classify_adapter_access(
+        &adapter.agent_id,
+        &adapter.conversation_id,
+        &agent.record().id.to_string(),
+        &conversation_id,
+        mappings
+            .iter()
+            .map(|m| (m.conversation_id.as_str(), m.target.as_str())),
+    ))
+}
+
+/// Pure authorization decision. `None`: this conversation may not use the
+/// adapter. `Some(None)`: the adapter's root conversation — may send to any
+/// target. `Some(Some(target))`: a target-scoped conversation — may send only
+/// to `target`.
+fn classify_adapter_access<'a>(
+    adapter_agent_id: &str,
+    adapter_root_conversation_id: &str,
+    agent_id: &str,
+    conversation_id: &str,
+    target_mappings: impl Iterator<Item = (&'a str, &'a str)>,
+) -> Option<Option<String>> {
+    if adapter_agent_id != agent_id {
+        return None;
+    }
+    if adapter_root_conversation_id == conversation_id {
+        return Some(None);
+    }
+    for (mapped_conversation, target) in target_mappings {
+        if mapped_conversation == conversation_id {
+            return Some(Some(target.to_string()));
+        }
+    }
+    None
+}
+
+/// Resolve the effective send target, enforcing that a target-scoped
+/// conversation may only send to its mapped target (a missing target defaults
+/// to it). A root conversation sends to whatever it requested.
+fn resolve_send_target(scoped: Option<&str>, requested: Option<&str>) -> Result<Option<String>> {
+    match scoped {
+        Some(scoped) => match requested {
+            Some(requested) if requested != scoped => {
+                bail!("target-scoped conversation may only send to mapped target {scoped}")
+            }
+            Some(requested) => Ok(Some(requested.to_string())),
+            None => Ok(Some(scoped.to_string())),
+        },
+        None => Ok(requested.map(str::to_string)),
+    }
 }
 
 async fn resolve_sandbox_attachments(
@@ -894,6 +981,59 @@ mod tests {
     use super::*;
     use crate::test_support::local_test_config;
     use crate::{AgentConfig, AgentHarnessKind, ConversationConfig};
+
+    #[test]
+    fn access_denied_for_other_agent() {
+        assert_eq!(
+            classify_adapter_access("agent-1", "root", "agent-2", "root", std::iter::empty()),
+            None
+        );
+    }
+
+    #[test]
+    fn root_conversation_may_send_to_any_target() {
+        // Some(None) => root conversation, no target constraint.
+        assert_eq!(
+            classify_adapter_access("a", "root", "a", "root", std::iter::empty()),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn scoped_conversation_is_constrained_to_its_mapped_target() {
+        let mappings = [("conv-A", "chan-A"), ("conv-B", "chan-B")];
+        assert_eq!(
+            classify_adapter_access("a", "root", "a", "conv-B", mappings.into_iter()),
+            Some(Some("chan-B".to_string()))
+        );
+        // A conversation with no mapping and not the root is denied.
+        assert_eq!(
+            classify_adapter_access("a", "root", "a", "conv-Z", mappings.into_iter()),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_send_target_enforces_scope() {
+        // Root (unscoped) passes the requested target through, or none.
+        assert_eq!(
+            resolve_send_target(None, Some("x")).unwrap(),
+            Some("x".into())
+        );
+        assert_eq!(resolve_send_target(None, None).unwrap(), None);
+        // Scoped: missing target defaults to the mapped one.
+        assert_eq!(
+            resolve_send_target(Some("chan-A"), None).unwrap(),
+            Some("chan-A".into())
+        );
+        // Scoped: matching target is allowed.
+        assert_eq!(
+            resolve_send_target(Some("chan-A"), Some("chan-A")).unwrap(),
+            Some("chan-A".into())
+        );
+        // Scoped: a different target is refused — the key cross-channel guard.
+        assert!(resolve_send_target(Some("chan-A"), Some("chan-B")).is_err());
+    }
 
     #[tokio::test]
     async fn create_and_list_adapter_tools_are_conversation_scoped() {
