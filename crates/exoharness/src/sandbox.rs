@@ -851,19 +851,27 @@ async fn find_running_docker_warm_sandbox(
     request: &SandboxRequest,
 ) -> Result<Option<String>> {
     let spec_hash = sandbox_spec_hash(&request.spec);
-    let output = Command::new(container_bin)
-        .arg("ps")
-        .arg("--filter")
-        .arg(format!("label={WARM_SANDBOX_KEY_LABEL}={}", request.key))
-        .arg("--filter")
-        .arg(format!("label={WARM_SANDBOX_SPEC_HASH_LABEL}={spec_hash}"))
-        .arg("--filter")
-        .arg("status=running")
-        .arg("--format")
-        .arg("{{.Names}}")
-        .kill_on_drop(true)
-        .output()
-        .await?;
+    let key_filter = format!("label={WARM_SANDBOX_KEY_LABEL}={}", request.key);
+    let spec_filter = format!("label={WARM_SANDBOX_SPEC_HASH_LABEL}={spec_hash}");
+    // Goes through the admin-command wrapper for its timeout: this runs while
+    // ensure_warm_sandbox_ready holds the warm_sandboxes lock, so a hung
+    // daemon would otherwise block every sandbox operation in the process.
+    let output = run_container_admin_command(
+        container_bin,
+        WARM_SANDBOX_CLEANUP_TIMEOUT,
+        [
+            "ps",
+            "--filter",
+            &key_filter,
+            "--filter",
+            &spec_filter,
+            "--filter",
+            "status=running",
+            "--format",
+            "{{.Names}}",
+        ],
+    )
+    .await?;
     if !output.status.success() {
         return Err(anyhow!(
             "failed to list warm sandboxes: {}",
