@@ -90,6 +90,12 @@ struct Cli {
         value_parser = parse_env_var_name
     )]
     bearer_env: Option<String>,
+    /// Path to a LiteLLM price JSON for cost tracking (overrides fetch/cache).
+    #[arg(long, global = true, env = "EXO_LITELLM_PRICES_PATH")]
+    pricing_path: Option<PathBuf>,
+    /// URL to fetch the LiteLLM price JSON from (overrides the default source).
+    #[arg(long, global = true, env = "EXO_LITELLM_PRICES_URL")]
+    pricing_url: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -758,6 +764,7 @@ async fn main() -> Result<()> {
         &cli.command,
     )
     .await?;
+    let pricing = Arc::new(cost::load(cli.pricing_path.clone(), cli.pricing_url.clone()).await);
     let harness = instantiate_harness(
         &cli.root,
         &exo_config,
@@ -765,6 +772,7 @@ async fn main() -> Result<()> {
         harness_kind,
         runtime_config.clone(),
         env_vars.clone(),
+        pricing,
     )
     .await?;
 
@@ -1995,12 +2003,14 @@ async fn instantiate_harness(
     kind: HarnessKind,
     runtime_config: Option<BraintrustRuntimeConfig>,
     env_vars: HashMap<String, String>,
+    pricing: Arc<cost::PricingTable>,
 ) -> Result<Arc<dyn Harness>> {
     let harness: Arc<dyn Harness> = match kind {
         HarnessKind::Basic => Arc::new(BasicHarness::from_exoharness(
             exoharness,
             runtime_config,
             env_vars,
+            pricing,
         )),
         HarnessKind::Rlm => Arc::new(RlmHarness::from_exoharness(
             exoharness,

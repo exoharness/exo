@@ -928,6 +928,7 @@ mod tests {
                 ),
             }],
             response_id: None,
+            usage: None,
         });
 
         assert_eq!(rendered.len(), 1);

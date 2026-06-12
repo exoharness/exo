@@ -280,6 +280,31 @@ pub struct ForkConversationRequest {
     pub name: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct UsageRecord {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cached_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_creation_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_reasoning_tokens: Option<i64>,
+    /// Cost in USD, computed at call time from the price table baked into
+    /// this binary. `None` if the model is not in the table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// Time to first token (streaming only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<u64>,
+    /// Wall-clock duration from request start to end of response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     pub id: EventId,
@@ -313,6 +338,11 @@ pub enum EventData {
     Messages {
         messages: Vec<Message>,
         response_id: Option<ResponseId>,
+        // Boxed to keep `EventData` small: `UsageRecord` is ~170 bytes and
+        // most events don't carry it, so inlining it would bloat every
+        // variant (and every enum that embeds `EventData`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<Box<UsageRecord>>,
     },
     ToolRequested {
         tool_call_id: ToolCallId,
@@ -866,6 +896,51 @@ mod tests {
             value.get("type").and_then(Value::as_str),
             Some("session_started")
         );
+    }
+
+    #[test]
+    fn messages_event_deserializes_without_usage_field() {
+        // Older logs predate per-message cost tracking and have no `usage`
+        // field on Messages events; serde(default) must keep them readable.
+        let json = serde_json::json!({
+            "type": "messages",
+            "messages": [],
+            "response_id": null,
+        });
+        let event: EventData = serde_json::from_value(json).expect("legacy event should parse");
+        match event {
+            EventData::Messages { usage, .. } => assert!(usage.is_none()),
+            _ => panic!("expected Messages variant"),
+        }
+    }
+
+    #[test]
+    fn messages_event_serializes_usage_when_present() {
+        let event = EventData::Messages {
+            messages: vec![],
+            response_id: None,
+            usage: Some(Box::new(UsageRecord {
+                model: "claude-sonnet-4-6".to_string(),
+                prompt_tokens: Some(100),
+                completion_tokens: Some(50),
+                cost_usd: Some(0.001),
+                ..Default::default()
+            })),
+        };
+        let value = serde_json::to_value(&event).expect("event should serialize");
+        let usage = value.get("usage").expect("usage field present");
+        assert_eq!(
+            usage.get("model").and_then(Value::as_str),
+            Some("claude-sonnet-4-6")
+        );
+        assert_eq!(
+            usage.get("prompt_tokens").and_then(Value::as_i64),
+            Some(100)
+        );
+        assert!((usage.get("cost_usd").and_then(Value::as_f64).unwrap() - 0.001).abs() < 1e-9);
+        // Round-trip back through the legacy-event parser
+        let parsed: EventData = serde_json::from_value(value).expect("round-trip parse");
+        assert!(matches!(parsed, EventData::Messages { usage: Some(_), .. }));
     }
 
     #[test]

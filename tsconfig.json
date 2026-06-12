@@ -16,6 +16,7 @@
       "@exo/model-runtime/responses": [
         "./typescript/model-runtime/responses.ts"
       ],
+      "@exo/model-runtime/cost": ["./typescript/model-runtime/cost.ts"],
       "@exo/codex/app-server": ["./typescript/codex/app-server.ts"],
       "@exo/cursor/sdk": ["./typescript/cursor/sdk.ts"],
       "@exo/cursor/protocol": ["./typescript/cursor/protocol.ts"]

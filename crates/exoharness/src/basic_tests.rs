@@ -302,6 +302,7 @@ async fn turn_events_continue_after_artifact_writes() {
     turn.add_events(vec![EventData::Messages {
         messages: vec![assistant_message("pong")],
         response_id: None,
+        usage: None,
     }])
     .await
     .expect("append after artifact write");
