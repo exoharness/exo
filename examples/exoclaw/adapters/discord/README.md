@@ -106,8 +106,7 @@ With `voice: true` the bot can join a Discord voice channel and hold a spoken
 conversation: it transcribes what you say, runs it through the normal Exoclaw
 agent turn (tools, identity, history), and speaks the reply back. STT and TTS
 both use the existing OpenAI secret — no extra API key. See
-[`docs/discord-voice-design.md`](../../../../docs/discord-voice-design.md) for
-the architecture.
+[`voice-design.md`](./voice-design.md) for the architecture.
 
 Extra requirements vs. the text-only adapter:
 
