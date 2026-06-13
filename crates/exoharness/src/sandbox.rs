@@ -833,7 +833,11 @@ async fn find_running_apple_warm_sandbox(
     let spec_hash = sandbox_spec_hash(&request.spec);
     let containers: Vec<ContainerListItem> = serde_json::from_slice(&output.stdout)?;
     Ok(containers.into_iter().find_map(|container| {
-        if container.status.as_deref() != Some("running") {
+        if !container
+            .status
+            .as_deref()
+            .is_some_and(is_running_container_status)
+        {
             return None;
         }
         let labels = &container.configuration.labels;
@@ -1224,7 +1228,23 @@ async fn cleanup_named_container(
             )
             .await
             {
-                Ok(stop) if stop.status.success() => {}
+                Ok(stop) if stop.status.success() => {
+                    if let Err(wait_error) =
+                        wait_for_apple_container_not_running(container_bin, name).await
+                    {
+                        kill_named_container_if_present(container_bin, name).await?;
+                        wait_for_apple_container_not_running(container_bin, name)
+                            .await
+                            .map_err(|kill_wait_error| {
+                                anyhow!(
+                                    "failed to stop warm sandbox {}: {}; {}",
+                                    name,
+                                    wait_error,
+                                    kill_wait_error
+                                )
+                            })?;
+                    }
+                }
                 Ok(stop) => {
                     let stderr = String::from_utf8_lossy(&stop.stderr).trim().to_string();
                     if !is_missing_container_error(&stderr)
@@ -1238,6 +1258,7 @@ async fn cleanup_named_container(
                             kill_error
                         ));
                     }
+                    wait_for_apple_container_not_running(container_bin, name).await?;
                 }
                 Err(stop_error) => {
                     if let Err(kill_error) =
@@ -1250,6 +1271,7 @@ async fn cleanup_named_container(
                             kill_error
                         ));
                     }
+                    wait_for_apple_container_not_running(container_bin, name).await?;
                 }
             }
 
@@ -1309,6 +1331,43 @@ async fn kill_named_container_if_present(container_bin: &Path, name: &str) -> Re
     Ok(())
 }
 
+async fn wait_for_apple_container_not_running(container_bin: &Path, name: &str) -> Result<()> {
+    let deadline = Instant::now() + WARM_SANDBOX_CLEANUP_TIMEOUT;
+    loop {
+        match apple_container_status(container_bin, name).await? {
+            None => return Ok(()),
+            Some(status) if !is_running_container_status(&status) => return Ok(()),
+            Some(_) => {}
+        }
+
+        if Instant::now() >= deadline {
+            return Err(anyhow!("container {} is still running", name));
+        }
+        time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn apple_container_status(container_bin: &Path, name: &str) -> Result<Option<String>> {
+    let output = run_container_admin_command(
+        container_bin,
+        WARM_SANDBOX_CLEANUP_TIMEOUT,
+        ["list", "--format", "json"],
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "failed to list warm sandboxes: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let containers: Vec<ContainerListItem> = serde_json::from_slice(&output.stdout)?;
+    Ok(containers
+        .into_iter()
+        .find(|container| container.configuration.id == name)
+        .and_then(|container| container.status))
+}
+
 async fn reap_orphaned_warm_sandboxes(container_bin: &Path) -> Result<()> {
     let output = run_container_admin_command(
         container_bin,
@@ -1341,7 +1400,11 @@ async fn reap_orphaned_warm_sandboxes(container_bin: &Path) -> Result<()> {
         {
             continue;
         }
-        if container.status.as_deref() != Some("running") {
+        if !container
+            .status
+            .as_deref()
+            .is_some_and(is_running_container_status)
+        {
             continue;
         }
         let Some(started_date) = container.started_date else {
@@ -1448,6 +1511,10 @@ fn is_container_not_running_error(stderr: &str) -> bool {
     stderr
         .to_ascii_lowercase()
         .contains("container is not running")
+}
+
+fn is_running_container_status(status: &str) -> bool {
+    status.eq_ignore_ascii_case("running")
 }
 
 fn is_already_exists_error(message: &str) -> bool {
