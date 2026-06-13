@@ -19,6 +19,7 @@ import {
   writeWorkerEvent,
 } from "../protocol";
 import { createResilienceHandlers, startConnectionWatchdog } from "./discord";
+import { DiscordVoice } from "./voice";
 
 const SEND_TIMEOUT_MS = 60_000;
 
@@ -33,6 +34,7 @@ const trigger = optionalStringField(config, "trigger") ?? "mentions_only";
 const defaultChannelId = optionalStringField(config, "defaultChannelId");
 const allowedChannels = stringArrayOrNull(config.allowedChannels);
 const allowBots = config.allowBots === true;
+const voiceEnabled = config.voice === true;
 if (trigger !== "all_messages" && trigger !== "mentions_only") {
   throw new Error("Discord trigger must be all_messages or mentions_only");
 }
@@ -56,9 +58,27 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.DirectMessages,
     GatewayIntentBits.MessageContent,
+    // GuildVoiceStates (non-privileged) is needed to track who is in a voice
+    // channel and to join it; added only when voice is enabled.
+    ...(voiceEnabled ? [GatewayIntentBits.GuildVoiceStates] : []),
   ],
   partials: [Partials.Channel],
 });
+
+// Voice is a microphone and speaker on the text pipe: a spoken utterance
+// becomes a normal `message` event (target = voice channel id); an outbound
+// send to that target is spoken back. All audio stays in this worker.
+let voice: DiscordVoice | null = null;
+if (voiceEnabled) {
+  const openaiKey = process.env.OPENAI_API_KEY;
+  if (!openaiKey) {
+    throw new Error(
+      "Discord voice requires OPENAI_API_KEY in the worker environment",
+    );
+  }
+  voice = new DiscordVoice(client, openaiKey, writeWorkerEvent);
+  voice.register();
+}
 
 client.on("error", (error) => {
   reportWorkerError(error.message);
@@ -155,6 +175,11 @@ try {
         content: command.text,
         files: await discordAttachmentFiles(command.attachments),
       });
+      // If this target has an active voice session, also speak the reply. The
+      // text send above doubles as the inspectable transcript of the voice turn.
+      if (voice) {
+        await voice.maybeSpeak(target, command.text);
+      }
       writeWorkerEvent({
         type: "lifecycle",
         name: "send_result",

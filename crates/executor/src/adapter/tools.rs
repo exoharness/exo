@@ -128,6 +128,14 @@ struct DiscordAdapterCreationConfig {
     trigger: DiscordTrigger,
     allowed_channels: Option<Vec<String>>,
     allow_bots: bool,
+    /// Enable voice: join voice channels and hold a spoken conversation. Needs
+    /// an OpenAI secret (see `openai_secret_id`) for STT/TTS.
+    #[serde(default)]
+    voice: bool,
+    /// Secret id holding the OpenAI API key for voice STT/TTS. Defaults to
+    /// `openai` when voice is enabled and no id is given.
+    #[serde(default)]
+    openai_secret_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -296,6 +304,21 @@ impl AdapterCreationConfig {
             }
             Self::Discord(config) => {
                 require_source(source, AdapterSource::Library, "discord")?;
+                // Voice STT/TTS run in the worker against the OpenAI secret;
+                // bind it only when voice is on so text-only adapters need no
+                // OpenAI key.
+                let mut secret_env = vec![WorkerSecretEnvVar {
+                    env: "EXO_DISCORD_BOT_TOKEN".to_string(),
+                    secret_id: config.bot_token_secret_id,
+                }];
+                if config.voice {
+                    secret_env.push(WorkerSecretEnvVar {
+                        env: "OPENAI_API_KEY".to_string(),
+                        secret_id: config
+                            .openai_secret_id
+                            .unwrap_or_else(|| "openai".to_string()),
+                    });
+                }
                 Ok(AdapterConfig {
                     adapter_type: "discord".to_string(),
                     worker_command: bundled_worker_command(
@@ -307,12 +330,10 @@ impl AdapterCreationConfig {
                         "trigger": config.trigger.as_str(),
                         "allowedChannels": config.allowed_channels,
                         "allowBots": config.allow_bots,
+                        "voice": config.voice,
                     }),
                     state_dir: None,
-                    secret_env: vec![WorkerSecretEnvVar {
-                        env: "EXO_DISCORD_BOT_TOKEN".to_string(),
-                        secret_id: config.bot_token_secret_id,
-                    }],
+                    secret_env,
                 })
             }
             Self::AgentCli(config) => {
