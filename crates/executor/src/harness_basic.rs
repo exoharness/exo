@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::{BasicExecutor, BraintrustRuntimeConfig, ModelClient, ToolRuntime};
+use cost::PricingTable;
 use exoharness::{BasicExoHarness, BasicExoHarnessConfig, ExoHarness, Result};
 
 use crate::harness_executor::ExecutorHarnessRuntime;
@@ -24,6 +25,24 @@ impl<M, T> BasicHarness<M, T> {
             inner: SharedHarness::new(exoharness, runtime),
         }
     }
+
+    /// Construct a harness whose executor fills cost from an explicit table.
+    pub fn with_pricing_table(
+        exoharness: Arc<dyn ExoHarness>,
+        model: Arc<M>,
+        tools: Arc<T>,
+        pricing: Arc<PricingTable>,
+    ) -> Self
+    where
+        M: ModelClient + 'static,
+        T: ToolRuntime + 'static,
+    {
+        let runtime =
+            ExecutorHarnessRuntime::new(BasicExecutor::with_pricing(model, tools, pricing), None);
+        Self {
+            inner: SharedHarness::new(exoharness, runtime),
+        }
+    }
 }
 
 impl BasicHarness<RouterModelClient, BasicToolRuntime> {
@@ -31,10 +50,14 @@ impl BasicHarness<RouterModelClient, BasicToolRuntime> {
         exoharness: Arc<dyn ExoHarness>,
         runtime_config: Option<BraintrustRuntimeConfig>,
         env: HashMap<String, String>,
+        pricing: Arc<PricingTable>,
     ) -> Self {
         let model = Arc::new(RouterModelClient::new(env));
         let tools = Arc::new(BasicToolRuntime);
-        let runtime = ExecutorHarnessRuntime::new(BasicExecutor::new(model, tools), runtime_config);
+        let runtime = ExecutorHarnessRuntime::new(
+            BasicExecutor::with_pricing(model, tools, pricing),
+            runtime_config,
+        );
         Self {
             inner: SharedHarness::new(exoharness, runtime),
         }
@@ -49,6 +72,7 @@ impl BasicHarness<RouterModelClient, BasicToolRuntime> {
             Arc::new(BasicExoHarness::new(exo_config).await?),
             runtime_config,
             env,
+            Arc::new(PricingTable::empty()),
         ))
     }
 }
