@@ -773,13 +773,8 @@ async fn read_sandbox_file(
 ) -> Result<Vec<u8>> {
     match effective_sandbox_scope(agent_config, config) {
         SandboxScope::Agent => {
-            let sandbox = ensure_agent_sandbox(agent, conversation, agent_config, config).await?;
-            read_sandbox_file_bytes(
-                sandbox.conversation.as_ref(),
-                sandbox.sandbox_id,
-                sandbox_path,
-            )
-            .await
+            let sandbox = ensure_agent_sandbox(agent, agent_config, config).await?;
+            read_agent_sandbox_file_bytes(agent, sandbox.sandbox_id, sandbox_path).await
         }
         SandboxScope::Conversation => {
             let sandbox_id =
@@ -847,6 +842,41 @@ async fn read_sandbox_file_bytes(
     sandbox_path: &str,
 ) -> Result<Vec<u8>> {
     let process = conversation
+        .run_in_sandbox(RunInSandboxRequest {
+            id: sandbox_id,
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "cat -- \"$1\"".to_string(),
+                "exo-read-attachment".to_string(),
+                sandbox_path.to_string(),
+            ],
+            env: Default::default(),
+        })
+        .await?;
+    let output = read_process_limited(process, MAX_ATTACHMENT_BYTES).await?;
+    if output.exit_code != 0 {
+        bail!(
+            "failed to read sandbox attachment {}: {}",
+            sandbox_path,
+            output.stderr.trim()
+        );
+    }
+    if output.truncated {
+        bail!(
+            "sandbox attachment is too large: exceeds {} bytes",
+            MAX_ATTACHMENT_BYTES
+        );
+    }
+    Ok(output.stdout)
+}
+
+async fn read_agent_sandbox_file_bytes(
+    agent: &dyn AgentHandle,
+    sandbox_id: String,
+    sandbox_path: &str,
+) -> Result<Vec<u8>> {
+    let process = agent
         .run_in_sandbox(RunInSandboxRequest {
             id: sandbox_id,
             command: vec![

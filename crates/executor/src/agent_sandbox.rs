@@ -1,6 +1,6 @@
 use exoharness::{
-    AgentHandle, Artifact, ArtifactVersion, ConversationHandle, CreateSandboxRequest,
-    ReadArtifactRequest, Result, SandboxProvider, Uuid7, WriteArtifactRequest,
+    AgentHandle, Artifact, ArtifactVersion, CreateSandboxRequest, ReadArtifactRequest, Result,
+    SandboxProvider, Uuid7, WriteArtifactRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -12,14 +12,12 @@ const AGENT_SANDBOX_NAME_PREFIX: &str = "agent-sandbox";
 
 #[derive(Clone)]
 pub(crate) struct AgentSandboxHandle {
-    pub(crate) conversation: std::sync::Arc<dyn ConversationHandle>,
     pub(crate) sandbox_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AgentSandboxRecord {
-    conversation_id: String,
     sandbox_name: String,
     provider: SandboxProvider,
     image: String,
@@ -42,7 +40,6 @@ impl AgentSandboxRecord {
 
 pub(crate) async fn ensure_agent_sandbox(
     agent: &dyn AgentHandle,
-    current_conversation: &dyn ConversationHandle,
     agent_config: &AgentConfig,
     conversation_config: &ConversationConfig,
 ) -> Result<AgentSandboxHandle> {
@@ -52,7 +49,7 @@ pub(crate) async fn ensure_agent_sandbox(
     }
 
     let sandbox_name = new_agent_sandbox_name();
-    let sandbox_id = current_conversation
+    let sandbox_id = agent
         .create_sandbox(CreateSandboxRequest {
             name: Some(sandbox_name.clone()),
             provider: spec.provider,
@@ -66,7 +63,6 @@ pub(crate) async fn ensure_agent_sandbox(
     store_agent_sandbox_record(
         agent,
         &AgentSandboxRecord {
-            conversation_id: current_conversation.record().id.to_string(),
             sandbox_name,
             provider: spec.provider,
             image: spec.image,
@@ -78,19 +74,7 @@ pub(crate) async fn ensure_agent_sandbox(
     )
     .await?;
 
-    let Some(owner) = agent
-        .get_conversation(&current_conversation.record().id)
-        .await?
-    else {
-        anyhow::bail!(
-            "agent sandbox owner conversation disappeared: {}",
-            current_conversation.record().id
-        );
-    };
-    Ok(AgentSandboxHandle {
-        conversation: owner,
-        sandbox_id,
-    })
+    Ok(AgentSandboxHandle { sandbox_id })
 }
 
 pub(crate) async fn current_agent_sandbox(
@@ -103,13 +87,7 @@ pub(crate) async fn current_agent_sandbox(
     if !record.matches_spec(spec) {
         return Ok(None);
     }
-    let Ok(conversation_id) = record.conversation_id.parse::<Uuid7>() else {
-        return Ok(None);
-    };
-    let Some(owner) = agent.get_conversation(&conversation_id).await? else {
-        return Ok(None);
-    };
-    let sandbox_id = owner
+    let sandbox_id = agent
         .create_sandbox(CreateSandboxRequest {
             name: Some(record.sandbox_name),
             provider: spec.provider,
@@ -120,10 +98,7 @@ pub(crate) async fn current_agent_sandbox(
             idle_seconds: Some(spec.idle_seconds),
         })
         .await?;
-    Ok(Some(AgentSandboxHandle {
-        conversation: owner,
-        sandbox_id,
-    }))
+    Ok(Some(AgentSandboxHandle { sandbox_id }))
 }
 
 async fn load_agent_sandbox_record(agent: &dyn AgentHandle) -> Result<Option<AgentSandboxRecord>> {

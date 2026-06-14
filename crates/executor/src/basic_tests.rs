@@ -10,10 +10,10 @@ use exoharness::{
     ConversationId, ConversationRecord, CreateSandboxRequest, Event, EventData, EventQuery,
     EventQueryDirection, EventStream, ExoHarness, ForkConversationRequest, GetEventsResult,
     NewAgentRequest, NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result,
-    RunInSandboxRequest, SandboxId, SandboxProcess, SandboxProcessEventQuery, SandboxProcessParts,
-    SandboxProcessRecord, SandboxProcessStatus, Secret, SecretMetadata, SecretType, SessionId,
-    SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, ToolRequest, ToolResult,
-    TurnHandle, TurnId, TurnRecord, Uuid7, WriteArtifactRequest,
+    RunInSandboxRequest, SandboxHandle, SandboxId, SandboxProcess, SandboxProcessEventQuery,
+    SandboxProcessParts, SandboxProcessRecord, SandboxProcessStatus, Secret, SecretMetadata,
+    SecretType, SessionId, SnapshotId, StartSandboxProcessRequest, StartSandboxRequest,
+    ToolRequest, ToolResult, TurnHandle, TurnId, TurnRecord, Uuid7, WriteArtifactRequest,
 };
 use futures::FutureExt;
 use futures::io::Cursor;
@@ -784,6 +784,74 @@ impl AgentHandle for FakeAgentHandle {
     }
 }
 
+#[async_trait]
+impl SandboxHandle for FakeAgentHandle {
+    async fn create_sandbox(&self, _request: CreateSandboxRequest) -> Result<SandboxId> {
+        Ok("agent-sandbox".to_string())
+    }
+
+    async fn snapshot_sandbox(&self, _id: SandboxId) -> Result<SnapshotId> {
+        Ok(Uuid7::now())
+    }
+
+    async fn start_sandbox(&self, _request: StartSandboxRequest) -> Result<()> {
+        Ok(())
+    }
+
+    async fn stop_sandbox(&self, _id: SandboxId) -> Result<()> {
+        Ok(())
+    }
+
+    async fn start_sandbox_process(
+        &self,
+        _request: StartSandboxProcessRequest,
+    ) -> Result<SandboxProcessRecord> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn write_sandbox_process_input(
+        &self,
+        _request: exoharness::WriteSandboxProcessInputRequest,
+    ) -> Result<()> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn close_sandbox_process_input(
+        &self,
+        _request: exoharness::CloseSandboxProcessInputRequest,
+    ) -> Result<()> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn get_sandbox_process_events(
+        &self,
+        _query: SandboxProcessEventQuery,
+    ) -> Result<exoharness::GetSandboxProcessEventsResult> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn wait_sandbox_process(
+        &self,
+        _request: exoharness::WaitSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn cancel_sandbox_process(
+        &self,
+        _request: exoharness::CancelSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn run_in_sandbox(
+        &self,
+        _request: RunInSandboxRequest,
+    ) -> Result<Box<dyn SandboxProcess>> {
+        Ok(Box::new(FakeSandboxProcess))
+    }
+}
+
 struct FakeConversationHandle {
     state: Arc<Mutex<FakeState>>,
     record: ConversationRecord,
@@ -962,6 +1030,35 @@ impl ConversationHandle for FakeConversationHandle {
         Ok(Vec::new())
     }
 
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
+        Ok(vec![test_model_binding_record()])
+    }
+
+    async fn put_binding(&self, _binding: Binding) -> Result<exoharness::BindingId> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn get_binding(&self, _id: &exoharness::BindingId) -> Result<Option<Binding>> {
+        Ok(Some(test_model_binding()))
+    }
+
+    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
+        Ok(vec![test_secret_metadata()])
+    }
+
+    async fn put_secret(&self, _secret: PutSecretRequest) -> Result<exoharness::SecretId> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn get_secret(&self, _id: &exoharness::SecretId) -> Result<Option<Secret>> {
+        Ok(Some(Secret::Key {
+            value: "test-key".to_string(),
+        }))
+    }
+}
+
+#[async_trait]
+impl SandboxHandle for FakeConversationHandle {
     async fn create_sandbox(&self, _request: CreateSandboxRequest) -> Result<SandboxId> {
         Err(anyhow!("not implemented"))
     }
@@ -1025,32 +1122,6 @@ impl ConversationHandle for FakeConversationHandle {
         _request: RunInSandboxRequest,
     ) -> Result<Box<dyn SandboxProcess>> {
         Ok(Box::new(FakeSandboxProcess))
-    }
-
-    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
-        Ok(vec![test_model_binding_record()])
-    }
-
-    async fn put_binding(&self, _binding: Binding) -> Result<exoharness::BindingId> {
-        Err(anyhow!("not implemented"))
-    }
-
-    async fn get_binding(&self, _id: &exoharness::BindingId) -> Result<Option<Binding>> {
-        Ok(Some(test_model_binding()))
-    }
-
-    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
-        Ok(vec![test_secret_metadata()])
-    }
-
-    async fn put_secret(&self, _secret: PutSecretRequest) -> Result<exoharness::SecretId> {
-        Err(anyhow!("not implemented"))
-    }
-
-    async fn get_secret(&self, _id: &exoharness::SecretId) -> Result<Option<Secret>> {
-        Ok(Some(Secret::Key {
-            value: "test-key".to_string(),
-        }))
     }
 }
 

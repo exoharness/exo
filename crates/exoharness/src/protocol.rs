@@ -95,6 +95,46 @@ pub enum Request {
         agent_id: AgentId,
         request: WriteArtifactRequest,
     },
+    AgentCreateSandbox {
+        agent_id: AgentId,
+        request: CreateSandboxRequest,
+    },
+    AgentSnapshotSandbox {
+        agent_id: AgentId,
+        sandbox_id: SandboxId,
+    },
+    AgentStartSandbox {
+        agent_id: AgentId,
+        request: StartSandboxRequest,
+    },
+    AgentStopSandbox {
+        agent_id: AgentId,
+        sandbox_id: SandboxId,
+    },
+    AgentStartSandboxProcess {
+        agent_id: AgentId,
+        request: StartSandboxProcessRequest,
+    },
+    AgentWriteSandboxProcessInput {
+        agent_id: AgentId,
+        request: WriteSandboxProcessInputRequest,
+    },
+    AgentCloseSandboxProcessInput {
+        agent_id: AgentId,
+        request: CloseSandboxProcessInputRequest,
+    },
+    AgentGetSandboxProcessEvents {
+        agent_id: AgentId,
+        query: SandboxProcessEventQuery,
+    },
+    AgentWaitSandboxProcess {
+        agent_id: AgentId,
+        request: WaitSandboxProcessRequest,
+    },
+    AgentCancelSandboxProcess {
+        agent_id: AgentId,
+        request: CancelSandboxProcessRequest,
+    },
     AgentListBindings {
         agent_id: AgentId,
     },
@@ -299,6 +339,16 @@ impl Request {
             Self::AgentListArtifacts { .. } => "agent_list_artifacts",
             Self::AgentReadArtifact { .. } => "agent_read_artifact",
             Self::AgentWriteArtifact { .. } => "agent_write_artifact",
+            Self::AgentCreateSandbox { .. } => "agent_create_sandbox",
+            Self::AgentSnapshotSandbox { .. } => "agent_snapshot_sandbox",
+            Self::AgentStartSandbox { .. } => "agent_start_sandbox",
+            Self::AgentStopSandbox { .. } => "agent_stop_sandbox",
+            Self::AgentStartSandboxProcess { .. } => "agent_start_sandbox_process",
+            Self::AgentWriteSandboxProcessInput { .. } => "agent_write_sandbox_process_input",
+            Self::AgentCloseSandboxProcessInput { .. } => "agent_close_sandbox_process_input",
+            Self::AgentGetSandboxProcessEvents { .. } => "agent_get_sandbox_process_events",
+            Self::AgentWaitSandboxProcess { .. } => "agent_wait_sandbox_process",
+            Self::AgentCancelSandboxProcess { .. } => "agent_cancel_sandbox_process",
             Self::AgentListBindings { .. } => "agent_list_bindings",
             Self::AgentPutBinding { .. } => "agent_put_binding",
             Self::AgentGetBinding { .. } => "agent_get_binding",

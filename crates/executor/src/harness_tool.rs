@@ -95,7 +95,7 @@ impl ToolRuntime for ExoclawToolRuntime {
     ) -> Result<()> {
         match effective_sandbox_scope(agent_config, config) {
             SandboxScope::Agent => {
-                ensure_agent_sandbox(agent, conversation, agent_config, config).await?;
+                ensure_agent_sandbox(agent, agent_config, config).await?;
             }
             SandboxScope::Conversation => {
                 ensure_conversation_sandbox(conversation, agent_config, config).await?;
@@ -305,7 +305,7 @@ struct RewindSandboxArguments {
 struct SandboxSnapshotInfo {
     snapshot_id: String,
     sandbox_id: String,
-    owner_conversation_id: String,
+    owner_conversation_id: Option<String>,
     scope: SandboxControlScope,
     created_at_ms: u64,
 }
@@ -476,13 +476,7 @@ async fn execute_list_sandbox_snapshots_tool(
             let Some(handle) = current_agent_sandbox(agent, &spec).await? else {
                 return Ok(empty_sandbox_snapshot_result(scope));
             };
-            sandbox_snapshot_result(
-                agent,
-                scope,
-                Some(handle.conversation.record().id.to_string()),
-                handle.sandbox_id,
-            )
-            .await
+            sandbox_snapshot_result(agent, scope, None, handle.sandbox_id).await
         }
         SandboxControlScope::Conversation => {
             let spec = conversation_sandbox_spec(agent_config, config);
@@ -517,13 +511,17 @@ async fn execute_snapshot_sandbox_tool(
     let scope = SandboxControlScope::or_default(args.scope);
     match scope {
         SandboxControlScope::Agent => {
-            let handle = ensure_agent_sandbox(agent, conversation, agent_config, config).await?;
-            let owner_conversation_id = handle.conversation.record().id;
-            let snapshot_id = turn.snapshot_sandbox(handle.sandbox_id.clone()).await?;
+            let handle = ensure_agent_sandbox(agent, agent_config, config).await?;
+            let snapshot_id = agent.snapshot_sandbox(handle.sandbox_id.clone()).await?;
+            turn.add_events(vec![EventData::SandboxSnapshotted {
+                sandbox_id: handle.sandbox_id.clone(),
+                snapshot_id,
+            }])
+            .await?;
             record_sandbox_snapshot(
                 agent,
                 scope,
-                owner_conversation_id.to_string(),
+                String::new(),
                 handle.sandbox_id.clone(),
                 snapshot_id.to_string(),
             )
@@ -532,7 +530,7 @@ async fn execute_snapshot_sandbox_tool(
                 "ok": true,
                 "scope": scope.as_str(),
                 "sandboxId": handle.sandbox_id,
-                "ownerConversationId": owner_conversation_id.to_string(),
+                "ownerConversationId": null,
                 "snapshotId": snapshot_id.to_string(),
             }))
         }
@@ -574,18 +572,23 @@ async fn execute_rewind_sandbox_tool(
     let spec = conversation_sandbox_spec(agent_config, config);
     match scope {
         SandboxControlScope::Agent => {
-            let handle = ensure_agent_sandbox(agent, conversation, agent_config, config).await?;
-            let owner_conversation_id = handle.conversation.record().id;
-            turn.start_sandbox(StartSandboxRequest {
-                id: handle.sandbox_id.clone(),
-                snapshot_id,
-                idle_seconds: Some(spec.idle_seconds),
-            })
+            let handle = ensure_agent_sandbox(agent, agent_config, config).await?;
+            agent
+                .start_sandbox(StartSandboxRequest {
+                    id: handle.sandbox_id.clone(),
+                    snapshot_id,
+                    idle_seconds: Some(spec.idle_seconds),
+                })
+                .await?;
+            turn.add_events(vec![EventData::SandboxStarted {
+                sandbox_id: handle.sandbox_id.clone(),
+                snapshot_id: Some(snapshot_id),
+            }])
             .await?;
             record_current_sandbox_snapshot(
                 agent,
                 scope,
-                owner_conversation_id.to_string(),
+                String::new(),
                 handle.sandbox_id.clone(),
                 args.snapshot_id.clone(),
             )
@@ -594,7 +597,7 @@ async fn execute_rewind_sandbox_tool(
                 "ok": true,
                 "scope": scope.as_str(),
                 "sandboxId": handle.sandbox_id,
-                "ownerConversationId": owner_conversation_id.to_string(),
+                "ownerConversationId": null,
                 "snapshotId": args.snapshot_id,
                 "rewound": true,
             }))
@@ -635,6 +638,10 @@ async fn sandbox_snapshot_result(
     sandbox_id: String,
 ) -> Result<ToolResult> {
     let owner_conversation_id = owner_conversation_id.unwrap_or_default();
+    let owner_conversation_id_result = match scope {
+        SandboxControlScope::Agent => None,
+        SandboxControlScope::Conversation => Some(owner_conversation_id.clone()),
+    };
     let registry = load_sandbox_snapshot_registry(agent).await?;
     let snapshots = registry
         .snapshots
@@ -647,7 +654,7 @@ async fn sandbox_snapshot_result(
         .map(|snapshot| SandboxSnapshotInfo {
             snapshot_id: snapshot.snapshot_id.clone(),
             sandbox_id: snapshot.sandbox_id.clone(),
-            owner_conversation_id: snapshot.owner_conversation_id.clone(),
+            owner_conversation_id: owner_conversation_id_result.clone(),
             scope: snapshot.scope,
             created_at_ms: snapshot.created_at_ms,
         })
@@ -666,7 +673,7 @@ async fn sandbox_snapshot_result(
         "ok": true,
         "scope": scope.as_str(),
         "sandboxId": sandbox_id,
-        "ownerConversationId": owner_conversation_id,
+        "ownerConversationId": owner_conversation_id_result,
         "currentSnapshotId": current_snapshot_id,
         "snapshots": snapshots,
     }))
@@ -862,9 +869,8 @@ async fn execute_exoclaw_shell_tool(
         .shell_program
         .clone()
         .ok_or_else(|| anyhow::anyhow!("shell tool is not enabled for this conversation"))?;
-    let agent_sandbox = ensure_agent_sandbox(agent, conversation, agent_config, config).await?;
-    let process = agent_sandbox
-        .conversation
+    let agent_sandbox = ensure_agent_sandbox(agent, agent_config, config).await?;
+    let process = agent
         .run_in_sandbox(RunInSandboxRequest {
             id: agent_sandbox.sandbox_id,
             command: vec![program, "-lc".to_string(), args.command],

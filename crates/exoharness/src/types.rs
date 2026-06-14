@@ -34,58 +34,7 @@ pub trait ExoHarness: Send + Sync {
 }
 
 #[async_trait]
-pub trait AgentHandle: Send + Sync {
-    fn record(&self) -> &AgentRecord;
-
-    async fn list_conversations(
-        &self,
-        request: ListConversationsRequest,
-    ) -> Result<ListConversationsResult<Arc<dyn ConversationHandle>>>;
-    async fn get_conversation(
-        &self,
-        id: &ConversationId,
-    ) -> Result<Option<Arc<dyn ConversationHandle>>>;
-    async fn new_conversation(
-        &self,
-        request: NewConversationRequest,
-    ) -> Result<Arc<dyn ConversationHandle>>;
-    async fn delete_conversation(&self, id: &ConversationId) -> Result<bool>;
-
-    async fn list_bindings(&self) -> Result<Vec<BindingRecord>>;
-    async fn put_binding(&self, binding: Binding) -> Result<BindingId>;
-    async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>>;
-
-    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>>;
-    async fn put_secret(&self, request: PutSecretRequest) -> Result<SecretId>;
-    async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>>;
-
-    async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion>;
-    async fn read_artifact(&self, request: ReadArtifactRequest) -> Result<Option<Artifact>>;
-    async fn list_artifacts(&self) -> Result<Vec<ArtifactVersion>>;
-}
-
-#[async_trait]
-pub trait ConversationHandle: Send + Sync {
-    fn record(&self) -> &ConversationRecord;
-
-    async fn start_session(&self) -> Result<SessionId>;
-    async fn end_session(&self, id: SessionId) -> Result<()>;
-    async fn begin_turn(&self, request: BeginTurnRequest) -> Result<Arc<dyn TurnHandle>>;
-    /// Rebuilds the local TurnHandle facade for an already-created turn.
-    /// The durable identity is the agent, conversation, session, and turn ids;
-    /// this method only bundles those ids back into the trait object API.
-    async fn turn_handle(&self, record: TurnRecord) -> Result<Arc<dyn TurnHandle>>;
-
-    async fn get_events(&self, query: Option<EventQuery>) -> Result<GetEventsResult>;
-    async fn watch_events(&self, after_exclusive: Bound<EventId>) -> Result<EventStream>;
-    async fn get_event(&self, id: EventId) -> Result<Option<Event>>;
-    async fn add_events(&self, request: AddEventsRequest) -> Result<AddEventsResult>;
-    async fn fork(&self, request: ForkConversationRequest) -> Result<Arc<dyn ConversationHandle>>;
-
-    async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion>;
-    async fn read_artifact(&self, request: ReadArtifactRequest) -> Result<Option<Artifact>>;
-    async fn list_artifacts(&self) -> Result<Vec<ArtifactVersion>>;
-
+pub trait SandboxHandle: Send + Sync {
     async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId>;
     async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId>;
     async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()>;
@@ -116,6 +65,60 @@ pub trait ConversationHandle: Send + Sync {
     ) -> Result<SandboxProcessStatus>;
     async fn run_in_sandbox(&self, request: RunInSandboxRequest)
     -> Result<Box<dyn SandboxProcess>>;
+}
+
+#[async_trait]
+pub trait AgentHandle: SandboxHandle {
+    fn record(&self) -> &AgentRecord;
+
+    async fn list_conversations(
+        &self,
+        request: ListConversationsRequest,
+    ) -> Result<ListConversationsResult<Arc<dyn ConversationHandle>>>;
+    async fn get_conversation(
+        &self,
+        id: &ConversationId,
+    ) -> Result<Option<Arc<dyn ConversationHandle>>>;
+    async fn new_conversation(
+        &self,
+        request: NewConversationRequest,
+    ) -> Result<Arc<dyn ConversationHandle>>;
+    async fn delete_conversation(&self, id: &ConversationId) -> Result<bool>;
+
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>>;
+    async fn put_binding(&self, binding: Binding) -> Result<BindingId>;
+    async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>>;
+
+    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>>;
+    async fn put_secret(&self, request: PutSecretRequest) -> Result<SecretId>;
+    async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>>;
+
+    async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion>;
+    async fn read_artifact(&self, request: ReadArtifactRequest) -> Result<Option<Artifact>>;
+    async fn list_artifacts(&self) -> Result<Vec<ArtifactVersion>>;
+}
+
+#[async_trait]
+pub trait ConversationHandle: SandboxHandle {
+    fn record(&self) -> &ConversationRecord;
+
+    async fn start_session(&self) -> Result<SessionId>;
+    async fn end_session(&self, id: SessionId) -> Result<()>;
+    async fn begin_turn(&self, request: BeginTurnRequest) -> Result<Arc<dyn TurnHandle>>;
+    /// Rebuilds the local TurnHandle facade for an already-created turn.
+    /// The durable identity is the agent, conversation, session, and turn ids;
+    /// this method only bundles those ids back into the trait object API.
+    async fn turn_handle(&self, record: TurnRecord) -> Result<Arc<dyn TurnHandle>>;
+
+    async fn get_events(&self, query: Option<EventQuery>) -> Result<GetEventsResult>;
+    async fn watch_events(&self, after_exclusive: Bound<EventId>) -> Result<EventStream>;
+    async fn get_event(&self, id: EventId) -> Result<Option<Event>>;
+    async fn add_events(&self, request: AddEventsRequest) -> Result<AddEventsResult>;
+    async fn fork(&self, request: ForkConversationRequest) -> Result<Arc<dyn ConversationHandle>>;
+
+    async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion>;
+    async fn read_artifact(&self, request: ReadArtifactRequest) -> Result<Option<Artifact>>;
+    async fn list_artifacts(&self) -> Result<Vec<ArtifactVersion>>;
 
     async fn list_bindings(&self) -> Result<Vec<BindingRecord>>;
     async fn put_binding(&self, binding: Binding) -> Result<BindingId>;

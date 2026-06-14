@@ -20,6 +20,10 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SandboxKey {
+    AgentSandbox {
+        agent_id: String,
+        sandbox_id: String,
+    },
     ConversationSandbox {
         conversation_id: String,
         sandbox_id: String,
@@ -29,6 +33,10 @@ pub enum SandboxKey {
 impl fmt::Display for SandboxKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::AgentSandbox {
+                agent_id,
+                sandbox_id,
+            } => write!(f, "agent:{agent_id}:{sandbox_id}"),
             Self::ConversationSandbox {
                 conversation_id,
                 sandbox_id,
@@ -1741,6 +1749,8 @@ mod tests {
                 key_filter.as_str(),
                 "--filter",
                 spec_filter.as_str(),
+                "--filter",
+                "status=running",
                 "--format",
                 "{{.Names}}",
             ]

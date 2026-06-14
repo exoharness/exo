@@ -24,10 +24,16 @@ impl SandboxProcess for LiveHttpSandboxProcess {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) enum HttpSandboxProcessScope {
+    Agent,
+    Conversation { conversation_id: ConversationId },
+}
+
 pub(super) fn spawn_http_sandbox_process_event_poller(
     harness: HttpExoHarness,
     agent_id: AgentId,
-    conversation_id: ConversationId,
+    scope: HttpSandboxProcessScope,
     sandbox_id: SandboxId,
     process_id: SandboxProcessId,
     mut stdout: tokio::io::DuplexStream,
@@ -38,19 +44,29 @@ pub(super) fn spawn_http_sandbox_process_event_poller(
         let mut cursor = None;
         let mut wait_tx = Some(wait_tx);
         loop {
-            let response = harness
-                .request(Request::ConversationGetSandboxProcessEvents {
-                    agent_id,
-                    conversation_id,
-                    query: SandboxProcessEventQuery {
-                        sandbox_id: sandbox_id.clone(),
-                        process_id: process_id.clone(),
-                        after: cursor,
-                        limit: None,
-                        follow: None,
-                    },
-                })
-                .await;
+            let query = SandboxProcessEventQuery {
+                sandbox_id: sandbox_id.clone(),
+                process_id: process_id.clone(),
+                after: cursor,
+                limit: None,
+                follow: None,
+            };
+            let response = match scope {
+                HttpSandboxProcessScope::Agent => {
+                    harness
+                        .request(Request::AgentGetSandboxProcessEvents { agent_id, query })
+                        .await
+                }
+                HttpSandboxProcessScope::Conversation { conversation_id } => {
+                    harness
+                        .request(Request::ConversationGetSandboxProcessEvents {
+                            agent_id,
+                            conversation_id,
+                            query,
+                        })
+                        .await
+                }
+            };
             let result = match response {
                 Ok(Response::SandboxProcessEvents { result }) => result,
                 Ok(response) => {
@@ -129,7 +145,7 @@ pub(super) fn spawn_http_sandbox_process_event_poller(
 pub(super) fn spawn_http_sandbox_process_stdin_forwarder(
     harness: HttpExoHarness,
     agent_id: AgentId,
-    conversation_id: ConversationId,
+    scope: HttpSandboxProcessScope,
     sandbox_id: SandboxId,
     process_id: SandboxProcessId,
     mut stdin: tokio::io::DuplexStream,
@@ -139,16 +155,29 @@ pub(super) fn spawn_http_sandbox_process_stdin_forwarder(
         loop {
             match stdin.read(&mut buffer).await {
                 Ok(0) => {
-                    let response = harness
-                        .request(Request::ConversationCloseSandboxProcessInput {
-                            agent_id,
-                            conversation_id,
-                            request: CloseSandboxProcessInputRequest {
-                                sandbox_id: sandbox_id.clone(),
-                                process_id: process_id.clone(),
-                            },
-                        })
-                        .await;
+                    let request = CloseSandboxProcessInputRequest {
+                        sandbox_id: sandbox_id.clone(),
+                        process_id: process_id.clone(),
+                    };
+                    let response = match scope {
+                        HttpSandboxProcessScope::Agent => {
+                            harness
+                                .request(Request::AgentCloseSandboxProcessInput {
+                                    agent_id,
+                                    request,
+                                })
+                                .await
+                        }
+                        HttpSandboxProcessScope::Conversation { conversation_id } => {
+                            harness
+                                .request(Request::ConversationCloseSandboxProcessInput {
+                                    agent_id,
+                                    conversation_id,
+                                    request,
+                                })
+                                .await
+                        }
+                    };
                     if let Err(error) = response {
                         tracing::warn!(
                             target: HTTP_EXOHARNESS_TRACING_TARGET,
@@ -159,17 +188,30 @@ pub(super) fn spawn_http_sandbox_process_stdin_forwarder(
                     return;
                 }
                 Ok(length) => {
-                    let response = harness
-                        .request(Request::ConversationWriteSandboxProcessInput {
-                            agent_id,
-                            conversation_id,
-                            request: WriteSandboxProcessInputRequest {
-                                sandbox_id: sandbox_id.clone(),
-                                process_id: process_id.clone(),
-                                data: buffer[..length].to_vec(),
-                            },
-                        })
-                        .await;
+                    let request = WriteSandboxProcessInputRequest {
+                        sandbox_id: sandbox_id.clone(),
+                        process_id: process_id.clone(),
+                        data: buffer[..length].to_vec(),
+                    };
+                    let response = match scope {
+                        HttpSandboxProcessScope::Agent => {
+                            harness
+                                .request(Request::AgentWriteSandboxProcessInput {
+                                    agent_id,
+                                    request,
+                                })
+                                .await
+                        }
+                        HttpSandboxProcessScope::Conversation { conversation_id } => {
+                            harness
+                                .request(Request::ConversationWriteSandboxProcessInput {
+                                    agent_id,
+                                    conversation_id,
+                                    request,
+                                })
+                                .await
+                        }
+                    };
                     if let Err(error) = response {
                         tracing::warn!(
                             target: HTTP_EXOHARNESS_TRACING_TARGET,

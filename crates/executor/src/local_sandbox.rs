@@ -9,7 +9,7 @@ use exoharness::{
     ConversationHandle, ConversationId, CreateSandboxRequest, Event, EventData, EventId, EventKind,
     EventStream, ExoHarness, ForkConversationRequest, GetEventsResult, ListConversationsRequest,
     ListConversationsResult, NewAgentRequest, NewConversationRequest, PutSecretRequest,
-    ReadArtifactRequest, Result, RunInSandboxRequest, SandboxId, SandboxProcess,
+    ReadArtifactRequest, Result, RunInSandboxRequest, SandboxHandle, SandboxId, SandboxProcess,
     SandboxProcessEventQuery, SandboxProcessRecord, SandboxProcessStatus, Secret, SecretId,
     SecretMetadata, SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnHandle,
     TurnRecord, Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest,
@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 const LOCAL_SANDBOX_AGENT_SLUG: &str = "__exo_local_sandbox";
+const LOCAL_AGENT_SANDBOX_SLUG_PREFIX: &str = "__exo_local_agent_sandbox";
 const LOCAL_SANDBOX_MAP_EVENT: &str = "local_sandbox_mapped";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +35,7 @@ pub struct LocalSandboxExoHarness {
 struct LocalSandboxState {
     remote: Arc<dyn ExoHarness>,
     local: Arc<dyn ExoHarness>,
+    agents: Mutex<HashMap<AgentId, Arc<dyn AgentHandle>>>,
     conversations: Mutex<HashMap<ConversationId, Arc<dyn ConversationHandle>>>,
     conversation_init: Mutex<()>,
     sandboxes: Mutex<HashMap<SandboxId, SandboxId>>,
@@ -54,6 +56,7 @@ impl LocalSandboxExoHarness {
             state: Arc::new(LocalSandboxState {
                 remote,
                 local,
+                agents: Mutex::new(HashMap::new()),
                 conversations: Mutex::new(HashMap::new()),
                 conversation_init: Mutex::new(()),
                 sandboxes: Mutex::new(HashMap::new()),
@@ -126,6 +129,70 @@ struct LocalSandboxAgent {
 
 fn wrap_agent(state: Arc<LocalSandboxState>, remote: Arc<dyn AgentHandle>) -> Arc<dyn AgentHandle> {
     Arc::new(LocalSandboxAgent { state, remote })
+}
+
+async fn local_agent_for(
+    state: &Arc<LocalSandboxState>,
+    remote_agent_id: AgentId,
+    remote_slug: &str,
+) -> Result<Arc<dyn AgentHandle>> {
+    {
+        let agents = state.agents.lock().await;
+        if let Some(agent) = agents.get(&remote_agent_id) {
+            return Ok(Arc::clone(agent));
+        }
+    }
+
+    let slug = format!("{LOCAL_AGENT_SANDBOX_SLUG_PREFIX}-{remote_agent_id}");
+    let local_agent = match state
+        .local
+        .list_agents()
+        .await?
+        .into_iter()
+        .find(|agent| agent.record().slug == slug)
+    {
+        Some(agent) => agent,
+        None => {
+            state
+                .local
+                .new_agent(NewAgentRequest {
+                    slug,
+                    name: format!("Local agent sandbox for {remote_slug}"),
+                })
+                .await?
+        }
+    };
+
+    let mut agents = state.agents.lock().await;
+    agents.insert(remote_agent_id, Arc::clone(&local_agent));
+    Ok(local_agent)
+}
+
+impl LocalSandboxAgent {
+    async fn local_agent(&self) -> Result<Arc<dyn AgentHandle>> {
+        local_agent_for(
+            &self.state,
+            self.remote.record().id,
+            self.remote.record().slug.as_str(),
+        )
+        .await
+    }
+
+    fn wants_local_sandbox(&self, request: &CreateSandboxRequest) -> bool {
+        self.state.force_local || request.provider.is_local()
+    }
+
+    async fn local_sandbox_id(&self, sandbox_id: &SandboxId) -> Result<Option<SandboxId>> {
+        Ok(self.state.sandboxes.lock().await.get(sandbox_id).cloned())
+    }
+
+    async fn map_local_sandbox(&self, remote_id: SandboxId, local_id: SandboxId) {
+        self.state
+            .sandboxes
+            .lock()
+            .await
+            .insert(remote_id, local_id);
+    }
 }
 
 #[async_trait]
@@ -206,6 +273,118 @@ impl AgentHandle for LocalSandboxAgent {
 
     async fn list_artifacts(&self) -> Result<Vec<ArtifactVersion>> {
         self.remote.list_artifacts().await
+    }
+}
+
+#[async_trait]
+impl SandboxHandle for LocalSandboxAgent {
+    async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
+        if !self.wants_local_sandbox(&request) {
+            return self.remote.create_sandbox(request).await;
+        }
+
+        let local_id = self.local_agent().await?.create_sandbox(request).await?;
+        let remote_id = local_id.clone();
+        self.map_local_sandbox(remote_id.clone(), local_id).await;
+        Ok(remote_id)
+    }
+
+    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
+        let Some(local_id) = self.local_sandbox_id(&id).await? else {
+            return self.remote.snapshot_sandbox(id).await;
+        };
+        self.local_agent().await?.snapshot_sandbox(local_id).await
+    }
+
+    async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
+        let Some(local_id) = self.local_sandbox_id(&request.id).await? else {
+            return self.remote.start_sandbox(request).await;
+        };
+        self.local_agent()
+            .await?
+            .start_sandbox(StartSandboxRequest {
+                id: local_id,
+                snapshot_id: request.snapshot_id,
+                idle_seconds: request.idle_seconds,
+            })
+            .await
+    }
+
+    async fn stop_sandbox(&self, id: SandboxId) -> Result<()> {
+        let Some(local_id) = self.local_sandbox_id(&id).await? else {
+            return self.remote.stop_sandbox(id).await;
+        };
+        self.local_agent().await?.stop_sandbox(local_id).await
+    }
+
+    async fn start_sandbox_process(
+        &self,
+        request: StartSandboxProcessRequest,
+    ) -> Result<SandboxProcessRecord> {
+        let Some(local_id) = self.local_sandbox_id(&request.sandbox_id).await? else {
+            return self.remote.start_sandbox_process(request).await;
+        };
+        start_mapped_sandbox_process(self.local_agent().await?, local_id, request).await
+    }
+
+    async fn write_sandbox_process_input(
+        &self,
+        request: WriteSandboxProcessInputRequest,
+    ) -> Result<()> {
+        let Some(local_id) = self.local_sandbox_id(&request.sandbox_id).await? else {
+            return self.remote.write_sandbox_process_input(request).await;
+        };
+        write_mapped_sandbox_process_input(self.local_agent().await?, local_id, request).await
+    }
+
+    async fn close_sandbox_process_input(
+        &self,
+        request: CloseSandboxProcessInputRequest,
+    ) -> Result<()> {
+        let Some(local_id) = self.local_sandbox_id(&request.sandbox_id).await? else {
+            return self.remote.close_sandbox_process_input(request).await;
+        };
+        close_mapped_sandbox_process_input(self.local_agent().await?, local_id, request).await
+    }
+
+    async fn get_sandbox_process_events(
+        &self,
+        query: SandboxProcessEventQuery,
+    ) -> Result<exoharness::GetSandboxProcessEventsResult> {
+        let Some(local_id) = self.local_sandbox_id(&query.sandbox_id).await? else {
+            return self.remote.get_sandbox_process_events(query).await;
+        };
+        get_mapped_sandbox_process_events(self.local_agent().await?, local_id, query).await
+    }
+
+    async fn wait_sandbox_process(
+        &self,
+        request: WaitSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus> {
+        let Some(local_id) = self.local_sandbox_id(&request.sandbox_id).await? else {
+            return self.remote.wait_sandbox_process(request).await;
+        };
+        wait_mapped_sandbox_process(self.local_agent().await?, local_id, request).await
+    }
+
+    async fn cancel_sandbox_process(
+        &self,
+        request: CancelSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus> {
+        let Some(local_id) = self.local_sandbox_id(&request.sandbox_id).await? else {
+            return self.remote.cancel_sandbox_process(request).await;
+        };
+        cancel_mapped_sandbox_process(self.local_agent().await?, local_id, request).await
+    }
+
+    async fn run_in_sandbox(
+        &self,
+        request: RunInSandboxRequest,
+    ) -> Result<Box<dyn SandboxProcess>> {
+        let Some(local_id) = self.local_sandbox_id(&request.id).await? else {
+            return self.remote.run_in_sandbox(request).await;
+        };
+        run_in_mapped_sandbox(self.local_agent().await?, local_id, request).await
     }
 }
 
@@ -335,6 +514,100 @@ async fn local_sandbox_id_for(
     Ok(None)
 }
 
+async fn start_mapped_sandbox_process(
+    local: Arc<dyn SandboxHandle>,
+    local_id: SandboxId,
+    request: StartSandboxProcessRequest,
+) -> Result<SandboxProcessRecord> {
+    let remote_id = request.sandbox_id.clone();
+    let mut process = local
+        .start_sandbox_process(StartSandboxProcessRequest {
+            sandbox_id: local_id,
+            ..request
+        })
+        .await?;
+    process.sandbox_id = remote_id;
+    Ok(process)
+}
+
+async fn write_mapped_sandbox_process_input(
+    local: Arc<dyn SandboxHandle>,
+    local_id: SandboxId,
+    request: WriteSandboxProcessInputRequest,
+) -> Result<()> {
+    local
+        .write_sandbox_process_input(WriteSandboxProcessInputRequest {
+            sandbox_id: local_id,
+            ..request
+        })
+        .await
+}
+
+async fn close_mapped_sandbox_process_input(
+    local: Arc<dyn SandboxHandle>,
+    local_id: SandboxId,
+    request: CloseSandboxProcessInputRequest,
+) -> Result<()> {
+    local
+        .close_sandbox_process_input(CloseSandboxProcessInputRequest {
+            sandbox_id: local_id,
+            ..request
+        })
+        .await
+}
+
+async fn get_mapped_sandbox_process_events(
+    local: Arc<dyn SandboxHandle>,
+    local_id: SandboxId,
+    query: SandboxProcessEventQuery,
+) -> Result<exoharness::GetSandboxProcessEventsResult> {
+    local
+        .get_sandbox_process_events(SandboxProcessEventQuery {
+            sandbox_id: local_id,
+            ..query
+        })
+        .await
+}
+
+async fn wait_mapped_sandbox_process(
+    local: Arc<dyn SandboxHandle>,
+    local_id: SandboxId,
+    request: WaitSandboxProcessRequest,
+) -> Result<SandboxProcessStatus> {
+    local
+        .wait_sandbox_process(WaitSandboxProcessRequest {
+            sandbox_id: local_id,
+            ..request
+        })
+        .await
+}
+
+async fn cancel_mapped_sandbox_process(
+    local: Arc<dyn SandboxHandle>,
+    local_id: SandboxId,
+    request: CancelSandboxProcessRequest,
+) -> Result<SandboxProcessStatus> {
+    local
+        .cancel_sandbox_process(CancelSandboxProcessRequest {
+            sandbox_id: local_id,
+            ..request
+        })
+        .await
+}
+
+async fn run_in_mapped_sandbox(
+    local: Arc<dyn SandboxHandle>,
+    local_id: SandboxId,
+    request: RunInSandboxRequest,
+) -> Result<Box<dyn SandboxProcess>> {
+    local
+        .run_in_sandbox(RunInSandboxRequest {
+            id: local_id,
+            ..request
+        })
+        .await
+}
+
 impl LocalSandboxConversation {
     async fn local_conversation(&self) -> Result<Arc<dyn ConversationHandle>> {
         local_conversation_for(
@@ -456,6 +729,33 @@ impl ConversationHandle for LocalSandboxConversation {
         self.remote.list_artifacts().await
     }
 
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
+        self.remote.list_bindings().await
+    }
+
+    async fn put_binding(&self, binding: Binding) -> Result<BindingId> {
+        self.remote.put_binding(binding).await
+    }
+
+    async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>> {
+        self.remote.get_binding(id).await
+    }
+
+    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
+        self.remote.list_secrets().await
+    }
+
+    async fn put_secret(&self, request: PutSecretRequest) -> Result<SecretId> {
+        self.remote.put_secret(request).await
+    }
+
+    async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>> {
+        self.remote.get_secret(id).await
+    }
+}
+
+#[async_trait]
+impl SandboxHandle for LocalSandboxConversation {
     async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
         if !self.wants_local_sandbox(&request) {
             return self.remote.create_sandbox(request).await;
@@ -543,17 +843,7 @@ impl ConversationHandle for LocalSandboxConversation {
         let Some(local_id) = self.local_sandbox_id(&request.sandbox_id).await? else {
             return self.remote.start_sandbox_process(request).await;
         };
-        let remote_id = request.sandbox_id.clone();
-        let mut process = self
-            .local_conversation()
-            .await?
-            .start_sandbox_process(StartSandboxProcessRequest {
-                sandbox_id: local_id,
-                ..request
-            })
-            .await?;
-        process.sandbox_id = remote_id;
-        Ok(process)
+        start_mapped_sandbox_process(self.local_conversation().await?, local_id, request).await
     }
 
     async fn write_sandbox_process_input(
@@ -563,12 +853,7 @@ impl ConversationHandle for LocalSandboxConversation {
         let Some(local_id) = self.local_sandbox_id(&request.sandbox_id).await? else {
             return self.remote.write_sandbox_process_input(request).await;
         };
-        self.local_conversation()
-            .await?
-            .write_sandbox_process_input(WriteSandboxProcessInputRequest {
-                sandbox_id: local_id,
-                ..request
-            })
+        write_mapped_sandbox_process_input(self.local_conversation().await?, local_id, request)
             .await
     }
 
@@ -579,12 +864,7 @@ impl ConversationHandle for LocalSandboxConversation {
         let Some(local_id) = self.local_sandbox_id(&request.sandbox_id).await? else {
             return self.remote.close_sandbox_process_input(request).await;
         };
-        self.local_conversation()
-            .await?
-            .close_sandbox_process_input(CloseSandboxProcessInputRequest {
-                sandbox_id: local_id,
-                ..request
-            })
+        close_mapped_sandbox_process_input(self.local_conversation().await?, local_id, request)
             .await
     }
 
@@ -595,13 +875,7 @@ impl ConversationHandle for LocalSandboxConversation {
         let Some(local_id) = self.local_sandbox_id(&query.sandbox_id).await? else {
             return self.remote.get_sandbox_process_events(query).await;
         };
-        self.local_conversation()
-            .await?
-            .get_sandbox_process_events(SandboxProcessEventQuery {
-                sandbox_id: local_id,
-                ..query
-            })
-            .await
+        get_mapped_sandbox_process_events(self.local_conversation().await?, local_id, query).await
     }
 
     async fn wait_sandbox_process(
@@ -611,13 +885,7 @@ impl ConversationHandle for LocalSandboxConversation {
         let Some(local_id) = self.local_sandbox_id(&request.sandbox_id).await? else {
             return self.remote.wait_sandbox_process(request).await;
         };
-        self.local_conversation()
-            .await?
-            .wait_sandbox_process(WaitSandboxProcessRequest {
-                sandbox_id: local_id,
-                ..request
-            })
-            .await
+        wait_mapped_sandbox_process(self.local_conversation().await?, local_id, request).await
     }
 
     async fn cancel_sandbox_process(
@@ -627,13 +895,7 @@ impl ConversationHandle for LocalSandboxConversation {
         let Some(local_id) = self.local_sandbox_id(&request.sandbox_id).await? else {
             return self.remote.cancel_sandbox_process(request).await;
         };
-        self.local_conversation()
-            .await?
-            .cancel_sandbox_process(CancelSandboxProcessRequest {
-                sandbox_id: local_id,
-                ..request
-            })
-            .await
+        cancel_mapped_sandbox_process(self.local_conversation().await?, local_id, request).await
     }
 
     async fn run_in_sandbox(
@@ -643,37 +905,7 @@ impl ConversationHandle for LocalSandboxConversation {
         let Some(local_id) = self.local_sandbox_id(&request.id).await? else {
             return self.remote.run_in_sandbox(request).await;
         };
-        self.local_conversation()
-            .await?
-            .run_in_sandbox(RunInSandboxRequest {
-                id: local_id,
-                ..request
-            })
-            .await
-    }
-
-    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
-        self.remote.list_bindings().await
-    }
-
-    async fn put_binding(&self, binding: Binding) -> Result<BindingId> {
-        self.remote.put_binding(binding).await
-    }
-
-    async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>> {
-        self.remote.get_binding(id).await
-    }
-
-    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
-        self.remote.list_secrets().await
-    }
-
-    async fn put_secret(&self, request: PutSecretRequest) -> Result<SecretId> {
-        self.remote.put_secret(request).await
-    }
-
-    async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>> {
-        self.remote.get_secret(id).await
+        run_in_mapped_sandbox(self.local_conversation().await?, local_id, request).await
     }
 }
 

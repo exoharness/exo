@@ -131,6 +131,68 @@ impl ExoHarnessServer {
                     artifact: agent.write_artifact(request).await?,
                 })
             }
+            Request::AgentCreateSandbox { agent_id, request } => {
+                let agent = self.require_agent(&agent_id).await?;
+                Ok(Response::SandboxId {
+                    sandbox_id: agent.create_sandbox(request).await?,
+                })
+            }
+            Request::AgentSnapshotSandbox {
+                agent_id,
+                sandbox_id,
+            } => {
+                let agent = self.require_agent(&agent_id).await?;
+                Ok(Response::SnapshotId {
+                    snapshot_id: agent.snapshot_sandbox(sandbox_id).await?,
+                })
+            }
+            Request::AgentStartSandbox { agent_id, request } => {
+                let agent = self.require_agent(&agent_id).await?;
+                agent.start_sandbox(request).await?;
+                Ok(Response::Unit)
+            }
+            Request::AgentStopSandbox {
+                agent_id,
+                sandbox_id,
+            } => {
+                let agent = self.require_agent(&agent_id).await?;
+                agent.stop_sandbox(sandbox_id).await?;
+                Ok(Response::Unit)
+            }
+            Request::AgentStartSandboxProcess { agent_id, request } => {
+                let agent = self.require_agent(&agent_id).await?;
+                Ok(Response::SandboxProcess {
+                    process: agent.start_sandbox_process(request).await?,
+                })
+            }
+            Request::AgentWriteSandboxProcessInput { agent_id, request } => {
+                let agent = self.require_agent(&agent_id).await?;
+                agent.write_sandbox_process_input(request).await?;
+                Ok(Response::Unit)
+            }
+            Request::AgentCloseSandboxProcessInput { agent_id, request } => {
+                let agent = self.require_agent(&agent_id).await?;
+                agent.close_sandbox_process_input(request).await?;
+                Ok(Response::Unit)
+            }
+            Request::AgentGetSandboxProcessEvents { agent_id, query } => {
+                let agent = self.require_agent(&agent_id).await?;
+                Ok(Response::SandboxProcessEvents {
+                    result: agent.get_sandbox_process_events(query).await?,
+                })
+            }
+            Request::AgentWaitSandboxProcess { agent_id, request } => {
+                let agent = self.require_agent(&agent_id).await?;
+                Ok(Response::SandboxProcessStatus {
+                    status: agent.wait_sandbox_process(request).await?,
+                })
+            }
+            Request::AgentCancelSandboxProcess { agent_id, request } => {
+                let agent = self.require_agent(&agent_id).await?;
+                Ok(Response::SandboxProcessStatus {
+                    status: agent.cancel_sandbox_process(request).await?,
+                })
+            }
             Request::AgentListBindings { agent_id } => {
                 let agent = self.require_agent(&agent_id).await?;
                 Ok(Response::Bindings {

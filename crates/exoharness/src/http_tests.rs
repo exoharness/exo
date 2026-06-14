@@ -164,6 +164,76 @@ async fn http_exoharness_runs_noninteractive_sandbox_commands() {
 }
 
 #[actix_web::test]
+async fn http_exoharness_runs_agent_scoped_sandbox_commands() {
+    let fixture = http_harness().await;
+    let agent = fixture
+        .harness
+        .new_agent(crate::NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let conversation = agent
+        .new_conversation(crate::NewConversationRequest::default())
+        .await
+        .expect("conversation");
+    let sandbox_id = agent
+        .create_sandbox(CreateSandboxRequest {
+            name: Some("agent-http".to_string()),
+            provider: SandboxProvider::LocalProcess,
+            image: "local".to_string(),
+            default_workdir: Some("/".to_string()),
+            file_system_mounts: None,
+            enable_networking: Some(true),
+            idle_seconds: Some(60),
+        })
+        .await
+        .expect("agent sandbox");
+    let process = agent
+        .run_in_sandbox(RunInSandboxRequest {
+            id: sandbox_id.clone(),
+            command: vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                "printf agent-http".to_string(),
+            ],
+            env: Default::default(),
+        })
+        .await
+        .expect("agent sandbox command");
+    let parts = process.into_parts();
+    let mut stdout = parts.stdout;
+    let mut output = Vec::new();
+    stdout.read_to_end(&mut output).await.expect("stdout");
+    assert_eq!(output, b"agent-http");
+    assert_eq!(parts.wait.await.expect("exit"), 0);
+
+    let events = conversation
+        .get_events(Some(EventQuery {
+            cursor: None,
+            direction: Some(EventQueryDirection::Asc),
+            limit: None,
+            session_id: None,
+            turn_id: None,
+            types: Some(vec![EventKind::SANDBOX_CREATED, EventKind::SANDBOX_STARTED]),
+        }))
+        .await
+        .expect("events")
+        .events;
+    assert!(events.is_empty());
+
+    let conversation_process = conversation
+        .run_in_sandbox(RunInSandboxRequest {
+            id: sandbox_id,
+            command: vec!["true".to_string()],
+            env: Default::default(),
+        })
+        .await;
+    assert!(conversation_process.is_err());
+}
+
+#[actix_web::test]
 async fn http_exoharness_supports_sandbox_process_events() {
     let fixture = http_harness().await;
     let agent = fixture
