@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/cli",
+  "crates/cost",
   "crates/exoharness",
   "crates/executor",
   "examples/exoclaw/scheduler-runner",
@@ -17,6 +18,9 @@ rust-version = "1.95"
 anyhow = "1.0.100"
 async-trait = "0.1.89"
 actix-web = "4.9.0"
+aws-config = "1.8.17"
+aws-credential-types = "1.2.14"
+aws-sdk-bedrockagentcore = "1.45.0"
 braintrust-sdk-rust = { git = "https://github.com/braintrustdata/braintrust-sdk-rust", rev = "55dcefd989b6038edb5ef8dfc438384340d5f4ae" }
 bytes = "1.10.1"
 chrono = { version = "0.4.42", features = ["serde"] }

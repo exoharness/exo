@@ -32,9 +32,9 @@ use executor::{
     LocalSandboxExoHarness, PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR,
     SandboxBackendChoice, SandboxProvider, SandboxProviderConfig, SandboxScope, Secret,
     SecretBackendChoice, ToolRequest, ToolRuntime, TypeScriptHarness, TypeScriptHarnessConfig,
-    Uuid7, VercelBackendSpec, default_daytona_image, default_docker_image, default_vercel_image,
-    effective_sandbox_scope, load_agent_config, send_conversation_wakeup,
-    serve_exoharness_http_listener_with_options,
+    Uuid7, VercelBackendSpec, default_aws_agentcore_image, default_daytona_image,
+    default_docker_image, default_vercel_image, effective_sandbox_scope, load_agent_config,
+    send_conversation_wakeup, serve_exoharness_http_listener_with_options,
 };
 use lingua::Message;
 use lingua::universal::{AssistantContent, AssistantContentPart, ToolContentPart, UserContent};
@@ -90,6 +90,12 @@ struct Cli {
         value_parser = parse_env_var_name
     )]
     bearer_env: Option<String>,
+    /// Path to a LiteLLM price JSON for cost tracking (overrides fetch/cache).
+    #[arg(long, global = true, env = "EXO_LITELLM_PRICES_PATH")]
+    pricing_path: Option<PathBuf>,
+    /// URL to fetch the LiteLLM price JSON from (overrides the default source).
+    #[arg(long, global = true, env = "EXO_LITELLM_PRICES_URL")]
+    pricing_url: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -208,6 +214,8 @@ enum SecretBackendArg {
 enum SandboxProviderArg {
     Daytona,
     Vercel,
+    #[value(name = "aws-agentcore")]
+    AwsAgentCore,
     #[value(name = "apple-container")]
     AppleContainer,
     Docker,
@@ -220,6 +228,7 @@ impl From<SandboxProviderArg> for SandboxProvider {
         match value {
             SandboxProviderArg::Daytona => Self::Daytona,
             SandboxProviderArg::Vercel => Self::Vercel,
+            SandboxProviderArg::AwsAgentCore => Self::AwsAgentCore,
             SandboxProviderArg::AppleContainer => Self::AppleContainer,
             SandboxProviderArg::Docker => Self::Docker,
             SandboxProviderArg::LocalProcess => Self::LocalProcess,
@@ -281,7 +290,20 @@ fn default_sandbox_backends() -> Vec<SandboxBackendChoice> {
         SandboxBackendChoice::LocalProcess,
         SandboxBackendChoice::Daytona(DaytonaBackendSpec::with_conventional_secrets()),
         SandboxBackendChoice::Vercel(VercelBackendSpec::with_conventional_secrets()),
+        SandboxBackendChoice::AwsAgentCore,
     ]
+}
+
+fn agentcore_region_from_arn(runtime_arn: &str) -> Option<String> {
+    let mut parts = runtime_arn.split(':');
+    let arn = parts.next()?;
+    let _partition = parts.next()?;
+    let service = parts.next()?;
+    let region = parts.next()?;
+    if arn == "arn" && service == "bedrock-agentcore" && !region.is_empty() {
+        return Some(region.to_string());
+    }
+    None
 }
 
 #[cfg(target_os = "macos")]
@@ -596,28 +618,35 @@ enum ProviderCommands {
     /// List configured sandbox provider bindings.
     List,
     /// Configure a sandbox provider (writes a Binding::Sandbox).
-    Configure {
-        #[arg(long, value_enum)]
-        provider: SandboxProviderArg,
-        /// Binding name (default: the provider name).
-        #[arg(long)]
-        name: Option<String>,
-        /// Secret (by name) holding the provider's API key/token. Required for remote providers.
-        #[arg(long)]
-        secret: Option<String>,
-        /// Region/target. Daytona: us | eu | experimental.
-        #[arg(long)]
-        region: Option<String>,
-        #[arg(long)]
-        organization_id: Option<String>,
-        #[arg(long)]
-        project_id: Option<String>,
-        #[arg(long)]
-        api_url: Option<String>,
-        /// Default base image for sandboxes that don't request one.
-        #[arg(long)]
-        default_image: Option<String>,
-    },
+    Configure(Box<ProviderConfigureArgs>),
+}
+
+#[derive(Debug, Args)]
+struct ProviderConfigureArgs {
+    #[arg(long, value_enum)]
+    provider: SandboxProviderArg,
+    /// Binding name (default: the provider name).
+    #[arg(long)]
+    name: Option<String>,
+    /// Secret (by name) holding the provider's API key/token. Required for Daytona and Vercel.
+    #[arg(long)]
+    secret: Option<String>,
+    /// Region/target. Daytona: us | eu | experimental.
+    #[arg(long)]
+    region: Option<String>,
+    #[arg(long)]
+    organization_id: Option<String>,
+    #[arg(long)]
+    project_id: Option<String>,
+    #[arg(long)]
+    api_url: Option<String>,
+    #[arg(long = "runtime-arn")]
+    runtime_arn: Option<String>,
+    #[arg(long)]
+    qualifier: Option<String>,
+    /// Default base image for sandboxes that don't request one.
+    #[arg(long)]
+    default_image: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Args)]
@@ -758,6 +787,7 @@ async fn main() -> Result<()> {
         &cli.command,
     )
     .await?;
+    let pricing = Arc::new(cost::load(cli.pricing_path.clone(), cli.pricing_url.clone()).await);
     let harness = instantiate_harness(
         &cli.root,
         &exo_config,
@@ -765,6 +795,7 @@ async fn main() -> Result<()> {
         harness_kind,
         runtime_config.clone(),
         env_vars.clone(),
+        pricing,
     )
     .await?;
 
@@ -1756,17 +1787,21 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            ProviderCommands::Configure {
-                provider,
-                name,
-                secret,
-                region,
-                organization_id,
-                project_id,
-                api_url,
-                default_image,
-            } => {
-                let binding_name = name.unwrap_or_else(|| format!("{provider:?}").to_lowercase());
+            ProviderCommands::Configure(args) => {
+                let ProviderConfigureArgs {
+                    provider,
+                    name,
+                    secret,
+                    region,
+                    organization_id,
+                    project_id,
+                    api_url,
+                    runtime_arn,
+                    qualifier,
+                    default_image,
+                } = *args;
+                let binding_name =
+                    name.unwrap_or_else(|| SandboxProvider::from(provider).as_str().to_string());
                 let config = match provider {
                     SandboxProviderArg::Daytona => {
                         let secret =
@@ -1800,6 +1835,27 @@ async fn main() -> Result<()> {
                             project_id,
                             api_url,
                             default_image: default_image.unwrap_or_else(default_vercel_image),
+                        }
+                    }
+                    SandboxProviderArg::AwsAgentCore => {
+                        let runtime_arn = runtime_arn.ok_or_else(|| {
+                            anyhow!("--runtime-arn is required for aws-agentcore")
+                        })?;
+                        let region = match region {
+                            Some(region) => region,
+                            None => agentcore_region_from_arn(&runtime_arn).ok_or_else(|| {
+                                anyhow!(
+                                    "--region is required when the AgentCore runtime ARN does not include a region"
+                                )
+                            })?,
+                        };
+                        SandboxProviderConfig::AwsAgentCore {
+                            runtime_arn,
+                            region,
+                            qualifier,
+                            endpoint_url: api_url,
+                            default_image: default_image
+                                .unwrap_or_else(default_aws_agentcore_image),
                         }
                     }
                     SandboxProviderArg::Docker => SandboxProviderConfig::Docker {
@@ -1995,12 +2051,14 @@ async fn instantiate_harness(
     kind: HarnessKind,
     runtime_config: Option<BraintrustRuntimeConfig>,
     env_vars: HashMap<String, String>,
+    pricing: Arc<cost::PricingTable>,
 ) -> Result<Arc<dyn Harness>> {
     let harness: Arc<dyn Harness> = match kind {
         HarnessKind::Basic => Arc::new(BasicHarness::from_exoharness(
             exoharness,
             runtime_config,
             env_vars,
+            pricing,
         )),
         HarnessKind::Rlm => Arc::new(RlmHarness::from_exoharness(
             exoharness,

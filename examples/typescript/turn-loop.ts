@@ -19,6 +19,7 @@ import {
   type ResponsesRuntimeLike,
   type TraceParent,
 } from "@exo/model-runtime/responses";
+import { ensureTable } from "@exo/model-runtime/cost";
 
 import { resolveLlmBinding } from "./shared";
 
@@ -34,6 +35,7 @@ export async function runResponsesHarnessTurn(
   context: TurnContext,
   options: ResponsesTurnLoopOptions = {},
 ): Promise<void> {
+  await ensureTable(); // load the price table once so cost is ready when events are built
   const modelBinding = await resolveLlmBinding(context);
   const runtime = runtimeFromModelBinding(context.agentConfig, modelBinding);
   await runtime.runTurn(context, (turnParent) =>

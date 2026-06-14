@@ -5,8 +5,8 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 
 use crate::protocol::{ClientMessage, ConversationHandleInfo, Request, Response, ServerMessage};
 use crate::{
-    AgentHandle, AgentId, ConversationHandle, ConversationId, ExoHarness, Result, SessionId,
-    TurnHandle, TurnId, TurnRecord,
+    AgentHandle, AgentId, ConversationHandle, ConversationId, ExoHarness, ListConversationsResult,
+    Result, SessionId, TurnHandle, TurnId, TurnRecord,
 };
 
 pub struct ExoHarnessServer {
@@ -63,18 +63,21 @@ impl ExoHarnessServer {
             Request::GetSecret { secret_id } => Ok(Response::Secret {
                 secret: self.root.get_secret(&secret_id).await?,
             }),
-            Request::ListConversations { agent_id } => {
+            Request::ListConversations { agent_id, request } => {
                 let agent = self.require_agent(&agent_id).await?;
+                let result = agent.list_conversations(request).await?;
                 Ok(Response::Conversations {
-                    conversations: agent
-                        .list_conversations()
-                        .await?
-                        .into_iter()
-                        .map(|conversation| ConversationHandleInfo {
-                            agent_id,
-                            record: conversation.record().clone(),
-                        })
-                        .collect(),
+                    result: ListConversationsResult {
+                        conversations: result
+                            .conversations
+                            .into_iter()
+                            .map(|conversation| ConversationHandleInfo {
+                                agent_id,
+                                record: conversation.record().clone(),
+                            })
+                            .collect(),
+                        next_cursor: result.next_cursor,
+                    },
                 })
             }
             Request::GetConversation {

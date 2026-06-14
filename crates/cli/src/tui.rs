@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -377,6 +378,90 @@ impl ChatRepl {
         Ok(())
     }
 
+    /// Summarize token usage and dollar cost for this conversation from the
+    /// `usage` records on its `messages` events. Paginates so it covers the
+    /// whole conversation, not just one page.
+    async fn print_cost(&self) -> Result<()> {
+        let handle = self.conversation.exoharness_handle();
+        let mut cursor: Option<EventId> = None;
+        let mut per_model: BTreeMap<String, ModelCost> = BTreeMap::new();
+        let mut unpriced = 0usize;
+        loop {
+            let result = handle
+                .get_events(Some(EventQuery {
+                    cursor,
+                    direction: Some(EventQueryDirection::Desc),
+                    limit: Some(REMOTE_HISTORY_PAGE_SIZE),
+                    session_id: None,
+                    turn_id: None,
+                    types: Some(vec![EventKind::MESSAGES]),
+                }))
+                .await?;
+            for event in &result.events {
+                if let EventData::Messages {
+                    usage: Some(usage), ..
+                } = &event.data
+                {
+                    let entry = per_model.entry(usage.model.clone()).or_default();
+                    entry.calls += 1;
+                    entry.prompt += usage.prompt_tokens.unwrap_or(0);
+                    entry.cached += usage.prompt_cached_tokens.unwrap_or(0);
+                    entry.completion += usage.completion_tokens.unwrap_or(0);
+                    match usage.cost_usd {
+                        Some(cost) => entry.cost += cost,
+                        None => unpriced += 1,
+                    }
+                }
+            }
+            match result.cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+
+        if per_model.is_empty() {
+            println!("no recorded model usage in this conversation yet");
+            return Ok(());
+        }
+
+        let mut total = ModelCost::default();
+        println!(
+            "{:<28} {:>6} {:>10} {:>10} {:>10} {:>12}",
+            "MODEL", "CALLS", "PROMPT", "CACHED", "OUT", "COST"
+        );
+        for (model, c) in &per_model {
+            println!(
+                "{:<28} {:>6} {:>10} {:>10} {:>10} {:>12}",
+                truncate(model, 28),
+                c.calls,
+                c.prompt,
+                c.cached,
+                c.completion,
+                fmt_usd(c.cost),
+            );
+            total.calls += c.calls;
+            total.prompt += c.prompt;
+            total.cached += c.cached;
+            total.completion += c.completion;
+            total.cost += c.cost;
+        }
+        println!(
+            "{:<28} {:>6} {:>10} {:>10} {:>10} {:>12}",
+            "TOTAL",
+            total.calls,
+            total.prompt,
+            total.cached,
+            total.completion,
+            fmt_usd(total.cost),
+        );
+        if unpriced > 0 {
+            println!(
+                "note: {unpriced} call(s) had no price (model not in the price table); cost excludes them"
+            );
+        }
+        Ok(())
+    }
+
     async fn run(&mut self) -> Result<()> {
         loop {
             let prompt = format!("{}> ", self.conversation.record().slug);
@@ -394,6 +479,11 @@ impl ChatRepl {
                     match trimmed {
                         "/quit" | "/exit" => break,
                         "/history" => self.print_transcript().await?,
+                        "/cost" | "/usage" => {
+                            if let Err(error) = self.print_cost().await {
+                                println!("cost summary failed: {error:#}");
+                            }
+                        }
                         "/help" => print_help(),
                         "/shell" | "/sandbox" => {
                             println!("usage: /shell <command>");
@@ -780,10 +870,40 @@ fn render_user_content_for_history(content: &UserContent) -> String {
     }
 }
 
+/// Per-model usage tally for `/cost`.
+#[derive(Default)]
+struct ModelCost {
+    calls: u64,
+    prompt: i64,
+    cached: i64,
+    completion: i64,
+    cost: f64,
+}
+
+/// Dynamic precision so sub-cent costs are not rounded to a misleading shape.
+fn fmt_usd(cost: f64) -> String {
+    if cost >= 1.0 {
+        format!("${cost:.2}")
+    } else if cost >= 0.01 {
+        format!("${cost:.4}")
+    } else {
+        format!("${cost:.6}")
+    }
+}
+
+fn truncate(value: &str, max: usize) -> String {
+    if value.len() <= max {
+        value.to_string()
+    } else {
+        format!("{}…", &value[..max.saturating_sub(1)])
+    }
+}
+
 fn print_help() {
     println!("repl commands:");
     println!("  /quit | /exit        exit the repl");
     println!("  /history             reprint the conversation transcript");
+    println!("  /cost | /usage       summarize token usage and dollar cost");
     println!("  /snapshot [<id>]     snapshot a sandbox in this conversation");
     println!("                       (defaults to the latest one if no id is given)");
     println!("  /snapshots           list snapshots taken in this conversation");
@@ -928,6 +1048,7 @@ mod tests {
                 ),
             }],
             response_id: None,
+            usage: None,
         });
 
         assert_eq!(rendered.len(), 1);

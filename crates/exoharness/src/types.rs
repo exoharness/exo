@@ -37,7 +37,10 @@ pub trait ExoHarness: Send + Sync {
 pub trait AgentHandle: Send + Sync {
     fn record(&self) -> &AgentRecord;
 
-    async fn list_conversations(&self) -> Result<Vec<Arc<dyn ConversationHandle>>>;
+    async fn list_conversations(
+        &self,
+        request: ListConversationsRequest,
+    ) -> Result<ListConversationsResult<Arc<dyn ConversationHandle>>>;
     async fn get_conversation(
         &self,
         id: &ConversationId,
@@ -177,6 +180,18 @@ pub struct NewConversationRequest {
     pub name: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ListConversationsRequest {
+    pub cursor: Option<EventId>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ListConversationsResult<T> {
+    pub conversations: Vec<T>,
+    pub next_cursor: Option<EventId>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TurnRecord {
     pub id: TurnId,
@@ -280,6 +295,31 @@ pub struct ForkConversationRequest {
     pub name: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct UsageRecord {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cached_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_creation_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_reasoning_tokens: Option<i64>,
+    /// Cost in USD, computed at call time from the price table baked into
+    /// this binary. `None` if the model is not in the table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// Time to first token (streaming only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<u64>,
+    /// Wall-clock duration from request start to end of response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     pub id: EventId,
@@ -313,6 +353,11 @@ pub enum EventData {
     Messages {
         messages: Vec<Message>,
         response_id: Option<ResponseId>,
+        // Boxed to keep `EventData` small: `UsageRecord` is ~170 bytes and
+        // most events don't carry it, so inlining it would bloat every
+        // variant (and every enum that embeds `EventData`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<Box<UsageRecord>>,
     },
     ToolRequested {
         tool_call_id: ToolCallId,
@@ -486,6 +531,8 @@ pub enum SandboxProvider {
     #[default]
     Daytona,
     Vercel,
+    #[serde(rename = "aws_agentcore", alias = "aws-agentcore")]
+    AwsAgentCore,
     AppleContainer,
     Docker,
     #[serde(alias = "local")]
@@ -504,6 +551,7 @@ impl SandboxProvider {
         match self {
             Self::Daytona => "daytona",
             Self::Vercel => "vercel",
+            Self::AwsAgentCore => "aws-agentcore",
             Self::AppleContainer => "apple-container",
             Self::Docker => "docker",
             Self::LocalProcess => "local-process",
@@ -524,6 +572,7 @@ impl FromStr for SandboxProvider {
         match value.trim() {
             "daytona" => Ok(Self::Daytona),
             "vercel" => Ok(Self::Vercel),
+            "aws-agentcore" | "aws_agentcore" => Ok(Self::AwsAgentCore),
             "apple-container" | "apple_container" => Ok(Self::AppleContainer),
             "docker" => Ok(Self::Docker),
             "local" | "local-process" | "local_process" => Ok(Self::LocalProcess),
@@ -794,6 +843,17 @@ pub enum SandboxProviderConfig {
         #[serde(default = "crate::sandbox_provider::default_vercel_image")]
         default_image: String,
     },
+    #[serde(rename = "aws_agentcore", alias = "aws-agentcore")]
+    AwsAgentCore {
+        runtime_arn: String,
+        region: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        qualifier: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint_url: Option<String>,
+        #[serde(default = "crate::sandbox_provider::default_aws_agentcore_image")]
+        default_image: String,
+    },
 }
 
 impl SandboxProviderConfig {
@@ -802,6 +862,7 @@ impl SandboxProviderConfig {
             Self::Daytona { .. } => SandboxProvider::Daytona,
             Self::Vercel { .. } => SandboxProvider::Vercel,
             Self::Docker { .. } => SandboxProvider::Docker,
+            Self::AwsAgentCore { .. } => SandboxProvider::AwsAgentCore,
         }
     }
 
@@ -810,7 +871,8 @@ impl SandboxProviderConfig {
         match self {
             Self::Daytona { default_image, .. }
             | Self::Vercel { default_image, .. }
-            | Self::Docker { default_image, .. } => default_image,
+            | Self::Docker { default_image, .. }
+            | Self::AwsAgentCore { default_image, .. } => default_image,
         }
     }
 }
@@ -869,6 +931,51 @@ mod tests {
     }
 
     #[test]
+    fn messages_event_deserializes_without_usage_field() {
+        // Older logs predate per-message cost tracking and have no `usage`
+        // field on Messages events; serde(default) must keep them readable.
+        let json = serde_json::json!({
+            "type": "messages",
+            "messages": [],
+            "response_id": null,
+        });
+        let event: EventData = serde_json::from_value(json).expect("legacy event should parse");
+        match event {
+            EventData::Messages { usage, .. } => assert!(usage.is_none()),
+            _ => panic!("expected Messages variant"),
+        }
+    }
+
+    #[test]
+    fn messages_event_serializes_usage_when_present() {
+        let event = EventData::Messages {
+            messages: vec![],
+            response_id: None,
+            usage: Some(Box::new(UsageRecord {
+                model: "claude-sonnet-4-6".to_string(),
+                prompt_tokens: Some(100),
+                completion_tokens: Some(50),
+                cost_usd: Some(0.001),
+                ..Default::default()
+            })),
+        };
+        let value = serde_json::to_value(&event).expect("event should serialize");
+        let usage = value.get("usage").expect("usage field present");
+        assert_eq!(
+            usage.get("model").and_then(Value::as_str),
+            Some("claude-sonnet-4-6")
+        );
+        assert_eq!(
+            usage.get("prompt_tokens").and_then(Value::as_i64),
+            Some(100)
+        );
+        assert!((usage.get("cost_usd").and_then(Value::as_f64).unwrap() - 0.001).abs() < 1e-9);
+        // Round-trip back through the legacy-event parser
+        let parsed: EventData = serde_json::from_value(value).expect("round-trip parse");
+        assert!(matches!(parsed, EventData::Messages { usage: Some(_), .. }));
+    }
+
+    #[test]
     fn serializes_mount_modes_as_ro_rw() {
         let ro =
             serde_json::to_value(FileSystemMountMode::ReadOnly).expect("mode should serialize");
@@ -896,11 +1003,13 @@ mod tests {
             "vercel".parse::<SandboxProvider>().unwrap(),
             SandboxProvider::Vercel
         );
+        assert!("agentcore".parse::<SandboxProvider>().is_err());
         assert_eq!(
             SandboxProvider::AppleContainer.to_string(),
             "apple-container"
         );
         assert_eq!(SandboxProvider::Vercel.to_string(), "vercel");
+        assert_eq!(SandboxProvider::AwsAgentCore.to_string(), "aws-agentcore");
         assert_eq!(SandboxProvider::LocalProcess.to_string(), "local-process");
     }
 }

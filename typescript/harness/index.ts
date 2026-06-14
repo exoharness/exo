@@ -1,4 +1,5 @@
 import type { ToolModuleExport } from "./tool-modules";
+import { mediaFollowUpMessage } from "./tool-media";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
@@ -10,6 +11,7 @@ export * from "./tools";
 export * from "./built-in-tools";
 export * from "./tool-modules";
 export * from "./adapter-tools";
+export * from "./tool-media";
 
 export type MessageRole =
   | "system"
@@ -703,6 +705,14 @@ function contentText(content: unknown): string {
         part &&
         typeof part === "object" &&
         "type" in part &&
+        (part as { type?: unknown }).type === "image"
+      ) {
+        return "[image]";
+      }
+      if (
+        part &&
+        typeof part === "object" &&
+        "type" in part &&
         (part as { type?: unknown }).type === "reasoning" &&
         "text" in part &&
         typeof (part as { text?: unknown }).text === "string"
@@ -764,6 +774,10 @@ function extendMaterializedMessages(
     messages.push(
       toolResultMessage(event.data.tool_call_id, toolName, event.data.result),
     );
+    const followUp = mediaFollowUpMessage(toolName, event.data.result);
+    if (followUp) {
+      messages.push(followUp);
+    }
   }
 }
 

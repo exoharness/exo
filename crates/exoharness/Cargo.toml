@@ -20,6 +20,12 @@ basic-backend = [
   "dep:url",
 ]
 apple-keychain = ["dep:keyring", "dep:keyring-core"]
+aws-agentcore = [
+  "basic-backend",
+  "dep:aws-config",
+  "dep:aws-credential-types",
+  "dep:aws-sdk-bedrockagentcore",
+]
 contract-tests = []
 
 [dependencies]
@@ -27,6 +33,9 @@ aes-gcm = { version = "0.11.0-rc.3", optional = true }
 actix-web = { workspace = true, optional = true }
 anyhow.workspace = true
 async-trait.workspace = true
+aws-config = { workspace = true, optional = true }
+aws-credential-types = { workspace = true, optional = true }
+aws-sdk-bedrockagentcore = { workspace = true, optional = true }
 base64 = { version = "0.22.1", optional = true }
 bytes.workspace = true
 chrono.workspace = true
