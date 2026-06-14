@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+import { z } from "zod";
+
 import type {
   Agent,
   HarnessToolRegistry,
@@ -20,15 +22,18 @@ const MEMORY_ARTIFACT_PATH = "memory/exoclaw-memory.json";
 const MAX_ENTRIES = 200;
 const MAX_TEXT_CHARS = 600;
 
-interface MemoryEntry {
-  id: string;
-  text: string;
-  createdAt: string;
-}
+const MemoryEntrySchema = z.object({
+  id: z.string(),
+  text: z.string(),
+  createdAt: z.string(),
+});
 
-interface MemoryStore {
-  entries: MemoryEntry[];
-}
+const MemoryStoreSchema = z.object({
+  entries: z.array(MemoryEntrySchema),
+});
+
+type MemoryEntry = z.infer<typeof MemoryEntrySchema>;
+type MemoryStore = z.infer<typeof MemoryStoreSchema>;
 
 // The artifact subset both Agent and the test fake provide.
 type MemoryHandle = Pick<
@@ -45,12 +50,20 @@ async function readMemory(handle: MemoryHandle): Promise<MemoryStore> {
     .filter((artifact) => artifact.path === MEMORY_ARTIFACT_PATH)
     .sort((a, b) => b.version - a.version)[0];
   if (!latest) {
+    // Nothing has ever been written — a legitimately empty store.
     return { entries: [] };
   }
-  const store = await handle.readArtifactJson<MemoryStore>({
-    artifactId: latest.artifactId,
-  });
-  return store && Array.isArray(store.entries) ? store : { entries: [] };
+  // The artifact exists, so a missing/invalid payload is a real error. Surface
+  // it loudly instead of masking it as "no memory" — otherwise the next write
+  // would silently bury a corrupt store.
+  const raw = await handle.readArtifactJson({ artifactId: latest.artifactId });
+  const parsed = MemoryStoreSchema.safeParse(raw);
+  if (!parsed.success) {
+    const message = `corrupt memory artifact ${MEMORY_ARTIFACT_PATH} (v${latest.version}): ${parsed.error.message}`;
+    console.error(message);
+    throw new Error(message);
+  }
+  return parsed.data;
 }
 
 async function writeMemory(

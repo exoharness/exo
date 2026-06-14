@@ -140,4 +140,16 @@ describe("memory tools", () => {
     const { context } = makeContext();
     expect(await memoryInstruction(context)).toBeNull();
   });
+
+  it("throws on a corrupt memory artifact instead of silently returning empty", async () => {
+    const { context, agent } = makeContext();
+    // Write a payload that exists but does not match the schema.
+    await agent.writeArtifactJson({
+      path: "memory/exoclaw-memory.json",
+      value: { entries: "not-an-array" },
+    });
+    await expect(memoryInstruction(context)).rejects.toThrow(
+      /corrupt memory artifact/,
+    );
+  });
 });
