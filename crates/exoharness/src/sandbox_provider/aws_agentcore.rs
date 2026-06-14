@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::sandbox::{
     ManagedSandboxBackend, ManagedSandboxHandle, SandboxCommand, SandboxCommandOutput,
     SandboxNetworkPolicy, SandboxRequest, SandboxSpec, SnapshotPayload, sandbox_spec_hash,
+    validate_durable_file_systems,
 };
 use crate::sandbox_provider::process_bridge;
 
@@ -346,6 +347,15 @@ fn reject_unsupported_request(request: &SandboxRequest) -> Result<()> {
         bail!(
             "AgentCore sandbox backend does not support host bind-mounts; remove conversation mounts or use a local sandbox provider"
         );
+    }
+    validate_durable_file_systems(&request.spec.durable_file_systems)?;
+    if request
+        .spec
+        .durable_file_systems
+        .iter()
+        .any(|file_system| matches!(file_system.mode, crate::FileSystemMountMode::ReadOnly))
+    {
+        bail!("AgentCore sandbox backend does not support read-only durable file systems");
     }
     if matches!(request.spec.network, SandboxNetworkPolicy::Disabled) {
         bail!("AgentCore sandbox backend cannot enforce disabled networking");

@@ -369,6 +369,8 @@ pub enum EventData {
         image: String,
         default_workdir: String,
         file_system_mounts: Vec<FileSystemMount>,
+        #[serde(default)]
+        durable_file_systems: Vec<DurableFileSystem>,
         enable_networking: bool,
         idle_seconds: u64,
     },
@@ -495,6 +497,13 @@ pub struct FileSystemMount {
     pub internal: Option<bool>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct DurableFileSystem {
+    pub name: String,
+    pub mount_path: String,
+    pub mode: FileSystemMountMode,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreateSandboxRequest {
     #[serde(default)]
@@ -503,6 +512,7 @@ pub struct CreateSandboxRequest {
     pub image: String,
     pub default_workdir: Option<String>,
     pub file_system_mounts: Option<Vec<FileSystemMount>>,
+    pub durable_file_systems: Option<Vec<DurableFileSystem>>,
     pub enable_networking: Option<bool>,
     pub idle_seconds: Option<u64>,
 }

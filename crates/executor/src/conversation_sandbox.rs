@@ -71,6 +71,7 @@ pub(crate) async fn create_conversation_sandbox(
             image: spec.image,
             default_workdir: Some(spec.default_workdir),
             file_system_mounts: Some(spec.file_system_mounts),
+            durable_file_systems: None,
             enable_networking: Some(spec.enable_networking),
             idle_seconds: Some(spec.idle_seconds),
         })

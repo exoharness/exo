@@ -70,6 +70,7 @@ pub(crate) async fn ensure_agent_sandbox(
             image: spec.image.clone(),
             default_workdir: Some(spec.default_workdir.clone()),
             file_system_mounts: Some(spec.file_system_mounts.clone()),
+            durable_file_systems: None,
             enable_networking: Some(spec.enable_networking),
             idle_seconds: Some(spec.idle_seconds),
         })

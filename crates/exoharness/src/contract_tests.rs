@@ -10,8 +10,8 @@ use tokio::time::timeout;
 use crate::{
     AddEventsRequest, BeginTurnRequest, Binding, EventData, EventKind, EventQuery,
     EventQueryDirection, ExoHarness, ForkConversationRequest, ListConversationsRequest,
-    ManagedSandboxHandle, NewAgentRequest, NewConversationRequest, SandboxCommand, Uuid7,
-    WriteArtifactRequest,
+    ManagedSandboxBackend, ManagedSandboxHandle, NewAgentRequest, NewConversationRequest,
+    SandboxCommand, SandboxRequest, Uuid7, WriteArtifactRequest,
 };
 
 pub async fn supports_agent_and_conversation_crud(harness: Arc<dyn ExoHarness>) {
@@ -388,6 +388,44 @@ pub async fn sandbox_handle_start_process_supports_long_running_request_response
     }
 }
 
+pub async fn sandbox_backend_durable_file_system_survives_stop_and_reacquire(
+    backend: Arc<dyn ManagedSandboxBackend>,
+    request: SandboxRequest,
+) -> crate::Result<()> {
+    let mount_path = request
+        .spec
+        .durable_file_systems
+        .first()
+        .context("durable filesystem contract requires a durable filesystem")?
+        .mount_path
+        .clone();
+    let marker = format!("durable-{}", Uuid7::now());
+
+    let first = backend
+        .acquire(request.clone())
+        .await
+        .context("acquire sandbox for durable filesystem write")?;
+    let write_result = write_durable_marker(Arc::clone(&first), &mount_path, &marker).await;
+    stop_after_contract(
+        first,
+        write_result,
+        "stop sandbox after durable filesystem write",
+    )
+    .await?;
+
+    let second = backend
+        .acquire(request)
+        .await
+        .context("reacquire sandbox for durable filesystem read")?;
+    let read_result = read_durable_marker(Arc::clone(&second), &mount_path, &marker).await;
+    stop_after_contract(
+        second,
+        read_result,
+        "stop sandbox after durable filesystem read",
+    )
+    .await
+}
+
 async fn sandbox_handle_start_process_supports_interactive_stdio_and_env_inner(
     handle: Arc<dyn ManagedSandboxHandle>,
 ) -> crate::Result<()> {
@@ -467,6 +505,95 @@ async fn sandbox_handle_start_process_supports_interactive_stdio_and_env_inner(
         bail!("unexpected stderr: {stderr:?}");
     }
     Ok(())
+}
+
+async fn write_durable_marker(
+    handle: Arc<dyn ManagedSandboxHandle>,
+    mount_path: &str,
+    marker: &str,
+) -> crate::Result<()> {
+    let mut env = std::collections::HashMap::new();
+    env.insert("EXO_DURABLE_MOUNT".to_string(), mount_path.to_string());
+    env.insert("EXO_DURABLE_MARKER".to_string(), marker.to_string());
+    let output = handle
+        .exec(&SandboxCommand {
+            argv: vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                "mkdir -p \"$EXO_DURABLE_MOUNT\" && printf '%s' \"$EXO_DURABLE_MARKER\" > \"$EXO_DURABLE_MOUNT/marker.txt\""
+                    .to_string(),
+            ],
+            env,
+            display_argv: None,
+            cwd: None,
+            timeout: Some(Duration::from_secs(30)),
+        })
+        .await
+        .context("write durable filesystem marker")?;
+    if !output.ok {
+        bail!(
+            "write durable filesystem marker failed with exit code {:?}: {}{}",
+            output.exit_code,
+            output.stdout,
+            output.stderr
+        );
+    }
+    Ok(())
+}
+
+async fn read_durable_marker(
+    handle: Arc<dyn ManagedSandboxHandle>,
+    mount_path: &str,
+    expected_marker: &str,
+) -> crate::Result<()> {
+    let mut env = std::collections::HashMap::new();
+    env.insert("EXO_DURABLE_MOUNT".to_string(), mount_path.to_string());
+    let output = handle
+        .exec(&SandboxCommand {
+            argv: vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                "cat \"$EXO_DURABLE_MOUNT/marker.txt\"".to_string(),
+            ],
+            env,
+            display_argv: None,
+            cwd: None,
+            timeout: Some(Duration::from_secs(30)),
+        })
+        .await
+        .context("read durable filesystem marker")?;
+    if !output.ok {
+        bail!(
+            "read durable filesystem marker failed with exit code {:?}: {}{}",
+            output.exit_code,
+            output.stdout,
+            output.stderr
+        );
+    }
+    if output.stdout != expected_marker {
+        bail!(
+            "durable filesystem marker mismatch: expected {:?}, got {:?}",
+            expected_marker,
+            output.stdout
+        );
+    }
+    Ok(())
+}
+
+async fn stop_after_contract(
+    handle: Arc<dyn ManagedSandboxHandle>,
+    result: crate::Result<()>,
+    context: &str,
+) -> crate::Result<()> {
+    let stop_result = handle.stop().await.with_context(|| context.to_string());
+    match (result, stop_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(stop_error)) => Err(anyhow!(
+            "{error:#}; also failed to stop sandbox after contract: {stop_error:#}"
+        )),
+    }
 }
 
 async fn sandbox_handle_start_process_supports_long_running_request_response_protocol_inner(
