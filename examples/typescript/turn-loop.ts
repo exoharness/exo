@@ -23,7 +23,7 @@ import {
 import { resolveLlmBinding } from "./shared";
 
 export interface ResponsesTurnLoopOptions {
-  instructions?: (context: TurnContext) => Message[];
+  instructions?: (context: TurnContext) => Message[] | Promise<Message[]>;
   registerTools?: (
     tools: HarnessToolRegistry,
     context: TurnContext,
@@ -113,9 +113,12 @@ async function runResponsesTurnLoop(
     if (options.registerTools) {
       await options.registerTools(tools, context);
     }
+    const instructions = options.instructions
+      ? await options.instructions(context)
+      : basicHarnessInstructions(context);
     const messages = await materializePromptMessages(
       conversation,
-      options.instructions?.(context) ?? basicHarnessInstructions(context),
+      instructions,
     );
     const request: NativeResponsesRequest = {
       model,
