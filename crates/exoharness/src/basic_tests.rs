@@ -453,6 +453,71 @@ async fn artifacts_are_versioned_by_path() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn read_latest_artifact_returns_highest_version() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
+        .await
+        .expect("harness should initialize");
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+
+    // No artifact yet at this path.
+    assert!(
+        agent
+            .latest_artifact_version("memory/store.json")
+            .await
+            .expect("latest version")
+            .is_none()
+    );
+    assert!(
+        agent
+            .read_latest_artifact("memory/store.json")
+            .await
+            .expect("read latest")
+            .is_none()
+    );
+
+    for contents in ["v1", "v2", "v3"] {
+        agent
+            .write_artifact(crate::WriteArtifactRequest {
+                path: "memory/store.json".to_string(),
+                contents: contents.as_bytes().to_vec(),
+            })
+            .await
+            .expect("write artifact");
+    }
+    // A decoy at a different path must not be selected.
+    agent
+        .write_artifact(crate::WriteArtifactRequest {
+            path: "config/other.json".to_string(),
+            contents: b"decoy".to_vec(),
+        })
+        .await
+        .expect("write decoy");
+
+    let latest_version = agent
+        .latest_artifact_version("memory/store.json")
+        .await
+        .expect("latest version")
+        .expect("some version");
+    assert_eq!(latest_version.version, 3);
+    assert_eq!(latest_version.path, "memory/store.json");
+
+    let latest = agent
+        .read_latest_artifact("memory/store.json")
+        .await
+        .expect("read latest")
+        .expect("some artifact");
+    assert_eq!(latest.version.version, 3);
+    assert_eq!(latest.contents, b"v3");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn artifacts_store_metadata_and_raw_contents_separately() {
     let tempdir = TempDir::new().expect("tempdir");
     let harness = BasicExoHarness::new(local_test_config(tempdir.path()))

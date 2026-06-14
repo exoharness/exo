@@ -44,22 +44,30 @@ function memoryHandle(context: TurnContext): MemoryHandle {
   return context.exoharness.current.agent;
 }
 
+// Reads and validates the store. Throws on a corrupt artifact (invalid JSON or
+// failing the schema) so the write path refuses to bury it; the read/inject
+// path catches this in memoryInstruction. A missing artifact is not corrupt —
+// it is a legitimately empty store.
 async function readMemory(handle: MemoryHandle): Promise<MemoryStore> {
-  const raw = await handle.readLatestArtifactJson({
-    path: MEMORY_ARTIFACT_PATH,
-  });
+  let raw: unknown;
+  try {
+    raw = await handle.readLatestArtifactJson({ path: MEMORY_ARTIFACT_PATH });
+  } catch (cause) {
+    // readLatestArtifactJson parses the stored bytes; it throws if they are not
+    // valid JSON. Treat that the same as a schema failure below.
+    throw new Error(
+      `corrupt memory artifact ${MEMORY_ARTIFACT_PATH}: not valid JSON`,
+      { cause },
+    );
+  }
   if (raw === null) {
-    // Nothing has ever been written — a legitimately empty store.
     return { entries: [] };
   }
-  // The artifact exists, so an invalid payload is a real error. Surface it
-  // loudly instead of masking it as "no memory" — otherwise the next write
-  // would silently bury a corrupt store.
   const parsed = MemoryStoreSchema.safeParse(raw);
   if (!parsed.success) {
-    const message = `corrupt memory artifact ${MEMORY_ARTIFACT_PATH}: ${parsed.error.message}`;
-    console.error(message);
-    throw new Error(message);
+    throw new Error(
+      `corrupt memory artifact ${MEMORY_ARTIFACT_PATH}: ${parsed.error.message}`,
+    );
   }
   return parsed.data;
 }
@@ -180,7 +188,23 @@ export function registerMemoryTools(registry: HarnessToolRegistry): void {
 export async function memoryInstruction(
   context: TurnContext,
 ): Promise<Message | null> {
-  const store = await readMemory(memoryHandle(context));
+  let store: MemoryStore;
+  try {
+    store = await readMemory(memoryHandle(context));
+  } catch (error) {
+    // Prompt assembly runs every model round, so a corrupt store must not brick
+    // the agent in every conversation. Degrade the read: log loudly and tell the
+    // model memory is unavailable rather than silently pretending it is empty.
+    // The write path (remember/forget) still throws, so nothing overwrites the
+    // corrupt artifact while it is broken.
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error(`memory unavailable during prompt assembly: ${detail}`);
+    return {
+      role: "developer",
+      content:
+        "Your durable memory could not be read this turn (the stored memory artifact appears corrupt). Do not assume it is empty; if the user asks about saved facts, tell them memory is temporarily unavailable.",
+    };
+  }
   if (store.entries.length === 0) {
     return null;
   }

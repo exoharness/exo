@@ -133,15 +133,27 @@ describe("memory tools", () => {
     expect(await memoryInstruction(context)).toBeNull();
   });
 
-  it("throws on a corrupt memory artifact instead of silently returning empty", async () => {
+  it("makes the write path (remember) reject on a corrupt store", async () => {
     const { context, agent } = makeContext();
-    // Write a payload that exists but does not match the schema.
+    // A payload that exists but does not match the schema.
     await agent.writeArtifactJson({
       path: "memory/exoclaw-memory.json",
       value: { entries: "not-an-array" },
     });
-    await expect(memoryInstruction(context)).rejects.toThrow(
+    await expect(call("remember", { text: "x" }, context)).rejects.toThrow(
       /corrupt memory artifact/,
     );
+  });
+
+  it("degrades the read path on a corrupt store instead of throwing", async () => {
+    const { context, agent } = makeContext();
+    await agent.writeArtifactJson({
+      path: "memory/exoclaw-memory.json",
+      value: { entries: "not-an-array" },
+    });
+    // Prompt assembly must not throw — it returns a degraded note instead.
+    const message = await memoryInstruction(context);
+    expect(message).not.toBeNull();
+    expect(String(message?.content)).toMatch(/unavailable|corrupt/i);
   });
 });
