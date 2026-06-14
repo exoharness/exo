@@ -1,11 +1,69 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  attachmentKindForContentType,
   createResilienceHandlers,
   describeCloseCode,
   errorMessage,
+  inboundAttachments,
   startConnectionWatchdog,
 } from "./discord";
+
+describe("attachmentKindForContentType", () => {
+  it("classifies media mime types", () => {
+    expect(attachmentKindForContentType("image/png")).toBe("image");
+    expect(attachmentKindForContentType("IMAGE/JPEG")).toBe("image");
+    expect(attachmentKindForContentType("video/mp4")).toBe("video");
+    expect(attachmentKindForContentType("audio/ogg")).toBe("audio");
+  });
+
+  it("falls back to document for unknown or missing types", () => {
+    expect(attachmentKindForContentType("application/pdf")).toBe("document");
+    expect(attachmentKindForContentType(null)).toBe("document");
+    expect(attachmentKindForContentType(undefined)).toBe("document");
+  });
+});
+
+describe("inboundAttachments", () => {
+  it("maps discord attachments to protocol attachments", () => {
+    const mapped = inboundAttachments([
+      {
+        url: "https://cdn.discordapp.com/a.png",
+        contentType: "image/png",
+        name: "a.png",
+      },
+      {
+        url: "https://cdn.discordapp.com/notes.txt",
+        contentType: null,
+        name: null,
+      },
+    ]);
+    expect(mapped).toEqual([
+      {
+        kind: "image",
+        path: null,
+        url: "https://cdn.discordapp.com/a.png",
+        data: null,
+        mimeType: "image/png",
+        fileName: "a.png",
+      },
+      {
+        kind: "document",
+        path: null,
+        url: "https://cdn.discordapp.com/notes.txt",
+        data: null,
+        mimeType: null,
+        fileName: null,
+      },
+    ]);
+  });
+
+  it("skips attachments without a url", () => {
+    expect(inboundAttachments([{ url: "", contentType: "image/png" }])).toEqual(
+      [],
+    );
+  });
+});
 
 describe("errorMessage", () => {
   it("uses the message of an Error", () => {

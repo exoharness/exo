@@ -43,6 +43,8 @@ pub enum WorkerEvent {
         message_id: Option<String>,
         #[serde(default)]
         metadata: Value,
+        #[serde(default)]
+        attachments: Vec<AdapterAttachment>,
     },
     Lifecycle {
         name: String,
@@ -300,6 +302,32 @@ mod tests {
     use tokio::sync::{Notify, oneshot};
 
     use super::*;
+
+    #[test]
+    fn message_event_parses_with_and_without_attachments() {
+        let plain: WorkerEvent = serde_json::from_str(
+            r#"{"type":"message","target":"channel-1","text":"hi","metadata":{}}"#,
+        )
+        .unwrap();
+        let WorkerEvent::Message { attachments, .. } = plain else {
+            panic!("expected message event");
+        };
+        assert!(attachments.is_empty());
+
+        let rich: WorkerEvent = serde_json::from_str(
+            r#"{"type":"message","target":"channel-1","text":"hi","attachments":[{"kind":"image","url":"https://cdn.example/a.png","mimeType":"image/png","fileName":"a.png"}]}"#,
+        )
+        .unwrap();
+        let WorkerEvent::Message { attachments, .. } = rich else {
+            panic!("expected message event");
+        };
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(
+            attachments[0].url.as_deref(),
+            Some("https://cdn.example/a.png")
+        );
+        assert_eq!(attachments[0].mime_type.as_deref(), Some("image/png"));
+    }
 
     #[tokio::test]
     async fn stops_worker_when_cancellation_trips() {

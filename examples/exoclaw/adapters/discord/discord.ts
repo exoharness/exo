@@ -1,4 +1,48 @@
-import type { WorkerInboundEvent } from "../protocol";
+import type { AdapterAttachment, WorkerInboundEvent } from "../protocol";
+
+export type DiscordAttachmentLike = {
+  url: string;
+  contentType?: string | null;
+  name?: string | null;
+};
+
+export function attachmentKindForContentType(
+  contentType: string | null | undefined,
+): AdapterAttachment["kind"] {
+  const mime = (contentType ?? "").toLowerCase();
+  if (mime.startsWith("image/")) {
+    return "image";
+  }
+  if (mime.startsWith("video/")) {
+    return "video";
+  }
+  if (mime.startsWith("audio/")) {
+    return "audio";
+  }
+  return "document";
+}
+
+/// Maps inbound Discord attachments to protocol attachments. Discord CDN URLs
+/// carry expiring signatures, so the host downloads them promptly.
+export function inboundAttachments(
+  attachments: Iterable<DiscordAttachmentLike>,
+): AdapterAttachment[] {
+  const mapped: AdapterAttachment[] = [];
+  for (const attachment of attachments) {
+    if (!attachment.url) {
+      continue;
+    }
+    mapped.push({
+      kind: attachmentKindForContentType(attachment.contentType),
+      path: null,
+      url: attachment.url,
+      data: null,
+      mimeType: attachment.contentType ?? null,
+      fileName: attachment.name ?? null,
+    });
+  }
+  return mapped;
+}
 
 export function errorMessage(value: unknown): string {
   if (value instanceof Error) {

@@ -18,7 +18,11 @@ import {
   parseWorkerCommand,
   writeWorkerEvent,
 } from "../protocol";
-import { createResilienceHandlers, startConnectionWatchdog } from "./discord";
+import {
+  createResilienceHandlers,
+  inboundAttachments,
+  startConnectionWatchdog,
+} from "./discord";
 import { DiscordVoice } from "./voice";
 
 const SEND_TIMEOUT_MS = 60_000;
@@ -130,6 +134,7 @@ client.on("messageCreate", (message) => {
       guildId: message.guildId,
       channelType: message.channel.type,
     },
+    attachments: inboundAttachments(message.attachments.values()),
   });
 });
 

@@ -776,7 +776,7 @@ async fn read_sandbox_file(
     }
 }
 
-async fn download_attachment(url: &str) -> Result<Vec<u8>> {
+pub(crate) async fn download_attachment(url: &str) -> Result<Vec<u8>> {
     let client = reqwest::Client::builder()
         .timeout(ATTACHMENT_DOWNLOAD_TIMEOUT)
         .build()

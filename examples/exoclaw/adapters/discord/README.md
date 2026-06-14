@@ -178,3 +178,11 @@ Discord supports outbound image, video, audio, and document attachments through 
 ```
 
 For files created in the sandbox, use `sandboxPath`. For remote media, use an HTTPS `url`. For small inline payloads, use base64 `data` or a data URL.
+
+### Inbound Attachments
+
+Inbound Discord attachments are forwarded with the message wakeup:
+
+- Images (up to 4 per message, 8 MB each) are downloaded by the host and attached to the wakeup message as multimodal content, so the model can view and analyze them directly.
+- Every attachment (including videos, audio, and documents) is also listed in the wakeup prompt with its kind, file name, mime type, and Discord CDN URL. Discord CDN URLs carry expiring signatures, so download promptly (e.g. with `curl` in the sandbox) if the raw file is needed.
+- Oversized or undownloadable images fall back to the URL listing instead of failing the message.

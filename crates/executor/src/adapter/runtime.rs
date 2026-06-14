@@ -10,9 +10,13 @@ use serde::Deserialize;
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
 
+use base64::Engine;
+use lingua::universal::{TextContentPart, UserContent, UserContentPart};
+
 use super::store::{AdapterStore, stable_target_key};
+use super::tools::download_attachment;
 use super::types::{
-    AdapterAttachment, AdapterConfig, AdapterEventType, AdapterRecord,
+    AdapterAttachment, AdapterAttachmentKind, AdapterConfig, AdapterEventType, AdapterRecord,
     AdapterTargetConversationRecord, now_ms,
 };
 use super::worker::{WorkerCommand, WorkerEvent, run_worker_loop};
@@ -20,7 +24,7 @@ use crate::conversation_events::{
     HOST_EVENT_ADAPTER_RUNNER_DRAINING, HOST_EVENT_ADAPTER_RUNNER_STARTED, HOST_EVENT_REBOOT,
     record_host_event,
 };
-use crate::conversation_wakeup::send_conversation_wakeup;
+use crate::conversation_wakeup::{send_conversation_wakeup, send_conversation_wakeup_content};
 use crate::{CreateConversationRequest, Harness, HarnessAgent, HarnessConversation};
 
 const INITIAL_RESTART_DELAY: Duration = Duration::from_secs(5);
@@ -570,6 +574,7 @@ async fn handle_worker_event(
             text,
             message_id,
             metadata,
+            attachments,
         } => {
             let conversation = resolve_message_conversation(
                 store,
@@ -591,6 +596,7 @@ async fn handle_worker_event(
                 text,
                 message_id,
                 metadata,
+                attachments,
             )
             .await
         }
@@ -725,6 +731,14 @@ fn short_slug_part(value: &str) -> String {
         .collect()
 }
 
+// Bound on inbound images forwarded to the model per message. Extra images
+// are still listed in the prompt text with their URLs.
+const MAX_INBOUND_IMAGES: usize = 4;
+// Raw-byte cap per inbound image sent to the model. Larger files are listed
+// by URL only so a single huge upload cannot blow up the model request.
+const MAX_INBOUND_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+
+#[allow(clippy::too_many_arguments)]
 async fn handle_worker_message(
     store: &AdapterStore,
     conversation: &dyn HarnessConversation,
@@ -735,6 +749,7 @@ async fn handle_worker_message(
     text: String,
     message_id: Option<String>,
     _metadata: serde_json::Value,
+    attachments: Vec<AdapterAttachment>,
 ) -> Result<()> {
     if let Some(message_id) = &message_id
         && !store
@@ -754,29 +769,40 @@ async fn handle_worker_message(
             adapter.id.clone(),
             AdapterEventType::Inbound,
             format!(
-                "{} adapter message from {} to {}",
+                "{} adapter message from {} to {}{}",
                 config.adapter_type,
                 sender.as_deref().unwrap_or("unknown"),
-                target
+                target,
+                if attachments.is_empty() {
+                    String::new()
+                } else {
+                    format!(" with {} attachment(s)", attachments.len())
+                },
             ),
         )
         .await?;
-    let wakeup_result = send_conversation_wakeup(
-        conversation,
-        format!(
-            "{} message received at target `{}` from {} via adapter `{}`:\n\n{}\n\nThis message came from an external adapter. If you answer this message, you MUST reply externally with send_adapter_message using adapterId `{}` and target `{}`. Do not answer only in the REPL unless you are explicitly deciding that no external reply should be sent. If this asks you to schedule future work whose results should be posted back externally, include adapterId `{}` and target `{}` in the scheduled task reportPrompt.",
-            config.adapter_type,
-            target,
-            sender.as_deref().unwrap_or("unknown"),
-            adapter.name,
-            text,
-            adapter.id,
-            target,
-            adapter.id,
-            target,
-        ),
-    )
-    .await;
+    let image_parts = download_inbound_images(&adapter.id, store, &attachments).await;
+    let prompt = compose_inbound_wakeup_prompt(
+        config,
+        adapter,
+        &target,
+        sender.as_deref(),
+        &text,
+        &attachments,
+        image_parts.len(),
+    );
+    let content = if image_parts.is_empty() {
+        UserContent::String(prompt)
+    } else {
+        let mut parts = vec![UserContentPart::Text(TextContentPart {
+            text: prompt,
+            encrypted_content: None,
+            provider_options: None,
+        })];
+        parts.extend(image_parts);
+        UserContent::Array(parts)
+    };
+    let wakeup_result = send_conversation_wakeup_content(conversation, content).await;
     // A failed model turn must not tear down the worker: the external
     // connection is healthy and dropping it loses every queued message.
     // Record the failure and keep processing events.
@@ -798,6 +824,118 @@ async fn handle_worker_message(
             .await?;
     }
     Ok(())
+}
+
+fn inbound_image_candidates(attachments: &[AdapterAttachment]) -> Vec<&AdapterAttachment> {
+    attachments
+        .iter()
+        .filter(|attachment| {
+            matches!(attachment.kind, AdapterAttachmentKind::Image) && attachment.url.is_some()
+        })
+        .take(MAX_INBOUND_IMAGES)
+        .collect()
+}
+
+/// Downloads inbound image attachments and converts them to multimodal
+/// message parts. Download failures are recorded but never fail the inbound
+/// message: the wakeup prompt always lists attachment URLs as a fallback.
+async fn download_inbound_images(
+    adapter_id: &str,
+    store: &AdapterStore,
+    attachments: &[AdapterAttachment],
+) -> Vec<UserContentPart> {
+    let mut parts = Vec::new();
+    for attachment in inbound_image_candidates(attachments) {
+        let Some(url) = attachment.url.as_deref() else {
+            continue;
+        };
+        match download_attachment(url).await {
+            Ok(bytes) if bytes.len() <= MAX_INBOUND_IMAGE_BYTES => {
+                parts.push(UserContentPart::Image {
+                    image: lingua::serde_json::Value::String(
+                        base64::engine::general_purpose::STANDARD.encode(&bytes),
+                    ),
+                    media_type: attachment.mime_type.clone(),
+                    provider_options: None,
+                });
+            }
+            Ok(bytes) => {
+                tracing::warn!(
+                    adapter_id,
+                    url,
+                    bytes = bytes.len(),
+                    "inbound image exceeds size cap; passing URL only"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(adapter_id, url, %error, "inbound image download failed");
+                if let Err(record_error) = store
+                    .record_event(
+                        adapter_id.to_string(),
+                        AdapterEventType::Error,
+                        format!("inbound attachment download failed: {error}"),
+                    )
+                    .await
+                {
+                    tracing::error!(adapter_id, %record_error, "failed to record download error");
+                }
+            }
+        }
+    }
+    parts
+}
+
+fn attachment_kind_label(kind: AdapterAttachmentKind) -> &'static str {
+    match kind {
+        AdapterAttachmentKind::Image => "image",
+        AdapterAttachmentKind::Video => "video",
+        AdapterAttachmentKind::Audio => "audio",
+        AdapterAttachmentKind::Document => "document",
+    }
+}
+
+fn compose_inbound_wakeup_prompt(
+    config: &AdapterConfig,
+    adapter: &AdapterRecord,
+    target: &str,
+    sender: Option<&str>,
+    text: &str,
+    attachments: &[AdapterAttachment],
+    attached_image_count: usize,
+) -> String {
+    let sender = sender.unwrap_or("unknown");
+    let mut prompt = format!(
+        "{} message received at target `{}` from {} via adapter `{}`:\n\n{}",
+        config.adapter_type, target, sender, adapter.name, text,
+    );
+    if !attachments.is_empty() {
+        prompt.push_str("\n\nThe message includes these attachments:\n");
+        for attachment in attachments {
+            let name = attachment.file_name.as_deref().unwrap_or("(unnamed)");
+            let mime = attachment.mime_type.as_deref().unwrap_or("unknown type");
+            let url = attachment.url.as_deref().unwrap_or("no url");
+            prompt.push_str(&format!(
+                "- {} `{}` ({}) — {}\n",
+                attachment_kind_label(attachment.kind),
+                name,
+                mime,
+                url,
+            ));
+        }
+        if attached_image_count > 0 {
+            prompt.push_str(&format!(
+                "\n{attached_image_count} image(s) are attached to this message so you can view them directly.",
+            ));
+        }
+        prompt.push_str(
+            "\nAttachment URLs may expire quickly; if you need the raw file, download it promptly (e.g. with curl in your sandbox).",
+        );
+    }
+    prompt.push_str(&format!(
+        "\n\nThis message came from an external adapter. If you answer this message, you MUST reply externally with send_adapter_message using adapterId `{}` and target `{}`. Do not answer only in the REPL unless you are explicitly deciding that no external reply should be sent. If this asks you to schedule future work whose results should be posted back externally, include adapterId `{}` and target `{}` in the scheduled task reportPrompt.",
+        adapter.id, target, adapter.id, target,
+    ));
+    prompt
 }
 
 async fn record_worker_lifecycle(
@@ -924,11 +1062,43 @@ mod tests {
         };
         AdapterConfig {
             adapter_type: "discord".to_string(),
-            worker_command: vec!["node".to_string()],
+            worker_command: vec!["true".to_string()],
             initialization,
             state_dir: None,
             secret_env: Vec::new(),
         }
+    }
+
+    fn test_attachment(kind: AdapterAttachmentKind, url: Option<&str>) -> AdapterAttachment {
+        AdapterAttachment {
+            kind,
+            path: None,
+            url: url.map(|url| url.to_string()),
+            data: None,
+            sandbox_path: None,
+            mime_type: Some("image/png".to_string()),
+            file_name: Some("photo.png".to_string()),
+        }
+    }
+
+    fn test_adapter_record() -> AdapterRecord {
+        AdapterRecord {
+            id: "adapter-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            name: "discord-dev".to_string(),
+            source: super::super::types::AdapterSource::Library,
+            enabled: true,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            config: test_adapter_config(),
+            last_connected_at_ms: None,
+            last_error: None,
+        }
+    }
+
+    fn test_adapter_config() -> AdapterConfig {
+        config_with_scope(None)
     }
 
     #[test]
@@ -965,5 +1135,63 @@ mod tests {
         assert!(a1.starts_with("adapter-"));
         // Slug must agree with the store's filename key for that target.
         assert!(a1.ends_with(&stable_target_key("channel-A")));
+    }
+
+    #[test]
+    fn image_candidates_filter_kind_url_and_cap() {
+        let attachments = vec![
+            test_attachment(AdapterAttachmentKind::Image, Some("https://a/1.png")),
+            test_attachment(AdapterAttachmentKind::Document, Some("https://a/doc.pdf")),
+            test_attachment(AdapterAttachmentKind::Image, None),
+            test_attachment(AdapterAttachmentKind::Image, Some("https://a/2.png")),
+            test_attachment(AdapterAttachmentKind::Image, Some("https://a/3.png")),
+            test_attachment(AdapterAttachmentKind::Image, Some("https://a/4.png")),
+            test_attachment(AdapterAttachmentKind::Image, Some("https://a/5.png")),
+        ];
+        let candidates = inbound_image_candidates(&attachments);
+        assert_eq!(candidates.len(), MAX_INBOUND_IMAGES);
+        assert_eq!(candidates[0].url.as_deref(), Some("https://a/1.png"));
+        assert_eq!(candidates[3].url.as_deref(), Some("https://a/4.png"));
+    }
+
+    #[test]
+    fn wakeup_prompt_without_attachments_matches_plain_format() {
+        let prompt = compose_inbound_wakeup_prompt(
+            &test_adapter_config(),
+            &test_adapter_record(),
+            "channel-9",
+            Some("martin"),
+            "hello",
+            &[],
+            0,
+        );
+        assert!(prompt.starts_with(
+            "discord message received at target `channel-9` from martin via adapter `discord-dev`:\n\nhello"
+        ));
+        assert!(!prompt.contains("attachments"));
+        assert!(prompt.contains("send_adapter_message using adapterId `adapter-1`"));
+    }
+
+    #[test]
+    fn wakeup_prompt_lists_attachments_and_attached_images() {
+        let attachments = vec![
+            test_attachment(AdapterAttachmentKind::Image, Some("https://a/1.png")),
+            test_attachment(AdapterAttachmentKind::Document, Some("https://a/doc.pdf")),
+        ];
+        let prompt = compose_inbound_wakeup_prompt(
+            &test_adapter_config(),
+            &test_adapter_record(),
+            "channel-9",
+            None,
+            "look at this",
+            &attachments,
+            1,
+        );
+        assert!(prompt.contains("from unknown"));
+        assert!(prompt.contains("The message includes these attachments:"));
+        assert!(prompt.contains("- image `photo.png` (image/png) — https://a/1.png"));
+        assert!(prompt.contains("- document `photo.png` (image/png) — https://a/doc.pdf"));
+        assert!(prompt.contains("1 image(s) are attached to this message"));
+        assert!(prompt.contains("Attachment URLs may expire quickly"));
     }
 }
