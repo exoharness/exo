@@ -29,6 +29,27 @@ const MAX_ATTACHMENT_BASE64_BYTES: usize = MAX_ATTACHMENT_BYTES.div_ceil(3) * 4 
 const ATTACHMENT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_ATTACHMENT_STDERR_BYTES: usize = 64 * 1024;
 
+#[derive(Debug, Clone)]
+pub struct AdapterCreationOptions {
+    worker_root: PathBuf,
+    default_irc_nick_prefix: String,
+    default_irc_username: String,
+}
+
+impl AdapterCreationOptions {
+    pub fn new(worker_root: impl Into<PathBuf>) -> Self {
+        Self {
+            worker_root: worker_root.into(),
+            default_irc_nick_prefix: "exo".to_string(),
+            default_irc_username: "exo".to_string(),
+        }
+    }
+
+    fn worker_command(&self, adapter_type: &str) -> Vec<String> {
+        worker_command(self.worker_root.join(adapter_type).join("worker.ts"))
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateAdapterArguments {
@@ -224,14 +245,14 @@ impl AdapterConversationScope {
     }
 }
 
-fn default_irc_nick() -> String {
+fn default_irc_nick(prefix: &str) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() % 10_000)
         .unwrap_or(0);
-    format!("exoclaw{:04}", suffix)
+    format!("{prefix}{suffix:04}")
 }
 
 impl AdapterCreationConfig {
@@ -245,21 +266,23 @@ impl AdapterCreationConfig {
         }
     }
 
-    fn into_adapter_config(self, source: AdapterSource) -> Result<AdapterConfig> {
+    fn into_adapter_config(
+        self,
+        source: AdapterSource,
+        options: &AdapterCreationOptions,
+    ) -> Result<AdapterConfig> {
         match self {
             Self::Irc(config) => {
                 require_source(source, AdapterSource::BuiltIn, "irc")?;
                 Ok(AdapterConfig {
                     adapter_type: "irc".to_string(),
-                    worker_command: bundled_worker_command(
-                        "examples/exoclaw/adapters/irc/worker.ts",
-                    ),
+                    worker_command: options.worker_command("irc"),
                     initialization: serde_json::json!({
                         "server": config.server,
                         "port": config.port,
                         "tls": config.tls,
-                        "nick": if config.nick.trim().is_empty() { default_irc_nick() } else { config.nick },
-                        "username": if config.username.trim().is_empty() { "exoclaw".to_string() } else { config.username },
+                        "nick": if config.nick.trim().is_empty() { default_irc_nick(&options.default_irc_nick_prefix) } else { config.nick },
+                        "username": if config.username.trim().is_empty() { options.default_irc_username.clone() } else { config.username },
                         "realname": config.realname,
                         "channel": config.channel,
                         "trigger": config.trigger.as_str(),
@@ -288,9 +311,7 @@ impl AdapterCreationConfig {
                 }
                 Ok(AdapterConfig {
                     adapter_type: "whatsapp".to_string(),
-                    worker_command: bundled_worker_command(
-                        "examples/exoclaw/adapters/whatsapp/worker.ts",
-                    ),
+                    worker_command: options.worker_command("whatsapp"),
                     initialization: serde_json::json!({
                         "authDir": config.auth_dir,
                         "linkMethod": config.link_method.map(|method| method.as_str()),
@@ -306,9 +327,7 @@ impl AdapterCreationConfig {
                 require_source(source, AdapterSource::Library, "signal")?;
                 Ok(AdapterConfig {
                     adapter_type: "signal".to_string(),
-                    worker_command: bundled_worker_command(
-                        "examples/exoclaw/adapters/signal/worker.ts",
-                    ),
+                    worker_command: options.worker_command("signal"),
                     initialization: serde_json::json!({
                         "account": config.account,
                         "deviceName": config.device_name,
@@ -339,9 +358,7 @@ impl AdapterCreationConfig {
                 }
                 Ok(AdapterConfig {
                     adapter_type: "discord".to_string(),
-                    worker_command: bundled_worker_command(
-                        "examples/exoclaw/adapters/discord/worker.ts",
-                    ),
+                    worker_command: options.worker_command("discord"),
                     initialization: serde_json::json!({
                         "tokenEnv": "EXO_DISCORD_BOT_TOKEN",
                         "defaultChannelId": config.default_channel_id,
@@ -371,9 +388,7 @@ impl AdapterCreationConfig {
                 }
                 Ok(AdapterConfig {
                     adapter_type: "agent-cli".to_string(),
-                    worker_command: bundled_worker_command(
-                        "examples/exoclaw/adapters/agent-cli/worker.ts",
-                    ),
+                    worker_command: options.worker_command("agent-cli"),
                     initialization: serde_json::json!({
                         "socketPath": config.socket_path,
                         "mountRoot": config.mount_root,
@@ -434,10 +449,7 @@ fn require_source(
     Ok(())
 }
 
-fn bundled_worker_command(relative_path: &str) -> Vec<String> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(relative_path);
+fn worker_command(path: PathBuf) -> Vec<String> {
     vec![
         "pnpm".to_string(),
         "tsx".to_string(),
@@ -449,12 +461,13 @@ pub async fn execute_create_adapter_tool(
     agent: &dyn AgentHandle,
     conversation: &dyn ConversationHandle,
     store: &AdapterStore,
+    options: &AdapterCreationOptions,
     request: &ToolRequest,
 ) -> Result<ToolResult> {
     let args =
         serde_json::from_value::<CreateAdapterArguments>(Value::Object(request.arguments.clone()))?;
     let adapter_type = args.config.adapter_type();
-    let config = args.config.into_adapter_config(args.source)?;
+    let config = args.config.into_adapter_config(args.source, options)?;
     let adapter = store
         .create_adapter(NewAdapter {
             agent_id: agent.record().id.to_string(),
@@ -982,6 +995,10 @@ mod tests {
     use crate::test_support::local_test_config;
     use crate::{AgentConfig, AgentHarnessKind, ConversationConfig};
 
+    fn test_creation_options() -> AdapterCreationOptions {
+        AdapterCreationOptions::new("/tmp/exo-adapters")
+    }
+
     #[test]
     fn access_denied_for_other_agent() {
         assert_eq!(
@@ -1060,6 +1077,7 @@ mod tests {
             agent.as_ref(),
             conversation.as_ref(),
             &store,
+            &test_creation_options(),
             &tool_request(
                 "create_adapter",
                 serde_json::json!({
@@ -1094,9 +1112,7 @@ mod tests {
         );
         assert_eq!(adapter.config.worker_command[0], "pnpm");
         assert_eq!(adapter.config.worker_command[1], "tsx");
-        assert!(
-            adapter.config.worker_command[2].ends_with("examples/exoclaw/adapters/irc/worker.ts")
-        );
+        assert!(adapter.config.worker_command[2].ends_with("/tmp/exo-adapters/irc/worker.ts"));
 
         let list_result = execute_list_adapters_tool(
             agent.as_ref(),
@@ -1126,11 +1142,12 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(config.adapter_type(), "agent-cli");
-        let adapter_config = config.into_adapter_config(AdapterSource::BuiltIn).unwrap();
+        let adapter_config = config
+            .into_adapter_config(AdapterSource::BuiltIn, &test_creation_options())
+            .unwrap();
         assert_eq!(adapter_config.adapter_type, "agent-cli");
         assert!(
-            adapter_config.worker_command[2]
-                .ends_with("examples/exoclaw/adapters/agent-cli/worker.ts")
+            adapter_config.worker_command[2].ends_with("/tmp/exo-adapters/agent-cli/worker.ts")
         );
         assert_eq!(
             adapter_config.initialization,
@@ -1155,11 +1172,11 @@ mod tests {
             .unwrap()
         };
         let error = parse("projects")
-            .into_adapter_config(AdapterSource::BuiltIn)
+            .into_adapter_config(AdapterSource::BuiltIn, &test_creation_options())
             .unwrap_err();
         assert!(error.to_string().contains("absolute host path"));
         let error = parse("/Users/me/projects")
-            .into_adapter_config(AdapterSource::Library)
+            .into_adapter_config(AdapterSource::Library, &test_creation_options())
             .unwrap_err();
         assert!(error.to_string().contains("source"));
     }
@@ -1292,6 +1309,7 @@ mod tests {
             agent.as_ref(),
             conversation.as_ref(),
             &store,
+            &test_creation_options(),
             &tool_request(
                 "create_adapter",
                 serde_json::json!({

@@ -360,8 +360,8 @@ impl CliContainerSandboxBackend {
 impl Drop for CliContainerSandboxBackend {
     fn drop(&mut self) {
         // Warm sandboxes intentionally outlive a single CLI/REPL process so a
-        // restarted Exoclaw agent can reattach to the same environment. Stale
-        // containers are cleaned by the orphan reaper on later backend startup.
+        // restarted agent can reattach to the same environment. Stale containers
+        // are cleaned by the orphan reaper on later backend startup.
     }
 }
 

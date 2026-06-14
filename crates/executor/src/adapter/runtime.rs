@@ -1028,7 +1028,7 @@ mod tests {
     #[test]
     fn claims_and_parses_fresh_reboot_notice() {
         let tempdir = tempfile::TempDir::new().unwrap();
-        let path = tempdir.path().join("exoclaw-reboot-notice.json");
+        let path = tempdir.path().join("adapter-reboot-notice.json");
         std::fs::write(
             &path,
             r#"{"requestedAt":"2026-06-09T19:39:02Z","reason":"restart-all"}"#,
@@ -1046,7 +1046,7 @@ mod tests {
     #[test]
     fn ignores_missing_and_malformed_reboot_notices() {
         let tempdir = tempfile::TempDir::new().unwrap();
-        let path = tempdir.path().join("exoclaw-reboot-notice.json");
+        let path = tempdir.path().join("adapter-reboot-notice.json");
         assert!(claim_reboot_notice(Some(&path)).is_none());
         assert!(claim_reboot_notice(None).is_none());
 

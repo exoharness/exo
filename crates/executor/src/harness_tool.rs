@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use crate::adapter::AdapterStore;
 use crate::adapter::tools::{
-    execute_create_adapter_tool, execute_delete_adapter_tool, execute_disable_adapter_tool,
-    execute_list_adapter_events_tool, execute_list_adapters_tool,
+    AdapterCreationOptions, execute_create_adapter_tool, execute_delete_adapter_tool,
+    execute_disable_adapter_tool, execute_list_adapter_events_tool, execute_list_adapters_tool,
     execute_send_adapter_message_tool,
 };
 use crate::agent_sandbox::{current_agent_sandbox, ensure_agent_sandbox};
@@ -28,7 +28,7 @@ use futures::io::AsyncReadExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-const SANDBOX_SNAPSHOT_REGISTRY_ARTIFACT_PATH: &str = "config/exoclaw-sandbox-snapshots.json";
+const SANDBOX_SNAPSHOT_REGISTRY_ARTIFACT_PATH: &str = "config/sandbox-snapshots.json";
 
 #[derive(Debug, Clone, Default)]
 pub struct BasicToolRuntime;
@@ -37,16 +37,19 @@ pub struct BasicToolRuntime;
 pub struct ExoclawToolRuntime {
     scheduler_store: SchedulerStore,
     adapter_store: AdapterStore,
+    adapter_creation_options: AdapterCreationOptions,
 }
 
 impl ExoclawToolRuntime {
     pub fn with_roots(
         scheduler_root: impl Into<PathBuf>,
         adapter_root: impl Into<PathBuf>,
+        adapter_worker_root: impl Into<PathBuf>,
     ) -> Self {
         Self {
             scheduler_store: SchedulerStore::new(scheduler_root),
             adapter_store: AdapterStore::new(adapter_root),
+            adapter_creation_options: AdapterCreationOptions::new(adapter_worker_root),
         }
     }
 }
@@ -146,7 +149,14 @@ impl ToolRuntime for ExoclawToolRuntime {
                 .await
             }
             "create_adapter" => {
-                execute_create_adapter_tool(agent, conversation, &self.adapter_store, request).await
+                execute_create_adapter_tool(
+                    agent,
+                    conversation,
+                    &self.adapter_store,
+                    &self.adapter_creation_options,
+                    request,
+                )
+                .await
             }
             "list_adapters" => {
                 execute_list_adapters_tool(agent, conversation, &self.adapter_store, request).await

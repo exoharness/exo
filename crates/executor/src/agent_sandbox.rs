@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::conversation_sandbox::{ConversationSandboxSpec, conversation_sandbox_spec};
 use crate::{AgentConfig, ConversationConfig};
 
-const AGENT_SANDBOX_ARTIFACT_PATH: &str = "config/exoclaw-agent-sandbox.json";
-const AGENT_SANDBOX_NAME_PREFIX: &str = "exoclaw-agent";
+const AGENT_SANDBOX_ARTIFACT_PATH: &str = "config/agent-sandbox.json";
+const AGENT_SANDBOX_NAME_PREFIX: &str = "agent-sandbox";
 
 #[derive(Clone)]
 pub(crate) struct AgentSandboxHandle {

@@ -313,6 +313,18 @@ adapters_pid_file() {
   echo "$ROOT_DIR/.exo/exoclaw-adapters.pid"
 }
 
+adapters_lock_file() {
+  echo "$ROOT_DIR/.exo/exoclaw-adapters.lock"
+}
+
+adapters_restart_file() {
+  echo "$ROOT_DIR/.exo/exoclaw-adapters.restart"
+}
+
+reboot_notice_file() {
+  echo "$ROOT_DIR/.exo/exoclaw-reboot-notice.json"
+}
+
 adapters_log_file() {
   echo "$ROOT_DIR/.exo/exoclaw-adapters.log"
 }
@@ -410,7 +422,11 @@ ensure_adapters() {
   EXO_GLOBAL_ARGS=()
   append_exo_global_args
   nohup "$EXO_BIN" "${EXO_GLOBAL_ARGS[@]}" --harness "$HARNESS" \
-    adapters run --limit "$ADAPTER_LIMIT" \
+    adapters run \
+      --limit "$ADAPTER_LIMIT" \
+      --lock-file "$(adapters_lock_file)" \
+      --drain-marker "$(adapters_restart_file)" \
+      --reboot-notice "$(reboot_notice_file)" \
     >>"$log_file" 2>&1 &
   echo "$!" >"$pid_file"
   echo "Adapter log: $log_file"

@@ -1,13 +1,12 @@
 # Exo Prompts
 
-This guide explains where prompts come from in Exo and how to change them. It
-is organized by layer:
+This guide maps the main places where Exo creates, stores, transforms, or
+injects model-visible prompt material. In Exo, a "prompt" is usually a
+`Message` assembled with durable conversation history before a model call. Some
+prompt-like text also lives in tool definitions, setup files, scheduler reports,
+adapter wakeups, and local Exoclaw profile files.
 
-- `exoharness` stores durable conversation state.
-- `executor` turns that state into model requests.
-- `exoclaw` is a concrete long-running agent built on those layers.
-
-If you only want to change how your local Exoclaw agent introduces itself or
+If you only want to change how your local Exoclaw instance introduces itself or
 behaves, start with [Changing Exoclaw Behavior](#changing-exoclaw-behavior).
 
 ## Mental Model
@@ -23,25 +22,25 @@ several sources:
 
 Most prompt changes should happen at the highest layer that matches the desired
 scope. Local identity belongs in local Exoclaw profile text. Adapter routing
-belongs in adapter wakeup prompts. Generic model history behavior belongs in
-executor prompt materialization.
+belongs in adapter wakeup prompts. Generic history behavior belongs in executor
+prompt materialization.
 
 ## Quick Change Guide
 
-| Goal                                                  | Best place to change                                                 |
-| ----------------------------------------------------- | -------------------------------------------------------------------- |
-| Change your local Exoclaw name/persona                | `.exo/exoclaw-profile.md`                                            |
-| Change committed Exoclaw identity for everyone        | `examples/exoclaw/prompts/me.md`                                     |
-| Change Exoclaw scheduler/adapter operating policy     | `examples/exoclaw/harness.ts`                                        |
-| Change what an adapter setup asks the agent to create | `examples/exoclaw/adapters/<adapter>/setup-prompt.md`                |
-| Change adapter-originated wakeup wording              | `crates/executor/src/adapter/runtime.rs`                             |
-| Change scheduled-task report wording                  | `crates/executor/src/scheduler_runtime.rs`                           |
-| Change TypeScript harness prompt assembly             | `examples/typescript/turn-loop.ts` and `typescript/harness/index.ts` |
-| Change Rust basic harness prompt assembly             | `crates/executor/src/basic.rs`                                       |
-| Change RLM system/root prompts                        | `crates/executor/src/rlm.rs`                                         |
-| Change tool-use guidance                              | tool definitions in `typescript/harness/*` or Rust tool definitions  |
+| Goal                                           | Best place to change                                                                                |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Change your local Exoclaw name/persona         | `.exo/exoclaw-profile.md`                                                                           |
+| Change committed Exoclaw identity for everyone | `examples/exoclaw/prompts/me.md`                                                                    |
+| Change Exoclaw operating policy                | `examples/exoclaw/harness.ts`                                                                       |
+| Change what adapter setup creates              | `examples/exoclaw/adapters/<adapter>/setup-prompt.md`                                               |
+| Change adapter-originated wakeup wording       | `crates/executor/src/adapter/runtime.rs`                                                            |
+| Change scheduled-task report wording           | `crates/executor/src/scheduler_runtime.rs`                                                          |
+| Change TypeScript prompt assembly              | `examples/typescript/turn-loop.ts` and `typescript/harness/index.ts`                                |
+| Change Rust basic harness prompt assembly      | `crates/executor/src/basic.rs`                                                                      |
+| Change RLM system/root prompts                 | `crates/executor/src/rlm.rs`                                                                        |
+| Change tool-use guidance                       | tool definitions in `typescript/harness/*`, `examples/exoclaw/*-tools.ts`, or Rust tool definitions |
 
-## exoharness
+## Exoharness
 
 `exoharness` is the durable state layer. It stores agents, conversations,
 events, artifacts, bindings, secrets, and sandbox records. It does not decide
@@ -51,8 +50,10 @@ Prompt-relevant state stored by `exoharness` includes:
 
 - conversation message events
 - tool request and tool result events
+- custom host events
 - agent records and conversation records
 - artifacts referenced by later prompts or tool results
+- sandbox lifecycle events
 
 The important user-facing idea is that history is durable. If a message was
 stored in a conversation event, later harnesses can rematerialize it into model
@@ -63,7 +64,7 @@ Relevant files:
 - `crates/exoharness/src/basic.rs`
 - `crates/exoharness/src/types.rs`
 
-## executor
+## Executor
 
 `executor` decides how to run a turn. It loads agent configuration, starts a
 turn, materializes prompt history, attaches tools, calls the model runtime, and
@@ -80,13 +81,13 @@ conversation history before each model round:
 
 - `crates/executor/src/basic.rs`
 
-For the TypeScript harness, the same pattern is exposed through:
+For TypeScript harnesses, the same pattern is exposed through:
 
 - `typescript/harness/index.ts`
 - `examples/typescript/turn-loop.ts`
 
-Change these paths when you want to alter the general prompt assembly behavior
-for a harness, not just a particular Exoclaw deployment.
+Change these paths when you want to alter general prompt assembly behavior for
+a harness, not just a particular Exoclaw deployment.
 
 ### Wakeup Prompts
 
@@ -94,9 +95,9 @@ Wakeups are synthetic user messages generated by host runtimes. They use:
 
 - `crates/executor/src/conversation_wakeup.rs`
 
-The wakeup helper sends a single user message into the conversation, runs the
-turn, then closes the session. This is used by CLI commands, scheduler reports,
-and external adapters.
+The wakeup helper sends a user message into the conversation, runs the turn, and
+then closes the session. This is used by CLI commands, scheduler reports, and
+external adapters.
 
 #### Adapter Wakeups
 
@@ -105,17 +106,22 @@ Adapter wakeups are created in:
 - `crates/executor/src/adapter/runtime.rs`
 
 This is the right place to change what the agent sees when Signal, Discord,
-WhatsApp, IRC, or another adapter receives an external message. The current
-adapter wakeup includes:
+WhatsApp, IRC, agent-cli, or another adapter receives an external message. The
+current adapter wakeup includes:
 
 - adapter type
 - external target
 - sender
 - adapter name
 - inbound text
+- attachment summaries when present
 - adapter id
 - instructions for external replies through `send_adapter_message`
 - instructions for preserving adapter id and target in scheduled task reports
+
+Discord image attachments are downloaded by the host and attached to the wakeup
+as multimodal model content when small enough; all attachments are also listed
+in the wakeup prompt with their metadata and URL.
 
 Change this prompt when the agent is making the wrong decision about whether or
 where to reply externally.
@@ -129,7 +135,7 @@ Scheduled task report prompts are created in:
 Each scheduled task stores a `reportPrompt`, defined by the agent when it calls
 `schedule_sandbox_task`. When a run completes, the scheduler wakeup combines
 that user-provided report prompt with run metadata, stdout/stderr previews, and
-an artifact reference.
+artifact references.
 
 Change scheduler wakeup wording when completed tasks are reported poorly. Change
 the `reportPrompt` itself when a particular task should report differently.
@@ -145,11 +151,31 @@ Important tool prompt surfaces:
 - `typescript/harness/built-in-tools.ts`
 - `typescript/harness/adapter-tools.ts`
 - `examples/exoclaw/scheduler-tools.ts`
+- `examples/exoclaw/sandbox-tools.ts`
+- `examples/exoclaw/guardian-tools.ts`
+- `examples/exoclaw/introspection-tools.ts`
+- `examples/exoclaw/tools/fal/fal-tools.ts`
 - `crates/executor/src/basic.rs`
 - `crates/executor/src/rlm.rs`
 
 Agent-created tools add more prompt material. Their `definition` and parameter
 schema become visible in later model rounds after the tool is installed.
+`uninstall_agent_tool` removes an installed generated tool from later rounds.
+
+### Model Runtime Role Mapping
+
+The TypeScript Responses runtime serializes Exo messages into provider request
+format in:
+
+- `typescript/model-runtime/responses.ts`
+
+In the current Responses path, Exo `system` and `developer` roles are both sent
+as provider `system` content. User, assistant, and tool content are converted
+separately. Response token and cost metadata are stored on `messages` events as
+`usage`.
+
+If provider behavior seems surprising, check this layer before changing source
+prompt text.
 
 ### RLM Prompts
 
@@ -168,7 +194,7 @@ Example TypeScript implementation:
 Change these only when you want to change the recursive language model workflow
 itself: how it uses the REPL, subqueries, context, or final-answer protocol.
 
-## exoclaw
+## Exoclaw
 
 Exoclaw is the long-running local control agent under `examples/exoclaw`. It is
 the layer most users should customize.
@@ -213,301 +239,20 @@ The Exoclaw harness builds its instruction list in:
 
 - `examples/exoclaw/harness.ts`
 
-It loads:
+It currently loads:
 
 1. base TypeScript harness instructions
 2. `examples/exoclaw/prompts/me.md`
-3. an Exoclaw-specific developer message describing scheduler, sandbox, and
-   adapter behavior
-4. optional local profile text from `.exo/exoclaw-profile.md`
+3. an Exoclaw-specific developer message describing scheduler, sandbox,
+   guardian, adapter, and self-maintenance behavior
+4. a Fal image-generation developer message
+5. optional local profile text from `.exo/exoclaw-profile.md`
 
 Change `examples/exoclaw/harness.ts` when you want to change global Exoclaw
-operating policy, such as how it should treat adapters, scheduled work, or
-sandbox scope.
+operating policy, such as how it should treat adapters, scheduled work, self
+maintenance, Fal images, or sandbox scope.
 
-### Startup And Setup Prompts
-
-The Exoclaw launcher can send one-time prompts before opening the REPL:
-
-- `examples/exoclaw/scripts/exoclaw-control`
-
-Important flags:
-
-- `--setup <adapter>`
-- `--setup-all`
-- `--initial-prompt-file <path>`
-
-Adapter setup prompts are one-time user messages that ask the running agent to
-create or confirm adapter configuration:
-
-- `examples/exoclaw/adapters/irc/setup-prompt.md`
-- `examples/exoclaw/adapters/whatsapp/setup-prompt.md`
-- `examples/exoclaw/adapters/signal/setup-prompt.md`
-- `examples/exoclaw/adapters/discord/setup-prompt.md`
-
-Change these when you want future setup runs to create adapters differently.
-For example, if Discord should default to `all_messages`, change the Discord
-setup prompt and the matching README/tool guidance.
-
-## History
-
-Conversation history is not a raw transcript file. It is an ordered event log
-that can contain messages, tool requests, tool results, custom events, artifact
-references, and other runtime state.
-
-Prompt materialization generally selects the model-relevant subset:
-
-- message events become user/assistant/system/developer messages
-- tool request events help reconstruct tool call names
-- tool result events become tool messages
-
-Rust materialization paths:
-
-- `crates/executor/src/harness_helpers.rs`
-- `crates/executor/src/basic.rs`
-
-TypeScript materialization paths:
-
-- `typescript/harness/index.ts`
-- `examples/typescript/turn-loop.ts`
-
-When changing history behavior, be careful about three things:
-
-1. Tool calls and tool results need to stay paired.
-2. Synthetic error tool results may be inserted if a previous run crashed after
-   requesting a tool but before recording the result.
-3. System/developer messages may be handled differently by provider-specific
-   runtimes.
-
-Example harnesses sometimes reshape history:
-
-- Claude Code filters system/developer messages out of the conversational
-  transcript and passes instructions as a system prompt.
-- Cursor SDK builds one user prompt containing a transcript, the current input,
-  and sandbox context.
-- RLM flattens conversation history into a context string for a REPL-centered
-  reasoning loop.
-
-## How Exo And The Local Environment Are Exposed
-
-Exo exposes itself to the model through prompts, tool definitions, and runtime
-metadata. The model does not automatically know every local detail; it sees what
-the harness chooses to include.
-
-### Exo Capabilities
-
-Exoclaw tells the model about high-level capabilities in:
-
-- `examples/exoclaw/harness.ts`
-- `examples/exoclaw/prompts/me.md`
-- tool descriptions in `typescript/harness/*`
-- scheduler descriptions in `examples/exoclaw/scheduler-tools.ts`
-- adapter descriptions in `typescript/harness/adapter-tools.ts`
-
-This is where the model learns that it can schedule tasks, create adapters,
-send adapter messages, and use shell commands.
-
-### Sandbox And Filesystem
-
-The model learns about sandbox behavior from harness instructions and tool
-descriptions. Exoclaw's developer prompt says that conversations default to the
-agent sandbox and explains when to use conversation or task sandboxes.
-
-Other harnesses expose more concrete environment text. For example, the Cursor
-SDK example prompt includes:
-
-- that Cursor is running inside Exo
-- prior conversation transcript
-- current user input
-- sandbox context
-- whether shell commands are available
-
-Relevant files:
-
-- `examples/exoclaw/harness.ts`
-- `examples/typescript/cursor-sdk-harness.ts`
-- `examples/typescript/shared.ts`
-
-### Local Profile
-
-`.exo/exoclaw-profile.md` is the intended place to expose local user and machine
-preferences to Exoclaw. It can include local persona, naming, operating
-preferences, or project-specific habits. Keep secrets out of it.
-
-### Environment Variables And Secrets
-
-Environment variables and secrets should not be copied into prompts. Instead,
-they should be exposed through bindings, secret references, adapter
-configuration, or tool configuration. The model may know that a secret name
-exists, but it should not see the raw secret value.
-
-## Model Runtime Role Mapping
-
-The Responses runtime converts Exo messages into provider requests in:
-
-- `typescript/model-runtime/responses.ts`
-
-In the current Responses path, Exo `system` and `developer` roles are both sent
-as provider `system` content. User, assistant, and tool content are converted
-separately.
-
-If provider behavior seems surprising, check this layer before changing the
-source prompt text.
-
-## Prompt Safety
-
-- Keep secrets out of prompts, setup files, tool descriptions, and
-  `reportPrompt` values.
-- Prefer structured tool arguments over prose when the model needs to preserve
-  ids, paths, or routing information.
-- Put local identity and preferences in `.exo/exoclaw-profile.md`.
-- Put general Exoclaw behavior in `examples/exoclaw/prompts/me.md` or
-  `examples/exoclaw/harness.ts`.
-- Put wakeup-specific routing rules in the wakeup prompt that creates the user
-  message.
-- After changing setup prompts, recreate or update existing adapters/tasks; the
-  prompt only affects future setup runs.
-
-# Exo Prompts
-
-This document maps the main places where Exo creates, stores, transforms, or
-injects model-visible prompts. In Exo, a "prompt" is usually just a `Message`
-that is assembled with durable conversation history before a model call. Some
-prompt-like text also lives in tool definitions, setup files, and scheduler or
-adapter wakeups.
-
-## Prompt Lifecycle
-
-Most turns follow the same shape:
-
-1. A caller sends user input into a conversation.
-2. The harness starts a turn and appends that input as conversation events.
-3. The executor loads agent instructions and conversation history.
-4. The active harness may add its own system or developer messages.
-5. Tool definitions are attached to the model request.
-6. Model output and tool results are appended back to the event log.
-
-The important distinction is that instructions are configuration, while user
-messages and wakeups are conversation events. Both become model-visible input.
-
-## Stored Agent Instructions
-
-Agent-level instructions are stored on `AgentConfig.instructions`:
-
-- `crates/executor/src/executor_types.rs`
-- `typescript/harness/index.ts`
-
-The basic Rust executor prepends these instructions to materialized conversation
-history before each model round:
-
-- `crates/executor/src/basic.rs`
-
-The TypeScript harness does the same through `materializePromptMessages(...)`:
-
-- `typescript/harness/index.ts`
-- `examples/typescript/turn-loop.ts`
-
-These instructions are the most general identity and behavior layer for an
-agent. They are not tied to a specific turn unless the agent config changes.
-
-## Conversation Messages
-
-Normal user input, assistant output, and tool results are stored as conversation
-events and later rematerialized into prompt messages.
-
-Key materialization paths:
-
-- `crates/executor/src/harness_helpers.rs`
-- `typescript/harness/index.ts`
-- `crates/executor/src/basic.rs`
-
-The CLI and TUI create normal user messages from interactive input:
-
-- `crates/cli/src/main.rs`
-- `crates/cli/src/tui.rs`
-
-The `exo conversation send` command uses the same wakeup path as background
-systems:
-
-- `crates/cli/src/main.rs`
-- `crates/executor/src/conversation_wakeup.rs`
-
-## Wakeup Prompts
-
-Wakeups are synthetic user messages generated by host runtimes. They start a new
-session, send one user message, run the conversation, and then close the
-session:
-
-- `crates/executor/src/conversation_wakeup.rs`
-
-Wakeups are used when something outside the REPL needs the agent to react.
-
-### Adapter Wakeups
-
-Adapters convert external messages into conversation wakeups:
-
-- `crates/executor/src/adapter/runtime.rs`
-
-The adapter wakeup prompt includes the adapter type, external target, sender,
-adapter name, inbound text, adapter id, and external reply instructions. It also
-preserves routing information for scheduled follow-up work by telling the agent
-to include `adapterId` and `target` in future `reportPrompt` values.
-
-Adapter workers themselves do not prompt the model directly. They emit protocol
-events; the Rust adapter runtime turns matching inbound events into wakeups.
-
-### Scheduler Wakeups
-
-Scheduled sandbox tasks store a user-provided `reportPrompt` on each task:
-
-- `crates/executor/src/scheduler_types.rs`
-- `examples/exoclaw/scheduler-tools.ts`
-
-When a task run finishes, the scheduler builds a wakeup prompt containing:
-
-- task name
-- run id
-- exit code or error
-- output artifact location
-- truncation status
-- the task's `reportPrompt`
-- stdout/stderr previews
-
-The prompt construction lives in:
-
-- `crates/executor/src/scheduler_runtime.rs`
-
-This is how scheduled work reports back to the conversation, and it is also how
-scheduled work can route results back to external adapters.
-
-## Exoclaw Prompts
-
-Exoclaw is the long-running local control harness under `examples/exoclaw`.
-
-The committed identity prompt is:
-
-- `examples/exoclaw/prompts/me.md`
-
-The Exoclaw harness loads that file as a developer message and adds another
-developer message describing Exoclaw-specific tools, sandbox behavior, adapter
-behavior, and scheduler behavior:
-
-- `examples/exoclaw/harness.ts`
-
-The harness also optionally loads a local, ignored profile prompt:
-
-- default path: `.exo/exoclaw-profile.md`
-- override: `EXOCLAW_LOCAL_PROMPT_FILE`
-- script flag: `--local-prompt-file`
-
-That local profile is intended for machine- or user-specific instructions, such
-as the user's name or the local agent persona. It should not be committed.
-
-The setup helper can create the local profile interactively:
-
-- `examples/exoclaw/scripts/exoclaw-control setup-profile`
-
-## Exoclaw Startup And Setup Prompts
+### Exoclaw Startup And Setup Prompts
 
 The Exoclaw launcher can send prompt files into the conversation before the REPL
 starts:
@@ -524,6 +269,7 @@ Adapter setup prompts are plain markdown instructions for the agent to create or
 confirm adapter configuration. Examples:
 
 - `examples/exoclaw/adapters/irc/setup-prompt.md`
+- `examples/exoclaw/adapters/agent-cli/setup-prompt.md`
 - `examples/exoclaw/adapters/whatsapp/setup-prompt.md`
 - `examples/exoclaw/adapters/signal/setup-prompt.md`
 - `examples/exoclaw/adapters/discord/setup-prompt.md`
@@ -531,89 +277,115 @@ confirm adapter configuration. Examples:
 These prompts are not persistent instructions. They are one-time user messages
 that ask the running agent to configure adapters.
 
-## Tool Descriptions
+### Self Map And Self-Control Docs
 
-Tool definitions are also model-visible prompt material. Names, descriptions,
-parameter descriptions, and schemas influence how the model calls tools.
+Exoclaw is told where to inspect its own source tree through:
 
-Built-in TypeScript tools:
+- `examples/exoclaw/SELF.md`
+- `examples/exoclaw/docs/SELF-CONTROL.md`
 
-- `typescript/harness/built-in-tools.ts`
+The startup script mounts the repository at `/workspace/exo` by default and the
+harness tells the model to start with the self map when modifying Exoclaw.
 
-Adapter tools:
+## History
 
-- `typescript/harness/adapter-tools.ts`
+Conversation history is not a raw transcript file. It is an ordered event log
+that can contain messages, tool requests, tool results, custom events, artifact
+references, sandbox lifecycle events, and other runtime state.
 
-Scheduler tools:
+Prompt materialization generally selects the model-relevant subset:
 
-- `examples/exoclaw/scheduler-tools.ts`
+- message events become user/assistant/system/developer messages
+- tool request events help reconstruct tool call names
+- tool result events become tool messages
+- synthetic error tool results may be inserted if a previous run crashed after
+  requesting a tool but before recording the result
 
-Rust-side tool definitions for basic/RLM harnesses:
+Rust materialization paths:
 
+- `crates/executor/src/harness_helpers.rs`
 - `crates/executor/src/basic.rs`
-- `crates/executor/src/rlm.rs`
 
-Agent-created tools add another prompt surface. The `install_agent_tool` tool
-accepts model-generated `moduleSource`, validates it, and registers the new
-tool for later model rounds. The generated tool's definition then becomes part
-of future model prompts.
+TypeScript materialization paths:
 
-## RLM Prompts
+- `typescript/harness/index.ts`
+- `examples/typescript/turn-loop.ts`
 
-The RLM harness builds its own prompt layer around conversation history. It adds
-a generated system prompt that explains the JavaScript REPL, subquery tools, and
-final-answer protocol, then adds a root user prompt containing the latest query
-and transcript metadata.
+When changing history behavior, be careful about tool-call pairing,
+provider-specific role handling, and usage/cost metadata on message events.
 
-Rust implementation:
+Example harnesses sometimes reshape history:
 
-- `crates/executor/src/rlm.rs`
+- Claude Code filters system/developer messages out of the conversational
+  transcript and passes instructions as a system prompt.
+- Cursor SDK builds one user prompt containing a transcript, the current input,
+  and sandbox context.
+- RLM flattens conversation history into a context string for a REPL-centered
+  reasoning loop.
 
-TypeScript example implementation:
+## How Exo And The Local Environment Are Exposed
 
-- `examples/typescript/rlm-harness.ts`
+Exo exposes itself to the model through prompts, tool definitions, and runtime
+metadata. The model does not automatically know every local detail; it sees what
+the harness chooses to include.
 
-RLM subqueries are prompts too. The RLM harness sends a smaller model call with
-the agent instructions, a subquery system instruction, and a user prompt
-containing the subquery text.
+### Exoclaw Capabilities
 
-## Other Example Harnesses
+Exoclaw tells the model about high-level capabilities in:
 
-Several example harnesses adapt Exo conversation history into prompts for
-external agent runtimes:
+- `examples/exoclaw/harness.ts`
+- `examples/exoclaw/prompts/me.md`
+- `examples/exoclaw/SELF.md`
+- tool descriptions in `typescript/harness/*`
+- Exoclaw tool descriptions in `examples/exoclaw/*-tools.ts`
+- adapter descriptions in `typescript/harness/adapter-tools.ts`
 
-- `examples/typescript/claude-code-harness.ts`
-- `examples/typescript/codex-harness.ts`
-- `examples/typescript/cursor-sdk-harness.ts`
+This is where the model learns that it can schedule tasks, inspect events, take
+sandbox snapshots, rewind sandboxes, create adapters, send adapter messages,
+generate Fal images, call guardian actions, install or uninstall generated
+tools, and use shell commands.
 
-These are not the default Exoclaw path, but they are useful references for how
-to bridge Exo conversation history into another runtime's prompt format.
+### Sandbox And Filesystem
 
-The Claude Code example collapses agent instructions into a system prompt and
-filters system/developer messages out of the conversational transcript it sends
-to Claude Code.
+The model learns about sandbox behavior from harness instructions and tool
+descriptions. Exoclaw's developer prompt says that conversations default to the
+agent sandbox and explains when to use conversation or task sandboxes.
 
-The Cursor SDK example builds one user prompt containing:
+`exoclaw-control` configures the important filesystem mounts:
 
-- a short instruction that Cursor is running inside Exo
-- a durable conversation transcript
-- the current user input
-- sandbox context
+- this repository at `/workspace/exo`
+- the Fal image cache at `/fal`
+- the agent-cli host root at `/agent-cli` when configured
 
-## Model Runtime Role Mapping
+Relevant files:
 
-The TypeScript Responses runtime serializes Exo messages into provider request
-format:
+- `examples/exoclaw/harness.ts`
+- `examples/exoclaw/scripts/exoclaw-control`
+- `crates/executor/src/conversation_sandbox.rs`
+- `crates/executor/src/agent_sandbox.rs`
 
-- `typescript/model-runtime/responses.ts`
+### Local Profile
 
-In the current Responses path, Exo `system` and `developer` roles are both sent
-as provider `system` content. User, assistant, and tool content are converted
-separately.
+`.exo/exoclaw-profile.md` is the intended place to expose local user and machine
+preferences to Exoclaw. It can include local persona, naming, operating
+preferences, or project-specific habits. Keep secrets out of it.
+
+### Environment Variables And Secrets
+
+Environment variables and secrets should not be copied into prompts. Instead,
+they should be exposed through bindings, secret references, adapter
+configuration, or tool configuration. The model may know that a secret name
+exists, but it should not see the raw secret value.
+
+Examples:
+
+- Discord setup refers to the secret id `discord-bot-token`.
+- Discord voice uses `openai` for STT/TTS when enabled.
+- Fal image generation requires `FAL_KEY` in the host environment.
 
 ## Prompt Safety Notes
 
-- Do not put secrets in instructions, setup prompts, tool definitions, or
+- Do not put secrets in instructions, setup prompts, tool descriptions, or
   scheduler `reportPrompt` values.
 - Prefer durable state and structured tool arguments over asking the model to
   remember operational details.
@@ -621,3 +393,10 @@ separately.
   for machine-specific identity or deployment details.
 - Wakeup prompts should include enough routing context for the agent to take the
   right action without relying on hidden state.
+- Put local identity and preferences in `.exo/exoclaw-profile.md`.
+- Put general Exoclaw behavior in `examples/exoclaw/prompts/me.md` or
+  `examples/exoclaw/harness.ts`.
+- Put wakeup-specific routing rules in the wakeup prompt that creates the user
+  message.
+- After changing setup prompts, recreate or update existing adapters/tasks; the
+  prompt only affects future setup runs.
