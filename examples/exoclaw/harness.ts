@@ -12,8 +12,6 @@ import {
   type TurnContext,
 } from "@exo/harness";
 
-import { registerMediaTools } from "./media-tools";
-import { registerWindowPortalTools } from "./portal-tools";
 import { registerFalTools } from "./tools/fal/fal-tools";
 import { registerSchedulerTools } from "./scheduler-tools";
 import { registerSandboxTools } from "./sandbox-tools";
@@ -50,8 +48,6 @@ async function registerExoclawTools(
   registerSchedulerTools(tools);
   registerAdapterTools(tools);
   registerIntrospectionTools(tools);
-  registerMediaTools(tools);
-  registerWindowPortalTools(tools);
   registerFalTools(tools);
   registerSandboxTools(tools);
   registerGuardianTools(tools);
@@ -85,11 +81,6 @@ function exoclawInstructions(context: TurnContext): Message[] {
     {
       role: "developer",
       content: `Your own source tree is mounted in the sandbox at ${repoPath}. Start with ${selfMapPath} when you need to inspect or modify Exoclaw itself. Use guardian_action for host-side builds and service restarts after code changes.`,
-    },
-    {
-      role: "developer",
-      content:
-        "Images: use view_image to attach a host image file to the conversation so you can see it next round. Use window_portal to observe and control a single user-granted desktop window via the window-portal daemon; opening a session requires the user to click the target window, and frames return as attached images with pixel coordinates. On a user_active error, the human's hand is on the mouse: wait roughly 15 seconds, retry, and only stop to report if it fails about three times in a row — the session stays valid, so do not abandon it for one transient error. On focus_lost, re-check status and retry once before reporting. Portal frames are also visible inside the sandbox under /window-portal (read-only); to post a frame to Discord or another adapter, call send_adapter_message with the frame's sandboxPath before closing the session (frames are deleted at session close — cp one elsewhere in the sandbox to keep it).",
     },
     {
       role: "developer",
