@@ -10,15 +10,18 @@ use serde::Deserialize;
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
 
-use super::store::AdapterStore;
-use super::types::{AdapterAttachment, AdapterConfig, AdapterEventType, AdapterRecord};
+use super::store::{AdapterStore, stable_target_key};
+use super::types::{
+    AdapterAttachment, AdapterConfig, AdapterEventType, AdapterRecord,
+    AdapterTargetConversationRecord, now_ms,
+};
 use super::worker::{WorkerCommand, WorkerEvent, run_worker_loop};
 use crate::conversation_events::{
     HOST_EVENT_ADAPTER_RUNNER_DRAINING, HOST_EVENT_ADAPTER_RUNNER_STARTED, HOST_EVENT_REBOOT,
     record_host_event,
 };
 use crate::conversation_wakeup::send_conversation_wakeup;
-use crate::{Harness, HarnessAgent, HarnessConversation};
+use crate::{CreateConversationRequest, Harness, HarnessAgent, HarnessConversation};
 
 const INITIAL_RESTART_DELAY: Duration = Duration::from_secs(5);
 const MAX_RESTART_DELAY: Duration = Duration::from_secs(300);
@@ -429,6 +432,7 @@ async fn run_adapter_loop(
     let outbound_notifier = register_adapter_outbound_notifier(&adapter.id);
     let event_store = store.clone();
     let event_adapter = adapter.clone();
+    let event_agent = std::sync::Arc::clone(&agent);
     let event_conversation = std::sync::Arc::clone(&conversation);
     let event_config = config.clone();
     let outbound_store = store.clone();
@@ -443,10 +447,19 @@ async fn run_adapter_loop(
         move |event| {
             let store = event_store.clone();
             let adapter = event_adapter.clone();
+            let agent = std::sync::Arc::clone(&event_agent);
             let conversation = std::sync::Arc::clone(&event_conversation);
             let config = event_config.clone();
             async move {
-                handle_worker_event(&store, conversation.as_ref(), &adapter, &config, event).await
+                handle_worker_event(
+                    &store,
+                    agent.as_ref(),
+                    conversation,
+                    &adapter,
+                    &config,
+                    event,
+                )
+                .await
             }
         },
         move || {
@@ -532,7 +545,8 @@ fn adapter_outbound_notifiers() -> &'static Mutex<HashMap<String, Weak<Notify>>>
 
 async fn handle_worker_event(
     store: &AdapterStore,
-    conversation: &dyn HarnessConversation,
+    agent: &dyn HarnessAgent,
+    root_conversation: Arc<dyn HarnessConversation>,
     adapter: &AdapterRecord,
     config: &AdapterConfig,
     event: WorkerEvent,
@@ -542,7 +556,7 @@ async fn handle_worker_event(
             store.mark_connected(&adapter.id).await?;
             record_worker_lifecycle(
                 store,
-                conversation,
+                root_conversation.as_ref(),
                 adapter,
                 config,
                 "connected",
@@ -557,9 +571,19 @@ async fn handle_worker_event(
             message_id,
             metadata,
         } => {
+            let conversation = resolve_message_conversation(
+                store,
+                agent,
+                root_conversation,
+                adapter,
+                config,
+                &target,
+                &metadata,
+            )
+            .await?;
             handle_worker_message(
                 store,
-                conversation,
+                conversation.as_ref(),
                 adapter,
                 config,
                 target,
@@ -571,7 +595,15 @@ async fn handle_worker_event(
             .await
         }
         WorkerEvent::Lifecycle { name, metadata } => {
-            record_worker_lifecycle(store, conversation, adapter, config, &name, metadata).await
+            record_worker_lifecycle(
+                store,
+                root_conversation.as_ref(),
+                adapter,
+                config,
+                &name,
+                metadata,
+            )
+            .await
         }
         WorkerEvent::Error { message } => {
             store.mark_error(&adapter.id, message.clone()).await?;
@@ -600,7 +632,7 @@ async fn handle_worker_event(
         WorkerEvent::Disconnected { reason } => {
             record_worker_lifecycle(
                 store,
-                conversation,
+                root_conversation.as_ref(),
                 adapter,
                 config,
                 "disconnected",
@@ -609,6 +641,88 @@ async fn handle_worker_event(
             .await
         }
     }
+}
+
+async fn resolve_message_conversation(
+    store: &AdapterStore,
+    agent: &dyn HarnessAgent,
+    root_conversation: Arc<dyn HarnessConversation>,
+    adapter: &AdapterRecord,
+    config: &AdapterConfig,
+    target: &str,
+    _metadata: &serde_json::Value,
+) -> Result<Arc<dyn HarnessConversation>> {
+    if !uses_target_conversation_scope(config) {
+        return Ok(root_conversation);
+    }
+    if let Some(record) = store.get_target_conversation(&adapter.id, target).await? {
+        if let Some(conversation) = agent.get_conversation(&record.conversation_id).await? {
+            return Ok(conversation);
+        }
+        tracing::warn!(
+            adapter_id = %adapter.id,
+            target,
+            conversation_id = %record.conversation_id,
+            "adapter target conversation mapping points to missing conversation; recreating"
+        );
+    }
+
+    let slug = target_conversation_slug(adapter, target);
+    let name = format!("{} target {}", adapter.name, target);
+    let conversation = match agent
+        .create_conversation(CreateConversationRequest {
+            slug: Some(slug.clone()),
+            name: Some(name),
+            ..Default::default()
+        })
+        .await
+    {
+        Ok(conversation) => conversation,
+        Err(error) => {
+            if let Some(conversation) = agent.get_conversation(&slug).await? {
+                conversation
+            } else {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to create target-scoped conversation for adapter {} target {}",
+                        adapter.id, target
+                    )
+                });
+            }
+        }
+    };
+    let record = AdapterTargetConversationRecord::new(
+        adapter.id.clone(),
+        target.to_string(),
+        conversation.record().id.to_string(),
+        now_ms(),
+    )?;
+    store.put_target_conversation(&record).await?;
+    Ok(conversation)
+}
+
+fn uses_target_conversation_scope(config: &AdapterConfig) -> bool {
+    config
+        .initialization
+        .get("conversationScope")
+        .and_then(|value| value.as_str())
+        == Some("target")
+}
+
+fn target_conversation_slug(adapter: &AdapterRecord, target: &str) -> String {
+    format!(
+        "adapter-{}-{}",
+        short_slug_part(&adapter.id),
+        stable_target_key(target)
+    )
+}
+
+fn short_slug_part(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .take(12)
+        .collect()
 }
 
 async fn handle_worker_message(
@@ -801,5 +915,55 @@ mod tests {
         std::fs::write(&path, "not json").unwrap();
         assert!(claim_reboot_notice(Some(&path)).is_none());
         assert!(!path.exists(), "malformed notices are still consumed");
+    }
+
+    fn config_with_scope(scope: Option<&str>) -> AdapterConfig {
+        let initialization = match scope {
+            Some(scope) => serde_json::json!({ "conversationScope": scope }),
+            None => serde_json::json!({}),
+        };
+        AdapterConfig {
+            adapter_type: "discord".to_string(),
+            worker_command: vec!["node".to_string()],
+            initialization,
+            state_dir: None,
+            secret_env: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn target_scope_only_when_explicitly_set() {
+        assert!(uses_target_conversation_scope(&config_with_scope(Some(
+            "target"
+        ))));
+        // Default and explicit "adapter" both stay on the root conversation.
+        assert!(!uses_target_conversation_scope(&config_with_scope(None)));
+        assert!(!uses_target_conversation_scope(&config_with_scope(Some(
+            "adapter"
+        ))));
+    }
+
+    #[test]
+    fn target_conversation_slug_is_deterministic_and_target_specific() {
+        let adapter = AdapterRecord::new(
+            super::super::types::NewAdapter {
+                agent_id: "agent".to_string(),
+                conversation_id: "conversation".to_string(),
+                name: "discord-dev".to_string(),
+                source: super::super::types::AdapterSource::BuiltIn,
+                config: config_with_scope(Some("target")),
+            },
+            0,
+        )
+        .unwrap();
+
+        let a1 = target_conversation_slug(&adapter, "channel-A");
+        let a2 = target_conversation_slug(&adapter, "channel-A");
+        let b = target_conversation_slug(&adapter, "channel-B");
+        assert_eq!(a1, a2, "same target must yield the same slug");
+        assert_ne!(a1, b, "different targets must yield different slugs");
+        assert!(a1.starts_with("adapter-"));
+        // Slug must agree with the store's filename key for that target.
+        assert!(a1.ends_with(&stable_target_key("channel-A")));
     }
 }
