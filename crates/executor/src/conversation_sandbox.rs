@@ -15,6 +15,7 @@ pub(crate) struct ConversationSandboxInfo {
     pub(crate) image: String,
     pub(crate) default_workdir: String,
     pub(crate) file_system_mounts: Vec<FileSystemMount>,
+    pub(crate) durable_file_systems: Vec<exoharness::DurableFileSystem>,
     pub(crate) enable_networking: bool,
     pub(crate) idle_seconds: u64,
 }
@@ -25,6 +26,7 @@ impl ConversationSandboxInfo {
             && self.image == spec.image
             && self.default_workdir == spec.default_workdir
             && self.file_system_mounts == spec.file_system_mounts
+            && self.durable_file_systems == spec.durable_file_systems
             && self.enable_networking == spec.enable_networking
             && self.idle_seconds == spec.idle_seconds
     }
@@ -36,6 +38,7 @@ pub(crate) struct ConversationSandboxSpec {
     pub(crate) image: String,
     pub(crate) default_workdir: String,
     pub(crate) file_system_mounts: Vec<FileSystemMount>,
+    pub(crate) durable_file_systems: Vec<exoharness::DurableFileSystem>,
     pub(crate) enable_networking: bool,
     pub(crate) idle_seconds: u64,
 }
@@ -71,7 +74,7 @@ pub(crate) async fn create_conversation_sandbox(
             image: spec.image,
             default_workdir: Some(spec.default_workdir),
             file_system_mounts: Some(spec.file_system_mounts),
-            durable_file_systems: None,
+            durable_file_systems: Some(spec.durable_file_systems),
             enable_networking: Some(spec.enable_networking),
             idle_seconds: Some(spec.idle_seconds),
         })
@@ -101,6 +104,7 @@ pub(crate) async fn conversation_sandboxes(
             image,
             default_workdir,
             file_system_mounts,
+            durable_file_systems,
             enable_networking,
             idle_seconds,
             ..
@@ -112,6 +116,7 @@ pub(crate) async fn conversation_sandboxes(
                 image,
                 default_workdir,
                 file_system_mounts,
+                durable_file_systems,
                 enable_networking,
                 idle_seconds,
             });
@@ -135,8 +140,15 @@ pub(crate) fn conversation_sandbox_spec(
             .mounts
             .first()
             .map(|mount| mount.mount_path.clone())
+            .or_else(|| {
+                config
+                    .durable_file_systems
+                    .first()
+                    .map(|file_system| file_system.mount_path.clone())
+            })
             .unwrap_or_else(|| "/".to_string()),
         file_system_mounts: normalize_mounts(&config.mounts),
+        durable_file_systems: config.durable_file_systems.clone(),
         enable_networking: agent_config.enable_networking,
         idle_seconds: 300,
     }

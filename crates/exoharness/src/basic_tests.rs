@@ -30,7 +30,7 @@ use crate::{
     WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
-const DURABLE_CONTRACT_MOUNT_PATH: &str = "/mnt/exo-durable";
+const DEFAULT_DURABLE_CONTRACT_MOUNT_PATH: &str = "/home/exo/workspace";
 
 #[tokio::test(flavor = "current_thread")]
 async fn basic_backend_supports_agent_and_conversation_crud() {
@@ -192,13 +192,14 @@ async fn docker_sandbox_contract_durable_file_system_survives_stop_and_reacquire
         crate::CliContainerSandboxBackend::docker()
             .with_durable_file_system_root(tempdir.path().join("durable-filesystems")),
     );
+    let mount_path = durable_contract_mount_path();
     crate::contract_tests::sandbox_backend_durable_file_system_survives_stop_and_reacquire(
         backend,
         durable_provider_contract_request(
             "docker",
             "durable-file-system",
             env_or("DOCKER_IMAGE", &crate::default_docker_image()),
-            "/",
+            &mount_path,
         ),
     )
     .await
@@ -213,13 +214,14 @@ async fn apple_container_sandbox_contract_durable_file_system_survives_stop_and_
         crate::CliContainerSandboxBackend::apple_container()
             .with_durable_file_system_root(tempdir.path().join("durable-filesystems")),
     );
+    let mount_path = durable_contract_mount_path();
     crate::contract_tests::sandbox_backend_durable_file_system_survives_stop_and_reacquire(
         backend,
         durable_provider_contract_request(
             "apple-container",
             "durable-file-system",
             env_or("APPLE_CONTAINER_IMAGE", &crate::default_docker_image()),
-            "/",
+            &mount_path,
         ),
     )
     .await
@@ -228,18 +230,19 @@ async fn apple_container_sandbox_contract_durable_file_system_survives_stop_and_
 
 #[cfg(feature = "aws-agentcore")]
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "uses a real AgentCore runtime configured with managed session storage at /mnt/exo-durable; run this test explicitly"]
+#[ignore = "uses a real AgentCore runtime configured with managed session storage at EXO_DURABLE_CONTRACT_MOUNT_PATH or /home/exo/workspace; run this test explicitly"]
 async fn aws_agentcore_sandbox_contract_durable_file_system_survives_stop_and_reacquire() {
     let Some(backend) = aws_agentcore_contract_backend().await else {
         return;
     };
+    let mount_path = durable_contract_mount_path();
     crate::contract_tests::sandbox_backend_durable_file_system_survives_stop_and_reacquire(
         backend,
         durable_provider_contract_request(
             "aws-agentcore",
             "durable-file-system",
             env_or("AGENTCORE_IMAGE", &crate::default_aws_agentcore_image()),
-            "/",
+            &mount_path,
         ),
     )
     .await
@@ -347,9 +350,13 @@ async fn aws_agentcore_contract_backend() -> Option<Arc<dyn ManagedSandboxBacken
         );
         return None;
     };
-    let Some(region) = nonempty_env("AWS_REGION").or_else(|| nonempty_env("AWS_DEFAULT_REGION"))
+    let Some(region) = nonempty_env("AWS_AGENTCORE_REGION")
+        .or_else(|| nonempty_env("AWS_REGION"))
+        .or_else(|| nonempty_env("AWS_DEFAULT_REGION"))
     else {
-        eprintln!("skipping real AgentCore sandbox contract: AWS_REGION is not set");
+        eprintln!(
+            "skipping real AgentCore sandbox contract: AWS_AGENTCORE_REGION or AWS_REGION is not set"
+        );
         return None;
     };
     let credentials = match (
@@ -427,10 +434,17 @@ fn durable_provider_contract_request(
     let mut request = provider_contract_request(provider, contract, image, default_workdir);
     request.spec.durable_file_systems = vec![DurableFileSystem {
         name: "workspace".to_string(),
-        mount_path: DURABLE_CONTRACT_MOUNT_PATH.to_string(),
+        mount_path: durable_contract_mount_path(),
         mode: FileSystemMountMode::ReadWrite,
     }];
     request
+}
+
+fn durable_contract_mount_path() -> String {
+    env_or(
+        "EXO_DURABLE_CONTRACT_MOUNT_PATH",
+        DEFAULT_DURABLE_CONTRACT_MOUNT_PATH,
+    )
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -26,6 +26,8 @@ struct AgentSandboxRecord {
     image: String,
     default_workdir: String,
     file_system_mounts: Vec<exoharness::FileSystemMount>,
+    #[serde(default)]
+    durable_file_systems: Vec<exoharness::DurableFileSystem>,
     enable_networking: bool,
     idle_seconds: u64,
 }
@@ -36,6 +38,7 @@ impl AgentSandboxRecord {
             && self.image == spec.image
             && self.default_workdir == spec.default_workdir
             && self.file_system_mounts == spec.file_system_mounts
+            && self.durable_file_systems == spec.durable_file_systems
             && self.enable_networking == spec.enable_networking
             && self.idle_seconds == spec.idle_seconds
     }
@@ -70,7 +73,7 @@ pub(crate) async fn ensure_agent_sandbox(
             image: spec.image.clone(),
             default_workdir: Some(spec.default_workdir.clone()),
             file_system_mounts: Some(spec.file_system_mounts.clone()),
-            durable_file_systems: None,
+            durable_file_systems: Some(spec.durable_file_systems.clone()),
             enable_networking: Some(spec.enable_networking),
             idle_seconds: Some(spec.idle_seconds),
         })
@@ -84,6 +87,7 @@ pub(crate) async fn ensure_agent_sandbox(
             image: spec.image,
             default_workdir: spec.default_workdir,
             file_system_mounts: spec.file_system_mounts,
+            durable_file_systems: spec.durable_file_systems,
             enable_networking: spec.enable_networking,
             idle_seconds: spec.idle_seconds,
         },

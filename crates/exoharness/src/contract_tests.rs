@@ -520,7 +520,7 @@ async fn write_durable_marker(
             argv: vec![
                 "/bin/sh".to_string(),
                 "-lc".to_string(),
-                "mkdir -p \"$EXO_DURABLE_MOUNT\" && printf '%s' \"$EXO_DURABLE_MARKER\" > \"$EXO_DURABLE_MOUNT/marker.txt\""
+                "test \"$(pwd)\" = \"$EXO_DURABLE_MOUNT\" && mkdir -p .codex-smoke && printf '%s' \"$EXO_DURABLE_MARKER\" > .codex-smoke/marker.txt"
                     .to_string(),
             ],
             env,
@@ -553,7 +553,8 @@ async fn read_durable_marker(
             argv: vec![
                 "/bin/sh".to_string(),
                 "-lc".to_string(),
-                "cat \"$EXO_DURABLE_MOUNT/marker.txt\"".to_string(),
+                "test \"$(pwd)\" = \"$EXO_DURABLE_MOUNT\" && cat .codex-smoke/marker.txt"
+                    .to_string(),
             ],
             env,
             display_argv: None,
