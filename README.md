@@ -4,6 +4,15 @@ Exo is a minimal system for building agents. It separates the trusted
 infrastructure needed for state, resources, and security from agent-specific
 logic.
 
+This repo contains both **exoharness**, the durable substrate for agents, and
+**Exoclaw**, a full long-running personal agent built on top of it. Exoclaw is
+the best place to start if you want to try Exo as a user: it can inspect and
+modify its own code, restart its services, manage adapters, run scheduled work,
+create tools, and snapshot or rewind its sandbox. Exoclaw supports a number of
+tools and adapters including IRC, WhatsApp, Signal, and Discord.
+
+For setup and usage, see [Exoclaw](examples/exoclaw/README.md).
+
 ![Exo architecture overview](docs/images/architecture-overview.svg)
 
 The goal is to provide a small, durable kernel for agents: minimal enough to
