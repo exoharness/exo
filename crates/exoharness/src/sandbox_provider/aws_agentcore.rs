@@ -26,6 +26,7 @@ pub struct AwsAgentCoreConfig {
     pub qualifier: Option<String>,
     pub endpoint_url: Option<String>,
     pub credentials: Option<AwsAgentCoreCredentials>,
+    pub session_storage_mount_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +41,7 @@ pub struct AwsAgentCoreSandboxBackend {
     runtime_arn: String,
     invoke_target: AwsAgentCoreInvokeTarget,
     qualifier: Option<String>,
+    session_storage_mount_path: Option<String>,
 }
 
 impl AwsAgentCoreSandboxBackend {
@@ -72,11 +74,17 @@ impl AwsAgentCoreSandboxBackend {
         }
         let service_config = service_config_builder.build();
         let invoke_target = agentcore_invoke_target(&config.runtime_arn)?;
+        let session_storage_mount_path = config
+            .session_storage_mount_path
+            .as_deref()
+            .map(normalize_agentcore_session_storage_mount_path)
+            .transpose()?;
         Ok(Self {
             client: Client::from_conf(service_config),
             runtime_arn: config.runtime_arn,
             invoke_target,
             qualifier: config.qualifier,
+            session_storage_mount_path,
         })
     }
 }
@@ -84,7 +92,7 @@ impl AwsAgentCoreSandboxBackend {
 #[async_trait]
 impl ManagedSandboxBackend for AwsAgentCoreSandboxBackend {
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        reject_unsupported_request(&request)?;
+        reject_unsupported_request(&request, self.session_storage_mount_path.as_deref())?;
         let spec_hash = sandbox_spec_hash(&request.spec);
         let runtime_session_id = agentcore_runtime_session_id(&request, &spec_hash);
         Ok(Arc::new(AwsAgentCoreSandboxHandle {
@@ -342,25 +350,73 @@ fn agentcore_invoke_target(runtime_arn: &str) -> Result<AwsAgentCoreInvokeTarget
     }
 }
 
-fn reject_unsupported_request(request: &SandboxRequest) -> Result<()> {
+fn reject_unsupported_request(
+    request: &SandboxRequest,
+    session_storage_mount_path: Option<&str>,
+) -> Result<()> {
     if !request.spec.mounts.is_empty() {
         bail!(
             "AgentCore sandbox backend does not support host bind-mounts; remove conversation mounts or use a local sandbox provider"
         );
     }
     validate_durable_file_systems(&request.spec.durable_file_systems)?;
-    if request
-        .spec
-        .durable_file_systems
-        .iter()
-        .any(|file_system| matches!(file_system.mode, crate::FileSystemMountMode::ReadOnly))
-    {
-        bail!("AgentCore sandbox backend does not support read-only durable file systems");
+    match request.spec.durable_file_systems.as_slice() {
+        [] => {}
+        [file_system] => {
+            if matches!(file_system.mode, crate::FileSystemMountMode::ReadOnly) {
+                bail!("AgentCore sandbox backend does not support read-only durable file systems");
+            }
+            let requested_mount_path =
+                normalize_agentcore_session_storage_mount_path(&file_system.mount_path)?;
+            // AgentCore managed session storage is provisioned on the runtime by
+            // create/update-agent-runtime, not on InvokeAgentRuntime. Exo stores
+            // the mount path it expects here so a durable FS request fails before
+            // we run work against a runtime that was built without matching
+            // filesystemConfigurations.
+            let Some(configured_mount_path) = session_storage_mount_path else {
+                bail!(
+                    "AgentCore sandbox backend was not configured with a managed session storage mount path; configure the runtime with filesystemConfigurations and set session_storage_mount_path"
+                );
+            };
+            if requested_mount_path != configured_mount_path {
+                bail!(
+                    "AgentCore sandbox durable file system mount path {requested_mount_path:?} does not match configured managed session storage mount path {configured_mount_path:?}"
+                );
+            }
+        }
+        _ => {
+            bail!("AgentCore sandbox backend supports at most one durable file system");
+        }
     }
     if matches!(request.spec.network, SandboxNetworkPolicy::Disabled) {
         bail!("AgentCore sandbox backend cannot enforce disabled networking");
     }
     Ok(())
+}
+
+fn normalize_agentcore_session_storage_mount_path(path: &str) -> Result<String> {
+    let trimmed = path.trim();
+    if !(6..=200).contains(&trimmed.len()) {
+        bail!("AgentCore session storage mount path must be between 6 and 200 characters: {path}");
+    }
+    let Some(suffix) = trimmed.strip_prefix("/mnt/") else {
+        bail!("AgentCore session storage mount path must be under /mnt/: {path}");
+    };
+    let suffix = suffix.trim_end_matches('/');
+    if suffix.is_empty() || suffix.contains('/') {
+        bail!(
+            "AgentCore session storage mount path must have exactly one subdirectory under /mnt/: {path}"
+        );
+    }
+    if !suffix
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        bail!(
+            "AgentCore session storage mount path may only contain letters, numbers, '.', '_', and '-' after /mnt/: {path}"
+        );
+    }
+    Ok(format!("/mnt/{suffix}"))
 }
 
 fn agentcore_runtime_session_id(request: &SandboxRequest, spec_hash: &str) -> String {
@@ -428,4 +484,71 @@ struct AgentCoreExecResponse {
     cwd: Option<String>,
     #[serde(default)]
     error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        DurableFileSystem, FileSystemMountMode, SandboxKey, SandboxLifecycleConfig,
+        SandboxNetworkPolicy, SandboxSpec,
+    };
+
+    #[test]
+    fn durable_file_system_requires_configured_session_storage_mount_path() {
+        let request = durable_request("/mnt/workspace", FileSystemMountMode::ReadWrite);
+        let error = reject_unsupported_request(&request, None).expect_err("missing mount path");
+        assert!(
+            error
+                .to_string()
+                .contains("was not configured with a managed session storage mount path")
+        );
+    }
+
+    #[test]
+    fn durable_file_system_must_match_configured_session_storage_mount_path() {
+        let request = durable_request("/mnt/workspace", FileSystemMountMode::ReadWrite);
+        let error =
+            reject_unsupported_request(&request, Some("/mnt/other")).expect_err("mount mismatch");
+        assert!(
+            error
+                .to_string()
+                .contains("does not match configured managed session storage mount path")
+        );
+    }
+
+    #[test]
+    fn durable_file_system_accepts_matching_session_storage_mount_path() {
+        let request = durable_request("/mnt/workspace", FileSystemMountMode::ReadWrite);
+        reject_unsupported_request(&request, Some("/mnt/workspace")).expect("matching mount path");
+    }
+
+    #[test]
+    fn durable_file_system_rejects_non_agentcore_mount_path_shape() {
+        let request = durable_request("/home/exo/workspace", FileSystemMountMode::ReadWrite);
+        let error =
+            reject_unsupported_request(&request, Some("/mnt/workspace")).expect_err("bad path");
+        assert!(error.to_string().contains("must be under /mnt/"));
+    }
+
+    fn durable_request(mount_path: &str, mode: FileSystemMountMode) -> SandboxRequest {
+        SandboxRequest {
+            key: SandboxKey::ConversationSandbox {
+                conversation_id: "conversation".to_string(),
+                sandbox_id: "sandbox".to_string(),
+            },
+            spec: SandboxSpec {
+                image: "agentcore".to_string(),
+                mounts: Vec::new(),
+                durable_file_systems: vec![DurableFileSystem {
+                    name: "workspace".to_string(),
+                    mount_path: mount_path.to_string(),
+                    mode,
+                }],
+                network: SandboxNetworkPolicy::Enabled,
+                default_workdir: "/mnt/workspace".to_string(),
+            },
+            lifecycle: SandboxLifecycleConfig::default(),
+        }
+    }
 }

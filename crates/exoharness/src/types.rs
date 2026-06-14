@@ -843,6 +843,8 @@ pub enum SandboxProviderConfig {
         qualifier: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         endpoint_url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_storage_mount_path: Option<String>,
         #[serde(default = "crate::sandbox_provider::default_aws_agentcore_image")]
         default_image: String,
     },

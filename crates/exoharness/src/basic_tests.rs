@@ -31,6 +31,8 @@ use crate::{
 };
 
 const DEFAULT_DURABLE_CONTRACT_MOUNT_PATH: &str = "/home/exo/workspace";
+#[cfg(feature = "aws-agentcore")]
+const DEFAULT_AGENTCORE_DURABLE_CONTRACT_MOUNT_PATH: &str = "/mnt/workspace";
 
 #[tokio::test(flavor = "current_thread")]
 async fn basic_backend_supports_agent_and_conversation_crud() {
@@ -230,12 +232,12 @@ async fn apple_container_sandbox_contract_durable_file_system_survives_stop_and_
 
 #[cfg(feature = "aws-agentcore")]
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "uses a real AgentCore runtime configured with managed session storage at EXO_DURABLE_CONTRACT_MOUNT_PATH or /home/exo/workspace; run this test explicitly"]
+#[ignore = "uses a real AgentCore runtime configured with managed session storage at EXO_AGENTCORE_DURABLE_CONTRACT_MOUNT_PATH or /mnt/workspace; run this test explicitly"]
 async fn aws_agentcore_sandbox_contract_durable_file_system_survives_stop_and_reacquire() {
     let Some(backend) = aws_agentcore_contract_backend().await else {
         return;
     };
-    let mount_path = durable_contract_mount_path();
+    let mount_path = agentcore_durable_contract_mount_path();
     crate::contract_tests::sandbox_backend_durable_file_system_survives_stop_and_reacquire(
         backend,
         durable_provider_contract_request(
@@ -384,6 +386,7 @@ async fn aws_agentcore_contract_backend() -> Option<Arc<dyn ManagedSandboxBacken
         endpoint_url: nonempty_env("AGENTCORE_ENDPOINT_URL")
             .or_else(|| nonempty_env("AWS_AGENTCORE_ENDPOINT_URL")),
         credentials,
+        session_storage_mount_path: Some(agentcore_durable_contract_mount_path()),
     })
     .await
     .expect("AwsAgentCoreSandboxBackend::new");
@@ -429,12 +432,12 @@ fn durable_provider_contract_request(
     provider: &str,
     contract: &str,
     image: String,
-    default_workdir: &str,
+    mount_path: &str,
 ) -> SandboxRequest {
-    let mut request = provider_contract_request(provider, contract, image, default_workdir);
+    let mut request = provider_contract_request(provider, contract, image, mount_path);
     request.spec.durable_file_systems = vec![DurableFileSystem {
         name: "workspace".to_string(),
-        mount_path: durable_contract_mount_path(),
+        mount_path: mount_path.to_string(),
         mode: FileSystemMountMode::ReadWrite,
     }];
     request
@@ -445,6 +448,14 @@ fn durable_contract_mount_path() -> String {
         "EXO_DURABLE_CONTRACT_MOUNT_PATH",
         DEFAULT_DURABLE_CONTRACT_MOUNT_PATH,
     )
+}
+
+#[cfg(feature = "aws-agentcore")]
+fn agentcore_durable_contract_mount_path() -> String {
+    nonempty_env("EXO_AGENTCORE_DURABLE_CONTRACT_MOUNT_PATH")
+        .or_else(|| nonempty_env("AWS_AGENTCORE_SESSION_STORAGE_MOUNT_PATH"))
+        .or_else(|| nonempty_env("AGENTCORE_SESSION_STORAGE_MOUNT_PATH"))
+        .unwrap_or_else(|| DEFAULT_AGENTCORE_DURABLE_CONTRACT_MOUNT_PATH.to_string())
 }
 
 #[tokio::test(flavor = "current_thread")]
