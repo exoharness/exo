@@ -410,6 +410,7 @@ impl ConversationHandle for LocalSandboxConversation {
     ) -> Result<Arc<dyn TurnHandle>> {
         Ok(Arc::new(LocalSandboxTurnHandle {
             state: Arc::clone(&self.state),
+            conversation_id: self.remote.record().id,
             remote: self.remote.begin_turn(request).await?,
         }))
     }
@@ -417,6 +418,7 @@ impl ConversationHandle for LocalSandboxConversation {
     async fn turn_handle(&self, record: TurnRecord) -> Result<Arc<dyn TurnHandle>> {
         Ok(Arc::new(LocalSandboxTurnHandle {
             state: Arc::clone(&self.state),
+            conversation_id: self.remote.record().id,
             remote: self.remote.turn_handle(record).await?,
         }))
     }
@@ -677,6 +679,7 @@ impl ConversationHandle for LocalSandboxConversation {
 
 struct LocalSandboxTurnHandle {
     state: Arc<LocalSandboxState>,
+    conversation_id: ConversationId,
     remote: Arc<dyn TurnHandle>,
 }
 
@@ -694,19 +697,19 @@ impl TurnHandle for LocalSandboxTurnHandle {
         self.remote.write_artifact(request).await
     }
 
-    async fn snapshot_sandbox(
-        &self,
-        conversation_id: ConversationId,
-        id: SandboxId,
-    ) -> Result<SnapshotId> {
-        let Some(local_id) = local_sandbox_id_for(&self.state, conversation_id, &id).await? else {
-            return self.remote.snapshot_sandbox(conversation_id, id).await;
+    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
+        let Some(local_id) = local_sandbox_id_for(&self.state, self.conversation_id, &id).await?
+        else {
+            return self.remote.snapshot_sandbox(id).await;
         };
-        let snapshot_id =
-            local_conversation_for(&self.state, conversation_id, &conversation_id.to_string())
-                .await?
-                .snapshot_sandbox(local_id)
-                .await?;
+        let snapshot_id = local_conversation_for(
+            &self.state,
+            self.conversation_id,
+            &self.conversation_id.to_string(),
+        )
+        .await?
+        .snapshot_sandbox(local_id)
+        .await?;
         self.remote
             .add_events(vec![EventData::SandboxSnapshotted {
                 sandbox_id: id,
@@ -716,24 +719,24 @@ impl TurnHandle for LocalSandboxTurnHandle {
         Ok(snapshot_id)
     }
 
-    async fn start_sandbox(
-        &self,
-        conversation_id: ConversationId,
-        request: StartSandboxRequest,
-    ) -> Result<()> {
+    async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
         let Some(local_id) =
-            local_sandbox_id_for(&self.state, conversation_id, &request.id).await?
+            local_sandbox_id_for(&self.state, self.conversation_id, &request.id).await?
         else {
-            return self.remote.start_sandbox(conversation_id, request).await;
+            return self.remote.start_sandbox(request).await;
         };
-        local_conversation_for(&self.state, conversation_id, &conversation_id.to_string())
-            .await?
-            .start_sandbox(StartSandboxRequest {
-                id: local_id,
-                snapshot_id: request.snapshot_id,
-                idle_seconds: request.idle_seconds,
-            })
-            .await?;
+        local_conversation_for(
+            &self.state,
+            self.conversation_id,
+            &self.conversation_id.to_string(),
+        )
+        .await?
+        .start_sandbox(StartSandboxRequest {
+            id: local_id,
+            snapshot_id: request.snapshot_id,
+            idle_seconds: request.idle_seconds,
+        })
+        .await?;
         self.remote
             .add_events(vec![EventData::SandboxStarted {
                 sandbox_id: request.id,

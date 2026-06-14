@@ -132,24 +132,8 @@ pub trait TurnHandle: Send + Sync {
 
     async fn add_events(&self, data: Vec<EventData>) -> Result<AddEventsResult>;
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion>;
-    async fn snapshot_sandbox(
-        &self,
-        _conversation_id: ConversationId,
-        _id: SandboxId,
-    ) -> Result<SnapshotId> {
-        Err(anyhow::anyhow!(
-            "turn-scoped sandbox snapshots are not supported by this harness"
-        ))
-    }
-    async fn start_sandbox(
-        &self,
-        _conversation_id: ConversationId,
-        _request: StartSandboxRequest,
-    ) -> Result<()> {
-        Err(anyhow::anyhow!(
-            "turn-scoped sandbox start is not supported by this harness"
-        ))
-    }
+    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId>;
+    async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()>;
     async fn finish(&self) -> Result<EventId>;
 }
 

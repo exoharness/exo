@@ -463,6 +463,33 @@ impl ExoHarnessServer {
                     artifact: turn.write_artifact(request).await?,
                 })
             }
+            Request::TurnSnapshotSandbox {
+                agent_id,
+                conversation_id,
+                session_id,
+                turn_id,
+                sandbox_id,
+            } => {
+                let turn = self
+                    .require_turn(agent_id, conversation_id, session_id, turn_id)
+                    .await?;
+                Ok(Response::SnapshotId {
+                    snapshot_id: turn.snapshot_sandbox(sandbox_id).await?,
+                })
+            }
+            Request::TurnStartSandbox {
+                agent_id,
+                conversation_id,
+                session_id,
+                turn_id,
+                request,
+            } => {
+                let turn = self
+                    .require_turn(agent_id, conversation_id, session_id, turn_id)
+                    .await?;
+                turn.start_sandbox(request).await?;
+                Ok(Response::Unit)
+            }
             Request::TurnFinish {
                 agent_id,
                 conversation_id,

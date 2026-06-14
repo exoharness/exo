@@ -758,6 +758,66 @@ async fn basic_backend_runs_commands_in_created_sandbox() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn conversation_create_sandbox_is_not_turn_scoped() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
+        .await
+        .expect("harness should initialize");
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let conversation = agent
+        .new_conversation(NewConversationRequest::default())
+        .await
+        .expect("conversation");
+    let turn = conversation
+        .begin_turn(BeginTurnRequest {
+            session_id: None,
+            input: vec![user_message("start turn")],
+        })
+        .await
+        .expect("turn should begin");
+
+    conversation
+        .create_sandbox(CreateSandboxRequest {
+            name: None,
+            provider: SandboxProvider::LocalProcess,
+            image: "basic-local-process".to_string(),
+            default_workdir: Some(tempdir.path().display().to_string()),
+            file_system_mounts: None,
+            enable_networking: Some(true),
+            idle_seconds: Some(60),
+        })
+        .await
+        .expect("sandbox should be created");
+
+    let events = conversation
+        .get_events(Some(EventQuery {
+            cursor: None,
+            direction: Some(EventQueryDirection::Asc),
+            limit: None,
+            session_id: None,
+            turn_id: None,
+            types: Some(vec![EventKind::SANDBOX_CREATED, EventKind::SANDBOX_STARTED]),
+        }))
+        .await
+        .expect("sandbox lifecycle events")
+        .events;
+
+    assert_eq!(events.len(), 2);
+    for event in events {
+        assert_ne!(event.session_id, Some(turn.record().session_id));
+        assert_ne!(event.turn_id, Some(turn.record().id));
+        assert_eq!(event.session_id, None);
+        assert_eq!(event.turn_id, None);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn basic_backend_reuses_named_sandbox() {
     let tempdir = TempDir::new().expect("tempdir");
     let harness = BasicExoHarness::new(local_test_config(tempdir.path()))

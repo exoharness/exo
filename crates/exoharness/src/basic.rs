@@ -1336,7 +1336,6 @@ impl ConversationHandle for BasicConversationHandle {
 
         Ok(Arc::new(BasicTurnHandle {
             harness: self.harness.clone(),
-            agent_id: self.agent_id,
             conversation_dir,
             conversation_id: self.record.id,
             record: turn_record,
@@ -1368,7 +1367,6 @@ impl ConversationHandle for BasicConversationHandle {
         }
         Ok(Arc::new(BasicTurnHandle {
             harness: self.harness.clone(),
-            agent_id: self.agent_id,
             conversation_dir: self.conversation_dir(),
             conversation_id: self.record.id,
             record,
@@ -2289,7 +2287,6 @@ async fn load_stored_sandbox(
 
 struct BasicTurnHandle {
     harness: BasicExoHarness,
-    agent_id: AgentId,
     conversation_dir: PathBuf,
     conversation_id: ConversationId,
     record: TurnRecord,
@@ -2299,19 +2296,6 @@ struct BasicTurnHandle {
 struct BasicTurnState {
     latest_event_id: Option<EventId>,
     finished: bool,
-}
-
-impl BasicTurnHandle {
-    fn owner_conversation_dir(&self, conversation_id: ConversationId) -> PathBuf {
-        if conversation_id == self.conversation_id {
-            return self.conversation_dir.clone();
-        }
-        self.harness
-            .agents_dir()
-            .join(self.agent_id.to_string())
-            .join("conversations")
-            .join(conversation_id.to_string())
-    }
 }
 
 #[async_trait]
@@ -2404,27 +2388,21 @@ impl TurnHandle for BasicTurnHandle {
         Ok(artifact_version)
     }
 
-    async fn snapshot_sandbox(
-        &self,
-        conversation_id: ConversationId,
-        id: SandboxId,
-    ) -> Result<SnapshotId> {
-        let conversation_dir = self.owner_conversation_dir(conversation_id);
+    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
         let (snapshot_id, event) =
-            snapshot_sandbox_side_effect(&self.harness, &conversation_dir, id).await?;
+            snapshot_sandbox_side_effect(&self.harness, &self.conversation_dir, id).await?;
         self.add_events(vec![event]).await?;
         Ok(snapshot_id)
     }
 
-    async fn start_sandbox(
-        &self,
-        conversation_id: ConversationId,
-        request: StartSandboxRequest,
-    ) -> Result<()> {
-        let conversation_dir = self.owner_conversation_dir(conversation_id);
-        let event =
-            start_sandbox_side_effect(&self.harness, &conversation_dir, conversation_id, request)
-                .await?;
+    async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
+        let event = start_sandbox_side_effect(
+            &self.harness,
+            &self.conversation_dir,
+            self.conversation_id,
+            request,
+        )
+        .await?;
         self.add_events(vec![event]).await?;
         Ok(())
     }

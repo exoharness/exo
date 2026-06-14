@@ -1,15 +1,21 @@
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
 
+use anyhow::bail;
+use async_trait::async_trait;
+use bytes::Bytes;
 use futures::io::AsyncReadExt;
 use tempfile::TempDir;
 
 use crate::test_support::local_test_config;
 use crate::{
-    BasicExoHarness, CreateSandboxRequest, ExoHarness, HttpExoHarness, RunInSandboxRequest,
-    SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessStatus, SandboxProcessStdin,
-    SandboxProvider, StartSandboxProcessRequest, WaitSandboxProcessRequest,
-    WriteSandboxProcessInputRequest, serve_exoharness_http_listener,
+    BasicExoHarness, BeginTurnRequest, CreateSandboxRequest, EventData, EventKind, EventQuery,
+    EventQueryDirection, ExoHarness, HttpExoHarness, ManagedSandboxBackend, ManagedSandboxHandle,
+    RunInSandboxRequest, SandboxCommand, SandboxCommandOutput, SandboxProcessEvent,
+    SandboxProcessEventQuery, SandboxProcessParts, SandboxProcessStatus, SandboxProcessStdin,
+    SandboxProvider, SandboxRequest, SnapshotKind, SnapshotPayload, StartSandboxProcessRequest,
+    StartSandboxRequest, WaitSandboxProcessRequest, WriteSandboxProcessInputRequest,
+    serve_exoharness_http_listener,
 };
 
 struct HttpHarnessFixture {
@@ -29,6 +35,27 @@ async fn http_harness() -> HttpHarnessFixture {
     let basic = BasicExoHarness::new(local_test_config(tempdir.path()))
         .await
         .expect("basic harness");
+    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("listener");
+    let addr = listener.local_addr().expect("local addr");
+    let server = actix_web::rt::spawn(serve_exoharness_http_listener(listener, Arc::new(basic)));
+    let harness: Arc<dyn ExoHarness> =
+        Arc::new(HttpExoHarness::new(format!("http://{addr}")).expect("http harness"));
+
+    HttpHarnessFixture {
+        harness,
+        server,
+        _tempdir: tempdir,
+    }
+}
+
+async fn http_harness_with_sandbox_backend(
+    backend: Arc<dyn ManagedSandboxBackend>,
+) -> HttpHarnessFixture {
+    let tempdir = TempDir::new().expect("tempdir");
+    let basic =
+        BasicExoHarness::new_with_sandbox_backend(local_test_config(tempdir.path()), backend)
+            .await
+            .expect("basic harness");
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("listener");
     let addr = listener.local_addr().expect("local addr");
     let server = actix_web::rt::spawn(serve_exoharness_http_listener(listener, Arc::new(basic)));
@@ -220,6 +247,144 @@ async fn http_exoharness_supports_sandbox_process_events() {
         events.events.last(),
         Some(SandboxProcessEvent::Exit { exit_code: 0, .. })
     ));
+}
+
+#[actix_web::test]
+async fn http_exoharness_supports_turn_scoped_sandbox_snapshot_and_start() {
+    let fixture = http_harness_with_sandbox_backend(Arc::new(SnapshotTestSandboxBackend)).await;
+    let agent = fixture
+        .harness
+        .new_agent(crate::NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let conversation = agent
+        .new_conversation(crate::NewConversationRequest::default())
+        .await
+        .expect("conversation");
+    let sandbox_id = conversation
+        .create_sandbox(CreateSandboxRequest {
+            name: None,
+            provider: SandboxProvider::LocalProcess,
+            image: "local".to_string(),
+            default_workdir: Some("/".to_string()),
+            file_system_mounts: None,
+            enable_networking: Some(true),
+            idle_seconds: Some(60),
+        })
+        .await
+        .expect("sandbox");
+    let turn = conversation
+        .begin_turn(BeginTurnRequest {
+            session_id: None,
+            input: Vec::new(),
+        })
+        .await
+        .expect("turn");
+
+    let snapshot_id = turn
+        .snapshot_sandbox(sandbox_id.clone())
+        .await
+        .expect("turn snapshot");
+    turn.start_sandbox(StartSandboxRequest {
+        id: sandbox_id.clone(),
+        snapshot_id,
+        idle_seconds: Some(60),
+    })
+    .await
+    .expect("turn start from snapshot");
+
+    let events = conversation
+        .get_events(Some(EventQuery {
+            cursor: None,
+            direction: Some(EventQueryDirection::Asc),
+            limit: None,
+            session_id: None,
+            turn_id: None,
+            types: Some(vec![
+                EventKind::SANDBOX_SNAPSHOTTED,
+                EventKind::SANDBOX_STARTED,
+            ]),
+        }))
+        .await
+        .expect("events")
+        .events;
+
+    let snapshot_event = events
+        .iter()
+        .find(|event| matches!(event.data, EventData::SandboxSnapshotted { .. }))
+        .expect("snapshot event");
+    assert_eq!(snapshot_event.session_id, Some(turn.record().session_id));
+    assert_eq!(snapshot_event.turn_id, Some(turn.record().id));
+
+    let restored_start_event = events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.data,
+                EventData::SandboxStarted {
+                    snapshot_id: Some(_),
+                    ..
+                }
+            )
+        })
+        .expect("snapshot-backed start event");
+    assert_eq!(
+        restored_start_event.session_id,
+        Some(turn.record().session_id)
+    );
+    assert_eq!(restored_start_event.turn_id, Some(turn.record().id));
+}
+
+struct SnapshotTestSandboxBackend;
+
+#[async_trait]
+impl ManagedSandboxBackend for SnapshotTestSandboxBackend {
+    async fn acquire(
+        &self,
+        _request: SandboxRequest,
+    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+        Ok(Arc::new(SnapshotTestSandboxHandle))
+    }
+
+    async fn acquire_from_snapshot(
+        &self,
+        _request: SandboxRequest,
+        payload: SnapshotPayload,
+    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+        assert_eq!(payload.bytes, Bytes::from_static(b"snapshot"));
+        Ok(Arc::new(SnapshotTestSandboxHandle))
+    }
+}
+
+struct SnapshotTestSandboxHandle;
+
+#[async_trait]
+impl ManagedSandboxHandle for SnapshotTestSandboxHandle {
+    fn id(&self) -> &str {
+        "snapshot-test-sandbox"
+    }
+
+    async fn exec(&self, _command: &SandboxCommand) -> crate::Result<SandboxCommandOutput> {
+        bail!("snapshot test sandbox does not support exec")
+    }
+
+    async fn start_process(&self, _command: &SandboxCommand) -> crate::Result<SandboxProcessParts> {
+        bail!("snapshot test sandbox does not support start_process")
+    }
+
+    async fn stop(&self) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn snapshot(&self) -> crate::Result<SnapshotPayload> {
+        Ok(SnapshotPayload {
+            kind: SnapshotKind::DaytonaSnapshot,
+            bytes: Bytes::from_static(b"snapshot"),
+        })
+    }
 }
 
 fn hosted_harness_from_env() -> Arc<dyn ExoHarness> {

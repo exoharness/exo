@@ -519,9 +519,7 @@ async fn execute_snapshot_sandbox_tool(
         SandboxControlScope::Agent => {
             let handle = ensure_agent_sandbox(agent, conversation, agent_config, config).await?;
             let owner_conversation_id = handle.conversation.record().id;
-            let snapshot_id = turn
-                .snapshot_sandbox(owner_conversation_id, handle.sandbox_id.clone())
-                .await?;
+            let snapshot_id = turn.snapshot_sandbox(handle.sandbox_id.clone()).await?;
             record_sandbox_snapshot(
                 agent,
                 scope,
@@ -541,9 +539,7 @@ async fn execute_snapshot_sandbox_tool(
         SandboxControlScope::Conversation => {
             let sandbox_id =
                 ensure_conversation_sandbox(conversation, agent_config, config).await?;
-            let snapshot_id = turn
-                .snapshot_sandbox(conversation.record().id, sandbox_id.clone())
-                .await?;
+            let snapshot_id = turn.snapshot_sandbox(sandbox_id.clone()).await?;
             record_sandbox_snapshot(
                 agent,
                 scope,
@@ -580,14 +576,11 @@ async fn execute_rewind_sandbox_tool(
         SandboxControlScope::Agent => {
             let handle = ensure_agent_sandbox(agent, conversation, agent_config, config).await?;
             let owner_conversation_id = handle.conversation.record().id;
-            turn.start_sandbox(
-                owner_conversation_id,
-                StartSandboxRequest {
-                    id: handle.sandbox_id.clone(),
-                    snapshot_id,
-                    idle_seconds: Some(spec.idle_seconds),
-                },
-            )
+            turn.start_sandbox(StartSandboxRequest {
+                id: handle.sandbox_id.clone(),
+                snapshot_id,
+                idle_seconds: Some(spec.idle_seconds),
+            })
             .await?;
             record_current_sandbox_snapshot(
                 agent,
@@ -609,14 +602,11 @@ async fn execute_rewind_sandbox_tool(
         SandboxControlScope::Conversation => {
             let sandbox_id =
                 ensure_conversation_sandbox(conversation, agent_config, config).await?;
-            turn.start_sandbox(
-                conversation.record().id,
-                StartSandboxRequest {
-                    id: sandbox_id.clone(),
-                    snapshot_id,
-                    idle_seconds: Some(spec.idle_seconds),
-                },
-            )
+            turn.start_sandbox(StartSandboxRequest {
+                id: sandbox_id.clone(),
+                snapshot_id,
+                idle_seconds: Some(spec.idle_seconds),
+            })
             .await?;
             record_current_sandbox_snapshot(
                 agent,

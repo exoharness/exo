@@ -257,6 +257,20 @@ pub enum Request {
         turn_id: TurnId,
         request: WriteArtifactRequest,
     },
+    TurnSnapshotSandbox {
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+        session_id: SessionId,
+        turn_id: TurnId,
+        sandbox_id: SandboxId,
+    },
+    TurnStartSandbox {
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+        session_id: SessionId,
+        turn_id: TurnId,
+        request: StartSandboxRequest,
+    },
     TurnFinish {
         agent_id: AgentId,
         conversation_id: ConversationId,
@@ -325,6 +339,8 @@ impl Request {
             Self::ConversationGetSecret { .. } => "conversation_get_secret",
             Self::TurnAddEvents { .. } => "turn_add_events",
             Self::TurnWriteArtifact { .. } => "turn_write_artifact",
+            Self::TurnSnapshotSandbox { .. } => "turn_snapshot_sandbox",
+            Self::TurnStartSandbox { .. } => "turn_start_sandbox",
             Self::TurnFinish { .. } => "turn_finish",
         }
     }

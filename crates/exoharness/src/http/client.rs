@@ -987,6 +987,40 @@ impl TurnHandle for HttpTurnHandle {
         }
     }
 
+    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
+        match self
+            .harness
+            .request(Request::TurnSnapshotSandbox {
+                agent_id: self.agent_id,
+                conversation_id: self.conversation_id,
+                session_id: self.record.session_id,
+                turn_id: self.record.id,
+                sandbox_id: id,
+            })
+            .await?
+        {
+            Response::SnapshotId { snapshot_id } => Ok(snapshot_id),
+            response => unexpected_response(response, "snapshot_id"),
+        }
+    }
+
+    async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
+        match self
+            .harness
+            .request(Request::TurnStartSandbox {
+                agent_id: self.agent_id,
+                conversation_id: self.conversation_id,
+                session_id: self.record.session_id,
+                turn_id: self.record.id,
+                request,
+            })
+            .await?
+        {
+            Response::Unit => Ok(()),
+            response => unexpected_response(response, "unit"),
+        }
+    }
+
     async fn finish(&self) -> Result<EventId> {
         match self
             .harness

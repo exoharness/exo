@@ -1097,6 +1097,14 @@ impl TurnHandle for FakeTurnHandle {
         Err(anyhow!("not implemented"))
     }
 
+    async fn snapshot_sandbox(&self, _id: SandboxId) -> Result<SnapshotId> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn start_sandbox(&self, _request: StartSandboxRequest) -> Result<()> {
+        Err(anyhow!("not implemented"))
+    }
+
     async fn finish(&self) -> Result<exoharness::EventId> {
         let event_id = append_event(
             &self.state,
