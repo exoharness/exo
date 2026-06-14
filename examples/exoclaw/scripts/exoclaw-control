@@ -713,9 +713,38 @@ setup_local_profile() {
   echo "Wrote local profile prompt. The harness will load it from EXOCLAW_LOCAL_PROMPT_FILE."
 }
 
+# During fresh, all agents and conversations are deleted, so every sandbox
+# container left behind by earlier runs is obsolete. Remove exo sandbox
+# containers whose creating process is gone; containers whose owner is still
+# alive (e.g. another exo checkout's running stack) are left alone, as is
+# anything without exo sandbox labels.
+cleanup_orphaned_sandbox_containers() {
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    return
+  fi
+  local container key owner name removed=0
+  for container in $(docker ps -a --filter "name=exo-" --format '{{.ID}}' 2>/dev/null); do
+    name="$(docker inspect "$container" --format '{{.Name}}' 2>/dev/null | sed 's|^/||')"
+    [[ "$name" == exo-* ]] || continue
+    key="$(docker inspect "$container" --format '{{index .Config.Labels "exo.sandbox.key"}}' 2>/dev/null)"
+    [[ -n "$key" ]] || continue
+    owner="$(docker inspect "$container" --format '{{index .Config.Labels "exo.sandbox.owner-pid"}}' 2>/dev/null)"
+    if [[ -n "$owner" ]] && kill -0 "$owner" 2>/dev/null; then
+      continue
+    fi
+    echo "Removing orphaned sandbox container $name..."
+    docker rm -f "$container" >/dev/null 2>&1 || true
+    removed=$((removed + 1))
+  done
+  if [[ "$removed" -gt 0 ]]; then
+    echo "Removed $removed orphaned sandbox container(s)."
+  fi
+}
+
 fresh_start() {
   build_exo
   delete_all_agents_and_conversations
+  cleanup_orphaned_sandbox_containers
   if [[ "$USE_SANDBOX" == true ]]; then
     PULL_SANDBOX=true
   fi
