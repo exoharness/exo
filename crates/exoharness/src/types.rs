@@ -34,10 +34,14 @@ pub trait ExoHarness: Send + Sync {
 }
 
 #[async_trait]
-pub trait SandboxHandle: Send + Sync {
-    async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId>;
+pub trait SnapshotHandle: Send + Sync {
     async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId>;
     async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()>;
+}
+
+#[async_trait]
+pub trait SandboxHandle: SnapshotHandle {
+    async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId>;
     async fn stop_sandbox(&self, id: SandboxId) -> Result<()>;
     async fn start_sandbox_process(
         &self,
@@ -130,13 +134,11 @@ pub trait ConversationHandle: SandboxHandle {
 }
 
 #[async_trait]
-pub trait TurnHandle: Send + Sync {
+pub trait TurnHandle: SnapshotHandle {
     fn record(&self) -> &TurnRecord;
 
     async fn add_events(&self, data: Vec<EventData>) -> Result<AddEventsResult>;
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion>;
-    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId>;
-    async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()>;
     async fn finish(&self) -> Result<EventId>;
 }
 

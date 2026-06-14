@@ -11,8 +11,8 @@ use exoharness::{
     ListConversationsResult, NewAgentRequest, NewConversationRequest, PutSecretRequest,
     ReadArtifactRequest, Result, RunInSandboxRequest, SandboxHandle, SandboxId, SandboxProcess,
     SandboxProcessEventQuery, SandboxProcessRecord, SandboxProcessStatus, Secret, SecretId,
-    SecretMetadata, SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnHandle,
-    TurnRecord, Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest,
+    SecretMetadata, SnapshotHandle, SnapshotId, StartSandboxProcessRequest, StartSandboxRequest,
+    TurnHandle, TurnRecord, Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest,
     WriteSandboxProcessInputRequest,
 };
 use serde::{Deserialize, Serialize};
@@ -277,18 +277,7 @@ impl AgentHandle for LocalSandboxAgent {
 }
 
 #[async_trait]
-impl SandboxHandle for LocalSandboxAgent {
-    async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
-        if !self.wants_local_sandbox(&request) {
-            return self.remote.create_sandbox(request).await;
-        }
-
-        let local_id = self.local_agent().await?.create_sandbox(request).await?;
-        let remote_id = local_id.clone();
-        self.map_local_sandbox(remote_id.clone(), local_id).await;
-        Ok(remote_id)
-    }
-
+impl SnapshotHandle for LocalSandboxAgent {
     async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
         let Some(local_id) = self.local_sandbox_id(&id).await? else {
             return self.remote.snapshot_sandbox(id).await;
@@ -308,6 +297,20 @@ impl SandboxHandle for LocalSandboxAgent {
                 idle_seconds: request.idle_seconds,
             })
             .await
+    }
+}
+
+#[async_trait]
+impl SandboxHandle for LocalSandboxAgent {
+    async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
+        if !self.wants_local_sandbox(&request) {
+            return self.remote.create_sandbox(request).await;
+        }
+
+        let local_id = self.local_agent().await?.create_sandbox(request).await?;
+        let remote_id = local_id.clone();
+        self.map_local_sandbox(remote_id.clone(), local_id).await;
+        Ok(remote_id)
     }
 
     async fn stop_sandbox(&self, id: SandboxId) -> Result<()> {
@@ -755,39 +758,7 @@ impl ConversationHandle for LocalSandboxConversation {
 }
 
 #[async_trait]
-impl SandboxHandle for LocalSandboxConversation {
-    async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
-        if !self.wants_local_sandbox(&request) {
-            return self.remote.create_sandbox(request).await;
-        }
-
-        let remote_id = format!("sandbox-{}", Uuid7::now());
-        let local_id = self
-            .local_conversation()
-            .await?
-            .create_sandbox(request.clone())
-            .await?;
-        self.map_local_sandbox(remote_id.clone(), local_id).await?;
-        self.append_remote_sandbox_events(vec![
-            EventData::SandboxCreated {
-                sandbox_id: remote_id.clone(),
-                name: request.name,
-                provider: request.provider,
-                image: request.image,
-                default_workdir: request.default_workdir.unwrap_or_default(),
-                file_system_mounts: request.file_system_mounts.unwrap_or_default(),
-                enable_networking: request.enable_networking.unwrap_or(true),
-                idle_seconds: request.idle_seconds.unwrap_or(60),
-            },
-            EventData::SandboxStarted {
-                sandbox_id: remote_id.clone(),
-                snapshot_id: None,
-            },
-        ])
-        .await?;
-        Ok(remote_id)
-    }
-
+impl SnapshotHandle for LocalSandboxConversation {
     async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
         let Some(local_id) = self.local_sandbox_id(&id).await? else {
             return self.remote.snapshot_sandbox(id).await;
@@ -822,6 +793,41 @@ impl SandboxHandle for LocalSandboxConversation {
             snapshot_id: Some(request.snapshot_id),
         }])
         .await
+    }
+}
+
+#[async_trait]
+impl SandboxHandle for LocalSandboxConversation {
+    async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
+        if !self.wants_local_sandbox(&request) {
+            return self.remote.create_sandbox(request).await;
+        }
+
+        let remote_id = format!("sandbox-{}", Uuid7::now());
+        let local_id = self
+            .local_conversation()
+            .await?
+            .create_sandbox(request.clone())
+            .await?;
+        self.map_local_sandbox(remote_id.clone(), local_id).await?;
+        self.append_remote_sandbox_events(vec![
+            EventData::SandboxCreated {
+                sandbox_id: remote_id.clone(),
+                name: request.name,
+                provider: request.provider,
+                image: request.image,
+                default_workdir: request.default_workdir.unwrap_or_default(),
+                file_system_mounts: request.file_system_mounts.unwrap_or_default(),
+                enable_networking: request.enable_networking.unwrap_or(true),
+                idle_seconds: request.idle_seconds.unwrap_or(60),
+            },
+            EventData::SandboxStarted {
+                sandbox_id: remote_id.clone(),
+                snapshot_id: None,
+            },
+        ])
+        .await?;
+        Ok(remote_id)
     }
 
     async fn stop_sandbox(&self, id: SandboxId) -> Result<()> {
@@ -916,19 +922,7 @@ struct LocalSandboxTurnHandle {
 }
 
 #[async_trait]
-impl TurnHandle for LocalSandboxTurnHandle {
-    fn record(&self) -> &TurnRecord {
-        self.remote.record()
-    }
-
-    async fn add_events(&self, data: Vec<EventData>) -> Result<AddEventsResult> {
-        self.remote.add_events(data).await
-    }
-
-    async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion> {
-        self.remote.write_artifact(request).await
-    }
-
+impl SnapshotHandle for LocalSandboxTurnHandle {
     async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
         let Some(local_id) = local_sandbox_id_for(&self.state, self.conversation_id, &id).await?
         else {
@@ -976,6 +970,21 @@ impl TurnHandle for LocalSandboxTurnHandle {
             }])
             .await?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl TurnHandle for LocalSandboxTurnHandle {
+    fn record(&self) -> &TurnRecord {
+        self.remote.record()
+    }
+
+    async fn add_events(&self, data: Vec<EventData>) -> Result<AddEventsResult> {
+        self.remote.add_events(data).await
+    }
+
+    async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion> {
+        self.remote.write_artifact(request).await
     }
 
     async fn finish(&self) -> Result<EventId> {

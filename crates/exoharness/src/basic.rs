@@ -42,9 +42,9 @@ use crate::{
     SandboxProcess, SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessId,
     SandboxProcessMode, SandboxProcessParts, SandboxProcessRecord, SandboxProcessStatus,
     SandboxProcessStdin, SandboxProvider, SandboxProviderConfig, Secret, SecretId, SecretMetadata,
-    SecretType, SessionId, SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnHandle,
-    TurnId, TurnRecord, Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest,
-    WriteSandboxProcessInputRequest,
+    SecretType, SessionId, SnapshotHandle, SnapshotId, StartSandboxProcessRequest,
+    StartSandboxRequest, TurnHandle, TurnId, TurnRecord, Uuid7, WaitSandboxProcessRequest,
+    WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
 #[derive(Debug, Clone)]
@@ -973,6 +973,26 @@ impl AgentHandle for BasicAgentHandle {
 }
 
 #[async_trait]
+impl SnapshotHandle for BasicAgentHandle {
+    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
+        let (snapshot_id, _event) =
+            snapshot_sandbox_side_effect(&self.harness, &self.agent_dir(), id).await?;
+        Ok(snapshot_id)
+    }
+
+    async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
+        start_sandbox_side_effect(
+            &self.harness,
+            &self.agent_dir(),
+            SandboxOwner::Agent(self.record.id),
+            request,
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
 impl SandboxHandle for BasicAgentHandle {
     async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
         if request.name.is_none() {
@@ -997,23 +1017,6 @@ impl SandboxHandle for BasicAgentHandle {
             return Ok(sandbox_id);
         }
         self.create_new_sandbox_locked(prepared).await
-    }
-
-    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
-        let (snapshot_id, _event) =
-            snapshot_sandbox_side_effect(&self.harness, &self.agent_dir(), id).await?;
-        Ok(snapshot_id)
-    }
-
-    async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
-        start_sandbox_side_effect(
-            &self.harness,
-            &self.agent_dir(),
-            SandboxOwner::Agent(self.record.id),
-            request,
-        )
-        .await?;
-        Ok(())
     }
 
     async fn stop_sandbox(&self, id: SandboxId) -> Result<()> {
@@ -1978,20 +1981,7 @@ impl ConversationHandle for BasicConversationHandle {
 }
 
 #[async_trait]
-impl SandboxHandle for BasicConversationHandle {
-    async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
-        if request.name.is_none() {
-            return self.create_new_sandbox(request).await;
-        }
-        let prepared = self.prepare_sandbox_request(request).await?;
-        let _guard = self.harness.inner.write_lock.lock().await;
-        if let Some((sandbox_id, sandbox)) = self.find_matching_sandbox(&prepared).await? {
-            self.active_sandbox_handle(&sandbox_id, &sandbox).await?;
-            return Ok(sandbox_id);
-        }
-        self.create_new_sandbox_locked(prepared).await
-    }
-
+impl SnapshotHandle for BasicConversationHandle {
     async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
         let (snapshot_id, event) =
             snapshot_sandbox_side_effect(&self.harness, &self.conversation_dir(), id).await?;
@@ -2011,6 +2001,22 @@ impl SandboxHandle for BasicConversationHandle {
         self.append_events_internal(None, None, None, vec![event])
             .await?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl SandboxHandle for BasicConversationHandle {
+    async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
+        if request.name.is_none() {
+            return self.create_new_sandbox(request).await;
+        }
+        let prepared = self.prepare_sandbox_request(request).await?;
+        let _guard = self.harness.inner.write_lock.lock().await;
+        if let Some((sandbox_id, sandbox)) = self.find_matching_sandbox(&prepared).await? {
+            self.active_sandbox_handle(&sandbox_id, &sandbox).await?;
+            return Ok(sandbox_id);
+        }
+        self.create_new_sandbox_locked(prepared).await
     }
 
     async fn stop_sandbox(&self, id: SandboxId) -> Result<()> {
@@ -2565,6 +2571,28 @@ struct BasicTurnState {
 }
 
 #[async_trait]
+impl SnapshotHandle for BasicTurnHandle {
+    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
+        let (snapshot_id, event) =
+            snapshot_sandbox_side_effect(&self.harness, &self.conversation_dir, id).await?;
+        self.add_events(vec![event]).await?;
+        Ok(snapshot_id)
+    }
+
+    async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
+        let event = start_sandbox_side_effect(
+            &self.harness,
+            &self.conversation_dir,
+            SandboxOwner::Conversation(self.conversation_id),
+            request,
+        )
+        .await?;
+        self.add_events(vec![event]).await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
 impl TurnHandle for BasicTurnHandle {
     fn record(&self) -> &TurnRecord {
         &self.record
@@ -2652,25 +2680,6 @@ impl TurnHandle for BasicTurnHandle {
             .expect("turn state poisoned")
             .latest_event_id = Some(add_result.latest_event_id);
         Ok(artifact_version)
-    }
-
-    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
-        let (snapshot_id, event) =
-            snapshot_sandbox_side_effect(&self.harness, &self.conversation_dir, id).await?;
-        self.add_events(vec![event]).await?;
-        Ok(snapshot_id)
-    }
-
-    async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
-        let event = start_sandbox_side_effect(
-            &self.harness,
-            &self.conversation_dir,
-            SandboxOwner::Conversation(self.conversation_id),
-            request,
-        )
-        .await?;
-        self.add_events(vec![event]).await?;
-        Ok(())
     }
 
     async fn finish(&self) -> Result<EventId> {

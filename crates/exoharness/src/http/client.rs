@@ -24,8 +24,8 @@ use crate::{
     NewAgentRequest, NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result,
     RunInSandboxRequest, SandboxHandle, SandboxId, SandboxProcess, SandboxProcessEventQuery,
     SandboxProcessParts, SandboxProcessRecord, SandboxProcessStatus, Secret, SecretId,
-    SecretMetadata, SessionId, SnapshotId, StartSandboxProcessRequest, StartSandboxRequest,
-    TurnHandle, TurnRecord, WaitSandboxProcessRequest, WriteArtifactRequest,
+    SecretMetadata, SessionId, SnapshotHandle, SnapshotId, StartSandboxProcessRequest,
+    StartSandboxRequest, TurnHandle, TurnRecord, WaitSandboxProcessRequest, WriteArtifactRequest,
     WriteSandboxProcessInputRequest,
 };
 
@@ -797,17 +797,20 @@ impl AgentHandle for HttpAgentHandle {
 }
 
 #[async_trait]
-impl SandboxHandle for HttpAgentHandle {
-    async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
-        http_create_sandbox(&self.harness, self.sandbox_scope(), request).await
-    }
-
+impl SnapshotHandle for HttpAgentHandle {
     async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
         http_snapshot_sandbox(&self.harness, self.sandbox_scope(), id).await
     }
 
     async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
         http_start_sandbox(&self.harness, self.sandbox_scope(), request).await
+    }
+}
+
+#[async_trait]
+impl SandboxHandle for HttpAgentHandle {
+    async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
+        http_create_sandbox(&self.harness, self.sandbox_scope(), request).await
     }
 
     async fn stop_sandbox(&self, id: SandboxId) -> Result<()> {
@@ -1162,17 +1165,20 @@ impl ConversationHandle for HttpConversationHandle {
 }
 
 #[async_trait]
-impl SandboxHandle for HttpConversationHandle {
-    async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
-        http_create_sandbox(&self.harness, self.sandbox_scope(), request).await
-    }
-
+impl SnapshotHandle for HttpConversationHandle {
     async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
         http_snapshot_sandbox(&self.harness, self.sandbox_scope(), id).await
     }
 
     async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
         http_start_sandbox(&self.harness, self.sandbox_scope(), request).await
+    }
+}
+
+#[async_trait]
+impl SandboxHandle for HttpConversationHandle {
+    async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
+        http_create_sandbox(&self.harness, self.sandbox_scope(), request).await
     }
 
     async fn stop_sandbox(&self, id: SandboxId) -> Result<()> {
@@ -1252,6 +1258,43 @@ impl HttpTurnHandle {
 }
 
 #[async_trait]
+impl SnapshotHandle for HttpTurnHandle {
+    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
+        match self
+            .harness
+            .request(Request::TurnSnapshotSandbox {
+                agent_id: self.agent_id,
+                conversation_id: self.conversation_id,
+                session_id: self.record.session_id,
+                turn_id: self.record.id,
+                sandbox_id: id,
+            })
+            .await?
+        {
+            Response::SnapshotId { snapshot_id } => Ok(snapshot_id),
+            response => unexpected_response(response, "snapshot_id"),
+        }
+    }
+
+    async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
+        match self
+            .harness
+            .request(Request::TurnStartSandbox {
+                agent_id: self.agent_id,
+                conversation_id: self.conversation_id,
+                session_id: self.record.session_id,
+                turn_id: self.record.id,
+                request,
+            })
+            .await?
+        {
+            Response::Unit => Ok(()),
+            response => unexpected_response(response, "unit"),
+        }
+    }
+}
+
+#[async_trait]
 impl TurnHandle for HttpTurnHandle {
     fn record(&self) -> &TurnRecord {
         &self.record
@@ -1288,40 +1331,6 @@ impl TurnHandle for HttpTurnHandle {
         {
             Response::ArtifactVersion { artifact } => Ok(artifact),
             response => unexpected_response(response, "artifact_version"),
-        }
-    }
-
-    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
-        match self
-            .harness
-            .request(Request::TurnSnapshotSandbox {
-                agent_id: self.agent_id,
-                conversation_id: self.conversation_id,
-                session_id: self.record.session_id,
-                turn_id: self.record.id,
-                sandbox_id: id,
-            })
-            .await?
-        {
-            Response::SnapshotId { snapshot_id } => Ok(snapshot_id),
-            response => unexpected_response(response, "snapshot_id"),
-        }
-    }
-
-    async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
-        match self
-            .harness
-            .request(Request::TurnStartSandbox {
-                agent_id: self.agent_id,
-                conversation_id: self.conversation_id,
-                session_id: self.record.session_id,
-                turn_id: self.record.id,
-                request,
-            })
-            .await?
-        {
-            Response::Unit => Ok(()),
-            response => unexpected_response(response, "unit"),
         }
     }
 
