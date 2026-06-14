@@ -33,14 +33,18 @@ reply. You can rerun this or edit the file directly at any time.
 3. Build and start everything with one command (run from the repo root):
 
 ```bash
-examples/exoclaw/scripts/exoclaw-control fresh --canonical \
-  --agent-cli-mount "$HOME/projects" --setup agent-cli
+examples/exoclaw/scripts/exoclaw-control fresh --canonical
 ```
 
-This builds the `exo` binary, creates the agent and a `dev` conversation,
-pulls the Docker sandbox image, mounts this repo at `/workspace/exo` and your
-workspace at `/agent-cli`, starts the scheduler and adapter runner, sets up
-the IRC, Discord, and agent-cli adapters, and drops you into a REPL.
+This builds the `exo` binary, creates the agent and a `dev` conversation, pulls
+the Docker sandbox image, mounts this repo at `/workspace/exo`, starts the
+scheduler and adapter runner, sets up the IRC and Discord adapters, and drops
+you into a REPL.
+
+Note that we've decided to support Discord as the primary control channel for
+Exoclaw because the integration is less complicated than WhatsApp and Signal and
+it supports rich content (voice, audio, images, and attachments). However, to
+use it, you need a bot token. See below for setup.
 
 4. Chat with Exoclaw in the REPL:
 
@@ -66,14 +70,61 @@ to your terminal when it finishes.
 
 Notes:
 
-- The Discord adapter needs a bot token to connect. Create the secret once
-  with `exo secret set discord-bot-token --env DISCORD_BOT_TOKEN` after
-  exporting your token, or ignore it; the other adapters work without it.
 - `fresh` deletes existing agents, conversations, and adapters first. For
   day-to-day restarts that keep state, drop `fresh`:
   `examples/exoclaw/scripts/exoclaw-control canonical`
 - For a minimal start without adapter setup:
   `examples/exoclaw/scripts/exoclaw-control --pull-sandbox`
+
+## Setting up Discord
+
+Exoclaw can connect to Discord through the library Discord adapter. The short
+path is:
+
+1. Create a Discord application and bot in the
+   [Discord Developer Portal](https://discord.com/developers/applications).
+2. In the bot settings, enable **Message Content Intent**.
+3. Invite the bot to your server with at least these bot permissions:
+   **View Channels**, **Send Messages**, **Read Message History**, and
+   **Attach Files** if you want Exoclaw to send images or other attachments.
+4. Store the bot token as the secret expected by the setup prompt:
+
+   ```bash
+   export DISCORD_BOT_TOKEN="..."
+   ./target/debug/exo secret set discord-bot-token --env DISCORD_BOT_TOKEN
+   ```
+
+5. Create or confirm the adapter:
+
+   ```bash
+   examples/exoclaw/scripts/exoclaw-control --setup discord
+   ```
+
+   If you are starting from scratch, you can include Discord in the normal
+   canonical setup:
+
+   ```bash
+   examples/exoclaw/scripts/exoclaw-control fresh --canonical --setup discord
+   ```
+
+6. Copy a Discord channel id for testing. In Discord, enable **User Settings** >
+   **Advanced** > **Developer Mode**, then right-click the target channel and
+   choose **Copy Channel ID**.
+
+To test outbound messages, ask Exoclaw:
+
+```text
+Send "hello from Exoclaw" to Discord using adapter <adapter-id> and target <channel-id>.
+```
+
+To test inbound wakeups, send a normal message in a channel the bot can read.
+The default setup uses `trigger: "all_messages"`, so the bot does not need to be
+mentioned. Discord attachments are forwarded too: inbound images are attached to
+the model wakeup for analysis, and outbound files can be sent with
+`send_adapter_message` attachments.
+
+For voice chat, richer attachment examples, and the full configuration surface,
+see [`adapters/discord/README.md`](./adapters/discord/README.md).
 
 ## Self Introspection
 
