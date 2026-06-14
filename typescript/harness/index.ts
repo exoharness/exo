@@ -235,6 +235,14 @@ export interface HistoryMessage {
   content: string;
 }
 
+/**
+ * Selects an artifact to read: by id, or by path (latest version unless a
+ * `version` is pinned). exoharness resolves either form server-side.
+ */
+export type ReadArtifactArgs =
+  | { artifactId: string; version?: number }
+  | { path: string; version?: number };
+
 export interface Agent {
   readonly record: AgentRecord;
   listConversations(): Promise<Conversation[]>;
@@ -242,21 +250,9 @@ export interface Agent {
   newConversation(request?: NewConversationRequest): Promise<Conversation>;
   deleteConversation(id: string): Promise<boolean>;
   listArtifacts(): Promise<ArtifactVersion[]>;
-  readArtifact(args: {
-    artifactId: string;
-    version?: number;
-  }): Promise<Artifact | null>;
-  readArtifactText(args: {
-    artifactId: string;
-    version?: number;
-  }): Promise<string | null>;
-  readArtifactJson<T>(args: {
-    artifactId: string;
-    version?: number;
-  }): Promise<T | null>;
-  /** Reads the latest version of the artifact at `path` (filter+sort done in exo). */
-  readLatestArtifact(args: { path: string }): Promise<Artifact | null>;
-  readLatestArtifactJson<T>(args: { path: string }): Promise<T | null>;
+  readArtifact(args: ReadArtifactArgs): Promise<Artifact | null>;
+  readArtifactText(args: ReadArtifactArgs): Promise<string | null>;
+  readArtifactJson<T>(args: ReadArtifactArgs): Promise<T | null>;
   writeArtifact(args: {
     path: string;
     contents: Uint8Array | string;
@@ -303,18 +299,9 @@ export interface Conversation {
   addEvents(request: AddEventsRequest): Promise<AddEventsResult>;
   fork(request?: ForkConversationRequest): Promise<Conversation>;
   listArtifacts(): Promise<ArtifactVersion[]>;
-  readArtifact(args: {
-    artifactId: string;
-    version?: number;
-  }): Promise<Artifact | null>;
-  readArtifactText(args: {
-    artifactId: string;
-    version?: number;
-  }): Promise<string | null>;
-  readArtifactJson<T>(args: {
-    artifactId: string;
-    version?: number;
-  }): Promise<T | null>;
+  readArtifact(args: ReadArtifactArgs): Promise<Artifact | null>;
+  readArtifactText(args: ReadArtifactArgs): Promise<string | null>;
+  readArtifactJson<T>(args: ReadArtifactArgs): Promise<T | null>;
   writeArtifact(args: {
     path: string;
     contents: Uint8Array | string;

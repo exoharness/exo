@@ -122,12 +122,6 @@ impl ExoHarnessServer {
                     artifact: agent.read_artifact(request).await?,
                 })
             }
-            Request::AgentReadLatestArtifact { agent_id, path } => {
-                let agent = self.require_agent(&agent_id).await?;
-                Ok(Response::Artifact {
-                    artifact: agent.read_latest_artifact(&path).await?,
-                })
-            }
             Request::AgentWriteArtifact { agent_id, request } => {
                 let agent = self.require_agent(&agent_id).await?;
                 Ok(Response::ArtifactVersion {

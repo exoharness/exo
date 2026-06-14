@@ -1,5 +1,7 @@
 use anyhow::anyhow;
-use exoharness::{AgentHandle, ConversationHandle, Result, WriteArtifactRequest};
+use exoharness::{
+    AgentHandle, ConversationHandle, ReadArtifactRequest, Result, WriteArtifactRequest,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -68,7 +70,7 @@ async fn read_json_artifact_from_agent<T: DeserializeOwned>(
     agent: &dyn AgentHandle,
     path: &str,
 ) -> Result<Option<T>> {
-    let Some(artifact) = agent.read_latest_artifact(path).await? else {
+    let Some(artifact) = agent.read_artifact(ReadArtifactRequest::path(path)).await? else {
         return Ok(None);
     };
     Ok(Some(serde_json::from_slice(&artifact.contents)?))
@@ -78,7 +80,10 @@ async fn read_json_artifact_from_conversation<T: DeserializeOwned>(
     conversation: &dyn ConversationHandle,
     path: &str,
 ) -> Result<Option<T>> {
-    let Some(artifact) = conversation.read_latest_artifact(path).await? else {
+    let Some(artifact) = conversation
+        .read_artifact(ReadArtifactRequest::path(path))
+        .await?
+    else {
         return Ok(None);
     };
     Ok(Some(serde_json::from_slice(&artifact.contents)?))

@@ -35,10 +35,10 @@ const MemoryStoreSchema = z.object({
 type MemoryEntry = z.infer<typeof MemoryEntrySchema>;
 type MemoryStore = z.infer<typeof MemoryStoreSchema>;
 
-// The artifact subset both Agent and the test fake provide. readLatestArtifact
-// pushes the path filter + latest-version sort into exo (see the trait defaults
-// in crates/exoharness) rather than listing every artifact and filtering here.
-type MemoryHandle = Pick<Agent, "readLatestArtifactJson" | "writeArtifactJson">;
+// The artifact subset both Agent and the test fake provide. Reading by path
+// (rather than listing every artifact and filtering here) lets exoharness
+// resolve the latest version in a single I/O.
+type MemoryHandle = Pick<Agent, "readArtifactJson" | "writeArtifactJson">;
 
 function memoryHandle(context: TurnContext): MemoryHandle {
   return context.exoharness.current.agent;
@@ -51,9 +51,9 @@ function memoryHandle(context: TurnContext): MemoryHandle {
 async function readMemory(handle: MemoryHandle): Promise<MemoryStore> {
   let raw: unknown;
   try {
-    raw = await handle.readLatestArtifactJson({ path: MEMORY_ARTIFACT_PATH });
+    raw = await handle.readArtifactJson({ path: MEMORY_ARTIFACT_PATH });
   } catch (cause) {
-    // readLatestArtifactJson parses the stored bytes; it throws if they are not
+    // readArtifactJson parses the stored bytes; it throws if they are not
     // valid JSON. Treat that the same as a schema failure below.
     throw new Error(
       `corrupt memory artifact ${MEMORY_ARTIFACT_PATH}: not valid JSON`,

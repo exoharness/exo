@@ -16,11 +16,7 @@ class FakeHandle {
   }[] = [];
   private seq = 0;
 
-  async readLatestArtifactJson<T>({
-    path,
-  }: {
-    path: string;
-  }): Promise<T | null> {
+  async readArtifactJson<T>({ path }: { path: string }): Promise<T | null> {
     const latest = this.versions
       .filter((v) => v.path === path)
       .sort((a, b) => b.version - a.version)[0];

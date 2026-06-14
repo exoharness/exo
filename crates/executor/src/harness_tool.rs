@@ -20,9 +20,9 @@ use crate::{SandboxScope, effective_sandbox_scope};
 use async_trait::async_trait;
 use exoharness::{
     AgentHandle, ConversationHandle, CreateSandboxRequest, EventData, EventKind, EventQuery,
-    EventQueryDirection, FileSystemMount, FileSystemMountMode, Result, RunInSandboxRequest,
-    SandboxProcess, SandboxProvider, SnapshotId, StartSandboxRequest, ToolRequest, ToolResult,
-    TurnHandle, WriteArtifactRequest,
+    EventQueryDirection, FileSystemMount, FileSystemMountMode, ReadArtifactRequest, Result,
+    RunInSandboxRequest, SandboxProcess, SandboxProvider, SnapshotId, StartSandboxRequest,
+    ToolRequest, ToolResult, TurnHandle, WriteArtifactRequest,
 };
 use futures::io::AsyncReadExt;
 use serde::{Deserialize, Serialize};
@@ -753,7 +753,9 @@ async fn load_sandbox_snapshot_registry(
     agent: &dyn AgentHandle,
 ) -> Result<SandboxSnapshotRegistry> {
     let Some(artifact) = agent
-        .read_latest_artifact(SANDBOX_SNAPSHOT_REGISTRY_ARTIFACT_PATH)
+        .read_artifact(ReadArtifactRequest::path(
+            SANDBOX_SNAPSHOT_REGISTRY_ARTIFACT_PATH,
+        ))
         .await?
     else {
         return Ok(SandboxSnapshotRegistry::default());

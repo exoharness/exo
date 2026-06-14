@@ -57,30 +57,12 @@ pub trait AgentHandle: Send + Sync {
     async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>>;
 
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion>;
+    /// Reads an artifact selected by id or path (see `ReadArtifactRequest`).
+    /// Implementations should resolve this in a single I/O where possible
+    /// (e.g. a backing query); callers asking by path get the latest version
+    /// unless one is pinned.
     async fn read_artifact(&self, request: ReadArtifactRequest) -> Result<Option<Artifact>>;
     async fn list_artifacts(&self) -> Result<Vec<ArtifactVersion>>;
-
-    /// Latest version metadata for the artifact at `path`, or `None` if none
-    /// exists. The default filters `list_artifacts`; backends may override to
-    /// push the lookup into the store.
-    async fn latest_artifact_version(&self, path: &str) -> Result<Option<ArtifactVersion>> {
-        Ok(select_latest_artifact_version(
-            self.list_artifacts().await?,
-            path,
-        ))
-    }
-
-    /// Reads the latest version of the artifact at `path`, or `None` if absent.
-    async fn read_latest_artifact(&self, path: &str) -> Result<Option<Artifact>> {
-        let Some(version) = self.latest_artifact_version(path).await? else {
-            return Ok(None);
-        };
-        self.read_artifact(ReadArtifactRequest {
-            artifact_id: version.artifact_id,
-            version: Some(version.version),
-        })
-        .await
-    }
 }
 
 #[async_trait]
@@ -102,30 +84,9 @@ pub trait ConversationHandle: Send + Sync {
     async fn fork(&self, request: ForkConversationRequest) -> Result<Arc<dyn ConversationHandle>>;
 
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion>;
+    /// Reads an artifact selected by id or path (see `ReadArtifactRequest`).
     async fn read_artifact(&self, request: ReadArtifactRequest) -> Result<Option<Artifact>>;
     async fn list_artifacts(&self) -> Result<Vec<ArtifactVersion>>;
-
-    /// Latest version metadata for the artifact at `path`, or `None` if none
-    /// exists. The default filters `list_artifacts`; backends may override to
-    /// push the lookup into the store.
-    async fn latest_artifact_version(&self, path: &str) -> Result<Option<ArtifactVersion>> {
-        Ok(select_latest_artifact_version(
-            self.list_artifacts().await?,
-            path,
-        ))
-    }
-
-    /// Reads the latest version of the artifact at `path`, or `None` if absent.
-    async fn read_latest_artifact(&self, path: &str) -> Result<Option<Artifact>> {
-        let Some(version) = self.latest_artifact_version(path).await? else {
-            return Ok(None);
-        };
-        self.read_artifact(ReadArtifactRequest {
-            artifact_id: version.artifact_id,
-            version: Some(version.version),
-        })
-        .await
-    }
 
     async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId>;
     async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId>;
@@ -477,18 +438,6 @@ pub struct ArtifactVersion {
     pub size_bytes: u64,
 }
 
-/// Pick the highest-version artifact at `path` from a `list_artifacts` result.
-/// Shared by the `AgentHandle`/`ConversationHandle` latest-artifact defaults.
-fn select_latest_artifact_version(
-    artifacts: Vec<ArtifactVersion>,
-    path: &str,
-) -> Option<ArtifactVersion> {
-    artifacts
-        .into_iter()
-        .filter(|artifact| artifact.path == path)
-        .max_by_key(|artifact| artifact.version)
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Artifact {
     #[serde(flatten)]
@@ -504,8 +453,37 @@ pub struct WriteArtifactRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReadArtifactRequest {
-    pub artifact_id: ArtifactId,
+    /// Which artifact to read — by id, or by path (latest version unless
+    /// `version` pins one). Keeping this a single request lets a backend
+    /// resolve either form in one I/O instead of a list-then-filter.
+    pub artifact: ArtifactRef,
     pub version: Option<u64>,
+}
+
+impl ReadArtifactRequest {
+    /// Read (the latest version of) the artifact with this id.
+    pub fn id(artifact_id: ArtifactId) -> Self {
+        Self {
+            artifact: ArtifactRef::Id(artifact_id),
+            version: None,
+        }
+    }
+
+    /// Read the latest version of the artifact at this path.
+    pub fn path(path: impl Into<String>) -> Self {
+        Self {
+            artifact: ArtifactRef::Path(path.into()),
+            version: None,
+        }
+    }
+}
+
+/// Selects an artifact either by its stable id or by its path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactRef {
+    Id(ArtifactId),
+    Path(String),
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]

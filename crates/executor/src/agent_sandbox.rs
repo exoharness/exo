@@ -1,6 +1,6 @@
 use exoharness::{
-    AgentHandle, ConversationHandle, CreateSandboxRequest, Result, SandboxProvider, Uuid7,
-    WriteArtifactRequest,
+    AgentHandle, ConversationHandle, CreateSandboxRequest, ReadArtifactRequest, Result,
+    SandboxProvider, Uuid7, WriteArtifactRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -128,7 +128,7 @@ pub(crate) async fn current_agent_sandbox(
 
 async fn load_agent_sandbox_record(agent: &dyn AgentHandle) -> Result<Option<AgentSandboxRecord>> {
     let Some(artifact) = agent
-        .read_latest_artifact(AGENT_SANDBOX_ARTIFACT_PATH)
+        .read_artifact(ReadArtifactRequest::path(AGENT_SANDBOX_ARTIFACT_PATH))
         .await?
     else {
         return Ok(None);

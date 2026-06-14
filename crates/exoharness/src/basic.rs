@@ -31,7 +31,7 @@ use crate::secrets::{
 };
 use crate::storage::BasicObjectStore;
 use crate::{
-    AddEventsRequest, AddEventsResult, AgentHandle, AgentId, AgentRecord, Artifact,
+    AddEventsRequest, AddEventsResult, AgentHandle, AgentId, AgentRecord, Artifact, ArtifactRef,
     ArtifactVersion, BeginTurnRequest, Binding, BindingId, BindingRecord, BindingType,
     BoxAsyncRead, BoxAsyncWrite, CancelSandboxProcessRequest, CloseSandboxProcessInputRequest,
     ConversationHandle, ConversationId, ConversationRecord, CreateSandboxRequest, Event, EventData,
@@ -866,7 +866,10 @@ impl AgentHandle for BasicAgentHandle {
             load_artifact_versions(&self.harness.inner.storage, &self.artifacts_dir()).await?;
         let selected = versions
             .into_iter()
-            .filter(|artifact| artifact.artifact_id == request.artifact_id)
+            .filter(|artifact| match &request.artifact {
+                ArtifactRef::Id(id) => artifact.artifact_id == *id,
+                ArtifactRef::Path(path) => &artifact.path == path,
+            })
             .filter(|artifact| {
                 request
                     .version
@@ -1469,7 +1472,10 @@ impl ConversationHandle for BasicConversationHandle {
             load_artifact_versions(&self.harness.inner.storage, &self.artifacts_dir()).await?;
         let selected = versions
             .into_iter()
-            .filter(|artifact| artifact.artifact_id == request.artifact_id)
+            .filter(|artifact| match &request.artifact {
+                ArtifactRef::Id(id) => artifact.artifact_id == *id,
+                ArtifactRef::Path(path) => &artifact.path == path,
+            })
             .filter(|artifact| {
                 request
                     .version

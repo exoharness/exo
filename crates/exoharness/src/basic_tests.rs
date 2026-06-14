@@ -453,7 +453,7 @@ async fn artifacts_are_versioned_by_path() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn read_latest_artifact_returns_highest_version() {
+async fn read_artifact_by_path_returns_latest_version() {
     let tempdir = TempDir::new().expect("tempdir");
     let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
         .await
@@ -469,16 +469,9 @@ async fn read_latest_artifact_returns_highest_version() {
     // No artifact yet at this path.
     assert!(
         agent
-            .latest_artifact_version("memory/store.json")
+            .read_artifact(crate::ReadArtifactRequest::path("memory/store.json"))
             .await
-            .expect("latest version")
-            .is_none()
-    );
-    assert!(
-        agent
-            .read_latest_artifact("memory/store.json")
-            .await
-            .expect("read latest")
+            .expect("read by path")
             .is_none()
     );
 
@@ -500,25 +493,30 @@ async fn read_latest_artifact_returns_highest_version() {
         .await
         .expect("write decoy");
 
-    let latest_version = agent
-        .latest_artifact_version("memory/store.json")
-        .await
-        .expect("latest version")
-        .expect("some version");
-    assert_eq!(latest_version.version, 3);
-    assert_eq!(latest_version.path, "memory/store.json");
-
+    // Reading by path returns the highest version.
     let latest = agent
-        .read_latest_artifact("memory/store.json")
+        .read_artifact(crate::ReadArtifactRequest::path("memory/store.json"))
         .await
-        .expect("read latest")
+        .expect("read by path")
         .expect("some artifact");
     assert_eq!(latest.version.version, 3);
+    assert_eq!(latest.version.path, "memory/store.json");
     assert_eq!(latest.contents, b"v3");
+
+    // A pinned version is still honored when reading by path.
+    let pinned = agent
+        .read_artifact(crate::ReadArtifactRequest {
+            artifact: crate::ArtifactRef::Path("memory/store.json".to_string()),
+            version: Some(1),
+        })
+        .await
+        .expect("read pinned by path")
+        .expect("v1 exists");
+    assert_eq!(pinned.contents, b"v1");
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn server_dispatches_agent_read_latest_artifact() {
+async fn server_dispatches_read_artifact_by_path() {
     use crate::protocol::{Request, Response};
     use crate::server::ExoHarnessServer;
 
@@ -549,14 +547,14 @@ async fn server_dispatches_agent_read_latest_artifact() {
 
     let server = ExoHarnessServer::new(harness.clone());
 
-    // Latest version is returned through the protocol dispatch.
+    // A path-keyed read returns the latest version through the protocol dispatch.
     match server
-        .handle_request(Request::AgentReadLatestArtifact {
+        .handle_request(Request::AgentReadArtifact {
             agent_id,
-            path: "memory/store.json".to_string(),
+            request: crate::ReadArtifactRequest::path("memory/store.json"),
         })
         .await
-        .expect("dispatch read-latest")
+        .expect("dispatch read by path")
     {
         Response::Artifact { artifact } => {
             let artifact = artifact.expect("some artifact");
@@ -568,12 +566,12 @@ async fn server_dispatches_agent_read_latest_artifact() {
 
     // A missing path yields an empty artifact response, not an error.
     match server
-        .handle_request(Request::AgentReadLatestArtifact {
+        .handle_request(Request::AgentReadArtifact {
             agent_id,
-            path: "memory/missing.json".to_string(),
+            request: crate::ReadArtifactRequest::path("memory/missing.json"),
         })
         .await
-        .expect("dispatch read-latest missing")
+        .expect("dispatch read by missing path")
     {
         Response::Artifact { artifact } => assert!(artifact.is_none()),
         other => panic!("expected Response::Artifact, got {}", other.kind()),
@@ -664,7 +662,7 @@ async fn legacy_json_artifacts_are_still_readable() {
 
     let loaded = agent
         .read_artifact(crate::ReadArtifactRequest {
-            artifact_id,
+            artifact: crate::ArtifactRef::Id(artifact_id),
             version: Some(1),
         })
         .await
