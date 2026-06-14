@@ -72,6 +72,12 @@ async function readMemory(handle: MemoryHandle): Promise<MemoryStore> {
   return parsed.data;
 }
 
+// TODO(storage-rework): remember/forget are read-modify-write with no
+// compare-and-swap. Agent-scoped memory is shared across conversations, so two
+// channels running turns concurrently can both read version N and both write
+// N+1, losing one update. Fix alongside the artifact versioning rework — either
+// an optimistic write that rejects when the latest version moved, or an
+// append-entry store op instead of rewriting the whole store.
 async function writeMemory(
   handle: MemoryHandle,
   store: MemoryStore,
