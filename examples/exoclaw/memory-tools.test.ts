@@ -16,23 +16,15 @@ class FakeHandle {
   }[] = [];
   private seq = 0;
 
-  async listArtifacts(): Promise<ArtifactVersion[]> {
-    return this.versions.map((v) => ({
-      artifactId: v.artifactId,
-      path: v.path,
-      version: v.version,
-      createdAt: "1970-01-01T00:00:00Z",
-      sizeBytes: 0,
-    }));
-  }
-
-  async readArtifactJson<T>({
-    artifactId,
+  async readLatestArtifactJson<T>({
+    path,
   }: {
-    artifactId: string;
+    path: string;
   }): Promise<T | null> {
-    const found = this.versions.find((v) => v.artifactId === artifactId);
-    return found ? (found.value as T) : null;
+    const latest = this.versions
+      .filter((v) => v.path === path)
+      .sort((a, b) => b.version - a.version)[0];
+    return latest ? (latest.value as T) : null;
   }
 
   async writeArtifactJson({

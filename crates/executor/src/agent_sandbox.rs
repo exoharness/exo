@@ -1,6 +1,6 @@
 use exoharness::{
-    AgentHandle, Artifact, ArtifactVersion, ConversationHandle, CreateSandboxRequest,
-    ReadArtifactRequest, Result, SandboxProvider, Uuid7, WriteArtifactRequest,
+    AgentHandle, ConversationHandle, CreateSandboxRequest, Result, SandboxProvider, Uuid7,
+    WriteArtifactRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -127,7 +127,10 @@ pub(crate) async fn current_agent_sandbox(
 }
 
 async fn load_agent_sandbox_record(agent: &dyn AgentHandle) -> Result<Option<AgentSandboxRecord>> {
-    let Some(artifact) = latest_agent_artifact(agent, AGENT_SANDBOX_ARTIFACT_PATH).await? else {
+    let Some(artifact) = agent
+        .read_latest_artifact(AGENT_SANDBOX_ARTIFACT_PATH)
+        .await?
+    else {
         return Ok(None);
     };
     Ok(Some(serde_json::from_slice(&artifact.contents)?))
@@ -144,25 +147,6 @@ async fn store_agent_sandbox_record(
         })
         .await?;
     Ok(())
-}
-
-async fn latest_agent_artifact(agent: &dyn AgentHandle, path: &str) -> Result<Option<Artifact>> {
-    let Some(version) = latest_artifact_version(agent.list_artifacts().await?, path) else {
-        return Ok(None);
-    };
-    agent
-        .read_artifact(ReadArtifactRequest {
-            artifact_id: version.artifact_id,
-            version: Some(version.version),
-        })
-        .await
-}
-
-fn latest_artifact_version(artifacts: Vec<ArtifactVersion>, path: &str) -> Option<ArtifactVersion> {
-    artifacts
-        .into_iter()
-        .filter(|artifact| artifact.path == path)
-        .max_by_key(|artifact| artifact.version)
 }
 
 fn new_agent_sandbox_name() -> String {

@@ -269,6 +269,7 @@ type RawExoRequest =
       agent_id: string;
       request: { artifact_id: string; version?: number };
     }
+  | { type: "agent_read_latest_artifact"; agent_id: string; path: string }
   | {
       type: "agent_write_artifact";
       agent_id: string;
@@ -1173,6 +1174,22 @@ function createAgent(client: ProtocolClient, raw: RawAgentRecord): Agent {
       version?: number;
     }): Promise<T | null> {
       return decodeArtifactJson<T>(await agent.readArtifact(args));
+    },
+
+    async readLatestArtifact(args: { path: string }): Promise<Artifact | null> {
+      const payload = await client.requestExo({
+        type: "agent_read_latest_artifact",
+        agent_id: record.id,
+        path: args.path,
+      });
+      if (payload.type !== "artifact") {
+        throw new Error(`expected artifact payload, got ${payload.type}`);
+      }
+      return payload.artifact ? toArtifact(payload.artifact) : null;
+    },
+
+    async readLatestArtifactJson<T>(args: { path: string }): Promise<T | null> {
+      return decodeArtifactJson<T>(await agent.readLatestArtifact(args));
     },
 
     async writeArtifact(args): Promise<ArtifactVersion> {

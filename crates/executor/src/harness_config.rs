@@ -1,8 +1,5 @@
 use anyhow::anyhow;
-use exoharness::{
-    AgentHandle, Artifact, ArtifactVersion, ConversationHandle, ReadArtifactRequest, Result,
-    WriteArtifactRequest,
-};
+use exoharness::{AgentHandle, ConversationHandle, Result, WriteArtifactRequest};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -71,7 +68,7 @@ async fn read_json_artifact_from_agent<T: DeserializeOwned>(
     agent: &dyn AgentHandle,
     path: &str,
 ) -> Result<Option<T>> {
-    let Some(artifact) = latest_artifact_from_agent(agent, path).await? else {
+    let Some(artifact) = agent.read_latest_artifact(path).await? else {
         return Ok(None);
     };
     Ok(Some(serde_json::from_slice(&artifact.contents)?))
@@ -81,47 +78,8 @@ async fn read_json_artifact_from_conversation<T: DeserializeOwned>(
     conversation: &dyn ConversationHandle,
     path: &str,
 ) -> Result<Option<T>> {
-    let Some(artifact) = latest_artifact_from_conversation(conversation, path).await? else {
+    let Some(artifact) = conversation.read_latest_artifact(path).await? else {
         return Ok(None);
     };
     Ok(Some(serde_json::from_slice(&artifact.contents)?))
-}
-
-async fn latest_artifact_from_agent(
-    agent: &dyn AgentHandle,
-    path: &str,
-) -> Result<Option<Artifact>> {
-    let latest_version = latest_artifact_version(agent.list_artifacts().await?, path);
-    let Some(latest_version) = latest_version else {
-        return Ok(None);
-    };
-    agent
-        .read_artifact(ReadArtifactRequest {
-            artifact_id: latest_version.artifact_id,
-            version: Some(latest_version.version),
-        })
-        .await
-}
-
-async fn latest_artifact_from_conversation(
-    conversation: &dyn ConversationHandle,
-    path: &str,
-) -> Result<Option<Artifact>> {
-    let latest_version = latest_artifact_version(conversation.list_artifacts().await?, path);
-    let Some(latest_version) = latest_version else {
-        return Ok(None);
-    };
-    conversation
-        .read_artifact(ReadArtifactRequest {
-            artifact_id: latest_version.artifact_id,
-            version: Some(latest_version.version),
-        })
-        .await
-}
-
-fn latest_artifact_version(artifacts: Vec<ArtifactVersion>, path: &str) -> Option<ArtifactVersion> {
-    artifacts
-        .into_iter()
-        .filter(|artifact| artifact.path == path)
-        .max_by_key(|artifact| artifact.version)
 }

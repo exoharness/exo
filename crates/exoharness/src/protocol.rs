@@ -90,6 +90,10 @@ pub enum Request {
         agent_id: AgentId,
         request: ReadArtifactRequest,
     },
+    AgentReadLatestArtifact {
+        agent_id: AgentId,
+        path: String,
+    },
     AgentWriteArtifact {
         agent_id: AgentId,
         request: WriteArtifactRequest,
@@ -283,6 +287,7 @@ impl Request {
             Self::DeleteConversation { .. } => "delete_conversation",
             Self::AgentListArtifacts { .. } => "agent_list_artifacts",
             Self::AgentReadArtifact { .. } => "agent_read_artifact",
+            Self::AgentReadLatestArtifact { .. } => "agent_read_latest_artifact",
             Self::AgentWriteArtifact { .. } => "agent_write_artifact",
             Self::AgentListBindings { .. } => "agent_list_bindings",
             Self::AgentPutBinding { .. } => "agent_put_binding",

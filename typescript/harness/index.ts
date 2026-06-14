@@ -254,6 +254,9 @@ export interface Agent {
     artifactId: string;
     version?: number;
   }): Promise<T | null>;
+  /** Reads the latest version of the artifact at `path` (filter+sort done in exo). */
+  readLatestArtifact(args: { path: string }): Promise<Artifact | null>;
+  readLatestArtifactJson<T>(args: { path: string }): Promise<T | null>;
   writeArtifact(args: {
     path: string;
     contents: Uint8Array | string;

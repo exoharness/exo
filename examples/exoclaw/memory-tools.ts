@@ -35,31 +35,29 @@ const MemoryStoreSchema = z.object({
 type MemoryEntry = z.infer<typeof MemoryEntrySchema>;
 type MemoryStore = z.infer<typeof MemoryStoreSchema>;
 
-// The artifact subset both Agent and the test fake provide.
-type MemoryHandle = Pick<
-  Agent,
-  "listArtifacts" | "readArtifactJson" | "writeArtifactJson"
->;
+// The artifact subset both Agent and the test fake provide. readLatestArtifact
+// pushes the path filter + latest-version sort into exo (see the trait defaults
+// in crates/exoharness) rather than listing every artifact and filtering here.
+type MemoryHandle = Pick<Agent, "readLatestArtifactJson" | "writeArtifactJson">;
 
 function memoryHandle(context: TurnContext): MemoryHandle {
   return context.exoharness.current.agent;
 }
 
 async function readMemory(handle: MemoryHandle): Promise<MemoryStore> {
-  const latest = (await handle.listArtifacts())
-    .filter((artifact) => artifact.path === MEMORY_ARTIFACT_PATH)
-    .sort((a, b) => b.version - a.version)[0];
-  if (!latest) {
+  const raw = await handle.readLatestArtifactJson({
+    path: MEMORY_ARTIFACT_PATH,
+  });
+  if (raw === null) {
     // Nothing has ever been written — a legitimately empty store.
     return { entries: [] };
   }
-  // The artifact exists, so a missing/invalid payload is a real error. Surface
-  // it loudly instead of masking it as "no memory" — otherwise the next write
+  // The artifact exists, so an invalid payload is a real error. Surface it
+  // loudly instead of masking it as "no memory" — otherwise the next write
   // would silently bury a corrupt store.
-  const raw = await handle.readArtifactJson({ artifactId: latest.artifactId });
   const parsed = MemoryStoreSchema.safeParse(raw);
   if (!parsed.success) {
-    const message = `corrupt memory artifact ${MEMORY_ARTIFACT_PATH} (v${latest.version}): ${parsed.error.message}`;
+    const message = `corrupt memory artifact ${MEMORY_ARTIFACT_PATH}: ${parsed.error.message}`;
     console.error(message);
     throw new Error(message);
   }

@@ -19,10 +19,10 @@ use crate::{AgentConfig, ConversationConfig, ToolRuntime};
 use crate::{SandboxScope, effective_sandbox_scope};
 use async_trait::async_trait;
 use exoharness::{
-    AgentHandle, Artifact, ArtifactVersion, ConversationHandle, CreateSandboxRequest, EventData,
-    EventKind, EventQuery, EventQueryDirection, FileSystemMount, FileSystemMountMode,
-    ReadArtifactRequest, Result, RunInSandboxRequest, SandboxProcess, SandboxProvider, SnapshotId,
-    StartSandboxRequest, ToolRequest, ToolResult, TurnHandle, WriteArtifactRequest,
+    AgentHandle, ConversationHandle, CreateSandboxRequest, EventData, EventKind, EventQuery,
+    EventQueryDirection, FileSystemMount, FileSystemMountMode, Result, RunInSandboxRequest,
+    SandboxProcess, SandboxProvider, SnapshotId, StartSandboxRequest, ToolRequest, ToolResult,
+    TurnHandle, WriteArtifactRequest,
 };
 use futures::io::AsyncReadExt;
 use serde::{Deserialize, Serialize};
@@ -752,8 +752,9 @@ fn upsert_current_sandbox_snapshot(
 async fn load_sandbox_snapshot_registry(
     agent: &dyn AgentHandle,
 ) -> Result<SandboxSnapshotRegistry> {
-    let Some(artifact) =
-        latest_agent_artifact(agent, SANDBOX_SNAPSHOT_REGISTRY_ARTIFACT_PATH).await?
+    let Some(artifact) = agent
+        .read_latest_artifact(SANDBOX_SNAPSHOT_REGISTRY_ARTIFACT_PATH)
+        .await?
     else {
         return Ok(SandboxSnapshotRegistry::default());
     };
@@ -771,25 +772,6 @@ async fn store_sandbox_snapshot_registry(
         })
         .await?;
     Ok(())
-}
-
-async fn latest_agent_artifact(agent: &dyn AgentHandle, path: &str) -> Result<Option<Artifact>> {
-    let Some(version) = latest_artifact_version(agent.list_artifacts().await?, path) else {
-        return Ok(None);
-    };
-    agent
-        .read_artifact(ReadArtifactRequest {
-            artifact_id: version.artifact_id,
-            version: Some(version.version),
-        })
-        .await
-}
-
-fn latest_artifact_version(artifacts: Vec<ArtifactVersion>, path: &str) -> Option<ArtifactVersion> {
-    artifacts
-        .into_iter()
-        .filter(|artifact| artifact.path == path)
-        .max_by_key(|artifact| artifact.version)
 }
 
 fn parse_snapshot_id(value: &str) -> Result<SnapshotId> {
