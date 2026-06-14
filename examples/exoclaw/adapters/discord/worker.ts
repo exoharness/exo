@@ -23,7 +23,7 @@ import {
   inboundAttachments,
   startConnectionWatchdog,
 } from "./discord";
-import { DiscordVoice } from "./voice";
+import type { DiscordVoice as DiscordVoiceInstance } from "./voice";
 
 const SEND_TIMEOUT_MS = 60_000;
 
@@ -72,7 +72,7 @@ const client = new Client({
 // Voice is a microphone and speaker on the text pipe: a spoken utterance
 // becomes a normal `message` event (target = voice channel id); an outbound
 // send to that target is spoken back. All audio stays in this worker.
-let voice: DiscordVoice | null = null;
+let voice: DiscordVoiceInstance | null = null;
 if (voiceEnabled) {
   const openaiKey = process.env.OPENAI_API_KEY;
   if (!openaiKey) {
@@ -80,6 +80,7 @@ if (voiceEnabled) {
       "Discord voice requires OPENAI_API_KEY in the worker environment",
     );
   }
+  const { DiscordVoice } = await import("./voice");
   voice = new DiscordVoice(client, openaiKey, writeWorkerEvent);
   voice.register();
 }
