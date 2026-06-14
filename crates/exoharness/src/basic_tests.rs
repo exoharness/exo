@@ -518,6 +518,69 @@ async fn read_latest_artifact_returns_highest_version() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn server_dispatches_agent_read_latest_artifact() {
+    use crate::protocol::{Request, Response};
+    use crate::server::ExoHarnessServer;
+
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = std::sync::Arc::new(
+        BasicExoHarness::new(local_test_config(tempdir.path()))
+            .await
+            .expect("harness should initialize"),
+    );
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let agent_id = agent.record().id;
+
+    for contents in ["v1", "v2"] {
+        agent
+            .write_artifact(crate::WriteArtifactRequest {
+                path: "memory/store.json".to_string(),
+                contents: contents.as_bytes().to_vec(),
+            })
+            .await
+            .expect("write artifact");
+    }
+
+    let server = ExoHarnessServer::new(harness.clone());
+
+    // Latest version is returned through the protocol dispatch.
+    match server
+        .handle_request(Request::AgentReadLatestArtifact {
+            agent_id,
+            path: "memory/store.json".to_string(),
+        })
+        .await
+        .expect("dispatch read-latest")
+    {
+        Response::Artifact { artifact } => {
+            let artifact = artifact.expect("some artifact");
+            assert_eq!(artifact.version.version, 2);
+            assert_eq!(artifact.contents, b"v2");
+        }
+        other => panic!("expected Response::Artifact, got {}", other.kind()),
+    }
+
+    // A missing path yields an empty artifact response, not an error.
+    match server
+        .handle_request(Request::AgentReadLatestArtifact {
+            agent_id,
+            path: "memory/missing.json".to_string(),
+        })
+        .await
+        .expect("dispatch read-latest missing")
+    {
+        Response::Artifact { artifact } => assert!(artifact.is_none()),
+        other => panic!("expected Response::Artifact, got {}", other.kind()),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn artifacts_store_metadata_and_raw_contents_separately() {
     let tempdir = TempDir::new().expect("tempdir");
     let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
