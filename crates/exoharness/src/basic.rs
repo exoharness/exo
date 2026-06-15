@@ -34,17 +34,17 @@ use crate::{
     AddEventsRequest, AddEventsResult, AgentHandle, AgentId, AgentRecord, Artifact,
     ArtifactVersion, BeginTurnRequest, Binding, BindingId, BindingRecord, BindingType,
     BoxAsyncRead, BoxAsyncWrite, CancelSandboxProcessRequest, CloseSandboxProcessInputRequest,
-    ConversationHandle, ConversationId, ConversationRecord, CreateSandboxRequest, Event, EventData,
-    EventId, EventKind, EventQuery, EventQueryDirection, EventStream, ExoHarness, FileSystemMount,
-    ForkConversationRequest, GetEventsResult, GetSandboxProcessEventsResult,
-    ListConversationsRequest, ListConversationsResult, NewAgentRequest, NewConversationRequest,
-    PutSecretRequest, ReadArtifactRequest, Result, RunInSandboxRequest, SandboxId, SandboxProcess,
-    SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessId, SandboxProcessMode,
-    SandboxProcessParts, SandboxProcessRecord, SandboxProcessStatus, SandboxProcessStdin,
-    SandboxProvider, SandboxProviderConfig, Secret, SecretId, SecretMetadata, SecretType,
-    SessionId, SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnHandle, TurnId,
-    TurnRecord, Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest,
-    WriteSandboxProcessInputRequest,
+    ConversationHandle, ConversationId, ConversationRecord, CreateSandboxRequest,
+    DurableFileSystem, Event, EventData, EventId, EventKind, EventQuery, EventQueryDirection,
+    EventStream, ExoHarness, FileSystemMount, ForkConversationRequest, GetEventsResult,
+    GetSandboxProcessEventsResult, ListConversationsRequest, ListConversationsResult,
+    NewAgentRequest, NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result,
+    RunInSandboxRequest, SandboxId, SandboxProcess, SandboxProcessEvent, SandboxProcessEventQuery,
+    SandboxProcessId, SandboxProcessMode, SandboxProcessParts, SandboxProcessRecord,
+    SandboxProcessStatus, SandboxProcessStdin, SandboxProvider, SandboxProviderConfig, Secret,
+    SecretId, SecretMetadata, SecretType, SessionId, SnapshotId, StartSandboxProcessRequest,
+    StartSandboxRequest, TurnHandle, TurnId, TurnRecord, Uuid7, WaitSandboxProcessRequest,
+    WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
 #[derive(Debug, Clone)]
@@ -148,6 +148,7 @@ pub struct BasicExoHarness {
 }
 
 struct BasicExoHarnessInner {
+    root: PathBuf,
     storage: BasicObjectStore,
     write_lock: AsyncMutex<()>,
     subscribers: Mutex<HashMap<ConversationId, Vec<mpsc::UnboundedSender<Result<Event>>>>>,
@@ -187,10 +188,14 @@ impl BasicExoHarnessInner {
         choice: &SandboxBackendChoice,
     ) -> Result<Arc<dyn ManagedSandboxBackend>> {
         let backend: Arc<dyn ManagedSandboxBackend> = match choice {
-            SandboxBackendChoice::AppleContainer => {
-                Arc::new(CliContainerSandboxBackend::apple_container())
-            }
-            SandboxBackendChoice::Docker => Arc::new(CliContainerSandboxBackend::docker()),
+            SandboxBackendChoice::AppleContainer => Arc::new(
+                CliContainerSandboxBackend::apple_container()
+                    .with_durable_file_system_root(self.root.join("durable-filesystems")),
+            ),
+            SandboxBackendChoice::Docker => Arc::new(
+                CliContainerSandboxBackend::docker()
+                    .with_durable_file_system_root(self.root.join("durable-filesystems")),
+            ),
             SandboxBackendChoice::LocalProcess => Arc::new(LocalProcessSandboxBackend::new()),
             SandboxBackendChoice::Daytona(spec) => {
                 // Prefer a root `Binding::Sandbox` for Daytona; fall back to the
@@ -421,32 +426,44 @@ impl BasicExoHarnessInner {
     #[cfg(feature = "aws-agentcore")]
     async fn aws_agentcore_config_from_binding(&self) -> Result<Option<crate::AwsAgentCoreConfig>> {
         let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
-        let Some((runtime_arn, region, qualifier, endpoint_url)) = bindings
-            .into_iter()
-            .rev()
-            .find_map(|record| match record.binding {
-                Binding::Sandbox {
-                    config:
-                        SandboxProviderConfig::AwsAgentCore {
-                            runtime_arn,
-                            region,
-                            qualifier,
-                            endpoint_url,
-                            ..
-                        },
-                    ..
-                } => Some((runtime_arn, region, qualifier, endpoint_url)),
-                _ => None,
-            })
+        let Some((runtime_arn, region, qualifier, endpoint_url, session_storage_mount_path)) =
+            bindings
+                .into_iter()
+                .rev()
+                .find_map(|record| match record.binding {
+                    Binding::Sandbox {
+                        config:
+                            SandboxProviderConfig::AwsAgentCore {
+                                runtime_arn,
+                                region,
+                                qualifier,
+                                endpoint_url,
+                                session_storage_mount_path,
+                                ..
+                            },
+                        ..
+                    } => Some((
+                        runtime_arn,
+                        region,
+                        qualifier,
+                        endpoint_url,
+                        session_storage_mount_path,
+                    )),
+                    _ => None,
+                })
         else {
             return Ok(None);
         };
+        let session_storage_mount_path = session_storage_mount_path
+            .or_else(|| nonempty_env("AWS_AGENTCORE_SESSION_STORAGE_MOUNT_PATH"))
+            .or_else(|| nonempty_env("AGENTCORE_SESSION_STORAGE_MOUNT_PATH"));
         Ok(Some(crate::AwsAgentCoreConfig {
             runtime_arn,
             region,
             qualifier,
             endpoint_url,
             credentials: aws_agentcore_credentials_from_env(),
+            session_storage_mount_path,
         }))
     }
 
@@ -481,6 +498,14 @@ fn aws_agentcore_credentials_from_env() -> Option<crate::AwsAgentCoreCredentials
         secret_access_key,
         session_token,
     })
+}
+
+#[cfg(feature = "aws-agentcore")]
+fn nonempty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 impl BasicExoHarness {
@@ -537,6 +562,7 @@ impl BasicExoHarness {
             build_secret_cipher(secret_backend, root.to_string_lossy().to_string())?;
         Ok(Self {
             inner: Arc::new(BasicExoHarnessInner {
+                root,
                 storage,
                 write_lock: AsyncMutex::new(()),
                 subscribers: Mutex::new(HashMap::new()),
@@ -1121,6 +1147,7 @@ impl BasicConversationHandle {
             image,
             default_workdir: request.default_workdir,
             file_system_mounts: request.file_system_mounts.unwrap_or_default(),
+            durable_file_systems: request.durable_file_systems.unwrap_or_default(),
             enable_networking: request.enable_networking.unwrap_or(true),
             idle_seconds: request.idle_seconds.unwrap_or(60),
         })
@@ -1153,6 +1180,7 @@ impl BasicConversationHandle {
                 image,
                 default_workdir,
                 file_system_mounts,
+                durable_file_systems,
                 enable_networking,
                 idle_seconds,
                 ..
@@ -1171,6 +1199,7 @@ impl BasicConversationHandle {
                 || image != request.image
                 || default_workdir != request.default_workdir.clone().unwrap_or_default()
                 || file_system_mounts != request.file_system_mounts
+                || durable_file_systems != request.durable_file_systems
                 || enable_networking != request.enable_networking
                 || idle_seconds != request.idle_seconds
             {
@@ -1249,6 +1278,7 @@ impl BasicConversationHandle {
                     image: sandbox.image,
                     default_workdir: sandbox.default_workdir.unwrap_or_default(),
                     file_system_mounts: sandbox.file_system_mounts,
+                    durable_file_systems: sandbox.durable_file_systems,
                     enable_networking: sandbox.enable_networking,
                     idle_seconds: sandbox.idle_seconds,
                 },
@@ -2455,6 +2485,7 @@ struct StoredSandbox {
     image: String,
     default_workdir: Option<String>,
     file_system_mounts: Vec<FileSystemMount>,
+    durable_file_systems: Vec<DurableFileSystem>,
     enable_networking: bool,
     idle_seconds: u64,
     running: bool,
@@ -2468,6 +2499,7 @@ struct PreparedSandboxRequest {
     image: String,
     default_workdir: Option<String>,
     file_system_mounts: Vec<FileSystemMount>,
+    durable_file_systems: Vec<DurableFileSystem>,
     enable_networking: bool,
     idle_seconds: u64,
 }
@@ -2481,6 +2513,7 @@ impl PreparedSandboxRequest {
             image: self.image.clone(),
             default_workdir: self.default_workdir.clone(),
             file_system_mounts: self.file_system_mounts.clone(),
+            durable_file_systems: self.durable_file_systems.clone(),
             enable_networking: self.enable_networking,
             idle_seconds: self.idle_seconds,
             running: true,
@@ -2814,6 +2847,7 @@ fn sandbox_request(
             } else {
                 SandboxNetworkPolicy::Disabled
             },
+            durable_file_systems: sandbox.durable_file_systems.clone(),
             default_workdir: sandbox
                 .default_workdir
                 .clone()

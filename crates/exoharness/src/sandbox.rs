@@ -19,6 +19,8 @@ use tokio::time;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use uuid::Uuid;
 
+use crate::DurableFileSystem;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SandboxKey {
     ConversationSandbox {
@@ -67,6 +69,7 @@ pub enum SandboxNetworkPolicy {
 pub struct SandboxSpec {
     pub image: String,
     pub mounts: Vec<SandboxMount>,
+    pub durable_file_systems: Vec<DurableFileSystem>,
     pub network: SandboxNetworkPolicy,
     pub default_workdir: String,
 }
@@ -184,6 +187,7 @@ pub(crate) const WARM_SANDBOX_KEY_LABEL: &str = "exo.sandbox.key";
 pub(crate) const WARM_SANDBOX_SPEC_HASH_LABEL: &str = "exo.sandbox.spec-hash";
 const WARM_SANDBOX_OWNER_PID_LABEL: &str = "exo.sandbox.owner-pid";
 const APPLE_ABSOLUTE_TIME_UNIX_OFFSET_SECONDS: f64 = 978_307_200.0;
+const DURABLE_FILE_SYSTEM_ROOT_ENV: &str = "EXO_DURABLE_FILE_SYSTEM_ROOT";
 
 #[derive(Debug, Clone)]
 struct WarmSandboxEntry {
@@ -236,6 +240,7 @@ struct DockerInspectConfiguration {
 pub struct CliContainerSandboxBackend {
     cli: ContainerCliFlavor,
     container_bin: PathBuf,
+    durable_file_system_root: Option<PathBuf>,
     system_started: Mutex<bool>,
     network_created: Mutex<bool>,
     warm_sandboxes: Arc<Mutex<HashMap<SandboxKey, WarmSandboxEntry>>>,
@@ -250,10 +255,16 @@ impl CliContainerSandboxBackend {
         Self::new(ContainerCliFlavor::Docker)
     }
 
+    pub fn with_durable_file_system_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.durable_file_system_root = Some(root.into());
+        self
+    }
+
     fn new(cli: ContainerCliFlavor) -> Self {
         Self {
             cli,
             container_bin: PathBuf::from(cli.default_binary()),
+            durable_file_system_root: None,
             system_started: Mutex::new(false),
             network_created: Mutex::new(false),
             warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),
@@ -316,12 +327,16 @@ impl CliContainerSandboxBackend {
     }
 
     async fn prepare_request(&self, request: SandboxRequest) -> Result<SandboxRequest> {
+        validate_durable_file_system_mounts(
+            &request.spec.mounts,
+            &request.spec.durable_file_systems,
+        )?;
         self.ensure_system_started().await?;
         if matches!(request.spec.network, SandboxNetworkPolicy::Enabled) {
             self.ensure_default_network_created().await?;
         }
 
-        let mounts = request
+        let mut mounts = request
             .spec
             .mounts
             .into_iter()
@@ -336,6 +351,11 @@ impl CliContainerSandboxBackend {
                 Ok(SandboxMount { host_path, ..mount })
             })
             .collect::<Result<Vec<_>>>()?;
+        mounts.extend(materialize_durable_file_systems(
+            &request.key,
+            &request.spec.durable_file_systems,
+            self.durable_file_system_root.as_deref(),
+        )?);
 
         Ok(SandboxRequest {
             key: request.key,
@@ -346,6 +366,7 @@ impl CliContainerSandboxBackend {
                     request.spec.image
                 },
                 mounts,
+                durable_file_systems: request.spec.durable_file_systems,
                 network: request.spec.network,
                 default_workdir: request.spec.default_workdir,
             },
@@ -656,6 +677,9 @@ impl LocalProcessSandboxBackend {
 #[async_trait]
 impl ManagedSandboxBackend for LocalProcessSandboxBackend {
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
+        if !request.spec.durable_file_systems.is_empty() {
+            bail!("local-process sandbox backend does not support durable file systems");
+        }
         Ok(Arc::new(LocalProcessSandboxHandle {
             id: format!("local:{}", request.key),
             request,
@@ -745,6 +769,139 @@ fn resolve_local_workdir(spec: &SandboxSpec, cwd: &str) -> Option<PathBuf> {
         .iter()
         .find(|mount| mount.guest_path == cwd)
         .map(|mount| mount.host_path.clone())
+}
+
+fn materialize_durable_file_systems(
+    key: &SandboxKey,
+    file_systems: &[DurableFileSystem],
+    configured_root: Option<&Path>,
+) -> Result<Vec<SandboxMount>> {
+    if file_systems.is_empty() {
+        return Ok(Vec::new());
+    }
+    let root = durable_file_system_root(configured_root)?;
+    file_systems
+        .iter()
+        .map(|file_system| {
+            let host_path = root.join(stable_fnv1a_hex(&format!("{}\n{}", key, file_system.name)));
+            std::fs::create_dir_all(&host_path).with_context(|| {
+                format!(
+                    "creating durable file system {} at {}",
+                    file_system.name,
+                    host_path.display()
+                )
+            })?;
+            let host_path = std::fs::canonicalize(&host_path).with_context(|| {
+                format!(
+                    "canonicalizing durable file system {} at {}",
+                    file_system.name,
+                    host_path.display()
+                )
+            })?;
+            Ok(SandboxMount {
+                host_path,
+                guest_path: file_system.mount_path.clone(),
+                access: match file_system.mode {
+                    crate::FileSystemMountMode::ReadOnly => SandboxMountAccess::ReadOnly,
+                    crate::FileSystemMountMode::ReadWrite => SandboxMountAccess::ReadWrite,
+                },
+                internal: true,
+            })
+        })
+        .collect()
+}
+
+fn validate_durable_file_system_mounts(
+    mounts: &[SandboxMount],
+    file_systems: &[DurableFileSystem],
+) -> Result<()> {
+    validate_durable_file_systems(file_systems)?;
+    for mount in mounts {
+        for file_system in file_systems {
+            if mount.guest_path == file_system.mount_path {
+                bail!(
+                    "sandbox mount path is used by both a host mount and durable file system: {}",
+                    file_system.mount_path
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_durable_file_systems(file_systems: &[DurableFileSystem]) -> Result<()> {
+    for (index, file_system) in file_systems.iter().enumerate() {
+        if file_system.name.trim().is_empty() {
+            bail!("durable file system name must not be empty");
+        }
+        if file_system.name.contains('/') || file_system.name.contains('\0') {
+            bail!(
+                "durable file system name must not contain path separators or NUL bytes: {}",
+                file_system.name
+            );
+        }
+        if !file_system.mount_path.starts_with('/') {
+            bail!(
+                "durable file system mount path must be absolute: {}",
+                file_system.mount_path
+            );
+        }
+        if file_system.mount_path.trim() == "/" {
+            bail!("durable file system mount path must not be /");
+        }
+        for prior in &file_systems[..index] {
+            if prior.name == file_system.name {
+                bail!("duplicate durable file system name: {}", file_system.name);
+            }
+            if prior.mount_path == file_system.mount_path {
+                bail!(
+                    "duplicate durable file system mount path: {}",
+                    file_system.mount_path
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn durable_file_system_root(configured_root: Option<&Path>) -> Result<PathBuf> {
+    if let Some(value) = std::env::var_os(DURABLE_FILE_SYSTEM_ROOT_ENV) {
+        let path = PathBuf::from(value);
+        if !path.as_os_str().is_empty() {
+            return Ok(path);
+        }
+    }
+    if let Some(root) = configured_root {
+        return Ok(root.to_path_buf());
+    }
+    if let Some(value) = std::env::var_os("XDG_DATA_HOME") {
+        let path = PathBuf::from(value);
+        if !path.as_os_str().is_empty() {
+            return Ok(path.join("exo").join("durable-filesystems"));
+        }
+    }
+    if let Some(value) = std::env::var_os("HOME") {
+        let path = PathBuf::from(value);
+        if !path.as_os_str().is_empty() {
+            return Ok(path
+                .join(".local")
+                .join("share")
+                .join("exo")
+                .join("durable-filesystems"));
+        }
+    }
+    bail!(
+        "could not determine durable file system root: set {DURABLE_FILE_SYSTEM_ROOT_ENV}, XDG_DATA_HOME, or HOME"
+    )
+}
+
+pub(crate) fn stable_fnv1a_hex(input: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in input.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 async fn touch_warm_sandbox(
@@ -857,7 +1014,11 @@ async fn find_running_apple_warm_sandbox(
     let spec_hash = sandbox_spec_hash(&request.spec);
     let containers: Vec<ContainerListItem> = serde_json::from_slice(&output.stdout)?;
     Ok(containers.into_iter().find_map(|container| {
-        if container.status.as_deref() != Some("running") {
+        if !container
+            .status
+            .as_deref()
+            .is_some_and(is_running_container_status)
+        {
             return None;
         }
         let labels = &container.configuration.labels;
@@ -1248,7 +1409,23 @@ async fn cleanup_named_container(
             )
             .await
             {
-                Ok(stop) if stop.status.success() => {}
+                Ok(stop) if stop.status.success() => {
+                    if let Err(wait_error) =
+                        wait_for_apple_container_not_running(container_bin, name).await
+                    {
+                        kill_named_container_if_present(container_bin, name).await?;
+                        wait_for_apple_container_not_running(container_bin, name)
+                            .await
+                            .map_err(|kill_wait_error| {
+                                anyhow!(
+                                    "failed to stop warm sandbox {}: {}; {}",
+                                    name,
+                                    wait_error,
+                                    kill_wait_error
+                                )
+                            })?;
+                    }
+                }
                 Ok(stop) => {
                     let stderr = String::from_utf8_lossy(&stop.stderr).trim().to_string();
                     if !is_missing_container_error(&stderr)
@@ -1262,6 +1439,7 @@ async fn cleanup_named_container(
                             kill_error
                         ));
                     }
+                    wait_for_apple_container_not_running(container_bin, name).await?;
                 }
                 Err(stop_error) => {
                     if let Err(kill_error) =
@@ -1274,6 +1452,7 @@ async fn cleanup_named_container(
                             kill_error
                         ));
                     }
+                    wait_for_apple_container_not_running(container_bin, name).await?;
                 }
             }
 
@@ -1342,6 +1521,43 @@ async fn reap_orphaned_warm_sandboxes(container_bin: &Path, cli: ContainerCliFla
     }
 }
 
+async fn wait_for_apple_container_not_running(container_bin: &Path, name: &str) -> Result<()> {
+    let deadline = Instant::now() + WARM_SANDBOX_CLEANUP_TIMEOUT;
+    loop {
+        match apple_container_status(container_bin, name).await? {
+            None => return Ok(()),
+            Some(status) if !is_running_container_status(&status) => return Ok(()),
+            Some(_) => {}
+        }
+
+        if Instant::now() >= deadline {
+            return Err(anyhow!("container {} is still running", name));
+        }
+        time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn apple_container_status(container_bin: &Path, name: &str) -> Result<Option<String>> {
+    let output = run_container_admin_command(
+        container_bin,
+        WARM_SANDBOX_CLEANUP_TIMEOUT,
+        ["list", "--format", "json"],
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "failed to list warm sandboxes: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let containers: Vec<ContainerListItem> = serde_json::from_slice(&output.stdout)?;
+    Ok(containers
+        .into_iter()
+        .find(|container| container.configuration.id == name)
+        .and_then(|container| container.status))
+}
+
 async fn reap_orphaned_apple_warm_sandboxes(container_bin: &Path) -> Result<()> {
     let output = run_container_admin_command(
         container_bin,
@@ -1374,7 +1590,11 @@ async fn reap_orphaned_apple_warm_sandboxes(container_bin: &Path) -> Result<()> 
         {
             continue;
         }
-        if container.status.as_deref() != Some("running") {
+        if !container
+            .status
+            .as_deref()
+            .is_some_and(is_running_container_status)
+        {
             continue;
         }
         let Some(started_date) = container.started_date else {
@@ -1570,6 +1790,10 @@ fn is_container_not_running_error(stderr: &str) -> bool {
         .contains("container is not running")
 }
 
+fn is_running_container_status(status: &str) -> bool {
+    status.eq_ignore_ascii_case("running")
+}
+
 fn is_already_exists_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("already exists")
@@ -1763,6 +1987,7 @@ mod tests {
             spec: SandboxSpec {
                 image: "docker.io/library/ubuntu:24.04".to_string(),
                 mounts: Vec::new(),
+                durable_file_systems: Vec::new(),
                 network: SandboxNetworkPolicy::Disabled,
                 default_workdir: "/".to_string(),
             },
@@ -1877,6 +2102,7 @@ mod tests {
         let backend = CliContainerSandboxBackend {
             cli: ContainerCliFlavor::AppleContainer,
             container_bin: missing_bin,
+            durable_file_system_root: None,
             system_started: Mutex::new(false),
             network_created: Mutex::new(false),
             warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),

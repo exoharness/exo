@@ -238,7 +238,7 @@ impl DaytonaSandboxBackend {
 #[async_trait]
 impl ManagedSandboxBackend for DaytonaSandboxBackend {
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        reject_host_mounts(&request)?;
+        reject_unsupported_mounts(&request)?;
         let spec_hash = sandbox_spec_hash(&request.spec);
 
         // Reuse a matching sandbox if one exists (also how we recover across exo
@@ -927,14 +927,17 @@ async fn stop_via_backend(backend: &DaytonaBackendHandle, id: &str) -> Result<()
     Ok(())
 }
 
-fn reject_host_mounts(request: &SandboxRequest) -> Result<()> {
-    if request.spec.mounts.is_empty() {
-        return Ok(());
+fn reject_unsupported_mounts(request: &SandboxRequest) -> Result<()> {
+    if !request.spec.mounts.is_empty() {
+        bail!(
+            "Daytona sandbox backend does not support host bind-mounts; \
+         remove conversation mounts or use a local sandbox provider"
+        );
     }
-    bail!(
-        "Daytona sandbox backend does not support host bind-mounts; \
-     remove conversation mounts or use a local sandbox provider"
-    )
+    if !request.spec.durable_file_systems.is_empty() {
+        bail!("Daytona sandbox backend does not support durable file systems");
+    }
+    Ok(())
 }
 
 fn idle_ttl_to_minutes(ttl: Duration) -> u32 {

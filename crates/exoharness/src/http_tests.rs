@@ -111,6 +111,7 @@ async fn http_exoharness_runs_noninteractive_sandbox_commands() {
             image: "local".to_string(),
             default_workdir: Some("/".to_string()),
             file_system_mounts: None,
+            durable_file_systems: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })
@@ -158,6 +159,7 @@ async fn http_exoharness_supports_sandbox_process_events() {
             image: "local".to_string(),
             default_workdir: Some("/".to_string()),
             file_system_mounts: None,
+            durable_file_systems: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })

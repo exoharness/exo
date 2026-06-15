@@ -32,6 +32,7 @@ fn make_request(conversation_id: &str, sandbox_id: &str) -> SandboxRequest {
         spec: SandboxSpec {
             image: "docker.io/library/ubuntu:24.04".into(),
             mounts: Vec::new(),
+            durable_file_systems: Vec::new(),
             network: SandboxNetworkPolicy::Enabled,
             default_workdir: "/".into(),
         },

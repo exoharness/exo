@@ -247,6 +247,7 @@ where
                 .shell_program
                 .or(default_conversation_config.shell_program),
             mounts: default_conversation_config.mounts,
+            durable_file_systems: default_conversation_config.durable_file_systems,
             sandbox_scope: default_conversation_config.sandbox_scope,
         };
         self.runtime

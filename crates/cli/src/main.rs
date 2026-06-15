@@ -611,6 +611,9 @@ struct ProviderConfigureArgs {
     runtime_arn: Option<String>,
     #[arg(long)]
     qualifier: Option<String>,
+    /// AgentCore managed session storage mount path configured on the runtime.
+    #[arg(long = "session-storage-mount-path")]
+    session_storage_mount_path: Option<String>,
     /// Default base image for sandboxes that don't request one.
     #[arg(long)]
     default_image: Option<String>,
@@ -1765,10 +1768,16 @@ async fn main() -> Result<()> {
                     api_url,
                     runtime_arn,
                     qualifier,
+                    session_storage_mount_path,
                     default_image,
                 } = *args;
                 let binding_name =
                     name.unwrap_or_else(|| SandboxProvider::from(provider).as_str().to_string());
+                if !matches!(provider, SandboxProviderArg::AwsAgentCore)
+                    && session_storage_mount_path.is_some()
+                {
+                    bail!("--session-storage-mount-path is only valid for aws-agentcore");
+                }
                 let config = match provider {
                     SandboxProviderArg::Daytona => {
                         let secret =
@@ -1821,6 +1830,7 @@ async fn main() -> Result<()> {
                             region,
                             qualifier,
                             endpoint_url: api_url,
+                            session_storage_mount_path,
                             default_image: default_image
                                 .unwrap_or_else(default_aws_agentcore_image),
                         }
