@@ -710,6 +710,95 @@ struct BasicAgentHandle {
     record: AgentRecord,
 }
 
+trait BasicSandboxScope {
+    fn sandbox_handle(&self) -> BasicScopedSandboxHandle<'_>;
+}
+
+trait BasicFullSandboxScope: BasicSandboxScope {}
+
+#[async_trait]
+impl<T> SnapshotHandle for T
+where
+    T: BasicSandboxScope + Send + Sync,
+{
+    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
+        self.sandbox_handle().snapshot_sandbox(id).await
+    }
+
+    async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
+        self.sandbox_handle().start_sandbox(request).await
+    }
+}
+
+#[async_trait]
+impl<T> SandboxHandle for T
+where
+    T: BasicFullSandboxScope + Send + Sync,
+{
+    async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
+        self.sandbox_handle().create_sandbox(request).await
+    }
+
+    async fn stop_sandbox(&self, id: SandboxId) -> Result<()> {
+        self.sandbox_handle().stop_sandbox(id).await
+    }
+
+    async fn start_sandbox_process(
+        &self,
+        request: StartSandboxProcessRequest,
+    ) -> Result<SandboxProcessRecord> {
+        self.sandbox_handle().start_sandbox_process(request).await
+    }
+
+    async fn write_sandbox_process_input(
+        &self,
+        request: WriteSandboxProcessInputRequest,
+    ) -> Result<()> {
+        self.sandbox_handle()
+            .write_sandbox_process_input(request)
+            .await
+    }
+
+    async fn close_sandbox_process_input(
+        &self,
+        request: CloseSandboxProcessInputRequest,
+    ) -> Result<()> {
+        self.sandbox_handle()
+            .close_sandbox_process_input(request)
+            .await
+    }
+
+    async fn get_sandbox_process_events(
+        &self,
+        query: SandboxProcessEventQuery,
+    ) -> Result<GetSandboxProcessEventsResult> {
+        self.sandbox_handle()
+            .get_sandbox_process_events(query)
+            .await
+    }
+
+    async fn wait_sandbox_process(
+        &self,
+        request: WaitSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus> {
+        self.sandbox_handle().wait_sandbox_process(request).await
+    }
+
+    async fn cancel_sandbox_process(
+        &self,
+        request: CancelSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus> {
+        self.sandbox_handle().cancel_sandbox_process(request).await
+    }
+
+    async fn run_in_sandbox(
+        &self,
+        request: RunInSandboxRequest,
+    ) -> Result<Box<dyn SandboxProcess>> {
+        self.sandbox_handle().run_in_sandbox(request).await
+    }
+}
+
 #[async_trait]
 impl AgentHandle for BasicAgentHandle {
     fn record(&self) -> &AgentRecord {
@@ -972,212 +1061,13 @@ impl AgentHandle for BasicAgentHandle {
     }
 }
 
-#[async_trait]
-impl SnapshotHandle for BasicAgentHandle {
-    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
-        let (snapshot_id, _event) =
-            snapshot_sandbox_side_effect(&self.harness, &self.agent_dir(), id).await?;
-        Ok(snapshot_id)
-    }
-
-    async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
-        start_sandbox_side_effect(
-            &self.harness,
-            &self.agent_dir(),
-            SandboxOwner::Agent(self.record.id),
-            request,
-        )
-        .await?;
-        Ok(())
+impl BasicSandboxScope for BasicAgentHandle {
+    fn sandbox_handle(&self) -> BasicScopedSandboxHandle<'_> {
+        BasicScopedSandboxHandle::agent(&self.harness, self.record.id)
     }
 }
 
-#[async_trait]
-impl SandboxHandle for BasicAgentHandle {
-    async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
-        if request.name.is_none() {
-            return self.create_new_sandbox(request).await;
-        }
-        let prepared = prepare_sandbox_request(&self.harness, request).await?;
-        let _guard = self.harness.inner.write_lock.lock().await;
-        if let Some((sandbox_id, sandbox)) = find_matching_stored_sandbox(
-            &self.harness.inner.storage,
-            &self.sandboxes_dir(),
-            &prepared,
-        )
-        .await?
-        {
-            active_sandbox_handle(
-                &self.harness,
-                SandboxOwner::Agent(self.record.id),
-                &sandbox_id,
-                &sandbox,
-            )
-            .await?;
-            return Ok(sandbox_id);
-        }
-        self.create_new_sandbox_locked(prepared).await
-    }
-
-    async fn stop_sandbox(&self, id: SandboxId) -> Result<()> {
-        let sandbox_handle = self
-            .harness
-            .inner
-            .running_sandboxes
-            .lock()
-            .await
-            .remove(&id);
-        if let Some(sandbox_handle) = sandbox_handle {
-            sandbox_handle.stop().await?;
-        }
-
-        let _guard = self.harness.inner.write_lock.lock().await;
-        let mut sandbox = self.load_sandbox(&id).await?;
-        if !sandbox.running {
-            return Ok(());
-        }
-        sandbox.running = false;
-        self.harness
-            .inner
-            .storage
-            .put_json(self.sandboxes_dir().join(format!("{id}.json")), &sandbox)
-            .await?;
-        Ok(())
-    }
-
-    async fn start_sandbox_process(
-        &self,
-        request: StartSandboxProcessRequest,
-    ) -> Result<SandboxProcessRecord> {
-        let pending = prepare_sandbox_process(
-            &self.harness,
-            &self.agent_dir(),
-            SandboxOwner::Agent(self.record.id),
-            None,
-            request,
-        )
-        .await?;
-        spawn_pending_sandbox_process(&self.harness, pending).await
-    }
-
-    async fn write_sandbox_process_input(
-        &self,
-        request: WriteSandboxProcessInputRequest,
-    ) -> Result<()> {
-        let process = self
-            .require_sandbox_process(&request.sandbox_id, &request.process_id)
-            .await?;
-        if !sandbox_process_status(&process).await.is_running() {
-            bail!("sandbox process is not running: {}", request.process_id);
-        }
-        let mut stdin = process.stdin.lock().await;
-        let stdin = stdin
-            .as_mut()
-            .ok_or_else(|| anyhow!("sandbox process stdin is closed: {}", request.process_id))?;
-        stdin.write_all(&request.data).await?;
-        stdin.flush().await?;
-        Ok(())
-    }
-
-    async fn close_sandbox_process_input(
-        &self,
-        request: CloseSandboxProcessInputRequest,
-    ) -> Result<()> {
-        let process = self
-            .require_sandbox_process(&request.sandbox_id, &request.process_id)
-            .await?;
-        process.stdin.lock().await.take();
-        Ok(())
-    }
-
-    async fn get_sandbox_process_events(
-        &self,
-        query: SandboxProcessEventQuery,
-    ) -> Result<GetSandboxProcessEventsResult> {
-        let process = self
-            .require_sandbox_process(&query.sandbox_id, &query.process_id)
-            .await?;
-        let after = query.after.unwrap_or_default();
-        let limit = query.limit.unwrap_or(u32::MAX) as usize;
-        let events = process
-            .events
-            .lock()
-            .await
-            .iter()
-            .filter(|event| event.cursor() > after)
-            .take(limit)
-            .cloned()
-            .collect::<Vec<_>>();
-        let cursor = events
-            .last()
-            .map(SandboxProcessEvent::cursor)
-            .or(query.after);
-        Ok(GetSandboxProcessEventsResult {
-            events,
-            cursor,
-            status: sandbox_process_status(&process).await,
-        })
-    }
-
-    async fn wait_sandbox_process(
-        &self,
-        request: WaitSandboxProcessRequest,
-    ) -> Result<SandboxProcessStatus> {
-        let process = self
-            .require_sandbox_process(&request.sandbox_id, &request.process_id)
-            .await?;
-        Ok(wait_for_sandbox_process_terminal_status(&process).await)
-    }
-
-    async fn cancel_sandbox_process(
-        &self,
-        request: CancelSandboxProcessRequest,
-    ) -> Result<SandboxProcessStatus> {
-        let process = self
-            .require_sandbox_process(&request.sandbox_id, &request.process_id)
-            .await?;
-        process.stdin.lock().await.take();
-        if let Some(tasks) = process.tasks.lock().await.take() {
-            tasks.stdout.abort();
-            tasks.stderr.abort();
-            tasks.wait.abort();
-        }
-        push_sandbox_process_event(&process, SandboxProcessEventPayload::Cancelled).await;
-        set_sandbox_process_status(&process, SandboxProcessStatus::Cancelled).await;
-        Ok(SandboxProcessStatus::Cancelled)
-    }
-
-    async fn run_in_sandbox(
-        &self,
-        request: RunInSandboxRequest,
-    ) -> Result<Box<dyn SandboxProcess>> {
-        let sandbox = self.load_sandbox(&request.id).await?;
-        if !sandbox.running {
-            bail!("sandbox is not running: {}", request.id);
-        }
-        if request.command.is_empty() {
-            bail!("sandbox command must not be empty");
-        }
-        let sandbox_handle = active_sandbox_handle(
-            &self.harness,
-            SandboxOwner::Agent(self.record.id),
-            &request.id,
-            &sandbox,
-        )
-        .await?;
-        let parts = sandbox_handle
-            .start_process(&SandboxCommand {
-                argv: request.command.clone(),
-                env: request.env.clone(),
-                display_argv: Some(request.command),
-                cwd: None,
-                timeout: None,
-            })
-            .await
-            .with_context(|| format!("failed to run command in sandbox {}", request.id))?;
-        Ok(Box::new(LiveSandboxProcess::new(parts)))
-    }
-}
+impl BasicFullSandboxScope for BasicAgentHandle {}
 
 impl BasicAgentHandle {
     fn agent_dir(&self) -> PathBuf {
@@ -1198,76 +1088,6 @@ impl BasicAgentHandle {
 
     fn artifacts_dir(&self) -> PathBuf {
         self.agent_dir().join("artifacts")
-    }
-
-    fn sandboxes_dir(&self) -> PathBuf {
-        self.agent_dir().join("sandboxes")
-    }
-
-    async fn load_sandbox(&self, id: &str) -> Result<StoredSandbox> {
-        load_stored_sandbox(&self.harness, &self.agent_dir(), id).await
-    }
-
-    async fn create_new_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
-        let prepared = prepare_sandbox_request(&self.harness, request).await?;
-        let sandbox_id = format!("sandbox-{}", Uuid7::now());
-        let sandbox = prepared.stored_sandbox(sandbox_id.clone());
-        let sandbox_handle = create_sandbox_handle(
-            &self.harness,
-            SandboxOwner::Agent(self.record.id),
-            &sandbox_id,
-            &sandbox,
-        )
-        .await?;
-        let _guard = self.harness.inner.write_lock.lock().await;
-        self.persist_created_sandbox(sandbox, sandbox_handle).await
-    }
-
-    async fn create_new_sandbox_locked(
-        &self,
-        request: PreparedSandboxRequest,
-    ) -> Result<SandboxId> {
-        let sandbox_id = format!("sandbox-{}", Uuid7::now());
-        let sandbox = request.stored_sandbox(sandbox_id.clone());
-        let sandbox_handle = create_sandbox_handle(
-            &self.harness,
-            SandboxOwner::Agent(self.record.id),
-            &sandbox_id,
-            &sandbox,
-        )
-        .await?;
-        self.persist_created_sandbox(sandbox, sandbox_handle).await
-    }
-
-    async fn persist_created_sandbox(
-        &self,
-        sandbox: StoredSandbox,
-        sandbox_handle: Arc<dyn ManagedSandboxHandle>,
-    ) -> Result<SandboxId> {
-        let sandbox_id = sandbox.id.clone();
-        self.harness
-            .inner
-            .storage
-            .put_json(
-                self.sandboxes_dir().join(format!("{sandbox_id}.json")),
-                &sandbox,
-            )
-            .await?;
-        self.harness
-            .inner
-            .running_sandboxes
-            .lock()
-            .await
-            .insert(sandbox_id.clone(), sandbox_handle);
-        Ok(sandbox_id)
-    }
-
-    async fn require_sandbox_process(
-        &self,
-        sandbox_id: &str,
-        process_id: &str,
-    ) -> Result<Arc<RunningSandboxProcess>> {
-        require_running_sandbox_process(&self.harness, sandbox_id, process_id).await
     }
 
     async fn list_conversation_records(
@@ -1341,52 +1161,373 @@ enum SandboxOwner {
     Conversation(ConversationId),
 }
 
-struct BasicConversationHandle {
-    harness: BasicExoHarness,
-    agent_id: AgentId,
-    record: ConversationRecord,
+struct BasicScopedSandboxHandle<'a> {
+    harness: &'a BasicExoHarness,
+    owner_dir: PathBuf,
+    owner: SandboxOwner,
+    event_sink: BasicSandboxEventSink<'a>,
 }
 
-impl BasicConversationHandle {
-    async fn active_sandbox_handle(
-        &self,
-        sandbox_id: &SandboxId,
-        sandbox: &StoredSandbox,
-    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        active_sandbox_handle(
-            &self.harness,
-            SandboxOwner::Conversation(self.record.id),
-            sandbox_id,
-            sandbox,
-        )
-        .await
+enum BasicSandboxEventSink<'a> {
+    None,
+    Conversation {
+        conversation_id: ConversationId,
+    },
+    Turn {
+        conversation_id: ConversationId,
+        session_id: SessionId,
+        turn_id: TurnId,
+        state: &'a Mutex<BasicTurnState>,
+    },
+}
+
+impl<'a> BasicScopedSandboxHandle<'a> {
+    fn agent(harness: &'a BasicExoHarness, agent_id: AgentId) -> Self {
+        Self {
+            harness,
+            owner_dir: harness.agents_dir().join(agent_id.to_string()),
+            owner: SandboxOwner::Agent(agent_id),
+            event_sink: BasicSandboxEventSink::None,
+        }
     }
 
-    async fn prepare_sandbox_request(
+    fn conversation(
+        harness: &'a BasicExoHarness,
+        conversation_id: ConversationId,
+        conversation_dir: PathBuf,
+    ) -> Self {
+        Self {
+            harness,
+            owner_dir: conversation_dir,
+            owner: SandboxOwner::Conversation(conversation_id),
+            event_sink: BasicSandboxEventSink::Conversation { conversation_id },
+        }
+    }
+
+    fn turn(
+        harness: &'a BasicExoHarness,
+        conversation_id: ConversationId,
+        conversation_dir: PathBuf,
+        session_id: SessionId,
+        turn_id: TurnId,
+        state: &'a Mutex<BasicTurnState>,
+    ) -> Self {
+        Self {
+            harness,
+            owner_dir: conversation_dir,
+            owner: SandboxOwner::Conversation(conversation_id),
+            event_sink: BasicSandboxEventSink::Turn {
+                conversation_id,
+                session_id,
+                turn_id,
+                state,
+            },
+        }
+    }
+
+    fn sandboxes_dir(&self) -> PathBuf {
+        self.owner_dir.join("sandboxes")
+    }
+
+    async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
+        self.ensure_full_sandbox_scope("create_sandbox")?;
+        if request.name.is_none() {
+            return self.create_new_sandbox(request).await;
+        }
+        let prepared = prepare_sandbox_request(self.harness, request).await?;
+        let _guard = self.harness.inner.write_lock.lock().await;
+        if let Some((sandbox_id, sandbox)) = self.find_matching_sandbox(&prepared).await? {
+            active_sandbox_handle(self.harness, self.owner, &sandbox_id, &sandbox).await?;
+            return Ok(sandbox_id);
+        }
+        self.create_new_sandbox_locked(prepared).await
+    }
+
+    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
+        let (snapshot_id, event) =
+            snapshot_sandbox_side_effect(self.harness, &self.owner_dir, id).await?;
+        self.append_events(vec![event]).await?;
+        Ok(snapshot_id)
+    }
+
+    async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
+        let event =
+            start_sandbox_side_effect(self.harness, &self.owner_dir, self.owner, request).await?;
+        self.append_events(vec![event]).await?;
+        Ok(())
+    }
+
+    async fn stop_sandbox(&self, id: SandboxId) -> Result<()> {
+        self.ensure_full_sandbox_scope("stop_sandbox")?;
+        let sandbox_handle = self
+            .harness
+            .inner
+            .running_sandboxes
+            .lock()
+            .await
+            .remove(&id);
+        if let Some(sandbox_handle) = sandbox_handle {
+            sandbox_handle.stop().await?;
+        }
+
+        let _guard = self.harness.inner.write_lock.lock().await;
+        let mut sandbox = self.load_sandbox(&id).await?;
+        if !sandbox.running {
+            return Ok(());
+        }
+        sandbox.running = false;
+        self.harness
+            .inner
+            .storage
+            .put_json(self.sandboxes_dir().join(format!("{id}.json")), &sandbox)
+            .await?;
+        self.append_events_locked(vec![EventData::SandboxStopped { sandbox_id: id }])
+            .await?;
+        Ok(())
+    }
+
+    async fn start_sandbox_process(
         &self,
-        request: CreateSandboxRequest,
-    ) -> Result<PreparedSandboxRequest> {
-        prepare_sandbox_request(&self.harness, request).await
+        request: StartSandboxProcessRequest,
+    ) -> Result<SandboxProcessRecord> {
+        self.ensure_full_sandbox_scope("start_sandbox_process")?;
+        let pending = prepare_sandbox_process(
+            self.harness,
+            &self.owner_dir,
+            self.owner,
+            self.process_event_log(),
+            request,
+        )
+        .await?;
+        self.append_events(vec![pending.started_event.clone()])
+            .await?;
+        spawn_pending_sandbox_process(self.harness, pending).await
+    }
+
+    async fn write_sandbox_process_input(
+        &self,
+        request: WriteSandboxProcessInputRequest,
+    ) -> Result<()> {
+        self.ensure_full_sandbox_scope("write_sandbox_process_input")?;
+        let process = self
+            .require_sandbox_process(&request.sandbox_id, &request.process_id)
+            .await?;
+        if !sandbox_process_status(&process).await.is_running() {
+            bail!("sandbox process is not running: {}", request.process_id);
+        }
+        let mut stdin = process.stdin.lock().await;
+        let stdin = stdin
+            .as_mut()
+            .ok_or_else(|| anyhow!("sandbox process stdin is closed: {}", request.process_id))?;
+        stdin.write_all(&request.data).await?;
+        stdin.flush().await?;
+        Ok(())
+    }
+
+    async fn close_sandbox_process_input(
+        &self,
+        request: CloseSandboxProcessInputRequest,
+    ) -> Result<()> {
+        self.ensure_full_sandbox_scope("close_sandbox_process_input")?;
+        let process = self
+            .require_sandbox_process(&request.sandbox_id, &request.process_id)
+            .await?;
+        process.stdin.lock().await.take();
+        Ok(())
+    }
+
+    async fn get_sandbox_process_events(
+        &self,
+        query: SandboxProcessEventQuery,
+    ) -> Result<GetSandboxProcessEventsResult> {
+        self.ensure_full_sandbox_scope("get_sandbox_process_events")?;
+        let process = self
+            .require_sandbox_process(&query.sandbox_id, &query.process_id)
+            .await?;
+        let after = query.after.unwrap_or_default();
+        let limit = query.limit.unwrap_or(u32::MAX) as usize;
+        let events = process
+            .events
+            .lock()
+            .await
+            .iter()
+            .filter(|event| event.cursor() > after)
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        let cursor = events
+            .last()
+            .map(SandboxProcessEvent::cursor)
+            .or(query.after);
+        Ok(GetSandboxProcessEventsResult {
+            events,
+            cursor,
+            status: sandbox_process_status(&process).await,
+        })
+    }
+
+    async fn wait_sandbox_process(
+        &self,
+        request: WaitSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus> {
+        self.ensure_full_sandbox_scope("wait_sandbox_process")?;
+        let process = self
+            .require_sandbox_process(&request.sandbox_id, &request.process_id)
+            .await?;
+        Ok(wait_for_sandbox_process_terminal_status(&process).await)
+    }
+
+    async fn cancel_sandbox_process(
+        &self,
+        request: CancelSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus> {
+        self.ensure_full_sandbox_scope("cancel_sandbox_process")?;
+        let process = self
+            .require_sandbox_process(&request.sandbox_id, &request.process_id)
+            .await?;
+        process.stdin.lock().await.take();
+        if let Some(tasks) = process.tasks.lock().await.take() {
+            tasks.stdout.abort();
+            tasks.stderr.abort();
+            tasks.wait.abort();
+        }
+        push_sandbox_process_event(&process, SandboxProcessEventPayload::Cancelled).await;
+        set_sandbox_process_status(&process, SandboxProcessStatus::Cancelled).await;
+        Ok(SandboxProcessStatus::Cancelled)
+    }
+
+    async fn run_in_sandbox(
+        &self,
+        request: RunInSandboxRequest,
+    ) -> Result<Box<dyn SandboxProcess>> {
+        self.ensure_full_sandbox_scope("run_in_sandbox")?;
+        let sandbox = self.load_sandbox(&request.id).await?;
+        if !sandbox.running {
+            bail!("sandbox is not running: {}", request.id);
+        }
+        if request.command.is_empty() {
+            bail!("sandbox command must not be empty");
+        }
+        let sandbox_handle =
+            active_sandbox_handle(self.harness, self.owner, &request.id, &sandbox).await?;
+        let parts = sandbox_handle
+            .start_process(&SandboxCommand {
+                argv: request.command.clone(),
+                env: request.env.clone(),
+                display_argv: Some(request.command),
+                cwd: None,
+                timeout: None,
+            })
+            .await
+            .with_context(|| format!("failed to run command in sandbox {}", request.id))?;
+        Ok(Box::new(LiveSandboxProcess::new(parts)))
+    }
+
+    fn ensure_full_sandbox_scope(&self, operation: &str) -> Result<()> {
+        if matches!(self.event_sink, BasicSandboxEventSink::Turn { .. }) {
+            bail!("{operation} is not supported on a turn scope");
+        }
+        Ok(())
+    }
+
+    async fn create_new_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
+        let prepared = prepare_sandbox_request(self.harness, request).await?;
+        let sandbox_id = format!("sandbox-{}", Uuid7::now());
+        let sandbox = prepared.stored_sandbox(sandbox_id.clone());
+        let sandbox_handle =
+            create_sandbox_handle(self.harness, self.owner, &sandbox_id, &sandbox).await?;
+        let _guard = self.harness.inner.write_lock.lock().await;
+        self.persist_created_sandbox_locked(sandbox, sandbox_handle)
+            .await
+    }
+
+    async fn create_new_sandbox_locked(
+        &self,
+        request: PreparedSandboxRequest,
+    ) -> Result<SandboxId> {
+        let sandbox_id = format!("sandbox-{}", Uuid7::now());
+        let sandbox = request.stored_sandbox(sandbox_id.clone());
+        let sandbox_handle =
+            create_sandbox_handle(self.harness, self.owner, &sandbox_id, &sandbox).await?;
+        self.persist_created_sandbox_locked(sandbox, sandbox_handle)
+            .await
+    }
+
+    async fn persist_created_sandbox_locked(
+        &self,
+        sandbox: StoredSandbox,
+        sandbox_handle: Arc<dyn ManagedSandboxHandle>,
+    ) -> Result<SandboxId> {
+        let sandbox_id = sandbox.id.clone();
+        self.harness
+            .inner
+            .storage
+            .put_json(
+                self.sandboxes_dir().join(format!("{sandbox_id}.json")),
+                &sandbox,
+            )
+            .await?;
+        self.harness
+            .inner
+            .running_sandboxes
+            .lock()
+            .await
+            .insert(sandbox_id.clone(), sandbox_handle);
+        self.append_events_locked(vec![
+            EventData::SandboxCreated {
+                sandbox_id: sandbox_id.clone(),
+                name: sandbox.name,
+                provider: sandbox.provider,
+                image: sandbox.image,
+                default_workdir: sandbox.default_workdir.unwrap_or_default(),
+                file_system_mounts: sandbox.file_system_mounts,
+                enable_networking: sandbox.enable_networking,
+                idle_seconds: sandbox.idle_seconds,
+            },
+            EventData::SandboxStarted {
+                sandbox_id: sandbox_id.clone(),
+                snapshot_id: None,
+            },
+        ])
+        .await?;
+        Ok(sandbox_id)
     }
 
     async fn find_matching_sandbox(
         &self,
         request: &PreparedSandboxRequest,
     ) -> Result<Option<(SandboxId, StoredSandbox)>> {
+        match self.event_sink {
+            BasicSandboxEventSink::None => {
+                find_matching_stored_sandbox(
+                    &self.harness.inner.storage,
+                    &self.sandboxes_dir(),
+                    request,
+                )
+                .await
+            }
+            BasicSandboxEventSink::Conversation { .. } => {
+                self.find_matching_conversation_sandbox(request).await
+            }
+            BasicSandboxEventSink::Turn { .. } => {
+                bail!("create_sandbox is not supported on a turn scope")
+            }
+        }
+    }
+
+    async fn find_matching_conversation_sandbox(
+        &self,
+        request: &PreparedSandboxRequest,
+    ) -> Result<Option<(SandboxId, StoredSandbox)>> {
         let Some(name) = &request.name else {
             return Ok(None);
         };
-        let events = self
-            .get_events(Some(EventQuery {
-                cursor: None,
-                direction: Some(EventQueryDirection::Asc),
-                limit: None,
-                session_id: None,
-                turn_id: None,
-                types: Some(vec![EventKind::SANDBOX_CREATED]),
-            }))
+        let mut events = load_events(&self.harness.inner.storage, &self.owner_dir.join("events"))
             .await?
-            .events;
+            .into_iter()
+            .filter(|event| event.data.kind() == EventKind::SANDBOX_CREATED)
+            .collect::<Vec<_>>();
+        events.sort_by_key(|event| event.id);
 
         for event in events.into_iter().rev() {
             let EventData::SandboxCreated {
@@ -1424,93 +1565,108 @@ impl BasicConversationHandle {
         Ok(None)
     }
 
-    async fn create_new_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
-        let prepared = self.prepare_sandbox_request(request).await?;
-        let sandbox_id = format!("sandbox-{}", Uuid7::now());
-        let sandbox = prepared.stored_sandbox(sandbox_id.clone());
-        let sandbox_handle = self.create_sandbox_handle(&sandbox_id, &sandbox).await?;
+    async fn load_sandbox(&self, id: &str) -> Result<StoredSandbox> {
+        load_stored_sandbox(self.harness, &self.owner_dir, id).await
+    }
+
+    async fn require_sandbox_process(
+        &self,
+        sandbox_id: &str,
+        process_id: &str,
+    ) -> Result<Arc<RunningSandboxProcess>> {
+        require_running_sandbox_process(self.harness, sandbox_id, process_id).await
+    }
+
+    fn process_event_log(&self) -> Option<SandboxProcessEventLog> {
+        match self.event_sink {
+            BasicSandboxEventSink::None | BasicSandboxEventSink::Turn { .. } => None,
+            BasicSandboxEventSink::Conversation { conversation_id } => {
+                Some(SandboxProcessEventLog {
+                    inner: Arc::clone(&self.harness.inner),
+                    conversation_id,
+                    conversation_dir: self.owner_dir.clone(),
+                })
+            }
+        }
+    }
+
+    async fn append_events(&self, data: Vec<EventData>) -> Result<()> {
+        if matches!(self.event_sink, BasicSandboxEventSink::None) {
+            return Ok(());
+        }
         let _guard = self.harness.inner.write_lock.lock().await;
-        self.persist_created_sandbox(sandbox, sandbox_handle).await
+        self.append_events_locked(data).await
     }
 
-    async fn create_new_sandbox_locked(
-        &self,
-        request: PreparedSandboxRequest,
-    ) -> Result<SandboxId> {
-        let sandbox_id = format!("sandbox-{}", Uuid7::now());
-        let sandbox = request.stored_sandbox(sandbox_id.clone());
-        let sandbox_handle = self.create_sandbox_handle(&sandbox_id, &sandbox).await?;
-        self.persist_created_sandbox(sandbox, sandbox_handle).await
+    async fn append_events_locked(&self, data: Vec<EventData>) -> Result<()> {
+        match self.event_sink {
+            BasicSandboxEventSink::None => Ok(()),
+            BasicSandboxEventSink::Conversation { conversation_id } => {
+                let mut record = self
+                    .harness
+                    .inner
+                    .storage
+                    .get_json::<ConversationRecord>(self.owner_dir.join("record.json"))
+                    .await?;
+                append_events_to_conversation(
+                    &self.harness.inner,
+                    &self.owner_dir,
+                    conversation_id,
+                    None,
+                    None,
+                    record.latest_event_id,
+                    data,
+                    &mut record,
+                )
+                .await?;
+                self.harness
+                    .inner
+                    .storage
+                    .put_json(self.owner_dir.join("record.json"), &record)
+                    .await?;
+                Ok(())
+            }
+            BasicSandboxEventSink::Turn {
+                conversation_id,
+                session_id,
+                turn_id,
+                state,
+            } => {
+                let expected_head = state.lock().expect("turn state poisoned").latest_event_id;
+                let mut record = self
+                    .harness
+                    .inner
+                    .storage
+                    .get_json::<ConversationRecord>(self.owner_dir.join("record.json"))
+                    .await?;
+                let add_result = append_events_to_conversation(
+                    &self.harness.inner,
+                    &self.owner_dir,
+                    conversation_id,
+                    Some(session_id),
+                    Some(turn_id),
+                    expected_head,
+                    data,
+                    &mut record,
+                )
+                .await?;
+                self.harness
+                    .inner
+                    .storage
+                    .put_json(self.owner_dir.join("record.json"), &record)
+                    .await?;
+                state.lock().expect("turn state poisoned").latest_event_id =
+                    Some(add_result.latest_event_id);
+                Ok(())
+            }
+        }
     }
+}
 
-    async fn create_sandbox_handle(
-        &self,
-        sandbox_id: &SandboxId,
-        sandbox: &StoredSandbox,
-    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        create_sandbox_handle(
-            &self.harness,
-            SandboxOwner::Conversation(self.record.id),
-            sandbox_id,
-            sandbox,
-        )
-        .await
-    }
-
-    async fn persist_created_sandbox(
-        &self,
-        sandbox: StoredSandbox,
-        sandbox_handle: Arc<dyn ManagedSandboxHandle>,
-    ) -> Result<SandboxId> {
-        let sandbox_id = sandbox.id.clone();
-        self.harness
-            .inner
-            .storage
-            .put_json(
-                self.sandboxes_dir().join(format!("{sandbox_id}.json")),
-                &sandbox,
-            )
-            .await?;
-        self.harness
-            .inner
-            .running_sandboxes
-            .lock()
-            .await
-            .insert(sandbox_id.clone(), sandbox_handle);
-        let mut record = self.load_record().await?;
-        append_events_to_conversation(
-            &self.harness.inner,
-            &self.conversation_dir(),
-            self.record.id,
-            None,
-            None,
-            record.latest_event_id,
-            vec![
-                EventData::SandboxCreated {
-                    sandbox_id: sandbox_id.clone(),
-                    name: sandbox.name,
-                    provider: sandbox.provider,
-                    image: sandbox.image,
-                    default_workdir: sandbox.default_workdir.unwrap_or_default(),
-                    file_system_mounts: sandbox.file_system_mounts,
-                    enable_networking: sandbox.enable_networking,
-                    idle_seconds: sandbox.idle_seconds,
-                },
-                EventData::SandboxStarted {
-                    sandbox_id: sandbox_id.clone(),
-                    snapshot_id: None,
-                },
-            ],
-            &mut record,
-        )
-        .await?;
-        self.harness
-            .inner
-            .storage
-            .put_json(self.conversation_dir().join("record.json"), &record)
-            .await?;
-        Ok(sandbox_id)
-    }
+struct BasicConversationHandle {
+    harness: BasicExoHarness,
+    agent_id: AgentId,
+    record: ConversationRecord,
 }
 
 #[async_trait]
@@ -1980,223 +2136,17 @@ impl ConversationHandle for BasicConversationHandle {
     }
 }
 
-#[async_trait]
-impl SnapshotHandle for BasicConversationHandle {
-    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
-        let (snapshot_id, event) =
-            snapshot_sandbox_side_effect(&self.harness, &self.conversation_dir(), id).await?;
-        self.append_events_internal(None, None, None, vec![event])
-            .await?;
-        Ok(snapshot_id)
-    }
-
-    async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
-        let event = start_sandbox_side_effect(
+impl BasicSandboxScope for BasicConversationHandle {
+    fn sandbox_handle(&self) -> BasicScopedSandboxHandle<'_> {
+        BasicScopedSandboxHandle::conversation(
             &self.harness,
-            &self.conversation_dir(),
-            SandboxOwner::Conversation(self.record.id),
-            request,
-        )
-        .await?;
-        self.append_events_internal(None, None, None, vec![event])
-            .await?;
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl SandboxHandle for BasicConversationHandle {
-    async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
-        if request.name.is_none() {
-            return self.create_new_sandbox(request).await;
-        }
-        let prepared = self.prepare_sandbox_request(request).await?;
-        let _guard = self.harness.inner.write_lock.lock().await;
-        if let Some((sandbox_id, sandbox)) = self.find_matching_sandbox(&prepared).await? {
-            self.active_sandbox_handle(&sandbox_id, &sandbox).await?;
-            return Ok(sandbox_id);
-        }
-        self.create_new_sandbox_locked(prepared).await
-    }
-
-    async fn stop_sandbox(&self, id: SandboxId) -> Result<()> {
-        // Take the handle and stop it before the write lock — stop() is a remote
-        // call and must not block other writers.
-        let sandbox_handle = self
-            .harness
-            .inner
-            .running_sandboxes
-            .lock()
-            .await
-            .remove(&id);
-        if let Some(sandbox_handle) = sandbox_handle {
-            sandbox_handle.stop().await?;
-        }
-
-        let _guard = self.harness.inner.write_lock.lock().await;
-        let mut sandbox = self.load_sandbox(&id).await?;
-        if !sandbox.running {
-            return Ok(());
-        }
-        sandbox.running = false;
-        self.harness
-            .inner
-            .storage
-            .put_json(self.sandboxes_dir().join(format!("{id}.json")), &sandbox)
-            .await?;
-        let mut record = self.load_record().await?;
-        append_events_to_conversation(
-            &self.harness.inner,
-            &self.conversation_dir(),
             self.record.id,
-            None,
-            None,
-            record.latest_event_id,
-            vec![EventData::SandboxStopped { sandbox_id: id }],
-            &mut record,
+            self.conversation_dir(),
         )
-        .await?;
-        self.harness
-            .inner
-            .storage
-            .put_json(self.conversation_dir().join("record.json"), &record)
-            .await?;
-        Ok(())
-    }
-
-    async fn start_sandbox_process(
-        &self,
-        request: StartSandboxProcessRequest,
-    ) -> Result<SandboxProcessRecord> {
-        let pending = prepare_sandbox_process(
-            &self.harness,
-            &self.conversation_dir(),
-            SandboxOwner::Conversation(self.record.id),
-            Some(SandboxProcessEventLog {
-                inner: Arc::clone(&self.harness.inner),
-                conversation_id: self.record.id,
-                conversation_dir: self.conversation_dir(),
-            }),
-            request,
-        )
-        .await?;
-        self.append_events_internal(None, None, None, vec![pending.started_event.clone()])
-            .await?;
-        spawn_pending_sandbox_process(&self.harness, pending).await
-    }
-
-    async fn write_sandbox_process_input(
-        &self,
-        request: WriteSandboxProcessInputRequest,
-    ) -> Result<()> {
-        let process = self
-            .require_sandbox_process(&request.sandbox_id, &request.process_id)
-            .await?;
-        if !sandbox_process_status(&process).await.is_running() {
-            bail!("sandbox process is not running: {}", request.process_id);
-        }
-        let mut stdin = process.stdin.lock().await;
-        let stdin = stdin
-            .as_mut()
-            .ok_or_else(|| anyhow!("sandbox process stdin is closed: {}", request.process_id))?;
-        stdin.write_all(&request.data).await?;
-        stdin.flush().await?;
-        Ok(())
-    }
-
-    async fn close_sandbox_process_input(
-        &self,
-        request: CloseSandboxProcessInputRequest,
-    ) -> Result<()> {
-        let process = self
-            .require_sandbox_process(&request.sandbox_id, &request.process_id)
-            .await?;
-        process.stdin.lock().await.take();
-        Ok(())
-    }
-
-    async fn get_sandbox_process_events(
-        &self,
-        query: SandboxProcessEventQuery,
-    ) -> Result<GetSandboxProcessEventsResult> {
-        let process = self
-            .require_sandbox_process(&query.sandbox_id, &query.process_id)
-            .await?;
-        let after = query.after.unwrap_or_default();
-        let limit = query.limit.unwrap_or(u32::MAX) as usize;
-        let events = process
-            .events
-            .lock()
-            .await
-            .iter()
-            .filter(|event| event.cursor() > after)
-            .take(limit)
-            .cloned()
-            .collect::<Vec<_>>();
-        let cursor = events
-            .last()
-            .map(SandboxProcessEvent::cursor)
-            .or(query.after);
-        Ok(GetSandboxProcessEventsResult {
-            events,
-            cursor,
-            status: sandbox_process_status(&process).await,
-        })
-    }
-
-    async fn wait_sandbox_process(
-        &self,
-        request: WaitSandboxProcessRequest,
-    ) -> Result<SandboxProcessStatus> {
-        let process = self
-            .require_sandbox_process(&request.sandbox_id, &request.process_id)
-            .await?;
-        Ok(wait_for_sandbox_process_terminal_status(&process).await)
-    }
-
-    async fn cancel_sandbox_process(
-        &self,
-        request: CancelSandboxProcessRequest,
-    ) -> Result<SandboxProcessStatus> {
-        let process = self
-            .require_sandbox_process(&request.sandbox_id, &request.process_id)
-            .await?;
-        process.stdin.lock().await.take();
-        if let Some(tasks) = process.tasks.lock().await.take() {
-            tasks.stdout.abort();
-            tasks.stderr.abort();
-            tasks.wait.abort();
-        }
-        push_sandbox_process_event(&process, SandboxProcessEventPayload::Cancelled).await;
-        set_sandbox_process_status(&process, SandboxProcessStatus::Cancelled).await;
-        Ok(SandboxProcessStatus::Cancelled)
-    }
-
-    async fn run_in_sandbox(
-        &self,
-        request: RunInSandboxRequest,
-    ) -> Result<Box<dyn SandboxProcess>> {
-        let sandbox = self.load_sandbox(&request.id).await?;
-        if !sandbox.running {
-            bail!("sandbox is not running: {}", request.id);
-        }
-        if request.command.is_empty() {
-            bail!("sandbox command must not be empty");
-        }
-        let sandbox_handle = self.active_sandbox_handle(&request.id, &sandbox).await?;
-        let parts = sandbox_handle
-            .start_process(&SandboxCommand {
-                argv: request.command.clone(),
-                env: request.env.clone(),
-                display_argv: Some(request.command),
-                cwd: None,
-                timeout: None,
-            })
-            .await
-            .with_context(|| format!("failed to run command in sandbox {}", request.id))?;
-        Ok(Box::new(LiveSandboxProcess::new(parts)))
     }
 }
+
+impl BasicFullSandboxScope for BasicConversationHandle {}
 
 impl BasicConversationHandle {
     fn agent_dir(&self) -> PathBuf {
@@ -2264,34 +2214,6 @@ impl BasicConversationHandle {
             .put_json(conversation_dir.join("record.json"), &record)
             .await?;
         Ok(add_result)
-    }
-
-    async fn load_sandbox(&self, id: &str) -> Result<StoredSandbox> {
-        self.harness
-            .inner
-            .storage
-            .get_json(self.sandboxes_dir().join(format!("{id}.json")))
-            .await
-    }
-
-    async fn require_sandbox_process(
-        &self,
-        sandbox_id: &str,
-        process_id: &str,
-    ) -> Result<Arc<RunningSandboxProcess>> {
-        let process = self
-            .harness
-            .inner
-            .running_processes
-            .lock()
-            .await
-            .get(process_id)
-            .cloned()
-            .ok_or_else(|| anyhow!("sandbox process not found: {process_id}"))?;
-        if process.sandbox_id != sandbox_id {
-            bail!("sandbox process {process_id} does not belong to sandbox {sandbox_id}");
-        }
-        Ok(process)
     }
 }
 
@@ -2570,25 +2492,16 @@ struct BasicTurnState {
     finished: bool,
 }
 
-#[async_trait]
-impl SnapshotHandle for BasicTurnHandle {
-    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
-        let (snapshot_id, event) =
-            snapshot_sandbox_side_effect(&self.harness, &self.conversation_dir, id).await?;
-        self.add_events(vec![event]).await?;
-        Ok(snapshot_id)
-    }
-
-    async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
-        let event = start_sandbox_side_effect(
+impl BasicSandboxScope for BasicTurnHandle {
+    fn sandbox_handle(&self) -> BasicScopedSandboxHandle<'_> {
+        BasicScopedSandboxHandle::turn(
             &self.harness,
-            &self.conversation_dir,
-            SandboxOwner::Conversation(self.conversation_id),
-            request,
+            self.conversation_id,
+            self.conversation_dir.clone(),
+            self.record.session_id,
+            self.record.id,
+            &self.state,
         )
-        .await?;
-        self.add_events(vec![event]).await?;
-        Ok(())
     }
 }
 
