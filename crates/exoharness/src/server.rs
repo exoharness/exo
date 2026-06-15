@@ -3,10 +3,16 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 
-use crate::protocol::{ClientMessage, ConversationHandleInfo, Request, Response, ServerMessage};
+use crate::protocol::{
+    ClientMessage, ConversationHandleInfo, Request, Response, SandboxScope, ServerMessage,
+};
 use crate::{
-    AgentHandle, AgentId, ConversationHandle, ConversationId, ExoHarness, ListConversationsResult,
-    Result, SessionId, TurnHandle, TurnId, TurnRecord,
+    AgentHandle, AgentId, CancelSandboxProcessRequest, CloseSandboxProcessInputRequest,
+    ConversationHandle, ConversationId, CreateSandboxRequest, ExoHarness,
+    GetSandboxProcessEventsResult, ListConversationsResult, Result, SandboxId,
+    SandboxProcessEventQuery, SandboxProcessRecord, SandboxProcessStatus, SessionId, SnapshotId,
+    StartSandboxProcessRequest, StartSandboxRequest, TurnHandle, TurnId, TurnRecord,
+    WaitSandboxProcessRequest, WriteSandboxProcessInputRequest,
 };
 
 pub struct ExoHarnessServer {
@@ -131,66 +137,42 @@ impl ExoHarnessServer {
                     artifact: agent.write_artifact(request).await?,
                 })
             }
-            Request::AgentCreateSandbox { agent_id, request } => {
-                let agent = self.require_agent(&agent_id).await?;
-                Ok(Response::SandboxId {
-                    sandbox_id: agent.create_sandbox(request).await?,
-                })
-            }
-            Request::AgentSnapshotSandbox {
-                agent_id,
-                sandbox_id,
-            } => {
-                let agent = self.require_agent(&agent_id).await?;
-                Ok(Response::SnapshotId {
-                    snapshot_id: agent.snapshot_sandbox(sandbox_id).await?,
-                })
-            }
-            Request::AgentStartSandbox { agent_id, request } => {
-                let agent = self.require_agent(&agent_id).await?;
-                agent.start_sandbox(request).await?;
+            Request::CreateSandbox { scope, request } => Ok(Response::SandboxId {
+                sandbox_id: self.create_sandbox(scope, request).await?,
+            }),
+            Request::SnapshotSandbox { scope, sandbox_id } => Ok(Response::SnapshotId {
+                snapshot_id: self.snapshot_sandbox(scope, sandbox_id).await?,
+            }),
+            Request::StartSandbox { scope, request } => {
+                self.start_sandbox(scope, request).await?;
                 Ok(Response::Unit)
             }
-            Request::AgentStopSandbox {
-                agent_id,
-                sandbox_id,
-            } => {
-                let agent = self.require_agent(&agent_id).await?;
-                agent.stop_sandbox(sandbox_id).await?;
+            Request::StopSandbox { scope, sandbox_id } => {
+                self.stop_sandbox(scope, sandbox_id).await?;
                 Ok(Response::Unit)
             }
-            Request::AgentStartSandboxProcess { agent_id, request } => {
-                let agent = self.require_agent(&agent_id).await?;
-                Ok(Response::SandboxProcess {
-                    process: agent.start_sandbox_process(request).await?,
-                })
-            }
-            Request::AgentWriteSandboxProcessInput { agent_id, request } => {
-                let agent = self.require_agent(&agent_id).await?;
-                agent.write_sandbox_process_input(request).await?;
+            Request::StartSandboxProcess { scope, request } => Ok(Response::SandboxProcess {
+                process: self.start_sandbox_process(scope, request).await?,
+            }),
+            Request::WriteSandboxProcessInput { scope, request } => {
+                self.write_sandbox_process_input(scope, request).await?;
                 Ok(Response::Unit)
             }
-            Request::AgentCloseSandboxProcessInput { agent_id, request } => {
-                let agent = self.require_agent(&agent_id).await?;
-                agent.close_sandbox_process_input(request).await?;
+            Request::CloseSandboxProcessInput { scope, request } => {
+                self.close_sandbox_process_input(scope, request).await?;
                 Ok(Response::Unit)
             }
-            Request::AgentGetSandboxProcessEvents { agent_id, query } => {
-                let agent = self.require_agent(&agent_id).await?;
+            Request::GetSandboxProcessEvents { scope, query } => {
                 Ok(Response::SandboxProcessEvents {
-                    result: agent.get_sandbox_process_events(query).await?,
+                    result: self.get_sandbox_process_events(scope, query).await?,
                 })
             }
-            Request::AgentWaitSandboxProcess { agent_id, request } => {
-                let agent = self.require_agent(&agent_id).await?;
+            Request::WaitSandboxProcess { scope, request } => Ok(Response::SandboxProcessStatus {
+                status: self.wait_sandbox_process(scope, request).await?,
+            }),
+            Request::CancelSandboxProcess { scope, request } => {
                 Ok(Response::SandboxProcessStatus {
-                    status: agent.wait_sandbox_process(request).await?,
-                })
-            }
-            Request::AgentCancelSandboxProcess { agent_id, request } => {
-                let agent = self.require_agent(&agent_id).await?;
-                Ok(Response::SandboxProcessStatus {
-                    status: agent.cancel_sandbox_process(request).await?,
+                    status: self.cancel_sandbox_process(scope, request).await?,
                 })
             }
             Request::AgentListBindings { agent_id } => {
@@ -343,102 +325,6 @@ impl ExoHarnessServer {
                     artifact: conversation.write_artifact(request).await?,
                 })
             }
-            Request::ConversationCreateSandbox {
-                agent_id,
-                conversation_id,
-                request,
-            } => {
-                let conversation = self.require_conversation(agent_id, conversation_id).await?;
-                Ok(Response::SandboxId {
-                    sandbox_id: conversation.create_sandbox(request).await?,
-                })
-            }
-            Request::ConversationSnapshotSandbox {
-                agent_id,
-                conversation_id,
-                sandbox_id,
-            } => {
-                let conversation = self.require_conversation(agent_id, conversation_id).await?;
-                Ok(Response::SnapshotId {
-                    snapshot_id: conversation.snapshot_sandbox(sandbox_id).await?,
-                })
-            }
-            Request::ConversationStartSandbox {
-                agent_id,
-                conversation_id,
-                request,
-            } => {
-                let conversation = self.require_conversation(agent_id, conversation_id).await?;
-                conversation.start_sandbox(request).await?;
-                Ok(Response::Unit)
-            }
-            Request::ConversationStopSandbox {
-                agent_id,
-                conversation_id,
-                sandbox_id,
-            } => {
-                let conversation = self.require_conversation(agent_id, conversation_id).await?;
-                conversation.stop_sandbox(sandbox_id).await?;
-                Ok(Response::Unit)
-            }
-            Request::ConversationStartSandboxProcess {
-                agent_id,
-                conversation_id,
-                request,
-            } => {
-                let conversation = self.require_conversation(agent_id, conversation_id).await?;
-                Ok(Response::SandboxProcess {
-                    process: conversation.start_sandbox_process(request).await?,
-                })
-            }
-            Request::ConversationWriteSandboxProcessInput {
-                agent_id,
-                conversation_id,
-                request,
-            } => {
-                let conversation = self.require_conversation(agent_id, conversation_id).await?;
-                conversation.write_sandbox_process_input(request).await?;
-                Ok(Response::Unit)
-            }
-            Request::ConversationCloseSandboxProcessInput {
-                agent_id,
-                conversation_id,
-                request,
-            } => {
-                let conversation = self.require_conversation(agent_id, conversation_id).await?;
-                conversation.close_sandbox_process_input(request).await?;
-                Ok(Response::Unit)
-            }
-            Request::ConversationGetSandboxProcessEvents {
-                agent_id,
-                conversation_id,
-                query,
-            } => {
-                let conversation = self.require_conversation(agent_id, conversation_id).await?;
-                Ok(Response::SandboxProcessEvents {
-                    result: conversation.get_sandbox_process_events(query).await?,
-                })
-            }
-            Request::ConversationWaitSandboxProcess {
-                agent_id,
-                conversation_id,
-                request,
-            } => {
-                let conversation = self.require_conversation(agent_id, conversation_id).await?;
-                Ok(Response::SandboxProcessStatus {
-                    status: conversation.wait_sandbox_process(request).await?,
-                })
-            }
-            Request::ConversationCancelSandboxProcess {
-                agent_id,
-                conversation_id,
-                request,
-            } => {
-                let conversation = self.require_conversation(agent_id, conversation_id).await?;
-                Ok(Response::SandboxProcessStatus {
-                    status: conversation.cancel_sandbox_process(request).await?,
-                })
-            }
             Request::ConversationListBindings {
                 agent_id,
                 conversation_id,
@@ -525,33 +411,6 @@ impl ExoHarnessServer {
                     artifact: turn.write_artifact(request).await?,
                 })
             }
-            Request::TurnSnapshotSandbox {
-                agent_id,
-                conversation_id,
-                session_id,
-                turn_id,
-                sandbox_id,
-            } => {
-                let turn = self
-                    .require_turn(agent_id, conversation_id, session_id, turn_id)
-                    .await?;
-                Ok(Response::SnapshotId {
-                    snapshot_id: turn.snapshot_sandbox(sandbox_id).await?,
-                })
-            }
-            Request::TurnStartSandbox {
-                agent_id,
-                conversation_id,
-                session_id,
-                turn_id,
-                request,
-            } => {
-                let turn = self
-                    .require_turn(agent_id, conversation_id, session_id, turn_id)
-                    .await?;
-                turn.start_sandbox(request).await?;
-                Ok(Response::Unit)
-            }
             Request::TurnFinish {
                 agent_id,
                 conversation_id,
@@ -600,6 +459,284 @@ impl ExoHarnessServer {
         }
 
         Ok(())
+    }
+
+    async fn create_sandbox(
+        &self,
+        scope: SandboxScope,
+        request: CreateSandboxRequest,
+    ) -> Result<SandboxId> {
+        match scope {
+            SandboxScope::Agent { agent_id } => {
+                self.require_agent(&agent_id)
+                    .await?
+                    .create_sandbox(request)
+                    .await
+            }
+            SandboxScope::Conversation {
+                agent_id,
+                conversation_id,
+            } => {
+                self.require_conversation(agent_id, conversation_id)
+                    .await?
+                    .create_sandbox(request)
+                    .await
+            }
+            SandboxScope::Turn { .. } => {
+                Err(anyhow!("create_sandbox is not supported on a turn scope"))
+            }
+        }
+    }
+
+    async fn snapshot_sandbox(
+        &self,
+        scope: SandboxScope,
+        sandbox_id: SandboxId,
+    ) -> Result<SnapshotId> {
+        match scope {
+            SandboxScope::Agent { agent_id } => {
+                self.require_agent(&agent_id)
+                    .await?
+                    .snapshot_sandbox(sandbox_id)
+                    .await
+            }
+            SandboxScope::Conversation {
+                agent_id,
+                conversation_id,
+            } => {
+                self.require_conversation(agent_id, conversation_id)
+                    .await?
+                    .snapshot_sandbox(sandbox_id)
+                    .await
+            }
+            SandboxScope::Turn {
+                agent_id,
+                conversation_id,
+                session_id,
+                turn_id,
+            } => {
+                self.require_turn(agent_id, conversation_id, session_id, turn_id)
+                    .await?
+                    .snapshot_sandbox(sandbox_id)
+                    .await
+            }
+        }
+    }
+
+    async fn start_sandbox(&self, scope: SandboxScope, request: StartSandboxRequest) -> Result<()> {
+        match scope {
+            SandboxScope::Agent { agent_id } => {
+                self.require_agent(&agent_id)
+                    .await?
+                    .start_sandbox(request)
+                    .await
+            }
+            SandboxScope::Conversation {
+                agent_id,
+                conversation_id,
+            } => {
+                self.require_conversation(agent_id, conversation_id)
+                    .await?
+                    .start_sandbox(request)
+                    .await
+            }
+            SandboxScope::Turn {
+                agent_id,
+                conversation_id,
+                session_id,
+                turn_id,
+            } => {
+                self.require_turn(agent_id, conversation_id, session_id, turn_id)
+                    .await?
+                    .start_sandbox(request)
+                    .await
+            }
+        }
+    }
+
+    async fn stop_sandbox(&self, scope: SandboxScope, sandbox_id: SandboxId) -> Result<()> {
+        match scope {
+            SandboxScope::Agent { agent_id } => {
+                self.require_agent(&agent_id)
+                    .await?
+                    .stop_sandbox(sandbox_id)
+                    .await
+            }
+            SandboxScope::Conversation {
+                agent_id,
+                conversation_id,
+            } => {
+                self.require_conversation(agent_id, conversation_id)
+                    .await?
+                    .stop_sandbox(sandbox_id)
+                    .await
+            }
+            SandboxScope::Turn { .. } => {
+                Err(anyhow!("stop_sandbox is not supported on a turn scope"))
+            }
+        }
+    }
+
+    async fn start_sandbox_process(
+        &self,
+        scope: SandboxScope,
+        request: StartSandboxProcessRequest,
+    ) -> Result<SandboxProcessRecord> {
+        match scope {
+            SandboxScope::Agent { agent_id } => {
+                self.require_agent(&agent_id)
+                    .await?
+                    .start_sandbox_process(request)
+                    .await
+            }
+            SandboxScope::Conversation {
+                agent_id,
+                conversation_id,
+            } => {
+                self.require_conversation(agent_id, conversation_id)
+                    .await?
+                    .start_sandbox_process(request)
+                    .await
+            }
+            SandboxScope::Turn { .. } => Err(anyhow!(
+                "start_sandbox_process is not supported on a turn scope"
+            )),
+        }
+    }
+
+    async fn write_sandbox_process_input(
+        &self,
+        scope: SandboxScope,
+        request: WriteSandboxProcessInputRequest,
+    ) -> Result<()> {
+        match scope {
+            SandboxScope::Agent { agent_id } => {
+                self.require_agent(&agent_id)
+                    .await?
+                    .write_sandbox_process_input(request)
+                    .await
+            }
+            SandboxScope::Conversation {
+                agent_id,
+                conversation_id,
+            } => {
+                self.require_conversation(agent_id, conversation_id)
+                    .await?
+                    .write_sandbox_process_input(request)
+                    .await
+            }
+            SandboxScope::Turn { .. } => Err(anyhow!(
+                "write_sandbox_process_input is not supported on a turn scope"
+            )),
+        }
+    }
+
+    async fn close_sandbox_process_input(
+        &self,
+        scope: SandboxScope,
+        request: CloseSandboxProcessInputRequest,
+    ) -> Result<()> {
+        match scope {
+            SandboxScope::Agent { agent_id } => {
+                self.require_agent(&agent_id)
+                    .await?
+                    .close_sandbox_process_input(request)
+                    .await
+            }
+            SandboxScope::Conversation {
+                agent_id,
+                conversation_id,
+            } => {
+                self.require_conversation(agent_id, conversation_id)
+                    .await?
+                    .close_sandbox_process_input(request)
+                    .await
+            }
+            SandboxScope::Turn { .. } => Err(anyhow!(
+                "close_sandbox_process_input is not supported on a turn scope"
+            )),
+        }
+    }
+
+    async fn get_sandbox_process_events(
+        &self,
+        scope: SandboxScope,
+        query: SandboxProcessEventQuery,
+    ) -> Result<GetSandboxProcessEventsResult> {
+        match scope {
+            SandboxScope::Agent { agent_id } => {
+                self.require_agent(&agent_id)
+                    .await?
+                    .get_sandbox_process_events(query)
+                    .await
+            }
+            SandboxScope::Conversation {
+                agent_id,
+                conversation_id,
+            } => {
+                self.require_conversation(agent_id, conversation_id)
+                    .await?
+                    .get_sandbox_process_events(query)
+                    .await
+            }
+            SandboxScope::Turn { .. } => Err(anyhow!(
+                "get_sandbox_process_events is not supported on a turn scope"
+            )),
+        }
+    }
+
+    async fn wait_sandbox_process(
+        &self,
+        scope: SandboxScope,
+        request: WaitSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus> {
+        match scope {
+            SandboxScope::Agent { agent_id } => {
+                self.require_agent(&agent_id)
+                    .await?
+                    .wait_sandbox_process(request)
+                    .await
+            }
+            SandboxScope::Conversation {
+                agent_id,
+                conversation_id,
+            } => {
+                self.require_conversation(agent_id, conversation_id)
+                    .await?
+                    .wait_sandbox_process(request)
+                    .await
+            }
+            SandboxScope::Turn { .. } => Err(anyhow!(
+                "wait_sandbox_process is not supported on a turn scope"
+            )),
+        }
+    }
+
+    async fn cancel_sandbox_process(
+        &self,
+        scope: SandboxScope,
+        request: CancelSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus> {
+        match scope {
+            SandboxScope::Agent { agent_id } => {
+                self.require_agent(&agent_id)
+                    .await?
+                    .cancel_sandbox_process(request)
+                    .await
+            }
+            SandboxScope::Conversation {
+                agent_id,
+                conversation_id,
+            } => {
+                self.require_conversation(agent_id, conversation_id)
+                    .await?
+                    .cancel_sandbox_process(request)
+                    .await
+            }
+            SandboxScope::Turn { .. } => Err(anyhow!(
+                "cancel_sandbox_process is not supported on a turn scope"
+            )),
+        }
     }
 
     async fn require_agent(&self, agent_id: &AgentId) -> Result<Arc<dyn AgentHandle>> {

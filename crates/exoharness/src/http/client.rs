@@ -10,10 +10,12 @@ use url::Url;
 
 use super::HTTP_EXOHARNESS_REQUEST_PATH;
 use super::process::{
-    HttpSandboxProcessScope, LiveHttpSandboxProcess, spawn_http_sandbox_process_event_poller,
+    LiveHttpSandboxProcess, spawn_http_sandbox_process_event_poller,
     spawn_http_sandbox_process_stdin_forwarder,
 };
-use crate::protocol::{ClientMessage, ConversationHandleInfo, Request, Response, ServerMessage};
+use crate::protocol::{
+    ClientMessage, ConversationHandleInfo, Request, Response, SandboxScope, ServerMessage,
+};
 use crate::{
     AddEventsRequest, AddEventsResult, AgentHandle, AgentId, AgentRecord, Artifact,
     ArtifactVersion, BeginTurnRequest, Binding, BindingId, BindingRecord,
@@ -193,204 +195,20 @@ impl HttpAgentHandle {
         Self { harness, record }
     }
 
-    fn sandbox_scope(&self) -> HttpSandboxScope {
-        HttpSandboxScope::Agent {
+    fn sandbox_scope(&self) -> SandboxScope {
+        SandboxScope::Agent {
             agent_id: self.record.id,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum HttpSandboxScope {
-    Agent {
-        agent_id: AgentId,
-    },
-    Conversation {
-        agent_id: AgentId,
-        conversation_id: ConversationId,
-    },
-}
-
-impl HttpSandboxScope {
-    fn agent_id(self) -> AgentId {
-        match self {
-            Self::Agent { agent_id } | Self::Conversation { agent_id, .. } => agent_id,
-        }
-    }
-
-    fn process_scope(self) -> HttpSandboxProcessScope {
-        match self {
-            Self::Agent { .. } => HttpSandboxProcessScope::Agent,
-            Self::Conversation {
-                conversation_id, ..
-            } => HttpSandboxProcessScope::Conversation { conversation_id },
-        }
-    }
-
-    fn create_sandbox_request(self, request: CreateSandboxRequest) -> Request {
-        match self {
-            Self::Agent { agent_id } => Request::AgentCreateSandbox { agent_id, request },
-            Self::Conversation {
-                agent_id,
-                conversation_id,
-            } => Request::ConversationCreateSandbox {
-                agent_id,
-                conversation_id,
-                request,
-            },
-        }
-    }
-
-    fn snapshot_sandbox_request(self, sandbox_id: SandboxId) -> Request {
-        match self {
-            Self::Agent { agent_id } => Request::AgentSnapshotSandbox {
-                agent_id,
-                sandbox_id,
-            },
-            Self::Conversation {
-                agent_id,
-                conversation_id,
-            } => Request::ConversationSnapshotSandbox {
-                agent_id,
-                conversation_id,
-                sandbox_id,
-            },
-        }
-    }
-
-    fn start_sandbox_request(self, request: StartSandboxRequest) -> Request {
-        match self {
-            Self::Agent { agent_id } => Request::AgentStartSandbox { agent_id, request },
-            Self::Conversation {
-                agent_id,
-                conversation_id,
-            } => Request::ConversationStartSandbox {
-                agent_id,
-                conversation_id,
-                request,
-            },
-        }
-    }
-
-    fn stop_sandbox_request(self, sandbox_id: SandboxId) -> Request {
-        match self {
-            Self::Agent { agent_id } => Request::AgentStopSandbox {
-                agent_id,
-                sandbox_id,
-            },
-            Self::Conversation {
-                agent_id,
-                conversation_id,
-            } => Request::ConversationStopSandbox {
-                agent_id,
-                conversation_id,
-                sandbox_id,
-            },
-        }
-    }
-
-    fn start_sandbox_process_request(self, request: StartSandboxProcessRequest) -> Request {
-        match self {
-            Self::Agent { agent_id } => Request::AgentStartSandboxProcess { agent_id, request },
-            Self::Conversation {
-                agent_id,
-                conversation_id,
-            } => Request::ConversationStartSandboxProcess {
-                agent_id,
-                conversation_id,
-                request,
-            },
-        }
-    }
-
-    fn write_sandbox_process_input_request(
-        self,
-        request: WriteSandboxProcessInputRequest,
-    ) -> Request {
-        match self {
-            Self::Agent { agent_id } => {
-                Request::AgentWriteSandboxProcessInput { agent_id, request }
-            }
-            Self::Conversation {
-                agent_id,
-                conversation_id,
-            } => Request::ConversationWriteSandboxProcessInput {
-                agent_id,
-                conversation_id,
-                request,
-            },
-        }
-    }
-
-    fn close_sandbox_process_input_request(
-        self,
-        request: CloseSandboxProcessInputRequest,
-    ) -> Request {
-        match self {
-            Self::Agent { agent_id } => {
-                Request::AgentCloseSandboxProcessInput { agent_id, request }
-            }
-            Self::Conversation {
-                agent_id,
-                conversation_id,
-            } => Request::ConversationCloseSandboxProcessInput {
-                agent_id,
-                conversation_id,
-                request,
-            },
-        }
-    }
-
-    fn get_sandbox_process_events_request(self, query: SandboxProcessEventQuery) -> Request {
-        match self {
-            Self::Agent { agent_id } => Request::AgentGetSandboxProcessEvents { agent_id, query },
-            Self::Conversation {
-                agent_id,
-                conversation_id,
-            } => Request::ConversationGetSandboxProcessEvents {
-                agent_id,
-                conversation_id,
-                query,
-            },
-        }
-    }
-
-    fn wait_sandbox_process_request(self, request: WaitSandboxProcessRequest) -> Request {
-        match self {
-            Self::Agent { agent_id } => Request::AgentWaitSandboxProcess { agent_id, request },
-            Self::Conversation {
-                agent_id,
-                conversation_id,
-            } => Request::ConversationWaitSandboxProcess {
-                agent_id,
-                conversation_id,
-                request,
-            },
-        }
-    }
-
-    fn cancel_sandbox_process_request(self, request: CancelSandboxProcessRequest) -> Request {
-        match self {
-            Self::Agent { agent_id } => Request::AgentCancelSandboxProcess { agent_id, request },
-            Self::Conversation {
-                agent_id,
-                conversation_id,
-            } => Request::ConversationCancelSandboxProcess {
-                agent_id,
-                conversation_id,
-                request,
-            },
         }
     }
 }
 
 async fn http_create_sandbox(
     harness: &HttpExoHarness,
-    scope: HttpSandboxScope,
+    scope: SandboxScope,
     request: CreateSandboxRequest,
 ) -> Result<SandboxId> {
     match harness
-        .request(scope.create_sandbox_request(request))
+        .request(Request::CreateSandbox { scope, request })
         .await?
     {
         Response::SandboxId { sandbox_id } => Ok(sandbox_id),
@@ -400,10 +218,16 @@ async fn http_create_sandbox(
 
 async fn http_snapshot_sandbox(
     harness: &HttpExoHarness,
-    scope: HttpSandboxScope,
+    scope: SandboxScope,
     id: SandboxId,
 ) -> Result<SnapshotId> {
-    match harness.request(scope.snapshot_sandbox_request(id)).await? {
+    match harness
+        .request(Request::SnapshotSandbox {
+            scope,
+            sandbox_id: id,
+        })
+        .await?
+    {
         Response::SnapshotId { snapshot_id } => Ok(snapshot_id),
         response => unexpected_response(response, "snapshot_id"),
     }
@@ -411,11 +235,11 @@ async fn http_snapshot_sandbox(
 
 async fn http_start_sandbox(
     harness: &HttpExoHarness,
-    scope: HttpSandboxScope,
+    scope: SandboxScope,
     request: StartSandboxRequest,
 ) -> Result<()> {
     match harness
-        .request(scope.start_sandbox_request(request))
+        .request(Request::StartSandbox { scope, request })
         .await?
     {
         Response::Unit => Ok(()),
@@ -425,10 +249,16 @@ async fn http_start_sandbox(
 
 async fn http_stop_sandbox(
     harness: &HttpExoHarness,
-    scope: HttpSandboxScope,
+    scope: SandboxScope,
     id: SandboxId,
 ) -> Result<()> {
-    match harness.request(scope.stop_sandbox_request(id)).await? {
+    match harness
+        .request(Request::StopSandbox {
+            scope,
+            sandbox_id: id,
+        })
+        .await?
+    {
         Response::Unit => Ok(()),
         response => unexpected_response(response, "unit"),
     }
@@ -436,11 +266,11 @@ async fn http_stop_sandbox(
 
 async fn http_start_sandbox_process(
     harness: &HttpExoHarness,
-    scope: HttpSandboxScope,
+    scope: SandboxScope,
     request: StartSandboxProcessRequest,
 ) -> Result<SandboxProcessRecord> {
     match harness
-        .request(scope.start_sandbox_process_request(request))
+        .request(Request::StartSandboxProcess { scope, request })
         .await?
     {
         Response::SandboxProcess { process } => Ok(process),
@@ -450,11 +280,11 @@ async fn http_start_sandbox_process(
 
 async fn http_write_sandbox_process_input(
     harness: &HttpExoHarness,
-    scope: HttpSandboxScope,
+    scope: SandboxScope,
     request: WriteSandboxProcessInputRequest,
 ) -> Result<()> {
     match harness
-        .request(scope.write_sandbox_process_input_request(request))
+        .request(Request::WriteSandboxProcessInput { scope, request })
         .await?
     {
         Response::Unit => Ok(()),
@@ -464,11 +294,11 @@ async fn http_write_sandbox_process_input(
 
 async fn http_close_sandbox_process_input(
     harness: &HttpExoHarness,
-    scope: HttpSandboxScope,
+    scope: SandboxScope,
     request: CloseSandboxProcessInputRequest,
 ) -> Result<()> {
     match harness
-        .request(scope.close_sandbox_process_input_request(request))
+        .request(Request::CloseSandboxProcessInput { scope, request })
         .await?
     {
         Response::Unit => Ok(()),
@@ -478,11 +308,11 @@ async fn http_close_sandbox_process_input(
 
 async fn http_get_sandbox_process_events(
     harness: &HttpExoHarness,
-    scope: HttpSandboxScope,
+    scope: SandboxScope,
     query: SandboxProcessEventQuery,
 ) -> Result<GetSandboxProcessEventsResult> {
     match harness
-        .request(scope.get_sandbox_process_events_request(query))
+        .request(Request::GetSandboxProcessEvents { scope, query })
         .await?
     {
         Response::SandboxProcessEvents { result } => Ok(result),
@@ -492,11 +322,11 @@ async fn http_get_sandbox_process_events(
 
 async fn http_wait_sandbox_process(
     harness: &HttpExoHarness,
-    scope: HttpSandboxScope,
+    scope: SandboxScope,
     request: WaitSandboxProcessRequest,
 ) -> Result<SandboxProcessStatus> {
     match harness
-        .request(scope.wait_sandbox_process_request(request))
+        .request(Request::WaitSandboxProcess { scope, request })
         .await?
     {
         Response::SandboxProcessStatus { status } => Ok(status),
@@ -506,11 +336,11 @@ async fn http_wait_sandbox_process(
 
 async fn http_cancel_sandbox_process(
     harness: &HttpExoHarness,
-    scope: HttpSandboxScope,
+    scope: SandboxScope,
     request: CancelSandboxProcessRequest,
 ) -> Result<SandboxProcessStatus> {
     match harness
-        .request(scope.cancel_sandbox_process_request(request))
+        .request(Request::CancelSandboxProcess { scope, request })
         .await?
     {
         Response::SandboxProcessStatus { status } => Ok(status),
@@ -520,7 +350,7 @@ async fn http_cancel_sandbox_process(
 
 async fn http_run_in_sandbox(
     harness: &HttpExoHarness,
-    scope: HttpSandboxScope,
+    scope: SandboxScope,
     request: RunInSandboxRequest,
 ) -> Result<Box<dyn SandboxProcess>> {
     let sandbox_id = request.id;
@@ -546,8 +376,7 @@ async fn http_run_in_sandbox(
     let (wait_tx, wait_rx) = oneshot::channel();
     spawn_http_sandbox_process_event_poller(
         harness.clone(),
-        scope.agent_id(),
-        scope.process_scope(),
+        scope,
         sandbox_id.clone(),
         process.id.clone(),
         stdout_writer,
@@ -556,8 +385,7 @@ async fn http_run_in_sandbox(
     );
     spawn_http_sandbox_process_stdin_forwarder(
         harness.clone(),
-        scope.agent_id(),
-        scope.process_scope(),
+        scope,
         sandbox_id,
         process.id,
         stdin_reader,
@@ -889,8 +717,8 @@ impl HttpConversationHandle {
         }
     }
 
-    fn sandbox_scope(&self) -> HttpSandboxScope {
-        HttpSandboxScope::Conversation {
+    fn sandbox_scope(&self) -> SandboxScope {
+        SandboxScope::Conversation {
             agent_id: self.agent_id,
             conversation_id: self.record.id,
         }
@@ -1255,42 +1083,25 @@ impl HttpTurnHandle {
             record,
         }
     }
+
+    fn sandbox_scope(&self) -> SandboxScope {
+        SandboxScope::Turn {
+            agent_id: self.agent_id,
+            conversation_id: self.conversation_id,
+            session_id: self.record.session_id,
+            turn_id: self.record.id,
+        }
+    }
 }
 
 #[async_trait]
 impl SnapshotHandle for HttpTurnHandle {
     async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
-        match self
-            .harness
-            .request(Request::TurnSnapshotSandbox {
-                agent_id: self.agent_id,
-                conversation_id: self.conversation_id,
-                session_id: self.record.session_id,
-                turn_id: self.record.id,
-                sandbox_id: id,
-            })
-            .await?
-        {
-            Response::SnapshotId { snapshot_id } => Ok(snapshot_id),
-            response => unexpected_response(response, "snapshot_id"),
-        }
+        http_snapshot_sandbox(&self.harness, self.sandbox_scope(), id).await
     }
 
     async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
-        match self
-            .harness
-            .request(Request::TurnStartSandbox {
-                agent_id: self.agent_id,
-                conversation_id: self.conversation_id,
-                session_id: self.record.session_id,
-                turn_id: self.record.id,
-                request,
-            })
-            .await?
-        {
-            Response::Unit => Ok(()),
-            response => unexpected_response(response, "unit"),
-        }
+        http_start_sandbox(&self.harness, self.sandbox_scope(), request).await
     }
 }
 
