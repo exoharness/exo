@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use crate::conversation_sandbox::{ConversationSandboxSpec, conversation_sandbox_spec};
 use crate::{AgentConfig, ConversationConfig};
 
-const AGENT_SANDBOX_ARTIFACT_PATH: &str = "config/agent-sandbox.json";
+// v1 was a conversation-owned handle with `conversationId`/`sandboxId`. The
+// agent-owned record has a different shape, so keep it on a distinct path.
+const AGENT_SANDBOX_ARTIFACT_PATH: &str = "config/agent-sandbox-v2.json";
 const AGENT_SANDBOX_NAME_PREFIX: &str = "agent-sandbox";
 
 #[derive(Clone)]
