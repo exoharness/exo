@@ -19,15 +19,20 @@ use tokio::time::{sleep, timeout};
 use crate::test_support::{local_test_config, local_test_config_with_daytona};
 use crate::{
     Artifact, ArtifactVersion, BasicExoHarness, BeginTurnRequest, Binding, BoxAsyncRead,
-    BoxAsyncWrite, CloseSandboxProcessInputRequest, CreateSandboxRequest, EventData, EventKind,
-    EventQuery, EventQueryDirection, ExoHarness, ForkConversationRequest, ManagedSandboxBackend,
-    ManagedSandboxHandle, NewAgentRequest, NewConversationRequest, PutSecretRequest,
-    RunInSandboxRequest, SandboxCommand, SandboxCommandOutput, SandboxKey, SandboxLifecycleConfig,
-    SandboxNetworkPolicy, SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessParts,
-    SandboxProcessStatus, SandboxProcessStdin, SandboxProvider, SandboxProviderConfig,
-    SandboxRequest, SandboxSpec, Secret, SnapshotPayload, StartSandboxProcessRequest, Uuid7,
-    WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
+    BoxAsyncWrite, CloseSandboxProcessInputRequest, CreateSandboxRequest, DurableFileSystem,
+    EventData, EventKind, EventQuery, EventQueryDirection, ExoHarness, FileSystemMountMode,
+    ForkConversationRequest, ManagedSandboxBackend, ManagedSandboxHandle, NewAgentRequest,
+    NewConversationRequest, PutSecretRequest, RunInSandboxRequest, SandboxCommand,
+    SandboxCommandOutput, SandboxKey, SandboxLifecycleConfig, SandboxNetworkPolicy,
+    SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessParts, SandboxProcessStatus,
+    SandboxProcessStdin, SandboxProvider, SandboxProviderConfig, SandboxRequest, SandboxSpec,
+    Secret, SnapshotPayload, StartSandboxProcessRequest, Uuid7, WaitSandboxProcessRequest,
+    WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
+
+const DEFAULT_DURABLE_CONTRACT_MOUNT_PATH: &str = "/home/exo/workspace";
+#[cfg(feature = "aws-agentcore")]
+const DEFAULT_AGENTCORE_DURABLE_CONTRACT_MOUNT_PATH: &str = "/mnt/workspace";
 
 #[tokio::test(flavor = "current_thread")]
 async fn basic_backend_supports_agent_and_conversation_crud() {
@@ -108,6 +113,32 @@ async fn local_process_sandbox_contract_start_process_long_running_protocol() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn local_process_sandbox_rejects_durable_file_systems() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let backend: Arc<dyn ManagedSandboxBackend> =
+        Arc::new(crate::LocalProcessSandboxBackend::new());
+    let result = backend
+        .acquire(durable_provider_contract_request(
+            "local-process",
+            "durable-file-system",
+            "local-process".to_string(),
+            &tempdir.path().display().to_string(),
+        ))
+        .await;
+    match result {
+        Ok(handle) => panic!(
+            "local-process unexpectedly acquired durable filesystem sandbox {}",
+            handle.id()
+        ),
+        Err(error) => assert!(
+            error
+                .to_string()
+                .contains("does not support durable file systems")
+        ),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 #[ignore = "uses a real Daytona sandbox; source sandbox-vars.sh and run this test explicitly"]
 async fn daytona_sandbox_contract_start_process_stdio_and_env() {
     let Some(handle) = daytona_contract_handle("stdio-and-env").await else {
@@ -155,6 +186,71 @@ async fn vercel_sandbox_contract_start_process_long_running_protocol() {
     .expect("Vercel sandbox long-running protocol contract");
 }
 
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "uses a real Docker sandbox; run this test explicitly"]
+async fn docker_sandbox_contract_durable_file_system_survives_stop_and_reacquire() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let backend: Arc<dyn ManagedSandboxBackend> = Arc::new(
+        crate::CliContainerSandboxBackend::docker()
+            .with_durable_file_system_root(tempdir.path().join("durable-filesystems")),
+    );
+    let mount_path = durable_contract_mount_path();
+    crate::contract_tests::sandbox_backend_durable_file_system_survives_stop_and_reacquire(
+        backend,
+        durable_provider_contract_request(
+            "docker",
+            "durable-file-system",
+            env_or("DOCKER_IMAGE", &crate::default_docker_image()),
+            &mount_path,
+        ),
+    )
+    .await
+    .expect("Docker sandbox durable filesystem contract");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "uses a real Apple container sandbox; run this test explicitly"]
+async fn apple_container_sandbox_contract_durable_file_system_survives_stop_and_reacquire() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let backend: Arc<dyn ManagedSandboxBackend> = Arc::new(
+        crate::CliContainerSandboxBackend::apple_container()
+            .with_durable_file_system_root(tempdir.path().join("durable-filesystems")),
+    );
+    let mount_path = durable_contract_mount_path();
+    crate::contract_tests::sandbox_backend_durable_file_system_survives_stop_and_reacquire(
+        backend,
+        durable_provider_contract_request(
+            "apple-container",
+            "durable-file-system",
+            env_or("APPLE_CONTAINER_IMAGE", &crate::default_docker_image()),
+            &mount_path,
+        ),
+    )
+    .await
+    .expect("Apple container sandbox durable filesystem contract");
+}
+
+#[cfg(feature = "aws-agentcore")]
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "uses a real AgentCore runtime configured with managed session storage at EXO_AGENTCORE_DURABLE_CONTRACT_MOUNT_PATH or /mnt/workspace; run this test explicitly"]
+async fn aws_agentcore_sandbox_contract_durable_file_system_survives_stop_and_reacquire() {
+    let Some(backend) = aws_agentcore_contract_backend().await else {
+        return;
+    };
+    let mount_path = agentcore_durable_contract_mount_path();
+    crate::contract_tests::sandbox_backend_durable_file_system_survives_stop_and_reacquire(
+        backend,
+        durable_provider_contract_request(
+            "aws-agentcore",
+            "durable-file-system",
+            env_or("AGENTCORE_IMAGE", &crate::default_aws_agentcore_image()),
+            &mount_path,
+        ),
+    )
+    .await
+    .expect("AgentCore sandbox durable filesystem contract");
+}
+
 async fn local_process_contract_handle(
     tempdir: &TempDir,
     sandbox_id: &str,
@@ -170,6 +266,7 @@ async fn local_process_contract_handle(
             spec: SandboxSpec {
                 image: "local-process".to_string(),
                 mounts: Vec::new(),
+                durable_file_systems: Vec::new(),
                 network: SandboxNetworkPolicy::Enabled,
                 default_workdir: tempdir.path().display().to_string(),
             },
@@ -245,6 +342,57 @@ async fn vercel_contract_handle(contract: &str) -> Option<Arc<dyn ManagedSandbox
     )
 }
 
+#[cfg(feature = "aws-agentcore")]
+async fn aws_agentcore_contract_backend() -> Option<Arc<dyn ManagedSandboxBackend>> {
+    let Some(runtime_arn) =
+        nonempty_env("AGENTCORE_RUNTIME_ARN").or_else(|| nonempty_env("AWS_AGENTCORE_RUNTIME_ARN"))
+    else {
+        eprintln!(
+            "skipping real AgentCore sandbox contract: AGENTCORE_RUNTIME_ARN or AWS_AGENTCORE_RUNTIME_ARN is not set"
+        );
+        return None;
+    };
+    let Some(region) = nonempty_env("AWS_AGENTCORE_REGION")
+        .or_else(|| nonempty_env("AWS_REGION"))
+        .or_else(|| nonempty_env("AWS_DEFAULT_REGION"))
+    else {
+        eprintln!(
+            "skipping real AgentCore sandbox contract: AWS_AGENTCORE_REGION or AWS_REGION is not set"
+        );
+        return None;
+    };
+    let credentials = match (
+        nonempty_env("AWS_ACCESS_KEY_ID"),
+        nonempty_env("AWS_SECRET_ACCESS_KEY"),
+    ) {
+        (Some(access_key_id), Some(secret_access_key)) => Some(crate::AwsAgentCoreCredentials {
+            access_key_id,
+            secret_access_key,
+            session_token: nonempty_env("AWS_SESSION_TOKEN"),
+        }),
+        (None, None) => None,
+        _ => {
+            eprintln!(
+                "skipping real AgentCore sandbox contract: set both AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or neither"
+            );
+            return None;
+        }
+    };
+    let backend = crate::AwsAgentCoreSandboxBackend::new(crate::AwsAgentCoreConfig {
+        runtime_arn,
+        region,
+        qualifier: nonempty_env("AGENTCORE_QUALIFIER")
+            .or_else(|| nonempty_env("AWS_AGENTCORE_QUALIFIER")),
+        endpoint_url: nonempty_env("AGENTCORE_ENDPOINT_URL")
+            .or_else(|| nonempty_env("AWS_AGENTCORE_ENDPOINT_URL")),
+        credentials,
+        session_storage_mount_path: Some(agentcore_durable_contract_mount_path()),
+    })
+    .await
+    .expect("AwsAgentCoreSandboxBackend::new");
+    Some(Arc::new(backend))
+}
+
 fn nonempty_env(name: &str) -> Option<String> {
     env::var(name)
         .ok()
@@ -270,6 +418,7 @@ fn provider_contract_request(
         spec: SandboxSpec {
             image,
             mounts: Vec::new(),
+            durable_file_systems: Vec::new(),
             network: SandboxNetworkPolicy::Enabled,
             default_workdir: default_workdir.to_string(),
         },
@@ -277,6 +426,36 @@ fn provider_contract_request(
             idle_ttl: Some(Duration::from_secs(300)),
         },
     }
+}
+
+fn durable_provider_contract_request(
+    provider: &str,
+    contract: &str,
+    image: String,
+    mount_path: &str,
+) -> SandboxRequest {
+    let mut request = provider_contract_request(provider, contract, image, mount_path);
+    request.spec.durable_file_systems = vec![DurableFileSystem {
+        name: "workspace".to_string(),
+        mount_path: mount_path.to_string(),
+        mode: FileSystemMountMode::ReadWrite,
+    }];
+    request
+}
+
+fn durable_contract_mount_path() -> String {
+    env_or(
+        "EXO_DURABLE_CONTRACT_MOUNT_PATH",
+        DEFAULT_DURABLE_CONTRACT_MOUNT_PATH,
+    )
+}
+
+#[cfg(feature = "aws-agentcore")]
+fn agentcore_durable_contract_mount_path() -> String {
+    nonempty_env("EXO_AGENTCORE_DURABLE_CONTRACT_MOUNT_PATH")
+        .or_else(|| nonempty_env("AWS_AGENTCORE_SESSION_STORAGE_MOUNT_PATH"))
+        .or_else(|| nonempty_env("AGENTCORE_SESSION_STORAGE_MOUNT_PATH"))
+        .unwrap_or_else(|| DEFAULT_AGENTCORE_DURABLE_CONTRACT_MOUNT_PATH.to_string())
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -722,6 +901,7 @@ async fn basic_backend_runs_commands_in_created_sandbox() {
             image: "basic-local-process".to_string(),
             default_workdir: Some(tempdir.path().display().to_string()),
             file_system_mounts: None,
+            durable_file_systems: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })
@@ -781,6 +961,7 @@ async fn basic_backend_reuses_named_sandbox() {
         image: "basic-local-process".to_string(),
         default_workdir: Some(tempdir.path().display().to_string()),
         file_system_mounts: None,
+        durable_file_systems: None,
         enable_networking: Some(true),
         idle_seconds: Some(60),
     };
@@ -831,6 +1012,7 @@ async fn basic_backend_reattaches_running_sandbox_in_new_harness_process() {
             image: "basic-local-process".to_string(),
             default_workdir: Some(tempdir.path().display().to_string()),
             file_system_mounts: None,
+            durable_file_systems: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })
@@ -909,6 +1091,7 @@ async fn basic_backend_exposes_process_events_and_input() {
             image: "basic-local-process".to_string(),
             default_workdir: Some(tempdir.path().display().to_string()),
             file_system_mounts: None,
+            durable_file_systems: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })
@@ -1033,6 +1216,7 @@ async fn basic_backend_records_process_name_metadata() {
             image: "basic-local-process".to_string(),
             default_workdir: Some(tempdir.path().display().to_string()),
             file_system_mounts: None,
+            durable_file_systems: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })
@@ -1239,6 +1423,7 @@ async fn test_sandbox(conversation: &Arc<dyn crate::ConversationHandle>) -> Stri
             image: "test-sandbox".to_string(),
             default_workdir: Some("/".to_string()),
             file_system_mounts: None,
+            durable_file_systems: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })
@@ -1285,6 +1470,7 @@ async fn basic_backend_rejects_daytona_provider() {
             image: "test-sandbox".to_string(),
             default_workdir: Some("/".to_string()),
             file_system_mounts: None,
+            durable_file_systems: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })
@@ -1323,6 +1509,7 @@ async fn advertised_daytona_without_secret_errors_at_first_use() {
             image: "test-sandbox".to_string(),
             default_workdir: Some("/".to_string()),
             file_system_mounts: None,
+            durable_file_systems: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })

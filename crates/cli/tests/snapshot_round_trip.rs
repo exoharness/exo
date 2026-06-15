@@ -75,6 +75,7 @@ async fn filesystem_snapshot_and_rewind_round_trip() {
             image: SANDBOX_IMAGE.into(),
             default_workdir: Some("/".into()),
             file_system_mounts: None,
+            durable_file_systems: None,
             enable_networking: Some(false),
             idle_seconds: Some(60),
         })
