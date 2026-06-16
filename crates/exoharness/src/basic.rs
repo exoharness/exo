@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::fmt::{self, Display, Formatter};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -820,7 +819,6 @@ impl AgentHandle for BasicAgentHandle {
             record.id,
             None,
             None,
-            None,
             vec![EventData::ConversationCreated {
                 slug: record.slug.clone(),
                 name: record.name.clone(),
@@ -866,7 +864,6 @@ impl AgentHandle for BasicAgentHandle {
                 record.id,
                 None,
                 None,
-                record.latest_event_id,
                 vec![EventData::ConversationDeleted],
                 &mut record,
             )
@@ -1269,7 +1266,6 @@ impl BasicConversationHandle {
             self.record.id,
             None,
             None,
-            record.latest_event_id,
             vec![
                 EventData::SandboxCreated {
                     sandbox_id: sandbox_id.clone(),
@@ -1307,18 +1303,13 @@ impl ConversationHandle for BasicConversationHandle {
 
     async fn start_session(&self) -> Result<SessionId> {
         let session_id = Uuid7::now();
-        self.append_events_internal(
-            Some(session_id),
-            None,
-            None,
-            vec![EventData::SessionStarted],
-        )
-        .await?;
+        self.append_events_internal(Some(session_id), None, vec![EventData::SessionStarted])
+            .await?;
         Ok(session_id)
     }
 
     async fn end_session(&self, id: SessionId) -> Result<()> {
-        self.append_events_internal(Some(id), None, None, vec![EventData::SessionEnded])
+        self.append_events_internal(Some(id), None, vec![EventData::SessionEnded])
             .await?;
         Ok(())
     }
@@ -1353,7 +1344,6 @@ impl ConversationHandle for BasicConversationHandle {
             self.record.id,
             Some(session_id),
             Some(turn_record.id),
-            record.latest_event_id,
             events_to_append,
             &mut record,
         )
@@ -1473,13 +1463,8 @@ impl ConversationHandle for BasicConversationHandle {
     }
 
     async fn add_events(&self, request: AddEventsRequest) -> Result<AddEventsResult> {
-        self.append_events_internal(
-            request.session_id,
-            request.turn_id,
-            request.expected_head,
-            request.data,
-        )
-        .await
+        self.append_events_internal(request.session_id, request.turn_id, request.data)
+            .await
     }
 
     async fn fork(&self, request: ForkConversationRequest) -> Result<Arc<dyn ConversationHandle>> {
@@ -1568,7 +1553,6 @@ impl ConversationHandle for BasicConversationHandle {
             record.id,
             None,
             None,
-            fork_record.latest_event_id,
             vec![EventData::ConversationForked {
                 source_conversation_id: self.record.id,
                 up_to_inclusive: request.up_to_inclusive,
@@ -1600,7 +1584,6 @@ impl ConversationHandle for BasicConversationHandle {
             self.record.id,
             None,
             None,
-            record.latest_event_id,
             vec![EventData::ArtifactWritten {
                 artifact_id: artifact_version.artifact_id,
                 path: artifact_version.path.clone(),
@@ -1717,7 +1700,6 @@ impl ConversationHandle for BasicConversationHandle {
             self.record.id,
             None,
             None,
-            record.latest_event_id,
             vec![EventData::SandboxSnapshotted {
                 sandbox_id: id,
                 snapshot_id,
@@ -1809,7 +1791,6 @@ impl ConversationHandle for BasicConversationHandle {
             self.record.id,
             None,
             None,
-            record.latest_event_id,
             vec![EventData::SandboxStarted {
                 sandbox_id: request.id,
                 snapshot_id: Some(request.snapshot_id),
@@ -1857,7 +1838,6 @@ impl ConversationHandle for BasicConversationHandle {
             self.record.id,
             None,
             None,
-            record.latest_event_id,
             vec![EventData::SandboxStopped { sandbox_id: id }],
             &mut record,
         )
@@ -1927,7 +1907,6 @@ impl ConversationHandle for BasicConversationHandle {
             notify: Notify::new(),
         });
         self.append_events_internal(
-            None,
             None,
             None,
             vec![EventData::SandboxProcessStarted {
@@ -2261,7 +2240,6 @@ impl BasicConversationHandle {
         &self,
         session_id: Option<SessionId>,
         turn_id: Option<TurnId>,
-        expected_head: Option<EventId>,
         data: Vec<EventData>,
     ) -> Result<AddEventsResult> {
         let _guard = self.harness.inner.write_lock.lock().await;
@@ -2273,7 +2251,6 @@ impl BasicConversationHandle {
             self.record.id,
             session_id,
             turn_id,
-            expected_head,
             data,
             &mut record,
         )
@@ -2342,14 +2319,12 @@ impl TurnHandle for BasicTurnHandle {
             .storage
             .get_json::<ConversationRecord>(self.conversation_dir.join("record.json"))
             .await?;
-        let expected_head = record.latest_event_id;
         let add_result = append_events_to_conversation(
             &self.harness.inner,
             &self.conversation_dir,
             self.conversation_id,
             Some(self.record.session_id),
             Some(self.record.id),
-            expected_head,
             data,
             &mut record,
         )
@@ -2368,23 +2343,12 @@ impl TurnHandle for BasicTurnHandle {
 
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion> {
         let _guard = self.harness.inner.write_lock.lock().await;
-        let expected_head = self
-            .state
-            .lock()
-            .expect("turn state poisoned")
-            .latest_event_id;
         let mut record = self
             .harness
             .inner
             .storage
             .get_json::<ConversationRecord>(self.conversation_dir.join("record.json"))
             .await?;
-        ensure_conversation_head(
-            record.latest_event_id,
-            expected_head,
-            Some(self.record.session_id),
-            Some(self.record.id),
-        )?;
         let artifact_version = write_artifact_version(
             &self.harness.inner,
             &self.conversation_dir.join("artifacts"),
@@ -2397,7 +2361,6 @@ impl TurnHandle for BasicTurnHandle {
             self.conversation_id,
             Some(self.record.session_id),
             Some(self.record.id),
-            expected_head,
             vec![EventData::ArtifactWritten {
                 artifact_id: artifact_version.artifact_id,
                 path: artifact_version.path.clone(),
@@ -2434,14 +2397,12 @@ impl TurnHandle for BasicTurnHandle {
             .storage
             .get_json::<ConversationRecord>(self.conversation_dir.join("record.json"))
             .await?;
-        let expected_head = record.latest_event_id;
         let add_result = append_events_to_conversation(
             &self.harness.inner,
             &self.conversation_dir,
             self.conversation_id,
             Some(self.record.session_id),
             Some(self.record.id),
-            expected_head,
             vec![EventData::TurnEnded],
             &mut record,
         )
@@ -2752,7 +2713,6 @@ async fn append_sandbox_process_data(
         process.conversation_id,
         None,
         None,
-        record.latest_event_id,
         data,
         &mut record,
     )
@@ -2865,20 +2825,11 @@ async fn append_events_to_conversation(
     conversation_id: ConversationId,
     session_id: Option<SessionId>,
     turn_id: Option<TurnId>,
-    expected_head: Option<EventId>,
     data: Vec<EventData>,
     record: &mut ConversationRecord,
 ) -> Result<AddEventsResult> {
     if data.is_empty() {
         bail!("cannot append zero events");
-    }
-    if let Some(expected_head) = expected_head {
-        ensure_conversation_head(
-            record.latest_event_id,
-            Some(expected_head),
-            session_id,
-            turn_id,
-        )?;
     }
     let mut event_ids = Vec::new();
     let mut latest_event_id = None;
@@ -2911,66 +2862,6 @@ async fn append_events_to_conversation(
         event_ids,
         latest_event_id,
     })
-}
-
-fn ensure_conversation_head(
-    current_head: Option<EventId>,
-    expected_head: Option<EventId>,
-    session_id: Option<SessionId>,
-    turn_id: Option<TurnId>,
-) -> Result<()> {
-    if current_head == expected_head {
-        return Ok(());
-    }
-    Err(ConversationHeadMismatch {
-        current_head,
-        expected_head,
-        session_id,
-        turn_id,
-    }
-    .into())
-}
-
-#[derive(Debug, Clone)]
-struct ConversationHeadMismatch {
-    current_head: Option<EventId>,
-    expected_head: Option<EventId>,
-    session_id: Option<SessionId>,
-    turn_id: Option<TurnId>,
-}
-
-impl Display for ConversationHeadMismatch {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let expected = format_event_head_timestamp(self.expected_head);
-        let current = format_event_head_timestamp(self.current_head);
-        if let Some(turn_id) = self.turn_id {
-            let session = self
-                .session_id
-                .map(|session_id| session_id.to_string())
-                .unwrap_or_else(|| "none".to_string());
-            return write!(
-                f,
-                "turn is stale and cannot be resumed: conversation head advanced outside this turn \
-                 (turn_id: {turn_id}, session_id: {session}, expected_head_at: {expected}, \
-                 current_head_at: {current})"
-            );
-        }
-        write!(
-            f,
-            "conversation head mismatch: expected_head_at: {expected}, current_head_at: {current}"
-        )
-    }
-}
-
-impl std::error::Error for ConversationHeadMismatch {}
-
-fn format_event_head_timestamp(head: Option<EventId>) -> String {
-    let Some(id) = head else {
-        return "none".to_string();
-    };
-    id.timestamp()
-        .map(|timestamp| timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn notify_subscribers(inner: &BasicExoHarnessInner, conversation_id: ConversationId, event: Event) {

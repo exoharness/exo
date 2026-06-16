@@ -585,7 +585,6 @@ impl TypeScriptRunnerProcess {
                         .add_events(AddEventsRequest {
                             session_id: None,
                             turn_id: None,
-                            expected_head: None,
                             data: vec![EventData::Custom {
                                 event_type: TYPESCRIPT_SANDBOX_PROCESS_REUSE_EVENT.to_string(),
                                 payload: serde_json::to_value(

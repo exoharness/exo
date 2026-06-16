@@ -178,7 +178,6 @@ pub(crate) async fn put_conversation_model_override(
         .add_events(AddEventsRequest {
             session_id: None,
             turn_id: None,
-            expected_head: None,
             data: vec![EventData::Custom {
                 event_type: CONVERSATION_MODEL_CONFIG_EVENT_TYPE.to_string(),
                 payload,

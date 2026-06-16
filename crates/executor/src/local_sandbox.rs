@@ -339,7 +339,6 @@ impl LocalSandboxConversation {
             .add_events(AddEventsRequest {
                 session_id: None,
                 turn_id: None,
-                expected_head: None,
                 data: vec![EventData::Custom {
                     event_type: LOCAL_SANDBOX_MAP_EVENT.to_string(),
                     payload: serde_json::to_value(LocalSandboxMapEvent {
@@ -357,7 +356,6 @@ impl LocalSandboxConversation {
             .add_events(AddEventsRequest {
                 session_id: None,
                 turn_id: None,
-                expected_head: None,
                 data,
             })
             .await?;

@@ -315,7 +315,6 @@ type RawExoRequest =
       request: {
         session_id?: string | null;
         turn_id?: string | null;
-        expected_head?: string | null;
         data: EventData[];
       };
     }
@@ -1045,13 +1044,11 @@ function toRawEventQuery(query?: EventQuery): RawEventQuery | null {
 function toRawAddEventsRequest(request: AddEventsRequest): {
   session_id?: string | null;
   turn_id?: string | null;
-  expected_head?: string | null;
   data: EventData[];
 } {
   return {
     session_id: request.sessionId ?? null,
     turn_id: request.turnId ?? null,
-    expected_head: request.expectedHead ?? null,
     data: request.data,
   };
 }

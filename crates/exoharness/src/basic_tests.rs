@@ -516,7 +516,7 @@ async fn turn_events_continue_after_artifact_writes() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn stale_turn_artifact_write_reports_unresumable_turn() {
+async fn turn_artifact_write_allows_interleaved_conversation_writes() {
     let tempdir = TempDir::new().expect("tempdir");
     let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
         .await
@@ -546,15 +546,14 @@ async fn stale_turn_artifact_write_reports_unresumable_turn() {
             contents: b"outside".to_vec(),
         })
         .await
-        .expect("advance conversation head outside turn");
-    let error = turn
-        .write_artifact(WriteArtifactRequest {
-            path: "tool-results/example.json".to_string(),
-            contents: br#"{"ok":true}"#.to_vec(),
-        })
-        .await
-        .expect_err("stale turn should fail");
-    let message = error.to_string();
+        .expect("write outside-turn artifact");
+    turn.write_artifact(WriteArtifactRequest {
+        path: "tool-results/example.json".to_string(),
+        contents: br#"{"ok":true}"#.to_vec(),
+    })
+    .await
+    .expect("turn artifact write should allow interleaved conversation writes");
+
     let events = conversation
         .get_events(Some(EventQuery {
             cursor: None,
@@ -567,42 +566,32 @@ async fn stale_turn_artifact_write_reports_unresumable_turn() {
         .await
         .expect("events")
         .events;
-    let expected_head_event = events
+    let outside_artifact_event = events
         .iter()
-        .rfind(|event| event.turn_id == Some(turn.record().id))
-        .expect("expected head event");
-    let current_head_event = events.last().expect("current head event");
-    let expected_at = expected_head_event
-        .id
-        .timestamp()
-        .expect("expected head timestamp")
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let current_at = current_head_event
-        .id
-        .timestamp()
-        .expect("current head timestamp")
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    assert!(
-        message.contains("turn is stale and cannot be resumed"),
-        "{message}"
+        .find(|event| {
+            matches!(
+                &event.data,
+                EventData::ArtifactWritten { path, .. } if path == "outside-turn.txt"
+            )
+        })
+        .expect("outside artifact event");
+    assert_eq!(outside_artifact_event.session_id, None);
+    assert_eq!(outside_artifact_event.turn_id, None);
+
+    let turn_artifact_event = events
+        .iter()
+        .find(|event| {
+            matches!(
+                &event.data,
+                EventData::ArtifactWritten { path, .. } if path == "tool-results/example.json"
+            )
+        })
+        .expect("turn artifact event");
+    assert_eq!(
+        turn_artifact_event.session_id,
+        Some(turn.record().session_id)
     );
-    assert!(message.contains(&turn.record().id.to_string()), "{message}");
-    assert!(
-        message.contains(&format!("expected_head_at: {expected_at}")),
-        "{message}"
-    );
-    assert!(
-        message.contains(&format!("current_head_at: {current_at}")),
-        "{message}"
-    );
-    assert!(
-        !message.contains(&expected_head_event.id.to_string()),
-        "{message}"
-    );
-    assert!(
-        !message.contains(&current_head_event.id.to_string()),
-        "{message}"
-    );
+    assert_eq!(turn_artifact_event.turn_id, Some(turn.record().id));
 }
 
 #[tokio::test(flavor = "current_thread")]

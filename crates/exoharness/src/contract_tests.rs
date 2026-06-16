@@ -110,7 +110,6 @@ pub async fn list_conversations_returns_recent_first_and_paginates(harness: Arc<
         .add_events(AddEventsRequest {
             session_id: None,
             turn_id: None,
-            expected_head: None,
             data: vec![EventData::Custom {
                 event_type: "touch".to_string(),
                 payload: serde_json::Value::Null,
