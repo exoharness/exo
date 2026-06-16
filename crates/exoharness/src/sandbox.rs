@@ -2047,6 +2047,7 @@ mod tests {
         let backend = CliContainerSandboxBackend {
             cli: ContainerCliFlavor::Docker,
             container_bin: script_path,
+            durable_file_system_root: None,
             system_started: Mutex::new(false),
             network_created: Mutex::new(false),
             warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),
@@ -2059,6 +2060,7 @@ mod tests {
             spec: SandboxSpec {
                 image: "docker.io/library/ubuntu:24.04".to_string(),
                 mounts: Vec::new(),
+                durable_file_systems: Vec::new(),
                 network: SandboxNetworkPolicy::Disabled,
                 default_workdir: "/".to_string(),
             },
