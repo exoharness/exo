@@ -260,7 +260,6 @@ pub struct GetEventsResult {
 pub struct AddEventsRequest {
     pub session_id: Option<SessionId>,
     pub turn_id: Option<TurnId>,
-    pub expected_head: Option<EventId>,
     pub data: Vec<EventData>,
 }
 
