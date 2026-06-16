@@ -66,8 +66,8 @@ tracing-subscriber = "0.3.20"
 url = "2.5.7"
 uuid = { version = "1.18.1", features = ["serde", "v4", "v7"] }
 
-lingua = { git = "https://github.com/braintrustdata/lingua.git", rev = "10f863cf9215c003fcbb4f315b25c011b4bb7569" }
-braintrust-llm-router = { git = "https://github.com/braintrustdata/lingua.git", package = "braintrust-llm-router", rev = "10f863cf9215c003fcbb4f315b25c011b4bb7569", default-features = false, features = [
+lingua = { git = "https://github.com/braintrustdata/lingua.git", rev = "3ab9bcc9b58688be37216e9ab0b3d8362d185cfb" }
+braintrust-llm-router = { git = "https://github.com/braintrustdata/lingua.git", package = "braintrust-llm-router", rev = "3ab9bcc9b58688be37216e9ab0b3d8362d185cfb", default-features = false, features = [
   "provider-openai",
   "provider-anthropic",
   "provider-google",

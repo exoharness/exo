@@ -408,13 +408,13 @@ impl TypeScriptRunnerProcess {
                                 Ok(response) => HostToGuestMessage::ExoResponse {
                                     id,
                                     ok: true,
-                                    response: Some(response),
+                                    response: Box::new(Some(response)),
                                     error: None,
                                 },
                                 Err(error) => HostToGuestMessage::ExoResponse {
                                     id,
                                     ok: false,
-                                    response: None,
+                                    response: Box::new(None),
                                     error: Some(format_error_chain(
                                         &error,
                                         format_args!(
@@ -890,7 +890,7 @@ enum HostToGuestMessage {
     ExoResponse {
         id: u64,
         ok: bool,
-        response: Option<ExoResponse>,
+        response: Box<Option<ExoResponse>>,
         error: Option<String>,
     },
     RuntimeEvent {
