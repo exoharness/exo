@@ -57,6 +57,10 @@ pub trait AgentHandle: Send + Sync {
     async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>>;
 
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion>;
+    /// Reads an artifact selected by id or path (see `ReadArtifactRequest`).
+    /// Implementations should resolve this in a single I/O where possible
+    /// (e.g. a backing query); callers asking by path get the latest version
+    /// unless one is pinned.
     async fn read_artifact(&self, request: ReadArtifactRequest) -> Result<Option<Artifact>>;
     async fn list_artifacts(&self) -> Result<Vec<ArtifactVersion>>;
 }
@@ -80,6 +84,7 @@ pub trait ConversationHandle: Send + Sync {
     async fn fork(&self, request: ForkConversationRequest) -> Result<Arc<dyn ConversationHandle>>;
 
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion>;
+    /// Reads an artifact selected by id or path (see `ReadArtifactRequest`).
     async fn read_artifact(&self, request: ReadArtifactRequest) -> Result<Option<Artifact>>;
     async fn list_artifacts(&self) -> Result<Vec<ArtifactVersion>>;
 
@@ -448,8 +453,37 @@ pub struct WriteArtifactRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReadArtifactRequest {
-    pub artifact_id: ArtifactId,
+    /// Which artifact to read — by id, or by path (latest version unless
+    /// `version` pins one). Keeping this a single request lets a backend
+    /// resolve either form in one I/O instead of a list-then-filter.
+    pub artifact: ArtifactRef,
     pub version: Option<u64>,
+}
+
+impl ReadArtifactRequest {
+    /// Read (the latest version of) the artifact with this id.
+    pub fn id(artifact_id: ArtifactId) -> Self {
+        Self {
+            artifact: ArtifactRef::Id(artifact_id),
+            version: None,
+        }
+    }
+
+    /// Read the latest version of the artifact at this path.
+    pub fn path(path: impl Into<String>) -> Self {
+        Self {
+            artifact: ArtifactRef::Path(path.into()),
+            version: None,
+        }
+    }
+}
+
+/// Selects an artifact either by its stable id or by its path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactRef {
+    Id(ArtifactId),
+    Path(String),
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]

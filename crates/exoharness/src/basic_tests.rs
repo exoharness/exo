@@ -453,6 +453,132 @@ async fn artifacts_are_versioned_by_path() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn read_artifact_by_path_returns_latest_version() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
+        .await
+        .expect("harness should initialize");
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+
+    // No artifact yet at this path.
+    assert!(
+        agent
+            .read_artifact(crate::ReadArtifactRequest::path("memory/store.json"))
+            .await
+            .expect("read by path")
+            .is_none()
+    );
+
+    for contents in ["v1", "v2", "v3"] {
+        agent
+            .write_artifact(crate::WriteArtifactRequest {
+                path: "memory/store.json".to_string(),
+                contents: contents.as_bytes().to_vec(),
+            })
+            .await
+            .expect("write artifact");
+    }
+    // A decoy at a different path must not be selected.
+    agent
+        .write_artifact(crate::WriteArtifactRequest {
+            path: "config/other.json".to_string(),
+            contents: b"decoy".to_vec(),
+        })
+        .await
+        .expect("write decoy");
+
+    // Reading by path returns the highest version.
+    let latest = agent
+        .read_artifact(crate::ReadArtifactRequest::path("memory/store.json"))
+        .await
+        .expect("read by path")
+        .expect("some artifact");
+    assert_eq!(latest.version.version, 3);
+    assert_eq!(latest.version.path, "memory/store.json");
+    assert_eq!(latest.contents, b"v3");
+
+    // A pinned version is still honored when reading by path.
+    let pinned = agent
+        .read_artifact(crate::ReadArtifactRequest {
+            artifact: crate::ArtifactRef::Path("memory/store.json".to_string()),
+            version: Some(1),
+        })
+        .await
+        .expect("read pinned by path")
+        .expect("v1 exists");
+    assert_eq!(pinned.contents, b"v1");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn server_dispatches_read_artifact_by_path() {
+    use crate::protocol::{Request, Response};
+    use crate::server::ExoHarnessServer;
+
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = std::sync::Arc::new(
+        BasicExoHarness::new(local_test_config(tempdir.path()))
+            .await
+            .expect("harness should initialize"),
+    );
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let agent_id = agent.record().id;
+
+    for contents in ["v1", "v2"] {
+        agent
+            .write_artifact(crate::WriteArtifactRequest {
+                path: "memory/store.json".to_string(),
+                contents: contents.as_bytes().to_vec(),
+            })
+            .await
+            .expect("write artifact");
+    }
+
+    let server = ExoHarnessServer::new(harness.clone());
+
+    // A path-keyed read returns the latest version through the protocol dispatch.
+    match server
+        .handle_request(Request::AgentReadArtifact {
+            agent_id,
+            request: crate::ReadArtifactRequest::path("memory/store.json"),
+        })
+        .await
+        .expect("dispatch read by path")
+    {
+        Response::Artifact { artifact } => {
+            let artifact = artifact.expect("some artifact");
+            assert_eq!(artifact.version.version, 2);
+            assert_eq!(artifact.contents, b"v2");
+        }
+        other => panic!("expected Response::Artifact, got {}", other.kind()),
+    }
+
+    // A missing path yields an empty artifact response, not an error.
+    match server
+        .handle_request(Request::AgentReadArtifact {
+            agent_id,
+            request: crate::ReadArtifactRequest::path("memory/missing.json"),
+        })
+        .await
+        .expect("dispatch read by missing path")
+    {
+        Response::Artifact { artifact } => assert!(artifact.is_none()),
+        other => panic!("expected Response::Artifact, got {}", other.kind()),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn artifacts_store_metadata_and_raw_contents_separately() {
     let tempdir = TempDir::new().expect("tempdir");
     let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
@@ -536,7 +662,7 @@ async fn legacy_json_artifacts_are_still_readable() {
 
     let loaded = agent
         .read_artifact(crate::ReadArtifactRequest {
-            artifact_id,
+            artifact: crate::ArtifactRef::Id(artifact_id),
             version: Some(1),
         })
         .await
