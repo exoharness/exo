@@ -28,6 +28,7 @@ import {
   type Message,
   type NewConversationRequest,
   type PendingToolCall,
+  type ReadArtifactArgs,
   type SandboxProcess,
   type SandboxProcessStartRequest,
   type SendRequest,
@@ -267,7 +268,10 @@ type RawExoRequest =
   | {
       type: "agent_read_artifact";
       agent_id: string;
-      request: { artifact_id: string; version?: number };
+      request: {
+        artifact: { id: string } | { path: string };
+        version?: number;
+      };
     }
   | {
       type: "agent_write_artifact";
@@ -338,7 +342,10 @@ type RawExoRequest =
       type: "conversation_read_artifact";
       agent_id: string;
       conversation_id: string;
-      request: { artifact_id: string; version?: number };
+      request: {
+        artifact: { id: string } | { path: string };
+        version?: number;
+      };
     }
   | {
       type: "conversation_write_artifact";
@@ -986,6 +993,12 @@ function decodeArtifactText(artifact: Artifact | null): string | null {
   return new TextDecoder().decode(artifact.contents);
 }
 
+function artifactRef(
+  args: ReadArtifactArgs,
+): { id: string } | { path: string } {
+  return "path" in args ? { path: args.path } : { id: args.artifactId };
+}
+
 function decodeArtifactJson<T>(artifact: Artifact | null): T | null {
   const text = decodeArtifactText(artifact);
   if (text === null) {
@@ -1153,10 +1166,7 @@ function createAgent(client: ProtocolClient, raw: RawAgentRecord): Agent {
       const payload = await client.requestExo({
         type: "agent_read_artifact",
         agent_id: record.id,
-        request: {
-          artifact_id: args.artifactId,
-          version: args.version,
-        },
+        request: { artifact: artifactRef(args), version: args.version },
       });
       if (payload.type !== "artifact") {
         throw new Error(`expected artifact payload, got ${payload.type}`);
@@ -1168,10 +1178,7 @@ function createAgent(client: ProtocolClient, raw: RawAgentRecord): Agent {
       return decodeArtifactText(await agent.readArtifact(args));
     },
 
-    async readArtifactJson<T>(args: {
-      artifactId: string;
-      version?: number;
-    }): Promise<T | null> {
+    async readArtifactJson<T>(args: ReadArtifactArgs): Promise<T | null> {
       return decodeArtifactJson<T>(await agent.readArtifact(args));
     },
 
@@ -1447,10 +1454,7 @@ function createConversation(
         type: "conversation_read_artifact",
         agent_id: raw.agent_id,
         conversation_id: record.id,
-        request: {
-          artifact_id: args.artifactId,
-          version: args.version,
-        },
+        request: { artifact: artifactRef(args), version: args.version },
       });
       if (payload.type !== "artifact") {
         throw new Error(`expected artifact payload, got ${payload.type}`);
@@ -1462,10 +1466,7 @@ function createConversation(
       return decodeArtifactText(await conversation.readArtifact(args));
     },
 
-    async readArtifactJson<T>(args: {
-      artifactId: string;
-      version?: number;
-    }): Promise<T | null> {
+    async readArtifactJson<T>(args: ReadArtifactArgs): Promise<T | null> {
       return decodeArtifactJson<T>(await conversation.readArtifact(args));
     },
 

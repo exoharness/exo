@@ -77,6 +77,22 @@ Two properties matter for rollback:
 
 Gap: host events currently cover the adapter runner only. The scheduler runner and the control REPL do not yet write start/drain/crash events into the log, and there is no agent-level (cross-conversation) event stream — host events are fanned out to each adapter-attached conversation.
 
+### Agent-writable memory (the `remember` tool)
+
+Everything above is memory the agent _reads_; until recently it had no way to _write_ a durable fact about the user or itself. Conversation history is replayed in full each turn, but it dies at the conversation boundary, and the local profile (`.exo/exoclaw-profile.md`) is human-curated — the agent cannot edit it. So "remember that my favorite coffee is X" had nowhere to go: it survived the current conversation by replay and was lost everywhere else.
+
+The memory tool closes that gap with the smallest mechanism that works, built entirely on the existing artifact store. The first cut is deliberately a single **global** store — no scoping — because that covers the motivating case ("remember my favorite coffee") and scope is easy to add later if a thread-local need appears.
+
+- **Storage.** One JSON artifact at `memory/exoclaw-memory.json` on the agent handle, so it persists across every conversation for this agent — exactly how `config/executor.json` is persisted. This is where durable user/identity facts live ("favorite coffee is X", "lives in Berkeley", "prefers terse replies").
+- **Write path — `remember(text)` tool.** Read-modify-write: load the current store, append an entry `{ id, text, createdAt }`, write a new artifact version. `forget(id)` removes one. A soft cap drops the oldest entries past a fixed ceiling so a runaway agent cannot grow the prompt without bound. The write is mechanical and lossless on purpose — no model call in the durable-write path.
+- **Read path — prompt injection.** At prompt-assembly time the harness reads the store and prepends a `developer` message listing the saved facts (with their ids, so the model can `forget` stale ones). This sits next to the identity prompt and local profile, so memory enters context the same way instructions do.
+
+How `forget` resolves a fuzzy request: the injected block carries the entry **ids**, so when the user says "forget the color thing" the main model — which already has the list in context — maps that to the matching id and calls `forget(id)`. The intelligence is the agent's; the tool only deletes by exact id.
+
+This is deliberately _not_ embedding-based retrieval. For a handful of short facts you inject all of them every turn — no vector store, no similarity search, no extra container. Embeddings only earn their place when the memory set outgrows what fits sensibly in every prompt; at that point the read path swaps always-inject for a query-time `recall` over an index, and the storage layer stays exactly where it is. The tool lives in the TypeScript harness (`examples/exoclaw/memory-tools.ts`) because both the artifact read/write API and prompt assembly are TS-side; no trusted-substrate change is required, since the substrate already provides durable, access-controlled artifacts.
+
+Limits of the prototype and the natural next increments (not blockers): always-inject means every saved fact costs prompt tokens each turn; there is no semantic dedup (saving the same fact twice yields two entries); the agent decides what to save (no automatic extraction from conversation); and there is no scoping yet (everything is global). A periodic, _async_ LLM consolidation pass — read the store, dedup/merge contradictions, write a new version while keeping the prior one for rollback — is the right place to add model-mediated cleanup, kept off the synchronous write path.
+
 ## 3. Component Observability: Logs and Telemetry
 
 Exoclaw should be able to inspect each of its components when debugging or evolving them, before escalating to restarts.
