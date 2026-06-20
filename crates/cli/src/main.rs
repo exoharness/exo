@@ -2419,6 +2419,7 @@ async fn find_secret_id(exoharness: &dyn ExoHarness, name: &str) -> Result<Optio
         .list_secrets()
         .await?
         .into_iter()
+        .rev()
         .find(|secret| secret.name == name)
         .map(|secret| secret.id))
 }
