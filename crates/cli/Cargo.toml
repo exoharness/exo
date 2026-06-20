@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+aws-agentcore = ["executor/aws-agentcore"]
+
 [[bin]]
 name = "exo"
 path = "src/main.rs"
@@ -12,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+cost = { path = "../cost" }
 executor = { path = "../executor" }
 lingua.workspace = true
 rustyline = "15.0.0"

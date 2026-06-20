@@ -197,7 +197,6 @@ export interface GetEventsResult {
 export interface AddEventsRequest {
   sessionId?: string | null;
   turnId?: string | null;
-  expectedHead?: string | null;
   data: EventData[];
 }
 
@@ -437,11 +436,13 @@ export function assistantTextMessage(text: string): Message {
 export function messagesEvent(
   messages: Message[],
   responseId?: string,
+  usage?: JsonObject,
 ): EventData {
   return {
     type: "messages",
     messages,
     response_id: responseId,
+    ...(usage ? { usage } : {}),
   };
 }
 

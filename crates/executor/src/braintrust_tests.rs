@@ -12,6 +12,7 @@ fn llm_metrics_use_braintrust_metric_names() {
         prompt_cached_tokens: Some(3),
         prompt_cache_creation_tokens: Some(2),
         completion_reasoning_tokens: Some(5),
+        ..Default::default()
     };
 
     let metrics = llm_metrics(Some(&usage), Some(Duration::from_millis(250)));

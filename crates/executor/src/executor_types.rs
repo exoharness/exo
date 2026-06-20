@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use exoharness::{
-    AgentHandle, ConversationHandle, EventId, FileSystemMount, ResponseId, Result, SandboxProvider,
-    SessionId, ToolArguments, ToolCallId, ToolRequest, ToolResult, TurnId,
+    AgentHandle, ConversationHandle, DurableFileSystem, EventId, FileSystemMount, ResponseId,
+    Result, SandboxProvider, SessionId, ToolArguments, ToolCallId, ToolRequest, ToolResult, TurnId,
 };
 use lingua::{Message, UniversalStreamChunk, UniversalUsage};
 use serde::{Deserialize, Serialize};
@@ -68,6 +68,8 @@ pub struct ConversationConfig {
     #[serde(default)]
     pub mounts: Vec<FileSystemMount>,
     #[serde(default)]
+    pub durable_file_systems: Vec<DurableFileSystem>,
+    #[serde(default)]
     pub sandbox_scope: Option<SandboxScope>,
 }
 
@@ -104,6 +106,7 @@ impl Default for ConversationConfig {
             sandbox_provider: None,
             shell_program: Some("/bin/bash".to_string()),
             mounts: Vec::new(),
+            durable_file_systems: Vec::new(),
             sandbox_scope: None,
         }
     }
@@ -184,6 +187,15 @@ pub struct ModelResponse {
     pub messages: Vec<Message>,
     pub tool_calls: Vec<PendingToolCall>,
     pub usage: Option<UniversalUsage>,
+    /// Model identifier echoed back by the provider, if available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Time to first token (streaming path only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft: Option<Duration>,
+    /// Wall-clock duration from request start to end of response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -32,6 +32,7 @@ import {
   type ToolDefinition,
   type TurnContext,
 } from "../harness";
+import { computeCostUsd, getTable } from "./cost";
 import type {
   ChatCompletion,
   ChatCompletionChunk,
@@ -943,16 +944,29 @@ export function tracedUnderParent<R>(
 export function linguaMessagesToResponsesInput(
   messages: Message[] | undefined,
 ): ResponseInput {
-  return linguaToResponsesMessages<ResponseInput>(
+  const items = linguaToResponsesMessages<ResponseInput>(
     (messages ?? []) as LinguaMessage[],
   );
+  // Requests are sent with `store: false`, so server-side item ids from prior
+  // rounds (rs_/fc_/msg_) don't resolve — replaying them 404s on reasoning
+  // models. Replay statelessly: drop reasoning items (lingua doesn't preserve
+  // encrypted_content, so a bare id is all we'd have) and strip item ids.
+  return items.flatMap((item) => {
+    if (!isRecord(item)) return [item];
+    if (item.type === "reasoning") return [];
+    if (typeof item.id === "string") {
+      const { id: _id, ...rest } = item;
+      return [rest as typeof item];
+    }
+    return [item];
+  }) as ResponseInput;
 }
 
 export function responseToLinguaEvents(response: Response): EventData[] {
   const events: EventData[] = [];
   const messages = responseMessages(response);
   if (messages.length > 0) {
-    events.push(messagesEvent(messages));
+    events.push(messagesEvent(messages, undefined, usageRecord(response)));
   }
   for (const result of responseToolCallResults(response)) {
     if (result.type === "tool_call") {
@@ -967,6 +981,29 @@ export function responseToLinguaEvents(response: Response): EventData[] {
     }
   }
   return events;
+}
+
+// Policy: attach raw usage + cost to the messages event. cost_usd is filled from
+// the shared price cache; left unset if the cache is unavailable.
+function usageRecord(response: Response): JsonObject | undefined {
+  const usage = response.usage;
+  if (!usage) return undefined;
+  const prompt = usage.input_tokens;
+  const completion = usage.output_tokens;
+  const cached = usage.input_tokens_details?.cached_tokens;
+  const reasoning = usage.output_tokens_details?.reasoning_tokens;
+  const table = getTable();
+  const cost = table
+    ? computeCostUsd(table, response.model, { prompt, completion, cached })
+    : null;
+
+  const record: JsonObject = { model: response.model };
+  if (prompt != null) record.prompt_tokens = prompt;
+  if (completion != null) record.completion_tokens = completion;
+  if (cached != null) record.prompt_cached_tokens = cached;
+  if (reasoning != null) record.completion_reasoning_tokens = reasoning;
+  if (cost != null) record.cost_usd = cost;
+  return record;
 }
 
 export function responseStreamEventToLinguaEvents(

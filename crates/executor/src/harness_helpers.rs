@@ -68,7 +68,10 @@ pub(crate) async fn resolve_conversation_handle(
         return Ok(Some(conversation));
     }
 
-    let conversations = agent.list_conversations().await?;
+    let conversations = agent
+        .list_conversations(exoharness::ListConversationsRequest::default())
+        .await?
+        .conversations;
     Ok(conversations
         .into_iter()
         .find(|conversation| conversation.record().slug == conversation_ref))
@@ -175,7 +178,6 @@ pub(crate) async fn put_conversation_model_override(
         .add_events(AddEventsRequest {
             session_id: None,
             turn_id: None,
-            expected_head: None,
             data: vec![EventData::Custom {
                 event_type: CONVERSATION_MODEL_CONFIG_EVENT_TYPE.to_string(),
                 payload,

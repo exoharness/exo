@@ -1,4 +1,5 @@
 use std::collections::{HashMap, hash_map::DefaultHasher};
+use std::ffi::OsString;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -9,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use bytes::Bytes;
+use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use tokio::process::{Child, Command};
@@ -16,6 +18,8 @@ use tokio::sync::Mutex;
 use tokio::time;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use uuid::Uuid;
+
+use crate::DurableFileSystem;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SandboxKey {
@@ -65,6 +69,7 @@ pub enum SandboxNetworkPolicy {
 pub struct SandboxSpec {
     pub image: String,
     pub mounts: Vec<SandboxMount>,
+    pub durable_file_systems: Vec<DurableFileSystem>,
     pub network: SandboxNetworkPolicy,
     pub default_workdir: String,
 }
@@ -188,6 +193,7 @@ pub(crate) const WARM_SANDBOX_KEY_LABEL: &str = "exo.sandbox.key";
 pub(crate) const WARM_SANDBOX_SPEC_HASH_LABEL: &str = "exo.sandbox.spec-hash";
 const WARM_SANDBOX_OWNER_PID_LABEL: &str = "exo.sandbox.owner-pid";
 const APPLE_ABSOLUTE_TIME_UNIX_OFFSET_SECONDS: f64 = 978_307_200.0;
+const DURABLE_FILE_SYSTEM_ROOT_ENV: &str = "EXO_DURABLE_FILE_SYSTEM_ROOT";
 
 #[derive(Debug, Clone)]
 struct WarmSandboxEntry {
@@ -212,10 +218,35 @@ struct ContainerListConfiguration {
     labels: HashMap<String, String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct DockerInspectItem {
+    #[serde(rename = "Id")]
+    id: String,
+    #[serde(rename = "State")]
+    state: DockerInspectState,
+    #[serde(rename = "Config")]
+    config: DockerInspectConfiguration,
+}
+
+#[derive(Debug, Deserialize)]
+struct DockerInspectState {
+    #[serde(rename = "Status")]
+    status: Option<String>,
+    #[serde(rename = "StartedAt")]
+    started_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DockerInspectConfiguration {
+    #[serde(rename = "Labels", default)]
+    labels: HashMap<String, String>,
+}
+
 #[derive(Debug)]
 pub struct CliContainerSandboxBackend {
     cli: ContainerCliFlavor,
     container_bin: PathBuf,
+    durable_file_system_root: Option<PathBuf>,
     system_started: Mutex<bool>,
     network_created: Mutex<bool>,
     warm_sandboxes: Arc<Mutex<HashMap<SandboxKey, WarmSandboxEntry>>>,
@@ -230,10 +261,16 @@ impl CliContainerSandboxBackend {
         Self::new(ContainerCliFlavor::Docker)
     }
 
+    pub fn with_durable_file_system_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.durable_file_system_root = Some(root.into());
+        self
+    }
+
     fn new(cli: ContainerCliFlavor) -> Self {
         Self {
             cli,
             container_bin: PathBuf::from(cli.default_binary()),
+            durable_file_system_root: None,
             system_started: Mutex::new(false),
             network_created: Mutex::new(false),
             warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),
@@ -241,29 +278,28 @@ impl CliContainerSandboxBackend {
     }
 
     async fn ensure_system_started(&self) -> Result<()> {
-        if !self.cli.requires_system_start() {
-            return Ok(());
-        }
         let mut started = self.system_started.lock().await;
         if *started {
             return Ok(());
         }
 
-        let output = Command::new(&self.container_bin)
-            .arg("system")
-            .arg("start")
-            .kill_on_drop(true)
-            .output()
-            .await
-            .with_context(|| missing_container_cli_message(self.cli, &self.container_bin))?;
-        if !output.status.success() {
-            return Err(anyhow!(
-                "failed to start container system: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
+        if self.cli.requires_system_start() {
+            let output = Command::new(&self.container_bin)
+                .arg("system")
+                .arg("start")
+                .kill_on_drop(true)
+                .output()
+                .await
+                .with_context(|| missing_container_cli_message(self.cli, &self.container_bin))?;
+            if !output.status.success() {
+                return Err(anyhow!(
+                    "failed to start container system: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
         }
 
-        if let Err(error) = reap_orphaned_warm_sandboxes(&self.container_bin).await {
+        if let Err(error) = reap_orphaned_warm_sandboxes(&self.container_bin, self.cli).await {
             tracing::warn!(%error, "failed to reap orphaned warm sandboxes");
         }
         *started = true;
@@ -297,12 +333,16 @@ impl CliContainerSandboxBackend {
     }
 
     async fn prepare_request(&self, request: SandboxRequest) -> Result<SandboxRequest> {
+        validate_durable_file_system_mounts(
+            &request.spec.mounts,
+            &request.spec.durable_file_systems,
+        )?;
         self.ensure_system_started().await?;
         if matches!(request.spec.network, SandboxNetworkPolicy::Enabled) {
             self.ensure_default_network_created().await?;
         }
 
-        let mounts = request
+        let mut mounts = request
             .spec
             .mounts
             .into_iter()
@@ -317,6 +357,11 @@ impl CliContainerSandboxBackend {
                 Ok(SandboxMount { host_path, ..mount })
             })
             .collect::<Result<Vec<_>>>()?;
+        mounts.extend(materialize_durable_file_systems(
+            &request.key,
+            &request.spec.durable_file_systems,
+            self.durable_file_system_root.as_deref(),
+        )?);
 
         Ok(SandboxRequest {
             key: request.key,
@@ -327,6 +372,7 @@ impl CliContainerSandboxBackend {
                     request.spec.image
                 },
                 mounts,
+                durable_file_systems: request.spec.durable_file_systems,
                 network: request.spec.network,
                 default_workdir: request.spec.default_workdir,
             },
@@ -407,13 +453,14 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
             schedule_cleanup_named_container(self.container_bin.clone(), self.cli, entry.name);
         }
 
-        let (name, owned) = match find_running_warm_sandbox(&self.container_bin, &request).await? {
-            Some(name) => (name, false),
-            None => (
-                create_unique_warm_sandbox(&self.container_bin, &request).await?,
-                true,
-            ),
-        };
+        let (name, owned) =
+            match find_running_warm_sandbox(&self.container_bin, self.cli, &request).await? {
+                Some(name) => (name, false),
+                None => (
+                    create_unique_warm_sandbox(&self.container_bin, &request).await?,
+                    true,
+                ),
+            };
 
         {
             let mut warm_sandboxes = self.warm_sandboxes.lock().await;
@@ -644,6 +691,9 @@ impl LocalProcessSandboxBackend {
 #[async_trait]
 impl ManagedSandboxBackend for LocalProcessSandboxBackend {
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
+        if !request.spec.durable_file_systems.is_empty() {
+            bail!("local-process sandbox backend does not support durable file systems");
+        }
         Ok(Arc::new(LocalProcessSandboxHandle {
             id: format!("local:{}", request.key),
             request,
@@ -735,6 +785,139 @@ fn resolve_local_workdir(spec: &SandboxSpec, cwd: &str) -> Option<PathBuf> {
         .map(|mount| mount.host_path.clone())
 }
 
+fn materialize_durable_file_systems(
+    key: &SandboxKey,
+    file_systems: &[DurableFileSystem],
+    configured_root: Option<&Path>,
+) -> Result<Vec<SandboxMount>> {
+    if file_systems.is_empty() {
+        return Ok(Vec::new());
+    }
+    let root = durable_file_system_root(configured_root)?;
+    file_systems
+        .iter()
+        .map(|file_system| {
+            let host_path = root.join(stable_fnv1a_hex(&format!("{}\n{}", key, file_system.name)));
+            std::fs::create_dir_all(&host_path).with_context(|| {
+                format!(
+                    "creating durable file system {} at {}",
+                    file_system.name,
+                    host_path.display()
+                )
+            })?;
+            let host_path = std::fs::canonicalize(&host_path).with_context(|| {
+                format!(
+                    "canonicalizing durable file system {} at {}",
+                    file_system.name,
+                    host_path.display()
+                )
+            })?;
+            Ok(SandboxMount {
+                host_path,
+                guest_path: file_system.mount_path.clone(),
+                access: match file_system.mode {
+                    crate::FileSystemMountMode::ReadOnly => SandboxMountAccess::ReadOnly,
+                    crate::FileSystemMountMode::ReadWrite => SandboxMountAccess::ReadWrite,
+                },
+                internal: true,
+            })
+        })
+        .collect()
+}
+
+fn validate_durable_file_system_mounts(
+    mounts: &[SandboxMount],
+    file_systems: &[DurableFileSystem],
+) -> Result<()> {
+    validate_durable_file_systems(file_systems)?;
+    for mount in mounts {
+        for file_system in file_systems {
+            if mount.guest_path == file_system.mount_path {
+                bail!(
+                    "sandbox mount path is used by both a host mount and durable file system: {}",
+                    file_system.mount_path
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_durable_file_systems(file_systems: &[DurableFileSystem]) -> Result<()> {
+    for (index, file_system) in file_systems.iter().enumerate() {
+        if file_system.name.trim().is_empty() {
+            bail!("durable file system name must not be empty");
+        }
+        if file_system.name.contains('/') || file_system.name.contains('\0') {
+            bail!(
+                "durable file system name must not contain path separators or NUL bytes: {}",
+                file_system.name
+            );
+        }
+        if !file_system.mount_path.starts_with('/') {
+            bail!(
+                "durable file system mount path must be absolute: {}",
+                file_system.mount_path
+            );
+        }
+        if file_system.mount_path.trim() == "/" {
+            bail!("durable file system mount path must not be /");
+        }
+        for prior in &file_systems[..index] {
+            if prior.name == file_system.name {
+                bail!("duplicate durable file system name: {}", file_system.name);
+            }
+            if prior.mount_path == file_system.mount_path {
+                bail!(
+                    "duplicate durable file system mount path: {}",
+                    file_system.mount_path
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn durable_file_system_root(configured_root: Option<&Path>) -> Result<PathBuf> {
+    if let Some(value) = std::env::var_os(DURABLE_FILE_SYSTEM_ROOT_ENV) {
+        let path = PathBuf::from(value);
+        if !path.as_os_str().is_empty() {
+            return Ok(path);
+        }
+    }
+    if let Some(root) = configured_root {
+        return Ok(root.to_path_buf());
+    }
+    if let Some(value) = std::env::var_os("XDG_DATA_HOME") {
+        let path = PathBuf::from(value);
+        if !path.as_os_str().is_empty() {
+            return Ok(path.join("exo").join("durable-filesystems"));
+        }
+    }
+    if let Some(value) = std::env::var_os("HOME") {
+        let path = PathBuf::from(value);
+        if !path.as_os_str().is_empty() {
+            return Ok(path
+                .join(".local")
+                .join("share")
+                .join("exo")
+                .join("durable-filesystems"));
+        }
+    }
+    bail!(
+        "could not determine durable file system root: set {DURABLE_FILE_SYSTEM_ROOT_ENV}, XDG_DATA_HOME, or HOME"
+    )
+}
+
+pub(crate) fn stable_fnv1a_hex(input: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in input.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
 async fn touch_warm_sandbox(
     warm_sandboxes: &Arc<Mutex<HashMap<SandboxKey, WarmSandboxEntry>>>,
     key: &SandboxKey,
@@ -812,6 +995,21 @@ async fn create_unique_warm_sandbox(
 
 async fn find_running_warm_sandbox(
     container_bin: &Path,
+    cli: ContainerCliFlavor,
+    request: &SandboxRequest,
+) -> Result<Option<String>> {
+    match cli {
+        ContainerCliFlavor::AppleContainer => {
+            find_running_apple_warm_sandbox(container_bin, request).await
+        }
+        ContainerCliFlavor::Docker => {
+            find_running_docker_warm_sandbox(container_bin, request).await
+        }
+    }
+}
+
+async fn find_running_apple_warm_sandbox(
+    container_bin: &Path,
     request: &SandboxRequest,
 ) -> Result<Option<String>> {
     let output = run_container_admin_command(
@@ -830,7 +1028,11 @@ async fn find_running_warm_sandbox(
     let spec_hash = sandbox_spec_hash(&request.spec);
     let containers: Vec<ContainerListItem> = serde_json::from_slice(&output.stdout)?;
     Ok(containers.into_iter().find_map(|container| {
-        if container.status.as_deref() != Some("running") {
+        if !container
+            .status
+            .as_deref()
+            .is_some_and(is_running_container_status)
+        {
             return None;
         }
         let labels = &container.configuration.labels;
@@ -842,6 +1044,41 @@ async fn find_running_warm_sandbox(
             .is_some_and(|value| value == &spec_hash);
         (key_matches && spec_matches).then_some(container.configuration.id)
     }))
+}
+
+async fn find_running_docker_warm_sandbox(
+    container_bin: &Path,
+    request: &SandboxRequest,
+) -> Result<Option<String>> {
+    let spec_hash = sandbox_spec_hash(&request.spec);
+    let key_filter = format!("label={WARM_SANDBOX_KEY_LABEL}={}", request.key);
+    let spec_filter = format!("label={WARM_SANDBOX_SPEC_HASH_LABEL}={spec_hash}");
+    let output = run_container_admin_command(
+        container_bin,
+        WARM_SANDBOX_CLEANUP_TIMEOUT,
+        [
+            "ps",
+            "--filter",
+            key_filter.as_str(),
+            "--filter",
+            spec_filter.as_str(),
+            "--format",
+            "{{.Names}}",
+        ],
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "failed to list warm sandboxes: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|name| !name.is_empty())
+        .map(ToOwned::to_owned))
 }
 
 async fn ensure_warm_sandbox_ready(
@@ -871,7 +1108,8 @@ async fn ensure_warm_sandbox_ready(
             if stale.owned {
                 schedule_cleanup_named_container(container_bin.to_path_buf(), cli, stale.name);
             }
-            let (name, owned) = match find_running_warm_sandbox(container_bin, request).await? {
+            let (name, owned) = match find_running_warm_sandbox(container_bin, cli, request).await?
+            {
                 Some(name) => (name, false),
                 None => (
                     create_unique_warm_sandbox(container_bin, request).await?,
@@ -890,7 +1128,8 @@ async fn ensure_warm_sandbox_ready(
             return Ok(name);
         }
         None => {
-            let (name, owned) = match find_running_warm_sandbox(container_bin, request).await? {
+            let (name, owned) = match find_running_warm_sandbox(container_bin, cli, request).await?
+            {
                 Some(name) => (name, false),
                 None => (
                     create_unique_warm_sandbox(container_bin, request).await?,
@@ -918,13 +1157,14 @@ async fn ensure_warm_sandbox_ready(
         return Ok(current_name);
     }
 
-    let (replacement_name, owned) = match find_running_warm_sandbox(container_bin, request).await? {
-        Some(name) => (name, false),
-        None => (
-            create_unique_warm_sandbox(container_bin, request).await?,
-            true,
-        ),
-    };
+    let (replacement_name, owned) =
+        match find_running_warm_sandbox(container_bin, cli, request).await? {
+            Some(name) => (name, false),
+            None => (
+                create_unique_warm_sandbox(container_bin, request).await?,
+                true,
+            ),
+        };
     warm_sandboxes.insert(
         request.key.clone(),
         WarmSandboxEntry {
@@ -1183,7 +1423,23 @@ async fn cleanup_named_container(
             )
             .await
             {
-                Ok(stop) if stop.status.success() => {}
+                Ok(stop) if stop.status.success() => {
+                    if let Err(wait_error) =
+                        wait_for_apple_container_not_running(container_bin, name).await
+                    {
+                        kill_named_container_if_present(container_bin, name).await?;
+                        wait_for_apple_container_not_running(container_bin, name)
+                            .await
+                            .map_err(|kill_wait_error| {
+                                anyhow!(
+                                    "failed to stop warm sandbox {}: {}; {}",
+                                    name,
+                                    wait_error,
+                                    kill_wait_error
+                                )
+                            })?;
+                    }
+                }
                 Ok(stop) => {
                     let stderr = String::from_utf8_lossy(&stop.stderr).trim().to_string();
                     if !is_missing_container_error(&stderr)
@@ -1197,6 +1453,7 @@ async fn cleanup_named_container(
                             kill_error
                         ));
                     }
+                    wait_for_apple_container_not_running(container_bin, name).await?;
                 }
                 Err(stop_error) => {
                     if let Err(kill_error) =
@@ -1209,6 +1466,7 @@ async fn cleanup_named_container(
                             kill_error
                         ));
                     }
+                    wait_for_apple_container_not_running(container_bin, name).await?;
                 }
             }
 
@@ -1268,7 +1526,53 @@ async fn kill_named_container_if_present(container_bin: &Path, name: &str) -> Re
     Ok(())
 }
 
-async fn reap_orphaned_warm_sandboxes(container_bin: &Path) -> Result<()> {
+async fn reap_orphaned_warm_sandboxes(container_bin: &Path, cli: ContainerCliFlavor) -> Result<()> {
+    match cli {
+        ContainerCliFlavor::AppleContainer => {
+            reap_orphaned_apple_warm_sandboxes(container_bin).await
+        }
+        ContainerCliFlavor::Docker => reap_orphaned_docker_warm_sandboxes(container_bin).await,
+    }
+}
+
+async fn wait_for_apple_container_not_running(container_bin: &Path, name: &str) -> Result<()> {
+    let deadline = Instant::now() + WARM_SANDBOX_CLEANUP_TIMEOUT;
+    loop {
+        match apple_container_status(container_bin, name).await? {
+            None => return Ok(()),
+            Some(status) if !is_running_container_status(&status) => return Ok(()),
+            Some(_) => {}
+        }
+
+        if Instant::now() >= deadline {
+            return Err(anyhow!("container {} is still running", name));
+        }
+        time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn apple_container_status(container_bin: &Path, name: &str) -> Result<Option<String>> {
+    let output = run_container_admin_command(
+        container_bin,
+        WARM_SANDBOX_CLEANUP_TIMEOUT,
+        ["list", "--format", "json"],
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "failed to list warm sandboxes: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let containers: Vec<ContainerListItem> = serde_json::from_slice(&output.stdout)?;
+    Ok(containers
+        .into_iter()
+        .find(|container| container.configuration.id == name)
+        .and_then(|container| container.status))
+}
+
+async fn reap_orphaned_apple_warm_sandboxes(container_bin: &Path) -> Result<()> {
     let output = run_container_admin_command(
         container_bin,
         WARM_SANDBOX_CLEANUP_TIMEOUT,
@@ -1300,7 +1604,11 @@ async fn reap_orphaned_warm_sandboxes(container_bin: &Path) -> Result<()> {
         {
             continue;
         }
-        if container.status.as_deref() != Some("running") {
+        if !container
+            .status
+            .as_deref()
+            .is_some_and(is_running_container_status)
+        {
             continue;
         }
         let Some(started_date) = container.started_date else {
@@ -1327,9 +1635,96 @@ async fn reap_orphaned_warm_sandboxes(container_bin: &Path) -> Result<()> {
     Ok(())
 }
 
+async fn reap_orphaned_docker_warm_sandboxes(container_bin: &Path) -> Result<()> {
+    let output = run_container_admin_command(
+        container_bin,
+        WARM_SANDBOX_CLEANUP_TIMEOUT,
+        [
+            "ps",
+            "-aq",
+            "--no-trunc",
+            "--filter",
+            "label=exo.sandbox.key",
+        ],
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "failed to list warm sandboxes: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let ids = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let mut inspect_args = Vec::with_capacity(ids.len() + 1);
+    inspect_args.push("inspect".to_string());
+    inspect_args.extend(ids);
+    let inspect = run_container_admin_command(
+        container_bin,
+        WARM_SANDBOX_CLEANUP_TIMEOUT,
+        inspect_args.iter().map(String::as_str),
+    )
+    .await?;
+    if !inspect.status.success() {
+        return Err(anyhow!(
+            "failed to inspect warm sandboxes: {}",
+            String::from_utf8_lossy(&inspect.stderr).trim()
+        ));
+    }
+
+    let now = Utc::now();
+    let min_age = chrono::Duration::from_std(ORPHANED_WARM_SANDBOX_MIN_AGE)
+        .expect("orphaned warm sandbox age fits in chrono duration");
+    let containers: Vec<DockerInspectItem> = serde_json::from_slice(&inspect.stdout)?;
+    for container in containers {
+        if !container.config.labels.contains_key(WARM_SANDBOX_KEY_LABEL) {
+            continue;
+        }
+        if let Some(owner_pid) = container.config.labels.get(WARM_SANDBOX_OWNER_PID_LABEL)
+            && owner_pid_is_alive(owner_pid)
+        {
+            continue;
+        }
+        if container.state.status.as_deref() != Some("running") {
+            continue;
+        }
+        let Some(started_at) = container.state.started_at.as_deref() else {
+            continue;
+        };
+        let started_at = parse_docker_timestamp(started_at)?;
+        if now.signed_duration_since(started_at) < min_age {
+            continue;
+        }
+        if let Err(error) =
+            cleanup_named_container(container_bin, ContainerCliFlavor::Docker, &container.id).await
+        {
+            tracing::warn!(
+                container_id = %container.id,
+                %error,
+                "failed to clean up orphaned warm sandbox"
+            );
+        }
+    }
+
+    Ok(())
+}
+
 fn apple_absolute_time_now() -> Result<f64> {
     let unix_now = SystemTime::now().duration_since(UNIX_EPOCH)?;
     Ok(unix_now.as_secs_f64() - APPLE_ABSOLUTE_TIME_UNIX_OFFSET_SECONDS)
+}
+
+fn parse_docker_timestamp(value: &str) -> Result<DateTime<Utc>> {
+    Ok(DateTime::parse_from_rfc3339(value)?.with_timezone(&Utc))
 }
 
 fn owner_pid_is_alive(pid: &str) -> bool {
@@ -1368,18 +1763,31 @@ fn missing_container_cli_message(cli: ContainerCliFlavor, container_bin: &Path) 
     }
 }
 
-async fn run_container_admin_command<const N: usize>(
+async fn run_container_admin_command<I, S>(
     container_bin: &Path,
     timeout: Duration,
-    args: [&str; N],
-) -> Result<std::process::Output> {
+    args: I,
+) -> Result<std::process::Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let args = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_os_string())
+        .collect::<Vec<OsString>>();
+    let display_args = args
+        .iter()
+        .map(|arg| arg.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ");
     let mut command = Command::new(container_bin);
-    command.args(args).kill_on_drop(true);
+    command.args(&args).kill_on_drop(true);
     match time::timeout(timeout, command.output()).await {
         Ok(output) => Ok(output?),
         Err(_) => Err(anyhow!(
             "container {} timed out after {}s",
-            args.join(" "),
+            display_args,
             timeout.as_secs()
         )),
     }
@@ -1394,6 +1802,10 @@ fn is_container_not_running_error(stderr: &str) -> bool {
     stderr
         .to_ascii_lowercase()
         .contains("container is not running")
+}
+
+fn is_running_container_status(status: &str) -> bool {
+    status.eq_ignore_ascii_case("running")
 }
 
 fn is_already_exists_error(message: &str) -> bool {
@@ -1558,6 +1970,145 @@ async fn docker_load_image(container_bin: &Path, payload: &Bytes) -> Result<Stri
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn docker_warm_sandbox_lookup_uses_docker_ps_filters() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let script_path = temp_dir.path().join("docker");
+        let args_path = temp_dir.path().join("args");
+        fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\n{{\n  for arg in \"$@\"; do\n    printf '%s\\n' \"$arg\"\n  done\n}} > '{}'\nprintf 'warm-name\\n'\n",
+                args_path.display()
+            ),
+        )
+        .expect("write fake docker script");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("fake docker metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("chmod fake docker");
+
+        let request = SandboxRequest {
+            key: SandboxKey::ConversationSandbox {
+                conversation_id: "conversation".to_string(),
+                sandbox_id: "sandbox".to_string(),
+            },
+            spec: SandboxSpec {
+                image: "docker.io/library/ubuntu:24.04".to_string(),
+                mounts: Vec::new(),
+                durable_file_systems: Vec::new(),
+                network: SandboxNetworkPolicy::Disabled,
+                default_workdir: "/".to_string(),
+            },
+            lifecycle: SandboxLifecycleConfig {
+                idle_ttl: Some(Duration::from_secs(60)),
+            },
+        };
+        let spec_hash = sandbox_spec_hash(&request.spec);
+
+        let name = find_running_warm_sandbox(&script_path, ContainerCliFlavor::Docker, &request)
+            .await
+            .expect("find warm sandbox");
+        assert_eq!(name.as_deref(), Some("warm-name"));
+
+        let key_filter = format!("label={WARM_SANDBOX_KEY_LABEL}={}", request.key);
+        let spec_filter = format!("label={WARM_SANDBOX_SPEC_HASH_LABEL}={spec_hash}");
+        let args = fs::read_to_string(&args_path).expect("read fake docker args");
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            vec![
+                "ps",
+                "--filter",
+                key_filter.as_str(),
+                "--filter",
+                spec_filter.as_str(),
+                "--format",
+                "{{.Names}}",
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn docker_prepare_request_reaps_orphaned_warm_sandboxes_with_real_cli_commands() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let script_path = temp_dir.path().join("docker");
+        let args_path = temp_dir.path().join("args");
+        fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\nfor arg in \"$@\"; do\n  printf '%s\\n' \"$arg\" >> '{}'\ndone\nprintf '%s\\n' '---' >> '{}'\ncase \"$1\" in\n  ps)\n    printf 'docker-container-id\\n'\n    ;;\n  inspect)\n    printf '%s\\n' '[{{\"Id\":\"docker-container-id\",\"Config\":{{\"Labels\":{{\"{}\":\"conversation:conversation:sandbox\"}}}},\"State\":{{\"Status\":\"running\",\"StartedAt\":\"2024-01-01T00:00:00Z\"}}}}]'\n    ;;\n  rm)\n    ;;\nesac\n",
+                args_path.display(),
+                args_path.display(),
+                WARM_SANDBOX_KEY_LABEL,
+            ),
+        )
+        .expect("write fake docker script");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("fake docker metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("chmod fake docker");
+
+        let backend = CliContainerSandboxBackend {
+            cli: ContainerCliFlavor::Docker,
+            container_bin: script_path,
+            durable_file_system_root: None,
+            system_started: Mutex::new(false),
+            network_created: Mutex::new(false),
+            warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let request = SandboxRequest {
+            key: SandboxKey::ConversationSandbox {
+                conversation_id: "conversation".to_string(),
+                sandbox_id: "sandbox".to_string(),
+            },
+            spec: SandboxSpec {
+                image: "docker.io/library/ubuntu:24.04".to_string(),
+                mounts: Vec::new(),
+                durable_file_systems: Vec::new(),
+                network: SandboxNetworkPolicy::Disabled,
+                default_workdir: "/".to_string(),
+            },
+            lifecycle: SandboxLifecycleConfig {
+                idle_ttl: Some(Duration::from_secs(60)),
+            },
+        };
+
+        backend
+            .prepare_request(request)
+            .await
+            .expect("prepare request");
+
+        let args = fs::read_to_string(&args_path).expect("read fake docker args");
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            vec![
+                "ps",
+                "-aq",
+                "--no-trunc",
+                "--filter",
+                "label=exo.sandbox.key",
+                "---",
+                "inspect",
+                "docker-container-id",
+                "---",
+                "rm",
+                "-f",
+                "docker-container-id",
+                "---",
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn apple_container_backend_names_missing_container_cli() {
         let missing_bin = std::env::temp_dir().join(format!(
@@ -1567,6 +2118,7 @@ mod tests {
         let backend = CliContainerSandboxBackend {
             cli: ContainerCliFlavor::AppleContainer,
             container_bin: missing_bin,
+            durable_file_system_root: None,
             system_started: Mutex::new(false),
             network_created: Mutex::new(false),
             warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),

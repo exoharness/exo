@@ -8,9 +8,10 @@ use lingua::universal::{AssistantContent, UserContent};
 use tokio::time::timeout;
 
 use crate::{
-    BeginTurnRequest, Binding, EventData, EventKind, EventQuery, EventQueryDirection, ExoHarness,
-    ForkConversationRequest, ManagedSandboxHandle, NewAgentRequest, NewConversationRequest,
-    SandboxCommand, Uuid7, WriteArtifactRequest,
+    AddEventsRequest, BeginTurnRequest, Binding, EventData, EventKind, EventQuery,
+    EventQueryDirection, ExoHarness, ForkConversationRequest, ListConversationsRequest,
+    ManagedSandboxBackend, ManagedSandboxHandle, NewAgentRequest, NewConversationRequest,
+    SandboxCommand, SandboxRequest, Uuid7, WriteArtifactRequest,
 };
 
 pub async fn supports_agent_and_conversation_crud(harness: Arc<dyn ExoHarness>) {
@@ -51,9 +52,10 @@ pub async fn supports_agent_and_conversation_crud(harness: Arc<dyn ExoHarness>) 
     );
     assert!(
         agent
-            .list_conversations()
+            .list_conversations(crate::ListConversationsRequest::default())
             .await
             .expect("list conversations")
+            .conversations
             .iter()
             .any(|candidate| candidate.record().id == conversation.record().id)
     );
@@ -70,6 +72,84 @@ pub async fn supports_agent_and_conversation_crud(harness: Arc<dyn ExoHarness>) 
             .await
             .expect("delete agent")
     );
+}
+
+pub async fn list_conversations_returns_recent_first_and_paginates(harness: Arc<dyn ExoHarness>) {
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: unique_slug("agent"),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent should be created");
+    let first = agent
+        .new_conversation(NewConversationRequest {
+            slug: Some(unique_slug("first")),
+            name: Some("First".to_string()),
+        })
+        .await
+        .expect("first conversation");
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let second = agent
+        .new_conversation(NewConversationRequest {
+            slug: Some(unique_slug("second")),
+            name: Some("Second".to_string()),
+        })
+        .await
+        .expect("second conversation");
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let third = agent
+        .new_conversation(NewConversationRequest {
+            slug: Some(unique_slug("third")),
+            name: Some("Third".to_string()),
+        })
+        .await
+        .expect("third conversation");
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    first
+        .add_events(AddEventsRequest {
+            session_id: None,
+            turn_id: None,
+            data: vec![EventData::Custom {
+                event_type: "touch".to_string(),
+                payload: serde_json::Value::Null,
+            }],
+        })
+        .await
+        .expect("touch first conversation");
+
+    let page = agent
+        .list_conversations(ListConversationsRequest {
+            cursor: None,
+            limit: Some(2),
+        })
+        .await
+        .expect("first page");
+    let page_ids: Vec<_> = page
+        .conversations
+        .iter()
+        .map(|conversation| conversation.record().id)
+        .collect();
+    assert_eq!(page_ids, vec![first.record().id, third.record().id]);
+    assert_eq!(
+        page.next_cursor,
+        Some(third.record().latest_event_id.unwrap_or(third.record().id))
+    );
+
+    let next_page = agent
+        .list_conversations(ListConversationsRequest {
+            cursor: page.next_cursor,
+            limit: Some(2),
+        })
+        .await
+        .expect("second page");
+    let next_page_ids: Vec<_> = next_page
+        .conversations
+        .iter()
+        .map(|conversation| conversation.record().id)
+        .collect();
+    assert_eq!(next_page_ids, vec![second.record().id]);
+    assert_eq!(next_page.next_cursor, None);
 }
 
 pub async fn begin_turn_tracks_events_through_finish(harness: Arc<dyn ExoHarness>) {
@@ -95,6 +175,7 @@ pub async fn begin_turn_tracks_events_through_finish(harness: Arc<dyn ExoHarness
     turn.add_events(vec![EventData::Messages {
         messages: vec![assistant_message("pong")],
         response_id: None,
+        usage: None,
     }])
     .await
     .expect("append assistant message");
@@ -167,6 +248,7 @@ pub async fn turn_events_continue_after_artifact_writes(harness: Arc<dyn ExoHarn
     turn.add_events(vec![EventData::Messages {
         messages: vec![assistant_message("pong")],
         response_id: None,
+        usage: None,
     }])
     .await
     .expect("append after artifact write");
@@ -305,6 +387,44 @@ pub async fn sandbox_handle_start_process_supports_long_running_request_response
     }
 }
 
+pub async fn sandbox_backend_durable_file_system_survives_stop_and_reacquire(
+    backend: Arc<dyn ManagedSandboxBackend>,
+    request: SandboxRequest,
+) -> crate::Result<()> {
+    let mount_path = request
+        .spec
+        .durable_file_systems
+        .first()
+        .context("durable filesystem contract requires a durable filesystem")?
+        .mount_path
+        .clone();
+    let marker = format!("durable-{}", Uuid7::now());
+
+    let first = backend
+        .acquire(request.clone())
+        .await
+        .context("acquire sandbox for durable filesystem write")?;
+    let write_result = write_durable_marker(Arc::clone(&first), &mount_path, &marker).await;
+    stop_after_contract(
+        first,
+        write_result,
+        "stop sandbox after durable filesystem write",
+    )
+    .await?;
+
+    let second = backend
+        .acquire(request)
+        .await
+        .context("reacquire sandbox for durable filesystem read")?;
+    let read_result = read_durable_marker(Arc::clone(&second), &mount_path, &marker).await;
+    stop_after_contract(
+        second,
+        read_result,
+        "stop sandbox after durable filesystem read",
+    )
+    .await
+}
+
 async fn sandbox_handle_start_process_supports_interactive_stdio_and_env_inner(
     handle: Arc<dyn ManagedSandboxHandle>,
 ) -> crate::Result<()> {
@@ -384,6 +504,96 @@ async fn sandbox_handle_start_process_supports_interactive_stdio_and_env_inner(
         bail!("unexpected stderr: {stderr:?}");
     }
     Ok(())
+}
+
+async fn write_durable_marker(
+    handle: Arc<dyn ManagedSandboxHandle>,
+    mount_path: &str,
+    marker: &str,
+) -> crate::Result<()> {
+    let mut env = std::collections::HashMap::new();
+    env.insert("EXO_DURABLE_MOUNT".to_string(), mount_path.to_string());
+    env.insert("EXO_DURABLE_MARKER".to_string(), marker.to_string());
+    let output = handle
+        .exec(&SandboxCommand {
+            argv: vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                "test \"$(pwd)\" = \"$EXO_DURABLE_MOUNT\" && mkdir -p .codex-smoke && printf '%s' \"$EXO_DURABLE_MARKER\" > .codex-smoke/marker.txt"
+                    .to_string(),
+            ],
+            env,
+            display_argv: None,
+            cwd: None,
+            timeout: Some(Duration::from_secs(30)),
+        })
+        .await
+        .context("write durable filesystem marker")?;
+    if !output.ok {
+        bail!(
+            "write durable filesystem marker failed with exit code {:?}: {}{}",
+            output.exit_code,
+            output.stdout,
+            output.stderr
+        );
+    }
+    Ok(())
+}
+
+async fn read_durable_marker(
+    handle: Arc<dyn ManagedSandboxHandle>,
+    mount_path: &str,
+    expected_marker: &str,
+) -> crate::Result<()> {
+    let mut env = std::collections::HashMap::new();
+    env.insert("EXO_DURABLE_MOUNT".to_string(), mount_path.to_string());
+    let output = handle
+        .exec(&SandboxCommand {
+            argv: vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                "test \"$(pwd)\" = \"$EXO_DURABLE_MOUNT\" && cat .codex-smoke/marker.txt"
+                    .to_string(),
+            ],
+            env,
+            display_argv: None,
+            cwd: None,
+            timeout: Some(Duration::from_secs(30)),
+        })
+        .await
+        .context("read durable filesystem marker")?;
+    if !output.ok {
+        bail!(
+            "read durable filesystem marker failed with exit code {:?}: {}{}",
+            output.exit_code,
+            output.stdout,
+            output.stderr
+        );
+    }
+    if output.stdout != expected_marker {
+        bail!(
+            "durable filesystem marker mismatch: expected {:?}, got {:?}",
+            expected_marker,
+            output.stdout
+        );
+    }
+    Ok(())
+}
+
+async fn stop_after_contract(
+    handle: Arc<dyn ManagedSandboxHandle>,
+    result: crate::Result<()>,
+    context: &str,
+) -> crate::Result<()> {
+    let stop_result = handle.stop().await.with_context(|| context.to_string());
+    match (result, stop_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(stop_error)) => Err(anyhow!(
+            "{error:#}; also failed to stop sandbox after contract: {stop_error:#}"
+        )),
+    }
 }
 
 async fn sandbox_handle_start_process_supports_long_running_request_response_protocol_inner(

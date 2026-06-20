@@ -7,12 +7,13 @@ use exoharness::{
     AddEventsRequest, AddEventsResult, AgentHandle, AgentId, Artifact, ArtifactVersion, Binding,
     BindingId, BindingRecord, CancelSandboxProcessRequest, CloseSandboxProcessInputRequest,
     ConversationHandle, ConversationId, CreateSandboxRequest, Event, EventData, EventId, EventKind,
-    EventStream, ExoHarness, ForkConversationRequest, GetEventsResult, NewAgentRequest,
-    NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result, RunInSandboxRequest,
-    SandboxId, SandboxProcess, SandboxProcessEventQuery, SandboxProcessRecord,
-    SandboxProcessStatus, Secret, SecretId, SecretMetadata, SnapshotId, StartSandboxProcessRequest,
-    StartSandboxRequest, TurnHandle, TurnRecord, Uuid7, WaitSandboxProcessRequest,
-    WriteArtifactRequest, WriteSandboxProcessInputRequest,
+    EventStream, ExoHarness, ForkConversationRequest, GetEventsResult, ListConversationsRequest,
+    ListConversationsResult, NewAgentRequest, NewConversationRequest, PutSecretRequest,
+    ReadArtifactRequest, Result, RunInSandboxRequest, SandboxId, SandboxProcess,
+    SandboxProcessEventQuery, SandboxProcessRecord, SandboxProcessStatus, Secret, SecretId,
+    SecretMetadata, SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnHandle,
+    TurnRecord, Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest,
+    WriteSandboxProcessInputRequest,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -133,14 +134,19 @@ impl AgentHandle for LocalSandboxAgent {
         self.remote.record()
     }
 
-    async fn list_conversations(&self) -> Result<Vec<Arc<dyn ConversationHandle>>> {
-        Ok(self
-            .remote
-            .list_conversations()
-            .await?
-            .into_iter()
-            .map(|remote| wrap_conversation(Arc::clone(&self.state), remote))
-            .collect())
+    async fn list_conversations(
+        &self,
+        request: ListConversationsRequest,
+    ) -> Result<ListConversationsResult<Arc<dyn ConversationHandle>>> {
+        let result = self.remote.list_conversations(request).await?;
+        Ok(ListConversationsResult {
+            conversations: result
+                .conversations
+                .into_iter()
+                .map(|remote| wrap_conversation(Arc::clone(&self.state), remote))
+                .collect(),
+            next_cursor: result.next_cursor,
+        })
     }
 
     async fn get_conversation(
@@ -254,8 +260,9 @@ impl LocalSandboxConversation {
 
         let slug = format!("remote-{}", self.remote.record().id);
         let local_conversation = match local_agent
-            .list_conversations()
+            .list_conversations(ListConversationsRequest::default())
             .await?
+            .conversations
             .into_iter()
             .find(|conversation| conversation.record().slug == slug)
         {
@@ -332,7 +339,6 @@ impl LocalSandboxConversation {
             .add_events(AddEventsRequest {
                 session_id: None,
                 turn_id: None,
-                expected_head: None,
                 data: vec![EventData::Custom {
                     event_type: LOCAL_SANDBOX_MAP_EVENT.to_string(),
                     payload: serde_json::to_value(LocalSandboxMapEvent {
@@ -350,7 +356,6 @@ impl LocalSandboxConversation {
             .add_events(AddEventsRequest {
                 session_id: None,
                 turn_id: None,
-                expected_head: None,
                 data,
             })
             .await?;
@@ -436,6 +441,7 @@ impl ConversationHandle for LocalSandboxConversation {
                 image: request.image,
                 default_workdir: request.default_workdir.unwrap_or_default(),
                 file_system_mounts: request.file_system_mounts.unwrap_or_default(),
+                durable_file_systems: request.durable_file_systems.unwrap_or_default(),
                 enable_networking: request.enable_networking.unwrap_or(true),
                 idle_seconds: request.idle_seconds.unwrap_or(60),
             },
@@ -683,6 +689,7 @@ mod tests {
                 image: "local-image".to_string(),
                 default_workdir: Some("/workspace".to_string()),
                 file_system_mounts: Some(Vec::new()),
+                durable_file_systems: None,
                 enable_networking: Some(false),
                 idle_seconds: Some(120),
             })

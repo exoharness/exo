@@ -17,6 +17,7 @@ import {
   parseWorkerCommand,
   writeWorkerEvent,
 } from "../protocol";
+import { createResilienceHandlers } from "./discord";
 
 const SEND_TIMEOUT_MS = 60_000;
 
@@ -34,6 +35,19 @@ const allowBots = config.allowBots === true;
 if (trigger !== "all_messages" && trigger !== "mentions_only") {
   throw new Error("Discord trigger must be all_messages or mentions_only");
 }
+
+const resilience = createResilienceHandlers({
+  emit: writeWorkerEvent,
+  exit: (code) => process.exit(code),
+});
+
+process.on("unhandledRejection", (reason) => {
+  resilience.onUnhandledRejection(reason);
+});
+
+process.on("uncaughtException", (error) => {
+  resilience.onUncaughtException(error);
+});
 
 const client = new Client({
   intents: [
@@ -60,10 +74,11 @@ client.once("ready", () => {
 });
 
 client.on("shardDisconnect", (event) => {
-  writeWorkerEvent({
-    type: "disconnected",
-    reason: event.reason || String(event.code),
-  });
+  resilience.onShardDisconnect(event.code);
+});
+
+client.on("shardError", (error) => {
+  resilience.onShardError(error);
 });
 
 client.on("messageCreate", (message) => {
@@ -91,7 +106,11 @@ client.on("messageCreate", (message) => {
   });
 });
 
-await client.login(token);
+try {
+  await client.login(token);
+} catch (error) {
+  resilience.onLoginFailure(error);
+}
 
 const input = readline.createInterface({
   input: process.stdin,

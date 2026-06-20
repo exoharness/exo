@@ -49,6 +49,15 @@ async fn http_exoharness_supports_agent_and_conversation_crud() {
 }
 
 #[actix_web::test]
+async fn http_exoharness_lists_conversations_recent_first_and_paginates() {
+    let fixture = http_harness().await;
+    crate::contract_tests::list_conversations_returns_recent_first_and_paginates(Arc::clone(
+        &fixture.harness,
+    ))
+    .await;
+}
+
+#[actix_web::test]
 async fn http_exoharness_begin_turn_tracks_events_through_finish() {
     let fixture = http_harness().await;
     crate::contract_tests::begin_turn_tracks_events_through_finish(Arc::clone(&fixture.harness))
@@ -102,6 +111,7 @@ async fn http_exoharness_runs_noninteractive_sandbox_commands() {
             image: "local".to_string(),
             default_workdir: Some("/".to_string()),
             file_system_mounts: None,
+            durable_file_systems: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })
@@ -149,6 +159,7 @@ async fn http_exoharness_supports_sandbox_process_events() {
             image: "local".to_string(),
             default_workdir: Some("/".to_string()),
             file_system_mounts: None,
+            durable_file_systems: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })

@@ -31,6 +31,7 @@ fn make_e2b_request(conversation_id: &str, sandbox_id: &str) -> SandboxRequest {
         spec: SandboxSpec {
             image: e2b_template_id(),
             mounts: Vec::new(),
+            durable_file_systems: Vec::new(),
             network: SandboxNetworkPolicy::Enabled,
             default_workdir: "/home/user".into(),
         },
@@ -60,6 +61,7 @@ fn make_sprites_request(conversation_id: &str, sandbox_id: &str) -> SandboxReque
         spec: SandboxSpec {
             image: "default".into(),
             mounts: Vec::new(),
+            durable_file_systems: Vec::new(),
             network: SandboxNetworkPolicy::Enabled,
             default_workdir: "/home/sprite".into(),
         },
