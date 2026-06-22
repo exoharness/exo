@@ -144,9 +144,90 @@ The continual setup creates one failure mode the paper's static setup doesn't:
 4. Model config (eventually frozen Opus 4.6 / Haiku 4.5 for a directly-comparable
    leaderboard number) deferred until the protocols are proven on a convenient model.
 
+## Benchmark options surveyed
+
+The landscape we considered, with pros/cons **for our continual-learning thesis**.
+Selected = in the plan above; the rest are candidates or rejected.
+
+### Horizon — SELECTED (Class 1)
+
+- **Link**: https://github.com/orinlabs/horizon · dataset `orinlabs/horizon-public`
+- **What**: long-horizon learning bench on Harbor; the agent must acquire learnings
+  from a long first-person session trace and apply them in a live environment.
+- **Framework**: Harbor (host-side agents; no-internet sandbox).
+- **Pros**: purpose-built for the exact thing exo is for (carry learnings across a
+  horizon); agent-native memory vs. `trace_rag` is a clean, publishable contrast;
+  Harbor-native so it reuses our infra; host-side exo agent now built.
+- **Cons**: only 3 public example tasks (the bulk is private to prevent overfit) —
+  limits a public number; requires the host-side proxy architecture (built, but
+  more moving parts); trace download needed a URL fix.
+
+### Online text classification — SELECTED (Class 2)
+
+- **Link**: Meta-Harness §4.1 (arXiv:2603.28052); datasets USPTO-50k,
+  Symptom2Disease, LawBench (+ 9-dataset OOD suite).
+- **What**: labeled examples arrive one at a time; the system updates memory; held-out
+  accuracy is measured — a continual/online-learning protocol by construction.
+- **Framework**: our own driver (not Harbor); simple.
+- **Pros**: cleanest continual protocol; cheap; directly Meta-Harness-comparable
+  (ACE/MCE + their searched harness); exposes a learning curve.
+- **Cons**: not agentic; narrow domain; needs a classification harness + streaming
+  driver built.
+
+### TerminalBench-2 — SELECTED (Class 3)
+
+- **Link**: Harbor `terminal-bench@2.0` (Merrill et al., arXiv:2601.11868).
+- **What**: 89 hard terminal/coding tasks; pass-rate leaderboard.
+- **Framework**: Harbor (installed agent; we run it today).
+- **Pros**: already running; public leaderboard to rank against; Meta-Harness
+  reported it (76.4% Opus / 37.6% Haiku) so a direct comparison exists.
+- **Cons**: single-shot capability bench — continual angle is weak (only "memory
+  carried across tasks/attempts"); not a learning benchmark per se.
+
+### Continual Learning Bench — STRONG CANDIDATE (investigate)
+
+- **Link**: https://continual-learning-bench.com/ (arXiv:2606.05661; GitHub `pgasawa/…`)
+- **What**: expert-validated hard tasks (software eng, data science, strategic
+  modeling) run as **sequences of instances**; headline metric is **Gain** =
+  stateful performance minus a stateless reset baseline — i.e. "how much the system
+  learned from experience."
+- **Framework**: TBD (needs checking — repo + paper exist; unclear if Harbor-based).
+- **Pros**: **the most on-thesis option** — its Gain metric is literally what our
+  plan calls the learning-curve signal (continual self-adaptation vs. a reset
+  baseline); diverse, hard, agentic tasks; has a leaderboard + Agg. Reward / Gain /
+  Avg. Cost metrics that map onto exo cleanly.
+- **Cons**: newer/less-proven; integration cost unknown until we confirm the
+  framework; need to verify task availability and whether exo plugs in directly.
+- **Take**: worth a focused spike — if it's Harbor-compatible (or a thin adapter),
+  it may be a _better_ continual-learning centerpiece than Horizon (bigger public
+  set, an explicit gain metric, diverse domains). Flag for evaluation.
+
+### SCBench / SlopCodeBench — TANGENTIAL
+
+- **Link**: https://www.scbench.ai/ (SprocketLab; Snorkel/DARPA/NSF). v1.0: 36
+  problems, 196 checkpoints, 19 models.
+- **What**: iterative coding — implement, then extend your own code across staged
+  requirement checkpoints; metrics are solve rate + **erosion** (quality decay) +
+  **verbosity**. gpt-5.5/Codex leads at 28.1%.
+- **Framework**: custom (not Harbor).
+- **Pros**: tests sustained quality under change; gpt-5.5 already strong; a real
+  "does it degrade over a run" axis.
+- **Cons**: measures _intra-task_ code erosion, not _cross-task learning from
+  experience_ — not continual learning in our sense (no memory/gain story); custom
+  harness = separate integration. Interesting but off-thesis; park it.
+
+### Retrieval-augmented math reasoning — REJECTED
+
+- **Link**: Meta-Harness §4.2 (200 IMO-level problems; 535K retrieval corpus).
+- **Why rejected**: least-continual of the paper's three (static retrieval policy),
+  heaviest build (corpus + airtight decontamination + 5-model pass@1), adds little
+  to the thesis. Revisit only for full paper coverage.
+
 ## Open decisions
 
 - Confirm the continual-learning framing and the per-class adaptation/eval protocol.
+- **Continual Learning Bench**: spike its framework/availability — potential
+  centerpiece alternative/addition to Horizon (its Gain metric matches our thesis).
 - Horizon history→memory design (load into memory store vs. read from env) — the
   core of the exo-vs-RAG comparison.
 - When to switch to Opus 4.6 / Haiku 4.5 (needs an Anthropic base-model path in exo).
