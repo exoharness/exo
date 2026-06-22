@@ -133,10 +133,7 @@ async fn acquire_create_includes_exo_metadata_labels() {
         .and_then(Value::as_array)
         .expect("labels array");
     assert!(labels.iter().any(|label| {
-        label.as_str()
-            == Some(&format!(
-                "exo.sandbox.key=conversation:conv-labels:sandbox-labels"
-            ))
+        label.as_str() == Some("exo.sandbox.key=conversation:conv-labels:sandbox-labels")
     }));
     assert!(
         labels

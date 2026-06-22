@@ -397,18 +397,18 @@ async fn start_process_in_sandbox(
         envd_access_token: envd_access_token.map(str::to_string),
     };
 
-    spawn_e2b_process_stream_poller(
-        process.clone(),
-        cmd.to_string(),
-        args.to_vec(),
+    spawn_e2b_process_stream_poller(E2bProcessStreamPoller {
+        process: process.clone(),
+        cmd: cmd.to_string(),
+        args: args.to_vec(),
         cwd,
-        command.env.clone(),
+        env: command.env.clone(),
         stdout_writer,
         stderr_writer,
         stdin_error_rx,
         pid_tx,
         wait_tx,
-    );
+    });
     spawn_e2b_process_stdin_forwarder(process, stdin_reader, pid_rx, stdin_error_tx);
 
     let wait: BoxFuture<'static, crate::Result<i32>> = Box::pin(async move {
@@ -518,7 +518,7 @@ struct E2bRunningProcess {
     envd_access_token: Option<String>,
 }
 
-fn spawn_e2b_process_stream_poller(
+struct E2bProcessStreamPoller {
     process: E2bRunningProcess,
     cmd: String,
     args: Vec<String>,
@@ -526,11 +526,25 @@ fn spawn_e2b_process_stream_poller(
     env: HashMap<String, String>,
     stdout_writer: tokio::io::DuplexStream,
     stderr_writer: tokio::io::DuplexStream,
-    mut stdin_error_rx: mpsc::UnboundedReceiver<anyhow::Error>,
+    stdin_error_rx: mpsc::UnboundedReceiver<anyhow::Error>,
     pid_tx: oneshot::Sender<i32>,
     wait_tx: oneshot::Sender<crate::Result<i32>>,
-) {
+}
+
+fn spawn_e2b_process_stream_poller(poller: E2bProcessStreamPoller) {
     tokio::spawn(async move {
+        let E2bProcessStreamPoller {
+            process,
+            cmd,
+            args,
+            cwd,
+            env,
+            stdout_writer,
+            stderr_writer,
+            mut stdin_error_rx,
+            pid_tx,
+            wait_tx,
+        } = poller;
         let sandbox_id = process.sandbox_id.clone();
         let result = poll_e2b_process_stream(
             process,
@@ -665,18 +679,16 @@ async fn poll_e2b_process_stream(
             let Some(event) = message.get("event") else {
                 continue;
             };
-            if let Some(start) = event.get("start") {
-                if let Some(pid) = start.get("pid").and_then(|v| v.as_i64()) {
-                    if let Some(sender) = pid_tx.take() {
-                        if sender.send(pid as i32).is_err() {
-                            tracing::debug!(
-                                sandbox_id = %process.sandbox_id,
-                                pid,
-                                "E2B process stdin forwarder dropped before pid was delivered"
-                            );
-                        }
-                    }
-                }
+            if let Some(start) = event.get("start")
+                && let Some(pid) = start.get("pid").and_then(|v| v.as_i64())
+                && let Some(sender) = pid_tx.take()
+                && sender.send(pid as i32).is_err()
+            {
+                tracing::debug!(
+                    sandbox_id = %process.sandbox_id,
+                    pid,
+                    "E2B process stdin forwarder dropped before pid was delivered"
+                );
             }
             if let Some(data) = event.get("data") {
                 if let Some(chunk) = data.get("stdout").and_then(|v| v.as_str()) {
@@ -957,10 +969,10 @@ mod connect_tests {
 
 /// E2B envd encodes stdout/stderr chunks as standard base64 in Connect JSON events.
 fn decode_process_bytes(raw: &str) -> String {
-    if let Ok(decoded) = BASE64.decode(raw.trim().as_bytes()) {
-        if let Ok(text) = String::from_utf8(decoded) {
-            return text;
-        }
+    if let Ok(decoded) = BASE64.decode(raw.trim().as_bytes())
+        && let Ok(text) = String::from_utf8(decoded)
+    {
+        return text;
     }
     raw.to_string()
 }
@@ -969,12 +981,11 @@ fn parse_exit_code(end: &serde_json::Value) -> i32 {
     if let Some(code) = end.get("exitCode").and_then(|v| v.as_i64()) {
         return code as i32;
     }
-    if let Some(status) = end.get("status").and_then(|v| v.as_str()) {
-        if let Some(rest) = status.strip_prefix("exit status ") {
-            if let Ok(code) = rest.trim().parse::<i32>() {
-                return code;
-            }
-        }
+    if let Some(status) = end.get("status").and_then(|v| v.as_str())
+        && let Some(rest) = status.strip_prefix("exit status ")
+        && let Ok(code) = rest.trim().parse::<i32>()
+    {
+        return code;
     }
     0
 }

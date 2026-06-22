@@ -415,12 +415,11 @@ async fn run_sprites_exec_websocket(
                         }
                     }
                     Message::Text(text) => {
-                        if let Ok(event) = serde_json::from_str::<SpritesExecJsonMessage>(&text) {
-                            if event.message_type == "exit" {
-                                if let Some(code) = event.exit_code {
-                                    exit_code = Some(code);
-                                }
-                            }
+                        if let Ok(event) = serde_json::from_str::<SpritesExecJsonMessage>(&text)
+                            && event.message_type == "exit"
+                            && let Some(code) = event.exit_code
+                        {
+                            exit_code = Some(code);
                         }
                     }
                     Message::Close(_) => break,
@@ -466,10 +465,10 @@ fn parse_sprites_binary_exit_code(payload: &[u8]) -> i32 {
     if payload.len() == 1 {
         return payload[0] as i32;
     }
-    if let Ok(text) = std::str::from_utf8(payload) {
-        if let Ok(code) = text.trim().parse::<i32>() {
-            return code;
-        }
+    if let Ok(text) = std::str::from_utf8(payload)
+        && let Ok(code) = text.trim().parse::<i32>()
+    {
+        return code;
     }
     payload.last().copied().unwrap_or(0) as i32
 }
@@ -554,10 +553,11 @@ fn parse_exec_response(body: &str) -> Result<(i32, String, String)> {
     }
 
     // Some deployments return a single JSON object; others stream NDJSON or raw stdout.
-    if trimmed.starts_with('{') && !trimmed.contains('\n') {
-        if let Ok(parsed) = serde_json::from_str::<SpritesHttpExecResponse>(trimmed) {
-            return Ok(parsed.into_parts());
-        }
+    if trimmed.starts_with('{')
+        && !trimmed.contains('\n')
+        && let Ok(parsed) = serde_json::from_str::<SpritesHttpExecResponse>(trimmed)
+    {
+        return Ok(parsed.into_parts());
     }
 
     let mut stdout = String::new();
@@ -709,10 +709,10 @@ fn parse_checkpoint_id_from_stream(body: &str) -> Result<String> {
             if let Some(id) = data.strip_prefix("  ID: ") {
                 checkpoint_id = Some(id.trim().to_string());
             }
-            if let Some(rest) = data.strip_prefix("Checkpoint ") {
-                if let Some(id) = rest.split_whitespace().next() {
-                    checkpoint_id = Some(id.to_string());
-                }
+            if let Some(rest) = data.strip_prefix("Checkpoint ")
+                && let Some(id) = rest.split_whitespace().next()
+            {
+                checkpoint_id = Some(id.to_string());
             }
         }
     }
