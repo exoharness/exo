@@ -1,5 +1,6 @@
 # Downloads / build outputs (recreated by setup.sh + build-bundle.sh)
 exo-bundle.tar.gz
+.cache/
 .venv/
 # upstream harbor reference clone — not needed at runtime (CLI pulls dataset from registry)
 /harbor/

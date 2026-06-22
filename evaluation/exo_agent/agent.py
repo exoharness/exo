@@ -58,21 +58,10 @@ class ExoAgent(BaseInstalledAgent):
         return f"exo --root {self._EXO_ROOT} --secret-backend file"
 
     async def install(self, environment: BaseEnvironment) -> None:
-        # System deps + Node 22 (skip node if already present).
-        await self.exec_as_root(
-            environment,
-            "apt-get update && apt-get install -y --no-install-recommends "
-            "curl ca-certificates tar",
-            env={"DEBIAN_FRONTEND": "noninteractive"},
-        )
-        await self.exec_as_root(
-            environment,
-            "command -v node >/dev/null 2>&1 || { "
-            "curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && "
-            "apt-get install -y nodejs; }",
-            env={"DEBIAN_FRONTEND": "noninteractive"},
-        )
         # Ship + unpack the slim exo bundle; expose `exo` on PATH (world-readable).
+        # The bundle is self-contained (static-musl exo + vendored node + deps), so
+        # this needs NO internet — required for sandboxes with allow_internet=false
+        # (e.g. Horizon). tar is present on essentially all task base images.
         await environment.upload_file(self._exo_bundle, self._BUNDLE_REMOTE)
         await self.exec_as_root(
             environment,
@@ -81,6 +70,20 @@ class ExoAgent(BaseInstalledAgent):
             f"chmod -R a+rX {self._EXO_HOME} && "
             f"ln -sf {self._EXO_HOME}/target/x86_64-unknown-linux-musl/release/exo "
             "/usr/local/bin/exo",
+        )
+        # Node: prefer one already in the image; else use the vendored glibc node;
+        # else (old-glibc image with no node + internet) fall back to NodeSource.
+        # Uses ( ) subshells, not { } groups, to avoid f-string brace collisions.
+        await self.exec_as_root(
+            environment,
+            "command -v node >/dev/null 2>&1 || "
+            f"( {self._EXO_HOME}/node --version >/dev/null 2>&1 && "
+            f"ln -sf {self._EXO_HOME}/node /usr/local/bin/node ) || "
+            "( ( command -v curl >/dev/null 2>&1 || ( apt-get update && "
+            "apt-get install -y --no-install-recommends curl ca-certificates ) ); "
+            "curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && "
+            "apt-get install -y nodejs )",
+            env={"DEBIAN_FRONTEND": "noninteractive"},
         )
 
     async def run(
