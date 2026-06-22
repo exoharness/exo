@@ -465,8 +465,10 @@ impl BasicExoHarnessInner {
 
     async fn e2b_config_from_binding(&self) -> Result<Option<crate::E2bConfig>> {
         let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
-        let Some((api_key_secret_id, api_url, default_image)) = bindings.into_iter().rev().find_map(
-            |record| match record.binding {
+        let Some((api_key_secret_id, api_url, default_image)) = bindings
+            .into_iter()
+            .rev()
+            .find_map(|record| match record.binding {
                 Binding::Sandbox {
                     config:
                         SandboxProviderConfig::E2b {
@@ -477,8 +479,8 @@ impl BasicExoHarnessInner {
                     ..
                 } => Some((api_key_secret_id, api_url, default_image)),
                 _ => None,
-            },
-        ) else {
+            })
+        else {
             return Ok(None);
         };
         let api_key = self
@@ -504,15 +506,12 @@ impl BasicExoHarnessInner {
         &self,
         spec: &SpritesBackendSpec,
     ) -> Result<crate::SpritesConfig> {
-        let token = self
-            .secret_key(&spec.token_secret)
-            .await?
-            .ok_or_else(|| {
-                anyhow!(
-                    "sprites sandbox requested but secret {:?} is not set",
-                    spec.token_secret
-                )
-            })?;
+        let token = self.secret_key(&spec.token_secret).await?.ok_or_else(|| {
+            anyhow!(
+                "sprites sandbox requested but secret {:?} is not set",
+                spec.token_secret
+            )
+        })?;
         Ok(crate::SpritesConfig {
             token,
             api_url: spec.api_url.clone(),
@@ -538,13 +537,7 @@ impl BasicExoHarnessInner {
                             labels,
                         },
                     ..
-                } => Some((
-                    token_secret_id,
-                    api_url,
-                    url_auth,
-                    organization,
-                    labels,
-                )),
+                } => Some((token_secret_id, api_url, url_auth, organization, labels)),
                 _ => None,
             })
         else {

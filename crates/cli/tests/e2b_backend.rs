@@ -7,8 +7,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use exoharness::{
     E2bConfig, E2bSandboxBackend, ManagedSandboxBackend, SandboxCommand, SandboxKey,
-    SandboxLifecycleConfig, SandboxMount, SandboxMountAccess, SandboxNetworkPolicy,
-    SandboxRequest, SandboxSpec, SnapshotKind, SnapshotPayload,
+    SandboxLifecycleConfig, SandboxMount, SandboxMountAccess, SandboxNetworkPolicy, SandboxRequest,
+    SandboxSpec, SnapshotKind, SnapshotPayload,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
@@ -85,9 +85,7 @@ async fn acquire_posts_to_sandboxes_with_metadata() {
     mount_empty_sandbox_list(&server).await;
     Mock::given(method("POST"))
         .and(path("/sandboxes"))
-        .respond_with(
-            ResponseTemplate::new(201).set_body_json(sandbox_created_json("sb-fresh")),
-        )
+        .respond_with(ResponseTemplate::new(201).set_body_json(sandbox_created_json("sb-fresh")))
         .expect(1)
         .mount(&server)
         .await;
@@ -130,7 +128,10 @@ async fn acquire_rejects_host_mounts() {
         Err(error) => error,
     };
     let msg = format!("{error:#}").to_lowercase();
-    assert!(msg.contains("mount") || msg.contains("e2b"), "unexpected: {msg}");
+    assert!(
+        msg.contains("mount") || msg.contains("e2b"),
+        "unexpected: {msg}"
+    );
     assert_eq!(
         server.received_requests().await.unwrap_or_default().len(),
         0
@@ -144,9 +145,10 @@ async fn acquire_reuses_running_sandbox_without_connect() {
 
     Mock::given(method("GET"))
         .and(path("/v2/sandboxes"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-            listed_sandbox_json("sb-running", "running"),
-        ])))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!([listed_sandbox_json("sb-running", "running"),])),
+        )
         .expect(1)
         .mount(&server)
         .await;
@@ -172,9 +174,10 @@ async fn acquire_connects_paused_sandbox() {
 
     Mock::given(method("GET"))
         .and(path("/v2/sandboxes"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-            listed_sandbox_json("sb-paused", "paused"),
-        ])))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!([listed_sandbox_json("sb-paused", "paused"),])),
+        )
         .mount(&server)
         .await;
     Mock::given(method("POST"))
@@ -197,9 +200,10 @@ async fn acquire_list_metadata_query_is_not_double_url_encoded() {
 
     Mock::given(method("GET"))
         .and(path("/v2/sandboxes"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-            listed_sandbox_json("sb-keyed", "running"),
-        ])))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!([listed_sandbox_json("sb-keyed", "running"),])),
+        )
         .expect(1)
         .mount(&server)
         .await;
@@ -210,7 +214,10 @@ async fn acquire_list_metadata_query_is_not_double_url_encoded() {
         .expect("acquire should find sandbox by metadata");
 
     let requests = server.received_requests().await.unwrap_or_default();
-    let query = requests[0].url.query().expect("list request has query string");
+    let query = requests[0]
+        .url
+        .query()
+        .expect("list request has query string");
     assert!(
         !query.contains("%253A"),
         "metadata filter must not double-encode ':' in sandbox keys; got {query}"
@@ -239,9 +246,7 @@ async fn acquire_creates_when_metadata_list_is_empty() {
         .await;
     Mock::given(method("POST"))
         .and(path("/sandboxes"))
-        .respond_with(
-            ResponseTemplate::new(201).set_body_json(sandbox_created_json("sb-fresh")),
-        )
+        .respond_with(ResponseTemplate::new(201).set_body_json(sandbox_created_json("sb-fresh")))
         .expect(1)
         .mount(&server)
         .await;
@@ -260,9 +265,7 @@ async fn stop_calls_pause_not_delete() {
     mount_empty_sandbox_list(&server).await;
     Mock::given(method("POST"))
         .and(path("/sandboxes"))
-        .respond_with(
-            ResponseTemplate::new(201).set_body_json(sandbox_created_json("sb-stop")),
-        )
+        .respond_with(ResponseTemplate::new(201).set_body_json(sandbox_created_json("sb-stop")))
         .mount(&server)
         .await;
     Mock::given(method("POST"))
@@ -294,9 +297,7 @@ async fn snapshot_returns_e2b_snapshot_payload() {
     mount_empty_sandbox_list(&server).await;
     Mock::given(method("POST"))
         .and(path("/sandboxes"))
-        .respond_with(
-            ResponseTemplate::new(201).set_body_json(sandbox_created_json("sb-snap")),
-        )
+        .respond_with(ResponseTemplate::new(201).set_body_json(sandbox_created_json("sb-snap")))
         .mount(&server)
         .await;
     Mock::given(method("POST"))
@@ -309,7 +310,10 @@ async fn snapshot_returns_e2b_snapshot_payload() {
         .mount(&server)
         .await;
 
-    let handle = backend.acquire(make_request("conv-7", "sandbox-7")).await.unwrap();
+    let handle = backend
+        .acquire(make_request("conv-7", "sandbox-7"))
+        .await
+        .unwrap();
     let payload = handle.snapshot().await.expect("snapshot ok");
 
     assert!(matches!(payload.kind, SnapshotKind::E2bSnapshot));
@@ -327,9 +331,7 @@ async fn acquire_from_snapshot_uses_snapshot_template_id() {
 
     Mock::given(method("POST"))
         .and(path("/sandboxes"))
-        .respond_with(
-            ResponseTemplate::new(201).set_body_json(sandbox_created_json("sb-restored")),
-        )
+        .respond_with(ResponseTemplate::new(201).set_body_json(sandbox_created_json("sb-restored")))
         .expect(1)
         .mount(&server)
         .await;
@@ -388,32 +390,29 @@ async fn exec_uses_envd_process_start() {
     mount_empty_sandbox_list(&server).await;
     Mock::given(method("POST"))
         .and(path("/sandboxes"))
-        .respond_with(
-            ResponseTemplate::new(201).set_body_json(sandbox_created_json("sb-exec")),
-        )
+        .respond_with(ResponseTemplate::new(201).set_body_json(sandbox_created_json("sb-exec")))
         .mount(&server)
         .await;
 
     let connect_stream = connect_enveloped_stream(&[
-        (
-            0,
-            json!({"event": {"data": {"stdout": "hello from mock"}}}),
-        ),
-        (
-            2,
-            json!({"event": {"end": {"status": "exit status 0"}}}),
-        ),
+        (0, json!({"event": {"data": {"stdout": "hello from mock"}}})),
+        (2, json!({"event": {"end": {"status": "exit status 0"}}})),
     ]);
 
     Mock::given(method("POST"))
         .and(path("/process.Process/Start"))
         .and(exec_start_request_with_stdin(false))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(connect_stream, "application/connect+json"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(connect_stream, "application/connect+json"),
+        )
         .expect(1)
         .mount(&server)
         .await;
 
-    let handle = backend.acquire(make_request("conv-10", "sandbox-10")).await.unwrap();
+    let handle = backend
+        .acquire(make_request("conv-10", "sandbox-10"))
+        .await
+        .unwrap();
     let output = handle
         .exec(&exoharness::SandboxCommand {
             argv: vec!["/bin/echo".into(), "hello".into()],
@@ -430,7 +429,9 @@ async fn exec_uses_envd_process_start() {
 
     let requests = server.received_requests().await.unwrap_or_default();
     assert!(
-        requests.iter().any(|r| r.url.path() == "/process.Process/Start"),
+        requests
+            .iter()
+            .any(|r| r.url.path() == "/process.Process/Start"),
         "exec must hit envd process start"
     );
 }
@@ -445,9 +446,7 @@ async fn start_process_streams_envd_process_stdout() {
     mount_empty_sandbox_list(&server).await;
     Mock::given(method("POST"))
         .and(path("/sandboxes"))
-        .respond_with(
-            ResponseTemplate::new(201).set_body_json(sandbox_created_json("sb-stream")),
-        )
+        .respond_with(ResponseTemplate::new(201).set_body_json(sandbox_created_json("sb-stream")))
         .mount(&server)
         .await;
     Mock::given(method("POST"))
@@ -456,14 +455,8 @@ async fn start_process_streams_envd_process_stdout() {
         .respond_with(ResponseTemplate::new(200).set_body_raw(
             connect_enveloped_stream(&[
                 (0, json!({"event": {"start": {"pid": 42}}})),
-                (
-                    0,
-                    json!({"event": {"data": {"stdout": "streamed-line\n"}}}),
-                ),
-                (
-                    0,
-                    json!({"event": {"end": {"status": "exit status 0"}}}),
-                ),
+                (0, json!({"event": {"data": {"stdout": "streamed-line\n"}}})),
+                (0, json!({"event": {"end": {"status": "exit status 0"}}})),
             ]),
             "application/connect+json",
         ))

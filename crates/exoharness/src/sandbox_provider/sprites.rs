@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
 use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use url::Url;
 
@@ -73,9 +73,8 @@ pub struct SpritesSandboxBackend {
 impl SpritesSandboxBackend {
     pub fn new(config: SpritesConfig) -> Result<Self> {
         let mut headers = HeaderMap::new();
-        let mut auth = HeaderValue::from_str(&format!("Bearer {}", config.token)).context(
-            "SPRITES_TOKEN contains characters that aren't valid in an HTTP header",
-        )?;
+        let mut auth = HeaderValue::from_str(&format!("Bearer {}", config.token))
+            .context("SPRITES_TOKEN contains characters that aren't valid in an HTTP header")?;
         auth.set_sensitive(true);
         headers.insert(AUTHORIZATION, auth);
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -237,7 +236,10 @@ impl SpritesBackendHandle {
         } else if let Some(rest) = self.api_url.strip_prefix("http://") {
             format!("ws://{rest}")
         } else {
-            bail!("Sprites api_url must be an http(s) URL, got {}", self.api_url);
+            bail!(
+                "Sprites api_url must be an http(s) URL, got {}",
+                self.api_url
+            );
         };
         Url::parse(&format!("{origin}{path}")).context("parsing Sprites WebSocket URL")
     }
@@ -320,12 +322,9 @@ async fn start_process_in_sprite(
         .as_str()
         .into_client_request()
         .context("building Sprites exec WebSocket request")?;
-    let auth = HeaderValue::from_str(&format!("Bearer {}", backend.token)).context(
-        "SPRITES_TOKEN contains characters that aren't valid in an HTTP header",
-    )?;
-    request
-        .headers_mut()
-        .insert(AUTHORIZATION, auth);
+    let auth = HeaderValue::from_str(&format!("Bearer {}", backend.token))
+        .context("SPRITES_TOKEN contains characters that aren't valid in an HTTP header")?;
+    request.headers_mut().insert(AUTHORIZATION, auth);
 
     let (ws_stream, _) = connect_async(request)
         .await
@@ -338,13 +337,8 @@ async fn start_process_in_sprite(
 
     let sprite_name_owned = sprite_name.to_string();
     tokio::spawn(async move {
-        let result = run_sprites_exec_websocket(
-            ws_stream,
-            stdin_reader,
-            stdout_writer,
-            stderr_writer,
-        )
-        .await;
+        let result =
+            run_sprites_exec_websocket(ws_stream, stdin_reader, stdout_writer, stderr_writer).await;
         if wait_tx.send(result).is_err() {
             tracing::debug!(
                 sprite_name = %sprite_name_owned,
@@ -371,7 +365,9 @@ async fn start_process_in_sprite(
 }
 
 async fn run_sprites_exec_websocket(
-    ws_stream: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    ws_stream: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
     mut stdin_reader: tokio::io::DuplexStream,
     mut stdout_writer: tokio::io::DuplexStream,
     mut stderr_writer: tokio::io::DuplexStream,
@@ -645,8 +641,7 @@ async fn save_checkpoint_via_backend(
         checkpoint_id,
         sprite_name: sprite_name.to_string(),
     };
-    let bytes =
-        serde_json::to_vec(&manifest).context("serializing Sprites snapshot manifest")?;
+    let bytes = serde_json::to_vec(&manifest).context("serializing Sprites snapshot manifest")?;
     Ok(SnapshotPayload {
         kind: SnapshotKind::SpritesSnapshot,
         bytes: Bytes::from(bytes),
@@ -765,10 +760,7 @@ fn sprite_labels_for_request(
         WARM_SANDBOX_KEY_LABEL,
         &request.key.to_string(),
     ));
-    labels.push(sprite_label(
-        WARM_SANDBOX_SPEC_HASH_LABEL,
-        spec_hash,
-    ));
+    labels.push(sprite_label(WARM_SANDBOX_SPEC_HASH_LABEL, spec_hash));
     labels.extend(extra_labels.iter().cloned());
     labels
 }

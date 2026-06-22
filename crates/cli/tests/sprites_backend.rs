@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use exoharness::{
-    ManagedSandboxBackend, SandboxKey, SandboxLifecycleConfig, SandboxMount,
-    SandboxMountAccess, SandboxNetworkPolicy, SandboxRequest, SandboxSpec, SnapshotKind,
-    SnapshotPayload, SpritesConfig, SpritesSandboxBackend,
+    ManagedSandboxBackend, SandboxKey, SandboxLifecycleConfig, SandboxMount, SandboxMountAccess,
+    SandboxNetworkPolicy, SandboxRequest, SandboxSpec, SnapshotKind, SnapshotPayload,
+    SpritesConfig, SpritesSandboxBackend,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path, path_regex};
@@ -133,11 +133,16 @@ async fn acquire_create_includes_exo_metadata_labels() {
         .and_then(Value::as_array)
         .expect("labels array");
     assert!(labels.iter().any(|label| {
-        label.as_str() == Some(&format!("exo.sandbox.key=conversation:conv-labels:sandbox-labels"))
+        label.as_str()
+            == Some(&format!(
+                "exo.sandbox.key=conversation:conv-labels:sandbox-labels"
+            ))
     }));
-    assert!(labels
-        .iter()
-        .any(|label| label.as_str() == Some(&format!("exo.sandbox.spec-hash={spec_hash}"))));
+    assert!(
+        labels
+            .iter()
+            .any(|label| label.as_str() == Some(&format!("exo.sandbox.spec-hash={spec_hash}")))
+    );
 }
 
 #[tokio::test]
@@ -264,9 +269,7 @@ async fn stop_does_not_delete_sprite() {
 
     let requests = server.received_requests().await.unwrap_or_default();
     assert!(
-        !requests
-            .iter()
-            .any(|r| r.method.as_str() == "DELETE"),
+        !requests.iter().any(|r| r.method.as_str() == "DELETE"),
         "stop must not delete the sprite"
     );
 }
@@ -387,7 +390,10 @@ async fn snapshot_returns_sprites_snapshot_payload() {
 
     assert!(matches!(payload.kind, SnapshotKind::SpritesSnapshot));
     let manifest: Value = serde_json::from_slice(&payload.bytes).unwrap();
-    assert_eq!(manifest.get("checkpoint_id").and_then(Value::as_str), Some("v3"));
+    assert_eq!(
+        manifest.get("checkpoint_id").and_then(Value::as_str),
+        Some("v3")
+    );
     assert_eq!(
         manifest.get("sprite_name").and_then(Value::as_str),
         Some(name.as_str())
@@ -455,4 +461,3 @@ async fn acquire_from_snapshot_rejects_wrong_kind() {
         "unexpected: {msg}"
     );
 }
-

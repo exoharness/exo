@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
-use futures::future::BoxFuture;
 use futures::StreamExt;
+use futures::future::BoxFuture;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -101,10 +101,7 @@ impl E2bSandboxBackend {
         let metadata = metadata_filter_query(key_label, spec_hash);
         // OpenAPI `state` uses style=form, explode=false → `state=running,paused`.
         // Two `state=` query params are not accepted reliably by the API.
-        if let Some(found) = self
-            .list_sandboxes_with_metadata(&metadata, true)
-            .await?
-        {
+        if let Some(found) = self.list_sandboxes_with_metadata(&metadata, true).await? {
             return Ok(Some(found));
         }
         // Fallback: metadata only (e.g. API ignores unknown state serialization).
@@ -226,7 +223,10 @@ impl ManagedSandboxBackend for E2bSandboxBackend {
         let key_label = request.key.to_string();
         let template_id = resolve_template_id(&request.spec, &self.template_id);
 
-        if let Some(existing) = self.find_sandbox_by_metadata(&key_label, &spec_hash).await? {
+        if let Some(existing) = self
+            .find_sandbox_by_metadata(&key_label, &spec_hash)
+            .await?
+        {
             let mut envd_access_token = None;
             if existing.state == "paused" {
                 let timeout_secs = idle_ttl_to_e2b_lifecycle(&request.lifecycle.idle_ttl).0;
@@ -300,7 +300,12 @@ impl E2bBackendHandle {
     }
 
     fn envd_endpoint(&self, sandbox_id: &str, path: &str) -> String {
-        envd_endpoint_url(self.envd_base_url.as_deref(), self.envd_port, sandbox_id, path)
+        envd_endpoint_url(
+            self.envd_base_url.as_deref(),
+            self.envd_port,
+            sandbox_id,
+            path,
+        )
     }
 }
 
@@ -358,8 +363,7 @@ impl ManagedSandboxHandle for E2bSandboxHandle {
     }
 
     async fn snapshot(&self) -> Result<SnapshotPayload> {
-        let base_template =
-            resolve_template_id(&self.request.spec, &self.backend.template_id);
+        let base_template = resolve_template_id(&self.request.spec, &self.backend.template_id);
         save_snapshot_via_backend(&self.backend, &self.sandbox_id, base_template).await
     }
 }
@@ -457,7 +461,8 @@ async fn exec_command_in_sandbox(
         },
         "stdin": false,
     });
-    let request_payload = serde_json::to_vec(&start_request).context("encoding E2B StartRequest")?;
+    let request_payload =
+        serde_json::to_vec(&start_request).context("encoding E2B StartRequest")?;
     let request_body = connect_encode_envelope(0, &request_payload)?;
 
     let mut request = backend
@@ -481,7 +486,10 @@ async fn exec_command_in_sandbox(
         .await
         .with_context(|| format!("exec in E2B sandbox {sandbox_id}"))?;
     let status = response.status();
-    let bytes = response.bytes().await.context("reading E2B exec response")?;
+    let bytes = response
+        .bytes()
+        .await
+        .context("reading E2B exec response")?;
     if !status.is_success() {
         bail!(
             "E2B exec failed ({status}): {}",
@@ -589,7 +597,8 @@ async fn poll_e2b_process_stream(
         },
         "stdin": true,
     });
-    let request_payload = serde_json::to_vec(&start_request).context("encoding E2B StartRequest")?;
+    let request_payload =
+        serde_json::to_vec(&start_request).context("encoding E2B StartRequest")?;
     let request_body = connect_encode_envelope(0, &request_payload)?;
 
     let mut request = process
@@ -815,8 +824,8 @@ impl ConnectEnvelopeReader {
         if self.buffer.len() < 5 {
             return Ok(None);
         }
-        let len = u32::from_be_bytes(self.buffer[1..5].try_into().expect("four length bytes"))
-            as usize;
+        let len =
+            u32::from_be_bytes(self.buffer[1..5].try_into().expect("four length bytes")) as usize;
         if len > CONNECT_MAX_ENVELOPE_BYTES {
             bail!("connect envelope length {len} exceeds max {CONNECT_MAX_ENVELOPE_BYTES}");
         }
@@ -856,7 +865,8 @@ fn connect_decode_envelopes(bytes: &[u8]) -> Result<Vec<(u8, Vec<u8>)>> {
             bail!("truncated Connect envelope header");
         }
         let flags = remaining[0];
-        let len = u32::from_be_bytes(remaining[1..5].try_into().expect("four length bytes")) as usize;
+        let len =
+            u32::from_be_bytes(remaining[1..5].try_into().expect("four length bytes")) as usize;
         remaining = &remaining[5..];
         if len > CONNECT_MAX_ENVELOPE_BYTES {
             bail!("connect envelope length {len} exceeds max {CONNECT_MAX_ENVELOPE_BYTES}");

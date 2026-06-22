@@ -102,7 +102,10 @@ async fn sprites_start_process_streams_incrementally() {
         SpritesSandboxBackend::new(sprites_config_from_env()).expect("SpritesSandboxBackend::new");
 
     let handle = backend
-        .acquire(make_sprites_request("live-sprites-stream", "sandbox-live-stream"))
+        .acquire(make_sprites_request(
+            "live-sprites-stream",
+            "sandbox-live-stream",
+        ))
         .await
         .expect("acquire Sprites sprite");
     assert_streaming_script(handle, "Sprites", "/home/sprite").await;
@@ -126,7 +129,10 @@ async fn e2b_start_process_contract() {
     .expect("E2bSandboxBackend::new");
 
     let handle = backend
-        .acquire(make_e2b_request("live-e2b-contract", "sandbox-live-contract"))
+        .acquire(make_e2b_request(
+            "live-e2b-contract",
+            "sandbox-live-contract",
+        ))
         .await
         .expect("acquire E2B sandbox");
     exoharness::contract_tests::sandbox_handle_start_process_supports_interactive_stdio_and_env(
@@ -143,7 +149,10 @@ async fn sprites_start_process_contract() {
         SpritesSandboxBackend::new(sprites_config_from_env()).expect("SpritesSandboxBackend::new");
 
     let handle = backend
-        .acquire(make_sprites_request("live-sprites-contract", "sandbox-live-contract"))
+        .acquire(make_sprites_request(
+            "live-sprites-contract",
+            "sandbox-live-contract",
+        ))
         .await
         .expect("acquire Sprites sprite");
     exoharness::contract_tests::sandbox_handle_start_process_supports_interactive_stdio_and_env(
@@ -153,11 +162,7 @@ async fn sprites_start_process_contract() {
     .expect("Sprites start_process contract");
 }
 
-async fn assert_streaming_script(
-    handle: Arc<dyn ManagedSandboxHandle>,
-    provider: &str,
-    cwd: &str,
-) {
+async fn assert_streaming_script(handle: Arc<dyn ManagedSandboxHandle>, provider: &str, cwd: &str) {
     let mut process = handle
         .start_process(&SandboxCommand {
             argv: vec![

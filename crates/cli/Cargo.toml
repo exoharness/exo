@@ -30,7 +30,10 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 bytes.workspace = true
-exoharness = { path = "../exoharness", features = ["basic-backend", "contract-tests"] }
+exoharness = { path = "../exoharness", features = [
+  "basic-backend",
+  "contract-tests",
+] }
 futures.workspace = true
 tempfile = "3.23.0"
 wiremock = "0.6"
