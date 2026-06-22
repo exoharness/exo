@@ -29,6 +29,8 @@ mod aws_agentcore {
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod process_bridge;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+mod proxy;
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod vercel;
 #[cfg(not(all(not(target_arch = "wasm32"), feature = "basic-backend")))]
 mod vercel {
@@ -52,6 +54,8 @@ pub use daytona::{
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub(crate) use docker::DEFAULT_DOCKER_IMAGE;
 pub use docker::default_docker_image;
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+pub use proxy::{PROXY_EXEC_URL_ENV, ProxySandboxBackend};
 pub use vercel::default_vercel_image;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub use vercel::{DEFAULT_VERCEL_API_URL, VercelConfig, VercelSandboxBackend};

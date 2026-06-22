@@ -580,6 +580,9 @@ pub enum SandboxProvider {
     Docker,
     #[serde(alias = "local")]
     LocalProcess,
+    /// Host-proxied: exec is forwarded to a host process that runs commands in
+    /// the real sandbox (see `sandbox_provider::proxy`).
+    Proxy,
 }
 
 impl SandboxProvider {
@@ -598,6 +601,7 @@ impl SandboxProvider {
             Self::AppleContainer => "apple-container",
             Self::Docker => "docker",
             Self::LocalProcess => "local-process",
+            Self::Proxy => "proxy",
         }
     }
 }
@@ -619,6 +623,7 @@ impl FromStr for SandboxProvider {
             "apple-container" | "apple_container" => Ok(Self::AppleContainer),
             "docker" => Ok(Self::Docker),
             "local" | "local-process" | "local_process" => Ok(Self::LocalProcess),
+            "proxy" => Ok(Self::Proxy),
             provider => Err(anyhow::anyhow!("unsupported sandbox provider: {provider}")),
         }
     }

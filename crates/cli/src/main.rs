@@ -29,7 +29,7 @@ use executor::{
     EventKind, EventQuery, EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions,
     ExoclawToolRuntime, FileSystemMount, FileSystemMountMode, ForkConversationRequest,
     HTTP_EXOHARNESS_TRACING_TARGET, Harness, HarnessAgent, HarnessConversation, HttpExoHarness,
-    LocalSandboxExoHarness, PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR,
+    LocalSandboxExoHarness, ProxyBackendSpec, PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR,
     SandboxBackendChoice, SandboxProvider, SandboxProviderConfig, SandboxScope, Secret,
     SecretBackendChoice, ToolRequest, ToolRuntime, TypeScriptHarness, TypeScriptHarnessConfig,
     Uuid7, VercelBackendSpec, default_aws_agentcore_image, default_daytona_image,
@@ -67,6 +67,11 @@ struct Cli {
     env_file: Option<PathBuf>,
     #[arg(long, global = true)]
     env_file_if_exists: Option<PathBuf>,
+    /// Host endpoint the `proxy` sandbox provider forwards `exec` to. When set, a
+    /// `proxy` backend is registered (for host-side agents whose sandbox has no
+    /// inbound network, e.g. Horizon on Harbor).
+    #[arg(long, global = true, env = "EXO_PROXY_EXEC_URL")]
+    proxy_exec_url: Option<String>,
     #[arg(long, global = true, env = "BRAINTRUST_API_KEY", hide = true)]
     braintrust_api_key: Option<String>,
     #[arg(long, global = true, env = "BRAINTRUST_APP_URL", hide = true)]
@@ -221,6 +226,7 @@ enum SandboxProviderArg {
     Docker,
     #[value(name = "local-process")]
     LocalProcess,
+    Proxy,
 }
 
 impl From<SandboxProviderArg> for SandboxProvider {
@@ -232,6 +238,7 @@ impl From<SandboxProviderArg> for SandboxProvider {
             SandboxProviderArg::AppleContainer => Self::AppleContainer,
             SandboxProviderArg::Docker => Self::Docker,
             SandboxProviderArg::LocalProcess => Self::LocalProcess,
+            SandboxProviderArg::Proxy => Self::Proxy,
         }
     }
 }
@@ -273,6 +280,9 @@ fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
         .any(|backend| backend.provider() == sandbox_default)
     {
         sandbox_backends.push(sandbox_backend);
+    }
+    if let Some(exec_url) = cli.proxy_exec_url.clone() {
+        sandbox_backends.push(SandboxBackendChoice::Proxy(ProxyBackendSpec { exec_url }));
     }
     Ok(BasicExoHarnessConfig {
         root: cli.root.join("exoharness"),

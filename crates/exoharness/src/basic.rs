@@ -66,6 +66,7 @@ pub enum SandboxBackendChoice {
     Daytona(DaytonaBackendSpec),
     Vercel(VercelBackendSpec),
     AwsAgentCore,
+    Proxy(ProxyBackendSpec),
 }
 
 impl SandboxBackendChoice {
@@ -77,8 +78,17 @@ impl SandboxBackendChoice {
             Self::Daytona(_) => SandboxProvider::Daytona,
             Self::Vercel(_) => SandboxProvider::Vercel,
             Self::AwsAgentCore => SandboxProvider::AwsAgentCore,
+            Self::Proxy(_) => SandboxProvider::Proxy,
         }
     }
+}
+
+/// Proxy backend config: the host HTTP endpoint exec is forwarded to. The URL is
+/// supplied directly (threaded from the CLI / `EXO_PROXY_EXEC_URL`), not read
+/// from a secret store — it's connection config, not a credential.
+#[derive(Debug, Clone)]
+pub struct ProxyBackendSpec {
+    pub exec_url: String,
 }
 
 /// Daytona connection config plus the secret-store names for its credentials,
@@ -228,6 +238,9 @@ impl BasicExoHarnessInner {
                         "aws-agentcore sandbox backend requires building exoharness with the aws-agentcore feature"
                     );
                 }
+            }
+            SandboxBackendChoice::Proxy(spec) => {
+                Arc::new(crate::ProxySandboxBackend::new(spec.exec_url.clone())?)
             }
         };
         Ok(backend)
