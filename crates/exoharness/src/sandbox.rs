@@ -867,8 +867,6 @@ async fn find_running_docker_warm_sandbox(
             key_filter.as_str(),
             "--filter",
             spec_filter.as_str(),
-            "--filter",
-            "status=running",
             "--format",
             "{{.Names}}",
         ],
