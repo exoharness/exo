@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use exoharness::{
-    AgentHandle, ConversationHandle, EventId, FileSystemMount, ResponseId, Result, SandboxProvider,
-    SessionId, ToolArguments, ToolCallId, ToolRequest, ToolResult, TurnHandle, TurnId,
+    AgentHandle, ConversationHandle, DurableFileSystem, EventId, FileSystemMount, ResponseId,
+    Result, SandboxProvider, SessionId, ToolArguments, ToolCallId, ToolRequest, ToolResult,
+    TurnHandle, TurnId,
 };
 use lingua::{Message, UniversalStreamChunk, UniversalUsage};
 use serde::{Deserialize, Serialize};
@@ -68,6 +69,8 @@ pub struct ConversationConfig {
     #[serde(default)]
     pub mounts: Vec<FileSystemMount>,
     #[serde(default)]
+    pub durable_file_systems: Vec<DurableFileSystem>,
+    #[serde(default)]
     pub sandbox_scope: Option<SandboxScope>,
 }
 
@@ -104,6 +107,7 @@ impl Default for ConversationConfig {
             sandbox_provider: None,
             shell_program: Some("/bin/bash".to_string()),
             mounts: Vec::new(),
+            durable_file_systems: Vec::new(),
             sandbox_scope: None,
         }
     }

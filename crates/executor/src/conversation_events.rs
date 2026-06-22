@@ -58,7 +58,6 @@ pub async fn record_host_event(
         .add_events(AddEventsRequest {
             session_id: None,
             turn_id: None,
-            expected_head: None,
             data: vec![EventData::Custom {
                 event_type: event_type.to_string(),
                 payload,

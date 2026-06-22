@@ -915,10 +915,6 @@ impl ConversationHandle for FakeConversationHandle {
 
     async fn add_events(&self, request: AddEventsRequest) -> Result<AddEventsResult> {
         let mut state = self.state.lock().expect("state poisoned");
-        if request.expected_head != state.conversation.record.latest_event_id {
-            return Err(anyhow!("head mismatch"));
-        }
-
         let mut event_ids = Vec::new();
         let mut latest_event_id = state.conversation.record.latest_event_id;
 
@@ -1067,10 +1063,6 @@ impl TurnHandle for FakeTurnHandle {
     }
 
     async fn add_events(&self, data: Vec<EventData>) -> Result<AddEventsResult> {
-        let expected_head = *self
-            .latest_event_id
-            .lock()
-            .expect("turn latest event id poisoned");
         let add_result = FakeConversationHandle {
             state: Arc::clone(&self.state),
             record: {
@@ -1081,7 +1073,6 @@ impl TurnHandle for FakeTurnHandle {
         .add_events(AddEventsRequest {
             session_id: Some(self.record.session_id),
             turn_id: Some(self.record.id),
-            expected_head,
             data,
         })
         .await?;

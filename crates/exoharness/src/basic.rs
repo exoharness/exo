@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::fmt::{self, Display, Formatter};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -34,17 +33,17 @@ use crate::{
     AddEventsRequest, AddEventsResult, AgentHandle, AgentId, AgentRecord, Artifact, ArtifactRef,
     ArtifactVersion, BeginTurnRequest, Binding, BindingId, BindingRecord, BindingType,
     BoxAsyncRead, BoxAsyncWrite, CancelSandboxProcessRequest, CloseSandboxProcessInputRequest,
-    ConversationHandle, ConversationId, ConversationRecord, CreateSandboxRequest, Event, EventData,
-    EventId, EventKind, EventQuery, EventQueryDirection, EventStream, ExoHarness, FileSystemMount,
-    ForkConversationRequest, GetEventsResult, GetSandboxProcessEventsResult,
-    ListConversationsRequest, ListConversationsResult, NewAgentRequest, NewConversationRequest,
-    PutSecretRequest, ReadArtifactRequest, Result, RunInSandboxRequest, SandboxId, SandboxProcess,
-    SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessId, SandboxProcessMode,
-    SandboxProcessParts, SandboxProcessRecord, SandboxProcessStatus, SandboxProcessStdin,
-    SandboxProvider, SandboxProviderConfig, Secret, SecretId, SecretMetadata, SecretType,
-    SessionId, SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnHandle, TurnId,
-    TurnRecord, Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest,
-    WriteSandboxProcessInputRequest,
+    ConversationHandle, ConversationId, ConversationRecord, CreateSandboxRequest,
+    DurableFileSystem, Event, EventData, EventId, EventKind, EventQuery, EventQueryDirection,
+    EventStream, ExoHarness, FileSystemMount, ForkConversationRequest, GetEventsResult,
+    GetSandboxProcessEventsResult, ListConversationsRequest, ListConversationsResult,
+    NewAgentRequest, NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result,
+    RunInSandboxRequest, SandboxId, SandboxProcess, SandboxProcessEvent, SandboxProcessEventQuery,
+    SandboxProcessId, SandboxProcessMode, SandboxProcessParts, SandboxProcessRecord,
+    SandboxProcessStatus, SandboxProcessStdin, SandboxProvider, SandboxProviderConfig, Secret,
+    SecretId, SecretMetadata, SecretType, SessionId, SnapshotId, StartSandboxProcessRequest,
+    StartSandboxRequest, TurnHandle, TurnId, TurnRecord, Uuid7, WaitSandboxProcessRequest,
+    WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
 #[derive(Debug, Clone)]
@@ -148,6 +147,7 @@ pub struct BasicExoHarness {
 }
 
 struct BasicExoHarnessInner {
+    root: PathBuf,
     storage: BasicObjectStore,
     write_lock: AsyncMutex<()>,
     subscribers: Mutex<HashMap<ConversationId, Vec<mpsc::UnboundedSender<Result<Event>>>>>,
@@ -187,10 +187,14 @@ impl BasicExoHarnessInner {
         choice: &SandboxBackendChoice,
     ) -> Result<Arc<dyn ManagedSandboxBackend>> {
         let backend: Arc<dyn ManagedSandboxBackend> = match choice {
-            SandboxBackendChoice::AppleContainer => {
-                Arc::new(CliContainerSandboxBackend::apple_container())
-            }
-            SandboxBackendChoice::Docker => Arc::new(CliContainerSandboxBackend::docker()),
+            SandboxBackendChoice::AppleContainer => Arc::new(
+                CliContainerSandboxBackend::apple_container()
+                    .with_durable_file_system_root(self.root.join("durable-filesystems")),
+            ),
+            SandboxBackendChoice::Docker => Arc::new(
+                CliContainerSandboxBackend::docker()
+                    .with_durable_file_system_root(self.root.join("durable-filesystems")),
+            ),
             SandboxBackendChoice::LocalProcess => Arc::new(LocalProcessSandboxBackend::new()),
             SandboxBackendChoice::Daytona(spec) => {
                 // Prefer a root `Binding::Sandbox` for Daytona; fall back to the
@@ -421,32 +425,44 @@ impl BasicExoHarnessInner {
     #[cfg(feature = "aws-agentcore")]
     async fn aws_agentcore_config_from_binding(&self) -> Result<Option<crate::AwsAgentCoreConfig>> {
         let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
-        let Some((runtime_arn, region, qualifier, endpoint_url)) = bindings
-            .into_iter()
-            .rev()
-            .find_map(|record| match record.binding {
-                Binding::Sandbox {
-                    config:
-                        SandboxProviderConfig::AwsAgentCore {
-                            runtime_arn,
-                            region,
-                            qualifier,
-                            endpoint_url,
-                            ..
-                        },
-                    ..
-                } => Some((runtime_arn, region, qualifier, endpoint_url)),
-                _ => None,
-            })
+        let Some((runtime_arn, region, qualifier, endpoint_url, session_storage_mount_path)) =
+            bindings
+                .into_iter()
+                .rev()
+                .find_map(|record| match record.binding {
+                    Binding::Sandbox {
+                        config:
+                            SandboxProviderConfig::AwsAgentCore {
+                                runtime_arn,
+                                region,
+                                qualifier,
+                                endpoint_url,
+                                session_storage_mount_path,
+                                ..
+                            },
+                        ..
+                    } => Some((
+                        runtime_arn,
+                        region,
+                        qualifier,
+                        endpoint_url,
+                        session_storage_mount_path,
+                    )),
+                    _ => None,
+                })
         else {
             return Ok(None);
         };
+        let session_storage_mount_path = session_storage_mount_path
+            .or_else(|| nonempty_env("AWS_AGENTCORE_SESSION_STORAGE_MOUNT_PATH"))
+            .or_else(|| nonempty_env("AGENTCORE_SESSION_STORAGE_MOUNT_PATH"));
         Ok(Some(crate::AwsAgentCoreConfig {
             runtime_arn,
             region,
             qualifier,
             endpoint_url,
             credentials: aws_agentcore_credentials_from_env(),
+            session_storage_mount_path,
         }))
     }
 
@@ -481,6 +497,14 @@ fn aws_agentcore_credentials_from_env() -> Option<crate::AwsAgentCoreCredentials
         secret_access_key,
         session_token,
     })
+}
+
+#[cfg(feature = "aws-agentcore")]
+fn nonempty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 impl BasicExoHarness {
@@ -537,6 +561,7 @@ impl BasicExoHarness {
             build_secret_cipher(secret_backend, root.to_string_lossy().to_string())?;
         Ok(Self {
             inner: Arc::new(BasicExoHarnessInner {
+                root,
                 storage,
                 write_lock: AsyncMutex::new(()),
                 subscribers: Mutex::new(HashMap::new()),
@@ -794,7 +819,6 @@ impl AgentHandle for BasicAgentHandle {
             record.id,
             None,
             None,
-            None,
             vec![EventData::ConversationCreated {
                 slug: record.slug.clone(),
                 name: record.name.clone(),
@@ -840,7 +864,6 @@ impl AgentHandle for BasicAgentHandle {
                 record.id,
                 None,
                 None,
-                record.latest_event_id,
                 vec![EventData::ConversationDeleted],
                 &mut record,
             )
@@ -1124,6 +1147,7 @@ impl BasicConversationHandle {
             image,
             default_workdir: request.default_workdir,
             file_system_mounts: request.file_system_mounts.unwrap_or_default(),
+            durable_file_systems: request.durable_file_systems.unwrap_or_default(),
             enable_networking: request.enable_networking.unwrap_or(true),
             idle_seconds: request.idle_seconds.unwrap_or(60),
         })
@@ -1156,6 +1180,7 @@ impl BasicConversationHandle {
                 image,
                 default_workdir,
                 file_system_mounts,
+                durable_file_systems,
                 enable_networking,
                 idle_seconds,
                 ..
@@ -1174,6 +1199,7 @@ impl BasicConversationHandle {
                 || image != request.image
                 || default_workdir != request.default_workdir.clone().unwrap_or_default()
                 || file_system_mounts != request.file_system_mounts
+                || durable_file_systems != request.durable_file_systems
                 || enable_networking != request.enable_networking
                 || idle_seconds != request.idle_seconds
             {
@@ -1243,7 +1269,6 @@ impl BasicConversationHandle {
             self.record.id,
             None,
             None,
-            record.latest_event_id,
             vec![
                 EventData::SandboxCreated {
                     sandbox_id: sandbox_id.clone(),
@@ -1252,6 +1277,7 @@ impl BasicConversationHandle {
                     image: sandbox.image,
                     default_workdir: sandbox.default_workdir.unwrap_or_default(),
                     file_system_mounts: sandbox.file_system_mounts,
+                    durable_file_systems: sandbox.durable_file_systems,
                     enable_networking: sandbox.enable_networking,
                     idle_seconds: sandbox.idle_seconds,
                 },
@@ -1280,18 +1306,13 @@ impl ConversationHandle for BasicConversationHandle {
 
     async fn start_session(&self) -> Result<SessionId> {
         let session_id = Uuid7::now();
-        self.append_events_internal(
-            Some(session_id),
-            None,
-            None,
-            vec![EventData::SessionStarted],
-        )
-        .await?;
+        self.append_events_internal(Some(session_id), None, vec![EventData::SessionStarted])
+            .await?;
         Ok(session_id)
     }
 
     async fn end_session(&self, id: SessionId) -> Result<()> {
-        self.append_events_internal(Some(id), None, None, vec![EventData::SessionEnded])
+        self.append_events_internal(Some(id), None, vec![EventData::SessionEnded])
             .await?;
         Ok(())
     }
@@ -1326,7 +1347,6 @@ impl ConversationHandle for BasicConversationHandle {
             self.record.id,
             Some(session_id),
             Some(turn_record.id),
-            record.latest_event_id,
             events_to_append,
             &mut record,
         )
@@ -1448,13 +1468,8 @@ impl ConversationHandle for BasicConversationHandle {
     }
 
     async fn add_events(&self, request: AddEventsRequest) -> Result<AddEventsResult> {
-        self.append_events_internal(
-            request.session_id,
-            request.turn_id,
-            request.expected_head,
-            request.data,
-        )
-        .await
+        self.append_events_internal(request.session_id, request.turn_id, request.data)
+            .await
     }
 
     async fn fork(&self, request: ForkConversationRequest) -> Result<Arc<dyn ConversationHandle>> {
@@ -1543,7 +1558,6 @@ impl ConversationHandle for BasicConversationHandle {
             record.id,
             None,
             None,
-            fork_record.latest_event_id,
             vec![EventData::ConversationForked {
                 source_conversation_id: self.record.id,
                 up_to_inclusive: request.up_to_inclusive,
@@ -1575,7 +1589,6 @@ impl ConversationHandle for BasicConversationHandle {
             self.record.id,
             None,
             None,
-            record.latest_event_id,
             vec![EventData::ArtifactWritten {
                 artifact_id: artifact_version.artifact_id,
                 path: artifact_version.path.clone(),
@@ -1640,8 +1653,7 @@ impl ConversationHandle for BasicConversationHandle {
     async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
         let (snapshot_id, event) =
             snapshot_sandbox_side_effect(&self.harness, &self.conversation_dir(), id).await?;
-        self.append_events_internal(None, None, None, vec![event])
-            .await?;
+        self.append_events_internal(None, None, vec![event]).await?;
         Ok(snapshot_id)
     }
 
@@ -1653,8 +1665,7 @@ impl ConversationHandle for BasicConversationHandle {
             request,
         )
         .await?;
-        self.append_events_internal(None, None, None, vec![event])
-            .await?;
+        self.append_events_internal(None, None, vec![event]).await?;
         Ok(())
     }
 
@@ -1690,7 +1701,6 @@ impl ConversationHandle for BasicConversationHandle {
             self.record.id,
             None,
             None,
-            record.latest_event_id,
             vec![EventData::SandboxStopped { sandbox_id: id }],
             &mut record,
         )
@@ -1760,7 +1770,6 @@ impl ConversationHandle for BasicConversationHandle {
             notify: Notify::new(),
         });
         self.append_events_internal(
-            None,
             None,
             None,
             vec![EventData::SandboxProcessStarted {
@@ -2086,7 +2095,6 @@ impl BasicConversationHandle {
         &self,
         session_id: Option<SessionId>,
         turn_id: Option<TurnId>,
-        expected_head: Option<EventId>,
         data: Vec<EventData>,
     ) -> Result<AddEventsResult> {
         let _guard = self.harness.inner.write_lock.lock().await;
@@ -2098,7 +2106,6 @@ impl BasicConversationHandle {
             self.record.id,
             session_id,
             turn_id,
-            expected_head,
             data,
             &mut record,
         )
@@ -2334,14 +2341,12 @@ impl TurnHandle for BasicTurnHandle {
             .storage
             .get_json::<ConversationRecord>(self.conversation_dir.join("record.json"))
             .await?;
-        let expected_head = record.latest_event_id;
         let add_result = append_events_to_conversation(
             &self.harness.inner,
             &self.conversation_dir,
             self.conversation_id,
             Some(self.record.session_id),
             Some(self.record.id),
-            expected_head,
             data,
             &mut record,
         )
@@ -2360,23 +2365,12 @@ impl TurnHandle for BasicTurnHandle {
 
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion> {
         let _guard = self.harness.inner.write_lock.lock().await;
-        let expected_head = self
-            .state
-            .lock()
-            .expect("turn state poisoned")
-            .latest_event_id;
         let mut record = self
             .harness
             .inner
             .storage
             .get_json::<ConversationRecord>(self.conversation_dir.join("record.json"))
             .await?;
-        ensure_conversation_head(
-            record.latest_event_id,
-            expected_head,
-            Some(self.record.session_id),
-            Some(self.record.id),
-        )?;
         let artifact_version = write_artifact_version(
             &self.harness.inner,
             &self.conversation_dir.join("artifacts"),
@@ -2389,7 +2383,6 @@ impl TurnHandle for BasicTurnHandle {
             self.conversation_id,
             Some(self.record.session_id),
             Some(self.record.id),
-            expected_head,
             vec![EventData::ArtifactWritten {
                 artifact_id: artifact_version.artifact_id,
                 path: artifact_version.path.clone(),
@@ -2451,14 +2444,12 @@ impl TurnHandle for BasicTurnHandle {
             .storage
             .get_json::<ConversationRecord>(self.conversation_dir.join("record.json"))
             .await?;
-        let expected_head = record.latest_event_id;
         let add_result = append_events_to_conversation(
             &self.harness.inner,
             &self.conversation_dir,
             self.conversation_id,
             Some(self.record.session_id),
             Some(self.record.id),
-            expected_head,
             vec![EventData::TurnEnded],
             &mut record,
         )
@@ -2502,6 +2493,7 @@ struct StoredSandbox {
     image: String,
     default_workdir: Option<String>,
     file_system_mounts: Vec<FileSystemMount>,
+    durable_file_systems: Vec<DurableFileSystem>,
     enable_networking: bool,
     idle_seconds: u64,
     running: bool,
@@ -2515,6 +2507,7 @@ struct PreparedSandboxRequest {
     image: String,
     default_workdir: Option<String>,
     file_system_mounts: Vec<FileSystemMount>,
+    durable_file_systems: Vec<DurableFileSystem>,
     enable_networking: bool,
     idle_seconds: u64,
 }
@@ -2528,6 +2521,7 @@ impl PreparedSandboxRequest {
             image: self.image.clone(),
             default_workdir: self.default_workdir.clone(),
             file_system_mounts: self.file_system_mounts.clone(),
+            durable_file_systems: self.durable_file_systems.clone(),
             enable_networking: self.enable_networking,
             idle_seconds: self.idle_seconds,
             running: true,
@@ -2766,7 +2760,6 @@ async fn append_sandbox_process_data(
         process.conversation_id,
         None,
         None,
-        record.latest_event_id,
         data,
         &mut record,
     )
@@ -2861,6 +2854,7 @@ fn sandbox_request(
             } else {
                 SandboxNetworkPolicy::Disabled
             },
+            durable_file_systems: sandbox.durable_file_systems.clone(),
             default_workdir: sandbox
                 .default_workdir
                 .clone()
@@ -2878,20 +2872,11 @@ async fn append_events_to_conversation(
     conversation_id: ConversationId,
     session_id: Option<SessionId>,
     turn_id: Option<TurnId>,
-    expected_head: Option<EventId>,
     data: Vec<EventData>,
     record: &mut ConversationRecord,
 ) -> Result<AddEventsResult> {
     if data.is_empty() {
         bail!("cannot append zero events");
-    }
-    if let Some(expected_head) = expected_head {
-        ensure_conversation_head(
-            record.latest_event_id,
-            Some(expected_head),
-            session_id,
-            turn_id,
-        )?;
     }
     let mut event_ids = Vec::new();
     let mut latest_event_id = None;
@@ -2924,66 +2909,6 @@ async fn append_events_to_conversation(
         event_ids,
         latest_event_id,
     })
-}
-
-fn ensure_conversation_head(
-    current_head: Option<EventId>,
-    expected_head: Option<EventId>,
-    session_id: Option<SessionId>,
-    turn_id: Option<TurnId>,
-) -> Result<()> {
-    if current_head == expected_head {
-        return Ok(());
-    }
-    Err(ConversationHeadMismatch {
-        current_head,
-        expected_head,
-        session_id,
-        turn_id,
-    }
-    .into())
-}
-
-#[derive(Debug, Clone)]
-struct ConversationHeadMismatch {
-    current_head: Option<EventId>,
-    expected_head: Option<EventId>,
-    session_id: Option<SessionId>,
-    turn_id: Option<TurnId>,
-}
-
-impl Display for ConversationHeadMismatch {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let expected = format_event_head_timestamp(self.expected_head);
-        let current = format_event_head_timestamp(self.current_head);
-        if let Some(turn_id) = self.turn_id {
-            let session = self
-                .session_id
-                .map(|session_id| session_id.to_string())
-                .unwrap_or_else(|| "none".to_string());
-            return write!(
-                f,
-                "turn is stale and cannot be resumed: conversation head advanced outside this turn \
-                 (turn_id: {turn_id}, session_id: {session}, expected_head_at: {expected}, \
-                 current_head_at: {current})"
-            );
-        }
-        write!(
-            f,
-            "conversation head mismatch: expected_head_at: {expected}, current_head_at: {current}"
-        )
-    }
-}
-
-impl std::error::Error for ConversationHeadMismatch {}
-
-fn format_event_head_timestamp(head: Option<EventId>) -> String {
-    let Some(id) = head else {
-        return "none".to_string();
-    };
-    id.timestamp()
-        .map(|timestamp| timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn notify_subscribers(inner: &BasicExoHarnessInner, conversation_id: ConversationId, event: Event) {

@@ -394,11 +394,9 @@ pub async fn send_adapter_message_with_handles(
         );
     }
     // Note: we intentionally do not write a conversation artifact here.
-    // This tool is invoked from inside an active agent turn, and writing to
-    // the conversation outside the turn handle advances the conversation
-    // head, which makes the active turn stale and crashes the adapter
-    // worker. The outbound message is durably queued in the AdapterStore
-    // outbox, and the event below records it for audit.
+    // The outbound message is durably queued in the AdapterStore outbox, and
+    // the event below records it for audit without adding adapter bookkeeping
+    // to the agent-visible conversation history.
     store
         .record_event(
             adapter.id.clone(),
@@ -759,11 +757,9 @@ async fn handle_worker_message(
         return Ok(());
     }
     // Note: we intentionally do not write a conversation artifact here.
-    // The wakeup turn below begins immediately, and any artifact writes
-    // through the conversation handle (rather than the active turn) advance
-    // the conversation head and could race with concurrent turns. The full
-    // inbound text is delivered to the agent via the wakeup prompt and the
-    // event is recorded in the AdapterStore for audit.
+    // The full inbound text is delivered to the agent via the wakeup prompt,
+    // and the event is recorded in the AdapterStore for audit without adding
+    // adapter bookkeeping to the agent-visible conversation history.
     store
         .record_event(
             adapter.id.clone(),
@@ -798,6 +794,7 @@ async fn handle_worker_message(
             text: prompt,
             encrypted_content: None,
             provider_options: None,
+            cache_control: None,
         })];
         parts.extend(image_parts);
         UserContent::Array(parts)
@@ -946,9 +943,8 @@ async fn record_worker_lifecycle(
     event_type: &str,
     _payload: serde_json::Value,
 ) -> Result<()> {
-    // Note: lifecycle events are recorded only in the AdapterStore. Writing
-    // them to the conversation as artifacts can advance the head outside of
-    // any active turn and corrupt the agent's turn state.
+    // Note: lifecycle events are recorded only in the AdapterStore so adapter
+    // bookkeeping does not pollute the agent-visible conversation history.
     store
         .record_event(
             adapter.id.clone(),

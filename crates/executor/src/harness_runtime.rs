@@ -44,9 +44,8 @@ impl ModelClient for RouterModelClient {
         let router = build_router(&request, format, &config)?;
         let universal_request = build_universal_request(&request, false)?;
         let payload = serialize_request(format, &universal_request)?;
-        let (prepared, _router_metadata) = router
-            .create_request(payload, &request.model, format)
-            .await?;
+        let route = resolve_provider_route(&router, &request.model, format)?;
+        let (prepared, _router_metadata) = router.create_request(payload, format, &route).await?;
         let body = router.complete(prepared, &ClientHeaders::new()).await?;
         let response = lingua::response_to_universal(body)?;
         normalize_model_response(response)
@@ -58,11 +57,12 @@ impl ModelClient for RouterModelClient {
         let router = build_router(&request, format, &config)?;
         let universal_request = build_universal_request(&request, true)?;
         let payload = serialize_request(format, &universal_request)?;
+        let route = resolve_provider_route(&router, &request.model, format)?;
         let (prepared, _router_metadata) = router
-            .create_stream_request(payload, &request.model, format)
+            .create_stream_request(payload, format, &route)
             .await?;
         let raw_stream = router
-            .complete_stream(prepared, &ClientHeaders::new())
+            .complete_stream(prepared, &ClientHeaders::new(), None)
             .await?;
         Ok(Box::new(RouterModelResponseStream {
             stream: map_universal_stream(raw_stream, format),
@@ -193,6 +193,18 @@ fn build_router(
         )
         .build()
         .map_err(Into::into)
+}
+
+fn resolve_provider_route(
+    router: &Router,
+    model: &str,
+    format: ProviderFormat,
+) -> Result<braintrust_llm_router::ProviderRoute> {
+    router
+        .resolve_provider_routes(model, format, &[])?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no provider route resolved for model {model}"))
 }
 
 fn build_universal_request(request: &ModelRequest, stream: bool) -> Result<UniversalRequest> {
@@ -526,6 +538,7 @@ impl UniversalResponseAccumulator {
                 text: self.text.clone(),
                 encrypted_content: None,
                 provider_options: None,
+                cache_control: None,
             }));
         }
 

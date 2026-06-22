@@ -364,7 +364,6 @@ impl LocalSandboxConversation {
             .add_events(AddEventsRequest {
                 session_id: None,
                 turn_id: None,
-                expected_head: None,
                 data: vec![EventData::Custom {
                     event_type: LOCAL_SANDBOX_MAP_EVENT.to_string(),
                     payload: serde_json::to_value(LocalSandboxMapEvent {
@@ -382,7 +381,6 @@ impl LocalSandboxConversation {
             .add_events(AddEventsRequest {
                 session_id: None,
                 turn_id: None,
-                expected_head: None,
                 data,
             })
             .await?;
@@ -474,6 +472,7 @@ impl ConversationHandle for LocalSandboxConversation {
                 image: request.image,
                 default_workdir: request.default_workdir.unwrap_or_default(),
                 file_system_mounts: request.file_system_mounts.unwrap_or_default(),
+                durable_file_systems: request.durable_file_systems.unwrap_or_default(),
                 enable_networking: request.enable_networking.unwrap_or(true),
                 idle_seconds: request.idle_seconds.unwrap_or(60),
             },
@@ -793,6 +792,7 @@ mod tests {
                 image: "local-image".to_string(),
                 default_workdir: Some("/workspace".to_string()),
                 file_system_mounts: Some(Vec::new()),
+                durable_file_systems: None,
                 enable_networking: Some(false),
                 idle_seconds: Some(120),
             })
