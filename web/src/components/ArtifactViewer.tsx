@@ -102,8 +102,12 @@ export function ArtifactWrittenCard({
     <section className="conversation-event tool-thread">
       <article className="artifact-card">
         <div className="artifact-head">
-          <span className="tool-glyph" aria-hidden="true">
-            <ArtifactGlyph />
+          <span
+            className="tool-glyph artifact-glyph"
+            data-filetype={fileTypeKind(path)}
+            aria-hidden="true"
+          >
+            <FileTypeGlyph path={path} />
           </span>
           <span className="artifact-head-text">
             <code>artifact</code>
@@ -334,11 +338,109 @@ function bytesToBase64(bytes: number[]): string {
   return btoa(binary);
 }
 
-function ArtifactGlyph() {
-  return (
-    <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
-      <path d="M9 1.6H4.2A1.2 1.2 0 0 0 3 2.8v10.4a1.2 1.2 0 0 0 1.2 1.2h7.6a1.2 1.2 0 0 0 1.2-1.2V5.4L9 1.6Z" />
-      <path d="M9 1.6V5.4h3.8" />
-    </svg>
-  );
+type FileTypeKind = "image" | "media" | "json" | "markdown" | "code" | "text";
+
+const CODE_EXT = new Set([
+  "js",
+  "jsx",
+  "ts",
+  "tsx",
+  "mjs",
+  "cjs",
+  "py",
+  "rs",
+  "go",
+  "rb",
+  "java",
+  "c",
+  "cc",
+  "cpp",
+  "h",
+  "hpp",
+  "sh",
+  "bash",
+  "zsh",
+  "css",
+  "scss",
+  "less",
+  "html",
+  "htm",
+  "xml",
+  "yaml",
+  "yml",
+  "toml",
+  "sql",
+  "php",
+]);
+
+// Pick a coarse file family from the path so each artifact card shows a glyph and
+// colour that match what it holds, instead of one generic file icon.
+export function fileTypeKind(path: string): FileTypeKind {
+  const ext = extensionOf(path);
+  if (IMAGE_EXT.has(ext)) {
+    return "image";
+  }
+  if (VIDEO_EXT.has(ext) || AUDIO_EXT.has(ext)) {
+    return "media";
+  }
+  if (ext === "json") {
+    return "json";
+  }
+  if (ext === "md" || ext === "markdown") {
+    return "markdown";
+  }
+  if (CODE_EXT.has(ext)) {
+    return "code";
+  }
+  return "text";
+}
+
+function FileTypeGlyph({ path }: { path: string }) {
+  switch (fileTypeKind(path)) {
+    case "image":
+      return (
+        <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
+          <rect x="2" y="3" width="12" height="10" rx="1.6" />
+          <circle cx="5.8" cy="6.3" r="1.1" />
+          <path d="M2.6 11.4 6.5 7.7l2.1 2.1L11 7.4l2.4 2.6" />
+        </svg>
+      );
+    case "media":
+      return (
+        <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
+          <circle cx="8" cy="8" r="6" />
+          <path d="M6.6 5.5 11 8l-4.4 2.5Z" />
+        </svg>
+      );
+    case "json":
+      return (
+        <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
+          <path d="M6.2 3C5 3 5 4.1 5 5.1c0 1.1-.5 1.8-1.3 2.3.8.5 1.3 1.2 1.3 2.3 0 1 0 2.1 1.2 2.1" />
+          <path d="M9.8 3c1.2 0 1.2 1.1 1.2 2.1 0 1.1.5 1.8 1.3 2.3-.8.5-1.3 1.2-1.3 2.3 0 1 0 2.1-1.2 2.1" />
+        </svg>
+      );
+    case "code":
+      return (
+        <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
+          <path d="M5.6 5 2.6 8l3 3" />
+          <path d="M10.4 5l3 3-3 3" />
+        </svg>
+      );
+    case "markdown":
+      return (
+        <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
+          <rect x="2" y="3.5" width="12" height="9" rx="1.6" />
+          <path d="M4.6 10.4V6.6l1.8 1.9 1.8-1.9v3.8" />
+          <path d="M10.8 6.6v3M9.5 8.3l1.3 1.4 1.3-1.4" />
+        </svg>
+      );
+    default:
+      return (
+        <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
+          <path d="M9 1.6H4.2A1.2 1.2 0 0 0 3 2.8v10.4a1.2 1.2 0 0 0 1.2 1.2h7.6a1.2 1.2 0 0 0 1.2-1.2V5.4L9 1.6Z" />
+          <path d="M9 1.6V5.4h3.8" />
+          <path d="M5.4 9h5.2M5.4 11h3.2" />
+        </svg>
+      );
+  }
 }

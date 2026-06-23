@@ -1456,6 +1456,36 @@ pre {
   color: var(--accent);
 }
 
+/* Artifact glyphs are tinted by file family so a card's contents read at a glance.
+   The colours are mid-tones that hold up on both the light and dark surfaces. */
+.artifact-glyph {
+  background: rgba(var(--fg-overlay-rgb), 0.06);
+}
+
+.artifact-glyph[data-filetype="image"] {
+  color: #4fa46b;
+}
+
+.artifact-glyph[data-filetype="media"] {
+  color: #9a6fd0;
+}
+
+.artifact-glyph[data-filetype="json"] {
+  color: #c0904a;
+}
+
+.artifact-glyph[data-filetype="markdown"] {
+  color: #5189d4;
+}
+
+.artifact-glyph[data-filetype="code"] {
+  color: var(--accent);
+}
+
+.artifact-glyph[data-filetype="text"] {
+  color: var(--text-faint);
+}
+
 .tool-title-group {
   display: grid;
   min-width: 0;
@@ -2004,12 +2034,26 @@ pre {
 
 .message-actions {
   position: absolute;
-  top: 0;
+  top: -2px;
   right: 0;
-  z-index: 1;
+  z-index: 2;
   display: inline-flex;
   align-items: center;
   gap: 1px;
+  padding: 1px 4px;
+  border-radius: 7px;
+  transition:
+    background var(--ease),
+    box-shadow var(--ease);
+}
+
+/* On hover the buttons sit in the top-right corner, exactly over the assistant
+   timestamp (and the top of a user bubble). Float them on an opaque chip so they
+   read as a toolbar instead of colliding with whatever is underneath. */
+.message-block:hover .message-actions,
+.message-block:focus-within .message-actions {
+  background: var(--bg);
+  box-shadow: 0 0 0 1px var(--hairline);
 }
 
 .role-user .message-actions {
