@@ -58,7 +58,6 @@ class ExoSystem(ContinualLearningSystem):
         self._model = model
         self._pending_feedback: Optional[str] = None
         self._root: Optional[str] = None
-        self._workspace: Optional[str] = None
         self._base: list[str] = []
         self._agent_inited = False
         self._conv: Optional[str] = None  # current per-instance conversation slug
@@ -78,27 +77,28 @@ class ExoSystem(ContinualLearningSystem):
         if not os.path.exists(_EXO_BIN):
             raise RuntimeError(f"exo binary not found at {_EXO_BIN}; build it or set EXO_BIN")
         self._root = tempfile.mkdtemp(prefix="exo-clbench-root-")
-        self._workspace = tempfile.mkdtemp(prefix="exo-clbench-ws-")
         self._base = [_EXO_BIN, "--root", self._root, "--secret-backend", "file"]
         self._run(self._base + ["secret", "set", "openai", "--env", "OPENAI_API_KEY"])
         self._run(self._base + ["model", "register", self._model, "--secret", "openai"])
+        # Docker sandbox = isolated container (NO host mount), so the agent's shell
+        # cannot reach the host's clbench repo / ground-truth data. (local-process
+        # would expose the host filesystem and let the agent read the answer keys.)
         self._run(
             self._base
             + ["agent", "create", "--slug", "t", "--model", self._model,
-               "--harness", _HARNESS, "--sandbox-provider", "local-process", "Exo"]
+               "--harness", _HARNESS, "--sandbox-provider", "docker", "Exo"]
         )
         self._agent_inited = True
 
     def _ensure_conversation(self) -> None:
         """Fresh conversation per task instance (clean context for the new scenario);
-        the agent and its memory persist, so lessons carry across instances."""
+        the agent and its memory persist, so lessons carry across instances. No host
+        mount — task data arrives via the prompt; the container provides scratch FS."""
         if self._conv is not None:
             return
         self._conv = f"c{self._conv_n}"
         self._conv_n += 1
         self._run(self._base + ["conversation", "create", "t", self._conv])
-        self._run(self._base + ["conversation", "mount", "add", "t", self._conv,
-                                self._workspace, self._workspace])
 
     def _run(self, argv: list[str], check: bool = True) -> str:
         proc = subprocess.run(
@@ -181,6 +181,38 @@ class ExoSystem(ContinualLearningSystem):
         except Exception:
             return None
 
+    def get_run_artifacts(self) -> Optional[dict[str, Any]]:
+        """Export the agent's durable memory so clbench records it in the trace —
+        lets us inspect WHAT the agent learned. The memory store is an artifact
+        (`memory/exoclaw-memory.json`, shape {entries: [...]}); read the newest copy
+        with the most entries from this run's exo root."""
+        if not self._root:
+            return None
+        best: list = []
+        for p in glob.glob(os.path.join(self._root, "**", "artifacts", "**", "*.bin"), recursive=True):
+            try:
+                d = json.load(open(p))
+            except Exception:
+                continue
+            if isinstance(d, dict) and isinstance(d.get("entries"), list) and len(d["entries"]) >= len(best):
+                best = d["entries"]
+        # Count remember/forget tool calls in the event store, so the trace shows
+        # whether the agent USED memory even if the store ended empty.
+        remember_calls = forget_calls = 0
+        for p in glob.glob(os.path.join(self._root, "**", "events", "*.json"), recursive=True):
+            try:
+                s = open(p).read()
+            except Exception:
+                continue
+            remember_calls += s.count('"tool_name":"remember"') + s.count('"tool_name": "remember"')
+            forget_calls += s.count('"tool_name":"forget"') + s.count('"tool_name": "forget"')
+        return {
+            "memory_count": len(best),
+            "remember_calls": remember_calls,
+            "forget_calls": forget_calls,
+            "memory_entries": best,
+        }
+
     def observe(self, observation: Observation, next_query: Optional[Query] = None) -> None:
         # At an instance boundary, drop the conversation so the next instance starts
         # fresh — the agent (and its durable memory) persists, carrying lessons.
@@ -191,10 +223,10 @@ class ExoSystem(ContinualLearningSystem):
             self._pending_feedback = content
 
     def reset(self) -> None:
-        for d in (self._root, self._workspace):
-            if d:
-                shutil.rmtree(d, ignore_errors=True)
-        self._root = self._workspace = None
+        # EXO_KEEP_ROOT=1 leaves temp roots on disk for memory inspection/debugging.
+        if os.environ.get("EXO_KEEP_ROOT") != "1" and self._root:
+            shutil.rmtree(self._root, ignore_errors=True)
+        self._root = None
         self._base = []
         self._pending_feedback = None
         self._agent_inited = False
