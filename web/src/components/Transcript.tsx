@@ -49,7 +49,10 @@ const VIEWPORT_OVERSCAN_PX = 800;
 // Spacing between timeline rows, applied as item top padding (matches the gap
 // the static grid used). Padding — not margin — keeps virtuoso's measurements
 // stable (margins collapse and confuse its size observer).
-const ROW_GAP_PX = 24;
+const ROW_GAP_PX = 22;
+// Tool calls, their results and written artifacts read as one block of activity,
+// so they sit tighter together than the breathing room between message turns.
+const TOOL_ROW_GAP_PX = 10;
 
 interface TranscriptProps {
   conversation: ConversationHandleInfo | null;
@@ -134,21 +137,29 @@ export function Transcript({
   // scrollHeight reflects the real end rather than an estimate.
   function scrollToBottom() {
     const pin = () => {
+      // Render+measure the final row first so scrollHeight reflects the real end,
+      // then pin onto it. Re-doing both each pass lets a tall last row that measures
+      // a few frames late still pull the view onto the true bottom.
+      const lastIndex = rowCountRef.current - 1;
+      if (lastIndex >= 0) {
+        virtuosoRef.current?.scrollToIndex({ index: lastIndex, align: "end" });
+      }
       const el = scrollRef.current;
       if (el) {
         el.scrollTop = el.scrollHeight;
         lastScrollTopRef.current = el.scrollTop;
       }
     };
-    const lastIndex = rowCountRef.current - 1;
-    if (lastIndex >= 0) {
-      virtuosoRef.current?.scrollToIndex({ index: lastIndex, align: "end" });
-    }
     pin();
     requestAnimationFrame(() => {
       pin();
       requestAnimationFrame(pin);
     });
+    // Settle across a short window for long conversations whose last rows lay out
+    // late. This only ever runs right after an explicit open/jump/send, before a
+    // reader would have scrolled, so it needs no interrupt guard.
+    setTimeout(pin, 120);
+    setTimeout(pin, 280);
   }
 
   // Virtuoso owns stick-to-bottom natively (followOutput) and reports the
@@ -253,6 +264,33 @@ export function Transcript({
   );
   rowCountRef.current = rows.length;
 
+  // virtuoso re-scrolls to initialTopMostItemIndex whenever its value changes, so
+  // tracking rows.length forever makes every poll-driven append jump back to the
+  // newest row and reset a reader who had scrolled up. But the index also has to
+  // reach the real last row for the open to land at the bottom. So we track the
+  // newest row only WHILE the conversation is still loading, then freeze it: the
+  // open lands at the bottom, and later live appends (handled by followOutput) no
+  // longer move it.
+  const initialIndexRef = useRef<{ id: string | null; index: number }>({
+    id: null,
+    index: 0,
+  });
+  const currentConvId = conversation?.record.id ?? null;
+  if (initialIndexRef.current.id !== currentConvId) {
+    initialIndexRef.current = {
+      id: currentConvId,
+      index: Math.max(0, rows.length - 1),
+    };
+  } else if (loading || stickRef.current) {
+    // While the conversation is still loading, keep targeting the newest row so the
+    // open lands at the bottom even as history pages in (ignoring the at-bottom
+    // flag, which flickers as the list grows). Once loaded, only keep targeting it
+    // while the reader is actually at the bottom; otherwise a poll-driven append
+    // would move the index and reset someone who has scrolled up to read history.
+    initialIndexRef.current.index = Math.max(0, rows.length - 1);
+  }
+  const initialTopMostItemIndex = initialIndexRef.current.index;
+
   // Land at the newest message once a conversation's events have loaded. Virtuoso
   // starts at the top and events arrive asynchronously, so we scroll the first
   // time rows appear for a conversation (once per conversation — live appends are
@@ -260,8 +298,13 @@ export function Transcript({
   const scrolledConvRef = useRef<string | null>(null);
   useEffect(() => {
     const convId = conversation?.record.id ?? null;
+    // Do NOT clear the marker when convId blips to null during a poll/refetch:
+    // clearing it would treat the next render as a fresh open and re-scroll to the
+    // bottom (part of the same reset family). Scroll to the newest message once,
+    // when a genuinely different conversation first has rows; the frozen initial
+    // index keeps it anchored there as the rest pages in, and followOutput keeps
+    // live appends in view.
     if (!convId) {
-      scrolledConvRef.current = null;
       return;
     }
     if (rows.length > 0 && scrolledConvRef.current !== convId) {
@@ -381,33 +424,38 @@ export function Transcript({
   // Render a single logical row on demand. Virtuoso only calls this for rows in
   // (or near) the viewport, so unmounted history costs nothing to display.
   const renderRow = useCallback(
-    (index: number, row: TimelineRowItem) => (
-      <div
-        data-find-row={index}
-        style={{ paddingTop: index === 0 ? 0 : ROW_GAP_PX }}
-      >
-        {row.event.data.type === "artifact_written" ? (
-          <ArtifactWrittenCard
-            artifactId={row.event.data.artifact_id}
-            createdAt={row.event.created_at}
-            path={row.event.data.path}
-            version={row.event.data.version}
-          />
-        ) : row.kind === "system" ? (
-          <SystemDivider event={row.event} />
-        ) : (
-          <ConversationEvent
-            agentLabel={agentLabel}
-            event={row.event}
-            onShowDetails={showEventDetails}
-            showSystemEvents={showSystemEvents}
-            showTools={showTools}
-            toolCallIds={toolCallIds}
-            toolResults={toolResults}
-          />
-        )}
-      </div>
-    ),
+    (index: number, row: TimelineRowItem) => {
+      const isToolActivity =
+        row.kind === "artifact" ||
+        (row.kind === "conversation" &&
+          conversationEventKind(row.event) === "tool");
+      const paddingTop =
+        index === 0 ? 0 : isToolActivity ? TOOL_ROW_GAP_PX : ROW_GAP_PX;
+      return (
+        <div data-find-row={index} style={{ paddingTop }}>
+          {row.event.data.type === "artifact_written" ? (
+            <ArtifactWrittenCard
+              artifactId={row.event.data.artifact_id}
+              createdAt={row.event.created_at}
+              path={row.event.data.path}
+              version={row.event.data.version}
+            />
+          ) : row.kind === "system" ? (
+            <SystemDivider event={row.event} />
+          ) : (
+            <ConversationEvent
+              agentLabel={agentLabel}
+              event={row.event}
+              onShowDetails={showEventDetails}
+              showSystemEvents={showSystemEvents}
+              showTools={showTools}
+              toolCallIds={toolCallIds}
+              toolResults={toolResults}
+            />
+          )}
+        </div>
+      );
+    },
     [
       agentLabel,
       showEventDetails,
@@ -549,7 +597,7 @@ export function Transcript({
                   computeItemKey={(_index, row) => row.key}
                   itemContent={renderRow}
                   increaseViewportBy={VIEWPORT_OVERSCAN_PX}
-                  initialTopMostItemIndex={Math.max(0, rows.length - 1)}
+                  initialTopMostItemIndex={initialTopMostItemIndex}
                   rangeChanged={find.refresh}
                   followOutput={(isAtBottom) => (isAtBottom ? "auto" : false)}
                   atBottomThreshold={80}
