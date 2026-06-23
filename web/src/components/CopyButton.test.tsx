@@ -48,7 +48,7 @@ describe("CopyButton", () => {
     expect(button).toHaveTextContent("copy");
   });
 
-  it("does not enter copied state when clipboard write fails", async () => {
+  it("surfaces a visible failed state when clipboard write fails", async () => {
     vi.mocked(copyText).mockResolvedValueOnce(false);
     render(<CopyButton text="secret" />);
     const button = screen.getByRole("button", { name: "copy" });
@@ -59,6 +59,13 @@ describe("CopyButton", () => {
     });
 
     expect(copyText).toHaveBeenCalledWith("secret");
+    expect(button).toHaveAccessibleName("Copy failed");
+    expect(button).toHaveTextContent("copy failed");
+
+    await act(async () => {
+      vi.advanceTimersByTime(2200);
+    });
+
     expect(button).toHaveAccessibleName("copy");
     expect(button).toHaveTextContent("copy");
   });

@@ -1969,6 +1969,21 @@ pre {
   color: var(--text-secondary);
 }
 
+/* Keep the outcome visible even when the button would otherwise fade out on
+   pointer-leave, and colour the failure so it reads as a problem, not a no-op. */
+.copy-button[data-copy-status="copied"],
+.copy-button[data-copy-status="failed"] {
+  opacity: 1;
+}
+
+.copy-button[data-copy-status="copied"] {
+  color: var(--success);
+}
+
+.copy-button[data-copy-status="failed"] {
+  color: var(--danger);
+}
+
 .message-block:hover .message-copy-button,
 .code-block-wrap:hover .code-copy-button,
 .raw-disclosure:hover .raw-copy-button,

@@ -10,7 +10,7 @@ export function CopyButton({
   label?: string;
   className?: string;
 }) {
-  const [copied, setCopied] = useState(false);
+  const [status, setStatus] = useState<"idle" | "copied" | "failed">("idle");
   const resetRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -25,24 +25,39 @@ export function CopyButton({
     event.preventDefault();
     event.stopPropagation();
     const ok = await copyText(text);
-    if (!ok) {
-      return;
-    }
-    setCopied(true);
+    // Always surface the outcome: a silent no-op on failure is exactly what makes a
+    // copy button feel broken.
+    setStatus(ok ? "copied" : "failed");
     if (resetRef.current != null) {
       window.clearTimeout(resetRef.current);
     }
-    resetRef.current = window.setTimeout(() => setCopied(false), 1400);
+    resetRef.current = window.setTimeout(
+      () => setStatus("idle"),
+      ok ? 1400 : 2200,
+    );
   }
 
+  const text_ =
+    status === "copied"
+      ? "copied"
+      : status === "failed"
+        ? "copy failed"
+        : label;
   return (
     <button
-      aria-label={copied ? "Copied" : label}
+      aria-label={
+        status === "copied"
+          ? "Copied"
+          : status === "failed"
+            ? "Copy failed"
+            : label
+      }
       className={className}
+      data-copy-status={status}
       onClick={(event) => void handleCopy(event)}
       type="button"
     >
-      {copied ? "copied" : label}
+      {text_}
     </button>
   );
 }
