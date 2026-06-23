@@ -18,18 +18,23 @@ cd "$HERE"
 
 MODEL="${MODEL:-openai/gpt-5.5}"
 N_CONCURRENT="${N_CONCURRENT:-4}"
+# Agent time budget multiplier. Keep 1.0 for a leaderboard-comparable run (every
+# agent gets each task's standard budget); raise only for exploratory "ceiling
+# with more time" runs (a few heavy tasks legitimately time out at 1.0).
+TIMEOUT_MULT="${TIMEOUT_MULT:-1.0}"
 
 # agent.py is imported as exo_agent.agent:ExoAgent and finds the bundle relative
 # to this dir, so PYTHONPATH must include it.
 export PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}"
 
-echo "==> harbor run | model=$MODEL concurrency=$N_CONCURRENT args=$*"
+echo "==> harbor run | model=$MODEL concurrency=$N_CONCURRENT timeout_mult=$TIMEOUT_MULT args=$*"
 harbor run \
   --dataset terminal-bench@2.0 \
   --agent-import-path exo_agent.agent:ExoAgent \
   -m "$MODEL" \
   --ae "OPENAI_API_KEY=$OPENAI_API_KEY" \
   --n-concurrent "$N_CONCURRENT" \
+  --agent-timeout-multiplier "$TIMEOUT_MULT" \
   "$@"
 
 echo "==> Generating report"

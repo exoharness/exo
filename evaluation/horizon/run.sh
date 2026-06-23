@@ -11,11 +11,11 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
 : "${OPENAI_API_KEY:?set OPENAI_API_KEY}"
-HORIZON_REPO="${HORIZON_REPO:-/home/worker/horizon}"
+HORIZON_REPO="${HORIZON_REPO:-$(cd "$HERE/../../.." && pwd)/horizon}"
 MODEL="${MODEL:-openai/gpt-5.5}"
 N_CONCURRENT="${N_CONCURRENT:-2}"
 export PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}"
-[ -x "$HERE/../target/release/exo" ] || { echo "build the host exo binary first: cargo build --release -p exo"; exit 1; }
+[ -x "$HERE/../../target/release/exo" ] || { echo "build the host exo binary first: cargo build --release -p exo"; exit 1; }
 
 DATASET_ARGS=(-d orinlabs/horizon-public)
 if [ "$#" -gt 0 ]; then

@@ -37,7 +37,7 @@ class ExoHostAgent(BaseAgent):
         self._extra_env: dict[str, str] = extra_env or {}
         # The exo repo (for tsx harness resolution) is one level up from here.
         here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self._repo = exo_repo or os.environ.get("EXO_REPO") or os.path.dirname(here)
+        self._repo = exo_repo or os.environ.get("EXO_REPO") or os.path.dirname(os.path.dirname(here))
         self._bin = (
             exo_bin
             or os.environ.get("EXO_BIN")

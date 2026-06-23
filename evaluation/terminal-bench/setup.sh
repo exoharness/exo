@@ -16,7 +16,7 @@
 #   - OPENAI_API_KEY in your environment when you run ./run.sh.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-EXO_REPO="${EXO_REPO:-$(cd "$HERE/.." && pwd)}"
+EXO_REPO="${EXO_REPO:-$(cd "$HERE/../.." && pwd)}"
 
 echo "==> exo repo: $EXO_REPO"
 [ -d "$EXO_REPO" ] || { echo "ERROR: exo repo not found at $EXO_REPO (set EXO_REPO=...)"; exit 1; }
@@ -30,7 +30,7 @@ echo "    harbor $(harbor --version 2>/dev/null || echo '?')"
 
 echo "==> Python deps for reporting (venv: $HERE/.venv)"
 python3 -m venv "$HERE/.venv"
-"$HERE/.venv/bin/pip" install -q -r "$HERE/requirements.txt"
+"$HERE/.venv/bin/pip" install -q -r "$HERE/../shared/requirements.txt"
 
 echo "==> Building slim exo bundle from $EXO_REPO"
 EXO_REPO="$EXO_REPO" "$HERE/build-bundle.sh" "$EXO_REPO"

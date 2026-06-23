@@ -6,7 +6,7 @@
 # Requires: rust + the x86_64-unknown-linux-musl target (musl-tools), pnpm.
 set -euo pipefail
 # evaluation/ lives inside the exo repo, so the repo root is one level up.
-EXO="${1:-${EXO_REPO:-$(cd "$(dirname "$0")/.." && pwd)}}"
+EXO="${1:-${EXO_REPO:-$(cd "$(dirname "$0")/../.." && pwd)}}"
 OUT="$(cd "$(dirname "$0")" && pwd)/exo-bundle.tar.gz"
 cd "$EXO"
 

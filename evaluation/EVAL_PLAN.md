@@ -78,10 +78,10 @@ and `hermes`.
     `environment.exec()`, and drives exo (Simple Coding Agent harness) for the turn.
   - Net: exo's shell runs _in_ the no-internet sandbox via `environment.exec`, while
     the model call stays on the networked host. Reusable for any no-internet bench.
-  - **Built + verified**: `setup-horizon.sh` (clone + patches), `exo_agent/
-host_agent.py` (`ExoHostAgent`), `run-horizon-host.sh`. A Horizon task runs
-    end-to-end via the proxy provider with a real reward (0 exceptions); a passing
-    run was observed. Reward varies with the agent's tool use — a D2 prompting lever.
+  - **Built + verified** (under `horizon/`): `setup.sh` (clone + patches),
+    `exo_agent/host_agent.py` (`ExoHostAgent`), `run.sh`. Horizon runs end-to-end
+    via the proxy provider with real rewards (0 exceptions) — 2/3 public tasks
+    passed. Reward varies with the agent's tool use — a D2 prompting lever.
 
 ## Class 2 — Online text classification
 

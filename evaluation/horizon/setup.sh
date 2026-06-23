@@ -12,8 +12,8 @@
 # Then run with: OPENAI_API_KEY=... ./run-horizon-host.sh [task-dir]
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-REPO="$(cd "$HERE/.." && pwd)"                     # the exo repo
-HORIZON_REPO="${HORIZON_REPO:-$(cd "$HERE/../.." && pwd)/horizon}"
+REPO="$(cd "$HERE/../.." && pwd)"                     # the exo repo
+HORIZON_REPO="${HORIZON_REPO:-$(cd "$HERE/../../.." && pwd)/horizon}"
 PUB_TRACES="https://huggingface.co/datasets/orinlabs/horizon-1-example-traces/resolve/main"
 
 echo "==> Horizon repo: $HORIZON_REPO"

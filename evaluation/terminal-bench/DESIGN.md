@@ -139,11 +139,16 @@ dominant failure mode:
 
 **D3 — Fix the tasks that didn't run.**
 
-- Infra failures: root cause was per-task Docker images filling the disk + Docker's
-  network limit. Disk has since been expanded (450 G), so all task images coexist —
-  drop the image pruner and raise concurrency for a clean run.
-- Timeouts: raise the per-task time/turn budget, or accept that a few heavy tasks
-  (full model training, OS install) are out of scope. Decide per task.
+- Infra failures (30): the real root cause — verified from the original job dir —
+  was **Docker Hub anonymous pull-rate-limiting (21/30)**, clustered in the last
+  third of the run as cumulative image pulls crossed the anonymous cap; plus ~8
+  containerd layer-corruption knock-ons and 2 one-offs. (Earlier "disk full +
+  network limit" theory was wrong; disk wasn't the cause.) **Fix: `docker login`**
+  — authenticated pulls comfortably exceed the ~89 images a run needs (verified a
+  previously-rate-limited image now pulls clean). Optionally pre-pull all task
+  images once before a run. Keep the 450 G for the cached image set.
+- Timeouts (7): raise the per-task time/turn budget, or accept that a few heavy
+  tasks (model training, OS install, video) are out of scope. Decide per task.
 
 **D4 — Clean full re-run + leaderboard comparison.** After D2–D3, re-run the full
 suite flake-free for a legitimate suite-wide number, and compare to the published
