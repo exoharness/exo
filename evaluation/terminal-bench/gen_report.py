@@ -192,8 +192,9 @@ def main():
     else:
         md.append("- Cost: not captured for this run (see OpenAI usage dashboard for total)")
     md.append("\n> Agent: Exo (minimal shell harness, local-process sandbox) running gpt-5.5 in-container via Harbor.")
-    md.append("> The infra exceptions are local disk/network limits on this VM (per-task Docker images filling the disk),")
-    md.append("> not the benchmark or the agent — re-running those tasks on a larger disk gives a clean complete score.\n")
+    md.append("> 'infra' exceptions are local Docker image build/pull failures (e.g. Docker Hub pull limits on")
+    md.append("> unauthenticated pulls, or containerd layer corruption on large images) — not the benchmark or the")
+    md.append("> agent. `docker login` + retrying those tasks recovers them.\n")
     md.append("## Graphs\n")
     md.append("![outcomes](outcomes.png)\n")
     md.append("![per-task reward](per_task_reward.png)\n")

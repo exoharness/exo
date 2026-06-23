@@ -67,6 +67,9 @@ bundle is rebuilt from your exo checkout; everything else regenerates per run.
 
 ## Results to date
 
-Full TB2.0 run (gpt-5.5): **47% raw** (42/89), **71% on executed tasks** (42/59),
-~$27. The rest were infra failures (since fixed — disk) and a handful of timeouts.
+Clean full run (gpt-5.5, 2026-06-23): **64/89 = 72% raw**, **75% excluding 4
+large-image Docker-storage failures** (box limit, not the agent). Remaining
+non-passes: those 4, 6 heavy-task timeouts, 15 genuine wrong answers. ~$41.
+(First run was 47% — crippled by infra; the jump came from the D3 fix:
+`docker login` + killing a stale image-pruner that deleted images mid-run.)
 See `DESIGN.md`.

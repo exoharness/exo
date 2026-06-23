@@ -102,15 +102,21 @@ read-only key 401s). See `README.md` for prerequisites.
 | Full Terminal-Bench 2.0 run | ✅ done — 89-task suite scored |
 | Horizon                     | ⬜ later                       |
 
-### Terminal-Bench 2.0 — exo + gpt-5.5 (run `2026-06-22__06-21-32`)
+### Terminal-Bench 2.0 — exo + gpt-5.5
 
-- **Raw: 42/89 = 47%.** **On the 59 tasks that actually executed: 42/59 = 71%.**
-- 30 tasks failed to _local infra_ (disk exhaustion from per-task Docker images +
-  Docker network exhaustion mid-run) — not the agent; excluded from the 71%.
-- 6 timeouts (heavy tasks: model training, OS install); 11 genuine wrong answers.
-- Cost **$27.03** (~$0.52/task captured; high prompt-cache hit rate).
-- `run.sh` writes a per-run report under `reports/<timestamp>/` (scoreboard,
-  per-task CSV, graphs); these outputs are gitignored, not committed.
+**Clean run (2026-06-23, D2 prompt + D3 infra fixes) — current best:**
+
+- **Raw: 64/89 = 72%.** Excluding 4 tasks that fail on a box-specific large-image
+  Docker-storage limitation: **64/85 = 75%.**
+- Remaining non-passes: 4 large-image infra (containerd overlayfs corruption on
+  multi-GB CUDA images — box limit, not the agent), 6 timeouts (heavy tasks at the
+  standard budget), 15 genuine wrong answers.
+- Cost ~$41 (more tasks now execute than the first run; gpt-5.5).
+
+**First run (2026-06-22\_\_06-21-32) — contaminated baseline, for contrast:**
+
+- Raw 42/89 = 47%; only 52 executed (30 killed by infra — see D3). The jump to 72%
+  is almost entirely D3 (infra) letting tasks actually run, not the D2 prompt.
 
 ### Key finding (drives next steps)
 
@@ -122,37 +128,36 @@ oracle_. Secondary modes: grade-time-blind shortcuts (depending on local-only
 artifacts, tearing down verified state) and one deps-not-installed case. These are
 addressable in the harness.
 
-## Next steps
+## Next steps — outcomes (D2/D3/D4 done 2026-06-23)
 
-**D2 — Stronger system + verification prompt (biggest score lever).** Target the
-dominant failure mode:
+**D2 — Stronger system + verification prompt. ✅ Done; net-neutral.** Rewrote the
+prompt for verification-against-an-oracle, grade-time isolation, dep install,
+tool-use, and a pre-finish self-check. Measured with a controlled full-suite A/B
+(same 50 tasks executed under both prompts): **40 → 41 (net +1; 4 gains, 3
+regressions)** — within nondeterminism noise. Kept (principled, harmless), but the
+prediction that this was "the biggest lever" was wrong — D3 was. A dedicated
+verify-tool / further iteration is possible future work but low expected value
+given this result.
 
-- _Verification discipline_: validate output against the task's actual success
-  criteria / an independent oracle before finishing — run provided tests/checkers,
-  diff against references, sanity-check numeric results. "It compiles" / "it ran"
-  is not done; contradicting evidence is a signal to keep going.
-- _Grade-time isolation awareness_: the solution is re-graded in a fresh, isolated
-  environment — don't depend on local-only artifacts, don't tear down verified
-  state, keep required services persistent.
-- Consider a structured self-check step or a dedicated verify tool over prose alone.
-- Re-bundle and re-run a subset to measure the lift before a full re-run.
+**D3 — Fix the tasks that didn't run. ✅ Done; the actual lever.** Root cause was
+NOT disk — it was **Docker Hub anonymous pull-rate-limiting (21/30)** plus a
+**stale `docker image prune` loop deleting images mid-run** (left over from an
+earlier session; killed) and containerd layer corruption. Fixes: `docker login`
+(authenticated pulls) + killed the pruner. Result: **28 of 30 previously-dead
+tasks now execute.** Remaining: 4 large-image tasks that corrupt during
+containerd/overlayfs extraction (box-specific storage limit; a daemon storage-
+driver swap would fix it but isn't worth the restart risk) and 6 legitimate
+timeouts (kept at standard budget for leaderboard comparability; `TIMEOUT_MULT`
+in run.sh raises it for exploratory ceiling runs).
 
-**D3 — Fix the tasks that didn't run.**
-
-- Infra failures (30): the real root cause — verified from the original job dir —
-  was **Docker Hub anonymous pull-rate-limiting (21/30)**, clustered in the last
-  third of the run as cumulative image pulls crossed the anonymous cap; plus ~8
-  containerd layer-corruption knock-ons and 2 one-offs. (Earlier "disk full +
-  network limit" theory was wrong; disk wasn't the cause.) **Fix: `docker login`**
-  — authenticated pulls comfortably exceed the ~89 images a run needs (verified a
-  previously-rate-limited image now pulls clean). Optionally pre-pull all task
-  images once before a run. Keep the 450 G for the cached image set.
-- Timeouts (7): raise the per-task time/turn budget, or accept that a few heavy
-  tasks (model training, OS install, video) are out of scope. Decide per task.
-
-**D4 — Clean full re-run + leaderboard comparison.** After D2–D3, re-run the full
-suite flake-free for a legitimate suite-wide number, and compare to the published
-Claude Code / Codex / OpenHands Terminal-Bench 2.0 results.
+**D4 — Clean full re-run + leaderboard comparison. ✅ Done.** Clean number above:
+**64/89 = 72% raw, 75% excl. box-storage limits.** For context, the Meta-Harness
+paper's TB2 Table 7 (different base models, so not apples-to-apples): on Claude
+Opus 4.6, hand-built harnesses span Claude Code 58.0 / Terminus-2 62.9 /
+Terminus-KIRA 74.7 / Meta-Harness 76.4 / ForgeCode 81.8. exo's minimal shell agent
+on gpt-5.5 at ~72% lands in that band — strong for a single-tool agent with no
+harness search. A direct same-model comparison needs running exo on Opus/Haiku
+(deferred — needs an Anthropic path in exo).
 
 **Horizon (later).** Once TB2.0 is solid, run Horizon — same harness, different
 `-d` dataset. Exo's agent-native durable memory (the agent decides what to
