@@ -134,7 +134,8 @@ class ExoHostAgent(BaseAgent):
             )
             await self._exo(exo + ["conversation", "create", "t", "c"], env)
             out = await self._exo(
-                exo + ["conversation", "send", "t", "c", instruction], env, check=False
+                # `--` so an instruction beginning with '-' isn't parsed as a flag.
+                exo + ["conversation", "send", "t", "c", "--", instruction], env, check=False
             )
             context.metadata = {"exo_transcript_tail": out[-4000:]}
         finally:

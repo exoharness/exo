@@ -128,7 +128,8 @@ class ExoAgent(BaseInstalledAgent):
         # Drive the task; capture transcript for Harbor.
         await self.exec_as_agent(
             environment,
-            f"mkdir -p /logs/agent; {cd}{exo} conversation send t c "
+            # `--` so an instruction beginning with '-' isn't parsed as a CLI flag.
+            f"mkdir -p /logs/agent; {cd}{exo} conversation send t c -- "
             f"{shlex.quote(instruction)} 2>&1 | tee {self._OUTPUT}",
             env=env,
         )
