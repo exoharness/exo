@@ -25,7 +25,13 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
-from ...interface import ContinualLearningSystem, Observation, Query, Response
+from ...interface import (
+    ContinualLearningSystem,
+    Observation,
+    Query,
+    Response,
+    observation_marks_instance_complete,
+)
 from ...registry import register_system
 from ..utils.structured_output import (
     extract_json,
@@ -54,15 +60,20 @@ class ExoSystem(ContinualLearningSystem):
         self._root: Optional[str] = None
         self._workspace: Optional[str] = None
         self._base: list[str] = []
-        self._inited = False
+        self._agent_inited = False
+        self._conv: Optional[str] = None  # current per-instance conversation slug
+        self._conv_n = 0
 
     @property
     def name(self) -> str:
         return "exo"
 
-    # --- exo lifecycle (per task instance) ---------------------------------
-    def _init(self) -> None:
-        if self._inited:
+    # --- exo lifecycle ------------------------------------------------------
+    def _init_agent(self) -> None:
+        """Once per run: create the agent. Its durable memory persists across the
+        run's instances (that's the continual-learning carrier); reset() (per run,
+        and per baseline instance) tears it down for a clean slate."""
+        if self._agent_inited:
             return
         if not os.path.exists(_EXO_BIN):
             raise RuntimeError(f"exo binary not found at {_EXO_BIN}; build it or set EXO_BIN")
@@ -76,12 +87,18 @@ class ExoSystem(ContinualLearningSystem):
             + ["agent", "create", "--slug", "t", "--model", self._model,
                "--harness", _HARNESS, "--sandbox-provider", "local-process", "Exo"]
         )
-        self._run(self._base + ["conversation", "create", "t", "c"])
-        self._run(
-            self._base
-            + ["conversation", "mount", "add", "t", "c", self._workspace, self._workspace]
-        )
-        self._inited = True
+        self._agent_inited = True
+
+    def _ensure_conversation(self) -> None:
+        """Fresh conversation per task instance (clean context for the new scenario);
+        the agent and its memory persist, so lessons carry across instances."""
+        if self._conv is not None:
+            return
+        self._conv = f"c{self._conv_n}"
+        self._conv_n += 1
+        self._run(self._base + ["conversation", "create", "t", self._conv])
+        self._run(self._base + ["conversation", "mount", "add", "t", self._conv,
+                                self._workspace, self._workspace])
 
     def _run(self, argv: list[str], check: bool = True) -> str:
         proc = subprocess.run(
@@ -93,9 +110,21 @@ class ExoSystem(ContinualLearningSystem):
         return proc.stdout or ""
 
     def _last_assistant_text(self) -> str:
-        """Final assistant text message from this instance's exo event store."""
+        """Final assistant text from the CURRENT conversation (newest event store)."""
+        conv_dirs = glob.glob(
+            os.path.join(self._root or "", "**", "conversations", "*", "events"),
+            recursive=True,
+        )
+        if not conv_dirs:
+            return ""
+
+        def newest_mtime(d: str) -> float:
+            files = glob.glob(os.path.join(d, "*.json"))
+            return max((os.path.getmtime(f) for f in files), default=0.0)
+
+        events_dir = max(conv_dirs, key=newest_mtime)  # the conversation we just sent to
         events = []
-        for path in glob.glob(os.path.join(self._root or "", "**", "events", "*.json"), recursive=True):
+        for path in glob.glob(os.path.join(events_dir, "*.json")):
             try:
                 ev = json.load(open(path))
             except Exception:
@@ -120,7 +149,8 @@ class ExoSystem(ContinualLearningSystem):
 
     # --- clbench interface -------------------------------------------------
     def respond(self, query: Query) -> Response:
-        self._init()
+        self._init_agent()
+        self._ensure_conversation()
         prompt = query.prompt
         if self._pending_feedback:
             prompt = (
@@ -130,16 +160,13 @@ class ExoSystem(ContinualLearningSystem):
             self._pending_feedback = None
         prompt += schema_to_prompt_instruction(query.response_schema)
 
-        self._run(self._base + ["conversation", "send", "t", "c", "--", prompt], check=False)
+        send = self._base + ["conversation", "send", "t", self._conv, "--"]
+        self._run(send + [prompt], check=False)
         action = self._parse(query.response_schema)
         if action is None:
             # one repair attempt: re-ask for JSON only, same conversation
-            self._run(
-                self._base + ["conversation", "send", "t", "c", "--",
-                              "Your last message must be ONLY a JSON object matching the schema "
-                              "given earlier — no prose, no code fences. Output it now."],
-                check=False,
-            )
+            self._run(send + ["Your last message must be ONLY a JSON object matching the schema "
+                              "given earlier — no prose, no code fences. Output it now."], check=False)
             action = self._parse(query.response_schema)
         if action is None:
             raise RuntimeError("exo did not produce a schema-valid response after one repair")
@@ -155,6 +182,10 @@ class ExoSystem(ContinualLearningSystem):
             return None
 
     def observe(self, observation: Observation, next_query: Optional[Query] = None) -> None:
+        # At an instance boundary, drop the conversation so the next instance starts
+        # fresh — the agent (and its durable memory) persists, carrying lessons.
+        if observation_marks_instance_complete(observation):
+            self._conv = None
         content = (observation.content or "").strip()
         if content:
             self._pending_feedback = content
@@ -166,4 +197,6 @@ class ExoSystem(ContinualLearningSystem):
         self._root = self._workspace = None
         self._base = []
         self._pending_feedback = None
-        self._inited = False
+        self._agent_inited = False
+        self._conv = None
+        self._conv_n = 0

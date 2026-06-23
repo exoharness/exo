@@ -22,7 +22,7 @@ CLBENCH="${CLBENCH_REPO:-$(cd "$HERE/../../.." && pwd)/clbench}"
 [ -e "$CLBENCH/src/systems/exo" ] || { echo "exo system not linked — run ./setup.sh"; exit 1; }
 
 TASK="${1:-exploitable_poker}"; [ "$#" -gt 0 ] && shift || true
-SCHEDULE="${SCHEDULE:-quick_test}"
+SCHEDULE="${SCHEDULE:-default}"
 
 echo "==> clbench run $TASK --schedule $SCHEDULE --system exo ${*}"
 cd "$CLBENCH"
