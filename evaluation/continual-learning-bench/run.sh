@@ -11,7 +11,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 export EXO_REPO="$(cd "$HERE/../.." && pwd)"
 export EXO_BIN="${EXO_BIN:-$EXO_REPO/target/release/exo}"
-export EXO_HARNESS="${EXO_HARNESS:-$EXO_REPO/examples/simple-coding-agent/harness.ts}"
+# clbench is a continual-learning benchmark, so default to the memory-enabled
+# harness (shell + remember/forget + per-turn memory injection). Override with
+# EXO_HARNESS=.../harness.ts for a memory-free control run.
+export EXO_HARNESS="${EXO_HARNESS:-$EXO_REPO/examples/simple-coding-agent/harness-memory.ts}"
 CLBENCH="${CLBENCH_REPO:-$(cd "$HERE/../../.." && pwd)/clbench}"
 
 : "${OPENAI_API_KEY:?set OPENAI_API_KEY}"

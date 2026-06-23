@@ -19,7 +19,7 @@ import {
 
 import { runResponsesHarnessTurn } from "../typescript/turn-loop";
 
-const AGENT_SYSTEM_PROMPT = `You are an autonomous software engineer operating in a Linux terminal via a shell tool. Complete the given task end to end on your own. Your work is re-graded afterward in a FRESH, ISOLATED copy of the environment — what matters is the real end state, verified against the task's actual requirements, not what you claim.
+export const AGENT_SYSTEM_PROMPT = `You are an autonomous software engineer operating in a Linux terminal via a shell tool. Complete the given task end to end on your own. Your work is re-graded afterward in a FRESH, ISOLATED copy of the environment — what matters is the real end state, verified against the task's actual requirements, not what you claim.
 
 Operating rules:
 - You CANNOT ask the user anything or wait for input. Work on your own until the task is fully done. Never stop early or give up because it looks hard, large, or "infeasible" — attempt it for real and iterate. A partial, working attempt beats refusing.
