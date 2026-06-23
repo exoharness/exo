@@ -35,17 +35,21 @@ Set `EXO_HARNESS=.../harness.ts` for a memory-free control.
 
 ### Results to date (gpt-5.5, `default` schedule, 1 run; Gain = memory − stateless baseline)
 
-| Task                        | Gain       | Notes                                                    |
-| --------------------------- | ---------- | -------------------------------------------------------- |
-| `sales_prediction`          | **+1.37**  | clear positive — memory helps                            |
-| `cohort_studies`            | **+0.02**  | positive (task `r_max` ≈ 0.16, so ~12% of max)           |
-| `database_exploration`      | _running_  | full default (subsetting clashes with its fixed variant) |
-| `blind_spectrum_monitoring` | _running_  | full default                                             |
-| `exploitable_poker`         | ~0 / noisy | luck-dominated on few hands — not a clean discriminator  |
+| Task                        | Gain        | Baseline | Notes                                                   |
+| --------------------------- | ----------- | -------- | ------------------------------------------------------- |
+| `blind_spectrum_monitoring` | **+18.49**  | +19.76   | memory ~doubles reward — concept-drift, memory shines   |
+| `database_exploration`      | **+4.27**   | +10.27   | strong positive                                         |
+| `sales_prediction`          | **+1.37**   | +7.95    | clear positive                                          |
+| `cohort_studies`            | **+0.02**   | −0.16    | positive (task `r_max` ≈ 0.16, so ~12% of max)          |
+| `exploitable_poker`         | ~0 / noisy  | —        | luck-dominated on few hands — not a clean discriminator |
+| `codebase_adaptation`       | not yet run | —        | heaviest (Docker code tasks)                            |
 
-Positive Gain on the deterministic learners confirms the continual-learning loop
-works end to end. (gpt-5.5; the reference leaderboard uses claude-opus-4-6, so this
-is exo's own column, not a same-model comparison.)
+**Positive Gain on every deterministic learner** — exo's continual learning works
+end to end and helps materially (dramatically on `blind_spectrum_monitoring`).
+gpt-5.5, `default` schedule, 1 run each; Gain = memory minus the stateless
+baseline. The reference leaderboard uses claude-opus-4-6, so this is exo's own
+column, not a same-model comparison. Next: `--runs 3` for solid numbers + prompt
+tuning to push Gain higher.
 
 ## Quickstart
 
