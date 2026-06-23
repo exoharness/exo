@@ -3,12 +3,13 @@
 Harnesses for evaluating Exo on external agent benchmarks, organized one folder
 per benchmark with shared bits in `shared/`.
 
-| Path                                 | What                                                                                                                                                                         |
-| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`EVAL_PLAN.md`](EVAL_PLAN.md)       | Cross-benchmark plan: the continual-learning thesis, selected reference benchmarks, and a survey of options. Start here.                                                     |
-| [`terminal-bench/`](terminal-bench/) | **Terminal-Bench 2.0** (Harbor): Exo as an _installed_ agent (runs inside the task sandbox). `setup.sh` → `run.sh`; see its `README.md` + `DESIGN.md`.                       |
-| [`horizon/`](horizon/)               | **Horizon** (orinlabs, Harbor): Exo as a _host-side_ agent (runs on the host, shell proxied into the no-internet sandbox via exo's `proxy` provider). `setup.sh` → `run.sh`. |
-| `shared/`                            | Files used across benchmarks (`requirements.txt` for the report scripts).                                                                                                    |
+| Path                                                     | What                                                                                                                                                                            |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`EVAL_PLAN.md`](EVAL_PLAN.md)                           | Cross-benchmark plan: the continual-learning thesis, selected reference benchmarks, and a survey of options. Start here.                                                        |
+| [`terminal-bench/`](terminal-bench/)                     | **Terminal-Bench 2.0** (Harbor): Exo as an _installed_ agent (runs inside the task sandbox). `setup.sh` → `run.sh`; see its `README.md` + `DESIGN.md`.                          |
+| [`horizon/`](horizon/)                                   | **Horizon** (orinlabs, Harbor): Exo as a _host-side_ agent (runs on the host, shell proxied into the no-internet sandbox via exo's `proxy` provider). `setup.sh` → `run.sh`.    |
+| [`continual-learning-bench/`](continual-learning-bench/) | **Continual Learning Bench** (pgasawa, custom framework): Exo as a clbench "system" (`@register_system("exo")`); measures Gain (stateful vs. stateless). `setup.sh` → `run.sh`. |
+| `shared/`                                                | Files used across benchmarks (`requirements.txt` for the report scripts).                                                                                                       |
 
 ## Layout conventions
 

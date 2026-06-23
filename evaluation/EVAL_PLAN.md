@@ -187,23 +187,23 @@ Selected = in the plan above; the rest are candidates or rejected.
 - **Cons**: single-shot capability bench — continual angle is weak (only "memory
   carried across tasks/attempts"); not a learning benchmark per se.
 
-### Continual Learning Bench — STRONG CANDIDATE (investigate)
+### Continual Learning Bench — INTEGRATED ✅ (most on-thesis)
 
 - **Link**: https://continual-learning-bench.com/ (arXiv:2606.05661; GitHub `pgasawa/…`)
 - **What**: expert-validated hard tasks (software eng, data science, strategic
   modeling) run as **sequences of instances**; headline metric is **Gain** =
   stateful performance minus a stateless reset baseline — i.e. "how much the system
-  learned from experience."
-- **Framework**: TBD (needs checking — repo + paper exist; unclear if Harbor-based).
-- **Pros**: **the most on-thesis option** — its Gain metric is literally what our
-  plan calls the learning-curve signal (continual self-adaptation vs. a reset
-  baseline); diverse, hard, agentic tasks; has a leaderboard + Agg. Reward / Gain /
-  Avg. Cost metrics that map onto exo cleanly.
-- **Cons**: newer/less-proven; integration cost unknown until we confirm the
-  framework; need to verify task availability and whether exo plugs in directly.
-- **Take**: worth a focused spike — if it's Harbor-compatible (or a thin adapter),
-  it may be a _better_ continual-learning centerpiece than Horizon (bigger public
-  set, an explicit gain metric, diverse domains). Flag for evaluation.
+  learned from experience." This is exactly our continual-learning signal.
+- **Framework**: its own (NOT Harbor) — `clbench run <task> --schedule … --system
+<name>`; agents are "systems" (`ContinualLearningSystem` registered via
+  `@register_system`, discovered from `src/systems/`).
+- **Status**: integrated at `continual-learning-bench/` — an exo system (host-side,
+  local-process) modeled on the in-tree `codex` system. Verified end-to-end on
+  `exploitable_poker` (baseline + runs, schema-valid responses, 0 repairs, Gain
+  computed). **Gain is negative on this branch** — no durable memory yet, so no
+  cross-episode learning; the eval support is what makes the memory branch's gain
+  measurable. This is likely the strongest centerpiece once memory lands (bigger,
+  more diverse than Horizon's 3 public tasks; explicit Gain metric).
 
 ### SCBench / SlopCodeBench — TANGENTIAL
 
@@ -229,8 +229,9 @@ Selected = in the plan above; the rest are candidates or rejected.
 ## Open decisions
 
 - Confirm the continual-learning framing and the per-class adaptation/eval protocol.
-- **Continual Learning Bench**: spike its framework/availability — potential
-  centerpiece alternative/addition to Horizon (its Gain metric matches our thesis).
+- ~~Continual Learning Bench spike~~ — DONE: integrated (`continual-learning-bench/`);
+  the next step there is wiring exo's durable memory (other branch) into the system
+  so Gain becomes positive.
 - Horizon history→memory design (load into memory store vs. read from env) — the
   core of the exo-vs-RAG comparison.
 - When to switch to Opus 4.6 / Haiku 4.5 (needs an Anthropic base-model path in exo).
