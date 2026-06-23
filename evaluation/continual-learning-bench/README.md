@@ -24,14 +24,28 @@ implements `respond(query) → Response`, `reset()`, `name`, registered with
   `clbench/src/systems/exo/`** (so the registry finds it), and ensures a host exo
   binary. **`run.sh`** — `clbench run <task> --schedule quick_test --system exo`.
 
-## Learning status (read this)
+## Learning status
 
-On _this_ exo branch there is **no durable memory**, so the only "learning" is the
-previous turn's feedback fed into the next prompt (basic in-context continuity).
-Exo's agent-native durable memory lives on another branch; it plugs into
-`observe()` / `_init()` later. **This folder is the eval _support_** — the plumbing
-that makes Exo's continual learning measurable here — not the learning itself, so
-expect modest Gain until memory is wired in.
+This branch is rebased onto `exoclaw-self-control` (agent memory, merged #70), and
+the default harness is the **memory-enabled** `harness-memory.ts` (shell +
+remember/forget + per-turn memory injection). So exo genuinely learns across a
+run's instances: the agent (and its durable memory) persists, with a fresh
+conversation per instance — lessons carry via memory, not a bloated transcript.
+Set `EXO_HARNESS=.../harness.ts` for a memory-free control.
+
+### Results to date (gpt-5.5, `default` schedule, 1 run; Gain = memory − stateless baseline)
+
+| Task                        | Gain       | Notes                                                    |
+| --------------------------- | ---------- | -------------------------------------------------------- |
+| `sales_prediction`          | **+1.37**  | clear positive — memory helps                            |
+| `cohort_studies`            | **+0.02**  | positive (task `r_max` ≈ 0.16, so ~12% of max)           |
+| `database_exploration`      | _running_  | full default (subsetting clashes with its fixed variant) |
+| `blind_spectrum_monitoring` | _running_  | full default                                             |
+| `exploitable_poker`         | ~0 / noisy | luck-dominated on few hands — not a clean discriminator  |
+
+Positive Gain on the deterministic learners confirms the continual-learning loop
+works end to end. (gpt-5.5; the reference leaderboard uses claude-opus-4-6, so this
+is exo's own column, not a same-model comparison.)
 
 ## Quickstart
 
