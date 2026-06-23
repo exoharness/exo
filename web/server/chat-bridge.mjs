@@ -1,8 +1,8 @@
-// Executor adapter seam: the substrate HTTP transport does not run agent turns, so
-// this local bridge invokes the exo CLI (`conversation send`) as the executor
-// entry point. Keep it thin — no streaming, no substrate reads beyond what the
-// CLI exposes. A future native executor HTTP API can replace this module without
-// touching the web UI.
+// Executor adapter seam: the substrate HTTP transport does not run agent turns or
+// create conversations, so this local bridge invokes the exo CLI (`conversation
+// send` and `conversation create`) as the executor entry point. Keep it thin — no
+// streaming, no substrate reads beyond what the CLI exposes. A future native
+// executor HTTP API can replace this module without touching the web UI.
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 
@@ -35,6 +35,14 @@ const server = createServer(async (request, response) => {
 
   if (request.method === "POST" && isCancelPath(url.pathname)) {
     await handleCancel(request, response);
+    return;
+  }
+
+  if (
+    request.method === "POST" &&
+    (url.pathname === "/create" || url.pathname === "/chat/create")
+  ) {
+    await handleCreate(request, response);
     return;
   }
 
@@ -135,6 +143,63 @@ async function runTurn({ agent, conversation, message, requestId }) {
     stderr: null,
     latestEventId,
   };
+}
+
+async function handleCreate(request, response) {
+  let payload;
+  try {
+    payload = await readJsonBody(request);
+  } catch (error) {
+    sendJson(response, 400, { ok: false, error: errorMessage(error) });
+    return;
+  }
+
+  const agent =
+    payload && typeof payload.agent === "string" ? payload.agent.trim() : "";
+  if (!agent) {
+    sendJson(response, 400, {
+      ok: false,
+      error: "agent must be a non-empty string",
+    });
+    return;
+  }
+  const name =
+    payload && typeof payload.name === "string" ? payload.name.trim() : "";
+
+  // `--` forces the agent (and optional name) to be read as positionals even if a
+  // name begins with "-". Mirrors the send path's argument handling.
+  const args = [
+    "--harness",
+    EXO_HARNESS,
+    "conversation",
+    "create",
+    "--",
+    agent,
+  ];
+  if (name) {
+    args.push(name);
+  }
+
+  const result = await spawnAndWait(EXO_BIN, args, 30_000);
+  if (!result.ok) {
+    sendJson(response, 500, {
+      ok: false,
+      exitCode: result.exitCode,
+      error: result.error,
+      stderr: result.stderr,
+    });
+    return;
+  }
+
+  // The CLI prints: "created conversation <slug> (<id>)".
+  const match = result.stdout.match(
+    /created conversation\s+(\S+)\s+\(([0-9a-f-]+)\)/i,
+  );
+  sendJson(response, 200, {
+    ok: true,
+    slug: match?.[1] ?? null,
+    id: match?.[2] ?? null,
+  });
 }
 
 async function handleCancel(request, response) {

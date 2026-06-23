@@ -26,6 +26,7 @@ exo web connects to a running **exoharness** HTTP server and shows:
 - **State inspector** — secrets (metadata only), bindings, and sandbox state reconstructed from conversation events.
 - **Artifact viewer** — read-only preview of conversation artifacts (text, JSON, markdown, images).
 - **Chat composer** — send a user message via the local bridge; the turn runs in the CLI and events appear through the same poll loop.
+- **New conversation** — the `+ New` control in the sidebar creates a conversation through the same bridge (`exo conversation create`), then selects it.
 
 The top bar shows substrate health (`GET /health`), a configurable base URL, and a **read-only inspector** label. Chat is optional and requires the bridge.
 
@@ -56,13 +57,12 @@ Default base URL is `/exo` (Vite proxy). The field accepts a server root (`http:
 
 ### Executor adapter (`server/chat-bridge.mjs`)
 
-The substrate HTTP API does **not** run agent turns. Chat posts to same-origin `/chat`, proxied to `chat-bridge.mjs`, which:
+The substrate HTTP API does **not** run agent turns or create conversations. Those writes post to same-origin paths proxied to `chat-bridge.mjs`:
 
-1. Validates `{ agent, conversation, message }`.
-2. Spawns `exo --harness <harness> conversation send <agent> <conversation> <message>` (default harness: `exoclaw`).
-3. Optionally runs `exo conversation show` to read `latest_event_id` from stdout.
+- `POST /chat` validates `{ agent, conversation, message }`, spawns `exo --harness <harness> conversation send <agent> <conversation> <message>` (default harness: `exoclaw`), then optionally runs `exo conversation show` to read `latest_event_id` from stdout.
+- `POST /chat/create` validates `{ agent, name? }`, spawns `exo --harness <harness> conversation create <agent> [name]`, and returns the new conversation's `slug` and `id` parsed from stdout.
 
-No streaming, no substrate mutation from the bridge — it is an explicit, replaceable executor seam. A future native executor HTTP API can swap in without changing the UI contract (`POST /chat` → `{ ok: true }`).
+Every spawn uses an argument array with `shell: false`. No streaming, no substrate reads beyond the CLI — it is an explicit, replaceable executor seam. A future native executor HTTP API can swap in without changing the UI contract.
 
 ### Live updates (cursor polling)
 

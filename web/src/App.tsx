@@ -512,6 +512,22 @@ export default function App() {
     pollEvents();
   }
 
+  async function handleCreateConversation(name: string) {
+    if (!selectedAgentId) {
+      throw new Error("select an agent before creating a conversation");
+    }
+    // Creating a conversation is a write, which the read-only substrate transport
+    // does not do, so it goes through the same local bridge as sending a turn.
+    const created = await createConversationViaBridge({
+      agent: selectedAgentId,
+      name,
+    });
+    if (created.id) {
+      setSelectedConversationId(created.id);
+    }
+    setRefreshToken((value) => value + 1);
+  }
+
   function handleSelectAgent(agentId: string) {
     setSelectedAgentId(agentId);
     setSelectedConversationId(null);
@@ -617,6 +633,7 @@ export default function App() {
             selectedConversationId={selectedConversationId}
             onSelectAgent={handleSelectAgent}
             onSelectConversation={setSelectedConversationId}
+            onCreateConversation={handleCreateConversation}
           />
           <Transcript
             agentLabel={
@@ -724,6 +741,38 @@ async function sendChatTurn({
   );
 }
 
+async function createConversationViaBridge({
+  agent,
+  name,
+}: {
+  agent: string;
+  name: string;
+}): Promise<{ id: string | null; slug: string | null }> {
+  const response = await fetch("/chat/create", {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ agent, name }),
+  });
+
+  const text = await response.text();
+  const payload = parseJsonObject(text);
+
+  if (!response.ok || !(payload && payload.ok === true)) {
+    throw new Error(
+      extractChatError(payload) ||
+        `conversation bridge failed (${response.status})`,
+    );
+  }
+
+  return {
+    id: typeof payload.id === "string" ? payload.id : null,
+    slug: typeof payload.slug === "string" ? payload.slug : null,
+  };
+}
+
 async function cancelChatTurn(requestId: string) {
   const response = await fetch("/chat/cancel", {
     method: "POST",
@@ -790,6 +839,7 @@ function LeftNav({
   selectedConversationId,
   onSelectAgent,
   onSelectConversation,
+  onCreateConversation,
 }: {
   agents: AgentRecord[];
   conversations: ConversationHandleInfo[];
@@ -800,8 +850,27 @@ function LeftNav({
   selectedConversationId: string | null;
   onSelectAgent: (agentId: string) => void;
   onSelectConversation: (conversationId: string) => void;
+  onCreateConversation: (name: string) => Promise<void>;
 }) {
   const [filter, setFilter] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [createPending, setCreatePending] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+
+  async function submitCreate() {
+    setCreatePending(true);
+    setCreateError(null);
+    try {
+      await onCreateConversation(newName.trim());
+      setCreating(false);
+      setNewName("");
+    } catch (error) {
+      setCreateError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCreatePending(false);
+    }
+  }
   const normalizedFilter = filter.trim().toLowerCase();
 
   const filteredAgents = useMemo(() => {
@@ -870,15 +939,78 @@ function LeftNav({
       <section className="nav-section nav-section-conversations">
         <div className="section-header">
           <h2>Conversations</h2>
-          <span>
-            {loadingConversations ? "…" : filteredConversations.length}
-          </span>
+          <div className="section-header-meta">
+            <span>
+              {loadingConversations ? "…" : filteredConversations.length}
+            </span>
+            {selectedAgent ? (
+              <button
+                aria-expanded={creating}
+                aria-label="New conversation"
+                className="ghost-button new-conversation-toggle"
+                onClick={() => {
+                  setCreateError(null);
+                  setCreating((value) => !value);
+                }}
+                type="button"
+              >
+                + New
+              </button>
+            ) : null}
+          </div>
         </div>
         {selectedAgent ? (
           <div className="selected-context">
             <span>{selectedAgent.name || selectedAgent.slug}</span>
             <code>{shortId(selectedAgent.id)}</code>
           </div>
+        ) : null}
+        {creating && selectedAgent ? (
+          <form
+            className="new-conversation-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitCreate();
+            }}
+          >
+            <input
+              autoFocus
+              className="new-conversation-input"
+              disabled={createPending}
+              onChange={(event) => setNewName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  setCreating(false);
+                  setCreateError(null);
+                }
+              }}
+              placeholder="Name (optional)"
+              value={newName}
+            />
+            <div className="new-conversation-actions">
+              <button
+                className="primary-button"
+                disabled={createPending}
+                type="submit"
+              >
+                {createPending ? "creating…" : "Create"}
+              </button>
+              <button
+                className="ghost-button"
+                disabled={createPending}
+                onClick={() => {
+                  setCreating(false);
+                  setCreateError(null);
+                }}
+                type="button"
+              >
+                Cancel
+              </button>
+            </div>
+            {createError ? (
+              <div className="new-conversation-error">{createError}</div>
+            ) : null}
+          </form>
         ) : null}
         <div className="nav-list">
           {filteredConversations.map((conversation) => (

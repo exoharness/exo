@@ -2218,6 +2218,92 @@ pre {
   font-variant-numeric: tabular-nums;
 }
 
+.section-header-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ghost-button {
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    color var(--ease),
+    border-color var(--ease),
+    background var(--ease);
+}
+
+.ghost-button:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--hairline-strong);
+  background: var(--surface-subtle);
+}
+
+.ghost-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.new-conversation-form {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 4px;
+  padding: 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 9px;
+  background: var(--surface-subtle);
+}
+
+.new-conversation-input {
+  width: 100%;
+  border: 1px solid var(--hairline);
+  border-radius: 7px;
+  background: var(--surface-raised);
+  color: var(--text);
+  padding: 6px 9px;
+  font-size: 12.5px;
+}
+
+.new-conversation-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+.new-conversation-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.primary-button {
+  border: 0;
+  border-radius: 7px;
+  background: var(--user-bubble);
+  color: var(--user-bubble-text);
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.primary-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.new-conversation-error {
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
 .panel-note {
   color: var(--text-faint);
   font-size: 11px;
