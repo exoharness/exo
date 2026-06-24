@@ -150,6 +150,20 @@ def main():
            "Memory pulling above the dashed baseline = lessons compounding across instances.\n",
            "![curves](cumulative_reward.png)\n"]
 
+    # --- Memory cadence (how often it remembered) ---
+    md += ["## Memory cadence (how often the agent remembered)\n",
+           "Per-instance rate hides the *style*: a low rate with high signal-per-entry "
+           "(deliberate structure capture) beats a high rate of redundant logging. "
+           "`net kept` = entries left in the store after any `forget`s.\n",
+           "| Task | Instances | remember | forget | net kept | remembers/instance |",
+           "|------|-----------|----------|--------|----------|--------------------|"]
+    for r in rows:
+        m = r["mem"]
+        rate = (m["remember"] / r["n"]) if r["n"] else 0.0
+        md.append(f"| `{r['task']}` | {r['n']} | {m['remember']} | {m['forget']} | "
+                  f"{len(m['entries'])} | {rate:.2f} |")
+    md.append("")
+
     # --- What the agent remembered (the source of the Gain) ---
     md += ["## What the agent remembered (why memory helps)\n",
            "The Gain comes entirely from this — lessons/state the stateful run carries "
