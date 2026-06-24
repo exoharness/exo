@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent,
+} from "react";
 import { ExoClient, normalizeRequestEndpoint } from "./api/exoClient";
 import type {
   AgentRecord,
@@ -13,6 +19,7 @@ import { Overview } from "./components/Overview";
 import { SidePanels } from "./components/SidePanels";
 import { Transcript } from "./components/Transcript";
 import { shortId } from "./lib/rendering";
+import { eventIdToTimestamp, formatRelativeTime } from "./lib/eventTime";
 import {
   computeConversationRollup,
   formatRollupChips,
@@ -20,6 +27,10 @@ import {
 import { deriveSandboxState } from "./lib/sandbox";
 import { loadAgentMemory, type MemoryEntry } from "./lib/agentMemory";
 import { useConversationEvents } from "./lib/useConversationEvents";
+import {
+  useConversationStats,
+  type ConversationTurnCounts,
+} from "./lib/useConversationStats";
 import {
   clearActiveChatTurnIfMatch,
   createActiveChatTurn,
@@ -160,6 +171,11 @@ export default function App() {
   }, [activeBaseUrl]);
   const client = clientState.client;
   const turnPending = activeChatTurn != null;
+  const conversationTurnCounts = useConversationStats(
+    client,
+    selectedAgentId,
+    conversations,
+  );
 
   const {
     events,
@@ -626,6 +642,7 @@ export default function App() {
           <LeftNav
             agents={agents}
             conversations={conversations}
+            turnCounts={conversationTurnCounts}
             loadingAgents={loadingAgents}
             loadingConversations={loadingConversations}
             selectedAgent={selectedAgent}
@@ -696,6 +713,17 @@ function scrollTranscriptToLatest() {
   if (el instanceof HTMLElement) {
     el.scrollTop = el.scrollHeight;
   }
+}
+
+// A stable per-conversation colour derived from its id, so the same conversation
+// always reads the same hue and different ones are easy to tell apart at a glance.
+// Mid saturation/lightness keeps every hue legible on both the light and dark nav.
+function conversationColor(id: string): string {
+  let hash = 0;
+  for (let index = 0; index < id.length; index += 1) {
+    hash = (hash * 31 + id.charCodeAt(index)) >>> 0;
+  }
+  return `hsl(${hash % 360} 62% 56%)`;
 }
 
 async function sendChatTurn({
@@ -832,6 +860,7 @@ function MoonIcon() {
 function LeftNav({
   agents,
   conversations,
+  turnCounts,
   loadingAgents,
   loadingConversations,
   selectedAgent,
@@ -843,6 +872,7 @@ function LeftNav({
 }: {
   agents: AgentRecord[];
   conversations: ConversationHandleInfo[];
+  turnCounts: ConversationTurnCounts;
   loadingAgents: boolean;
   loadingConversations: boolean;
   selectedAgent: AgentRecord | null;
@@ -872,6 +902,9 @@ function LeftNav({
     }
   }
   const normalizedFilter = filter.trim().toLowerCase();
+  // Sampled once per render for relative timestamps; the list re-renders often
+  // enough (selection, filter, count arrivals) to keep "2h" style labels fresh.
+  const nowMs = Date.now();
 
   const filteredAgents = useMemo(() => {
     if (!normalizedFilter) {
@@ -1013,27 +1046,57 @@ function LeftNav({
           </form>
         ) : null}
         <div className="nav-list">
-          {filteredConversations.map((conversation) => (
-            <button
-              className={`nav-item conversation-nav-item ${
-                conversation.record.id === selectedConversationId
-                  ? "selected"
-                  : ""
-              }`}
-              key={conversation.record.id}
-              onClick={() => onSelectConversation(conversation.record.id)}
-              type="button"
-            >
-              <span>
-                {conversation.record.name ||
-                  conversation.record.slug ||
-                  shortId(conversation.record.id)}
-              </span>
-              <code>
-                {conversation.record.slug || shortId(conversation.record.id)}
-              </code>
-            </button>
-          ))}
+          {filteredConversations.map((conversation) => {
+            const lastActiveMs = eventIdToTimestamp(
+              conversation.record.latest_event_id,
+            );
+            const turns = turnCounts.get(
+              `${selectedAgentId}:${conversation.record.id}`,
+            );
+            return (
+              <button
+                className={`nav-item conversation-nav-item ${
+                  conversation.record.id === selectedConversationId
+                    ? "selected"
+                    : ""
+                }`}
+                key={conversation.record.id}
+                onClick={() => onSelectConversation(conversation.record.id)}
+                style={
+                  {
+                    "--conv-color": conversationColor(conversation.record.id),
+                  } as CSSProperties
+                }
+                type="button"
+              >
+                <span className="conversation-nav-name">
+                  <span aria-hidden="true" className="conversation-dot" />
+                  {conversation.record.name ||
+                    conversation.record.slug ||
+                    shortId(conversation.record.id)}
+                </span>
+                <span className="conversation-nav-meta">
+                  <code>
+                    {conversation.record.slug ||
+                      shortId(conversation.record.id)}
+                  </code>
+                  {lastActiveMs != null ? (
+                    <time
+                      className="conversation-nav-stat"
+                      dateTime={new Date(lastActiveMs).toISOString()}
+                    >
+                      {formatRelativeTime(lastActiveMs, nowMs)}
+                    </time>
+                  ) : null}
+                  {turns != null && turns > 0 ? (
+                    <span className="conversation-nav-stat">
+                      {turns} {turns === 1 ? "turn" : "turns"}
+                    </span>
+                  ) : null}
+                </span>
+              </button>
+            );
+          })}
           {!loadingConversations &&
           selectedAgentId &&
           filteredConversations.length === 0 ? (

@@ -129,6 +129,11 @@ export function Transcript({
   const prevTurnPendingRef = useRef(false);
   // Stick to the newest message unless the reader has scrolled up to read history.
   const stickRef = useRef(true);
+  // True once the reader has deliberately scrolled away (a real wheel/touch gesture,
+  // never content growth or a poll). This is what freezes auto-stick: relying on the
+  // at-bottom flag alone is wrong, because it flickers as the list grows and a poll
+  // briefly flips `loading`, both of which would otherwise yank the reader back down.
+  const userScrolledAwayRef = useRef(false);
   const lastScrollTopRef = useRef(0);
 
   // Pin to the bottom now and across the next two frames, so we still land on the
@@ -137,9 +142,9 @@ export function Transcript({
   // scrollHeight reflects the real end rather than an estimate.
   function scrollToBottom() {
     const pin = () => {
-      // Render+measure the final row first so scrollHeight reflects the real end,
-      // then pin onto it. Re-doing both each pass lets a tall last row that measures
-      // a few frames late still pull the view onto the true bottom.
+      // Ask virtuoso to render+measure the final row so scrollHeight reflects the
+      // real end, then pin onto it. Re-doing both each pass lets a tall last row
+      // that measures a few frames late still pull the view onto the true bottom.
       const lastIndex = rowCountRef.current - 1;
       if (lastIndex >= 0) {
         virtuosoRef.current?.scrollToIndex({ index: lastIndex, align: "end" });
@@ -168,7 +173,17 @@ export function Transcript({
   // fought virtuoso's own scroll anchoring and made scrolling up flicker/jump.
   const handleAtBottomChange = useCallback((atBottom: boolean) => {
     stickRef.current = atBottom;
+    // Returning to the bottom re-arms auto-stick. We never set the flag true here:
+    // atBottom turning false also fires when the list simply grew below the view.
+    if (atBottom) {
+      userScrolledAwayRef.current = false;
+    }
     setShowJumpToLatest(!atBottom);
+  }, []);
+
+  // A real wheel or touch gesture is the only thing that means "I took the scroll".
+  const markUserScroll = useCallback(() => {
+    userScrolledAwayRef.current = true;
   }, []);
 
   const artifactLoader = useMemo(() => {
@@ -213,6 +228,7 @@ export function Transcript({
   // Switching conversations resets stick + clears any open detail.
   useEffect(() => {
     stickRef.current = true;
+    userScrolledAwayRef.current = false;
     setDetailSelection(null);
   }, [conversation?.record.id]);
 
@@ -265,12 +281,9 @@ export function Transcript({
   rowCountRef.current = rows.length;
 
   // virtuoso re-scrolls to initialTopMostItemIndex whenever its value changes, so
-  // tracking rows.length forever makes every poll-driven append jump back to the
-  // newest row and reset a reader who had scrolled up. But the index also has to
-  // reach the real last row for the open to land at the bottom. So we track the
-  // newest row only WHILE the conversation is still loading, then freeze it: the
-  // open lands at the bottom, and later live appends (handled by followOutput) no
-  // longer move it.
+  // tracking rows.length forever makes every append jump back to the newest row and
+  // reset a reader who scrolled up. We keep targeting the newest row until the reader
+  // deliberately scrolls away (a real gesture, not growth or a poll), then freeze it.
   const initialIndexRef = useRef<{ id: string | null; index: number }>({
     id: null,
     index: 0,
@@ -281,12 +294,7 @@ export function Transcript({
       id: currentConvId,
       index: Math.max(0, rows.length - 1),
     };
-  } else if (loading || stickRef.current) {
-    // While the conversation is still loading, keep targeting the newest row so the
-    // open lands at the bottom even as history pages in (ignoring the at-bottom
-    // flag, which flickers as the list grows). Once loaded, only keep targeting it
-    // while the reader is actually at the bottom; otherwise a poll-driven append
-    // would move the index and reset someone who has scrolled up to read history.
+  } else if (!userScrolledAwayRef.current) {
     initialIndexRef.current.index = Math.max(0, rows.length - 1);
   }
   const initialTopMostItemIndex = initialIndexRef.current.index;
@@ -335,6 +343,27 @@ export function Transcript({
     rows,
     scrollToRow,
   });
+
+  // Minimap: one colored marker per row, plus a moving highlight for the rows
+  // currently on screen. The range comes from virtuoso's rangeChanged (the same
+  // signal find repaints on), so the indicator tracks the real viewport.
+  const minimapMarkers = useMemo(() => rows.map(markerKindForRow), [rows]);
+  const [visibleRange, setVisibleRange] = useState<{
+    startIndex: number;
+    endIndex: number;
+  }>({ startIndex: 0, endIndex: 0 });
+  const handleRangeChanged = useCallback(
+    (range: { startIndex: number; endIndex: number }) => {
+      find.refresh();
+      setVisibleRange((current) =>
+        current.startIndex === range.startIndex &&
+        current.endIndex === range.endIndex
+          ? current
+          : range,
+      );
+    },
+    [find],
+  );
 
   function handleFindKeyDown(event: KeyboardEvent<HTMLInputElement>) {
     if (event.key === "Enter") {
@@ -440,6 +469,8 @@ export function Transcript({
               path={row.event.data.path}
               version={row.event.data.version}
             />
+          ) : row.kind === "error" ? (
+            <ErrorEvent event={row.event} />
           ) : row.kind === "system" ? (
             <SystemDivider event={row.event} />
           ) : (
@@ -471,150 +502,163 @@ export function Transcript({
   return (
     <ArtifactContext.Provider value={artifactLoader}>
       <main className="main-panel" aria-label="Conversation transcript">
-        <div className="transcript-scroll" ref={setScrollNode}>
-          <div className="main-inner">
-            {error ? <div className="error-banner">{error}</div> : null}
+        <div className="transcript-region">
+          <div
+            className="transcript-scroll"
+            onTouchMove={markUserScroll}
+            onWheel={markUserScroll}
+            ref={setScrollNode}
+          >
+            <div className="main-inner">
+              {error ? <div className="error-banner">{error}</div> : null}
 
-            {conversation ? (
-              <header className="conversation-header">
-                <div className="conversation-header-main">
-                  <h1>
-                    {conversation.record.name ||
-                      conversation.record.slug ||
-                      shortId(conversation.record.id)}
-                  </h1>
-                  {rollupChips.length > 0 ? (
-                    <div
-                      className="conversation-rollup"
-                      aria-label="Conversation totals"
+              {conversation ? (
+                <header className="conversation-header">
+                  <div className="conversation-header-main">
+                    <h1>
+                      {conversation.record.name ||
+                        conversation.record.slug ||
+                        shortId(conversation.record.id)}
+                    </h1>
+                    {rollupChips.length > 0 ? (
+                      <div
+                        className="conversation-rollup"
+                        aria-label="Conversation totals"
+                      >
+                        {rollupChips.map((chip) => (
+                          <span className="metric-chip" key={chip}>
+                            {chip}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="conversation-header-actions">
+                    <button
+                      className="text-button"
+                      disabled={events.length === 0}
+                      onClick={() =>
+                        downloadConversationJson(events, exportStem)
+                      }
+                      type="button"
                     >
-                      {rollupChips.map((chip) => (
-                        <span className="metric-chip" key={chip}>
-                          {chip}
-                        </span>
-                      ))}
-                    </div>
+                      export json
+                    </button>
+                    <button
+                      className="text-button"
+                      disabled={events.length === 0}
+                      onClick={() =>
+                        downloadConversationMarkdown(events, exportStem)
+                      }
+                      type="button"
+                    >
+                      export md
+                    </button>
+                  </div>
+                </header>
+              ) : null}
+
+              <div className="timeline-toolbar">
+                <div className="timeline-status">
+                  <span>
+                    {loading
+                      ? "loading events"
+                      : `showing ${rows.length.toLocaleString()} of ${orderedEvents.length.toLocaleString()}`}
+                  </span>
+                  {conversation?.record.latest_event_id ? (
+                    <span>
+                      head {shortId(conversation.record.latest_event_id)}
+                    </span>
                   ) : null}
                 </div>
-                <div className="conversation-header-actions">
-                  <button
-                    className="text-button"
-                    disabled={events.length === 0}
-                    onClick={() => downloadConversationJson(events, exportStem)}
-                    type="button"
+                <div className="timeline-tools">
+                  <TranscriptSearchBox
+                    activeIndex={find.activeIndex}
+                    matchCount={find.matchCount}
+                    onChange={setFindQuery}
+                    onClear={() => setFindQuery("")}
+                    onKeyDown={handleFindKeyDown}
+                    onNext={find.next}
+                    onPrev={find.prev}
+                    query={findQuery}
+                  />
+                  <div
+                    className="filter-chips"
+                    role="group"
+                    aria-label="Filter timeline by type"
                   >
-                    export json
-                  </button>
-                  <button
-                    className="text-button"
-                    disabled={events.length === 0}
-                    onClick={() =>
-                      downloadConversationMarkdown(events, exportStem)
-                    }
-                    type="button"
-                  >
-                    export md
-                  </button>
+                    <FilterChip
+                      active={showMessages}
+                      label="messages"
+                      onToggle={() => setShowMessages((value) => !value)}
+                    />
+                    <FilterChip
+                      active={showTools}
+                      label="tools"
+                      onToggle={() => setShowTools((value) => !value)}
+                    />
+                    <FilterChip
+                      active={showArtifacts}
+                      label="artifacts"
+                      onToggle={() => setShowArtifacts((value) => !value)}
+                    />
+                    <FilterChip
+                      active={showSystemEvents}
+                      label="system"
+                      onToggle={() => setShowSystemEvents((value) => !value)}
+                    />
+                  </div>
                 </div>
-              </header>
-            ) : null}
+              </div>
 
-            <div className="timeline-toolbar">
-              <div className="timeline-status">
-                <span>
-                  {loading
-                    ? "loading events"
-                    : `showing ${rows.length.toLocaleString()} of ${orderedEvents.length.toLocaleString()}`}
-                </span>
-                {conversation?.record.latest_event_id ? (
-                  <span>
-                    head {shortId(conversation.record.latest_event_id)}
-                  </span>
+              <div
+                className="timeline"
+                ref={timelineRef}
+                role="log"
+                aria-live="polite"
+                aria-relevant="additions text"
+              >
+                {!conversation ? (
+                  <EmptyState title="No conversation selected" />
+                ) : null}
+                {conversation && loading && events.length === 0 ? (
+                  <EventLoadingSkeleton />
+                ) : null}
+                {conversation && !loading && events.length === 0 && !pending ? (
+                  <EmptyState title="No events recorded" />
+                ) : null}
+                {hasRows && scrollEl ? (
+                  <Virtuoso
+                    key={conversation?.record.id ?? "none"}
+                    ref={virtuosoRef}
+                    customScrollParent={scrollEl}
+                    data={rows}
+                    computeItemKey={(_index, row) => row.key}
+                    itemContent={renderRow}
+                    increaseViewportBy={VIEWPORT_OVERSCAN_PX}
+                    initialTopMostItemIndex={initialTopMostItemIndex}
+                    rangeChanged={handleRangeChanged}
+                    followOutput={(isAtBottom) =>
+                      isAtBottom && !userScrolledAwayRef.current
+                        ? "auto"
+                        : false
+                    }
+                    atBottomThreshold={80}
+                    atBottomStateChange={handleAtBottomChange}
+                  />
+                ) : null}
+                {pending != null || turnPending ? (
+                  <div className="timeline-live-rows">
+                    {pending != null ? <PendingMessage text={pending} /> : null}
+                    {turnPending || pending != null ? (
+                      <TypingIndicator agentLabel={agentLabel} />
+                    ) : null}
+                  </div>
                 ) : null}
               </div>
-              <div className="timeline-tools">
-                <TranscriptSearchBox
-                  activeIndex={find.activeIndex}
-                  matchCount={find.matchCount}
-                  onChange={setFindQuery}
-                  onClear={() => setFindQuery("")}
-                  onKeyDown={handleFindKeyDown}
-                  onNext={find.next}
-                  onPrev={find.prev}
-                  query={findQuery}
-                />
-                <div
-                  className="filter-chips"
-                  role="group"
-                  aria-label="Filter timeline by type"
-                >
-                  <FilterChip
-                    active={showMessages}
-                    label="messages"
-                    onToggle={() => setShowMessages((value) => !value)}
-                  />
-                  <FilterChip
-                    active={showTools}
-                    label="tools"
-                    onToggle={() => setShowTools((value) => !value)}
-                  />
-                  <FilterChip
-                    active={showArtifacts}
-                    label="artifacts"
-                    onToggle={() => setShowArtifacts((value) => !value)}
-                  />
-                  <FilterChip
-                    active={showSystemEvents}
-                    label="system"
-                    onToggle={() => setShowSystemEvents((value) => !value)}
-                  />
-                </div>
+              <div className="sr-only" aria-live="polite">
+                {liveAnnouncement}
               </div>
-            </div>
-
-            <div
-              className="timeline"
-              ref={timelineRef}
-              role="log"
-              aria-live="polite"
-              aria-relevant="additions text"
-            >
-              {!conversation ? (
-                <EmptyState title="No conversation selected" />
-              ) : null}
-              {conversation && loading && events.length === 0 ? (
-                <EventLoadingSkeleton />
-              ) : null}
-              {conversation && !loading && events.length === 0 && !pending ? (
-                <EmptyState title="No events recorded" />
-              ) : null}
-              {hasRows && scrollEl ? (
-                <Virtuoso
-                  key={conversation?.record.id ?? "none"}
-                  ref={virtuosoRef}
-                  customScrollParent={scrollEl}
-                  data={rows}
-                  computeItemKey={(_index, row) => row.key}
-                  itemContent={renderRow}
-                  increaseViewportBy={VIEWPORT_OVERSCAN_PX}
-                  initialTopMostItemIndex={initialTopMostItemIndex}
-                  rangeChanged={find.refresh}
-                  followOutput={(isAtBottom) => (isAtBottom ? "auto" : false)}
-                  atBottomThreshold={80}
-                  atBottomStateChange={handleAtBottomChange}
-                />
-              ) : null}
-              {pending != null || turnPending ? (
-                <div className="timeline-live-rows">
-                  {pending != null ? <PendingMessage text={pending} /> : null}
-                  {turnPending || pending != null ? (
-                    <TypingIndicator agentLabel={agentLabel} />
-                  ) : null}
-                </div>
-              ) : null}
-            </div>
-            <div className="sr-only" aria-live="polite">
-              {liveAnnouncement}
             </div>
           </div>
           {showJumpToLatest ? (
@@ -625,6 +669,14 @@ export function Transcript({
             >
               jump to latest
             </button>
+          ) : null}
+          {hasRows && conversation ? (
+            <TimelineMinimap
+              markers={minimapMarkers}
+              startIndex={visibleRange.startIndex}
+              endIndex={visibleRange.endIndex}
+              onJump={scrollToRow}
+            />
           ) : null}
         </div>
         <ChatComposer
@@ -914,6 +966,131 @@ function ConversationEvent({
   }
 
   return null;
+}
+
+type MarkerKind = "message" | "tool" | "artifact" | "error" | "system";
+
+function markerKindForRow(row: TimelineRowItem): MarkerKind {
+  if (row.kind === "error") {
+    return "error";
+  }
+  if (row.kind === "artifact") {
+    return "artifact";
+  }
+  if (row.kind === "system") {
+    return "system";
+  }
+  return conversationEventKind(row.event) === "tool" ? "tool" : "message";
+}
+
+// Highest-signal kind wins when several rows collapse into one minimap segment,
+// so an error or tool call is never hidden behind a plain message.
+const MARKER_PRIORITY: Record<MarkerKind, number> = {
+  error: 4,
+  tool: 3,
+  artifact: 2,
+  message: 1,
+  system: 0,
+};
+
+// Cap on minimap segments: longer conversations bucket multiple rows per segment
+// so the strip stays a fixed, readable size instead of thousands of slivers.
+const MINIMAP_MAX_SEGMENTS = 240;
+// Below this, a minimap adds clutter without helping you navigate.
+const MINIMAP_MIN_ROWS = 8;
+
+function TimelineMinimap({
+  markers,
+  startIndex,
+  endIndex,
+  onJump,
+}: {
+  markers: MarkerKind[];
+  startIndex: number;
+  endIndex: number;
+  onJump: (rowIndex: number) => void;
+}) {
+  const segments = useMemo(() => {
+    const total = markers.length;
+    const count = Math.min(MINIMAP_MAX_SEGMENTS, total);
+    const out: Array<{ kind: MarkerKind; rowIndex: number; span: number }> = [];
+    for (let segment = 0; segment < count; segment += 1) {
+      const lo = Math.floor((segment * total) / count);
+      const hi = Math.max(lo + 1, Math.floor(((segment + 1) * total) / count));
+      let kind: MarkerKind = markers[lo] ?? "system";
+      for (let i = lo + 1; i < hi; i += 1) {
+        if (MARKER_PRIORITY[markers[i]!] > MARKER_PRIORITY[kind]) {
+          kind = markers[i]!;
+        }
+      }
+      out.push({ kind, rowIndex: lo, span: hi - lo });
+    }
+    return out;
+  }, [markers]);
+
+  if (markers.length < MINIMAP_MIN_ROWS) {
+    return null;
+  }
+
+  const total = markers.length;
+  return (
+    <div className="timeline-minimap" aria-hidden="true">
+      {segments.map((segment, index) => {
+        const segLo = segment.rowIndex;
+        const segHi = segLo + segment.span;
+        const inView = segLo <= endIndex && segHi > startIndex;
+        return (
+          <button
+            className={`timeline-minimap-tick kind-${segment.kind}${
+              inView ? " in-view" : ""
+            }`}
+            key={index}
+            onClick={() => onJump(segment.rowIndex)}
+            tabIndex={-1}
+            type="button"
+          >
+            <span className="timeline-minimap-dot" />
+          </button>
+        );
+      })}
+      <span className="sr-only">{total} events</span>
+    </div>
+  );
+}
+
+function ErrorEvent({ event }: { event: Event }) {
+  const message =
+    event.data.type === "error" ? event.data.message : "Unknown error";
+  return (
+    <section
+      className="conversation-event timeline-error"
+      id={`event-${event.id}`}
+    >
+      <div className="timeline-error-card" role="alert">
+        <svg
+          aria-hidden="true"
+          className="timeline-error-icon"
+          fill="none"
+          height="16"
+          stroke="currentColor"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeWidth="1.6"
+          viewBox="0 0 24 24"
+          width="16"
+        >
+          <path d="M10.3 3.86 1.82 18a2 2 0 0 0 1.7 3h16.96a2 2 0 0 0 1.7-3L13.7 3.86a2 2 0 0 0-3.4 0Z" />
+          <line x1="12" x2="12" y1="9" y2="13" />
+          <line x1="12" x2="12.01" y1="17" y2="17" />
+        </svg>
+        <div className="timeline-error-body">
+          <span className="timeline-error-label">Error</span>
+          <p className="timeline-error-message">{message}</p>
+        </div>
+      </div>
+      <RawDisclosure value={event} />
+    </section>
+  );
 }
 
 function MessagesEvent({
@@ -1908,7 +2085,7 @@ function findRowIndexOf(node: Node): number {
 
 interface TimelineRowItem {
   key: string;
-  kind: "artifact" | "system" | "conversation";
+  kind: "artifact" | "system" | "conversation" | "error";
   event: Event;
   text: string;
 }
@@ -1947,6 +2124,18 @@ function buildTimelineRows(
       rows.push({
         key: event.id,
         kind: "artifact",
+        event,
+        text: eventSearchText(event, toolResults),
+      });
+      continue;
+    }
+
+    // Error events carry real failure signal, so they surface as their own row
+    // (always, not behind the system-events toggle) and render highlighted.
+    if (event.data.type === "error") {
+      rows.push({
+        key: event.id,
+        kind: "error",
         event,
         text: eventSearchText(event, toolResults),
       });
@@ -2054,6 +2243,10 @@ function eventSearchText(
       }
     }
     return parts.join(" ");
+  }
+
+  if (data.type === "error") {
+    return `error ${data.message}`;
   }
 
   return systemEventLabel(event);

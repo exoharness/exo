@@ -17,6 +17,7 @@
   --fg-overlay-rgb: 22, 25, 33;
   --chrome-rgb: 255, 255, 255;
   --accent-rgb: 79, 86, 214;
+  --danger-rgb: 207, 70, 70;
 
   /* Canvas → raised rails → floating cards: three elevation tiers give the panes
      real depth instead of one flat white field. */
@@ -34,6 +35,9 @@
      mode) so white text keeps AA contrast in both themes. */
   --user-bubble: rgb(79, 86, 214);
   --user-bubble-text: #ffffff;
+  /* Opaque elevated surface for floating menus/toolbars (hover actions). Solid in
+     both themes so it never lets the content underneath bleed through. */
+  --float-surface: #ffffff;
   --hairline: rgba(var(--fg-overlay-rgb), 0.1);
   --hairline-strong: rgba(var(--fg-overlay-rgb), 0.16);
   --pane-bg: var(--surface-1);
@@ -69,10 +73,12 @@
   --fg-overlay-rgb: 237, 237, 240;
   --chrome-rgb: 13, 14, 16;
   --accent-rgb: 138, 147, 240;
+  --danger-rgb: 216, 131, 131;
 
   --bg: #0c0d0f;
   --surface-1: rgba(var(--fg-overlay-rgb), 0.028);
   --surface-raised: rgba(var(--fg-overlay-rgb), 0.05);
+  --float-surface: #20232b;
 
   --text: #f1f2f5;
   --text-secondary: #b2b5bf;
@@ -465,8 +471,18 @@ pre {
   margin-top: -2px;
 }
 
+/* Non-scrolling positioning context for overlays (minimap, jump-to-latest) that
+   must stay pinned to the viewport while the transcript itself scrolls. */
+.transcript-region {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .transcript-scroll {
   position: relative;
+  height: 100%;
   min-width: 0;
   min-height: 0;
   overflow: auto;
@@ -562,6 +578,61 @@ pre {
 .nav-item.selected span {
   color: var(--accent);
   font-weight: 600;
+}
+
+.conversation-nav-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A stable colour dot per conversation so they are easy to tell apart in the list.
+   The hue comes from the conversation id (see conversationColor in App.tsx). */
+.conversation-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--conv-color, var(--text-faint));
+}
+
+/* Secondary line under a conversation name: slug, last-active time, turn count. */
+.conversation-nav-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.conversation-nav-meta code {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.conversation-nav-stat {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.conversation-nav-stat::before {
+  content: "·";
+  margin-right: 6px;
+  opacity: 0.55;
+}
+
+/* Keep the meta line muted even when the row is selected (the name takes accent). */
+.nav-item.selected .conversation-nav-stat {
+  color: var(--text-faint);
+  font-weight: 400;
 }
 
 .selected-context {
@@ -1317,9 +1388,17 @@ pre {
 .json-disclosure summary,
 .process-card summary,
 .binding-row summary {
-  color: var(--text-faint);
+  color: var(--text-secondary);
   cursor: pointer;
   font-size: 12px;
+  font-weight: 500;
+}
+
+.raw-disclosure summary:hover,
+.json-disclosure summary:hover,
+.process-card summary:hover,
+.binding-row summary:hover {
+  color: var(--text);
 }
 
 .thinking-disclosure summary {
@@ -1420,6 +1499,47 @@ pre {
 
 .tool-status-error {
   border-left: 2px solid var(--danger);
+}
+
+/* Error events get a distinct red card so failures stand out at a glance. */
+.timeline-error-card {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid rgba(var(--danger-rgb), 0.35);
+  border-left: 2px solid var(--danger);
+  border-radius: 10px;
+  background: rgba(var(--danger-rgb), 0.07);
+}
+
+.timeline-error-icon {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--danger);
+}
+
+.timeline-error-body {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.timeline-error-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--danger);
+}
+
+.timeline-error-message {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .tool-status-pending {
@@ -1524,11 +1644,11 @@ pre {
 .system-detail-button {
   border: 0;
   background: transparent;
-  color: var(--text-faint);
+  color: var(--text-secondary);
   opacity: 0;
   padding: 0;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.2;
   transition:
     opacity var(--ease),
@@ -1985,9 +2105,9 @@ pre {
 .copy-button {
   border: 0;
   background: transparent;
-  color: var(--text-faint);
+  color: var(--text-secondary);
   padding: 2px 6px;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.2;
   opacity: 0;
   transition:
@@ -1996,7 +2116,7 @@ pre {
 }
 
 .copy-button:hover {
-  color: var(--text-secondary);
+  color: var(--text);
 }
 
 /* Keep the outcome visible even when the button would otherwise fade out on
@@ -2032,45 +2152,59 @@ pre {
   right: 5px;
 }
 
+/* Per-message hover actions live in a proper floating toolbar that sits over the
+   timestamp / bubble corner. It is one opaque, elevated unit (nothing bleeds
+   through) and its labels are full-strength so they actually read. */
 .message-actions {
   position: absolute;
-  top: -2px;
+  top: -8px;
   right: 0;
-  z-index: 2;
+  z-index: 3;
   display: inline-flex;
   align-items: center;
-  gap: 1px;
-  padding: 1px 4px;
-  border-radius: 7px;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--float-surface);
+  box-shadow:
+    0 8px 22px rgba(0, 0, 0, 0.22),
+    0 0 0 1px var(--hairline);
+  opacity: 0;
+  transform: translateY(3px);
+  pointer-events: none;
   transition:
-    background var(--ease),
-    box-shadow var(--ease);
+    opacity var(--ease),
+    transform var(--ease);
 }
 
-/* On hover the buttons sit in the top-right corner, exactly over the assistant
-   timestamp (and the top of a user bubble). Float them on an opaque chip so they
-   read as a toolbar instead of colliding with whatever is underneath. */
 .message-block:hover .message-actions,
 .message-block:focus-within .message-actions {
-  background: var(--bg);
-  box-shadow: 0 0 0 1px var(--hairline);
-}
-
-.role-user .message-actions {
-  right: 5px;
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
 }
 
 .message-action-button {
+  opacity: 1;
+  padding: 4px 9px;
+  border-radius: 7px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.25;
   text-decoration: none;
+  transition:
+    background var(--ease),
+    color var(--ease);
+}
+
+.message-action-button:hover {
+  background: rgba(var(--fg-overlay-rgb), 0.08);
+  color: var(--text);
 }
 
 .message-anchor {
   font-family: var(--mono);
-}
-
-.message-block:hover .message-action-button,
-.message-block:focus-within .message-action-button {
-  opacity: 1;
 }
 
 .code-block-wrap {
@@ -2094,6 +2228,89 @@ pre {
 
 .raw-copy-button {
   opacity: 0;
+}
+
+/* A compressed map of the whole conversation pinned to the scroll viewport: one
+   colored marker per row (bucketed on long conversations), with a moving band for
+   the rows on screen. Lives in the right padding so it does not cover content. */
+.timeline-minimap {
+  position: absolute;
+  top: 60px;
+  right: 8px;
+  bottom: 20px;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  width: 12px;
+  padding: 3px 2px;
+  border-radius: 7px;
+  background: transparent;
+  overflow: hidden;
+  opacity: 0.6;
+  pointer-events: none;
+  transition:
+    opacity 0.16s ease,
+    background 0.16s ease;
+}
+
+.transcript-scroll:hover .timeline-minimap,
+.timeline-minimap:hover {
+  opacity: 1;
+  background: var(--surface-subtle);
+}
+
+.timeline-minimap-tick {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.timeline-minimap-tick.in-view {
+  background: rgba(var(--accent-rgb), 0.18);
+}
+
+.timeline-minimap-dot {
+  width: 6px;
+  height: 100%;
+  min-height: 0;
+  border-radius: 1px;
+  background: var(--text-faint);
+  transition:
+    width 0.1s ease,
+    background 0.1s ease;
+}
+
+.timeline-minimap-tick:hover .timeline-minimap-dot {
+  width: 12px;
+}
+
+.timeline-minimap-tick.kind-message .timeline-minimap-dot {
+  background: var(--text-secondary);
+}
+
+.timeline-minimap-tick.kind-tool .timeline-minimap-dot {
+  background: #9a6fd0;
+}
+
+.timeline-minimap-tick.kind-artifact .timeline-minimap-dot {
+  background: #4fa46b;
+}
+
+.timeline-minimap-tick.kind-error .timeline-minimap-dot {
+  background: var(--danger);
+}
+
+.timeline-minimap-tick.kind-system .timeline-minimap-dot {
+  background: var(--text-faint);
+  opacity: 0.5;
 }
 
 .jump-to-latest {
