@@ -52,26 +52,36 @@ ground-truth files (e.g. `data/sales_prediction/sales_lifecycle_panel.jsonl`,
 
 ### Results (gpt-5.5, `default` schedule, 1 run, **Docker-isolated**; Gain = memory − stateless baseline)
 
-| Task                        | Gain       | Baseline | Memory (honest, no host access)                                   |
-| --------------------------- | ---------- | -------- | ----------------------------------------------------------------- |
-| `blind_spectrum_monitoring` | **+22.12** | +19.76   | memory **>2×** reward — persistent channel/occupancy map per scan |
-| `sales_prediction`          | **+2.14**  | +6.47    | "anchor on realized actuals; raise fast-movers we underpredict"   |
-| `cohort_studies`            | **+0.07**  | −0.64    | epidemiological conventions (reward scale is tiny here)           |
-| `database_exploration`      | pending    | —        | needs isolated re-measure (prior +4.27 was contaminated)          |
-| `exploitable_poker`         | noisy      | —        | luck-dominated on few hands — not a clean discriminator           |
-| `codebase_adaptation`       | not run    | —        | agentic — needs clbench's task container, not a bare box          |
+| Task                        | Gain       | Baseline → memory | What memory carries                                                  |
+| --------------------------- | ---------- | ----------------- | -------------------------------------------------------------------- |
+| `blind_spectrum_monitoring` | **+27.89** | 19.76 → 47.65     | cross-scan occupancy map — which channels persist vs go dormant      |
+| `database_exploration`      | **+10.20** | 11.13 → 21.33     | the DB schema — **queries/question 6.12 → 2.90 (−53%)**, reward ~2×  |
+| `sales_prediction`          | **+3.31**  | 6.19 → 9.50       | data layout + "anchor on actuals; raise fast-movers we underpredict" |
+| `cohort_studies`            | **+0.33**  | −0.99 → −0.66     | little saved here; tiny reward scale                                 |
+| `exploitable_poker`         | noisy      | —                 | luck-dominated on few hands — not a clean discriminator              |
+| `codebase_adaptation`       | not run    | —                 | agentic (bash-in-Docker via the task); same action-channel pattern   |
 
-**Honest Gain is positive on every prediction task — and _higher_ than the
-contaminated runs**, because real learning (tracking dormant channels, correcting a
-forecast bias) beats clumsy answer-key hunting. `blind_spectrum_monitoring` is the
-showcase: it's engineered so a single scan is insufficient, and exo's memory builds
-the cross-scan occupancy map that more than doubles reward. The agentic tasks
-(`database_exploration`, `codebase_adaptation`) genuinely need the task's own data,
-which lived on the host — under isolation they have nothing to work with, so they
-need running inside clbench's **task** container (separate work). The reference
-leaderboard uses claude-opus-4-6, so this is exo's own column, not a same-model
-comparison. Next: `--runs 3` for variance bars + the task-container path for the
-agentic tasks.
+**Positive Gain on every task, all honest** (Docker-isolated, no host answer-key
+access). The agent's durable memory is the entire mechanism — see the report's "What
+the agent remembered" section. Two payoffs show up:
+
+- **Discovered structure** — `database_exploration` is the showcase: the agent saves
+  the schema (tables, columns, FKs, taxonomy quirks; it even `forget`s and corrects a
+  wrong entry) and stops re-exploring, **halving queries-per-question while doubling
+  reward**. `blind_spectrum_monitoring` builds a cross-scan occupancy map a single
+  noisy scan can't give.
+- **Strategy lessons** — `sales_prediction` learns it systematically under-predicts
+  fast-movers and corrects upward each episode.
+
+The harness prompt (`harness-memory.ts`) names both payoffs and tells the agent to
+consult memory first; that single change took `database_exploration` from +0.60
+(re-exploring every instance) to +10.20. The agentic tasks reach their environment
+through the task's **action channel** (SQL / bash the _task_ executes), not the
+agent's own sandbox — so Docker isolation is correct, not limiting;
+`database_exploration` already works this way and `codebase_adaptation` is the same
+pattern. The reference leaderboard uses claude-opus-4-6, so this is exo's own column,
+not a same-model comparison. Next: `--runs 3` for variance bars; wire
+`codebase_adaptation`.
 
 ## Quickstart
 
