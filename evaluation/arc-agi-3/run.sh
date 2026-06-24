@@ -17,7 +17,7 @@ export EXO_HARNESS="${EXO_HARNESS:-$EXO_REPO/examples/simple-coding-agent/harnes
 export MODEL="${MODEL:-gpt-5.5}"
 A3="${ARC3_REPO:-$(cd "$HERE/../../.." && pwd)/ARC-AGI-3-Agents}"
 
-: "${OPENAI_API_KEY:?set OPENAI_API_KEY (exo's model calls)}"
+: "${OPENAI_API_KEY:?set OPENAI_API_KEY for exo model calls}"
 : "${ARC_API_KEY:?set ARC_API_KEY (ARC-AGI-3 game API; get one at arcprize.org)}"
 export OPENAI_API_KEY ARC_API_KEY
 [ -x "$EXO_BIN" ] || { echo "exo binary missing at $EXO_BIN — run ./setup.sh"; exit 1; }
