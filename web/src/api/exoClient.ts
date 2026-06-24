@@ -70,13 +70,17 @@ export class ExoClient {
     }
   }
 
-  // One page of events strictly after `cursor` (an event id) in ascending order.
-  // This is the single substrate read the live poller and the full loader share;
-  // a future `watch_events` endpoint would replace the polling, not this call.
+  // One page of events relative to `cursor` (an event id). Ascending walks forward
+  // from the cursor (the live poller); descending walks back from the newest event
+  // (the initial load, so a long conversation opens at its latest messages instead
+  // of paging up from the very first one). A future `watch_events` endpoint would
+  // replace the ascending poll, not this call.
   async getEventsPage(
     agentId: AgentId,
     conversationId: ConversationId,
     cursor: EventId | null,
+    direction: "asc" | "desc" = "asc",
+    limit: number = EVENT_PAGE_SIZE,
   ): Promise<GetEventsResult> {
     const response = await this.send(
       {
@@ -85,13 +89,47 @@ export class ExoClient {
         conversation_id: conversationId,
         query: {
           cursor,
-          direction: "asc",
-          limit: EVENT_PAGE_SIZE,
+          direction,
+          limit,
         },
       },
       "events",
     );
     return response.result;
+  }
+
+  // Count completed turns by fetching only `turn_ended` markers (one event per
+  // turn) instead of the whole transcript, so the conversation list can show a
+  // size without paging every conversation's full history.
+  async countConversationTurns(
+    agentId: AgentId,
+    conversationId: ConversationId,
+  ): Promise<number> {
+    let total = 0;
+    let cursor: EventId | null = null;
+    for (;;) {
+      const response: Extract<ExoResponse, { type: "events" }> =
+        await this.send(
+          {
+            type: "conversation_get_events",
+            agent_id: agentId,
+            conversation_id: conversationId,
+            query: {
+              cursor,
+              direction: "asc",
+              limit: EVENT_PAGE_SIZE,
+              types: ["turn_ended"],
+            },
+          },
+          "events",
+        );
+      const { events } = response.result;
+      total += events.length;
+      if (events.length < EVENT_PAGE_SIZE) {
+        return total;
+      }
+      cursor = events[events.length - 1]!.id;
+    }
   }
 
   async readConversationArtifact(

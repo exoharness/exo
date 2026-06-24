@@ -62,7 +62,8 @@ export function useConversationEvents({
     let cancelled = false;
     let running = false;
     let timer: number | undefined;
-    let cursor: EventId | null = null;
+    // The newest event we hold; the poll fetches anything strictly newer.
+    let newestId: EventId | null = null;
     let emptyStreak = 0;
     const seen = new Set<string>();
 
@@ -70,11 +71,43 @@ export function useConversationEvents({
     setError(null);
     setLoading(true);
 
-    // Pull every page newer than the cursor; returns whether anything landed.
-    async function drain(): Promise<boolean> {
+    // Newest page first: a long conversation opens straight to its latest messages
+    // instead of paging up from the very first event and scrolling all the way down,
+    // which made opening slow. (History beyond the newest page is not paged back in;
+    // the latest page is what a reader lands on.)
+    async function loadLatest() {
+      const page = await exoClient.getEventsPage(
+        agent,
+        conversation,
+        null,
+        "desc",
+        EVENT_PAGE_SIZE,
+      );
+      if (cancelled) {
+        return;
+      }
+      const chronological = [...page.events].reverse();
+      for (const event of chronological) {
+        seen.add(event.id);
+      }
+      setEvents(chronological);
+      newestId = chronological.at(-1)?.id ?? null;
+      setLoading(false);
+    }
+
+    // Pull every page strictly newer than the latest event we hold, oldest-first,
+    // and append. Returns whether anything landed.
+    async function drainNewer(): Promise<boolean> {
       let added = false;
+      let cursor = newestId;
       for (;;) {
-        const page = await exoClient.getEventsPage(agent, conversation, cursor);
+        const page = await exoClient.getEventsPage(
+          agent,
+          conversation,
+          cursor,
+          "asc",
+          EVENT_PAGE_SIZE,
+        );
         if (cancelled) {
           return added;
         }
@@ -87,6 +120,7 @@ export function useConversationEvents({
         );
         if (pageCursor) {
           cursor = pageCursor;
+          newestId = pageCursor;
         }
         if (fresh.length > 0) {
           setEvents((previous) => previous.concat(fresh));
@@ -113,7 +147,7 @@ export function useConversationEvents({
       }
       running = true;
       try {
-        const added = await drain();
+        const added = await drainNewer();
         if (cancelled) {
           return;
         }
@@ -151,21 +185,13 @@ export function useConversationEvents({
     };
 
     void (async () => {
-      running = true;
       try {
-        await drain();
-        if (cancelled) {
-          return;
-        }
-        setLoading(false);
+        await loadLatest();
       } catch (caught) {
-        if (cancelled) {
-          return;
+        if (!cancelled) {
+          setLoading(false);
+          setError(caught instanceof Error ? caught.message : String(caught));
         }
-        setLoading(false);
-        setError(caught instanceof Error ? caught.message : String(caught));
-      } finally {
-        running = false;
       }
       schedule(
         turnPendingRef.current ? ACTIVE_INTERVAL_MS : IDLE_BASE_INTERVAL_MS,
