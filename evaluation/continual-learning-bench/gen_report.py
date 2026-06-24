@@ -22,8 +22,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # is 3 levels below the exo repo root, whose parent holds the clone.
 CLBENCH = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(HERE))), "clbench")
-TASKS = ["blind_spectrum_monitoring", "database_exploration", "sales_prediction",
-         "cohort_studies", "exploitable_poker"]
+# Only the tasks measured under Docker isolation (agent's shell cannot reach the
+# host's clbench checkout / ground-truth files). database_exploration,
+# codebase_adaptation, and exploitable_poker need honest isolated re-measurement
+# (their prior numbers came from a host-exposed shell and are NOT trustworthy).
+TASKS = ["blind_spectrum_monitoring", "sales_prediction", "cohort_studies"]
 
 
 def latest_live(task):
