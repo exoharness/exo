@@ -24,6 +24,12 @@ CLBENCH="${CLBENCH_REPO:-$(cd "$HERE/../../.." && pwd)/clbench}"
 TASK="${1:-exploitable_poker}"; [ "$#" -gt 0 ] && shift || true
 SCHEDULE="${SCHEDULE:-default}"
 
+# Capture the agent's durable memory per task so gen_report.py can show WHAT it
+# learned (clbench's parallel runner doesn't surface system artifacts). Fresh dir
+# per task so stale snapshots from older runs don't leak in.
+export EXO_MEM_SNAPSHOT_DIR="${EXO_MEM_SNAPSHOT_DIR:-$HERE/reports/_mem/$TASK}"
+rm -rf "$EXO_MEM_SNAPSHOT_DIR" 2>/dev/null || true
+
 echo "==> clbench run $TASK --schedule $SCHEDULE --system exo ${*}"
 cd "$CLBENCH"
 uv run clbench run "$TASK" --schedule "$SCHEDULE" --system exo "$@"

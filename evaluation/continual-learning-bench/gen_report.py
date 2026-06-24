@@ -26,7 +26,8 @@ CLBENCH = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
 # host's clbench checkout / ground-truth files). database_exploration,
 # codebase_adaptation, and exploitable_poker need honest isolated re-measurement
 # (their prior numbers came from a host-exposed shell and are NOT trustworthy).
-TASKS = ["blind_spectrum_monitoring", "sales_prediction", "cohort_studies"]
+TASKS = ["blind_spectrum_monitoring", "database_exploration", "sales_prediction",
+         "cohort_studies"]
 
 
 def latest_live(task):
@@ -45,6 +46,42 @@ def rewards_list(path):
             if isinstance(o.get("reward"), (int, float))]
 
 
+MEM_DIR = os.path.join(HERE, "reports", "_mem")  # ExoSystem._snapshot_memory writes here
+
+
+def read_memory(task, live, run_filename):
+    """Memory the agent accumulated on the stateful run — the source of the Gain.
+    Primary: per-run snapshots ExoSystem writes to reports/_mem/<task>/*.json (the
+    parallel clbench runner never calls get_run_artifacts, so we capture it ourselves
+    from observe()); pick the RICHEST snapshot so baseline resets don't clobber it.
+    Fallbacks: the trace sidecar, then a scan of kept exo roots in /tmp.
+    Returns {entries:[...], remember:int, forget:int, source:str}."""
+    snaps = glob.glob(os.path.join(MEM_DIR, task, "*.json"))
+    best = {"entries": [], "remember": 0, "forget": 0, "source": "snapshot"}
+    for p in snaps:
+        try:
+            d = json.load(open(p))
+        except Exception:
+            continue
+        if len(d.get("memory_entries", [])) > len(best["entries"]):
+            best = {"entries": d.get("memory_entries", []),
+                    "remember": d.get("remember_calls", 0),
+                    "forget": d.get("forget_calls", 0), "source": "snapshot"}
+    if best["entries"]:
+        return best
+    stem = os.path.splitext(os.path.basename(run_filename))[0]
+    side = os.path.join(live, "artifacts", stem, "artifacts.json")
+    if os.path.exists(side):
+        try:
+            d = json.load(open(side))
+            return {"entries": d.get("memory_entries", []),
+                    "remember": d.get("remember_calls", 0),
+                    "forget": d.get("forget_calls", 0), "source": "trace"}
+        except Exception:
+            pass
+    return best
+
+
 def main():
     ts = dt.datetime.now().strftime("%Y-%m-%d__%H-%M-%S")
     outdir = os.path.join(HERE, "reports", ts)
@@ -60,11 +97,13 @@ def main():
         m = rewards_list(runs[0]) if runs else []
         if not b and not m:
             continue
+        mem = read_memory(task, live, os.path.basename(runs[0])) if runs else \
+            {"entries": [], "remember": 0, "forget": 0, "source": "n/a"}
         rows.append({
             "task": task, "n": len(m),
             "baseline_total": sum(b), "memory_total": sum(m),
             "gain": sum(m) - sum(b),
-            "b": b, "m": m,
+            "b": b, "m": m, "mem": mem,
         })
 
     rows.sort(key=lambda r: r["gain"], reverse=True)
@@ -109,8 +148,33 @@ def main():
     md += ["\n![gain](gain_by_task.png)\n",
            "## Learning curves (cumulative reward over instances)\n",
            "Memory pulling above the dashed baseline = lessons compounding across instances.\n",
-           "![curves](cumulative_reward.png)\n",
-           "> exo+gpt-5.5 with the memory-enabled Simple Coding Agent harness "
+           "![curves](cumulative_reward.png)\n"]
+
+    # --- What the agent remembered (the source of the Gain) ---
+    md += ["## What the agent remembered (why memory helps)\n",
+           "The Gain comes entirely from this — lessons/state the stateful run carries "
+           "across instances that the stateless baseline re-derives from scratch every "
+           "time. Sampled from the agent's durable memory store on the stateful run.\n"]
+    for r in rows:
+        mem = r["mem"]
+        entries = mem["entries"]
+        if not entries and not mem["remember"]:
+            continue
+        md.append(f"### `{r['task']}` — {len(entries)} entries "
+                  f"(remember×{mem['remember']}, forget×{mem['forget']}; "
+                  f"Gain **{r['gain']:+.2f}**)\n")
+        if mem["source"] != "trace":
+            md.append(f"_source: {mem['source']}_\n")
+        # show first, middle, last to surface progression/compounding
+        n = len(entries)
+        picks = sorted(set([0, n // 2, n - 1])) if n else []
+        labels = {0: "early", n // 2: "mid", n - 1: "late"}
+        for i in picks:
+            txt = (entries[i].get("text", "") if isinstance(entries[i], dict) else str(entries[i]))
+            md.append(f"- **[{labels.get(i, '')}]** {txt.strip()[:300]}")
+        md.append("")
+
+    md += ["> exo+gpt-5.5 with the memory-enabled Simple Coding Agent harness "
            "(remember/forget + per-turn injection). The reference leaderboard uses "
            "claude-opus-4-6, so this is exo's own column, not a same-model comparison.\n"]
     open(os.path.join(outdir, "REPORT.md"), "w").write("\n".join(md))

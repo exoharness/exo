@@ -181,13 +181,12 @@ class ExoSystem(ContinualLearningSystem):
         except Exception:
             return None
 
-    def get_run_artifacts(self) -> Optional[dict[str, Any]]:
-        """Export the agent's durable memory so clbench records it in the trace —
-        lets us inspect WHAT the agent learned. The memory store is an artifact
-        (`memory/exoclaw-memory.json`, shape {entries: [...]}); read the newest copy
-        with the most entries from this run's exo root."""
+    def _read_memory(self) -> tuple[list, int, int]:
+        """Richest durable-memory store + remember/forget tool-call counts from this
+        run's exo root. The store is versioned (`artifacts/<id>/<n>.bin`, shape
+        {entries:[...]}); the copy with the most entries is the latest."""
         if not self._root:
-            return None
+            return [], 0, 0
         best: list = []
         for p in glob.glob(os.path.join(self._root, "**", "artifacts", "**", "*.bin"), recursive=True):
             try:
@@ -196,8 +195,6 @@ class ExoSystem(ContinualLearningSystem):
                 continue
             if isinstance(d, dict) and isinstance(d.get("entries"), list) and len(d["entries"]) >= len(best):
                 best = d["entries"]
-        # Count remember/forget tool calls in the event store, so the trace shows
-        # whether the agent USED memory even if the store ended empty.
         remember_calls = forget_calls = 0
         for p in glob.glob(os.path.join(self._root, "**", "events", "*.json"), recursive=True):
             try:
@@ -206,11 +203,41 @@ class ExoSystem(ContinualLearningSystem):
                 continue
             remember_calls += s.count('"tool_name":"remember"') + s.count('"tool_name": "remember"')
             forget_calls += s.count('"tool_name":"forget"') + s.count('"tool_name": "forget"')
+        return best, remember_calls, forget_calls
+
+    def _snapshot_memory(self) -> None:
+        """Persist the current memory store to EXO_MEM_SNAPSHOT_DIR for the report.
+        clbench's parallel (`permute`) runner never calls get_run_artifacts, so this
+        is the reliable capture hook (called from observe() at every instance
+        boundary, while the root is still alive). One file per exo root; gen_report
+        picks the richest across the dir — so per-instance baseline resets (tiny
+        stores) never clobber the stateful run's accumulated memory."""
+        snap_dir = os.environ.get("EXO_MEM_SNAPSHOT_DIR")
+        if not snap_dir or not self._root:
+            return
+        best, remember_calls, forget_calls = self._read_memory()
+        try:
+            os.makedirs(snap_dir, exist_ok=True)
+            out = os.path.join(snap_dir, os.path.basename(self._root) + ".json")
+            with open(out, "w") as f:
+                json.dump({"memory_entries": best, "remember_calls": remember_calls,
+                           "forget_calls": forget_calls}, f)
+        except Exception:
+            pass
+
+    def get_run_artifacts(self) -> Optional[dict[str, Any]]:
+        """Export durable memory if clbench's serial runner asks (kept for the
+        non-parallel path; the parallel runner relies on _snapshot_memory instead)."""
+        best, remember_calls, forget_calls = self._read_memory()
+        if not self._root:
+            return None
         return {
+            "artifact_type": "exo",
             "memory_count": len(best),
             "remember_calls": remember_calls,
             "forget_calls": forget_calls,
             "memory_entries": best,
+            "memory_files": {"memory.json": json.dumps({"entries": best}, indent=2)},
         }
 
     def observe(self, observation: Observation, next_query: Optional[Query] = None) -> None:
@@ -218,6 +245,7 @@ class ExoSystem(ContinualLearningSystem):
         # fresh — the agent (and its durable memory) persists, carrying lessons.
         if observation_marks_instance_complete(observation):
             self._conv = None
+            self._snapshot_memory()  # capture for the report (parallel runner won't)
         content = (observation.content or "").strip()
         if content:
             self._pending_feedback = content
