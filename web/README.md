@@ -64,6 +64,8 @@ The substrate HTTP API does **not** run agent turns or create conversations. Tho
 
 Every spawn uses an argument array with `shell: false`. No streaming, no substrate reads beyond the CLI — it is an explicit, replaceable executor seam. A future native executor HTTP API can swap in without changing the UI contract.
 
+The bridge is trusted-local and write-capable: it shells the `exo` CLI and runs real turns, so it is not part of the read-only substrate story. Run it on localhost for a trusted user and do not expose it to untrusted networks.
+
 ### Live updates (cursor polling)
 
 `useConversationEvents` repeatedly calls `conversation_get_events` with an ascending cursor after the last seen event id. Cadence:
@@ -181,7 +183,7 @@ npm run preview  # static preview; configure reverse proxy for /exo and /chat
 
 **Not called:** `get_secret`, `put_secret`, `conversation_begin_turn`, `conversation_add_events`, or any other mutating request. Sandbox process I/O and mutation helpers are also unused.
 
-**Write path (chat only):** `POST /chat` on the bridge → `exo conversation send`.
+**Write paths (bridge only):** `POST /chat` → `exo conversation send`, and `POST /chat/create` → `exo conversation create`.
 
 ## Chat caveats
 
