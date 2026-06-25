@@ -25,8 +25,11 @@ import {
   registerMemoryTools,
 } from "../exoclaw/memory-tools";
 
-// Fixed path shared with pokemon_runner.py (keep in sync). One game per host.
+// Fixed paths shared with pokemon_runner.py / live_server.py (keep in sync).
 const SCREEN_PATH = "/tmp/exo-pokemon/screen.png";
+// Live "coach" channel: the player can post a hint via the web view; it's
+// written here and injected into the prompt until they change or clear it.
+const GUIDANCE_PATH = "/tmp/exo-pokemon/guidance.json";
 
 const POKEMON_PROMPT = `You are playing Pokémon on a Game Boy by looking at the screen and choosing button presses. The image is the current 160x144 screen.
 
@@ -53,6 +56,17 @@ async function instructions(context: TurnContext): Promise<Message[]> {
   const memory = await memoryInstruction(context);
   if (memory !== null) {
     messages.push(memory);
+  }
+  try {
+    const g = JSON.parse(readFileSync(GUIDANCE_PATH, "utf8"));
+    if (g && typeof g.text === "string" && g.text.trim()) {
+      messages.push({
+        role: "developer",
+        content: `📣 LIVE DIRECTION FROM THE PLAYER (a human watching you play just sent this — prioritize it): ${g.text.trim()}`,
+      });
+    }
+  } catch {
+    // no guidance set — ignore
   }
   try {
     const b64 = readFileSync(SCREEN_PATH).toString("base64");

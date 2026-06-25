@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import argparse
 import http.server
+import json
 import os
 
 DIR = "/tmp/exo-pokemon"  # must match pokemon_runner.py / harness-pokemon.ts
+GUIDANCE = os.path.join(DIR, "guidance.json")  # player "coach" channel; read by the harness
 
 PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>exo plays Pokemon — live</title>
 <style>
@@ -38,6 +40,9 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>exo plays Poke
  ul{margin:6px 0 0;padding:0;list-style:none} li{background:#191b34;border-radius:8px;padding:7px 10px;margin:5px 0;font-size:13px}
  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#3a3} .off{background:#a33}
  .live{font-size:12px;color:#9aa0c0}
+ .coach{border:1px solid #2d2f55} input{width:100%;background:#0c0d18;border:1px solid #2d2f55;color:#e8e8f0;border-radius:7px;padding:9px 11px;font:14px system-ui}
+ .btns{display:flex;gap:8px;margin-top:8px} button{background:#3550e0;color:#fff;border:0;border-radius:7px;padding:8px 16px;font-weight:600;cursor:pointer;font-size:13px} button.sec{background:#2a2c4a}
+ .gcur{margin-top:9px;font-size:13px;color:#ffd479;min-height:18px} .gcur b{color:#7e84a8;font-weight:600}
 </style></head><body>
 <div class="wrap">
  <h1>🎮 exo plays Pok&eacute;mon &mdash; live</h1>
@@ -47,7 +52,12 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>exo plays Poke
    <div class="bar"><span class="turn" id="turn">turn &mdash;</span> <span id="buttons"></span></div>
  </div>
  <div>
-   <div class="panel"><p class="lbl">reasoning</p><div class="reason" id="reason">&mdash;</div></div>
+   <div class="panel coach"><p class="lbl">🎤 direct exo (live)</p>
+     <input id="gin" placeholder="tell exo what to do — e.g. 'enter the building to your left'" autocomplete="off">
+     <div class="btns"><button id="gsend">Send</button><button id="gclear" class="sec">Clear</button></div>
+     <div class="gcur" id="gcur"></div>
+   </div>
+   <div class="panel" style="margin-top:14px"><p class="lbl">reasoning</p><div class="reason" id="reason">&mdash;</div></div>
    <div class="panel" style="margin-top:14px"><p class="lbl">durable memory</p><ul id="mem"></ul></div>
  </div>
 </div>
@@ -67,7 +77,13 @@ async function tick(){
     }
   }catch(e){ document.getElementById('dot').className='dot off'; document.getElementById('live').textContent='no game running'; }
 }
-setInterval(tick,700); tick();
+async function postG(text){ await fetch('/guidance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})}); showG(); }
+async function showG(){ try{ const g=await (await fetch('/guidance',{cache:'no-store'})).json();
+  document.getElementById('gcur').innerHTML = g.text ? ('<b>active:</b> '+g.text.replace(/</g,'&lt;')) : '<b>none</b> — exo plays on its own'; }catch(e){} }
+document.getElementById('gsend').onclick=()=>{ const v=document.getElementById('gin').value.trim(); if(v) postG(v); };
+document.getElementById('gin').addEventListener('keydown',e=>{ if(e.key==='Enter'){ const v=e.target.value.trim(); if(v) postG(v); } });
+document.getElementById('gclear').onclick=()=>{ document.getElementById('gin').value=''; postG(''); };
+setInterval(tick,700); tick(); showG();
 </script></body></html>"""
 
 
@@ -93,8 +109,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == "/state":
             p = os.path.join(DIR, "state.json")
             self._send(200, "application/json", open(p, "rb").read() if os.path.exists(p) else b"{}")
+        elif path == "/guidance":
+            self._send(200, "application/json", open(GUIDANCE, "rb").read() if os.path.exists(GUIDANCE) else b"{}")
         else:
             self._send(404, "text/plain", b"not found")
+
+    def do_POST(self) -> None:
+        if self.path.split("?", 1)[0] != "/guidance":
+            self._send(404, "text/plain", b"not found")
+            return
+        n = int(self.headers.get("Content-Length", 0))
+        try:
+            body = json.loads(self.rfile.read(n) or b"{}")
+            text = str(body.get("text", "")).strip()
+        except Exception:
+            text = ""
+        # Persist (or clear). The harness reads this each turn and injects it.
+        os.makedirs(DIR, exist_ok=True)
+        with open(GUIDANCE, "w") as f:
+            json.dump({"text": text}, f)
+        self._send(200, "application/json", json.dumps({"ok": True, "text": text}).encode())
 
     def log_message(self, *args) -> None:  # quiet
         pass
@@ -103,10 +137,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
 def main() -> None:
     ap = argparse.ArgumentParser(description="Live web view for the Pokémon run.")
     ap.add_argument("--port", type=int, default=8080)
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="bind address. 127.0.0.1 = localhost only (use ssh -L). "
+                         "0.0.0.0 = all interfaces (reachable over a Tailscale tailnet / LAN).")
     args = ap.parse_args()
     os.makedirs(DIR, exist_ok=True)
-    print(f"live view on http://localhost:{args.port}  (ssh -L {args.port}:localhost:{args.port} <box>)")
-    http.server.ThreadingHTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
+    print(f"live view binding {args.host}:{args.port}")
+    if args.host in ("127.0.0.1", "localhost"):
+        print(f"  localhost-only — port-forward: ssh -L {args.port}:localhost:{args.port} <box>")
+    else:
+        print(f"  reachable on the tailnet/LAN at <host>:{args.port}")
+    http.server.ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()
 
 
 if __name__ == "__main__":
