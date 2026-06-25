@@ -64,6 +64,8 @@ pub enum SandboxBackendChoice {
     Docker,
     LocalProcess,
     Daytona(DaytonaBackendSpec),
+    E2b(E2bBackendSpec),
+    Sprites(SpritesBackendSpec),
     Vercel(VercelBackendSpec),
     AwsAgentCore,
 }
@@ -75,6 +77,8 @@ impl SandboxBackendChoice {
             Self::Docker => SandboxProvider::Docker,
             Self::LocalProcess => SandboxProvider::LocalProcess,
             Self::Daytona(_) => SandboxProvider::Daytona,
+            Self::E2b(_) => SandboxProvider::E2b,
+            Self::Sprites(_) => SandboxProvider::Sprites,
             Self::Vercel(_) => SandboxProvider::Vercel,
             Self::AwsAgentCore => SandboxProvider::AwsAgentCore,
         }
@@ -93,16 +97,58 @@ pub struct DaytonaBackendSpec {
     pub target_secret: Option<String>,
 }
 
-impl DaytonaBackendSpec {
+impl Default for DaytonaBackendSpec {
     /// Official endpoints; credentials read from the conventional `DAYTONA_*`
     /// secret names.
-    pub fn with_conventional_secrets() -> Self {
+    fn default() -> Self {
         Self {
             api_url: crate::DEFAULT_DAYTONA_API_URL.to_string(),
             toolbox_url: crate::DEFAULT_DAYTONA_TOOLBOX_URL.to_string(),
             api_key_secret: "DAYTONA_API_KEY".to_string(),
             organization_id_secret: Some("DAYTONA_ORGANIZATION_ID".to_string()),
             target_secret: Some("DAYTONA_TARGET".to_string()),
+        }
+    }
+}
+
+/// E2B connection config plus secret-store names for credentials, resolved
+/// lazily on first use.
+#[derive(Debug, Clone)]
+pub struct E2bBackendSpec {
+    pub api_url: String,
+    pub api_key_secret: String,
+    pub template_id: String,
+}
+
+impl Default for E2bBackendSpec {
+    fn default() -> Self {
+        Self {
+            api_url: crate::DEFAULT_E2B_API_URL.to_string(),
+            api_key_secret: "E2B_API_KEY".to_string(),
+            template_id: crate::default_e2b_template(),
+        }
+    }
+}
+
+/// Sprites connection config plus secret-store name for the bearer token,
+/// resolved lazily on first use.
+#[derive(Debug, Clone)]
+pub struct SpritesBackendSpec {
+    pub api_url: String,
+    pub token_secret: String,
+    pub url_auth: Option<String>,
+    pub organization: Option<String>,
+    pub labels: Vec<String>,
+}
+
+impl Default for SpritesBackendSpec {
+    fn default() -> Self {
+        Self {
+            api_url: crate::DEFAULT_SPRITES_API_URL.to_string(),
+            token_secret: "SPRITES_TOKEN".to_string(),
+            url_auth: None,
+            organization: None,
+            labels: Vec::new(),
         }
     }
 }
@@ -204,6 +250,20 @@ impl BasicExoHarnessInner {
                     None => self.daytona_config_from_spec(spec).await?,
                 };
                 Arc::new(crate::DaytonaSandboxBackend::new(config)?)
+            }
+            SandboxBackendChoice::E2b(spec) => {
+                let config = match self.e2b_config_from_binding().await? {
+                    Some(config) => config,
+                    None => self.e2b_config_from_spec(spec).await?,
+                };
+                Arc::new(crate::E2bSandboxBackend::new(config)?)
+            }
+            SandboxBackendChoice::Sprites(spec) => {
+                let config = match self.sprites_config_from_binding().await? {
+                    Some(config) => config,
+                    None => self.sprites_config_from_spec(spec).await?,
+                };
+                Arc::new(crate::SpritesSandboxBackend::new(config)?)
             }
             SandboxBackendChoice::Vercel(spec) => {
                 let config = match self.vercel_config_from_binding().await? {
@@ -383,6 +443,124 @@ impl BasicExoHarnessInner {
         }))
     }
 
+    async fn e2b_config_from_spec(&self, spec: &E2bBackendSpec) -> Result<crate::E2bConfig> {
+        let api_key = self
+            .secret_key(&spec.api_key_secret)
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "e2b sandbox requested but secret {:?} is not set",
+                    spec.api_key_secret
+                )
+            })?;
+        Ok(crate::E2bConfig {
+            api_key,
+            api_url: spec.api_url.clone(),
+            template_id: spec.template_id.clone(),
+            envd_port: crate::DEFAULT_E2B_ENVD_PORT,
+            envd_base_url: None,
+            secure: false,
+        })
+    }
+
+    async fn e2b_config_from_binding(&self) -> Result<Option<crate::E2bConfig>> {
+        let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
+        let Some((api_key_secret_id, api_url, default_image)) = bindings
+            .into_iter()
+            .rev()
+            .find_map(|record| match record.binding {
+                Binding::Sandbox {
+                    config:
+                        SandboxProviderConfig::E2b {
+                            api_key_secret_id,
+                            api_url,
+                            default_image,
+                        },
+                    ..
+                } => Some((api_key_secret_id, api_url, default_image)),
+                _ => None,
+            })
+        else {
+            return Ok(None);
+        };
+        let api_key = self
+            .secret_key_by_id(api_key_secret_id)
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "e2b sandbox binding references secret id {api_key_secret_id}, \
+                 which is not set"
+                )
+            })?;
+        Ok(Some(crate::E2bConfig {
+            api_key,
+            api_url: api_url.unwrap_or_else(|| crate::DEFAULT_E2B_API_URL.to_string()),
+            template_id: default_image,
+            envd_port: crate::DEFAULT_E2B_ENVD_PORT,
+            envd_base_url: None,
+            secure: false,
+        }))
+    }
+
+    async fn sprites_config_from_spec(
+        &self,
+        spec: &SpritesBackendSpec,
+    ) -> Result<crate::SpritesConfig> {
+        let token = self.secret_key(&spec.token_secret).await?.ok_or_else(|| {
+            anyhow!(
+                "sprites sandbox requested but secret {:?} is not set",
+                spec.token_secret
+            )
+        })?;
+        Ok(crate::SpritesConfig {
+            token,
+            api_url: spec.api_url.clone(),
+            url_auth: spec.url_auth.clone(),
+            organization: spec.organization.clone(),
+            extra_labels: spec.labels.clone(),
+        })
+    }
+
+    async fn sprites_config_from_binding(&self) -> Result<Option<crate::SpritesConfig>> {
+        let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
+        let Some((token_secret_id, api_url, url_auth, organization, labels)) = bindings
+            .into_iter()
+            .rev()
+            .find_map(|record| match record.binding {
+                Binding::Sandbox {
+                    config:
+                        SandboxProviderConfig::Sprites {
+                            token_secret_id,
+                            api_url,
+                            url_auth,
+                            organization,
+                            labels,
+                        },
+                    ..
+                } => Some((token_secret_id, api_url, url_auth, organization, labels)),
+                _ => None,
+            })
+        else {
+            return Ok(None);
+        };
+        let token = self
+            .secret_key_by_id(token_secret_id)
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "sprites sandbox binding references secret id {token_secret_id}, \
+                 which is not set"
+                )
+            })?;
+        Ok(Some(crate::SpritesConfig {
+            token,
+            api_url: api_url.unwrap_or_else(|| crate::DEFAULT_SPRITES_API_URL.to_string()),
+            url_auth,
+            organization,
+            extra_labels: labels,
+        }))
+    }
+
     async fn vercel_config_from_binding(&self) -> Result<Option<crate::VercelConfig>> {
         let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
         let Some((api_token_secret_id, team_id, project_id, api_url)) = bindings
@@ -475,7 +653,10 @@ impl BasicExoHarnessInner {
             let Binding::Sandbox { config, .. } = record.binding else {
                 return None;
             };
-            (config.provider() == provider).then(|| config.default_image().to_string())
+            (config.provider() == provider)
+                .then(|| config.default_image())
+                .flatten()
+                .map(str::to_string)
         }))
     }
 }
