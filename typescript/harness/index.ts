@@ -197,7 +197,6 @@ export interface GetEventsResult {
 export interface AddEventsRequest {
   sessionId?: string | null;
   turnId?: string | null;
-  expectedHead?: string | null;
   data: EventData[];
 }
 
@@ -700,6 +699,14 @@ function contentText(content: unknown): string {
         typeof (part as { text?: unknown }).text === "string"
       ) {
         return (part as { text: string }).text;
+      }
+      if (
+        part &&
+        typeof part === "object" &&
+        "type" in part &&
+        (part as { type?: unknown }).type === "image"
+      ) {
+        return "[image]";
       }
       if (
         part &&

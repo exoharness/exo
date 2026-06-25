@@ -516,7 +516,7 @@ async fn turn_events_continue_after_artifact_writes() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn stale_turn_artifact_write_reports_unresumable_turn() {
+async fn turn_artifact_write_allows_interleaved_conversation_writes() {
     let tempdir = TempDir::new().expect("tempdir");
     let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
         .await
@@ -546,15 +546,14 @@ async fn stale_turn_artifact_write_reports_unresumable_turn() {
             contents: b"outside".to_vec(),
         })
         .await
-        .expect("advance conversation head outside turn");
-    let error = turn
-        .write_artifact(WriteArtifactRequest {
-            path: "tool-results/example.json".to_string(),
-            contents: br#"{"ok":true}"#.to_vec(),
-        })
-        .await
-        .expect_err("stale turn should fail");
-    let message = error.to_string();
+        .expect("write outside-turn artifact");
+    turn.write_artifact(WriteArtifactRequest {
+        path: "tool-results/example.json".to_string(),
+        contents: br#"{"ok":true}"#.to_vec(),
+    })
+    .await
+    .expect("turn artifact write should allow interleaved conversation writes");
+
     let events = conversation
         .get_events(Some(EventQuery {
             cursor: None,
@@ -567,42 +566,32 @@ async fn stale_turn_artifact_write_reports_unresumable_turn() {
         .await
         .expect("events")
         .events;
-    let expected_head_event = events
+    let outside_artifact_event = events
         .iter()
-        .rfind(|event| event.turn_id == Some(turn.record().id))
-        .expect("expected head event");
-    let current_head_event = events.last().expect("current head event");
-    let expected_at = expected_head_event
-        .id
-        .timestamp()
-        .expect("expected head timestamp")
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let current_at = current_head_event
-        .id
-        .timestamp()
-        .expect("current head timestamp")
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    assert!(
-        message.contains("turn is stale and cannot be resumed"),
-        "{message}"
+        .find(|event| {
+            matches!(
+                &event.data,
+                EventData::ArtifactWritten { path, .. } if path == "outside-turn.txt"
+            )
+        })
+        .expect("outside artifact event");
+    assert_eq!(outside_artifact_event.session_id, None);
+    assert_eq!(outside_artifact_event.turn_id, None);
+
+    let turn_artifact_event = events
+        .iter()
+        .find(|event| {
+            matches!(
+                &event.data,
+                EventData::ArtifactWritten { path, .. } if path == "tool-results/example.json"
+            )
+        })
+        .expect("turn artifact event");
+    assert_eq!(
+        turn_artifact_event.session_id,
+        Some(turn.record().session_id)
     );
-    assert!(message.contains(&turn.record().id.to_string()), "{message}");
-    assert!(
-        message.contains(&format!("expected_head_at: {expected_at}")),
-        "{message}"
-    );
-    assert!(
-        message.contains(&format!("current_head_at: {current_at}")),
-        "{message}"
-    );
-    assert!(
-        !message.contains(&expected_head_event.id.to_string()),
-        "{message}"
-    );
-    assert!(
-        !message.contains(&current_head_event.id.to_string()),
-        "{message}"
-    );
+    assert_eq!(turn_artifact_event.turn_id, Some(turn.record().id));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -935,6 +924,189 @@ async fn basic_backend_runs_commands_in_created_sandbox() {
     assert_eq!(String::from_utf8_lossy(&stdout_bytes), "hello");
     assert_eq!(String::from_utf8_lossy(&stderr_bytes), "");
     assert_eq!(wait_result.expect("process should exit"), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agent_scoped_sandbox_is_shared_without_conversation_ownership() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
+        .await
+        .expect("harness should initialize");
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let first_conversation = agent
+        .new_conversation(NewConversationRequest {
+            slug: Some("first".to_string()),
+            name: Some("First".to_string()),
+        })
+        .await
+        .expect("first conversation");
+    let second_conversation = agent
+        .new_conversation(NewConversationRequest {
+            slug: Some("second".to_string()),
+            name: Some("Second".to_string()),
+        })
+        .await
+        .expect("second conversation");
+
+    let create_request = CreateSandboxRequest {
+        name: Some("shared-agent-sandbox".to_string()),
+        provider: SandboxProvider::LocalProcess,
+        image: "basic-local-process".to_string(),
+        default_workdir: Some(tempdir.path().display().to_string()),
+        file_system_mounts: None,
+        durable_file_systems: None,
+        enable_networking: Some(true),
+        idle_seconds: Some(60),
+    };
+    let sandbox_id = agent
+        .create_sandbox(create_request.clone())
+        .await
+        .expect("agent sandbox should be created");
+    let write_process = agent
+        .run_in_sandbox(RunInSandboxRequest {
+            id: sandbox_id.clone(),
+            command: vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                "printf agent-owned > agent-sandbox-proof".to_string(),
+            ],
+            env: Default::default(),
+        })
+        .await
+        .expect("agent sandbox command should run");
+    assert_eq!(
+        write_process
+            .into_parts()
+            .wait
+            .await
+            .expect("write should exit"),
+        0
+    );
+
+    let reacquired = agent
+        .create_sandbox(create_request)
+        .await
+        .expect("named agent sandbox should reacquire");
+    assert_eq!(reacquired, sandbox_id);
+    let read_process = agent
+        .run_in_sandbox(RunInSandboxRequest {
+            id: reacquired.clone(),
+            command: vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                "cat agent-sandbox-proof".to_string(),
+            ],
+            env: Default::default(),
+        })
+        .await
+        .expect("agent sandbox should retain filesystem state");
+    let parts = read_process.into_parts();
+    let mut stdout = parts.stdout;
+    let mut stdout_bytes = Vec::new();
+    drop(parts.stdin);
+    let (stdout_result, wait_result) =
+        tokio::join!(stdout.read_to_end(&mut stdout_bytes), parts.wait);
+    stdout_result.expect("stdout should read");
+    assert_eq!(wait_result.expect("read should exit"), 0);
+    assert_eq!(String::from_utf8_lossy(&stdout_bytes), "agent-owned");
+
+    let conversation_process = first_conversation
+        .run_in_sandbox(RunInSandboxRequest {
+            id: reacquired,
+            command: vec!["true".to_string()],
+            env: Default::default(),
+        })
+        .await;
+    assert!(conversation_process.is_err());
+
+    for conversation in [first_conversation, second_conversation] {
+        let events = conversation
+            .get_events(Some(EventQuery {
+                cursor: None,
+                direction: Some(EventQueryDirection::Asc),
+                limit: None,
+                session_id: None,
+                turn_id: None,
+                types: Some(vec![
+                    EventKind::SANDBOX_CREATED,
+                    EventKind::SANDBOX_STARTED,
+                    EventKind::SANDBOX_PROCESS_STARTED,
+                    EventKind::SANDBOX_PROCESS_EVENT,
+                    EventKind::SANDBOX_PROCESS_STATE_UPDATED,
+                ]),
+            }))
+            .await
+            .expect("conversation events should load")
+            .events;
+        assert!(events.is_empty());
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn conversation_create_sandbox_is_not_turn_scoped() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
+        .await
+        .expect("harness should initialize");
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let conversation = agent
+        .new_conversation(NewConversationRequest::default())
+        .await
+        .expect("conversation");
+    let turn = conversation
+        .begin_turn(BeginTurnRequest {
+            session_id: None,
+            input: vec![user_message("start turn")],
+        })
+        .await
+        .expect("turn should begin");
+
+    conversation
+        .create_sandbox(CreateSandboxRequest {
+            name: None,
+            provider: SandboxProvider::LocalProcess,
+            image: "basic-local-process".to_string(),
+            default_workdir: Some(tempdir.path().display().to_string()),
+            file_system_mounts: None,
+            durable_file_systems: None,
+            enable_networking: Some(true),
+            idle_seconds: Some(60),
+        })
+        .await
+        .expect("sandbox should be created");
+
+    let events = conversation
+        .get_events(Some(EventQuery {
+            cursor: None,
+            direction: Some(EventQueryDirection::Asc),
+            limit: None,
+            session_id: None,
+            turn_id: None,
+            types: Some(vec![EventKind::SANDBOX_CREATED, EventKind::SANDBOX_STARTED]),
+        }))
+        .await
+        .expect("sandbox lifecycle events")
+        .events;
+
+    assert_eq!(events.len(), 2);
+    for event in events {
+        assert_ne!(event.session_id, Some(turn.record().session_id));
+        assert_ne!(event.turn_id, Some(turn.record().id));
+        assert_eq!(event.session_id, None);
+        assert_eq!(event.turn_id, None);
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

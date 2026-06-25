@@ -13,7 +13,7 @@ When WhatsApp asks for pairing, the worker logs an ASCII QR code and emits a lif
 Use the Exoclaw setup flow:
 
 ```bash
-examples/exoclaw/scripts/exoclaw-repl fresh --pull-sandbox --setup whatsapp
+examples/exoclaw/scripts/exoclaw-control fresh --pull-sandbox --setup whatsapp
 ```
 
 The script watches `.exo/exoclaw-adapters.log`, prints the QR code if it appears, and pauses while you scan it. Scan from WhatsApp using the linked-device flow.

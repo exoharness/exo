@@ -34,7 +34,45 @@ pub trait ExoHarness: Send + Sync {
 }
 
 #[async_trait]
-pub trait AgentHandle: Send + Sync {
+pub trait SnapshotHandle: Send + Sync {
+    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId>;
+    async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()>;
+}
+
+#[async_trait]
+pub trait SandboxHandle: SnapshotHandle {
+    async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId>;
+    async fn stop_sandbox(&self, id: SandboxId) -> Result<()>;
+    async fn start_sandbox_process(
+        &self,
+        request: StartSandboxProcessRequest,
+    ) -> Result<SandboxProcessRecord>;
+    async fn write_sandbox_process_input(
+        &self,
+        request: WriteSandboxProcessInputRequest,
+    ) -> Result<()>;
+    async fn close_sandbox_process_input(
+        &self,
+        request: CloseSandboxProcessInputRequest,
+    ) -> Result<()>;
+    async fn get_sandbox_process_events(
+        &self,
+        query: SandboxProcessEventQuery,
+    ) -> Result<GetSandboxProcessEventsResult>;
+    async fn wait_sandbox_process(
+        &self,
+        request: WaitSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus>;
+    async fn cancel_sandbox_process(
+        &self,
+        request: CancelSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus>;
+    async fn run_in_sandbox(&self, request: RunInSandboxRequest)
+    -> Result<Box<dyn SandboxProcess>>;
+}
+
+#[async_trait]
+pub trait AgentHandle: SandboxHandle {
     fn record(&self) -> &AgentRecord;
 
     async fn list_conversations(
@@ -65,7 +103,7 @@ pub trait AgentHandle: Send + Sync {
 }
 
 #[async_trait]
-pub trait ConversationHandle: Send + Sync {
+pub trait ConversationHandle: SandboxHandle {
     fn record(&self) -> &ConversationRecord;
 
     async fn start_session(&self) -> Result<SessionId>;
@@ -86,37 +124,6 @@ pub trait ConversationHandle: Send + Sync {
     async fn read_artifact(&self, request: ReadArtifactRequest) -> Result<Option<Artifact>>;
     async fn list_artifacts(&self) -> Result<Vec<ArtifactVersion>>;
 
-    async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId>;
-    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId>;
-    async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()>;
-    async fn stop_sandbox(&self, id: SandboxId) -> Result<()>;
-    async fn start_sandbox_process(
-        &self,
-        request: StartSandboxProcessRequest,
-    ) -> Result<SandboxProcessRecord>;
-    async fn write_sandbox_process_input(
-        &self,
-        request: WriteSandboxProcessInputRequest,
-    ) -> Result<()>;
-    async fn close_sandbox_process_input(
-        &self,
-        request: CloseSandboxProcessInputRequest,
-    ) -> Result<()>;
-    async fn get_sandbox_process_events(
-        &self,
-        query: SandboxProcessEventQuery,
-    ) -> Result<GetSandboxProcessEventsResult>;
-    async fn wait_sandbox_process(
-        &self,
-        request: WaitSandboxProcessRequest,
-    ) -> Result<SandboxProcessStatus>;
-    async fn cancel_sandbox_process(
-        &self,
-        request: CancelSandboxProcessRequest,
-    ) -> Result<SandboxProcessStatus>;
-    async fn run_in_sandbox(&self, request: RunInSandboxRequest)
-    -> Result<Box<dyn SandboxProcess>>;
-
     async fn list_bindings(&self) -> Result<Vec<BindingRecord>>;
     async fn put_binding(&self, binding: Binding) -> Result<BindingId>;
     async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>>;
@@ -127,7 +134,7 @@ pub trait ConversationHandle: Send + Sync {
 }
 
 #[async_trait]
-pub trait TurnHandle: Send + Sync {
+pub trait TurnHandle: SnapshotHandle {
     fn record(&self) -> &TurnRecord;
 
     async fn add_events(&self, data: Vec<EventData>) -> Result<AddEventsResult>;
@@ -260,7 +267,6 @@ pub struct GetEventsResult {
 pub struct AddEventsRequest {
     pub session_id: Option<SessionId>,
     pub turn_id: Option<TurnId>,
-    pub expected_head: Option<EventId>,
     pub data: Vec<EventData>,
 }
 
@@ -522,6 +528,8 @@ pub struct CreateSandboxRequest {
 pub enum SandboxProvider {
     #[default]
     Daytona,
+    E2b,
+    Sprites,
     Vercel,
     #[serde(rename = "aws_agentcore", alias = "aws-agentcore")]
     AwsAgentCore,
@@ -542,6 +550,8 @@ impl SandboxProvider {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Daytona => "daytona",
+            Self::E2b => "e2b",
+            Self::Sprites => "sprites",
             Self::Vercel => "vercel",
             Self::AwsAgentCore => "aws-agentcore",
             Self::AppleContainer => "apple-container",
@@ -563,6 +573,8 @@ impl FromStr for SandboxProvider {
     fn from_str(value: &str) -> Result<Self> {
         match value.trim() {
             "daytona" => Ok(Self::Daytona),
+            "e2b" => Ok(Self::E2b),
+            "sprites" => Ok(Self::Sprites),
             "vercel" => Ok(Self::Vercel),
             "aws-agentcore" | "aws_agentcore" => Ok(Self::AwsAgentCore),
             "apple-container" | "apple_container" => Ok(Self::AppleContainer),
@@ -835,6 +847,27 @@ pub enum SandboxProviderConfig {
         #[serde(default = "crate::sandbox_provider::default_vercel_image")]
         default_image: String,
     },
+    E2b {
+        api_key_secret_id: SecretId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_url: Option<String>,
+        #[serde(default = "default_e2b_template")]
+        default_image: String,
+    },
+    Sprites {
+        token_secret_id: SecretId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_url: Option<String>,
+        /// Sprite HTTP URL auth mode: `sprite` (default) or `public`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url_auth: Option<String>,
+        /// Organization slug when the token can access multiple orgs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        organization: Option<String>,
+        /// Extra Sprites labels on create (exo resume labels are added automatically).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        labels: Vec<String>,
+    },
     #[serde(rename = "aws_agentcore", alias = "aws-agentcore")]
     AwsAgentCore {
         runtime_arn: String,
@@ -850,23 +883,31 @@ pub enum SandboxProviderConfig {
     },
 }
 
+pub fn default_e2b_template() -> String {
+    "base".to_string()
+}
+
 impl SandboxProviderConfig {
     pub fn provider(&self) -> SandboxProvider {
         match self {
             Self::Daytona { .. } => SandboxProvider::Daytona,
+            Self::E2b { .. } => SandboxProvider::E2b,
+            Self::Sprites { .. } => SandboxProvider::Sprites,
             Self::Vercel { .. } => SandboxProvider::Vercel,
             Self::Docker { .. } => SandboxProvider::Docker,
             Self::AwsAgentCore { .. } => SandboxProvider::AwsAgentCore,
         }
     }
 
-    /// The binding's configured default base image.
-    pub fn default_image(&self) -> &str {
+    /// The binding's configured default base image / E2B template id.
+    pub fn default_image(&self) -> Option<&str> {
         match self {
             Self::Daytona { default_image, .. }
             | Self::Vercel { default_image, .. }
             | Self::Docker { default_image, .. }
-            | Self::AwsAgentCore { default_image, .. } => default_image,
+            | Self::E2b { default_image, .. }
+            | Self::AwsAgentCore { default_image, .. } => Some(default_image),
+            Self::Sprites { .. } => None,
         }
     }
 }

@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 
@@ -18,6 +18,12 @@ pub enum AdapterCommands {
     Run {
         #[arg(long, default_value_t = 10)]
         limit: usize,
+        #[arg(long)]
+        lock_file: Option<PathBuf>,
+        #[arg(long)]
+        drain_marker: Option<PathBuf>,
+        #[arg(long)]
+        reboot_notice: Option<PathBuf>,
     },
     Disable {
         adapter_id: String,
@@ -51,9 +57,25 @@ pub async fn handle_adapter_command(
             }
             writer.flush()?;
         }
-        AdapterCommands::Run { limit } => {
-            let _lock = AdapterRunnerLock::acquire(root)?;
-            run_adapters_watch(harness, store, AdapterRunOptions { limit }).await?;
+        AdapterCommands::Run {
+            limit,
+            lock_file,
+            drain_marker,
+            reboot_notice,
+        } => {
+            let _lock = AdapterRunnerLock::acquire(
+                lock_file.unwrap_or_else(|| root.join("adapters.lock")),
+            )?;
+            run_adapters_watch(
+                harness,
+                store,
+                AdapterRunOptions {
+                    limit,
+                    drain_marker,
+                    reboot_notice,
+                },
+            )
+            .await?;
         }
         AdapterCommands::Disable { adapter_id } => {
             if store.disable_adapter(&adapter_id).await?.is_some() {
@@ -79,8 +101,7 @@ struct AdapterRunnerLock {
 }
 
 impl AdapterRunnerLock {
-    fn acquire(root: &Path) -> Result<Self> {
-        let path = root.join("exoclaw-adapters.lock");
+    fn acquire(path: PathBuf) -> Result<Self> {
         let pid = std::process::id().to_string();
         match fs::OpenOptions::new()
             .write(true)
@@ -101,7 +122,7 @@ impl AdapterRunnerLock {
                     );
                 }
                 fs::remove_file(&path)?;
-                Self::acquire(root)
+                Self::acquire(path)
             }
             Err(error) => Err(error.into()),
         }
@@ -140,9 +161,10 @@ mod tests {
     #[test]
     fn adapter_runner_lock_rejects_concurrent_holder() {
         let tempdir = TempDir::new().unwrap();
-        let first = AdapterRunnerLock::acquire(tempdir.path()).unwrap();
+        let lock_file = tempdir.path().join("adapters.lock");
+        let first = AdapterRunnerLock::acquire(lock_file.clone()).unwrap();
 
-        let error = AdapterRunnerLock::acquire(tempdir.path()).unwrap_err();
+        let error = AdapterRunnerLock::acquire(lock_file.clone()).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -150,14 +172,15 @@ mod tests {
         );
 
         drop(first);
-        AdapterRunnerLock::acquire(tempdir.path()).unwrap();
+        AdapterRunnerLock::acquire(lock_file).unwrap();
     }
 
     #[test]
     fn adapter_runner_lock_reclaims_stale_pid_file() {
         let tempdir = TempDir::new().unwrap();
-        fs::write(tempdir.path().join("exoclaw-adapters.lock"), "999999999").unwrap();
+        let lock_file = tempdir.path().join("adapters.lock");
+        fs::write(&lock_file, "999999999").unwrap();
 
-        AdapterRunnerLock::acquire(tempdir.path()).unwrap();
+        AdapterRunnerLock::acquire(lock_file).unwrap();
     }
 }

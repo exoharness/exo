@@ -24,7 +24,7 @@ pub(crate) fn local_test_config_with_daytona(root: impl Into<PathBuf>) -> BasicE
         sandbox_default: SandboxProvider::LocalProcess,
         sandbox_backends: vec![
             SandboxBackendChoice::LocalProcess,
-            SandboxBackendChoice::Daytona(DaytonaBackendSpec::with_conventional_secrets()),
+            SandboxBackendChoice::Daytona(DaytonaBackendSpec::default()),
         ],
     }
 }

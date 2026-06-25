@@ -26,15 +26,16 @@ use executor::{
     AgentHarnessKind, BasicExoHarness, BasicExoHarnessConfig, BasicHarness, BasicToolRuntime,
     Binding, BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig,
     ConversationModelConfig, CreateAgentRequest, CreateConversationRequest, DaytonaBackendSpec,
-    EventKind, EventQuery, EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions,
-    ExoclawToolRuntime, FileSystemMount, FileSystemMountMode, ForkConversationRequest,
-    HTTP_EXOHARNESS_TRACING_TARGET, Harness, HarnessAgent, HarnessConversation, HttpExoHarness,
-    LocalSandboxExoHarness, PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR,
-    SandboxBackendChoice, SandboxProvider, SandboxProviderConfig, SandboxScope, Secret,
-    SecretBackendChoice, ToolRequest, ToolRuntime, TypeScriptHarness, TypeScriptHarnessConfig,
-    Uuid7, VercelBackendSpec, default_aws_agentcore_image, default_daytona_image,
-    default_docker_image, default_vercel_image, effective_sandbox_scope, load_agent_config,
-    send_conversation_wakeup, serve_exoharness_http_listener_with_options,
+    E2bBackendSpec, EventKind, EventQuery, EventQueryDirection, ExoHarness,
+    ExoHarnessHttpServeOptions, ExoclawToolRuntime, FileSystemMount, FileSystemMountMode,
+    ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET, Harness, HarnessAgent,
+    HarnessConversation, HttpExoHarness, LocalSandboxExoHarness, PutSecretRequest, RlmHarness,
+    SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxProvider, SandboxProviderConfig,
+    SandboxScope, Secret, SecretBackendChoice, SpritesBackendSpec, ToolRequest, ToolRuntime,
+    TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, VercelBackendSpec,
+    default_aws_agentcore_image, default_daytona_image, default_docker_image, default_e2b_template,
+    default_vercel_image, effective_sandbox_scope, load_agent_config, send_conversation_wakeup,
+    serve_exoharness_http_listener_with_options,
 };
 use lingua::Message;
 use lingua::universal::{AssistantContent, AssistantContentPart, ToolContentPart, UserContent};
@@ -61,6 +62,8 @@ struct Cli {
     secret_backend: Option<SecretBackendArg>,
     #[arg(long, global = true, env = "EXO_MASTER_KEY_PATH")]
     master_key_path: Option<PathBuf>,
+    #[arg(long, global = true, value_enum, env = "EXO_SANDBOX_BACKEND")]
+    sandbox_backend: Option<SandboxBackendArg>,
     #[arg(long, global = true)]
     env_file: Option<PathBuf>,
     #[arg(long, global = true)]
@@ -211,6 +214,10 @@ enum SecretBackendArg {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum SandboxProviderArg {
     Daytona,
+    #[value(name = "e2b")]
+    E2b,
+    #[value(name = "sprites")]
+    Sprites,
     Vercel,
     #[value(name = "aws-agentcore")]
     AwsAgentCore,
@@ -225,11 +232,32 @@ impl From<SandboxProviderArg> for SandboxProvider {
     fn from(value: SandboxProviderArg) -> Self {
         match value {
             SandboxProviderArg::Daytona => Self::Daytona,
+            SandboxProviderArg::E2b => Self::E2b,
+            SandboxProviderArg::Sprites => Self::Sprites,
             SandboxProviderArg::Vercel => Self::Vercel,
             SandboxProviderArg::AwsAgentCore => Self::AwsAgentCore,
             SandboxProviderArg::AppleContainer => Self::AppleContainer,
             SandboxProviderArg::Docker => Self::Docker,
             SandboxProviderArg::LocalProcess => Self::LocalProcess,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SandboxBackendArg {
+    #[value(name = "apple-container")]
+    AppleContainer,
+    Docker,
+    #[value(name = "local-process")]
+    LocalProcess,
+}
+
+impl From<SandboxBackendArg> for SandboxBackendChoice {
+    fn from(value: SandboxBackendArg) -> Self {
+        match value {
+            SandboxBackendArg::AppleContainer => Self::AppleContainer,
+            SandboxBackendArg::Docker => Self::Docker,
+            SandboxBackendArg::LocalProcess => Self::LocalProcess,
         }
     }
 }
@@ -241,11 +269,23 @@ fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
             path: cli.master_key_path.clone(),
         },
     };
+    let sandbox_backend = cli
+        .sandbox_backend
+        .map(SandboxBackendChoice::from)
+        .unwrap_or_else(default_sandbox_backend);
+    let sandbox_default = sandbox_backend.provider();
+    let mut sandbox_backends = default_sandbox_backends();
+    if !sandbox_backends
+        .iter()
+        .any(|backend| backend.provider() == sandbox_default)
+    {
+        sandbox_backends.push(sandbox_backend);
+    }
     Ok(BasicExoHarnessConfig {
         root: cli.root.join("exoharness"),
         secret_backend,
-        sandbox_default: default_local_sandbox_provider(),
-        sandbox_backends: default_sandbox_backends(),
+        sandbox_default,
+        sandbox_backends,
     })
 }
 
@@ -255,7 +295,9 @@ fn default_sandbox_backends() -> Vec<SandboxBackendChoice> {
     vec![
         default_sandbox_backend(),
         SandboxBackendChoice::LocalProcess,
-        SandboxBackendChoice::Daytona(DaytonaBackendSpec::with_conventional_secrets()),
+        SandboxBackendChoice::Daytona(DaytonaBackendSpec::default()),
+        SandboxBackendChoice::E2b(E2bBackendSpec::default()),
+        SandboxBackendChoice::Sprites(SpritesBackendSpec::default()),
         SandboxBackendChoice::Vercel(VercelBackendSpec::with_conventional_secrets()),
         SandboxBackendChoice::AwsAgentCore,
     ]
@@ -595,12 +637,13 @@ struct ProviderConfigureArgs {
     /// Binding name (default: the provider name).
     #[arg(long)]
     name: Option<String>,
-    /// Secret (by name) holding the provider's API key/token. Required for Daytona and Vercel.
+    /// Secret (by name) holding the provider's API key/token. Required for remote providers.
     #[arg(long)]
     secret: Option<String>,
     /// Region/target. Daytona: us | eu | experimental.
     #[arg(long)]
     region: Option<String>,
+    /// Daytona organization id, or Sprites organization slug.
     #[arg(long)]
     organization_id: Option<String>,
     #[arg(long)]
@@ -617,6 +660,12 @@ struct ProviderConfigureArgs {
     /// Default base image for sandboxes that don't request one.
     #[arg(long)]
     default_image: Option<String>,
+    /// Sprites sprite HTTP URL auth: sprite | public.
+    #[arg(long)]
+    url_auth: Option<String>,
+    /// Extra Sprites labels (repeatable). Exo resume labels are added on create.
+    #[arg(long = "label")]
+    labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Args)]
@@ -1770,6 +1819,8 @@ async fn main() -> Result<()> {
                     qualifier,
                     session_storage_mount_path,
                     default_image,
+                    url_auth,
+                    labels,
                 } = *args;
                 let binding_name =
                     name.unwrap_or_else(|| SandboxProvider::from(provider).as_str().to_string());
@@ -1838,10 +1889,35 @@ async fn main() -> Result<()> {
                     SandboxProviderArg::Docker => SandboxProviderConfig::Docker {
                         default_image: default_image.unwrap_or_else(default_docker_image),
                     },
-                    other => bail!(
-                        "provider {other:?} has no binding-based config yet \
-                         (E2B and exe.dev are followups)"
-                    ),
+                    SandboxProviderArg::E2b => {
+                        let secret =
+                            secret.ok_or_else(|| anyhow!("--secret is required for e2b"))?;
+                        let secret_id =
+                            find_secret_id(harness.exoharness_handle().as_ref(), &secret)
+                                .await?
+                                .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
+                        SandboxProviderConfig::E2b {
+                            api_key_secret_id: secret_id,
+                            api_url,
+                            default_image: default_image.unwrap_or_else(default_e2b_template),
+                        }
+                    }
+                    SandboxProviderArg::Sprites => {
+                        let secret =
+                            secret.ok_or_else(|| anyhow!("--secret is required for sprites"))?;
+                        let secret_id =
+                            find_secret_id(harness.exoharness_handle().as_ref(), &secret)
+                                .await?
+                                .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
+                        SandboxProviderConfig::Sprites {
+                            token_secret_id: secret_id,
+                            api_url,
+                            url_auth,
+                            organization: organization_id,
+                            labels,
+                        }
+                    }
+                    other => bail!("provider {other:?} has no binding-based config yet"),
                 };
                 let id = harness
                     .exoharness_handle()
@@ -2375,6 +2451,7 @@ async fn find_secret_id(exoharness: &dyn ExoHarness, name: &str) -> Result<Optio
         .list_secrets()
         .await?
         .into_iter()
+        .rev()
         .find(|secret| secret.name == name)
         .map(|secret| secret.id))
 }
@@ -2538,6 +2615,7 @@ async fn run_sandbox_shell_command(
         .execute(
             agent_handle.as_ref(),
             conversation_handle.as_ref(),
+            None,
             &agent_config,
             &config,
             &ToolRequest {

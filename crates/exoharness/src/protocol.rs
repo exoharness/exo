@@ -24,6 +24,34 @@ pub struct TurnHandleInfo {
     pub record: TurnRecord,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SandboxScope {
+    Agent {
+        agent_id: AgentId,
+    },
+    Conversation {
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+    },
+    Turn {
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+        session_id: SessionId,
+        turn_id: TurnId,
+    },
+}
+
+impl SandboxScope {
+    pub fn agent_id(self) -> AgentId {
+        match self {
+            Self::Agent { agent_id }
+            | Self::Conversation { agent_id, .. }
+            | Self::Turn { agent_id, .. } => agent_id,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClientMessage {
@@ -95,6 +123,46 @@ pub enum Request {
         agent_id: AgentId,
         request: WriteArtifactRequest,
     },
+    CreateSandbox {
+        scope: SandboxScope,
+        request: CreateSandboxRequest,
+    },
+    SnapshotSandbox {
+        scope: SandboxScope,
+        sandbox_id: SandboxId,
+    },
+    StartSandbox {
+        scope: SandboxScope,
+        request: StartSandboxRequest,
+    },
+    StopSandbox {
+        scope: SandboxScope,
+        sandbox_id: SandboxId,
+    },
+    StartSandboxProcess {
+        scope: SandboxScope,
+        request: StartSandboxProcessRequest,
+    },
+    WriteSandboxProcessInput {
+        scope: SandboxScope,
+        request: WriteSandboxProcessInputRequest,
+    },
+    CloseSandboxProcessInput {
+        scope: SandboxScope,
+        request: CloseSandboxProcessInputRequest,
+    },
+    GetSandboxProcessEvents {
+        scope: SandboxScope,
+        query: SandboxProcessEventQuery,
+    },
+    WaitSandboxProcess {
+        scope: SandboxScope,
+        request: WaitSandboxProcessRequest,
+    },
+    CancelSandboxProcess {
+        scope: SandboxScope,
+        request: CancelSandboxProcessRequest,
+    },
     AgentListBindings {
         agent_id: AgentId,
     },
@@ -164,56 +232,6 @@ pub enum Request {
         agent_id: AgentId,
         conversation_id: ConversationId,
         request: WriteArtifactRequest,
-    },
-    ConversationCreateSandbox {
-        agent_id: AgentId,
-        conversation_id: ConversationId,
-        request: CreateSandboxRequest,
-    },
-    ConversationSnapshotSandbox {
-        agent_id: AgentId,
-        conversation_id: ConversationId,
-        sandbox_id: SandboxId,
-    },
-    ConversationStartSandbox {
-        agent_id: AgentId,
-        conversation_id: ConversationId,
-        request: StartSandboxRequest,
-    },
-    ConversationStopSandbox {
-        agent_id: AgentId,
-        conversation_id: ConversationId,
-        sandbox_id: SandboxId,
-    },
-    ConversationStartSandboxProcess {
-        agent_id: AgentId,
-        conversation_id: ConversationId,
-        request: StartSandboxProcessRequest,
-    },
-    ConversationWriteSandboxProcessInput {
-        agent_id: AgentId,
-        conversation_id: ConversationId,
-        request: WriteSandboxProcessInputRequest,
-    },
-    ConversationCloseSandboxProcessInput {
-        agent_id: AgentId,
-        conversation_id: ConversationId,
-        request: CloseSandboxProcessInputRequest,
-    },
-    ConversationGetSandboxProcessEvents {
-        agent_id: AgentId,
-        conversation_id: ConversationId,
-        query: SandboxProcessEventQuery,
-    },
-    ConversationWaitSandboxProcess {
-        agent_id: AgentId,
-        conversation_id: ConversationId,
-        request: WaitSandboxProcessRequest,
-    },
-    ConversationCancelSandboxProcess {
-        agent_id: AgentId,
-        conversation_id: ConversationId,
-        request: CancelSandboxProcessRequest,
     },
     ConversationListBindings {
         agent_id: AgentId,
@@ -285,6 +303,16 @@ impl Request {
             Self::AgentListArtifacts { .. } => "agent_list_artifacts",
             Self::AgentReadArtifact { .. } => "agent_read_artifact",
             Self::AgentWriteArtifact { .. } => "agent_write_artifact",
+            Self::CreateSandbox { .. } => "create_sandbox",
+            Self::SnapshotSandbox { .. } => "snapshot_sandbox",
+            Self::StartSandbox { .. } => "start_sandbox",
+            Self::StopSandbox { .. } => "stop_sandbox",
+            Self::StartSandboxProcess { .. } => "start_sandbox_process",
+            Self::WriteSandboxProcessInput { .. } => "write_sandbox_process_input",
+            Self::CloseSandboxProcessInput { .. } => "close_sandbox_process_input",
+            Self::GetSandboxProcessEvents { .. } => "get_sandbox_process_events",
+            Self::WaitSandboxProcess { .. } => "wait_sandbox_process",
+            Self::CancelSandboxProcess { .. } => "cancel_sandbox_process",
             Self::AgentListBindings { .. } => "agent_list_bindings",
             Self::AgentPutBinding { .. } => "agent_put_binding",
             Self::AgentGetBinding { .. } => "agent_get_binding",
@@ -301,22 +329,6 @@ impl Request {
             Self::ConversationListArtifacts { .. } => "conversation_list_artifacts",
             Self::ConversationReadArtifact { .. } => "conversation_read_artifact",
             Self::ConversationWriteArtifact { .. } => "conversation_write_artifact",
-            Self::ConversationCreateSandbox { .. } => "conversation_create_sandbox",
-            Self::ConversationSnapshotSandbox { .. } => "conversation_snapshot_sandbox",
-            Self::ConversationStartSandbox { .. } => "conversation_start_sandbox",
-            Self::ConversationStopSandbox { .. } => "conversation_stop_sandbox",
-            Self::ConversationStartSandboxProcess { .. } => "conversation_start_sandbox_process",
-            Self::ConversationWriteSandboxProcessInput { .. } => {
-                "conversation_write_sandbox_process_input"
-            }
-            Self::ConversationCloseSandboxProcessInput { .. } => {
-                "conversation_close_sandbox_process_input"
-            }
-            Self::ConversationGetSandboxProcessEvents { .. } => {
-                "conversation_get_sandbox_process_events"
-            }
-            Self::ConversationWaitSandboxProcess { .. } => "conversation_wait_sandbox_process",
-            Self::ConversationCancelSandboxProcess { .. } => "conversation_cancel_sandbox_process",
             Self::ConversationListBindings { .. } => "conversation_list_bindings",
             Self::ConversationPutBinding { .. } => "conversation_put_binding",
             Self::ConversationGetBinding { .. } => "conversation_get_binding",

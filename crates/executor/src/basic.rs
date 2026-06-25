@@ -55,6 +55,17 @@ impl<M, T> Clone for BasicExecutor<M, T> {
     }
 }
 
+struct ToolRoundContext<'a> {
+    agent: &'a dyn AgentHandle,
+    conversation: &'a dyn ConversationHandle,
+    turn: Arc<dyn TurnHandle>,
+    agent_config: &'a AgentConfig,
+    conversation_config: &'a ConversationConfig,
+    round: usize,
+    stream_mode: ExecutorStreamMode<'a>,
+    turn_trace: Option<&'a dyn TurnExecutionTrace>,
+}
+
 impl<M, T> BasicExecutor<M, T>
 where
     M: ModelClient + 'static,
@@ -118,7 +129,7 @@ where
         &self,
         agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
-        turn: &dyn TurnHandle,
+        turn: Arc<dyn TurnHandle>,
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
         stream_mode: ExecutorStreamMode<'_>,
@@ -152,14 +163,17 @@ where
 
             let tool_results = self
                 .execute_tool_round(
-                    agent,
-                    conversation,
-                    agent_config,
-                    conversation_config,
+                    ToolRoundContext {
+                        agent,
+                        conversation,
+                        turn: Arc::clone(&turn),
+                        agent_config,
+                        conversation_config,
+                        round: round as usize,
+                        stream_mode,
+                        turn_trace,
+                    },
                     tool_requests,
-                    round as usize,
-                    stream_mode,
-                    turn_trace,
                 )
                 .await?;
             turn.add_events(tool_results).await?;
@@ -276,19 +290,13 @@ where
 
     async fn execute_tool_round(
         &self,
-        agent: &dyn AgentHandle,
-        conversation: &dyn ConversationHandle,
-        agent_config: &AgentConfig,
-        conversation_config: &ConversationConfig,
+        context: ToolRoundContext<'_>,
         tool_requests: Vec<ExecutableToolRequest>,
-        round: usize,
-        stream_mode: ExecutorStreamMode<'_>,
-        turn_trace: Option<&dyn TurnExecutionTrace>,
     ) -> Result<Vec<EventData>> {
         let mut tool_results = Vec::with_capacity(tool_requests.len());
 
         for tool_request in tool_requests {
-            if let ExecutorStreamMode::Enabled(event_tx) = stream_mode {
+            if let ExecutorStreamMode::Enabled(event_tx) = context.stream_mode {
                 try_send_stream_event(
                     event_tx,
                     ExecutionStreamEvent::ToolCall {
@@ -299,25 +307,23 @@ where
                 );
             }
 
-            let mut tool_trace = match turn_trace {
+            let mut tool_trace = match context.turn_trace {
                 Some(turn_trace) => {
                     turn_trace
-                        .start_tool_call(&tool_request.request, round)
+                        .start_tool_call(&tool_request.request, context.round)
                         .await
                 }
                 None => None,
             };
-            let (result, tool_succeeded) = match self
-                .tools
-                .execute(
-                    agent,
-                    conversation,
-                    agent_config,
-                    conversation_config,
-                    &tool_request.request,
-                )
-                .await
-            {
+            let tool_future = self.tools.execute(
+                context.agent,
+                context.conversation,
+                Some(context.turn.as_ref()),
+                context.agent_config,
+                context.conversation_config,
+                &tool_request.request,
+            );
+            let (result, tool_succeeded) = match tool_future.await {
                 Ok(response) => (response, true),
                 Err(error) => {
                     if let Some(tool_trace) = tool_trace.take() {
@@ -335,7 +341,7 @@ where
             if tool_succeeded && let Some(tool_trace) = tool_trace.take() {
                 tool_trace.finish_success(&result).await;
             }
-            if let ExecutorStreamMode::Enabled(event_tx) = stream_mode {
+            if let ExecutorStreamMode::Enabled(event_tx) = context.stream_mode {
                 try_send_stream_event(
                     event_tx,
                     ExecutionStreamEvent::ToolResult {
@@ -392,7 +398,7 @@ where
         self.run_turn_loop(
             agent,
             conversation,
-            turn.as_ref(),
+            turn,
             agent_config,
             conversation_config,
             stream_mode,

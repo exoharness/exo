@@ -28,6 +28,7 @@ export type WorkerInboundEvent =
       text: string;
       message_id?: string | null;
       metadata?: JsonObject;
+      attachments?: AdapterAttachment[];
     }
   | {
       type: "lifecycle";

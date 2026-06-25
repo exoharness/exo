@@ -52,6 +52,50 @@ describe("model runtime dispatch", () => {
 });
 
 describe("response tool-call parsing", () => {
+  it("attaches response usage to message events", () => {
+    const response = {
+      id: "resp_1",
+      model: "gpt-5.4",
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "output_text",
+              text: "hello",
+              annotations: [],
+            },
+          ],
+        },
+      ],
+      usage: {
+        input_tokens: 12,
+        output_tokens: 5,
+        total_tokens: 17,
+        input_tokens_details: {
+          cached_tokens: 3,
+        },
+        output_tokens_details: {
+          reasoning_tokens: 2,
+        },
+      },
+    } as unknown as Response;
+
+    expect(responseToLinguaEvents(response)).toContainEqual({
+      type: "messages",
+      messages: expect.any(Array),
+      response_id: undefined,
+      usage: expect.objectContaining({
+        model: "gpt-5.4",
+        prompt_tokens: 12,
+        completion_tokens: 5,
+        prompt_cached_tokens: 3,
+        completion_reasoning_tokens: 2,
+      }),
+    });
+  });
+
   it("turns malformed function arguments into tool result errors", () => {
     const response = {
       id: "resp_1",

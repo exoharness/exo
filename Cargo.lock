@@ -164,7 +164,7 @@ dependencies = [
  "regex",
  "regex-lite",
  "serde",
- "serde_json 1.0.149",
+ "serde_json",
  "serde_urlencoded",
  "smallvec",
  "socket2 0.6.3",
@@ -413,7 +413,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e4f2b81832e72834d7518d8487a0396a28cc408186a2e8854c0f98011faf12"
 dependencies = [
  "serde",
- "serde_json 1.0.149",
+ "serde_json",
 ]
 
 [[package]]
@@ -1077,9 +1077,9 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 [[package]]
 name = "big_serde_json"
 version = "0.1.0"
-source = "git+https://github.com/braintrustdata/lingua.git?rev=10f863cf9215c003fcbb4f315b25c011b4bb7569#10f863cf9215c003fcbb4f315b25c011b4bb7569"
+source = "git+https://github.com/braintrustdata/lingua.git?rev=3ab9bcc9b58688be37216e9ab0b3d8362d185cfb#3ab9bcc9b58688be37216e9ab0b3d8362d185cfb"
 dependencies = [
- "serde_json 1.0.145",
+ "braintrust_serde_json",
  "ts-rs",
 ]
 
@@ -1212,7 +1212,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "ryu-js",
  "serde",
- "serde_json 1.0.149",
+ "serde_json",
  "sptr",
  "static_assertions",
  "tap",
@@ -1328,7 +1328,7 @@ dependencies = [
 [[package]]
 name = "braintrust-llm-router"
 version = "0.1.0"
-source = "git+https://github.com/braintrustdata/lingua.git?rev=10f863cf9215c003fcbb4f315b25c011b4bb7569#10f863cf9215c003fcbb4f315b25c011b4bb7569"
+source = "git+https://github.com/braintrustdata/lingua.git?rev=3ab9bcc9b58688be37216e9ab0b3d8362d185cfb#3ab9bcc9b58688be37216e9ab0b3d8362d185cfb"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1358,7 +1358,7 @@ dependencies = [
  "reqwest-middleware",
  "reqwest-retry",
  "serde",
- "serde_json 1.0.149",
+ "serde_json",
  "sha2 0.10.9",
  "smallvec",
  "thiserror 2.0.18",
@@ -1385,13 +1385,25 @@ dependencies = [
  "regex",
  "reqwest",
  "serde",
- "serde_json 1.0.149",
+ "serde_json",
  "serde_repr",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "braintrust_serde_json"
+version = "1.0.145"
+source = "git+https://github.com/braintrustdata/serde-json.git?rev=905b790b50e8922370f3e73ef93d7d5fb7010edc#905b790b50e8922370f3e73ef93d7d5fb7010edc"
+dependencies = [
+ "itoa",
+ "memchr",
+ "ryu",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -1763,7 +1775,7 @@ dependencies = [
  "anyhow",
  "reqwest",
  "serde",
- "serde_json 1.0.149",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",
@@ -2017,6 +2029,12 @@ dependencies = [
  "parking_lot_core 0.9.12",
  "serde",
 ]
+
+[[package]]
+name = "data-encoding"
+version = "2.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
 
 [[package]]
 name = "db-keystore"
@@ -2363,10 +2381,11 @@ dependencies = [
  "cost",
  "exoharness",
  "futures",
+ "libc",
  "lingua",
  "reqwest",
  "serde",
- "serde_json 1.0.149",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -2388,7 +2407,7 @@ dependencies = [
  "lingua",
  "rustyline",
  "serde",
- "serde_json 1.0.149",
+ "serde_json",
  "tabwriter",
  "tempfile",
  "tokio",
@@ -2430,11 +2449,12 @@ dependencies = [
  "object_store",
  "reqwest",
  "serde",
- "serde_json 1.0.149",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
+ "tokio-tungstenite",
  "tokio-util",
  "tracing",
  "url",
@@ -3064,7 +3084,7 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.4",
  "tower-service",
- "webpki-roots",
+ "webpki-roots 1.0.6",
 ]
 
 [[package]]
@@ -3564,7 +3584,7 @@ dependencies = [
  "rand 0.8.5",
  "rsa",
  "serde",
- "serde_json 1.0.149",
+ "serde_json",
  "sha2 0.10.9",
  "signature",
  "simple_asn1",
@@ -3703,7 +3723,7 @@ dependencies = [
 [[package]]
 name = "lingua"
 version = "0.1.0"
-source = "git+https://github.com/braintrustdata/lingua.git?rev=10f863cf9215c003fcbb4f315b25c011b4bb7569#10f863cf9215c003fcbb4f315b25c011b4bb7569"
+source = "git+https://github.com/braintrustdata/lingua.git?rev=3ab9bcc9b58688be37216e9ab0b3d8362d185cfb#3ab9bcc9b58688be37216e9ab0b3d8362d185cfb"
 dependencies = [
  "anyhow",
  "assert-json-diff",
@@ -3712,10 +3732,11 @@ dependencies = [
  "big_serde_json",
  "bytes",
  "js-sys",
+ "regex",
  "reqwest",
  "serde",
  "serde-wasm-bindgen",
- "serde_json 1.0.149",
+ "serde_json",
  "serde_with",
  "serde_yaml",
  "thiserror 2.0.18",
@@ -4138,7 +4159,7 @@ dependencies = [
  "ring",
  "rustls-pemfile",
  "serde",
- "serde_json 1.0.149",
+ "serde_json",
  "serde_urlencoded",
  "thiserror 2.0.18",
  "tokio",
@@ -4900,7 +4921,7 @@ dependencies = [
  "rustls-native-certs",
  "rustls-pki-types",
  "serde",
- "serde_json 1.0.149",
+ "serde_json",
  "serde_urlencoded",
  "sync_wrapper",
  "tokio",
@@ -4914,7 +4935,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
- "webpki-roots",
+ "webpki-roots 1.0.6",
 ]
 
 [[package]]
@@ -5255,7 +5276,7 @@ dependencies = [
  "dyn-clone",
  "ref-cast",
  "serde",
- "serde_json 1.0.149",
+ "serde_json",
 ]
 
 [[package]]
@@ -5267,7 +5288,7 @@ dependencies = [
  "dyn-clone",
  "ref-cast",
  "serde",
- "serde_json 1.0.149",
+ "serde_json",
 ]
 
 [[package]]
@@ -5391,18 +5412,6 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.145"
-source = "git+https://github.com/ankrgyl/serde-json.git?rev=efa66e3a1d61459ab2d325f92ebe3acbd6ca18b1#efa66e3a1d61459ab2d325f92ebe3acbd6ca18b1"
-dependencies = [
- "itoa",
- "memchr",
- "ryu",
- "serde",
- "serde_core",
-]
-
-[[package]]
-name = "serde_json"
 version = "1.0.149"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86"
@@ -5451,7 +5460,7 @@ dependencies = [
  "schemars 0.9.0",
  "schemars 1.2.1",
  "serde_core",
- "serde_json 1.0.149",
+ "serde_json",
  "serde_with_macros",
  "time",
 ]
@@ -5963,6 +5972,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-tungstenite"
+version = "0.26.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a9daff607c6d2bf6c16fd681ccb7eecc83e4e2cdc1ca067ffaadfca5de7f084"
+dependencies = [
+ "futures-util",
+ "log",
+ "rustls 0.23.37",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tungstenite",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
 name = "tokio-util"
 version = "0.7.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6160,6 +6185,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "tungstenite"
+version = "0.26.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4793cb5e56680ecbb1d843515b23b6de9a75eb04b66643e256a396d43be33c13"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http 1.4.0",
+ "httparse",
+ "log",
+ "rand 0.9.4",
+ "rustls 0.23.37",
+ "rustls-pki-types",
+ "sha1 0.10.6",
+ "thiserror 2.0.18",
+ "utf-8",
+]
+
+[[package]]
 name = "turso"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6305,7 +6349,7 @@ dependencies = [
  "prost",
  "roaring",
  "serde",
- "serde_json 1.0.149",
+ "serde_json",
  "thiserror 2.0.18",
  "tracing",
  "turso_core",
@@ -6452,6 +6496,12 @@ name = "urlencoding"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
+
+[[package]]
+name = "utf-8"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09cc8ee72d2a9becf2f2febe0205bbed8fc6615b7cb429ad062dc7b7ddd036a9"
 
 [[package]]
 name = "utf16_iter"
@@ -6686,6 +6736,15 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.6",
 ]
 
 [[package]]
@@ -7005,7 +7064,7 @@ dependencies = [
  "once_cell",
  "regex",
  "serde",
- "serde_json 1.0.149",
+ "serde_json",
  "tokio",
  "url",
 ]
@@ -7073,7 +7132,7 @@ dependencies = [
  "log",
  "serde",
  "serde_derive",
- "serde_json 1.0.149",
+ "serde_json",
  "wasm-encoder",
  "wasm-metadata",
  "wasmparser",
@@ -7093,7 +7152,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_derive",
- "serde_json 1.0.149",
+ "serde_json",
  "unicode-xid",
  "wasmparser",
 ]

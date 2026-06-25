@@ -1,26 +1,72 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use exoharness::{AgentHandle, ConversationHandle, Secret, SecretId};
+use serde::Deserialize;
 use tokio::sync::Notify;
+use tokio::task::JoinSet;
 
-use super::store::AdapterStore;
-use super::types::{AdapterAttachment, AdapterConfig, AdapterEventType, AdapterRecord};
+use base64::Engine;
+use lingua::universal::{TextContentPart, UserContent, UserContentPart};
+
+use super::store::{AdapterStore, stable_target_key};
+use super::tools::download_attachment;
+use super::types::{
+    AdapterAttachment, AdapterAttachmentKind, AdapterConfig, AdapterEventType, AdapterRecord,
+    AdapterTargetConversationRecord, now_ms,
+};
 use super::worker::{WorkerCommand, WorkerEvent, run_worker_loop};
-use crate::conversation_wakeup::send_conversation_wakeup;
-use crate::{Harness, HarnessAgent, HarnessConversation};
+use crate::conversation_events::{
+    HOST_EVENT_ADAPTER_RUNNER_DRAINING, HOST_EVENT_ADAPTER_RUNNER_STARTED, HOST_EVENT_REBOOT,
+    record_host_event,
+};
+use crate::conversation_wakeup::{send_conversation_wakeup, send_conversation_wakeup_content};
+use crate::{CreateConversationRequest, Harness, HarnessAgent, HarnessConversation};
 
-#[derive(Debug, Clone, Copy)]
+const INITIAL_RESTART_DELAY: Duration = Duration::from_secs(5);
+const MAX_RESTART_DELAY: Duration = Duration::from_secs(300);
+// A worker that survived this long was healthy; its next failure starts the
+// backoff schedule over instead of inheriting a stale long delay.
+const STABLE_RUN_THRESHOLD: Duration = Duration::from_secs(60);
+
+// A reboot notice older than this is stale (e.g. left behind by a runner that
+// crashed before claiming it) and should be dropped rather than announced.
+const REBOOT_NOTICE_MAX_AGE: Duration = Duration::from_secs(15 * 60);
+
+#[derive(Debug, Clone)]
 pub struct AdapterRunOptions {
     pub limit: usize,
+    /// When this file appears, the runner claims it (removes the file), stops
+    /// starting new work, lets in-flight wakeup turns finish, and exits so a
+    /// supervisor can restart it on a fresh build.
+    pub drain_marker: Option<PathBuf>,
+    /// Written by the service guardian when it restarts the adapter runner.
+    /// A fresh runner claims it and wakes the adapter conversations so the
+    /// agent can announce externally that it is back up.
+    pub reboot_notice: Option<PathBuf>,
 }
 
 impl Default for AdapterRunOptions {
     fn default() -> Self {
-        Self { limit: 10 }
+        Self {
+            limit: 10,
+            drain_marker: None,
+            reboot_notice: None,
+        }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebootNotice {
+    #[serde(default)]
+    pub requested_at: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 pub async fn run_adapters_watch(
@@ -28,63 +74,300 @@ pub async fn run_adapters_watch(
     store: AdapterStore,
     options: AdapterRunOptions,
 ) -> Result<()> {
-    let mut running = HashSet::new();
+    let running = Arc::new(Mutex::new(HashSet::<String>::new()));
+    let drain = Arc::new(AtomicBool::new(false));
+    let mut supervisors = JoinSet::new();
+    if let Some(notice) = claim_reboot_notice(options.reboot_notice.as_deref()) {
+        // The wakeup turn can take minutes; run it in the background so the
+        // adapter workers (and the connections the agent will announce on)
+        // start immediately. The durable outbox holds any announcement until
+        // the relevant worker is connected.
+        let harness = Arc::clone(&harness);
+        let store = store.clone();
+        tokio::spawn(async move {
+            if let Err(error) = announce_reboot(harness, store, notice).await {
+                tracing::error!(%error, "failed to announce adapter runner reboot");
+            }
+        });
+    }
+    {
+        // Record the runner start in the canonical conversation event log. A
+        // start without a preceding host_reboot event implies an unplanned
+        // restart. Background so worker startup is not delayed.
+        let harness = Arc::clone(&harness);
+        let store = store.clone();
+        tokio::spawn(async move {
+            record_host_event_for_adapter_conversations(
+                harness.as_ref(),
+                &store,
+                HOST_EVENT_ADAPTER_RUNNER_STARTED,
+                serde_json::json!({ "pid": std::process::id() }),
+            )
+            .await;
+        });
+    }
     loop {
+        if claim_drain_marker(options.drain_marker.as_deref()) {
+            tracing::info!("adapter runner drain requested; waiting for in-flight work");
+            drain.store(true, Ordering::SeqCst);
+            record_host_event_for_adapter_conversations(
+                harness.as_ref(),
+                &store,
+                HOST_EVENT_ADAPTER_RUNNER_DRAINING,
+                serde_json::json!({ "pid": std::process::id() }),
+            )
+            .await;
+            break;
+        }
         let adapters = store.enabled_adapters().await?;
         for adapter in adapters.into_iter().take(options.limit) {
-            if !running.insert(adapter.id.clone()) {
+            if !running
+                .lock()
+                .expect("adapter running set poisoned")
+                .insert(adapter.id.clone())
+            {
                 continue;
             }
             let harness = Arc::clone(&harness);
             let store = store.clone();
-            tokio::spawn(async move {
-                loop {
-                    match store.get_adapter(&adapter.id).await {
-                        Ok(Some(current)) if current.enabled => {}
-                        Ok(Some(_)) => {
-                            tokio::time::sleep(Duration::from_secs(5)).await;
-                            continue;
-                        }
-                        Ok(_) => break,
-                        Err(_) => break,
-                    }
-                    if let Err(error) =
-                        run_adapter_loop(Arc::clone(&harness), &store, adapter.clone()).await
-                    {
-                        tracing::error!(
-                            adapter_id = %adapter.id,
-                            %error,
-                            "adapter runtime error; restarting in 5s"
-                        );
-                        if let Err(mark_error) =
-                            store.mark_error(&adapter.id, error.to_string()).await
-                        {
-                            tracing::error!(
-                                adapter_id = %adapter.id,
-                                error = %mark_error,
-                                "failed to mark adapter error"
-                            );
-                        }
-                        if let Err(record_error) = store
-                            .record_event(
-                                adapter.id.clone(),
-                                AdapterEventType::Error,
-                                error.to_string(),
-                            )
-                            .await
-                        {
-                            tracing::error!(
-                                adapter_id = %adapter.id,
-                                error = %record_error,
-                                "failed to record adapter error"
-                            );
-                        }
-                    }
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                }
+            let running = Arc::clone(&running);
+            let drain = Arc::clone(&drain);
+            supervisors.spawn(async move {
+                let adapter_id = adapter.id.clone();
+                supervise_adapter(harness, store, adapter, drain).await;
+                running
+                    .lock()
+                    .expect("adapter running set poisoned")
+                    .remove(&adapter_id);
             });
         }
+        // Reap finished supervision tasks so the JoinSet does not grow
+        // unboundedly while the runner stays up.
+        while supervisors.try_join_next().is_some() {}
         tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+    while supervisors.join_next().await.is_some() {}
+    tracing::info!("adapter runner drained; exiting for restart");
+    Ok(())
+}
+
+fn claim_drain_marker(marker: Option<&std::path::Path>) -> bool {
+    let Some(marker) = marker else {
+        return false;
+    };
+    std::fs::remove_file(marker).is_ok()
+}
+
+fn claim_reboot_notice(notice_path: Option<&std::path::Path>) -> Option<RebootNotice> {
+    let notice_path = notice_path?;
+    let contents = std::fs::read_to_string(notice_path).ok()?;
+    let age = std::fs::metadata(notice_path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok());
+    if std::fs::remove_file(notice_path).is_err() {
+        // Another claimant got there first.
+        return None;
+    }
+    match age {
+        Some(age) if age <= REBOOT_NOTICE_MAX_AGE => {}
+        _ => {
+            tracing::warn!(
+                path = %notice_path.display(),
+                "ignoring stale reboot notice"
+            );
+            return None;
+        }
+    }
+    match serde_json::from_str::<RebootNotice>(&contents) {
+        Ok(notice) => Some(notice),
+        Err(error) => {
+            tracing::warn!(
+                path = %notice_path.display(),
+                %error,
+                "failed to parse reboot notice"
+            );
+            None
+        }
+    }
+}
+
+/// Appends a host event to the canonical event log of each distinct
+/// conversation that has an enabled adapter. Failures are logged per
+/// conversation rather than propagated: a missing conversation must not block
+/// the event from reaching the others.
+async fn record_host_event_for_adapter_conversations(
+    harness: &dyn Harness,
+    store: &AdapterStore,
+    event_type: &str,
+    payload: serde_json::Value,
+) {
+    let adapters = match store.enabled_adapters().await {
+        Ok(adapters) => adapters,
+        Err(error) => {
+            tracing::error!(%error, event_type, "failed to list adapters for host event");
+            return;
+        }
+    };
+    let mut seen = HashSet::new();
+    for adapter in &adapters {
+        if !seen.insert((adapter.agent_id.clone(), adapter.conversation_id.clone())) {
+            continue;
+        }
+        let result = async {
+            let agent = require_agent(harness, adapter).await?;
+            let conversation = require_conversation(agent.as_ref(), adapter).await?;
+            record_host_event(
+                conversation.exoharness_handle().as_ref(),
+                event_type,
+                payload.clone(),
+            )
+            .await
+        }
+        .await;
+        if let Err(error) = result {
+            tracing::error!(
+                conversation_id = %adapter.conversation_id,
+                %error,
+                event_type,
+                "failed to record host event"
+            );
+        }
+    }
+}
+
+async fn announce_reboot(
+    harness: Arc<dyn Harness>,
+    store: AdapterStore,
+    notice: RebootNotice,
+) -> Result<()> {
+    let adapters = store.enabled_adapters().await?;
+    let mut woken = HashSet::new();
+    let reason = notice.reason.as_deref().unwrap_or("unspecified");
+    let requested_at = notice.requested_at.as_deref().unwrap_or("unknown time");
+    for adapter in &adapters {
+        if !woken.insert((adapter.agent_id.clone(), adapter.conversation_id.clone())) {
+            continue;
+        }
+        let adapter_names = adapters
+            .iter()
+            .filter(|candidate| {
+                candidate.agent_id == adapter.agent_id
+                    && candidate.conversation_id == adapter.conversation_id
+            })
+            .map(|candidate| format!("`{}` ({})", candidate.name, candidate.config.adapter_type))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let agent = require_agent(harness.as_ref(), adapter).await?;
+        let conversation = require_conversation(agent.as_ref(), adapter).await?;
+        // Record the reboot in the canonical event log before the wakeup turn
+        // so the immutable history exists even if the announcement turn fails.
+        if let Err(error) = record_host_event(
+            conversation.exoharness_handle().as_ref(),
+            HOST_EVENT_REBOOT,
+            serde_json::json!({
+                "reason": notice.reason,
+                "requestedAt": notice.requested_at,
+            }),
+        )
+        .await
+        {
+            tracing::error!(
+                conversation_id = %adapter.conversation_id,
+                %error,
+                "failed to record host_reboot event"
+            );
+        }
+        send_conversation_wakeup(
+            conversation.as_ref(),
+            format!(
+                "Host services were restarted (reason: {reason}, requested at {requested_at}) and the adapter runner is back up. Adapter workers for {adapter_names} are reconnecting now. If you announced this reboot externally, or external users should know you are back, announce your return with send_adapter_message on the relevant adapters and targets; outbound messages queue durably and deliver once the adapter reconnects. If no announcement is appropriate, do nothing.",
+            ),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "reboot announcement wakeup failed for conversation {}",
+                adapter.conversation_id
+            )
+        })?;
+    }
+    Ok(())
+}
+
+async fn supervise_adapter(
+    harness: Arc<dyn Harness>,
+    store: AdapterStore,
+    adapter: AdapterRecord,
+    drain: Arc<AtomicBool>,
+) {
+    let mut restart_delay = INITIAL_RESTART_DELAY;
+    loop {
+        if drain.load(Ordering::SeqCst) {
+            break;
+        }
+        match store.get_adapter(&adapter.id).await {
+            Ok(Some(current)) if current.enabled => {}
+            Ok(Some(_)) => {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+            Ok(_) => break,
+            Err(error) => {
+                tracing::error!(
+                    adapter_id = %adapter.id,
+                    %error,
+                    "failed to read adapter record; retrying"
+                );
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+        }
+        let started_at = Instant::now();
+        if let Err(error) = run_adapter_loop(
+            Arc::clone(&harness),
+            &store,
+            adapter.clone(),
+            Arc::clone(&drain),
+        )
+        .await
+        {
+            if started_at.elapsed() >= STABLE_RUN_THRESHOLD {
+                restart_delay = INITIAL_RESTART_DELAY;
+            }
+            tracing::error!(
+                adapter_id = %adapter.id,
+                %error,
+                "adapter runtime error; restarting in {}s",
+                restart_delay.as_secs()
+            );
+            if let Err(mark_error) = store.mark_error(&adapter.id, error.to_string()).await {
+                tracing::error!(
+                    adapter_id = %adapter.id,
+                    error = %mark_error,
+                    "failed to mark adapter error"
+                );
+            }
+            if let Err(record_error) = store
+                .record_event(
+                    adapter.id.clone(),
+                    AdapterEventType::Error,
+                    error.to_string(),
+                )
+                .await
+            {
+                tracing::error!(
+                    adapter_id = %adapter.id,
+                    error = %record_error,
+                    "failed to record adapter error"
+                );
+            }
+            tokio::time::sleep(restart_delay).await;
+            restart_delay = (restart_delay * 2).min(MAX_RESTART_DELAY);
+            continue;
+        }
+        restart_delay = INITIAL_RESTART_DELAY;
+        tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
 
@@ -111,11 +394,9 @@ pub async fn send_adapter_message_with_handles(
         );
     }
     // Note: we intentionally do not write a conversation artifact here.
-    // This tool is invoked from inside an active agent turn, and writing to
-    // the conversation outside the turn handle advances the conversation
-    // head, which makes the active turn stale and crashes the adapter
-    // worker. The outbound message is durably queued in the AdapterStore
-    // outbox, and the event below records it for audit.
+    // The outbound message is durably queued in the AdapterStore outbox, and
+    // the event below records it for audit without adding adapter bookkeeping
+    // to the agent-visible conversation history.
     store
         .record_event(
             adapter.id.clone(),
@@ -143,6 +424,7 @@ async fn run_adapter_loop(
     harness: Arc<dyn Harness>,
     store: &AdapterStore,
     adapter: AdapterRecord,
+    drain: Arc<AtomicBool>,
 ) -> Result<()> {
     let agent = require_agent(harness.as_ref(), &adapter).await?;
     let conversation = require_conversation(agent.as_ref(), &adapter).await?;
@@ -152,6 +434,7 @@ async fn run_adapter_loop(
     let outbound_notifier = register_adapter_outbound_notifier(&adapter.id);
     let event_store = store.clone();
     let event_adapter = adapter.clone();
+    let event_agent = std::sync::Arc::clone(&agent);
     let event_conversation = std::sync::Arc::clone(&conversation);
     let event_config = config.clone();
     let outbound_store = store.clone();
@@ -166,10 +449,19 @@ async fn run_adapter_loop(
         move |event| {
             let store = event_store.clone();
             let adapter = event_adapter.clone();
+            let agent = std::sync::Arc::clone(&event_agent);
             let conversation = std::sync::Arc::clone(&event_conversation);
             let config = event_config.clone();
             async move {
-                handle_worker_event(&store, conversation.as_ref(), &adapter, &config, event).await
+                handle_worker_event(
+                    &store,
+                    agent.as_ref(),
+                    conversation,
+                    &adapter,
+                    &config,
+                    event,
+                )
+                .await
             }
         },
         move || {
@@ -192,7 +484,11 @@ async fn run_adapter_loop(
         move || {
             let store = stop_store.clone();
             let adapter_id = stop_adapter_id.clone();
+            let drain = Arc::clone(&drain);
             async move {
+                if drain.load(Ordering::SeqCst) {
+                    return Ok(true);
+                }
                 Ok(store
                     .get_adapter(&adapter_id)
                     .await?
@@ -251,7 +547,8 @@ fn adapter_outbound_notifiers() -> &'static Mutex<HashMap<String, Weak<Notify>>>
 
 async fn handle_worker_event(
     store: &AdapterStore,
-    conversation: &dyn HarnessConversation,
+    agent: &dyn HarnessAgent,
+    root_conversation: Arc<dyn HarnessConversation>,
     adapter: &AdapterRecord,
     config: &AdapterConfig,
     event: WorkerEvent,
@@ -261,7 +558,7 @@ async fn handle_worker_event(
             store.mark_connected(&adapter.id).await?;
             record_worker_lifecycle(
                 store,
-                conversation,
+                root_conversation.as_ref(),
                 adapter,
                 config,
                 "connected",
@@ -275,10 +572,21 @@ async fn handle_worker_event(
             text,
             message_id,
             metadata,
+            attachments,
         } => {
+            let conversation = resolve_message_conversation(
+                store,
+                agent,
+                root_conversation,
+                adapter,
+                config,
+                &target,
+                &metadata,
+            )
+            .await?;
             handle_worker_message(
                 store,
-                conversation,
+                conversation.as_ref(),
                 adapter,
                 config,
                 target,
@@ -286,11 +594,20 @@ async fn handle_worker_event(
                 text,
                 message_id,
                 metadata,
+                attachments,
             )
             .await
         }
         WorkerEvent::Lifecycle { name, metadata } => {
-            record_worker_lifecycle(store, conversation, adapter, config, &name, metadata).await
+            record_worker_lifecycle(
+                store,
+                root_conversation.as_ref(),
+                adapter,
+                config,
+                &name,
+                metadata,
+            )
+            .await
         }
         WorkerEvent::Error { message } => {
             store.mark_error(&adapter.id, message.clone()).await?;
@@ -319,7 +636,7 @@ async fn handle_worker_event(
         WorkerEvent::Disconnected { reason } => {
             record_worker_lifecycle(
                 store,
-                conversation,
+                root_conversation.as_ref(),
                 adapter,
                 config,
                 "disconnected",
@@ -330,6 +647,96 @@ async fn handle_worker_event(
     }
 }
 
+async fn resolve_message_conversation(
+    store: &AdapterStore,
+    agent: &dyn HarnessAgent,
+    root_conversation: Arc<dyn HarnessConversation>,
+    adapter: &AdapterRecord,
+    config: &AdapterConfig,
+    target: &str,
+    _metadata: &serde_json::Value,
+) -> Result<Arc<dyn HarnessConversation>> {
+    if !uses_target_conversation_scope(config) {
+        return Ok(root_conversation);
+    }
+    if let Some(record) = store.get_target_conversation(&adapter.id, target).await? {
+        if let Some(conversation) = agent.get_conversation(&record.conversation_id).await? {
+            return Ok(conversation);
+        }
+        tracing::warn!(
+            adapter_id = %adapter.id,
+            target,
+            conversation_id = %record.conversation_id,
+            "adapter target conversation mapping points to missing conversation; recreating"
+        );
+    }
+
+    let slug = target_conversation_slug(adapter, target);
+    let name = format!("{} target {}", adapter.name, target);
+    let conversation = match agent
+        .create_conversation(CreateConversationRequest {
+            slug: Some(slug.clone()),
+            name: Some(name),
+            ..Default::default()
+        })
+        .await
+    {
+        Ok(conversation) => conversation,
+        Err(error) => {
+            if let Some(conversation) = agent.get_conversation(&slug).await? {
+                conversation
+            } else {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to create target-scoped conversation for adapter {} target {}",
+                        adapter.id, target
+                    )
+                });
+            }
+        }
+    };
+    let record = AdapterTargetConversationRecord::new(
+        adapter.id.clone(),
+        target.to_string(),
+        conversation.record().id.to_string(),
+        now_ms(),
+    )?;
+    store.put_target_conversation(&record).await?;
+    Ok(conversation)
+}
+
+fn uses_target_conversation_scope(config: &AdapterConfig) -> bool {
+    config
+        .initialization
+        .get("conversationScope")
+        .and_then(|value| value.as_str())
+        == Some("target")
+}
+
+fn target_conversation_slug(adapter: &AdapterRecord, target: &str) -> String {
+    format!(
+        "adapter-{}-{}",
+        short_slug_part(&adapter.id),
+        stable_target_key(target)
+    )
+}
+
+fn short_slug_part(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .take(12)
+        .collect()
+}
+
+// Bound on inbound images forwarded to the model per message. Extra images
+// are still listed in the prompt text with their URLs.
+const MAX_INBOUND_IMAGES: usize = 4;
+// Raw-byte cap per inbound image sent to the model. Larger files are listed
+// by URL only so a single huge upload cannot blow up the model request.
+const MAX_INBOUND_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+
+#[allow(clippy::too_many_arguments)]
 async fn handle_worker_message(
     store: &AdapterStore,
     conversation: &dyn HarnessConversation,
@@ -340,6 +747,7 @@ async fn handle_worker_message(
     text: String,
     message_id: Option<String>,
     _metadata: serde_json::Value,
+    attachments: Vec<AdapterAttachment>,
 ) -> Result<()> {
     if let Some(message_id) = &message_id
         && !store
@@ -349,40 +757,182 @@ async fn handle_worker_message(
         return Ok(());
     }
     // Note: we intentionally do not write a conversation artifact here.
-    // The wakeup turn below begins immediately, and any artifact writes
-    // through the conversation handle (rather than the active turn) advance
-    // the conversation head and could race with concurrent turns. The full
-    // inbound text is delivered to the agent via the wakeup prompt and the
-    // event is recorded in the AdapterStore for audit.
+    // The full inbound text is delivered to the agent via the wakeup prompt,
+    // and the event is recorded in the AdapterStore for audit without adding
+    // adapter bookkeeping to the agent-visible conversation history.
     store
         .record_event(
             adapter.id.clone(),
             AdapterEventType::Inbound,
             format!(
-                "{} adapter message from {} to {}",
+                "{} adapter message from {} to {}{}",
                 config.adapter_type,
                 sender.as_deref().unwrap_or("unknown"),
-                target
+                target,
+                if attachments.is_empty() {
+                    String::new()
+                } else {
+                    format!(" with {} attachment(s)", attachments.len())
+                },
             ),
         )
         .await?;
-    send_conversation_wakeup(
-        conversation,
-        format!(
-            "{} message received at target `{}` from {} via adapter `{}`:\n\n{}\n\nThis message came from an external adapter. If you answer this message, you MUST reply externally with send_adapter_message using adapterId `{}` and target `{}`. Do not answer only in the REPL unless you are explicitly deciding that no external reply should be sent. If this asks you to schedule future work whose results should be posted back externally, include adapterId `{}` and target `{}` in the scheduled task reportPrompt.",
-            config.adapter_type,
-            target,
-            sender.as_deref().unwrap_or("unknown"),
-            adapter.name,
-            text,
-            adapter.id,
-            target,
-            adapter.id,
-            target,
-        ),
-    )
-    .await?;
+    let image_parts = download_inbound_images(&adapter.id, store, &attachments).await;
+    let prompt = compose_inbound_wakeup_prompt(
+        config,
+        adapter,
+        &target,
+        sender.as_deref(),
+        &text,
+        &attachments,
+        image_parts.len(),
+    );
+    let content = if image_parts.is_empty() {
+        UserContent::String(prompt)
+    } else {
+        let mut parts = vec![UserContentPart::Text(TextContentPart {
+            text: prompt,
+            encrypted_content: None,
+            provider_options: None,
+            cache_control: None,
+        })];
+        parts.extend(image_parts);
+        UserContent::Array(parts)
+    };
+    let wakeup_result = send_conversation_wakeup_content(conversation, content).await;
+    // A failed model turn must not tear down the worker: the external
+    // connection is healthy and dropping it loses every queued message.
+    // Record the failure and keep processing events.
+    if let Err(error) = wakeup_result {
+        tracing::error!(
+            adapter_id = %adapter.id,
+            %error,
+            "adapter wakeup turn failed; worker stays up"
+        );
+        store
+            .mark_error(&adapter.id, format!("wakeup turn failed: {error}"))
+            .await?;
+        store
+            .record_event(
+                adapter.id.clone(),
+                AdapterEventType::Error,
+                format!("wakeup turn failed: {error}"),
+            )
+            .await?;
+    }
     Ok(())
+}
+
+fn inbound_image_candidates(attachments: &[AdapterAttachment]) -> Vec<&AdapterAttachment> {
+    attachments
+        .iter()
+        .filter(|attachment| {
+            matches!(attachment.kind, AdapterAttachmentKind::Image) && attachment.url.is_some()
+        })
+        .take(MAX_INBOUND_IMAGES)
+        .collect()
+}
+
+/// Downloads inbound image attachments and converts them to multimodal
+/// message parts. Download failures are recorded but never fail the inbound
+/// message: the wakeup prompt always lists attachment URLs as a fallback.
+async fn download_inbound_images(
+    adapter_id: &str,
+    store: &AdapterStore,
+    attachments: &[AdapterAttachment],
+) -> Vec<UserContentPart> {
+    let mut parts = Vec::new();
+    for attachment in inbound_image_candidates(attachments) {
+        let Some(url) = attachment.url.as_deref() else {
+            continue;
+        };
+        match download_attachment(url).await {
+            Ok(bytes) if bytes.len() <= MAX_INBOUND_IMAGE_BYTES => {
+                parts.push(UserContentPart::Image {
+                    image: lingua::serde_json::Value::String(
+                        base64::engine::general_purpose::STANDARD.encode(&bytes),
+                    ),
+                    media_type: attachment.mime_type.clone(),
+                    provider_options: None,
+                });
+            }
+            Ok(bytes) => {
+                tracing::warn!(
+                    adapter_id,
+                    url,
+                    bytes = bytes.len(),
+                    "inbound image exceeds size cap; passing URL only"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(adapter_id, url, %error, "inbound image download failed");
+                if let Err(record_error) = store
+                    .record_event(
+                        adapter_id.to_string(),
+                        AdapterEventType::Error,
+                        format!("inbound attachment download failed: {error}"),
+                    )
+                    .await
+                {
+                    tracing::error!(adapter_id, %record_error, "failed to record download error");
+                }
+            }
+        }
+    }
+    parts
+}
+
+fn attachment_kind_label(kind: AdapterAttachmentKind) -> &'static str {
+    match kind {
+        AdapterAttachmentKind::Image => "image",
+        AdapterAttachmentKind::Video => "video",
+        AdapterAttachmentKind::Audio => "audio",
+        AdapterAttachmentKind::Document => "document",
+    }
+}
+
+fn compose_inbound_wakeup_prompt(
+    config: &AdapterConfig,
+    adapter: &AdapterRecord,
+    target: &str,
+    sender: Option<&str>,
+    text: &str,
+    attachments: &[AdapterAttachment],
+    attached_image_count: usize,
+) -> String {
+    let sender = sender.unwrap_or("unknown");
+    let mut prompt = format!(
+        "{} message received at target `{}` from {} via adapter `{}`:\n\n{}",
+        config.adapter_type, target, sender, adapter.name, text,
+    );
+    if !attachments.is_empty() {
+        prompt.push_str("\n\nThe message includes these attachments:\n");
+        for attachment in attachments {
+            let name = attachment.file_name.as_deref().unwrap_or("(unnamed)");
+            let mime = attachment.mime_type.as_deref().unwrap_or("unknown type");
+            let url = attachment.url.as_deref().unwrap_or("no url");
+            prompt.push_str(&format!(
+                "- {} `{}` ({}) — {}\n",
+                attachment_kind_label(attachment.kind),
+                name,
+                mime,
+                url,
+            ));
+        }
+        if attached_image_count > 0 {
+            prompt.push_str(&format!(
+                "\n{attached_image_count} image(s) are attached to this message so you can view them directly.",
+            ));
+        }
+        prompt.push_str(
+            "\nAttachment URLs may expire quickly; if you need the raw file, download it promptly (e.g. with curl in your sandbox).",
+        );
+    }
+    prompt.push_str(&format!(
+        "\n\nThis message came from an external adapter. If you answer this message, you MUST reply externally with send_adapter_message using adapterId `{}` and target `{}`. Do not answer only in the REPL unless you are explicitly deciding that no external reply should be sent. If this asks you to schedule future work whose results should be posted back externally, include adapterId `{}` and target `{}` in the scheduled task reportPrompt.",
+        adapter.id, target, adapter.id, target,
+    ));
+    prompt
 }
 
 async fn record_worker_lifecycle(
@@ -393,16 +943,16 @@ async fn record_worker_lifecycle(
     event_type: &str,
     _payload: serde_json::Value,
 ) -> Result<()> {
-    // Note: lifecycle events are recorded only in the AdapterStore. Writing
-    // them to the conversation as artifacts can advance the head outside of
-    // any active turn and corrupt the agent's turn state.
+    // Note: lifecycle events are recorded only in the AdapterStore so adapter
+    // bookkeeping does not pollute the agent-visible conversation history.
     store
         .record_event(
             adapter.id.clone(),
             match event_type {
                 "connected" => AdapterEventType::Connected,
+                "disconnected" => AdapterEventType::Disconnected,
                 "error" => AdapterEventType::Error,
-                _ => AdapterEventType::Inbound,
+                _ => AdapterEventType::Lifecycle,
             },
             format!("{} worker {event_type}", config.adapter_type),
         )
@@ -465,4 +1015,179 @@ async fn resolve_secret_id(agent: &dyn AgentHandle, reference: &str) -> Result<S
         .find(|secret| secret.name == reference)
         .map(|secret| secret.id)
         .ok_or_else(|| anyhow!("adapter secret not found: {reference}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claims_and_parses_fresh_reboot_notice() {
+        let tempdir = tempfile::TempDir::new().unwrap();
+        let path = tempdir.path().join("adapter-reboot-notice.json");
+        std::fs::write(
+            &path,
+            r#"{"requestedAt":"2026-06-09T19:39:02Z","reason":"restart-all"}"#,
+        )
+        .unwrap();
+
+        let notice = claim_reboot_notice(Some(&path)).expect("notice should be claimed");
+        assert_eq!(notice.reason.as_deref(), Some("restart-all"));
+        assert_eq!(notice.requested_at.as_deref(), Some("2026-06-09T19:39:02Z"));
+        assert!(!path.exists(), "claiming must remove the notice file");
+
+        assert!(claim_reboot_notice(Some(&path)).is_none());
+    }
+
+    #[test]
+    fn ignores_missing_and_malformed_reboot_notices() {
+        let tempdir = tempfile::TempDir::new().unwrap();
+        let path = tempdir.path().join("adapter-reboot-notice.json");
+        assert!(claim_reboot_notice(Some(&path)).is_none());
+        assert!(claim_reboot_notice(None).is_none());
+
+        std::fs::write(&path, "not json").unwrap();
+        assert!(claim_reboot_notice(Some(&path)).is_none());
+        assert!(!path.exists(), "malformed notices are still consumed");
+    }
+
+    fn config_with_scope(scope: Option<&str>) -> AdapterConfig {
+        let initialization = match scope {
+            Some(scope) => serde_json::json!({ "conversationScope": scope }),
+            None => serde_json::json!({}),
+        };
+        AdapterConfig {
+            adapter_type: "discord".to_string(),
+            worker_command: vec!["true".to_string()],
+            initialization,
+            state_dir: None,
+            secret_env: Vec::new(),
+        }
+    }
+
+    fn test_attachment(kind: AdapterAttachmentKind, url: Option<&str>) -> AdapterAttachment {
+        AdapterAttachment {
+            kind,
+            path: None,
+            url: url.map(|url| url.to_string()),
+            data: None,
+            sandbox_path: None,
+            mime_type: Some("image/png".to_string()),
+            file_name: Some("photo.png".to_string()),
+        }
+    }
+
+    fn test_adapter_record() -> AdapterRecord {
+        AdapterRecord {
+            id: "adapter-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            name: "discord-dev".to_string(),
+            source: super::super::types::AdapterSource::Library,
+            enabled: true,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            config: test_adapter_config(),
+            last_connected_at_ms: None,
+            last_error: None,
+        }
+    }
+
+    fn test_adapter_config() -> AdapterConfig {
+        config_with_scope(None)
+    }
+
+    #[test]
+    fn target_scope_only_when_explicitly_set() {
+        assert!(uses_target_conversation_scope(&config_with_scope(Some(
+            "target"
+        ))));
+        // Default and explicit "adapter" both stay on the root conversation.
+        assert!(!uses_target_conversation_scope(&config_with_scope(None)));
+        assert!(!uses_target_conversation_scope(&config_with_scope(Some(
+            "adapter"
+        ))));
+    }
+
+    #[test]
+    fn target_conversation_slug_is_deterministic_and_target_specific() {
+        let adapter = AdapterRecord::new(
+            super::super::types::NewAdapter {
+                agent_id: "agent".to_string(),
+                conversation_id: "conversation".to_string(),
+                name: "discord-dev".to_string(),
+                source: super::super::types::AdapterSource::BuiltIn,
+                config: config_with_scope(Some("target")),
+            },
+            0,
+        )
+        .unwrap();
+
+        let a1 = target_conversation_slug(&adapter, "channel-A");
+        let a2 = target_conversation_slug(&adapter, "channel-A");
+        let b = target_conversation_slug(&adapter, "channel-B");
+        assert_eq!(a1, a2, "same target must yield the same slug");
+        assert_ne!(a1, b, "different targets must yield different slugs");
+        assert!(a1.starts_with("adapter-"));
+        // Slug must agree with the store's filename key for that target.
+        assert!(a1.ends_with(&stable_target_key("channel-A")));
+    }
+
+    #[test]
+    fn image_candidates_filter_kind_url_and_cap() {
+        let attachments = vec![
+            test_attachment(AdapterAttachmentKind::Image, Some("https://a/1.png")),
+            test_attachment(AdapterAttachmentKind::Document, Some("https://a/doc.pdf")),
+            test_attachment(AdapterAttachmentKind::Image, None),
+            test_attachment(AdapterAttachmentKind::Image, Some("https://a/2.png")),
+            test_attachment(AdapterAttachmentKind::Image, Some("https://a/3.png")),
+            test_attachment(AdapterAttachmentKind::Image, Some("https://a/4.png")),
+            test_attachment(AdapterAttachmentKind::Image, Some("https://a/5.png")),
+        ];
+        let candidates = inbound_image_candidates(&attachments);
+        assert_eq!(candidates.len(), MAX_INBOUND_IMAGES);
+        assert_eq!(candidates[0].url.as_deref(), Some("https://a/1.png"));
+        assert_eq!(candidates[3].url.as_deref(), Some("https://a/4.png"));
+    }
+
+    #[test]
+    fn wakeup_prompt_without_attachments_matches_plain_format() {
+        let prompt = compose_inbound_wakeup_prompt(
+            &test_adapter_config(),
+            &test_adapter_record(),
+            "channel-9",
+            Some("martin"),
+            "hello",
+            &[],
+            0,
+        );
+        assert!(prompt.starts_with(
+            "discord message received at target `channel-9` from martin via adapter `discord-dev`:\n\nhello"
+        ));
+        assert!(!prompt.contains("attachments"));
+        assert!(prompt.contains("send_adapter_message using adapterId `adapter-1`"));
+    }
+
+    #[test]
+    fn wakeup_prompt_lists_attachments_and_attached_images() {
+        let attachments = vec![
+            test_attachment(AdapterAttachmentKind::Image, Some("https://a/1.png")),
+            test_attachment(AdapterAttachmentKind::Document, Some("https://a/doc.pdf")),
+        ];
+        let prompt = compose_inbound_wakeup_prompt(
+            &test_adapter_config(),
+            &test_adapter_record(),
+            "channel-9",
+            None,
+            "look at this",
+            &attachments,
+            1,
+        );
+        assert!(prompt.contains("from unknown"));
+        assert!(prompt.contains("The message includes these attachments:"));
+        assert!(prompt.contains("- image `photo.png` (image/png) — https://a/1.png"));
+        assert!(prompt.contains("- document `photo.png` (image/png) — https://a/doc.pdf"));
+        assert!(prompt.contains("1 image(s) are attached to this message"));
+        assert!(prompt.contains("Attachment URLs may expire quickly"));
+    }
 }

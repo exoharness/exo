@@ -110,7 +110,6 @@ pub async fn list_conversations_returns_recent_first_and_paginates(harness: Arc<
         .add_events(AddEventsRequest {
             session_id: None,
             turn_id: None,
-            expected_head: None,
             data: vec![EventData::Custom {
                 event_type: "touch".to_string(),
                 payload: serde_json::Value::Null,
@@ -438,7 +437,7 @@ async fn sandbox_handle_start_process_supports_interactive_stdio_and_env_inner(
         .start_process(&SandboxCommand {
             argv: vec![
                 "/bin/sh".to_string(),
-                "-lc".to_string(),
+                "-c".to_string(),
                 "printf 'ready\\n'; IFS= read -r line; printf 'env=%s input=%s\\n' \"$EXO_CONTRACT_ENV\" \"$line\"".to_string(),
             ],
             env,
@@ -604,7 +603,7 @@ async fn sandbox_handle_start_process_supports_long_running_request_response_pro
         .start_process(&SandboxCommand {
             argv: vec![
                 "/bin/sh".to_string(),
-                "-lc".to_string(),
+                "-c".to_string(),
                 [
                     "printf 'protocol-ready\\n'",
                     "while IFS= read -r line; do",

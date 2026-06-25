@@ -1,27 +1,26 @@
 use exoharness::{
-    AgentHandle, Artifact, ArtifactVersion, ConversationHandle, CreateSandboxRequest,
-    ReadArtifactRequest, Result, SandboxProvider, Uuid7, WriteArtifactRequest,
+    AgentHandle, Artifact, ArtifactVersion, CreateSandboxRequest, ReadArtifactRequest, Result,
+    SandboxProvider, Uuid7, WriteArtifactRequest,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::conversation_sandbox::{
-    ConversationSandboxSpec, conversation_sandbox_spec, conversation_sandboxes,
-};
+use crate::conversation_sandbox::{ConversationSandboxSpec, conversation_sandbox_spec};
 use crate::{AgentConfig, ConversationConfig};
 
-const AGENT_SANDBOX_ARTIFACT_PATH: &str = "config/exoclaw-agent-sandbox.json";
+// v1 was a conversation-owned handle with `conversationId`/`sandboxId`. The
+// agent-owned record has a different shape, so keep it on a distinct path.
+const AGENT_SANDBOX_ARTIFACT_PATH: &str = "config/agent-sandbox-v2.json";
+const AGENT_SANDBOX_NAME_PREFIX: &str = "agent-sandbox";
 
 #[derive(Clone)]
 pub(crate) struct AgentSandboxHandle {
-    pub(crate) conversation: std::sync::Arc<dyn ConversationHandle>,
     pub(crate) sandbox_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AgentSandboxRecord {
-    conversation_id: String,
-    sandbox_id: String,
+    sandbox_name: String,
     provider: SandboxProvider,
     image: String,
     default_workdir: String,
@@ -46,29 +45,18 @@ impl AgentSandboxRecord {
 
 pub(crate) async fn ensure_agent_sandbox(
     agent: &dyn AgentHandle,
-    current_conversation: &dyn ConversationHandle,
     agent_config: &AgentConfig,
     conversation_config: &ConversationConfig,
 ) -> Result<AgentSandboxHandle> {
     let spec = conversation_sandbox_spec(agent_config, conversation_config);
-    if let Some(record) = load_agent_sandbox_record(agent).await?
-        && record.matches_spec(&spec)
-        && let Ok(conversation_id) = record.conversation_id.parse::<Uuid7>()
-        && let Some(owner) = agent.get_conversation(&conversation_id).await?
-    {
-        for sandbox in conversation_sandboxes(owner.as_ref()).await? {
-            if sandbox.id == record.sandbox_id && sandbox.matches_spec(&spec) {
-                return Ok(AgentSandboxHandle {
-                    conversation: owner,
-                    sandbox_id: record.sandbox_id,
-                });
-            }
-        }
+    if let Some(handle) = current_agent_sandbox(agent, &spec).await? {
+        return Ok(handle);
     }
 
-    let sandbox_id = current_conversation
+    let sandbox_name = new_agent_sandbox_name();
+    let sandbox_id = agent
         .create_sandbox(CreateSandboxRequest {
-            name: None,
+            name: Some(sandbox_name.clone()),
             provider: spec.provider,
             image: spec.image.clone(),
             default_workdir: Some(spec.default_workdir.clone()),
@@ -81,8 +69,7 @@ pub(crate) async fn ensure_agent_sandbox(
     store_agent_sandbox_record(
         agent,
         &AgentSandboxRecord {
-            conversation_id: current_conversation.record().id.to_string(),
-            sandbox_id: sandbox_id.clone(),
+            sandbox_name,
             provider: spec.provider,
             image: spec.image,
             default_workdir: spec.default_workdir,
@@ -94,19 +81,32 @@ pub(crate) async fn ensure_agent_sandbox(
     )
     .await?;
 
-    let Some(owner) = agent
-        .get_conversation(&current_conversation.record().id)
-        .await?
-    else {
-        anyhow::bail!(
-            "agent sandbox owner conversation disappeared: {}",
-            current_conversation.record().id
-        );
+    Ok(AgentSandboxHandle { sandbox_id })
+}
+
+pub(crate) async fn current_agent_sandbox(
+    agent: &dyn AgentHandle,
+    spec: &ConversationSandboxSpec,
+) -> Result<Option<AgentSandboxHandle>> {
+    let Some(record) = load_agent_sandbox_record(agent).await? else {
+        return Ok(None);
     };
-    Ok(AgentSandboxHandle {
-        conversation: owner,
-        sandbox_id,
-    })
+    if !record.matches_spec(spec) {
+        return Ok(None);
+    }
+    let sandbox_id = agent
+        .create_sandbox(CreateSandboxRequest {
+            name: Some(record.sandbox_name),
+            provider: spec.provider,
+            image: spec.image.clone(),
+            default_workdir: Some(spec.default_workdir.clone()),
+            file_system_mounts: Some(spec.file_system_mounts.clone()),
+            durable_file_systems: Some(spec.durable_file_systems.clone()),
+            enable_networking: Some(spec.enable_networking),
+            idle_seconds: Some(spec.idle_seconds),
+        })
+        .await?;
+    Ok(Some(AgentSandboxHandle { sandbox_id }))
 }
 
 async fn load_agent_sandbox_record(agent: &dyn AgentHandle) -> Result<Option<AgentSandboxRecord>> {
@@ -146,4 +146,8 @@ fn latest_artifact_version(artifacts: Vec<ArtifactVersion>, path: &str) -> Optio
         .into_iter()
         .filter(|artifact| artifact.path == path)
         .max_by_key(|artifact| artifact.version)
+}
+
+fn new_agent_sandbox_name() -> String {
+    format!("{AGENT_SANDBOX_NAME_PREFIX}-{}", Uuid7::now())
 }

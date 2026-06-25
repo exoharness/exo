@@ -179,6 +179,7 @@ where
         conversation: &dyn ConversationHandle,
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
+        turn: Arc<dyn TurnHandle>,
         request: RuntimeRequest,
     ) -> Result<RuntimeResponsePayload> {
         match request {
@@ -188,6 +189,7 @@ where
                     .execute(
                         agent,
                         conversation,
+                        Some(turn.as_ref()),
                         agent_config,
                         conversation_config,
                         &request,
@@ -380,6 +382,7 @@ impl TypeScriptRunnerProcess {
                                     conversation,
                                     agent_config,
                                     conversation_config,
+                                    Arc::clone(&turn),
                                     request,
                                 )
                                 .await;
@@ -408,13 +411,13 @@ impl TypeScriptRunnerProcess {
                                 Ok(response) => HostToGuestMessage::ExoResponse {
                                     id,
                                     ok: true,
-                                    response: Some(response),
+                                    response: Box::new(Some(response)),
                                     error: None,
                                 },
                                 Err(error) => HostToGuestMessage::ExoResponse {
                                     id,
                                     ok: false,
-                                    response: None,
+                                    response: Box::new(None),
                                     error: Some(format_error_chain(
                                         &error,
                                         format_args!(
@@ -456,6 +459,7 @@ impl TypeScriptRunnerProcess {
         conversation: &dyn ConversationHandle,
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
+        turn: Arc<dyn TurnHandle>,
         request: RuntimeRequest,
     ) -> Result<RuntimeResponsePayload>
     where
@@ -469,6 +473,7 @@ impl TypeScriptRunnerProcess {
                         conversation,
                         agent_config,
                         conversation_config,
+                        Arc::clone(&turn),
                         RuntimeRequest::ExecuteTool { request },
                     )
                     .await
@@ -585,7 +590,6 @@ impl TypeScriptRunnerProcess {
                         .add_events(AddEventsRequest {
                             session_id: None,
                             turn_id: None,
-                            expected_head: None,
                             data: vec![EventData::Custom {
                                 event_type: TYPESCRIPT_SANDBOX_PROCESS_REUSE_EVENT.to_string(),
                                 payload: serde_json::to_value(
@@ -850,9 +854,11 @@ impl TypeScriptHarness<ExoclawToolRuntime> {
             .context("failed to resolve current directory for Exoclaw harness")?;
         let root = root.as_ref();
         let exoharness: Arc<dyn ExoHarness> = Arc::new(BasicExoHarness::new(exo_config).await?);
+        let adapter_worker_root = workspace_root.join("examples/exoclaw/adapters");
         let tools = Arc::new(ExoclawToolRuntime::with_roots(
             root.join("scheduled-tasks"),
             root.join("adapters"),
+            adapter_worker_root,
         ));
         let runtime = ExecutorHarnessRuntime::new(
             TypeScriptExecutor::new(Arc::clone(&exoharness), workspace_root, env, tools),
@@ -891,7 +897,7 @@ enum HostToGuestMessage {
     ExoResponse {
         id: u64,
         ok: bool,
-        response: Option<ExoResponse>,
+        response: Box<Option<ExoResponse>>,
         error: Option<String>,
     },
     RuntimeEvent {

@@ -10,10 +10,11 @@ use exoharness::{
     ConversationId, ConversationRecord, CreateSandboxRequest, Event, EventData, EventQuery,
     EventQueryDirection, EventStream, ExoHarness, ForkConversationRequest, GetEventsResult,
     NewAgentRequest, NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result,
-    RunInSandboxRequest, SandboxId, SandboxProcess, SandboxProcessEventQuery, SandboxProcessParts,
-    SandboxProcessRecord, SandboxProcessStatus, Secret, SecretMetadata, SecretType, SessionId,
-    SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, ToolRequest, ToolResult,
-    TurnHandle, TurnId, TurnRecord, Uuid7, WriteArtifactRequest,
+    RunInSandboxRequest, SandboxHandle, SandboxId, SandboxProcess, SandboxProcessEventQuery,
+    SandboxProcessParts, SandboxProcessRecord, SandboxProcessStatus, Secret, SecretMetadata,
+    SecretType, SessionId, SnapshotHandle, SnapshotId, StartSandboxProcessRequest,
+    StartSandboxRequest, ToolRequest, ToolResult, TurnHandle, TurnId, TurnRecord, Uuid7,
+    WriteArtifactRequest,
 };
 use futures::FutureExt;
 use futures::io::Cursor;
@@ -577,6 +578,7 @@ impl ToolRuntime for FailingToolRuntime {
         &self,
         _agent: &dyn AgentHandle,
         _conversation: &dyn ConversationHandle,
+        _turn: Option<&dyn TurnHandle>,
         _agent_config: &AgentConfig,
         _config: &ConversationConfig,
         _request: &ToolRequest,
@@ -591,6 +593,7 @@ impl ToolRuntime for FakeToolRuntime {
         &self,
         _agent: &dyn AgentHandle,
         _conversation: &dyn ConversationHandle,
+        _turn: Option<&dyn TurnHandle>,
         _agent_config: &AgentConfig,
         _config: &ConversationConfig,
         _request: &ToolRequest,
@@ -782,6 +785,77 @@ impl AgentHandle for FakeAgentHandle {
     }
 }
 
+#[async_trait]
+impl SnapshotHandle for FakeAgentHandle {
+    async fn snapshot_sandbox(&self, _id: SandboxId) -> Result<SnapshotId> {
+        Ok(Uuid7::now())
+    }
+
+    async fn start_sandbox(&self, _request: StartSandboxRequest) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl SandboxHandle for FakeAgentHandle {
+    async fn create_sandbox(&self, _request: CreateSandboxRequest) -> Result<SandboxId> {
+        Ok("agent-sandbox".to_string())
+    }
+
+    async fn stop_sandbox(&self, _id: SandboxId) -> Result<()> {
+        Ok(())
+    }
+
+    async fn start_sandbox_process(
+        &self,
+        _request: StartSandboxProcessRequest,
+    ) -> Result<SandboxProcessRecord> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn write_sandbox_process_input(
+        &self,
+        _request: exoharness::WriteSandboxProcessInputRequest,
+    ) -> Result<()> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn close_sandbox_process_input(
+        &self,
+        _request: exoharness::CloseSandboxProcessInputRequest,
+    ) -> Result<()> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn get_sandbox_process_events(
+        &self,
+        _query: SandboxProcessEventQuery,
+    ) -> Result<exoharness::GetSandboxProcessEventsResult> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn wait_sandbox_process(
+        &self,
+        _request: exoharness::WaitSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn cancel_sandbox_process(
+        &self,
+        _request: exoharness::CancelSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn run_in_sandbox(
+        &self,
+        _request: RunInSandboxRequest,
+    ) -> Result<Box<dyn SandboxProcess>> {
+        Ok(Box::new(FakeSandboxProcess))
+    }
+}
+
 struct FakeConversationHandle {
     state: Arc<Mutex<FakeState>>,
     record: ConversationRecord,
@@ -913,10 +987,6 @@ impl ConversationHandle for FakeConversationHandle {
 
     async fn add_events(&self, request: AddEventsRequest) -> Result<AddEventsResult> {
         let mut state = self.state.lock().expect("state poisoned");
-        if request.expected_head != state.conversation.record.latest_event_id {
-            return Err(anyhow!("head mismatch"));
-        }
-
         let mut event_ids = Vec::new();
         let mut latest_event_id = state.conversation.record.latest_event_id;
 
@@ -960,15 +1030,47 @@ impl ConversationHandle for FakeConversationHandle {
         Ok(Vec::new())
     }
 
-    async fn create_sandbox(&self, _request: CreateSandboxRequest) -> Result<SandboxId> {
+    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
+        Ok(vec![test_model_binding_record()])
+    }
+
+    async fn put_binding(&self, _binding: Binding) -> Result<exoharness::BindingId> {
         Err(anyhow!("not implemented"))
     }
 
+    async fn get_binding(&self, _id: &exoharness::BindingId) -> Result<Option<Binding>> {
+        Ok(Some(test_model_binding()))
+    }
+
+    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
+        Ok(vec![test_secret_metadata()])
+    }
+
+    async fn put_secret(&self, _secret: PutSecretRequest) -> Result<exoharness::SecretId> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn get_secret(&self, _id: &exoharness::SecretId) -> Result<Option<Secret>> {
+        Ok(Some(Secret::Key {
+            value: "test-key".to_string(),
+        }))
+    }
+}
+
+#[async_trait]
+impl SnapshotHandle for FakeConversationHandle {
     async fn snapshot_sandbox(&self, _id: SandboxId) -> Result<SnapshotId> {
         Err(anyhow!("not implemented"))
     }
 
     async fn start_sandbox(&self, _request: StartSandboxRequest) -> Result<()> {
+        Err(anyhow!("not implemented"))
+    }
+}
+
+#[async_trait]
+impl SandboxHandle for FakeConversationHandle {
+    async fn create_sandbox(&self, _request: CreateSandboxRequest) -> Result<SandboxId> {
         Err(anyhow!("not implemented"))
     }
 
@@ -1024,32 +1126,6 @@ impl ConversationHandle for FakeConversationHandle {
     ) -> Result<Box<dyn SandboxProcess>> {
         Ok(Box::new(FakeSandboxProcess))
     }
-
-    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
-        Ok(vec![test_model_binding_record()])
-    }
-
-    async fn put_binding(&self, _binding: Binding) -> Result<exoharness::BindingId> {
-        Err(anyhow!("not implemented"))
-    }
-
-    async fn get_binding(&self, _id: &exoharness::BindingId) -> Result<Option<Binding>> {
-        Ok(Some(test_model_binding()))
-    }
-
-    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
-        Ok(vec![test_secret_metadata()])
-    }
-
-    async fn put_secret(&self, _secret: PutSecretRequest) -> Result<exoharness::SecretId> {
-        Err(anyhow!("not implemented"))
-    }
-
-    async fn get_secret(&self, _id: &exoharness::SecretId) -> Result<Option<Secret>> {
-        Ok(Some(Secret::Key {
-            value: "test-key".to_string(),
-        }))
-    }
 }
 
 struct FakeTurnHandle {
@@ -1059,16 +1135,23 @@ struct FakeTurnHandle {
 }
 
 #[async_trait]
+impl SnapshotHandle for FakeTurnHandle {
+    async fn snapshot_sandbox(&self, _id: SandboxId) -> Result<SnapshotId> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn start_sandbox(&self, _request: StartSandboxRequest) -> Result<()> {
+        Err(anyhow!("not implemented"))
+    }
+}
+
+#[async_trait]
 impl TurnHandle for FakeTurnHandle {
     fn record(&self) -> &TurnRecord {
         &self.record
     }
 
     async fn add_events(&self, data: Vec<EventData>) -> Result<AddEventsResult> {
-        let expected_head = *self
-            .latest_event_id
-            .lock()
-            .expect("turn latest event id poisoned");
         let add_result = FakeConversationHandle {
             state: Arc::clone(&self.state),
             record: {
@@ -1079,7 +1162,6 @@ impl TurnHandle for FakeTurnHandle {
         .add_events(AddEventsRequest {
             session_id: Some(self.record.session_id),
             turn_id: Some(self.record.id),
-            expected_head,
             data,
         })
         .await?;

@@ -37,10 +37,9 @@ handle types:
 
 The distinction between `ConversationHandle` and `TurnHandle` is important.
 Conversation-level writes append to the conversation head immediately. Turn-level
-writes are tied to the active turn and use the turn's expected head. If another
-writer advances the conversation while a turn is open, the turn becomes stale
-and further turn writes fail. Code that runs inside a turn should prefer
-`TurnHandle` for messages and artifacts.
+writes attach the active turn's session and turn ids to appended messages and
+artifacts. Code that runs inside a turn should prefer `TurnHandle` for messages
+and artifacts so the event log preserves turn ownership.
 
 ## Key Crates And Files
 
@@ -126,9 +125,9 @@ environment:
 - `list_bindings()`, `put_binding()`, `get_binding()`
 - `list_secrets()`, `put_secret()`, `get_secret()`
 
-Conversation-level `add_events()` accepts an optional `expected_head`. If set,
-the append fails unless the conversation head still matches. This is the
-optimistic concurrency primitive used throughout the system.
+Conversation-level `add_events()` is append-only. Callers that need to avoid
+overlapping agent runs should serialize through the executor-level `send()` APIs
+or another higher-level owner/lease.
 
 ### Turn: `TurnHandle`
 
@@ -139,16 +138,14 @@ A turn handle is the active-turn write surface:
 - `write_artifact(WriteArtifactRequest) -> ArtifactVersion`
 - `finish() -> EventId`
 
-The turn tracks the latest event it wrote. Each turn write checks that the
-conversation head is still the turn's latest event before appending more data.
+Turn writes append events tagged with the turn's session and turn ids.
 `finish()` writes `turn_ended` and marks the handle complete. Calling
-`finish()` again is idempotent and returns the existing latest event id.
+`finish()` again is idempotent and returns the existing finish event id.
 
 ## Records And IDs
 
 Most persisted records use UUIDv7 IDs. These IDs carry sortable timestamps,
-which makes event ordering straightforward and helps produce useful stale-turn
-error messages.
+which makes event ordering straightforward.
 
 Important records:
 
@@ -216,18 +213,6 @@ and finishes the turn. External systems such as adapters and scheduler wakeups
 usually call `send()` with a fresh session and then close the session after the
 wakeup completes.
 
-Stale turns happen when:
-
-1. A turn begins and records its expected conversation head.
-2. Some other writer appends to the same conversation outside that turn.
-3. The active turn tries to append a message, artifact, or `turn_ended`.
-
-The basic implementation reports this as:
-
-```text
-turn is stale and cannot be resumed: conversation head advanced outside this turn
-```
-
 For code running during a turn, use `context.exoharness.current.turn` instead of
 `context.exoharness.current.conversation` when appending messages or artifacts.
 For code outside a turn, serialize wakeups per conversation if multiple external
@@ -242,7 +227,7 @@ creates a new artifact id.
 Artifact APIs exist at agent and conversation scope. Conversation-level
 `write_artifact()` appends an `artifact_written` event to the conversation.
 Turn-level `write_artifact()` also appends an `artifact_written` event, but it
-does so through the active turn and preserves the turn's concurrency invariant.
+tags the event with the active turn's session and turn ids.
 
 TypeScript convenience methods:
 
@@ -345,9 +330,9 @@ The protocol request variants mirror the core handles:
   `conversation_write_artifact`, conversation bindings, conversation secrets.
 - Turn: `turn_add_events`, `turn_write_artifact`, `turn_finish`.
 
-The protocol server stores active turns in an in-memory handle table. TypeScript
-code receives a numeric `handle_id` for the active turn. Subsequent turn
-requests refer to that handle id. `turn_finish` removes the handle.
+The protocol addresses turns by durable ids. TypeScript code receives the active
+turn's agent, conversation, session, and turn ids, and subsequent turn requests
+send those ids back to the host.
 
 ## Executor Harness Facade
 
@@ -579,7 +564,8 @@ When a task is due, the scheduler runtime:
 
 The wakeup uses `HarnessConversation::send()`, so the task result becomes a
 normal agent turn. A per-conversation wakeup lock serializes these external
-wakeups to avoid stale-turn conflicts.
+wakeups so two scheduler/adapter triggers do not run the same conversation at
+once.
 
 ## Adapter Integration
 
@@ -599,9 +585,9 @@ Adapter runtime flow:
 8. The worker loop drains outbound messages and sends them externally.
 
 Inbound and outbound adapter state is intentionally stored in `AdapterStore`
-rather than as conversation artifacts during an active turn. This prevents an
-external adapter write from advancing the conversation head while a turn is
-using its `TurnHandle`.
+rather than as conversation artifacts. Adapter events can arrive while an agent
+turn is running, and storing them outside the conversation log avoids unrelated
+history churn.
 
 Like the scheduler, adapter wakeups use the per-conversation wakeup lock before
 calling `HarnessConversation::send()`.
@@ -636,9 +622,8 @@ Important properties:
 - Sandboxes are tracked in metadata plus an in-memory running-sandbox table.
 
 Because some coordination is in-memory, multiple independent processes writing
-to the same harness root should be treated carefully. The API has optimistic
-head checks, but the basic backend is primarily designed for a coordinated local
-runtime.
+to the same harness root should be treated carefully. The basic backend is
+primarily designed for a coordinated local runtime.
 
 ## Concurrency Rules
 
@@ -650,8 +635,6 @@ Use these rules when adding new subcomponents:
   `send()` API rather than appending assistant messages directly.
 - If multiple external sources can wake the same conversation, serialize those
   wakeups.
-- If code appends conversation events directly, set `expected_head` when it
-  depends on a stable head.
 - Do not write conversation artifacts from adapter or scheduler plumbing while a
   wakeup turn is active.
 - Keep durable subsystem queues in their subsystem stores when the data is not
@@ -767,9 +750,8 @@ adapter worker
 
 - The basic backend's event subscribers and running sandbox table are
   in-memory, so they are not a distributed coordination layer.
-- Turn handles are process-local protocol handles in the TypeScript bridge.
-  They cannot be persisted and resumed by another runner process.
-- Direct conversation writes during a turn can make that turn stale.
+- TypeScript turn requests carry durable turn ids, but there is no separate
+  turn lease token. Coordinate concurrent writers at the executor/wakeup layer.
 - Tool results are compacted for model history, so callers should follow
   artifact references for full output.
 - TypeScript runner protocol messages are line-delimited JSON. Anything written
