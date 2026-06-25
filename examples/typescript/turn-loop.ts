@@ -24,7 +24,7 @@ import { ensureTable } from "@exo/model-runtime/cost";
 import { resolveLlmBinding } from "./shared";
 
 export interface ResponsesTurnLoopOptions {
-  instructions?: (context: TurnContext) => Message[];
+  instructions?: (context: TurnContext) => Message[] | Promise<Message[]>;
   registerTools?: (
     tools: HarnessToolRegistry,
     context: TurnContext,
@@ -117,7 +117,9 @@ async function runResponsesTurnLoop(
     }
     const messages = await materializePromptMessages(
       conversation,
-      options.instructions?.(context) ?? basicHarnessInstructions(context),
+      options.instructions
+        ? await options.instructions(context)
+        : basicHarnessInstructions(context),
     );
     const request: NativeResponsesRequest = {
       model,

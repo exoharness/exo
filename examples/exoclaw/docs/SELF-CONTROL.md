@@ -77,6 +77,18 @@ Two properties matter for rollback:
 
 Gap: host events currently cover the adapter runner only. The scheduler runner and the control REPL do not yet write start/drain/crash events into the log, and there is no agent-level (cross-conversation) event stream — host events are fanned out to each adapter-attached conversation.
 
+### Agent-writable memory (the `remember` tool)
+
+Everything above is memory the agent reads; until recently it had no way to write a durable fact about the user or itself. Conversation history is replayed in full each turn, but it dies at the conversation boundary, and the local profile (`.exo/exoclaw-profile.md`) is human-curated.
+
+The memory tool closes that gap with a small artifact-backed store:
+
+- **Storage.** One JSON artifact at `memory/exoclaw-memory.json` on the agent handle, so it persists across every conversation for this agent.
+- **Write path.** `remember(text)` appends `{ id, text, createdAt }`; `forget(id)` removes one entry. A fixed cap drops the oldest entries if the store grows too large.
+- **Read path.** Prompt assembly reads the latest memory artifact and adds a developer message listing saved facts with ids, so the model can use them and delete stale ones.
+
+This is deliberately not embedding-based retrieval. For a small set of short facts, always injecting the whole store is simpler and easier to audit. If the memory set grows beyond what should fit in every prompt, the storage layer can stay the same while the read path evolves toward query-time recall.
+
 ## 3. Component Observability: Logs and Telemetry
 
 Exoclaw should be able to inspect each of its components when debugging or evolving them, before escalating to restarts.
