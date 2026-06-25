@@ -1,10 +1,69 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  attachmentKindForContentType,
   createResilienceHandlers,
   describeCloseCode,
   errorMessage,
+  inboundAttachments,
+  startConnectionWatchdog,
 } from "./discord";
+
+describe("attachmentKindForContentType", () => {
+  it("classifies media mime types", () => {
+    expect(attachmentKindForContentType("image/png")).toBe("image");
+    expect(attachmentKindForContentType("IMAGE/JPEG")).toBe("image");
+    expect(attachmentKindForContentType("video/mp4")).toBe("video");
+    expect(attachmentKindForContentType("audio/ogg")).toBe("audio");
+  });
+
+  it("falls back to document for unknown or missing types", () => {
+    expect(attachmentKindForContentType("application/pdf")).toBe("document");
+    expect(attachmentKindForContentType(null)).toBe("document");
+    expect(attachmentKindForContentType(undefined)).toBe("document");
+  });
+});
+
+describe("inboundAttachments", () => {
+  it("maps discord attachments to protocol attachments", () => {
+    const mapped = inboundAttachments([
+      {
+        url: "https://cdn.discordapp.com/a.png",
+        contentType: "image/png",
+        name: "a.png",
+      },
+      {
+        url: "https://cdn.discordapp.com/notes.txt",
+        contentType: null,
+        name: null,
+      },
+    ]);
+    expect(mapped).toEqual([
+      {
+        kind: "image",
+        path: null,
+        url: "https://cdn.discordapp.com/a.png",
+        data: null,
+        mimeType: "image/png",
+        fileName: "a.png",
+      },
+      {
+        kind: "document",
+        path: null,
+        url: "https://cdn.discordapp.com/notes.txt",
+        data: null,
+        mimeType: null,
+        fileName: null,
+      },
+    ]);
+  });
+
+  it("skips attachments without a url", () => {
+    expect(inboundAttachments([{ url: "", contentType: "image/png" }])).toEqual(
+      [],
+    );
+  });
+});
 
 describe("errorMessage", () => {
   it("uses the message of an Error", () => {
@@ -67,17 +126,34 @@ describe("createResilienceHandlers", () => {
     expect(exit).toHaveBeenCalledWith(1);
   });
 
-  it("reports a shard disconnect without exiting into a restart loop", () => {
+  it("reports TLS access denied exceptions without exiting", () => {
     const emit = vi.fn();
     const exit = vi.fn();
-    // 4014 (disallowed intents) is a config error a restart cannot fix; the
-    // worker must stay up rather than churn.
+    const error = Object.assign(
+      new Error("write EPROTO tlsv1 alert access denied"),
+      { code: "EPROTO" },
+    );
+    createResilienceHandlers({ emit, exit }).onUncaughtException(error);
+    expect(emit).toHaveBeenCalledWith({
+      type: "error",
+      message:
+        "Discord TLS stream error: write EPROTO tlsv1 alert access denied",
+    });
+    expect(exit).not.toHaveBeenCalled();
+  });
+
+  it("exits after a shard disconnect instead of lingering as a zombie", () => {
+    const emit = vi.fn();
+    const exit = vi.fn();
+    // shardDisconnect means discord.js gave up reconnecting; a worker that
+    // stays up will never receive another message. The runner's exponential
+    // backoff bounds the restart churn for persistent config errors.
     createResilienceHandlers({ emit, exit }).onShardDisconnect(4014);
     expect(emit).toHaveBeenCalledWith({
       type: "disconnected",
       reason: expect.stringContaining("privileged intents"),
     });
-    expect(exit).not.toHaveBeenCalled();
+    expect(exit).toHaveBeenCalledWith(1);
   });
 
   it("keeps the worker alive on a shard error", () => {
@@ -102,5 +178,57 @@ describe("createResilienceHandlers", () => {
       message: "discord login failed: invalid token",
     });
     expect(exit).toHaveBeenCalledWith(1);
+  });
+});
+
+describe("startConnectionWatchdog", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("exits when the client stays not-ready past the timeout", () => {
+    vi.useFakeTimers();
+    const emit = vi.fn();
+    const exit = vi.fn();
+    const stop = startConnectionWatchdog({
+      isReady: () => false,
+      emit,
+      exit,
+      intervalMs: 1_000,
+      timeoutMs: 5_000,
+    });
+    vi.advanceTimersByTime(4_000);
+    expect(exit).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(2_000);
+    expect(emit).toHaveBeenCalledWith({
+      type: "error",
+      message: expect.stringContaining("discord gateway not ready"),
+    });
+    expect(exit).toHaveBeenCalledWith(1);
+    stop();
+  });
+
+  it("stays quiet while the client is ready and recovers after blips", () => {
+    vi.useFakeTimers();
+    const emit = vi.fn();
+    const exit = vi.fn();
+    let ready = true;
+    const stop = startConnectionWatchdog({
+      isReady: () => ready,
+      emit,
+      exit,
+      intervalMs: 1_000,
+      timeoutMs: 5_000,
+    });
+    vi.advanceTimersByTime(60_000);
+    expect(exit).not.toHaveBeenCalled();
+    // A short blip below the timeout must not kill the worker.
+    ready = false;
+    vi.advanceTimersByTime(3_000);
+    ready = true;
+    vi.advanceTimersByTime(60_000);
+    expect(exit).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
+    stop();
   });
 });

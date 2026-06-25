@@ -704,6 +704,14 @@ function contentText(content: unknown): string {
         part &&
         typeof part === "object" &&
         "type" in part &&
+        (part as { type?: unknown }).type === "image"
+      ) {
+        return "[image]";
+      }
+      if (
+        part &&
+        typeof part === "object" &&
+        "type" in part &&
         (part as { type?: unknown }).type === "reasoning" &&
         "text" in part &&
         typeof (part as { text?: unknown }).text === "string"

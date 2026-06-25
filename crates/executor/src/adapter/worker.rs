@@ -1,8 +1,9 @@
 use std::path::Path;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -42,6 +43,8 @@ pub enum WorkerEvent {
         message_id: Option<String>,
         #[serde(default)]
         metadata: Value,
+        #[serde(default)]
+        attachments: Vec<AdapterAttachment>,
     },
     Lifecycle {
         name: String,
@@ -88,6 +91,12 @@ where
         "starting adapter worker"
     );
     let mut command = worker_command(adapter_id, config, secret_env);
+    // Workers can spawn their own children (pnpm -> tsx -> node). Put the
+    // whole tree in its own process group so shutdown can signal everything;
+    // kill_on_drop alone would only reach the direct child and orphan the
+    // grandchild that actually holds the external connection.
+    #[cfg(unix)]
+    command.process_group(0);
     let mut child = command
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -95,6 +104,7 @@ where
         .kill_on_drop(true)
         .spawn()
         .context("failed to spawn adapter worker")?;
+    let worker_pid = child.id();
     let stdin = child
         .stdin
         .take()
@@ -105,35 +115,38 @@ where
         .ok_or_else(|| anyhow!("adapter worker stdout was not piped"))?;
     let mut lines = BufReader::new(stdout).lines();
     let mut stop_interval = tokio::time::interval(std::time::Duration::from_secs(1));
+    let pending_events = Arc::new(AtomicUsize::new(0));
     let (event_tx, event_rx) = mpsc::unbounded_channel();
-    let mut event_task = tokio::spawn(process_worker_events(event_rx, on_event));
+    let mut event_task = tokio::spawn(process_worker_events(
+        event_rx,
+        on_event,
+        Arc::clone(&pending_events),
+    ));
     let mut command_task = tokio::spawn(process_worker_commands(
         stdin,
         outbound_notify,
         take_outbound_messages,
     ));
 
-    loop {
+    let result = loop {
         tokio::select! {
             status = child.wait() => {
-                let status = status?;
-                command_task.abort();
-                event_task.abort();
-                bail!("adapter worker exited with status {status}");
+                break match status {
+                    Ok(status) => Err(anyhow!("adapter worker exited with status {status}")),
+                    Err(error) => Err(error.into()),
+                };
             }
             line = lines.next_line() => {
-                let Some(line) = line? else {
-                    command_task.abort();
-                    event_task.abort();
-                    bail!("adapter worker closed stdout");
+                let line = match line {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break Err(anyhow!("adapter worker closed stdout")),
+                    Err(error) => break Err(error.into()),
                 };
                 let event = match serde_json::from_str::<WorkerEvent>(&line) {
                     Ok(event) => event,
                     Err(error) => {
-                        command_task.abort();
-                        event_task.abort();
-                        return Err(error)
-                            .with_context(|| format!("failed to parse adapter worker event: {line}"));
+                        break Err(anyhow::Error::from(error)
+                            .context(format!("failed to parse adapter worker event: {line}")));
                     }
                 };
                 tracing::debug!(
@@ -141,49 +154,69 @@ where
                     event = ?event,
                     "adapter worker event"
                 );
+                pending_events.fetch_add(1, Ordering::SeqCst);
                 if event_tx.send(event).is_err() {
-                    command_task.abort();
-                    event_task.abort();
-                    bail!("adapter event handler stopped");
+                    break Err(anyhow!("adapter event handler stopped"));
                 }
             }
             _ = stop_interval.tick() => {
-                if should_stop().await? {
-                    command_task.abort();
-                    event_task.abort();
-                    return Ok(());
+                // Only honor a stop request between events so an in-flight
+                // wakeup turn is not cancelled halfway through.
+                if pending_events.load(Ordering::SeqCst) == 0 && should_stop().await? {
+                    break Ok(());
                 }
             }
             result = &mut event_task => {
-                command_task.abort();
-                match result {
-                    Ok(Ok(())) => bail!("adapter event handler stopped"),
-                    Ok(Err(error)) => return Err(error),
-                    Err(error) => return Err(anyhow!("adapter event handler task failed: {error}")),
-                }
+                break match result {
+                    Ok(Ok(())) => Err(anyhow!("adapter event handler stopped")),
+                    Ok(Err(error)) => Err(error),
+                    Err(error) => Err(anyhow!("adapter event handler task failed: {error}")),
+                };
             }
             result = &mut command_task => {
-                event_task.abort();
-                match result {
-                    Ok(Ok(())) => bail!("adapter command sender stopped"),
-                    Ok(Err(error)) => return Err(error),
-                    Err(error) => return Err(anyhow!("adapter command sender task failed: {error}")),
-                }
+                break match result {
+                    Ok(Ok(())) => Err(anyhow!("adapter command sender stopped")),
+                    Ok(Err(error)) => Err(error),
+                    Err(error) => Err(anyhow!("adapter command sender task failed: {error}")),
+                };
             }
         }
-    }
+    };
+    command_task.abort();
+    event_task.abort();
+    terminate_worker_process_group(worker_pid).await;
+    result
 }
+
+#[cfg(unix)]
+async fn terminate_worker_process_group(pid: Option<u32>) {
+    let Some(pid) = pid else {
+        return;
+    };
+    let group = -(pid as i32);
+    // SIGTERM lets workers shut down cleanly; SIGKILL sweeps up anything
+    // (including descendants of an already-dead leader) that ignored it.
+    unsafe { libc::kill(group, libc::SIGTERM) };
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    unsafe { libc::kill(group, libc::SIGKILL) };
+}
+
+#[cfg(not(unix))]
+async fn terminate_worker_process_group(_pid: Option<u32>) {}
 
 async fn process_worker_events<F, Fut>(
     mut event_rx: mpsc::UnboundedReceiver<WorkerEvent>,
     mut on_event: F,
+    pending_events: Arc<AtomicUsize>,
 ) -> Result<()>
 where
     F: FnMut(WorkerEvent) -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
 {
     while let Some(event) = event_rx.recv().await {
-        on_event(event).await?;
+        let result = on_event(event).await;
+        pending_events.fetch_sub(1, Ordering::SeqCst);
+        result?;
     }
     Ok(())
 }
@@ -269,6 +302,32 @@ mod tests {
     use tokio::sync::{Notify, oneshot};
 
     use super::*;
+
+    #[test]
+    fn message_event_parses_with_and_without_attachments() {
+        let plain: WorkerEvent = serde_json::from_str(
+            r#"{"type":"message","target":"channel-1","text":"hi","metadata":{}}"#,
+        )
+        .unwrap();
+        let WorkerEvent::Message { attachments, .. } = plain else {
+            panic!("expected message event");
+        };
+        assert!(attachments.is_empty());
+
+        let rich: WorkerEvent = serde_json::from_str(
+            r#"{"type":"message","target":"channel-1","text":"hi","attachments":[{"kind":"image","url":"https://cdn.example/a.png","mimeType":"image/png","fileName":"a.png"}]}"#,
+        )
+        .unwrap();
+        let WorkerEvent::Message { attachments, .. } = rich else {
+            panic!("expected message event");
+        };
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(
+            attachments[0].url.as_deref(),
+            Some("https://cdn.example/a.png")
+        );
+        assert_eq!(attachments[0].mime_type.as_deref(), Some("image/png"));
+    }
 
     #[tokio::test]
     async fn stops_worker_when_cancellation_trips() {

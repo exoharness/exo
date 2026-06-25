@@ -23,6 +23,10 @@ use crate::DurableFileSystem;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SandboxKey {
+    AgentSandbox {
+        agent_id: String,
+        sandbox_id: String,
+    },
     ConversationSandbox {
         conversation_id: String,
         sandbox_id: String,
@@ -32,6 +36,10 @@ pub enum SandboxKey {
 impl fmt::Display for SandboxKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::AgentSandbox {
+                agent_id,
+                sandbox_id,
+            } => write!(f, "agent:{agent_id}:{sandbox_id}"),
             Self::ConversationSandbox {
                 conversation_id,
                 sandbox_id,
@@ -411,8 +419,8 @@ impl CliContainerSandboxBackend {
 impl Drop for CliContainerSandboxBackend {
     fn drop(&mut self) {
         // Warm sandboxes intentionally outlive a single CLI/REPL process so a
-        // restarted Exoclaw agent can reattach to the same environment. Stale
-        // containers are cleaned by the orphan reaper on later backend startup.
+        // restarted agent can reattach to the same environment. Stale containers
+        // are cleaned by the orphan reaper on later backend startup.
     }
 }
 
@@ -1000,7 +1008,7 @@ async fn find_running_warm_sandbox(
 ) -> Result<Option<String>> {
     match cli {
         ContainerCliFlavor::AppleContainer => {
-            find_running_apple_warm_sandbox(container_bin, request).await
+            find_running_apple_container_warm_sandbox(container_bin, request).await
         }
         ContainerCliFlavor::Docker => {
             find_running_docker_warm_sandbox(container_bin, request).await
@@ -1008,7 +1016,7 @@ async fn find_running_warm_sandbox(
     }
 }
 
-async fn find_running_apple_warm_sandbox(
+async fn find_running_apple_container_warm_sandbox(
     container_bin: &Path,
     request: &SandboxRequest,
 ) -> Result<Option<String>> {
@@ -1062,6 +1070,8 @@ async fn find_running_docker_warm_sandbox(
             key_filter.as_str(),
             "--filter",
             spec_filter.as_str(),
+            "--filter",
+            "status=running",
             "--format",
             "{{.Names}}",
         ],
@@ -1855,6 +1865,7 @@ async fn docker_snapshot_container(
         .arg("-p")
         .arg(container_name)
         .arg(&snap_tag)
+        .kill_on_drop(true)
         .output()
         .await
         .with_context(|| format!("running `docker commit` for {container_name}"))?;
@@ -1870,6 +1881,7 @@ async fn docker_snapshot_container(
         .arg(&snap_tag)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .output()
         .await
         .with_context(|| format!("running `docker save {snap_tag}`"))?;
@@ -1879,6 +1891,7 @@ async fn docker_snapshot_container(
             .arg("image")
             .arg("rm")
             .arg(&snap_tag)
+            .kill_on_drop(true)
             .output()
             .await;
         bail!(
@@ -1894,6 +1907,7 @@ async fn docker_snapshot_container(
         .arg("image")
         .arg("rm")
         .arg(&snap_tag)
+        .kill_on_drop(true)
         .output()
         .await;
     if let Ok(output) = &rm_output
@@ -2027,6 +2041,8 @@ mod tests {
                 key_filter.as_str(),
                 "--filter",
                 spec_filter.as_str(),
+                "--filter",
+                "status=running",
                 "--format",
                 "{{.Names}}",
             ]

@@ -13,22 +13,22 @@ The worker handles `PING` with `PONG`, parses `PRIVMSG` lines, and emits Exoclaw
 Use the Exoclaw setup flow:
 
 ```bash
-examples/exoclaw/scripts/exoclaw-repl fresh --pull-sandbox --setup irc
+examples/exoclaw/scripts/exoclaw-control fresh --pull-sandbox --setup irc
 ```
 
 The setup prompt at `setup-prompt.md` asks Exoclaw to create a built-in adapter similar to:
 
 ```json
 {
-  "name": "libera-exo-test",
+  "name": "undernet-exo-test-plain",
   "source": "built_in",
   "config": {
     "type": "irc",
-    "server": "irc.libera.chat",
-    "port": 6697,
-    "tls": true,
-    "nick": "exospooky",
-    "username": "exospooky",
+    "server": "irc.undernet.org",
+    "port": 6667,
+    "tls": false,
+    "nick": "",
+    "username": "",
     "realname": "Exoclaw Test Bot",
     "channel": "#exoclaw",
     "passwordSecretId": null,

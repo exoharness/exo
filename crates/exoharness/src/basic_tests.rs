@@ -927,6 +927,189 @@ async fn basic_backend_runs_commands_in_created_sandbox() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn agent_scoped_sandbox_is_shared_without_conversation_ownership() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
+        .await
+        .expect("harness should initialize");
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let first_conversation = agent
+        .new_conversation(NewConversationRequest {
+            slug: Some("first".to_string()),
+            name: Some("First".to_string()),
+        })
+        .await
+        .expect("first conversation");
+    let second_conversation = agent
+        .new_conversation(NewConversationRequest {
+            slug: Some("second".to_string()),
+            name: Some("Second".to_string()),
+        })
+        .await
+        .expect("second conversation");
+
+    let create_request = CreateSandboxRequest {
+        name: Some("shared-agent-sandbox".to_string()),
+        provider: SandboxProvider::LocalProcess,
+        image: "basic-local-process".to_string(),
+        default_workdir: Some(tempdir.path().display().to_string()),
+        file_system_mounts: None,
+        durable_file_systems: None,
+        enable_networking: Some(true),
+        idle_seconds: Some(60),
+    };
+    let sandbox_id = agent
+        .create_sandbox(create_request.clone())
+        .await
+        .expect("agent sandbox should be created");
+    let write_process = agent
+        .run_in_sandbox(RunInSandboxRequest {
+            id: sandbox_id.clone(),
+            command: vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                "printf agent-owned > agent-sandbox-proof".to_string(),
+            ],
+            env: Default::default(),
+        })
+        .await
+        .expect("agent sandbox command should run");
+    assert_eq!(
+        write_process
+            .into_parts()
+            .wait
+            .await
+            .expect("write should exit"),
+        0
+    );
+
+    let reacquired = agent
+        .create_sandbox(create_request)
+        .await
+        .expect("named agent sandbox should reacquire");
+    assert_eq!(reacquired, sandbox_id);
+    let read_process = agent
+        .run_in_sandbox(RunInSandboxRequest {
+            id: reacquired.clone(),
+            command: vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                "cat agent-sandbox-proof".to_string(),
+            ],
+            env: Default::default(),
+        })
+        .await
+        .expect("agent sandbox should retain filesystem state");
+    let parts = read_process.into_parts();
+    let mut stdout = parts.stdout;
+    let mut stdout_bytes = Vec::new();
+    drop(parts.stdin);
+    let (stdout_result, wait_result) =
+        tokio::join!(stdout.read_to_end(&mut stdout_bytes), parts.wait);
+    stdout_result.expect("stdout should read");
+    assert_eq!(wait_result.expect("read should exit"), 0);
+    assert_eq!(String::from_utf8_lossy(&stdout_bytes), "agent-owned");
+
+    let conversation_process = first_conversation
+        .run_in_sandbox(RunInSandboxRequest {
+            id: reacquired,
+            command: vec!["true".to_string()],
+            env: Default::default(),
+        })
+        .await;
+    assert!(conversation_process.is_err());
+
+    for conversation in [first_conversation, second_conversation] {
+        let events = conversation
+            .get_events(Some(EventQuery {
+                cursor: None,
+                direction: Some(EventQueryDirection::Asc),
+                limit: None,
+                session_id: None,
+                turn_id: None,
+                types: Some(vec![
+                    EventKind::SANDBOX_CREATED,
+                    EventKind::SANDBOX_STARTED,
+                    EventKind::SANDBOX_PROCESS_STARTED,
+                    EventKind::SANDBOX_PROCESS_EVENT,
+                    EventKind::SANDBOX_PROCESS_STATE_UPDATED,
+                ]),
+            }))
+            .await
+            .expect("conversation events should load")
+            .events;
+        assert!(events.is_empty());
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn conversation_create_sandbox_is_not_turn_scoped() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
+        .await
+        .expect("harness should initialize");
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let conversation = agent
+        .new_conversation(NewConversationRequest::default())
+        .await
+        .expect("conversation");
+    let turn = conversation
+        .begin_turn(BeginTurnRequest {
+            session_id: None,
+            input: vec![user_message("start turn")],
+        })
+        .await
+        .expect("turn should begin");
+
+    conversation
+        .create_sandbox(CreateSandboxRequest {
+            name: None,
+            provider: SandboxProvider::LocalProcess,
+            image: "basic-local-process".to_string(),
+            default_workdir: Some(tempdir.path().display().to_string()),
+            file_system_mounts: None,
+            durable_file_systems: None,
+            enable_networking: Some(true),
+            idle_seconds: Some(60),
+        })
+        .await
+        .expect("sandbox should be created");
+
+    let events = conversation
+        .get_events(Some(EventQuery {
+            cursor: None,
+            direction: Some(EventQueryDirection::Asc),
+            limit: None,
+            session_id: None,
+            turn_id: None,
+            types: Some(vec![EventKind::SANDBOX_CREATED, EventKind::SANDBOX_STARTED]),
+        }))
+        .await
+        .expect("sandbox lifecycle events")
+        .events;
+
+    assert_eq!(events.len(), 2);
+    for event in events {
+        assert_ne!(event.session_id, Some(turn.record().session_id));
+        assert_ne!(event.turn_id, Some(turn.record().id));
+        assert_eq!(event.session_id, None);
+        assert_eq!(event.turn_id, None);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn basic_backend_reuses_named_sandbox() {
     let tempdir = TempDir::new().expect("tempdir");
     let harness = BasicExoHarness::new(local_test_config(tempdir.path()))

@@ -1,25 +1,183 @@
 # Exoclaw Harness
 
-Exoclaw is a persistent agent built on exoclaw designed to be helpful wherever
-there is a task to do from a computer. It supports task scheuling, a full
+Exoclaw is a persistent agent built on Exo designed to be helpful wherever
+there is a task to do from a computer. It supports task scheduling, a full
 sandbox where it can install its own tools and integrations, and right now
-supports WhatsApp, Signal, and IRC out of the box.
+supports IRC, WhatsApp, Signal, Discord, and a shell CLI (`exo-cli`) out of
+the box.
 
-Exoclaw includes a helper script to start up all the subservices (task
-scheduling and adapters). To get started, simply run:
+## Quickstart
+
+The simplest path from a fresh checkout to a running Exoclaw.
+
+**Prerequisites:** Docker running, a Rust toolchain, and Node with pnpm.
+
+1. Install JS dependencies and configure your model key:
 
 ```bash
-  examples/exoclaw/scripts/exoclaw-repl fresh \
-  --pull-sandbox \
-  --agent exoclaw \
-  --agent-name "exoclaw" \
-  --conversation dev \
-  --setup-all \
-  --setup-profile
+pnpm install
+cp .env.example .env   # then fill in OPENAI_API_KEY
 ```
 
-Or for a minimal start (just REPL, pull sandbox):
-`examples/exoclaw/scripts/exoclaw-repl --pull-sandbox`
+2. Tell Exoclaw who you are (optional but recommended):
+
+```bash
+examples/exoclaw/scripts/exoclaw-control setup-profile
+```
+
+This interactively asks for your name and any local instructions, and writes
+them to `.exo/exoclaw-profile.md` (git-ignored). The harness loads it as an
+extra prompt on every turn, so the agent greets you by name from its first
+reply. You can rerun this or edit the file directly at any time.
+
+3. Build and start everything with one command (run from the repo root):
+
+```bash
+examples/exoclaw/scripts/exoclaw-control fresh --canonical
+```
+
+This builds the `exo` binary, creates the agent and a `dev` conversation, pulls
+the Docker sandbox image, mounts this repo at `/workspace/exo`, starts the
+scheduler and adapter runner, sets up the IRC and Discord adapters, and drops
+you into a REPL.
+
+Note that we've decided to support Discord as the primary control channel for
+Exoclaw because the integration is less complicated than WhatsApp and Signal and
+it supports rich content (voice, audio, images, and attachments). However, to
+use it, you need a bot token. See below for setup.
+
+4. Chat with Exoclaw in the REPL:
+
+```text
+dev> hello! what can you do?
+```
+
+5. Talk to it from any shell. Put the CLI on your PATH once:
+
+```bash
+ln -s "$PWD/examples/exoclaw/scripts/exo-cli" ~/bin/exo-cli
+```
+
+Then from any directory under `~/projects`:
+
+```bash
+cd ~/projects/some-repo
+exo-cli "set up a simple node environment in this directory"
+```
+
+The agent has read-write access to the directory you call it from and replies
+to your terminal when it finishes.
+
+Notes:
+
+- `fresh` deletes existing agents, conversations, and adapters first. For
+  day-to-day restarts that keep state, drop `fresh`:
+  `examples/exoclaw/scripts/exoclaw-control canonical`
+- For a minimal start without adapter setup:
+  `examples/exoclaw/scripts/exoclaw-control --pull-sandbox`
+
+## Setting up Discord
+
+Exoclaw can connect to Discord through the library Discord adapter. The short
+path is:
+
+1. Create a Discord application and bot in the
+   [Discord Developer Portal](https://discord.com/developers/applications).
+2. In the bot settings, enable **Message Content Intent**.
+3. Invite the bot to your server with at least these bot permissions:
+   **View Channels**, **Send Messages**, **Read Message History**, and
+   **Attach Files** if you want Exoclaw to send images or other attachments.
+4. Store the bot token as the secret expected by the setup prompt:
+
+   ```bash
+   export DISCORD_BOT_TOKEN="..."
+   ./target/debug/exo secret set discord-bot-token --env DISCORD_BOT_TOKEN
+   ```
+
+5. Create or confirm the adapter:
+
+   ```bash
+   examples/exoclaw/scripts/exoclaw-control --setup discord
+   ```
+
+   If you are starting from scratch, you can include Discord in the normal
+   canonical setup:
+
+   ```bash
+   examples/exoclaw/scripts/exoclaw-control fresh --canonical --setup discord
+   ```
+
+6. Copy a Discord channel id for testing. In Discord, enable **User Settings** >
+   **Advanced** > **Developer Mode**, then right-click the target channel and
+   choose **Copy Channel ID**.
+
+To test outbound messages, ask Exoclaw:
+
+```text
+Send "hello from Exoclaw" to Discord using adapter <adapter-id> and target <channel-id>.
+```
+
+To test inbound wakeups, send a normal message in a channel the bot can read.
+The default setup uses `trigger: "all_messages"`, so the bot does not need to be
+mentioned. Discord attachments are forwarded too: inbound images are attached to
+the model wakeup for analysis, and outbound files can be sent with
+`send_adapter_message` attachments.
+
+For voice chat, richer attachment examples, and the full configuration surface,
+see [`adapters/discord/README.md`](./adapters/discord/README.md).
+
+## Self Introspection
+
+Exoclaw starts with sandbox shell support by default. The startup script mounts
+this repository into the sandbox at `/workspace/exo` and makes that path
+available to the harness as `EXOCLAW_REPO`. The self map lives at:
+
+```text
+/workspace/exo/examples/exoclaw/SELF.md
+```
+
+The checked-in source for that map is `examples/exoclaw/SELF.md`. It points
+Exoclaw to the harness, prompts, adapter runtime, scheduler, sandbox tools, and
+service guardian. Use `--self-repo-mount <path>` or `EXOCLAW_REPO` to choose a
+different sandbox mount path.
+
+## Service Guardian
+
+`examples/exoclaw/scripts/exoclaw-service-guardian` is a host-side helper for
+self-maintenance. It owns build and service-control actions that should happen
+outside the agent's sandbox, while preserving `.exo` state such as adapter
+pairing data, conversations, artifacts, and sandbox records.
+
+Common commands:
+
+```bash
+examples/exoclaw/scripts/exoclaw-service-guardian status
+examples/exoclaw/scripts/exoclaw-service-guardian build
+examples/exoclaw/scripts/exoclaw-service-guardian restart-adapters
+examples/exoclaw/scripts/exoclaw-service-guardian restart-scheduler
+examples/exoclaw/scripts/exoclaw-service-guardian restart-all --build
+```
+
+Save local launch settings for later restarts with:
+
+```bash
+examples/exoclaw/scripts/exoclaw-service-guardian configure --sandbox-backend docker
+```
+
+The service guardian manages only the scheduler and adapter runners. Start or
+reconnect an interactive REPL with `examples/exoclaw/scripts/exoclaw-control`.
+
+Exoclaw can call the same host-side surface through the `guardian_action` tool.
+That tool exposes only allowlisted actions such as `status`, `build`,
+`restart_adapters`, `restart_scheduler`, `restart_all`, and `logs`.
+Restart actions are handed off to a detached guardian process after a short
+delay so the current agent turn can finish before services stop. Detached
+restart output is written to `.exo/exoclaw-service-guardian-actions.log`.
+
+When `examples/exoclaw/scripts/exoclaw-control --control` is running, it also acts
+as the foreground REPL supervisor. Guardian builds write
+`.exo/exoclaw-control.restart`; the control wrapper sees that marker, restarts only
+the child `exo repl`, and keeps your terminal open.
 
 ## Setting up the identity
 
@@ -32,7 +190,7 @@ it as an additional developer prompt when it exists, and `.exo` is ignored by
 git. To create it interactively:
 
 ```bash
-examples/exoclaw/scripts/exoclaw-repl setup-profile
+examples/exoclaw/scripts/exoclaw-control setup-profile
 ```
 
 The script asks for the user's name and any extra local instructions. To use a
@@ -75,23 +233,29 @@ Adapters are host-owned long-running runtimes for external applications. They
 are intentionally separate from scheduled sandbox commands: adapters own sockets,
 reconnect behavior, inbound message parsing, event history, and conversation
 wake-ups. Agents configure adapters with tools, and the local adapter runner
-started by `examples/exoclaw/scripts/exoclaw-repl` keeps them connected.
+started by `examples/exoclaw/scripts/exoclaw-control` keeps them connected.
 
-Exoclaw ships with three adapters: IRC, WhatsApp, and Signal. The easiest way to
-use them is to have the script send all three setup prompts before opening the
-REPL:
+Exoclaw ships with IRC, WhatsApp, Signal, Discord, and agent-cli adapters
+(see `adapters/agent-cli/README.md` for the shell CLI). The canonical local
+setup turns on IRC and Discord:
 
 ```bash
-examples/exoclaw/scripts/exoclaw-repl --setup-all
+examples/exoclaw/scripts/exoclaw-control canonical
+```
+
+To send every setup prompt before opening the REPL:
+
+```bash
+examples/exoclaw/scripts/exoclaw-control --setup-all
 ```
 
 For a fresh control agent with a local profile prompt and all adapters:
 
 ```bash
 PATH="/opt/homebrew/opt/openjdk/bin:$PATH" \
-  examples/exoclaw/scripts/exoclaw-repl fresh \
-  --agent spooky \
-  --agent-name Spooky \
+  examples/exoclaw/scripts/exoclaw-control fresh \
+  --agent exoclaw-agent \
+  --agent-name "Exoclaw" \
   --conversation dev \
   --setup-profile \
   --setup-all
@@ -155,13 +319,13 @@ the cli. The following command will create a REPL with the agent and a
 persistent sandbox that will be durable across conversations
 
 ```bash
-examples/exoclaw/scripts/exoclaw-repl --pull-sandbox
+examples/exoclaw/scripts/exoclaw-control --pull-sandbox
 ```
 
 If you want a conversation to have its own sandbox, use `sandboxScope: "conversation"`:
 
 ```bash
-examples/exoclaw/scripts/exoclaw-repl --conversation isolated-dev --sandbox-scope conversation
+examples/exoclaw/scripts/exoclaw-control --conversation isolated-dev --sandbox-scope conversation
 exo --harness exoclaw conversation update exoclaw-agent isolated-dev --sandbox-scope conversation
 ```
 
