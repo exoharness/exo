@@ -605,32 +605,44 @@ impl BasicExoHarnessInner {
     #[cfg(feature = "aws-agentcore")]
     async fn aws_agentcore_config_from_binding(&self) -> Result<Option<crate::AwsAgentCoreConfig>> {
         let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
-        let Some((runtime_arn, region, qualifier, endpoint_url)) = bindings
-            .into_iter()
-            .rev()
-            .find_map(|record| match record.binding {
-                Binding::Sandbox {
-                    config:
-                        SandboxProviderConfig::AwsAgentCore {
-                            runtime_arn,
-                            region,
-                            qualifier,
-                            endpoint_url,
-                            ..
-                        },
-                    ..
-                } => Some((runtime_arn, region, qualifier, endpoint_url)),
-                _ => None,
-            })
+        let Some((runtime_arn, region, qualifier, endpoint_url, session_storage_mount_path)) =
+            bindings
+                .into_iter()
+                .rev()
+                .find_map(|record| match record.binding {
+                    Binding::Sandbox {
+                        config:
+                            SandboxProviderConfig::AwsAgentCore {
+                                runtime_arn,
+                                region,
+                                qualifier,
+                                endpoint_url,
+                                session_storage_mount_path,
+                                ..
+                            },
+                        ..
+                    } => Some((
+                        runtime_arn,
+                        region,
+                        qualifier,
+                        endpoint_url,
+                        session_storage_mount_path,
+                    )),
+                    _ => None,
+                })
         else {
             return Ok(None);
         };
+        let session_storage_mount_path = session_storage_mount_path
+            .or_else(|| nonempty_env("AWS_AGENTCORE_SESSION_STORAGE_MOUNT_PATH"))
+            .or_else(|| nonempty_env("AGENTCORE_SESSION_STORAGE_MOUNT_PATH"));
         Ok(Some(crate::AwsAgentCoreConfig {
             runtime_arn,
             region,
             qualifier,
             endpoint_url,
             credentials: aws_agentcore_credentials_from_env(),
+            session_storage_mount_path,
         }))
     }
 
@@ -667,6 +679,14 @@ fn aws_agentcore_credentials_from_env() -> Option<crate::AwsAgentCoreCredentials
         secret_access_key,
         session_token,
     })
+}
+
+#[cfg(feature = "aws-agentcore")]
+fn nonempty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 impl BasicExoHarness {
