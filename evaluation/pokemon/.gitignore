@@ -1,0 +1,5 @@
+.venv/
+runs/
+*.gb
+*.gbc
+*.state
