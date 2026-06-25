@@ -686,7 +686,9 @@ async fn read_artifact_by_path_returns_latest_version() {
     // A pinned version is still honored when reading by path.
     let pinned = agent
         .read_artifact(crate::ReadArtifactRequest {
-            artifact: crate::ArtifactRef::Path("memory/store.json".to_string()),
+            artifact: crate::ArtifactRef::Path {
+                path: "memory/store.json".to_string(),
+            },
             version: Some(1),
         })
         .await
@@ -842,7 +844,7 @@ async fn legacy_json_artifacts_are_still_readable() {
 
     let loaded = agent
         .read_artifact(crate::ReadArtifactRequest {
-            artifact: crate::ArtifactRef::Id(artifact_id),
+            artifact: crate::ArtifactRef::Id { artifact_id },
             version: Some(1),
         })
         .await

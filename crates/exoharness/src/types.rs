@@ -510,7 +510,7 @@ impl ReadArtifactRequest {
     /// Read (the latest version of) the artifact with this id.
     pub fn id(artifact_id: ArtifactId) -> Self {
         Self {
-            artifact: ArtifactRef::Id(artifact_id),
+            artifact: ArtifactRef::Id { artifact_id },
             version: None,
         }
     }
@@ -518,7 +518,7 @@ impl ReadArtifactRequest {
     /// Read the latest version of the artifact at this path.
     pub fn path(path: impl Into<String>) -> Self {
         Self {
-            artifact: ArtifactRef::Path(path.into()),
+            artifact: ArtifactRef::Path { path: path.into() },
             version: None,
         }
     }
@@ -526,10 +526,10 @@ impl ReadArtifactRequest {
 
 /// Selects an artifact either by its stable id or by its path.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ArtifactRef {
-    Id(ArtifactId),
-    Path(String),
+    Id { artifact_id: ArtifactId },
+    Path { path: String },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]

@@ -1152,8 +1152,8 @@ impl AgentHandle for BasicAgentHandle {
         let selected = versions
             .into_iter()
             .filter(|artifact| match &request.artifact {
-                ArtifactRef::Id(id) => artifact.artifact_id == *id,
-                ArtifactRef::Path(path) => &artifact.path == path,
+                ArtifactRef::Id { artifact_id } => artifact.artifact_id == *artifact_id,
+                ArtifactRef::Path { path } => &artifact.path == path,
             })
             .filter(|artifact| {
                 request
@@ -1792,8 +1792,8 @@ impl ConversationHandle for BasicConversationHandle {
         let selected = versions
             .into_iter()
             .filter(|artifact| match &request.artifact {
-                ArtifactRef::Id(id) => artifact.artifact_id == *id,
-                ArtifactRef::Path(path) => &artifact.path == path,
+                ArtifactRef::Id { artifact_id } => artifact.artifact_id == *artifact_id,
+                ArtifactRef::Path { path } => &artifact.path == path,
             })
             .filter(|artifact| {
                 request

@@ -269,7 +269,9 @@ type RawExoRequest =
       type: "agent_read_artifact";
       agent_id: string;
       request: {
-        artifact: { id: string } | { path: string };
+        artifact:
+          | { type: "id"; artifact_id: string }
+          | { type: "path"; path: string };
         version?: number;
       };
     }
@@ -342,7 +344,9 @@ type RawExoRequest =
       agent_id: string;
       conversation_id: string;
       request: {
-        artifact: { id: string } | { path: string };
+        artifact:
+          | { type: "id"; artifact_id: string }
+          | { type: "path"; path: string };
         version?: number;
       };
     }
@@ -994,8 +998,10 @@ function decodeArtifactText(artifact: Artifact | null): string | null {
 
 function artifactRef(
   args: ReadArtifactArgs,
-): { id: string } | { path: string } {
-  return "path" in args ? { path: args.path } : { id: args.artifactId };
+): { type: "id"; artifact_id: string } | { type: "path"; path: string } {
+  return "path" in args
+    ? { type: "path", path: args.path }
+    : { type: "id", artifact_id: args.artifactId };
 }
 
 function decodeArtifactJson<T>(artifact: Artifact | null): T | null {
