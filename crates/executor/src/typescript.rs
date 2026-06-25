@@ -411,13 +411,13 @@ impl TypeScriptRunnerProcess {
                                 Ok(response) => HostToGuestMessage::ExoResponse {
                                     id,
                                     ok: true,
-                                    response: Some(response),
+                                    response: Box::new(Some(response)),
                                     error: None,
                                 },
                                 Err(error) => HostToGuestMessage::ExoResponse {
                                     id,
                                     ok: false,
-                                    response: None,
+                                    response: Box::new(None),
                                     error: Some(format_error_chain(
                                         &error,
                                         format_args!(
@@ -590,7 +590,6 @@ impl TypeScriptRunnerProcess {
                         .add_events(AddEventsRequest {
                             session_id: None,
                             turn_id: None,
-                            expected_head: None,
                             data: vec![EventData::Custom {
                                 event_type: TYPESCRIPT_SANDBOX_PROCESS_REUSE_EVENT.to_string(),
                                 payload: serde_json::to_value(
@@ -898,7 +897,7 @@ enum HostToGuestMessage {
     ExoResponse {
         id: u64,
         ok: bool,
-        response: Option<ExoResponse>,
+        response: Box<Option<ExoResponse>>,
         error: Option<String>,
     },
     RuntimeEvent {

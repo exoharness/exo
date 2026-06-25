@@ -211,6 +211,7 @@ async fn usage_record_is_persisted_with_computed_cost() {
                 prompt_cached_tokens: None,
                 prompt_cache_creation_tokens: None,
                 completion_reasoning_tokens: None,
+                ..Default::default()
             }),
             model: Some("claude-sonnet-4-6".to_string()),
             ttft: None,
@@ -355,6 +356,7 @@ async fn usage_record_with_anthropic_cache_hits() {
                 prompt_cached_tokens: Some(10_000),
                 prompt_cache_creation_tokens: Some(2_000),
                 completion_reasoning_tokens: None,
+                ..Default::default()
             }),
             model: Some("claude-sonnet-4-6".to_string()),
             ttft: None,
@@ -474,6 +476,7 @@ async fn usage_record_with_openai_inclusive_accounting() {
                 prompt_cached_tokens: Some(500),
                 prompt_cache_creation_tokens: None,
                 completion_reasoning_tokens: None,
+                ..Default::default()
             }),
             model: Some("gpt-4o-mini".to_string()),
             ttft: None,

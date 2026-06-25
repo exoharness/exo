@@ -34,17 +34,17 @@ use crate::{
     AddEventsRequest, AddEventsResult, AgentHandle, AgentId, AgentRecord, Artifact,
     ArtifactVersion, BeginTurnRequest, Binding, BindingId, BindingRecord, BindingType,
     BoxAsyncRead, BoxAsyncWrite, CancelSandboxProcessRequest, CloseSandboxProcessInputRequest,
-    ConversationHandle, ConversationId, ConversationRecord, CreateSandboxRequest, Event, EventData,
-    EventId, EventKind, EventQuery, EventQueryDirection, EventStream, ExoHarness, FileSystemMount,
-    ForkConversationRequest, GetEventsResult, GetSandboxProcessEventsResult,
-    ListConversationsRequest, ListConversationsResult, NewAgentRequest, NewConversationRequest,
-    PutSecretRequest, ReadArtifactRequest, Result, RunInSandboxRequest, SandboxHandle, SandboxId,
-    SandboxProcess, SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessId,
-    SandboxProcessMode, SandboxProcessParts, SandboxProcessRecord, SandboxProcessStatus,
-    SandboxProcessStdin, SandboxProvider, SandboxProviderConfig, Secret, SecretId, SecretMetadata,
-    SecretType, SessionId, SnapshotHandle, SnapshotId, StartSandboxProcessRequest,
-    StartSandboxRequest, TurnHandle, TurnId, TurnRecord, Uuid7, WaitSandboxProcessRequest,
-    WriteArtifactRequest, WriteSandboxProcessInputRequest,
+    ConversationHandle, ConversationId, ConversationRecord, CreateSandboxRequest,
+    DurableFileSystem, Event, EventData, EventId, EventKind, EventQuery, EventQueryDirection,
+    EventStream, ExoHarness, FileSystemMount, ForkConversationRequest, GetEventsResult,
+    GetSandboxProcessEventsResult, ListConversationsRequest, ListConversationsResult,
+    NewAgentRequest, NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result,
+    RunInSandboxRequest, SandboxHandle, SandboxId, SandboxProcess, SandboxProcessEvent,
+    SandboxProcessEventQuery, SandboxProcessId, SandboxProcessMode, SandboxProcessParts,
+    SandboxProcessRecord, SandboxProcessStatus, SandboxProcessStdin, SandboxProvider,
+    SandboxProviderConfig, Secret, SecretId, SecretMetadata, SecretType, SessionId, SnapshotHandle,
+    SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnHandle, TurnId, TurnRecord,
+    Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
 #[derive(Debug, Clone)]
@@ -65,6 +65,8 @@ pub enum SandboxBackendChoice {
     Docker,
     LocalProcess,
     Daytona(DaytonaBackendSpec),
+    E2b(E2bBackendSpec),
+    Sprites(SpritesBackendSpec),
     Vercel(VercelBackendSpec),
     AwsAgentCore,
 }
@@ -76,6 +78,8 @@ impl SandboxBackendChoice {
             Self::Docker => SandboxProvider::Docker,
             Self::LocalProcess => SandboxProvider::LocalProcess,
             Self::Daytona(_) => SandboxProvider::Daytona,
+            Self::E2b(_) => SandboxProvider::E2b,
+            Self::Sprites(_) => SandboxProvider::Sprites,
             Self::Vercel(_) => SandboxProvider::Vercel,
             Self::AwsAgentCore => SandboxProvider::AwsAgentCore,
         }
@@ -104,6 +108,48 @@ impl DaytonaBackendSpec {
             api_key_secret: "DAYTONA_API_KEY".to_string(),
             organization_id_secret: Some("DAYTONA_ORGANIZATION_ID".to_string()),
             target_secret: Some("DAYTONA_TARGET".to_string()),
+        }
+    }
+}
+
+/// E2B connection config plus secret-store names for credentials, resolved
+/// lazily on first use.
+#[derive(Debug, Clone)]
+pub struct E2bBackendSpec {
+    pub api_url: String,
+    pub api_key_secret: String,
+    pub template_id: String,
+}
+
+impl Default for E2bBackendSpec {
+    fn default() -> Self {
+        Self {
+            api_url: crate::DEFAULT_E2B_API_URL.to_string(),
+            api_key_secret: "E2B_API_KEY".to_string(),
+            template_id: crate::default_e2b_template(),
+        }
+    }
+}
+
+/// Sprites connection config plus secret-store name for the bearer token,
+/// resolved lazily on first use.
+#[derive(Debug, Clone)]
+pub struct SpritesBackendSpec {
+    pub api_url: String,
+    pub token_secret: String,
+    pub url_auth: Option<String>,
+    pub organization: Option<String>,
+    pub labels: Vec<String>,
+}
+
+impl Default for SpritesBackendSpec {
+    fn default() -> Self {
+        Self {
+            api_url: crate::DEFAULT_SPRITES_API_URL.to_string(),
+            token_secret: "SPRITES_TOKEN".to_string(),
+            url_auth: None,
+            organization: None,
+            labels: Vec::new(),
         }
     }
 }
@@ -201,6 +247,20 @@ impl BasicExoHarnessInner {
                 };
                 Arc::new(crate::DaytonaSandboxBackend::new(config)?)
             }
+            SandboxBackendChoice::E2b(spec) => {
+                let config = match self.e2b_config_from_binding().await? {
+                    Some(config) => config,
+                    None => self.e2b_config_from_spec(spec).await?,
+                };
+                Arc::new(crate::E2bSandboxBackend::new(config)?)
+            }
+            SandboxBackendChoice::Sprites(spec) => {
+                let config = match self.sprites_config_from_binding().await? {
+                    Some(config) => config,
+                    None => self.sprites_config_from_spec(spec).await?,
+                };
+                Arc::new(crate::SpritesSandboxBackend::new(config)?)
+            }
             SandboxBackendChoice::Vercel(spec) => {
                 let config = match self.vercel_config_from_binding().await? {
                     Some(config) => config,
@@ -258,6 +318,122 @@ impl BasicExoHarnessInner {
             target,
             organization_id,
         })
+    }
+
+    async fn e2b_config_from_spec(&self, spec: &E2bBackendSpec) -> Result<crate::E2bConfig> {
+        let api_key = self
+            .secret_key(&spec.api_key_secret)
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "e2b sandbox requested but secret {:?} is not set",
+                    spec.api_key_secret
+                )
+            })?;
+        Ok(crate::E2bConfig {
+            api_key,
+            api_url: spec.api_url.clone(),
+            template_id: spec.template_id.clone(),
+            envd_port: crate::DEFAULT_E2B_ENVD_PORT,
+            envd_base_url: None,
+            secure: false,
+        })
+    }
+
+    async fn e2b_config_from_binding(&self) -> Result<Option<crate::E2bConfig>> {
+        let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
+        let Some((api_key_secret_id, api_url, default_image)) = bindings
+            .into_iter()
+            .rev()
+            .find_map(|record| match record.binding {
+                Binding::Sandbox {
+                    config:
+                        SandboxProviderConfig::E2b {
+                            api_key_secret_id,
+                            api_url,
+                            default_image,
+                        },
+                    ..
+                } => Some((api_key_secret_id, api_url, default_image)),
+                _ => None,
+            })
+        else {
+            return Ok(None);
+        };
+        let api_key = self
+            .secret_key_by_id(api_key_secret_id)
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "e2b sandbox binding references secret id {api_key_secret_id}, which is not set"
+                )
+            })?;
+        Ok(Some(crate::E2bConfig {
+            api_key,
+            api_url: api_url.unwrap_or_else(|| crate::DEFAULT_E2B_API_URL.to_string()),
+            template_id: default_image,
+            envd_port: crate::DEFAULT_E2B_ENVD_PORT,
+            envd_base_url: None,
+            secure: false,
+        }))
+    }
+
+    async fn sprites_config_from_spec(
+        &self,
+        spec: &SpritesBackendSpec,
+    ) -> Result<crate::SpritesConfig> {
+        let token = self.secret_key(&spec.token_secret).await?.ok_or_else(|| {
+            anyhow!(
+                "sprites sandbox requested but secret {:?} is not set",
+                spec.token_secret
+            )
+        })?;
+        Ok(crate::SpritesConfig {
+            token,
+            api_url: spec.api_url.clone(),
+            url_auth: spec.url_auth.clone(),
+            organization: spec.organization.clone(),
+            extra_labels: spec.labels.clone(),
+        })
+    }
+
+    async fn sprites_config_from_binding(&self) -> Result<Option<crate::SpritesConfig>> {
+        let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
+        let Some((token_secret_id, api_url, url_auth, organization, labels)) = bindings
+            .into_iter()
+            .rev()
+            .find_map(|record| match record.binding {
+                Binding::Sandbox {
+                    config:
+                        SandboxProviderConfig::Sprites {
+                            token_secret_id,
+                            api_url,
+                            url_auth,
+                            organization,
+                            labels,
+                        },
+                    ..
+                } => Some((token_secret_id, api_url, url_auth, organization, labels)),
+                _ => None,
+            })
+        else {
+            return Ok(None);
+        };
+        let token = self
+            .secret_key_by_id(token_secret_id)
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "sprites sandbox binding references secret id {token_secret_id}, which is not set"
+                )
+            })?;
+        Ok(Some(crate::SpritesConfig {
+            token,
+            api_url: api_url.unwrap_or_else(|| crate::DEFAULT_SPRITES_API_URL.to_string()),
+            url_auth,
+            organization,
+            extra_labels: labels,
+        }))
     }
 
     /// `VercelConfig` from the conventional `VERCEL_*` secret-name spec.
@@ -459,7 +635,9 @@ impl BasicExoHarnessInner {
             let Binding::Sandbox { config, .. } = record.binding else {
                 return None;
             };
-            (config.provider() == provider).then(|| config.default_image().to_string())
+            (config.provider() == provider)
+                .then(|| config.default_image().map(str::to_string))
+                .flatten()
         }))
     }
 }
@@ -1481,6 +1659,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
                 image: sandbox.image,
                 default_workdir: sandbox.default_workdir.unwrap_or_default(),
                 file_system_mounts: sandbox.file_system_mounts,
+                durable_file_systems: sandbox.durable_file_systems,
                 enable_networking: sandbox.enable_networking,
                 idle_seconds: sandbox.idle_seconds,
             },
@@ -1537,6 +1716,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
                 image,
                 default_workdir,
                 file_system_mounts,
+                durable_file_systems,
                 enable_networking,
                 idle_seconds,
                 ..
@@ -1555,6 +1735,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
                 || image != request.image
                 || default_workdir != request.default_workdir.clone().unwrap_or_default()
                 || file_system_mounts != request.file_system_mounts
+                || durable_file_systems != request.durable_file_systems
                 || enable_networking != request.enable_networking
                 || idle_seconds != request.idle_seconds
             {
@@ -1843,13 +2024,8 @@ impl ConversationHandle for BasicConversationHandle {
     }
 
     async fn add_events(&self, request: AddEventsRequest) -> Result<AddEventsResult> {
-        self.append_events_internal(
-            request.session_id,
-            request.turn_id,
-            request.expected_head,
-            request.data,
-        )
-        .await
+        self.append_events_internal(request.session_id, request.turn_id, None, request.data)
+            .await
     }
 
     async fn fork(&self, request: ForkConversationRequest) -> Result<Arc<dyn ConversationHandle>> {
@@ -2381,6 +2557,7 @@ async fn prepare_sandbox_request(
         image,
         default_workdir: request.default_workdir,
         file_system_mounts: request.file_system_mounts.unwrap_or_default(),
+        durable_file_systems: request.durable_file_systems.unwrap_or_default(),
         enable_networking: request.enable_networking.unwrap_or(true),
         idle_seconds: request.idle_seconds.unwrap_or(60),
     })
@@ -2409,6 +2586,7 @@ async fn find_matching_stored_sandbox(
             || sandbox.image != request.image
             || sandbox.default_workdir != request.default_workdir
             || sandbox.file_system_mounts != request.file_system_mounts
+            || sandbox.durable_file_systems != request.durable_file_systems
             || sandbox.enable_networking != request.enable_networking
             || sandbox.idle_seconds != request.idle_seconds
         {
@@ -2662,6 +2840,8 @@ struct StoredSandbox {
     image: String,
     default_workdir: Option<String>,
     file_system_mounts: Vec<FileSystemMount>,
+    #[serde(default)]
+    durable_file_systems: Vec<DurableFileSystem>,
     enable_networking: bool,
     idle_seconds: u64,
     running: bool,
@@ -2675,6 +2855,7 @@ struct PreparedSandboxRequest {
     image: String,
     default_workdir: Option<String>,
     file_system_mounts: Vec<FileSystemMount>,
+    durable_file_systems: Vec<DurableFileSystem>,
     enable_networking: bool,
     idle_seconds: u64,
 }
@@ -2688,6 +2869,7 @@ impl PreparedSandboxRequest {
             image: self.image.clone(),
             default_workdir: self.default_workdir.clone(),
             file_system_mounts: self.file_system_mounts.clone(),
+            durable_file_systems: self.durable_file_systems.clone(),
             enable_networking: self.enable_networking,
             idle_seconds: self.idle_seconds,
             running: true,
@@ -3163,6 +3345,7 @@ fn sandbox_request(
                     internal: mount.internal.unwrap_or(false),
                 })
                 .collect(),
+            durable_file_systems: sandbox.durable_file_systems.clone(),
             network: if sandbox.enable_networking {
                 SandboxNetworkPolicy::Enabled
             } else {

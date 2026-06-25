@@ -151,7 +151,7 @@ impl VercelSandboxBackend {
 #[async_trait]
 impl ManagedSandboxBackend for VercelSandboxBackend {
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        reject_host_mounts(&request)?;
+        reject_unsupported_mounts(&request)?;
         let spec_hash = sandbox_spec_hash(&request.spec);
         let sandbox_name = vercel_sandbox_name(&request, &spec_hash);
         let response = match self.get_sandbox_session(&sandbox_name).await? {
@@ -627,14 +627,17 @@ fn stable_fnv1a_hex(input: &str) -> String {
     format!("{hash:016x}")
 }
 
-fn reject_host_mounts(request: &SandboxRequest) -> Result<()> {
-    if request.spec.mounts.is_empty() {
-        return Ok(());
+fn reject_unsupported_mounts(request: &SandboxRequest) -> Result<()> {
+    if !request.spec.mounts.is_empty() {
+        bail!(
+            "Vercel sandbox backend does not support host bind-mounts; \
+         remove conversation mounts or use a local sandbox provider"
+        );
     }
-    bail!(
-        "Vercel sandbox backend does not support host bind-mounts; \
-     remove conversation mounts or use a local sandbox provider"
-    )
+    if !request.spec.durable_file_systems.is_empty() {
+        bail!("Vercel sandbox backend does not support durable file systems");
+    }
+    Ok(())
 }
 
 fn duration_to_millis(duration: Duration) -> u64 {

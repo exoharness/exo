@@ -197,7 +197,6 @@ export interface GetEventsResult {
 export interface AddEventsRequest {
   sessionId?: string | null;
   turnId?: string | null;
-  expectedHead?: string | null;
   data: EventData[];
 }
 

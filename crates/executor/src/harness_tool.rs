@@ -889,8 +889,15 @@ pub(crate) async fn ensure_shell_sandbox(
         .mounts
         .first()
         .map(|mount| mount.mount_path.clone())
+        .or_else(|| {
+            config
+                .durable_file_systems
+                .first()
+                .map(|file_system| file_system.mount_path.clone())
+        })
         .unwrap_or_else(|| "/".to_string());
     let desired_mounts = normalize_mounts(&config.mounts);
+    let desired_durable_file_systems = config.durable_file_systems.clone();
     let desired_provider = config.effective_sandbox_provider(agent_config);
     // Empty means "unspecified"; the harness fills the provider's default.
     let requested_image = config.effective_sandbox_image(agent_config);
@@ -904,6 +911,7 @@ pub(crate) async fn ensure_shell_sandbox(
         let config_matches = image_matches
             && sandbox.default_workdir == desired_default_workdir
             && sandbox.file_system_mounts == desired_mounts
+            && sandbox.durable_file_systems == desired_durable_file_systems
             && sandbox.enable_networking == desired_enable_networking
             && sandbox.idle_seconds == 300;
 
@@ -932,6 +940,7 @@ pub(crate) async fn ensure_shell_sandbox(
             image: desired_image,
             default_workdir: Some(desired_default_workdir),
             file_system_mounts: Some(desired_mounts),
+            durable_file_systems: Some(desired_durable_file_systems),
             enable_networking: Some(desired_enable_networking),
             idle_seconds: Some(300),
         })
@@ -959,6 +968,7 @@ struct ShellSandboxInfo {
     image: String,
     default_workdir: String,
     file_system_mounts: Vec<FileSystemMount>,
+    durable_file_systems: Vec<exoharness::DurableFileSystem>,
     enable_networking: bool,
     idle_seconds: u64,
 }
@@ -989,6 +999,7 @@ async fn latest_shell_sandbox(
             image,
             default_workdir,
             file_system_mounts,
+            durable_file_systems,
             enable_networking,
             idle_seconds,
             ..
@@ -1001,6 +1012,7 @@ async fn latest_shell_sandbox(
                 image,
                 default_workdir,
                 file_system_mounts,
+                durable_file_systems,
                 enable_networking,
                 idle_seconds,
             }))
