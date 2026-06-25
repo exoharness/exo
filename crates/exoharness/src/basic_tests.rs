@@ -960,6 +960,7 @@ async fn agent_scoped_sandbox_is_shared_without_conversation_ownership() {
         image: "basic-local-process".to_string(),
         default_workdir: Some(tempdir.path().display().to_string()),
         file_system_mounts: None,
+        durable_file_systems: None,
         enable_networking: Some(true),
         idle_seconds: Some(60),
     };
@@ -1079,6 +1080,7 @@ async fn conversation_create_sandbox_is_not_turn_scoped() {
             image: "basic-local-process".to_string(),
             default_workdir: Some(tempdir.path().display().to_string()),
             file_system_mounts: None,
+            durable_file_systems: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })
