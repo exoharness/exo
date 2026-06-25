@@ -98,10 +98,10 @@ pub struct DaytonaBackendSpec {
     pub target_secret: Option<String>,
 }
 
-impl DaytonaBackendSpec {
+impl Default for DaytonaBackendSpec {
     /// Official endpoints; credentials read from the conventional `DAYTONA_*`
     /// secret names.
-    pub fn with_conventional_secrets() -> Self {
+    fn default() -> Self {
         Self {
             api_url: crate::DEFAULT_DAYTONA_API_URL.to_string(),
             toolbox_url: crate::DEFAULT_DAYTONA_TOOLBOX_URL.to_string(),
@@ -109,6 +109,14 @@ impl DaytonaBackendSpec {
             organization_id_secret: Some("DAYTONA_ORGANIZATION_ID".to_string()),
             target_secret: Some("DAYTONA_TARGET".to_string()),
         }
+    }
+}
+
+impl DaytonaBackendSpec {
+    /// Official endpoints; credentials read from the conventional `DAYTONA_*`
+    /// secret names.
+    pub fn with_conventional_secrets() -> Self {
+        Self::default()
     }
 }
 
