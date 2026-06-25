@@ -1,4 +1,4 @@
-import { createContext, useContext, useState } from "react";
+import { createContext, useContext, useEffect, useRef, useState } from "react";
 import type { Artifact } from "../api/protocol";
 import { decodeBytes, formatTime } from "../lib/rendering";
 import { ImageLightbox, MarkdownContent } from "./Markdown";
@@ -182,7 +182,25 @@ function ArtifactContent({ artifact }: { artifact: Artifact }) {
     return <audio className="md-audio" controls src={dataUrl} />;
   }
 
+  if (kind === "pdf") {
+    return <PdfPreview bytes={artifact.contents} />;
+  }
+
   const text = decodeBytes(artifact.contents);
+
+  if (kind === "html") {
+    // Render in a fully locked-down iframe: `sandbox` with no allow-* tokens
+    // means no scripts, no forms, no same-origin, so agent-authored HTML can be
+    // previewed without it running anything.
+    return (
+      <iframe
+        className="md-html"
+        sandbox=""
+        srcDoc={text}
+        title={artifact.path}
+      />
+    );
+  }
 
   if (kind === "json") {
     try {
@@ -201,7 +219,103 @@ function ArtifactContent({ artifact }: { artifact: Artifact }) {
   return <TextPreview text={text} />;
 }
 
-type ArtifactKind = "image" | "video" | "audio" | "json" | "markdown" | "text";
+// Cap on rendered pages so a huge PDF cannot lock the tab; the rest is a note.
+const PDF_PREVIEW_PAGE_LIMIT = 10;
+
+// pdf.js is heavy (~hundreds of KB plus a worker), so it is imported on demand
+// the first time a PDF is opened rather than shipped in the main bundle.
+function PdfPreview({ bytes }: { bytes: number[] }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [status, setStatus] = useState<"loading" | "ready" | "error">(
+    "loading",
+  );
+  const [error, setError] = useState<string | null>(null);
+  const [pageCount, setPageCount] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+    setStatus("loading");
+    setError(null);
+
+    void (async () => {
+      try {
+        const pdfjs = await import("pdfjs-dist");
+        const workerUrl = (
+          await import("pdfjs-dist/build/pdf.worker.min.mjs?url")
+        ).default;
+        pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
+
+        // Copy into a fresh buffer; pdf.js takes ownership of the bytes it reads.
+        const doc = await pdfjs.getDocument({ data: Uint8Array.from(bytes) })
+          .promise;
+        if (cancelled) {
+          return;
+        }
+        setPageCount(doc.numPages);
+        container.replaceChildren();
+        const pages = Math.min(doc.numPages, PDF_PREVIEW_PAGE_LIMIT);
+        for (let n = 1; n <= pages; n += 1) {
+          const page = await doc.getPage(n);
+          if (cancelled) {
+            return;
+          }
+          const viewport = page.getViewport({ scale: 1.4 });
+          const canvas = document.createElement("canvas");
+          canvas.className = "md-pdf-page";
+          canvas.width = Math.ceil(viewport.width);
+          canvas.height = Math.ceil(viewport.height);
+          container.appendChild(canvas);
+          await page.render({ canvas, viewport }).promise;
+        }
+        if (!cancelled) {
+          setStatus("ready");
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setStatus("error");
+          setError(caught instanceof Error ? caught.message : String(caught));
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [bytes]);
+
+  return (
+    <div className="md-pdf">
+      {status === "loading" ? (
+        <div className="md-pdf-note">Loading PDF…</div>
+      ) : null}
+      {status === "error" ? (
+        <div className="md-pdf-note md-pdf-error">
+          PDF preview failed: {error}
+        </div>
+      ) : null}
+      <div ref={containerRef} className="md-pdf-pages" />
+      {status === "ready" && pageCount > PDF_PREVIEW_PAGE_LIMIT ? (
+        <div className="md-pdf-note">
+          Showing the first {PDF_PREVIEW_PAGE_LIMIT} of {pageCount} pages.
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+type ArtifactKind =
+  | "image"
+  | "video"
+  | "audio"
+  | "pdf"
+  | "html"
+  | "json"
+  | "markdown"
+  | "text";
 
 const IMAGE_EXT = new Set([
   "png",
@@ -227,6 +341,12 @@ export function classifyArtifact(artifact: Artifact): ArtifactKind {
   if (AUDIO_EXT.has(ext)) {
     return "audio";
   }
+  if (ext === "pdf" || sniffPdf(artifact.contents)) {
+    return "pdf";
+  }
+  if (ext === "html" || ext === "htm") {
+    return "html";
+  }
   if (ext === "json") {
     return "json";
   }
@@ -237,6 +357,18 @@ export function classifyArtifact(artifact: Artifact): ArtifactKind {
     return "json";
   }
   return "text";
+}
+
+// "%PDF-" magic so a mislabeled or extension-less PDF still previews.
+function sniffPdf(bytes: number[]): boolean {
+  return (
+    bytes.length >= 5 &&
+    bytes[0] === 0x25 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x44 &&
+    bytes[3] === 0x46 &&
+    bytes[4] === 0x2d
+  );
 }
 
 function extensionOf(path: string): string {

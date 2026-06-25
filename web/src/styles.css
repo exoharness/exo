@@ -1345,6 +1345,46 @@ pre {
   background: #000;
 }
 
+/* Agent-authored HTML, rendered in a script-less sandboxed iframe. */
+.md-html {
+  display: block;
+  width: 100%;
+  height: 360px;
+  margin: 0 0 14px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.md-pdf {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+
+.md-pdf-pages {
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+}
+
+.md-pdf-page {
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  box-shadow: var(--shadow-raised);
+}
+
+.md-pdf-note {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.md-pdf-error {
+  color: var(--danger);
+}
+
 .lightbox {
   position: fixed;
   inset: 0;
