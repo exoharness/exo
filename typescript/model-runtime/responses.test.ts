@@ -3,6 +3,8 @@ import type { Response } from "openai/resources/responses/responses";
 
 import {
   AnthropicRuntime,
+  buildNonStreamingBody,
+  buildStreamingBody,
   ChatCompletionsRuntime,
   isAnthropicModel,
   isOpenRouterBinding,
@@ -78,6 +80,16 @@ describe("model runtime dispatch", () => {
         baseUrl: "https://openrouter.ai/api/v1",
       }),
     ).toBeInstanceOf(ChatCompletionsRuntime);
+  });
+});
+
+describe("reasoning summaries", () => {
+  it("requests reasoning summaries on both streaming and non-streaming bodies", () => {
+    const request = { model: "gpt-5.4", messages: [] };
+    expect(buildStreamingBody(request).reasoning).toEqual({ summary: "auto" });
+    expect(buildNonStreamingBody(request).reasoning).toEqual({
+      summary: "auto",
+    });
   });
 });
 

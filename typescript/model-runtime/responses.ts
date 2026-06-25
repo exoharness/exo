@@ -792,7 +792,7 @@ async function traceRootExecutorTurn(
   );
 }
 
-function buildNonStreamingBody(
+export function buildNonStreamingBody(
   request: NativeResponsesRequest,
 ): ResponseCreateParamsNonStreaming {
   return {
@@ -803,12 +803,13 @@ function buildNonStreamingBody(
       toolDefinitionsToResponsesTools(request.tools ?? []),
     max_output_tokens: request.maxOutputTokens ?? null,
     metadata: request.metadata ?? null,
+    reasoning: { summary: "auto" },
     stream: false,
     store: false,
   };
 }
 
-function buildStreamingBody(
+export function buildStreamingBody(
   request: NativeResponsesRequest,
 ): ResponseCreateParamsStreaming {
   return {
@@ -819,6 +820,7 @@ function buildStreamingBody(
       toolDefinitionsToResponsesTools(request.tools ?? []),
     max_output_tokens: request.maxOutputTokens ?? null,
     metadata: request.metadata ?? null,
+    reasoning: { summary: "auto" },
     stream: true,
     store: false,
   };
