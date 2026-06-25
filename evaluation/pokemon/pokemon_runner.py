@@ -174,6 +174,14 @@ def main() -> None:
             buttons = parse_buttons(reply)
             print(f"[{step:03d}] conv={conv} buttons={buttons}  reply={reply[:110]!r}", flush=True)
             log.append({"step": step, "conv": conv, "buttons": buttons, "reply": reply[:500]})
+            # live state for the web view (live_server.py serves it)
+            try:
+                reasoning = (re.search(r'"reasoning"\s*:\s*"([^"]*)"', reply) or [None, ""])[1]
+                json.dump({"turn": step, "total": args.steps, "conv": conv, "buttons": buttons,
+                           "reasoning": reasoning, "memory": read_memory(root)},
+                          open(os.path.join(os.path.dirname(_SCREEN), "state.json"), "w"))
+            except Exception:
+                pass
             if args.memory_snapshot_every and step % args.memory_snapshot_every == 0:
                 json.dump(read_memory(root), open(os.path.join(mem_dir, f"turn_{step:04d}.json"), "w"), indent=2)
             for b in buttons:

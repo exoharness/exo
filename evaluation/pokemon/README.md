@@ -48,6 +48,23 @@ Knobs (env / args): `POKEMON_STEPS`, `MODEL` (default `gpt-5.5`), `POKEMON_STATE
 `--boot-frames`. Output (frames + `session.json` with every turn's buttons +
 reasoning) lands in `runs/latest/` (gitignored).
 
+## Watch it live (in your browser)
+
+`live_server.py` is a tiny stdlib web view — the game screen + the agent's current
+buttons, reasoning, and durable memory, auto-refreshing each turn:
+
+```bash
+# on the box: start the viewer, then start a game in another shell
+python live_server.py --port 8080
+OPENAI_API_KEY=… POKEMON_ROM=… ./run.sh --steps 300
+
+# on your laptop: forward the port and open it
+ssh -L 8080:localhost:8080 <box>     # then visit http://localhost:8080
+```
+
+The runner writes `/tmp/exo-pokemon/screen.png` + `state.json` each turn; the
+server just reflects them, so it works for any in-progress run.
+
 ## Show it working
 
 Every turn's frame is saved to `runs/latest/frames/NNNN.png`. Make a GIF/video:
