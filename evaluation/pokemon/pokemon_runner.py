@@ -115,6 +115,7 @@ def main() -> None:
     ap.add_argument("--rom", default=os.environ.get("POKEMON_ROM"), help="path to a .gb/.gbc ROM you own")
     ap.add_argument("--state", default=os.environ.get("POKEMON_STATE"), help="optional PyBoy save state to start from")
     ap.add_argument("--save-state", default=os.environ.get("POKEMON_SAVE_STATE"), help="write a PyBoy save state at the end (e.g. to skip the intro next time)")
+    ap.add_argument("--exo-root", default=os.environ.get("POKEMON_EXO_ROOT"), help="reuse an existing exo --root (continuation: keeps the agent + durable memory)")
     ap.add_argument("--steps", type=int, default=int(os.environ.get("POKEMON_STEPS", "40")))
     ap.add_argument("--press-frames", type=int, default=8, help="frames a button is held")
     ap.add_argument("--settle-frames", type=int, default=24, help="frames to advance after a press")
@@ -143,12 +144,20 @@ def main() -> None:
             for _ in range(args.boot_frames):
                 pyboy.tick()
 
-        root = tempfile.mkdtemp(prefix="exo-pokemon-")
-        base = [_EXO_BIN, "--root", root, "--secret-backend", "file"]
-        _run(base + ["secret", "set", "openai", "--env", "OPENAI_API_KEY"])
-        _run(base + ["model", "register", _MODEL, "--secret", "openai"])
-        _run(base + ["agent", "create", "--slug", "t", "--model", _MODEL,
-                     "--harness", _HARNESS, "--sandbox-provider", "docker", "Pokemon"])
+        # Continuation mode: reuse an existing exo root so the agent + its durable
+        # memory carry across runs (e.g. extending a finished run). Otherwise make
+        # a fresh agent.
+        if args.exo_root and os.path.isdir(args.exo_root):
+            root = args.exo_root
+            base = [_EXO_BIN, "--root", root, "--secret-backend", "file"]
+            print(f"continuing with existing exo agent/memory at {root}")
+        else:
+            root = tempfile.mkdtemp(prefix="exo-pokemon-")
+            base = [_EXO_BIN, "--root", root, "--secret-backend", "file"]
+            _run(base + ["secret", "set", "openai", "--env", "OPENAI_API_KEY"])
+            _run(base + ["model", "register", _MODEL, "--secret", "openai"])
+            _run(base + ["agent", "create", "--slug", "t", "--model", _MODEL,
+                         "--harness", _HARNESS, "--sandbox-provider", "docker", "Pokemon"])
         conv_n = 0
         conv = f"c{conv_n}"
         _run(base + ["conversation", "create", "t", conv])
