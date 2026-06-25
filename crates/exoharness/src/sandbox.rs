@@ -197,6 +197,8 @@ const WARM_SANDBOX_KEEPALIVE_ARGV: &[&str] = &["sleep", "infinity"];
 const WARM_SANDBOX_HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(3);
 const WARM_SANDBOX_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const ORPHANED_WARM_SANDBOX_MIN_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const DEFAULT_NETWORK_CREATE_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_NETWORK_CREATE_RETRY_DELAY: Duration = Duration::from_millis(200);
 pub(crate) const WARM_SANDBOX_KEY_LABEL: &str = "exo.sandbox.key";
 pub(crate) const WARM_SANDBOX_SPEC_HASH_LABEL: &str = "exo.sandbox.spec-hash";
 const WARM_SANDBOX_OWNER_PID_LABEL: &str = "exo.sandbox.owner-pid";
@@ -320,24 +322,34 @@ impl CliContainerSandboxBackend {
             return Ok(());
         }
 
-        let output = Command::new(&self.container_bin)
-            .arg("network")
-            .arg("create")
-            .arg(DEFAULT_ENABLED_NETWORK_NAME)
-            .kill_on_drop(true)
-            .output()
-            .await?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            if !stderr.contains("already exists") {
-                return Err(anyhow!(
-                    "failed to create default container network {DEFAULT_ENABLED_NETWORK_NAME}: {stderr}"
-                ));
+        let deadline = Instant::now() + DEFAULT_NETWORK_CREATE_TIMEOUT;
+        loop {
+            let output = Command::new(&self.container_bin)
+                .arg("network")
+                .arg("create")
+                .arg(DEFAULT_ENABLED_NETWORK_NAME)
+                .kill_on_drop(true)
+                .output()
+                .await?;
+            if output.status.success() {
+                *created = true;
+                return Ok(());
             }
-        }
 
-        *created = true;
-        Ok(())
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if stderr.contains("already exists") {
+                *created = true;
+                return Ok(());
+            }
+            if stderr.contains("pending operation") && Instant::now() < deadline {
+                tokio::time::sleep(DEFAULT_NETWORK_CREATE_RETRY_DELAY).await;
+                continue;
+            }
+
+            return Err(anyhow!(
+                "failed to create default container network {DEFAULT_ENABLED_NETWORK_NAME}: {stderr}"
+            ));
+        }
     }
 
     async fn prepare_request(&self, request: SandboxRequest) -> Result<SandboxRequest> {
