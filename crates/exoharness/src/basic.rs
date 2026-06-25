@@ -2751,23 +2751,13 @@ impl TurnHandle for BasicTurnHandle {
 
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion> {
         let _guard = self.harness.inner.write_lock.lock().await;
-        let expected_head = self
-            .state
-            .lock()
-            .expect("turn state poisoned")
-            .latest_event_id;
         let mut record = self
             .harness
             .inner
             .storage
             .get_json::<ConversationRecord>(self.conversation_dir.join("record.json"))
             .await?;
-        ensure_conversation_head(
-            record.latest_event_id,
-            expected_head,
-            Some(self.record.session_id),
-            Some(self.record.id),
-        )?;
+        let expected_head = record.latest_event_id;
         let artifact_version = write_artifact_version(
             &self.harness.inner,
             &self.conversation_dir.join("artifacts"),
