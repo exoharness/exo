@@ -97,14 +97,32 @@ def parse_buttons(text: str) -> list[str]:
     return [b for b in out if b in _BUTTONS][:3]
 
 
+def read_memory(root: str) -> list:
+    """Richest durable-memory store (most entries) from the agent's artifacts."""
+    best: list = []
+    for p in glob.glob(os.path.join(root, "**", "artifacts", "**", "*.bin"), recursive=True):
+        try:
+            d = json.load(open(p))
+        except Exception:
+            continue
+        if isinstance(d, dict) and isinstance(d.get("entries"), list) and len(d["entries"]) > len(best):
+            best = d["entries"]
+    return best
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="exo plays Pokémon via PyBoy.")
     ap.add_argument("--rom", default=os.environ.get("POKEMON_ROM"), help="path to a .gb/.gbc ROM you own")
     ap.add_argument("--state", default=os.environ.get("POKEMON_STATE"), help="optional PyBoy save state to start from")
+    ap.add_argument("--save-state", default=os.environ.get("POKEMON_SAVE_STATE"), help="write a PyBoy save state at the end (e.g. to skip the intro next time)")
     ap.add_argument("--steps", type=int, default=int(os.environ.get("POKEMON_STEPS", "40")))
     ap.add_argument("--press-frames", type=int, default=8, help="frames a button is held")
     ap.add_argument("--settle-frames", type=int, default=24, help="frames to advance after a press")
     ap.add_argument("--boot-frames", type=int, default=900, help="frames to advance before turn 1 (skip boot logos)")
+    ap.add_argument("--conv-reset-every", type=int, default=int(os.environ.get("POKEMON_CONV_RESET", "0")),
+                    help="start a fresh conversation every N turns (durable memory carries continuity; bounds context/latency over long runs). 0=never")
+    ap.add_argument("--memory-snapshot-every", type=int, default=int(os.environ.get("POKEMON_MEM_SNAPSHOT", "0")),
+                    help="dump the durable-memory store to <out>/memory/turn_NNNN.json every N turns. 0=off")
     ap.add_argument("--out", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "runs", "latest"))
     args = ap.parse_args()
 
@@ -131,19 +149,33 @@ def main() -> None:
         _run(base + ["model", "register", _MODEL, "--secret", "openai"])
         _run(base + ["agent", "create", "--slug", "t", "--model", _MODEL,
                      "--harness", _HARNESS, "--sandbox-provider", "docker", "Pokemon"])
-        _run(base + ["conversation", "create", "t", "c"])
+        conv_n = 0
+        conv = f"c{conv_n}"
+        _run(base + ["conversation", "create", "t", conv])
+        mem_dir = os.path.join(args.out, "memory")
+        if args.memory_snapshot_every:
+            os.makedirs(mem_dir, exist_ok=True)
 
         log = []
         for step in range(args.steps):
+            # Roll the conversation periodically: chat history is wiped (bounding
+            # context + latency), but the agent + its durable memory persist, so
+            # memory becomes the thing that carries the game forward.
+            if args.conv_reset_every and step > 0 and step % args.conv_reset_every == 0:
+                conv_n += 1
+                conv = f"c{conv_n}"
+                _run(base + ["conversation", "create", "t", conv])
             frame = pyboy.screen.image.convert("RGB")
             frame.save(_SCREEN)                                   # what the harness reads
             frame.resize((480, 432)).save(os.path.join(frames_dir, f"{step:04d}.png"))
-            _run(base + ["conversation", "send", "t", "c", "--",
+            _run(base + ["conversation", "send", "t", conv, "--",
                          f"Turn {step}: here is the current screen. Choose your next button(s)."], check=False)
             reply = _last_assistant(root)
             buttons = parse_buttons(reply)
-            print(f"[{step:03d}] buttons={buttons}  reply={reply[:120]!r}")
-            log.append({"step": step, "buttons": buttons, "reply": reply[:500]})
+            print(f"[{step:03d}] conv={conv} buttons={buttons}  reply={reply[:110]!r}", flush=True)
+            log.append({"step": step, "conv": conv, "buttons": buttons, "reply": reply[:500]})
+            if args.memory_snapshot_every and step % args.memory_snapshot_every == 0:
+                json.dump(read_memory(root), open(os.path.join(mem_dir, f"turn_{step:04d}.json"), "w"), indent=2)
             for b in buttons:
                 pyboy.button(b, args.press_frames)
                 for _ in range(args.press_frames + args.settle_frames):
@@ -154,9 +186,17 @@ def main() -> None:
 
         # final frame + log
         pyboy.screen.image.convert("RGB").resize((480, 432)).save(os.path.join(frames_dir, f"{args.steps:04d}.png"))
-        json.dump({"rom": os.path.basename(args.rom), "model": _MODEL, "steps": args.steps, "log": log},
+        if args.save_state:
+            with open(args.save_state, "wb") as f:
+                pyboy.save_state(f)
+            print(f"saved PyBoy state -> {args.save_state}")
+        final_memory = read_memory(root)
+        if args.memory_snapshot_every:
+            json.dump(final_memory, open(os.path.join(mem_dir, f"turn_{args.steps:04d}.json"), "w"), indent=2)
+        json.dump({"rom": os.path.basename(args.rom), "model": _MODEL, "steps": args.steps,
+                   "conv_reset_every": args.conv_reset_every, "final_memory": final_memory, "log": log},
                   open(os.path.join(args.out, "session.json"), "w"), indent=2)
-        print(f"\nDone. {args.steps} turns. Frames + session.json in {args.out}")
+        print(f"\nDone. {args.steps} turns. {len(final_memory)} memory entries. Output in {args.out}")
         if os.environ.get("EXO_KEEP_ROOT") != "1":
             shutil.rmtree(root, ignore_errors=True)
     finally:
