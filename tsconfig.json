@@ -26,5 +26,10 @@
     "incremental": true
   },
   "include": ["**/*.ts"],
-  "exclude": ["node_modules"]
+  "exclude": [
+    "node_modules",
+    "**/.exo/**",
+    "**/runs/**",
+    "**/harness-pokemon-self.ts"
+  ]
 }
