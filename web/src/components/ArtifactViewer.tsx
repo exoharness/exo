@@ -1,4 +1,12 @@
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import hljs from "highlight.js";
 import type { Artifact } from "../api/protocol";
 import { decodeBytes, formatTime } from "../lib/rendering";
 import { ImageLightbox, MarkdownContent } from "./Markdown";
@@ -208,7 +216,7 @@ function ArtifactContent({ artifact }: { artifact: Artifact }) {
         <JsonPreview defaultOpen label="artifact" value={JSON.parse(text)} />
       );
     } catch {
-      return <TextPreview text={text} />;
+      return <CodePreview text={text} path="x.json" />;
     }
   }
 
@@ -216,7 +224,119 @@ function ArtifactContent({ artifact }: { artifact: Artifact }) {
     return <MarkdownContent text={text} />;
   }
 
-  return <TextPreview text={text} />;
+  return <CodePreview text={text} path={artifact.path} />;
+}
+
+// Skip auto-detection on very large blobs: highlightAuto runs every grammar over
+// the input, which is slow on big shell logs. Above these caps we fall back to the
+// plain TextPreview so opening a huge artifact never stalls the tab.
+const HIGHLIGHT_AUTO_MAX_CHARS = 100_000;
+const HIGHLIGHT_AUTO_MAX_LINES = 4000;
+
+// Maps a file extension to a highlight.js language id. Markdown is handled by
+// MarkdownContent before this is reached, so it is intentionally absent.
+const LANGUAGE_BY_EXT: Record<string, string> = {
+  mjs: "javascript",
+  js: "javascript",
+  cjs: "javascript",
+  jsx: "javascript",
+  ts: "typescript",
+  tsx: "typescript",
+  mts: "typescript",
+  cts: "typescript",
+  json: "json",
+  py: "python",
+  rs: "rust",
+  sh: "bash",
+  bash: "bash",
+  zsh: "bash",
+  go: "go",
+  rb: "ruby",
+  java: "java",
+  c: "c",
+  h: "c",
+  cc: "cpp",
+  cpp: "cpp",
+  cxx: "cpp",
+  hpp: "cpp",
+  css: "css",
+  html: "xml",
+  htm: "xml",
+  xml: "xml",
+  yml: "yaml",
+  yaml: "yaml",
+  toml: "ini",
+  ini: "ini",
+  sql: "sql",
+};
+
+// Highlight artifact text with highlight.js and reuse the existing `.hljs`
+// palette. A known extension highlights against that language; an unknown or
+// generic extension (.txt, stdout.txt, …) is auto-detected when the blob is small
+// enough. Anything else renders through the plain TextPreview unchanged.
+function CodePreview({
+  text,
+  path,
+  maxCollapsedLength = 1600,
+}: {
+  text: string;
+  path: string;
+  maxCollapsedLength?: number;
+}) {
+  const highlighted = useMemo(() => {
+    // An empty blob has nothing to colour; let TextPreview show its "(empty)"
+    // placeholder rather than rendering a blank highlighted box.
+    if (!text) {
+      return null;
+    }
+    const ext = extensionOf(path);
+    const language = LANGUAGE_BY_EXT[ext];
+    if (language && hljs.getLanguage(language)) {
+      return hljs.highlight(text, { language, ignoreIllegals: true }).value;
+    }
+    const tooLarge =
+      text.length > HIGHLIGHT_AUTO_MAX_CHARS ||
+      countLines(text) > HIGHLIGHT_AUTO_MAX_LINES;
+    if (tooLarge) {
+      return null;
+    }
+    return hljs.highlightAuto(text).value;
+  }, [text, path]);
+
+  if (highlighted == null) {
+    return <TextPreview maxCollapsedLength={maxCollapsedLength} text={text} />;
+  }
+
+  const code = (
+    <pre className="message-text">
+      <code
+        className="hljs"
+        dangerouslySetInnerHTML={{ __html: highlighted }}
+      />
+    </pre>
+  );
+
+  const isLong = text.length > maxCollapsedLength || countLines(text) > 24;
+  if (!isLong) {
+    return code;
+  }
+
+  return (
+    <details className="json-disclosure">
+      <summary>text ({text.length.toLocaleString()} chars)</summary>
+      {code}
+    </details>
+  );
+}
+
+function countLines(text: string): number {
+  let lines = 1;
+  for (let index = 0; index < text.length; index += 1) {
+    if (text.charCodeAt(index) === 10) {
+      lines += 1;
+    }
+  }
+  return lines;
 }
 
 // Cap on rendered pages so a huge PDF cannot lock the tab; the rest is a note.
