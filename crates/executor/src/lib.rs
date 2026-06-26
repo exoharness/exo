@@ -23,6 +23,7 @@ mod harness_runtime;
 mod harness_tool;
 mod harness_types;
 mod local_sandbox;
+mod mesh_work_source;
 mod rlm;
 #[cfg(test)]
 mod rlm_tests;
@@ -33,6 +34,7 @@ mod shared;
 #[cfg(test)]
 mod test_support;
 mod typescript;
+mod work_source;
 
 pub use adapter::AdapterStore;
 pub use adapter::{
@@ -67,12 +69,18 @@ pub use harness_types::{
     CreateAgentRequest, CreateConversationRequest, Harness, HarnessAgent, HarnessConversation,
 };
 pub use local_sandbox::LocalSandboxExoHarness;
+pub use mesh_work_source::{
+    CliMeshClient, MeshBoardConfig, MeshBoardItem, MeshBoardSource, MeshClient,
+};
 pub use rlm::RlmHarness;
-pub use scheduler_runtime::{SchedulerRunOptions, run_due_tasks, run_task};
+pub use scheduler_runtime::{
+    SchedulerRunOptions, run_due_tasks, run_due_tasks_from_sources, run_task,
+};
 pub use scheduler_store::SchedulerStore;
 pub use scheduler_types::{
     DEFAULT_MAX_OUTPUT_BYTES, NewScheduledTask, ScheduledTaskRecord, ScheduledTaskRunRecord, now_ms,
 };
 pub use typescript::TypeScriptHarness;
+pub use work_source::{ClaimedWork, CompletionHook, StoreWorkSource, WorkOutcome, WorkSource};
 
 pub(crate) use basic::BasicExecutor;

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use exoharness::{RunInSandboxRequest, SandboxProcess, WriteArtifactRequest};
 use futures::io::{AsyncRead, AsyncReadExt};
 use serde::Serialize;
@@ -13,6 +13,7 @@ use crate::scheduler_types::{
     DEFAULT_COMMAND_TIMEOUT_MS, DEFAULT_TASK_LEASE_MS, ScheduledTaskRecord, ScheduledTaskRunRecord,
     ScheduledTaskSandboxMode, now_ms,
 };
+use crate::work_source::{ClaimedWork, CompletionHook, StoreWorkSource, WorkOutcome, WorkSource};
 use crate::{Harness, Uuid7};
 
 #[derive(Debug, Clone, Copy)]
@@ -43,19 +44,98 @@ struct ScheduledTaskArtifact {
     error: Option<String>,
 }
 
+/// Run all tasks due in the store-backed source.
+///
+/// This is the original entry point and is preserved verbatim in behavior: it
+/// drains the single [`SchedulerStore`] source. It is now a thin wrapper over
+/// [`run_due_tasks_from_sources`] with one [`StoreWorkSource`].
 pub async fn run_due_tasks(
     harness: Arc<dyn Harness>,
     store: &SchedulerStore,
     options: SchedulerRunOptions,
 ) -> Result<Vec<ScheduledTaskRunRecord>> {
-    let due = store
-        .claim_due_tasks(now_ms(), options.limit, DEFAULT_TASK_LEASE_MS)
-        .await?;
+    let sources: Vec<Box<dyn WorkSource>> = vec![Box::new(StoreWorkSource::new(store.clone()))];
+    run_due_tasks_from_sources(harness, store, &sources, options).await
+}
+
+/// Run all due work drained from a list of [`WorkSource`]s.
+///
+/// Each source is asked to atomically claim up to `limit` units of due work
+/// (leased for [`DEFAULT_TASK_LEASE_MS`]); the claimed work is then run with the
+/// exact same claim/lease/run/record contract exo has always used. The
+/// `store` remains the system of record for the *run* (`put_run`/`put_task`),
+/// regardless of which source produced the work; a source may additionally
+/// observe completion via [`ClaimedWork::on_complete`].
+pub async fn run_due_tasks_from_sources(
+    harness: Arc<dyn Harness>,
+    store: &SchedulerStore,
+    sources: &[Box<dyn WorkSource>],
+    options: SchedulerRunOptions,
+) -> Result<Vec<ScheduledTaskRunRecord>> {
+    let claimed = claim_from_sources(sources, now_ms(), options.limit).await?;
     futures::future::try_join_all(
-        due.into_iter()
-            .map(|task| run_task(Arc::clone(&harness), store, task)),
+        claimed
+            .into_iter()
+            .map(|work| run_claimed_work(Arc::clone(&harness), store, work)),
     )
     .await
+}
+
+/// Drain claimed work from each source in order, sharing one `limit` budget
+/// across all sources. Returns at most `limit` units. Extracted so the
+/// trait-dispatch contract (ordering + budget) is unit-testable without a live
+/// sandbox/harness.
+async fn claim_from_sources(
+    sources: &[Box<dyn WorkSource>],
+    now: u64,
+    limit: usize,
+) -> Result<Vec<ClaimedWork>> {
+    let mut claimed: Vec<ClaimedWork> = Vec::new();
+    for source in sources {
+        let remaining = limit.saturating_sub(claimed.len());
+        if remaining == 0 {
+            break;
+        }
+        let from_source = source
+            .claim_due(now, remaining, DEFAULT_TASK_LEASE_MS)
+            .await
+            .with_context(|| format!("work source `{}` failed to claim", source.name()))?;
+        claimed.extend(from_source);
+    }
+    Ok(claimed)
+}
+
+/// Run one unit of claimed work and, if the source attached a completion hook,
+/// acknowledge the outcome back to the source.
+async fn run_claimed_work(
+    harness: Arc<dyn Harness>,
+    store: &SchedulerStore,
+    work: ClaimedWork,
+) -> Result<ScheduledTaskRunRecord> {
+    let ClaimedWork {
+        task, on_complete, ..
+    } = work;
+    let run = run_task(harness, store, task).await?;
+    notify_completion(&run, on_complete).await;
+    Ok(run)
+}
+
+/// Map a finished run to a [`WorkOutcome`] and fire the source's completion
+/// hook, if any. A hook failure is logged, never fatal — exo has already
+/// recorded the run; acknowledging the source is best-effort.
+async fn notify_completion(run: &ScheduledTaskRunRecord, on_complete: Option<CompletionHook>) {
+    let Some(hook) = on_complete else {
+        return;
+    };
+    let outcome = match &run.error {
+        Some(_) => WorkOutcome::Errored,
+        None => WorkOutcome::Completed {
+            exit_code: run.exit_code,
+        },
+    };
+    if let Err(error) = hook(outcome).await {
+        tracing::warn!(%error, run_id = %run.id, "work source completion hook failed");
+    }
 }
 
 pub async fn run_task(
@@ -511,8 +591,160 @@ fn preview(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
     use super::*;
+    use crate::scheduler_types::NewScheduledTask;
+    use crate::work_source::ClaimedWork;
     use futures::{future::FutureExt, io::Cursor};
+
+    fn mock_task(name: &str) -> ScheduledTaskRecord {
+        ScheduledTaskRecord::new(
+            NewScheduledTask {
+                agent_id: "agent".to_string(),
+                conversation_id: "conversation".to_string(),
+                name: name.to_string(),
+                schedule: "@every 1m".to_string(),
+                sandbox_mode: None,
+                setup_command: None,
+                command: vec!["true".to_string()],
+                report_prompt: "Report.".to_string(),
+                max_output_bytes: None,
+            },
+            1,
+        )
+        .unwrap()
+    }
+
+    /// A mock [`WorkSource`] that yields a fixed number of tasks per claim and
+    /// records how many units it was asked for, so we can assert the loop's
+    /// per-source budget arithmetic.
+    struct MockSource {
+        name: String,
+        tasks: Vec<ScheduledTaskRecord>,
+        last_limit: Arc<AtomicUsize>,
+    }
+
+    impl MockSource {
+        fn new(name: &str, count: usize) -> Self {
+            Self {
+                name: name.to_string(),
+                tasks: (0..count)
+                    .map(|i| mock_task(&format!("{name}-{i}")))
+                    .collect(),
+                last_limit: Arc::new(AtomicUsize::new(usize::MAX)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl WorkSource for MockSource {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        async fn claim_due(
+            &self,
+            _now_ms: u64,
+            limit: usize,
+            _lease_ms: u64,
+        ) -> Result<Vec<ClaimedWork>> {
+            self.last_limit.store(limit, Ordering::SeqCst);
+            Ok(self
+                .tasks
+                .iter()
+                .take(limit)
+                .cloned()
+                .map(|task| ClaimedWork::from_store(self.name.clone(), task))
+                .collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn claim_from_sources_drains_in_order_and_shares_budget() {
+        let first = MockSource::new("first", 3);
+        let second = MockSource::new("second", 5);
+        let second_limit = Arc::clone(&second.last_limit);
+        let sources: Vec<Box<dyn WorkSource>> = vec![Box::new(first), Box::new(second)];
+
+        let claimed = claim_from_sources(&sources, now_ms(), 5).await.unwrap();
+        // First source gives 3; second source is asked for the remaining 2.
+        assert_eq!(claimed.len(), 5);
+        assert_eq!(second_limit.load(Ordering::SeqCst), 2);
+        assert_eq!(claimed[0].source, "first");
+        assert_eq!(claimed[3].source, "second");
+    }
+
+    #[tokio::test]
+    async fn claim_from_sources_stops_when_budget_exhausted() {
+        let first = MockSource::new("first", 5);
+        let second = MockSource::new("second", 5);
+        let second_limit = Arc::clone(&second.last_limit);
+        let sources: Vec<Box<dyn WorkSource>> = vec![Box::new(first), Box::new(second)];
+
+        let claimed = claim_from_sources(&sources, now_ms(), 5).await.unwrap();
+        assert_eq!(claimed.len(), 5);
+        // Budget exhausted by the first source; the second is never asked.
+        assert_eq!(second_limit.load(Ordering::SeqCst), usize::MAX);
+    }
+
+    #[tokio::test]
+    async fn notify_completion_fires_hook_with_outcome() {
+        let fired = Arc::new(Mutex::new(None));
+        let captured = Arc::clone(&fired);
+        let hook: CompletionHook = Box::new(move |outcome| {
+            let captured = Arc::clone(&captured);
+            Box::pin(async move {
+                *captured.lock().unwrap() = Some(outcome);
+                Ok(())
+            })
+        });
+        let run = ScheduledTaskRunRecord {
+            id: "run".to_string(),
+            task_id: "task".to_string(),
+            started_at_ms: 0,
+            finished_at_ms: 1,
+            exit_code: Some(0),
+            stdout_bytes: 0,
+            stderr_bytes: 0,
+            truncated: false,
+            result_artifact_id: None,
+            error: None,
+        };
+        notify_completion(&run, Some(hook)).await;
+        assert_eq!(
+            *fired.lock().unwrap(),
+            Some(WorkOutcome::Completed { exit_code: Some(0) })
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_completion_maps_error_outcome() {
+        let fired = Arc::new(Mutex::new(None));
+        let captured = Arc::clone(&fired);
+        let hook: CompletionHook = Box::new(move |outcome| {
+            let captured = Arc::clone(&captured);
+            Box::pin(async move {
+                *captured.lock().unwrap() = Some(outcome);
+                Ok(())
+            })
+        });
+        let run = ScheduledTaskRunRecord {
+            id: "run".to_string(),
+            task_id: "task".to_string(),
+            started_at_ms: 0,
+            finished_at_ms: 1,
+            exit_code: None,
+            stdout_bytes: 0,
+            stderr_bytes: 0,
+            truncated: false,
+            result_artifact_id: None,
+            error: Some("boom".to_string()),
+        };
+        notify_completion(&run, Some(hook)).await;
+        assert_eq!(*fired.lock().unwrap(), Some(WorkOutcome::Errored));
+    }
 
     struct HangingSandboxProcess;
 
