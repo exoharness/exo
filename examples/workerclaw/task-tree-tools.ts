@@ -49,7 +49,7 @@ function taskTreeInitTool(): ToolInstance {
   return localTool({
     name: "task_tree_init",
     description:
-      "Initialize the task tree after understanding the client request. Call once early with objectives, sub-objectives, and TODO leaves. The bridge mirrors this to Olivia's task_nodes schema.",
+      "Initialize the task tree after understanding the request. Call once early with objectives, sub-objectives, and TODO leaves. Tool results include a bridgeEvent payload for host integrations.",
     parameters: {
       type: "object",
       additionalProperties: false,
