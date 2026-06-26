@@ -23,6 +23,7 @@ import os
 
 DIR = "/tmp/exo-pokemon"  # must match pokemon_runner.py / harness-pokemon.ts
 GUIDANCE = os.path.join(DIR, "guidance.json")  # player "coach" channel; read by the harness
+READ_ONLY = False  # set by --read-only: hide the coach box + reject guidance posts (safe for public sharing)
 
 PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>exo plays Pokemon — live</title>
 <style>
@@ -81,9 +82,14 @@ async function tick(){
       const se=document.getElementById('selfedits');
       if(se) se.innerHTML = (typeof s.self_edits==='number') ? ('<b>policy self-edits:</b> '+s.self_edits) : '<b>self-edits:</b> —';
       const td=document.getElementById('tools');
-      if(td) td.innerHTML=(s.tools&&s.tools.length)
-        ? ('<p class="lbl" style="margin-top:9px">agent-created tools ('+s.tools.length+')</p>'+s.tools.map(t=>'<details><summary>'+(t.name||'tool').replace(/</g,'&lt;')+'</summary><pre>'+(t.source||'').replace(/</g,'&lt;').slice(0,2000)+'</pre></details>').join(''))
-        : '<div class="gcur" style="margin-top:6px"><b>created tools:</b> none yet</div>';
+      // Only re-render tools when they actually change, else the 700ms refresh
+      // would snap any open <details> shut while you're reading the source.
+      const tkey=JSON.stringify(s.tools||[]);
+      if(td && tkey!==window.__toolsKey){ window.__toolsKey=tkey;
+        td.innerHTML=(s.tools&&s.tools.length)
+          ? ('<p class="lbl" style="margin-top:9px">agent-created tools ('+s.tools.length+')</p>'+s.tools.map(t=>'<details><summary>'+(t.name||'tool').replace(/</g,'&lt;')+'</summary><pre>'+(t.source||'').replace(/</g,'&lt;').slice(0,2000)+'</pre></details>').join(''))
+          : '<div class="gcur" style="margin-top:6px"><b>created tools:</b> none yet</div>';
+      }
       if(s.turn!==last){ last=s.turn; document.getElementById('screen').src='/screen.png?t='+s.turn+'_'+Date.now(); }
     }
   }catch(e){ document.getElementById('dot').className='dot off'; document.getElementById('live').textContent='no game running'; }
@@ -94,6 +100,8 @@ async function showG(){ try{ const g=await (await fetch('/guidance',{cache:'no-s
 document.getElementById('gsend').onclick=()=>{ const v=document.getElementById('gin').value.trim(); if(v) postG(v); };
 document.getElementById('gin').addEventListener('keydown',e=>{ if(e.key==='Enter'){ const v=e.target.value.trim(); if(v) postG(v); } });
 document.getElementById('gclear').onclick=()=>{ document.getElementById('gin').value=''; postG(''); };
+(async function(){ try{ const c=await (await fetch('/config')).json();
+  if(c.read_only){ const el=document.querySelector('.coach'); if(el) el.style.display='none'; } }catch(e){} })();
 setInterval(tick,700); tick(); showG();
 </script></body></html>"""
 
@@ -122,10 +130,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send(200, "application/json", open(p, "rb").read() if os.path.exists(p) else b"{}")
         elif path == "/guidance":
             self._send(200, "application/json", open(GUIDANCE, "rb").read() if os.path.exists(GUIDANCE) else b"{}")
+        elif path == "/config":
+            self._send(200, "application/json", json.dumps({"read_only": READ_ONLY}).encode())
         else:
             self._send(404, "text/plain", b"not found")
 
     def do_POST(self) -> None:
+        if READ_ONLY:
+            self._send(403, "text/plain", b"read-only")
+            return
         if self.path.split("?", 1)[0] != "/guidance":
             self._send(404, "text/plain", b"not found")
             return
@@ -151,7 +164,11 @@ def main() -> None:
     ap.add_argument("--host", default="127.0.0.1",
                     help="bind address. 127.0.0.1 = localhost only (use ssh -L). "
                          "0.0.0.0 = all interfaces (reachable over a Tailscale tailnet / LAN).")
+    ap.add_argument("--read-only", action="store_true",
+                    help="hide the coach box + reject guidance posts (safe for public sharing)")
     args = ap.parse_args()
+    global READ_ONLY
+    READ_ONLY = args.read_only
     os.makedirs(DIR, exist_ok=True)
     print(f"live view binding {args.host}:{args.port}")
     if args.host in ("127.0.0.1", "localhost"):
