@@ -119,11 +119,6 @@ export interface ResponsesRuntimeLike {
   ): Promise<EventData[]>;
 }
 
-interface NativeLlmResult {
-  response: Response;
-  ttftMs: number | null;
-}
-
 interface NativeLlmTraceOptions extends NativeTraceOptions {
   streamed: boolean;
   handlers?: NativeStreamHandlers;
@@ -182,11 +177,10 @@ export class ResponsesRuntime implements ResponsesRuntimeLike {
     request: NativeResponsesRequest,
     options: NativeTraceOptions = {},
   ): Promise<Response> {
-    const { response } = await this.runLlmRequest(request, {
+    return this.runLlmRequest(request, {
       ...options,
       streamed: false,
     });
-    return response;
   }
 
   async completeStream(
@@ -194,12 +188,11 @@ export class ResponsesRuntime implements ResponsesRuntimeLike {
     handlers: NativeStreamHandlers = {},
     options: NativeTraceOptions = {},
   ): Promise<Response> {
-    const { response } = await this.runLlmRequest(request, {
+    return this.runLlmRequest(request, {
       ...options,
       streamed: true,
       handlers,
     });
-    return response;
   }
 
   async traceToolCall(
@@ -239,14 +232,11 @@ export class ResponsesRuntime implements ResponsesRuntimeLike {
   private async runLlmRequest(
     request: NativeResponsesRequest,
     options: NativeLlmTraceOptions,
-  ): Promise<NativeLlmResult> {
+  ): Promise<Response> {
     if (options.streamed) {
       return this.completeStreamRaw(buildStreamingBody(request), options.handlers);
     }
-    return {
-      response: await this.completeRaw(buildNonStreamingBody(request)),
-      ttftMs: null,
-    };
+    return this.completeRaw(buildNonStreamingBody(request));
   }
 
   private async completeRaw(
@@ -258,7 +248,7 @@ export class ResponsesRuntime implements ResponsesRuntimeLike {
   private async completeStreamRaw(
     body: ResponseCreateParamsStreaming,
     handlers: NativeStreamHandlers = {},
-  ): Promise<NativeLlmResult> {
+  ): Promise<Response> {
     const startedAt = performance.now();
     let sawFirstChunk = false;
     let ttftMs: number | null = null;
@@ -287,10 +277,7 @@ export class ResponsesRuntime implements ResponsesRuntimeLike {
     if (!finalResponse) {
       throw new Error("Responses API stream ended without completion");
     }
-    return {
-      response: finalResponse,
-      ttftMs,
-    };
+    return finalResponse;
   }
 }
 
@@ -380,11 +367,10 @@ export class ChatCompletionsRuntime implements ResponsesRuntimeLike {
     request: NativeResponsesRequest,
     options: NativeTraceOptions = {},
   ): Promise<Response> {
-    const { response } = await this.runLlmRequest(request, {
+    return this.runLlmRequest(request, {
       ...options,
       streamed: false,
     });
-    return response;
   }
 
   async completeStream(
@@ -392,12 +378,11 @@ export class ChatCompletionsRuntime implements ResponsesRuntimeLike {
     handlers: NativeStreamHandlers = {},
     options: NativeTraceOptions = {},
   ): Promise<Response> {
-    const { response } = await this.runLlmRequest(request, {
+    return this.runLlmRequest(request, {
       ...options,
       streamed: true,
       handlers,
     });
-    return response;
   }
 
   async traceToolCall(
@@ -437,19 +422,16 @@ export class ChatCompletionsRuntime implements ResponsesRuntimeLike {
   private async runLlmRequest(
     request: NativeResponsesRequest,
     options: NativeLlmTraceOptions,
-  ): Promise<NativeLlmResult> {
+  ): Promise<Response> {
     if (options.streamed) {
       return this.completeStreamRaw(
         buildChatStreamingBody(request),
         options.handlers,
       );
     }
-    return {
-      response: chatCompletionToResponse(
-        await this.completeRaw(buildChatNonStreamingBody(request)),
-      ),
-      ttftMs: null,
-    };
+    return chatCompletionToResponse(
+      await this.completeRaw(buildChatNonStreamingBody(request)),
+    );
   }
 
   private async completeRaw(
@@ -461,7 +443,7 @@ export class ChatCompletionsRuntime implements ResponsesRuntimeLike {
   private async completeStreamRaw(
     body: ChatCompletionCreateParamsStreaming,
     handlers: NativeStreamHandlers = {},
-  ): Promise<NativeLlmResult> {
+  ): Promise<Response> {
     const startedAt = performance.now();
     let sawFirstChunk = false;
     let ttftMs: number | null = null;
@@ -481,10 +463,7 @@ export class ChatCompletionsRuntime implements ResponsesRuntimeLike {
       }
     }
 
-    return {
-      response: accumulator.finalize(),
-      ttftMs,
-    };
+    return accumulator.finalize();
   }
 }
 
@@ -533,11 +512,10 @@ export class AnthropicRuntime implements ResponsesRuntimeLike {
     request: NativeResponsesRequest,
     options: NativeTraceOptions = {},
   ): Promise<Response> {
-    const { response } = await this.runLlmRequest(request, {
+    return this.runLlmRequest(request, {
       ...options,
       streamed: false,
     });
-    return response;
   }
 
   async completeStream(
@@ -545,12 +523,11 @@ export class AnthropicRuntime implements ResponsesRuntimeLike {
     handlers: NativeStreamHandlers = {},
     options: NativeTraceOptions = {},
   ): Promise<Response> {
-    const { response } = await this.runLlmRequest(request, {
+    return this.runLlmRequest(request, {
       ...options,
       streamed: true,
       handlers,
     });
-    return response;
   }
 
   async traceToolCall(
@@ -590,23 +567,20 @@ export class AnthropicRuntime implements ResponsesRuntimeLike {
   private async runLlmRequest(
     request: NativeResponsesRequest,
     options: NativeLlmTraceOptions,
-  ): Promise<NativeLlmResult> {
+  ): Promise<Response> {
     const body = buildAnthropicBody(request);
     if (options.streamed) {
       return this.completeStreamRaw(body, options.handlers);
     }
-    return {
-      response: anthropicMessageToResponse(
-        await this.client.messages.create(body),
-      ),
-      ttftMs: null,
-    };
+    return anthropicMessageToResponse(
+      await this.client.messages.create(body),
+    );
   }
 
   private async completeStreamRaw(
     body: Anthropic.MessageCreateParamsNonStreaming,
     handlers: NativeStreamHandlers = {},
-  ): Promise<NativeLlmResult> {
+  ): Promise<Response> {
     const startedAt = performance.now();
     let sawFirstChunk = false;
     let ttftMs: number | null = null;
@@ -626,10 +600,7 @@ export class AnthropicRuntime implements ResponsesRuntimeLike {
       }
     }
 
-    return {
-      response: anthropicMessageToResponse(await stream.finalMessage()),
-      ttftMs,
-    };
+    return anthropicMessageToResponse(await stream.finalMessage());
   }
 }
 
