@@ -1,106 +1,69 @@
-# WhatsApp Adapter
+# WhatsApp adapter (Twilio)
 
-The WhatsApp adapter is an experimental Exoclaw library adapter implemented as a TypeScript worker using Baileys. It runs as a linked-device client: WhatsApp remains owned by the phone account, and Exoclaw connects as an additional device after QR or pairing-code linking.
+Outbound-only Twilio WhatsApp adapter for WorkerClaw.
 
-## How It Works
+## What it does today
 
-The host adapter runner starts `worker.ts` and passes adapter configuration through `EXO_ADAPTER_CONFIG`. The worker stores Baileys auth state on disk, opens a WhatsApp socket, emits JSONL events on stdout, and receives outbound send commands on stdin.
+- **Outbound:** `send_adapter_message` → Twilio REST API → WhatsApp user
+- **Inbound:** not implemented in this worker
 
-When WhatsApp asks for pairing, the worker logs an ASCII QR code and emits a lifecycle event named `qr`, or requests and emits a `pairing_code` when configured for pairing-code linking. After pairing, incoming text messages become Exoclaw adapter message events. Outbound `send_adapter_message` calls send text, or text plus rich attachments, to the target WhatsApp chat id.
+The worker connects to Twilio, accepts `send_message` commands on stdin, and
+returns ack/nack events. It does **not** maintain a socket or HTTP listener for
+incoming messages.
 
-## Setup
+## Inbound (not in this worker)
 
-Use the Exoclaw setup flow:
+Twilio delivers inbound WhatsApp to an **HTTP webhook** you configure in the
+Twilio console — not to a long-lived sidecar process. To wake WorkerClaw on
+inbound messages you need a separate ingress path, for example:
 
-```bash
-examples/exoclaw/scripts/exoclaw-control fresh --pull-sandbox --setup whatsapp
-```
+1. **Webhook → exo wakeup** — A small HTTP handler receives Twilio POSTs,
+   validates the signature, and triggers an adapter conversation wakeup with
+   the message text and sender (via your host's exo integration).
+2. **Baileys-style worker** — The linked-device approach in
+   `examples/exoclaw/adapters/whatsapp/` keeps a WhatsApp Web socket inside the
+   worker and emits `message` events on stdout (full bidirectional, unofficial
+   API, QR pairing). That is a different integration model than Twilio.
 
-The script watches `.exo/exoclaw-adapters.log`, prints the QR code if it appears, and pauses while you scan it. Scan from WhatsApp using the linked-device flow.
+The exo adapter protocol already supports inbound: workers emit
+`{ type: "message", target, sender, text, ... }` on stdout and the Rust adapter
+runtime records the event and wakes the conversation. The Twilio worker simply
+does not emit those events yet.
 
-The setup prompt at `setup-prompt.md` asks Exoclaw to create a library adapter similar to:
+## Secrets
 
-```json
-{
-  "name": "whatsapp-dev",
-  "source": "library",
-  "config": {
-    "type": "whatsapp",
-    "authDir": null,
-    "linkMethod": "qr",
-    "phoneNumber": null,
-    "trigger": "all_messages",
-    "allowedChats": null
-  }
-}
-```
+Provide via exo conversation or agent secrets (or env in the adapter process):
 
-## Configuration
+- `TWILIO_ACCOUNT_SID`
+- `TWILIO_AUTH_TOKEN`
+- `TWILIO_WHATSAPP_FROM`
 
-- `authDir` controls where Baileys stores linked-device credentials. If omitted, the worker uses `.exo/adapters/whatsapp/<adapter-id>/auth` or the host-provided adapter state directory.
-- `linkMethod` is `qr` or `pairing-code`. Use `pairing-code` with `phoneNumber` when QR linking is unreliable.
-- `trigger` is `all_messages` or `contacts_only`.
-- `allowedChats` can restrict wakeups to specific WhatsApp chat ids.
-
-## Rich Outbound Content
-
-The WhatsApp worker supports outbound image, video, audio, and document attachments. Use the `attachments` field on `send_adapter_message`; each attachment must specify exactly one of HTTPS `url`, base64 `data`, or `sandboxPath`.
-
-Example image send:
+## Config
 
 ```json
 {
-  "adapterId": "adapter-id",
-  "target": "120363426815150953@g.us",
-  "text": "Here is the chart.",
-  "attachments": [
-    {
-      "kind": "image",
-      "url": "https://example.com/chart.png",
-      "data": null,
-      "sandboxPath": null,
-      "mimeType": "image/png",
-      "fileName": null
-    }
-  ]
+  "type": "whatsapp",
+  "defaultTo": "+15551234567",
+  "trigger": "all_messages"
 }
 ```
 
-Documents require `mimeType` and `fileName`:
+`defaultTo` is the fallback recipient for outbound sends when no target is
+passed. `trigger` is reserved for future inbound filtering; it has no effect
+while the worker is outbound-only.
 
-```json
-{
-  "kind": "document",
-  "url": null,
-  "data": "base64-pdf-bytes",
-  "sandboxPath": null,
-  "mimeType": "application/pdf",
-  "fileName": "report.pdf"
-}
+## Outbound example
+
+After creating the adapter, ask WorkerClaw:
+
+```text
+Send "hello from WorkerClaw" on WhatsApp adapter <adapter-id> to +15551234567.
 ```
 
-If the image was created inside the agent sandbox, the adapter worker cannot read that sandbox path directly. Pass the file as `sandboxPath`; the host tool will stage it into `.exo/adapters/media` and send that staged host path to the worker:
+Or rely on `defaultTo` in config and omit the target in `send_adapter_message`.
 
-```json
-{
-  "kind": "image",
-  "url": null,
-  "data": null,
-  "sandboxPath": "/tmp/exoclaw_media/funny-cat.jpg",
-  "mimeType": "image/png",
-  "fileName": null
-}
-```
+## TODOs
 
-Use `data` only for small inline payloads. Large inline base64 is rejected by the host tool.
-
-For image, video, and document attachments, `text` is sent as the caption on the first caption-capable attachment. Audio attachments are sent as media, followed by a separate text message when needed.
-
-## Quirks And Gotchas
-
-- Baileys is an unofficial WhatsApp Web client library. It works for testing, but it is inherently more brittle than a supported API.
-- If another WhatsApp Web session replaces this device, the worker can disconnect with a conflict/replaced message. Re-pair if needed.
-- If the session is logged out, delete the adapter auth directory and pair again.
-- WhatsApp sends require the target chat id from the inbound wakeup. Do not guess a phone number as the target.
-- Inbound media is not downloaded yet. The worker currently exposes inbound text plus captions on image/video messages.
-- QR codes and chat ids may appear in `.exo/exoclaw-adapters.log`; treat that log as sensitive local state.
+- **Twilio inbound webhook (later)** — Optional exo-native path: HTTP handler receives Twilio POSTs, validates signature, emits adapter `message` events / wakes the conversation. Not needed when a host platform already owns ingress (e.g. a Receiver on a webhook service that creates tasks and only uses this worker for outbound `send_adapter_message` during execution).
+- **Rich attachments** — Outbound media (image, document) via Twilio; inbound media parsing if inbound is added.
+- **`trigger` / `allowedChats`** — Wire config fields once inbound filtering exists.
