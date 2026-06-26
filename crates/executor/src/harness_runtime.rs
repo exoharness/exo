@@ -39,8 +39,8 @@ impl RouterModelClient {
 #[async_trait]
 impl ModelClient for RouterModelClient {
     async fn complete(&self, request: ModelRequest) -> Result<ModelResponse> {
-        let format = ProviderFormat::Responses;
         let config = resolve_runtime_config(&request, self.env.as_ref())?;
+        let format = config.format;
         let router = build_router(&request, format, &config)?;
         let universal_request = build_universal_request(&request, false)?;
         let payload = serialize_request(format, &universal_request)?;
@@ -52,8 +52,8 @@ impl ModelClient for RouterModelClient {
     }
 
     async fn complete_stream(&self, request: ModelRequest) -> Result<Box<dyn ModelResponseStream>> {
-        let format = ProviderFormat::Responses;
         let config = resolve_runtime_config(&request, self.env.as_ref())?;
+        let format = config.format;
         let router = build_router(&request, format, &config)?;
         let universal_request = build_universal_request(&request, true)?;
         let payload = serialize_request(format, &universal_request)?;
@@ -95,6 +95,7 @@ impl ModelResponseStream for RouterModelResponseStream {
 struct ResolvedRuntimeConfig {
     provider_alias: String,
     provider_kind: String,
+    format: ProviderFormat,
     endpoint: Option<Url>,
     endpoint_template: Option<String>,
     metadata: HashMap<String, lingua_json::Value>,
@@ -102,6 +103,57 @@ struct ResolvedRuntimeConfig {
 }
 
 fn resolve_runtime_config(
+    request: &ModelRequest,
+    env: &HashMap<String, String>,
+) -> Result<ResolvedRuntimeConfig> {
+    if is_anthropic_model(&request.model) {
+        resolve_anthropic_config(request, env)
+    } else {
+        resolve_openai_config(request, env)
+    }
+}
+
+/// Anthropic model bindings route to the native Messages API. We detect them by
+/// model name (`claude*`). Bedrock/Vertex Anthropic ids carry provider prefixes
+/// (e.g. `us.anthropic.claude-...`) so they do not match here and keep falling
+/// through to the OpenAI-compatible path.
+fn is_anthropic_model(model: &str) -> bool {
+    model.to_ascii_lowercase().starts_with("claude")
+}
+
+fn resolve_anthropic_config(
+    request: &ModelRequest,
+    env: &HashMap<String, String>,
+) -> Result<ResolvedRuntimeConfig> {
+    let key = request
+        .api_key
+        .clone()
+        .or_else(|| optional_env(env, "ANTHROPIC_API_KEY"))
+        .ok_or_else(|| anyhow::anyhow!("model request is missing an API key"))?;
+    // `None` lets the provider use its built-in default
+    // (`https://api.anthropic.com/v1/`).
+    let endpoint = request
+        .base_url
+        .clone()
+        .or_else(|| optional_env(env, "ANTHROPIC_BASE_URL"))
+        .map(|raw| Url::parse(&raw))
+        .transpose()?;
+    Ok(ResolvedRuntimeConfig {
+        provider_alias: "anthropic".to_string(),
+        provider_kind: "anthropic".to_string(),
+        format: ProviderFormat::Anthropic,
+        endpoint,
+        endpoint_template: None,
+        metadata: HashMap::new(),
+        auth: AuthConfig::ApiKey {
+            key,
+            header: Some("x-api-key".to_string()),
+            prefix: None,
+        },
+    })
+}
+
+fn resolve_openai_config(
     request: &ModelRequest,
     env: &HashMap<String, String>,
 ) -> Result<ResolvedRuntimeConfig> {
@@ -129,6 +181,7 @@ fn resolve_runtime_config(
     Ok(ResolvedRuntimeConfig {
         provider_alias: "openai".to_string(),
         provider_kind: "openai".to_string(),
+        format: ProviderFormat::Responses,
         endpoint,
         endpoint_template: None,
         metadata,
@@ -287,6 +340,34 @@ mod tests {
 
         assert_eq!(payload.stream, Some(true));
         assert!(payload.stream_options.is_none());
+    }
+
+    #[test]
+    fn anthropic_models_route_to_the_native_messages_api() {
+        let mut request = model_request();
+        request.model = "claude-sonnet-4-6".to_string();
+        request.api_key = Some("sk-ant-test".to_string());
+
+        let config = resolve_runtime_config(&request, &HashMap::new()).unwrap();
+
+        assert_eq!(config.provider_kind, "anthropic");
+        assert_eq!(config.format, ProviderFormat::Anthropic);
+        assert!(matches!(
+            config.auth,
+            AuthConfig::ApiKey { ref header, ref prefix, .. }
+                if header.as_deref() == Some("x-api-key") && prefix.is_none()
+        ));
+    }
+
+    #[test]
+    fn non_anthropic_models_keep_the_openai_responses_route() {
+        let mut request = model_request();
+        request.api_key = Some("sk-test".to_string());
+
+        let config = resolve_runtime_config(&request, &HashMap::new()).unwrap();
+
+        assert_eq!(config.provider_kind, "openai");
+        assert_eq!(config.format, ProviderFormat::Responses);
     }
 
     #[test]

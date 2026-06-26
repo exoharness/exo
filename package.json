@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.126",
+    "@anthropic-ai/sdk": "^0.106.0",
     "@braintrust/lingua": "^0.1.0",
     "@braintrust/lingua-wasm": "^0.1.0",
     "@cursor/sdk": "^1.0.12",
