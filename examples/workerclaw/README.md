@@ -1,356 +1,246 @@
-# Exoclaw Harness
+# WorkerClaw
 
-Exoclaw is a persistent agent built on Exo designed to be helpful wherever
-there is a task to do from a computer. It supports task scheduling, a full
-sandbox where it can install its own tools and integrations, and right now
-supports IRC, WhatsApp, Signal, Discord, and a shell CLI (`exo-cli`) out of
-the box.
+WorkerClaw is an autonomous exo harness for jobs that need planning, execution,
+and a durable record of progress. The agent breaks work into a task tree,
+updates status as it goes, runs shell and sandbox commands, talks to external
+channels through adapters when configured, and reports deliverables when
+something is ready to hand off.
+
+WorkerClaw is built on the same exo substrate as other harness examples: agents,
+conversations, artifacts, adapters, and optional scheduling all live under
+your exo `--root` (typically `.exo`).
 
 ## Quickstart
 
-The simplest path from a fresh checkout to a running Exoclaw.
+**Prerequisites:** a built `exo` binary, Node with pnpm, and a model API key.
 
-**Prerequisites:** Docker running, a Rust toolchain, and Node with pnpm.
+From the exo repository root:
 
-1. Install JS dependencies and configure your model key:
+1. Install dependencies and configure your model key:
 
 ```bash
 pnpm install
-cp .env.example .env   # then fill in OPENAI_API_KEY
+cp .env.example .env   # then fill in the provider key your model binding uses
 ```
 
-2. Tell Exoclaw who you are (optional but recommended):
+2. Build the CLI (Rust 1.95+):
 
 ```bash
-examples/exoclaw/scripts/exoclaw-control setup-profile
+cargo build -p exo-cli
 ```
 
-This interactively asks for your name and any local instructions, and writes
-them to `.exo/exoclaw-profile.md` (git-ignored). The harness loads it as an
-extra prompt on every turn, so the agent greets you by name from its first
-reply. You can rerun this or edit the file directly at any time.
-
-3. Build and start everything with one command (run from the repo root):
+3. Create a WorkerClaw agent and conversation:
 
 ```bash
-examples/exoclaw/scripts/exoclaw-control fresh --canonical
+EXO=./target/debug/exo
+
+$EXO --harness typescript --root .exo \
+  agent create "WorkerClaw" \
+  --slug worker \
+  --module examples/workerclaw/harness.ts \
+  --model gpt-5.4
+
+$EXO --harness typescript --root .exo \
+  conversation create worker \
+  --slug job-1 \
+  --name "First job"
 ```
 
-This builds the `exo` binary, creates the agent and a `dev` conversation, pulls
-the Docker sandbox image, mounts this repo at `/workspace/exo`, starts the
-scheduler and adapter runner, sets up the IRC and Discord adapters, and drops
-you into a REPL.
+4. Send a task:
 
-Note that we've decided to support Discord as the primary control channel for
-Exoclaw because the integration is less complicated than WhatsApp and Signal and
-it supports rich content (voice, audio, images, and attachments). However, to
-use it, you need a bot token. See below for setup.
+```bash
+$EXO --harness typescript --root .exo \
+  conversation send worker job-1 \
+  "Plan and build a small CLI that converts CSV to JSON. Report the result when done."
+```
 
-4. Chat with Exoclaw in the REPL:
+5. Open an interactive REPL on the same conversation (optional):
+
+```bash
+$EXO --harness typescript --root .exo repl worker job-1
+```
+
+WorkerClaw will call `task_tree_init` early, keep the tree updated as it
+works, use `report_deliverable` for outputs, and finish with `complete_task`.
+
+## How it works
+
+Each user message starts a **turn**. The harness in `harness.ts` assembles
+prompts, registers tools, and runs the model loop until the turn completes.
+Events (messages, tool calls, tool results, artifact writes) append to the
+conversation log under `.exo`.
+
+Task-tree tools also persist a **`task-tree.json`** conversation artifact.
+That snapshot survives across turns so you can resume long jobs. Tool results
+from task-tree tools include a structured `bridgeEvent` field — useful if a
+host process outside exo wants to mirror progress into its own database or UI.
+
+## Codebase layout
 
 ```text
-dev> hello! what can you do?
+examples/workerclaw/
+  harness.ts              Entry point: prompts + tool registration
+  prompts/me.md           Committed identity and operating rules
+  task-tree-tools.ts      Task tree + deliverable + complete_task tools
+  introspection-tools.ts  list_adapter_events, list_conversation_events
+  sandbox-tools.ts        Snapshot and rewind for the agent sandbox
+  scheduler-tools.ts      Recurring tasks (optional; see env below)
+  host-tools.ts           Bridge from TypeScript tool defs to Rust host tools
+  adapters/               Sidecar workers (IRC, Discord, WhatsApp, Signal, …)
+  scheduler-runner/       Host process that fires scheduled sandbox tasks
+  scripts/                Local control helpers (shared with other examples)
+  SELF.md                 Map of important paths for self-inspection
 ```
 
-5. Talk to it from any shell. Put the CLI on your PATH once:
+Rust adapter runtime and model-facing adapter tools live outside this folder:
 
-```bash
-ln -s "$PWD/examples/exoclaw/scripts/exo-cli" ~/bin/exo-cli
+- `crates/executor/src/adapter/` — adapter store, worker supervision, outbox
+- `typescript/harness/adapter-tools.ts` — `create_adapter`, `send_adapter_message`, …
+
+See [`SELF.md`](./SELF.md) for the full path map the agent reads at runtime.
+
+## Task tree
+
+WorkerClaw owns its own plan. Conventions:
+
+| Depth | Role                         |
+| ----- | ---------------------------- |
+| 1     | Objectives                   |
+| 2     | Sub-objectives               |
+| 3     | TODO leaves (`isLeaf: true`) |
+
+Status flow: `pending` → `in_progress` → `completed` or `failed`.
+
+**Tools:**
+
+- `task_tree_init` — declare the full tree once you understand the job
+- `task_tree_upsert_node` — add or revise a single node later
+- `task_tree_update_status` — move a node through statuses
+- `report_deliverable` — record a URL, file, image, or text output
+- `complete_task` — signal the whole job is finished (once)
+
+**Bridge events:** successful task-tree tool results look like:
+
+```json
+{
+  "ok": true,
+  "bridgeEvent": {
+    "type": "task_tree.init",
+    "rootRef": "root",
+    "nodes": []
+  }
+}
 ```
 
-Then from any directory under `~/projects`:
-
-```bash
-cd ~/projects/some-repo
-exo-cli "set up a simple node environment in this directory"
-```
-
-The agent has read-write access to the directory you call it from and replies
-to your terminal when it finishes.
-
-Notes:
-
-- `fresh` deletes existing agents, conversations, and adapters first. For
-  day-to-day restarts that keep state, drop `fresh`:
-  `examples/exoclaw/scripts/exoclaw-control canonical`
-- For a minimal start without adapter setup:
-  `examples/exoclaw/scripts/exoclaw-control --pull-sandbox`
-
-## Setting up Discord
-
-Exoclaw can connect to Discord through the library Discord adapter. The short
-path is:
-
-1. Create a Discord application and bot in the
-   [Discord Developer Portal](https://discord.com/developers/applications).
-2. In the bot settings, enable **Message Content Intent**.
-3. Invite the bot to your server with at least these bot permissions:
-   **View Channels**, **Send Messages**, **Read Message History**, and
-   **Attach Files** if you want Exoclaw to send images or other attachments.
-4. Store the bot token as the secret expected by the setup prompt:
-
-   ```bash
-   export DISCORD_BOT_TOKEN="..."
-   ./target/debug/exo secret set discord-bot-token --env DISCORD_BOT_TOKEN
-   ```
-
-5. Create or confirm the adapter:
-
-   ```bash
-   examples/exoclaw/scripts/exoclaw-control --setup discord
-   ```
-
-   If you are starting from scratch, you can include Discord in the normal
-   canonical setup:
-
-   ```bash
-   examples/exoclaw/scripts/exoclaw-control fresh --canonical --setup discord
-   ```
-
-6. Copy a Discord channel id for testing. In Discord, enable **User Settings** >
-   **Advanced** > **Developer Mode**, then right-click the target channel and
-   choose **Copy Channel ID**.
-
-To test outbound messages, ask Exoclaw:
-
-```text
-Send "hello from Exoclaw" to Discord using adapter <adapter-id> and target <channel-id>.
-```
-
-To test inbound wakeups, send a normal message in a channel the bot can read.
-The default setup uses `trigger: "all_messages"`, so the bot does not need to be
-mentioned. Discord attachments are forwarded too: inbound images are attached to
-the model wakeup for analysis, and outbound files can be sent with
-`send_adapter_message` attachments.
-
-For voice chat, richer attachment examples, and the full configuration surface,
-see [`adapters/discord/README.md`](./adapters/discord/README.md).
-
-## Self Introspection
-
-Exoclaw starts with sandbox shell support by default. The startup script mounts
-this repository into the sandbox at `/workspace/exo` and makes that path
-available to the harness as `EXOCLAW_REPO`. The self map lives at:
-
-```text
-/workspace/exo/examples/exoclaw/SELF.md
-```
-
-The checked-in source for that map is `examples/exoclaw/SELF.md`. It points
-Exoclaw to the harness, prompts, adapter runtime, scheduler, sandbox tools, and
-service guardian. Use `--self-repo-mount <path>` or `EXOCLAW_REPO` to choose a
-different sandbox mount path.
-
-## Service Guardian
-
-`examples/exoclaw/scripts/exoclaw-service-guardian` is a host-side helper for
-self-maintenance. It owns build and service-control actions that should happen
-outside the agent's sandbox, while preserving `.exo` state such as adapter
-pairing data, conversations, artifacts, and sandbox records.
-
-Common commands:
-
-```bash
-examples/exoclaw/scripts/exoclaw-service-guardian status
-examples/exoclaw/scripts/exoclaw-service-guardian build
-examples/exoclaw/scripts/exoclaw-service-guardian restart-adapters
-examples/exoclaw/scripts/exoclaw-service-guardian restart-scheduler
-examples/exoclaw/scripts/exoclaw-service-guardian restart-all --build
-```
-
-Save local launch settings for later restarts with:
-
-```bash
-examples/exoclaw/scripts/exoclaw-service-guardian configure --sandbox-backend docker
-```
-
-The service guardian manages only the scheduler and adapter runners. Start or
-reconnect an interactive REPL with `examples/exoclaw/scripts/exoclaw-control`.
-
-Exoclaw can call the same host-side surface through the `guardian_action` tool.
-That tool exposes only allowlisted actions such as `status`, `build`,
-`restart_adapters`, `restart_scheduler`, `restart_all`, and `logs`.
-Restart actions are handed off to a detached guardian process after a short
-delay so the current agent turn can finish before services stop. Detached
-restart output is written to `.exo/exoclaw-service-guardian-actions.log`.
-
-When `examples/exoclaw/scripts/exoclaw-control --control` is running, it also acts
-as the foreground REPL supervisor. Guardian builds write
-`.exo/exoclaw-control.restart`; the control wrapper sees that marker, restarts only
-the child `exo repl`, and keeps your terminal open.
-
-## Setting up the identity
-
-`examples/exoclaw/prompts/me.md` is the committed, generic Exoclaw identity
-prompt. It's best to keep this high level, and not specific to any given
-instance or the local deployment environment.
-
-Use `.exo/exoclaw-profile.md` for local instructions instead. The harness loads
-it as an additional developer prompt when it exists, and `.exo` is ignored by
-git. To create it interactively:
-
-```bash
-examples/exoclaw/scripts/exoclaw-control setup-profile
-```
-
-The script asks for the user's name and any extra local instructions. To use a
-different local prompt path, set `EXOCLAW_LOCAL_PROMPT_FILE` or pass
-`--local-prompt-file <path>`.
+Event types include `task_tree.init`, `task_tree.upsert_node`,
+`task_tree.update_status`, `deliverable.report`, and `task.complete`. A host
+integration can subscribe to exo conversation events and react to these payloads
+without changing the harness.
 
 ## Tools
 
-Exoclaw includes the normal minimal tools:
+WorkerClaw registers tools in layers (`harness.ts`):
 
-- `shell`
-- `install_agent_tool` when agent tool creation is enabled
-- configured library tools
+**Built-in** (from exo harness defaults when enabled on the agent):
 
-It also adds scheduler tools:
+- `shell` — run commands in the agent sandbox
+- `install_agent_tool` / agent tool creation when enabled on the agent config
 
-- `schedule_sandbox_task`
-- `list_scheduled_tasks`
-- `cancel_scheduled_task`
-- `delete_scheduled_task`
+**Task tree** — see above.
 
-`cancel_scheduled_task` disables a task and preserves its record/history.
-`delete_scheduled_task` removes the task record and stored run history.
+**Adapters:**
 
-And adapter tools:
-
-- `create_adapter`
-- `list_adapters`
-- `disable_adapter`
-- `delete_adapter`
+- `create_adapter`, `list_adapters`, `disable_adapter`, `delete_adapter`
 - `send_adapter_message`
 
-`disable_adapter` stops future adapter wake-ups while preserving the adapter
-record and event history. `delete_adapter` removes the adapter record and stored
-events.
+**Introspection:**
+
+- `list_adapter_events` — adapter telemetry (connect, disconnect, inbound, errors)
+- `list_conversation_events` — read the durable conversation event log
+
+**Sandbox:**
+
+- `list_sandbox_snapshots`, `snapshot_sandbox`, `rewind_sandbox`
+
+**Scheduler** (when `WORKERCLAW_ENABLE_SCHEDULER=true`):
+
+- `schedule_sandbox_task`, `list_scheduled_tasks`, `cancel_scheduled_task`, `delete_scheduled_task`
+
+**Host-injected modules:** anything registered on the agent with
+`--tool-module` / `toolModulePaths` (extra sandboxes, HTTP clients, custom
+packages). Register at agent create/update time:
+
+```bash
+$EXO --harness typescript agent update worker \
+  --tool-module /path/to/my-tools.ts
+```
 
 ## Adapters
 
-Adapters are host-owned long-running runtimes for external applications. They
-are intentionally separate from scheduled sandbox commands: adapters own sockets,
-reconnect behavior, inbound message parsing, event history, and conversation
-wake-ups. Agents configure adapters with tools, and the local adapter runner
-started by `examples/exoclaw/scripts/exoclaw-control` keeps them connected.
+Adapters are long-running host processes that connect WorkerClaw to external
+apps (chat, IRC, CLI bridges). They are separate from one-shot sandbox commands:
+adapters keep connections open, parse inbound traffic, write event history, and
+wake the conversation when something needs a reply.
 
-Exoclaw ships with IRC, WhatsApp, Signal, Discord, and agent-cli adapters
-(see `adapters/agent-cli/README.md` for the shell CLI). The canonical local
-setup turns on IRC and Discord:
+Shipped adapter workers live under `adapters/`:
 
-```bash
-examples/exoclaw/scripts/exoclaw-control canonical
-```
+| Adapter                                         | Notes                                          |
+| ----------------------------------------------- | ---------------------------------------------- |
+| [Discord](./adapters/discord/README.md)         | Bot token, rich attachments, optional voice    |
+| [IRC](./adapters/irc/README.md)                 | TLS/plain TCP, mention or all-messages trigger |
+| [WhatsApp](./adapters/whatsapp/setup-prompt.md) | Twilio outbound (see setup prompt)             |
+| [Signal](./adapters/signal/README.md)           | `signal-cli` linked device                     |
+| [agent-cli](./adapters/agent-cli/README.md)     | Unix-socket shell bridge from any directory    |
+| [Slack](./adapters/slack/README.md)             | Placeholder worker today                       |
 
-To send every setup prompt before opening the REPL:
-
-```bash
-examples/exoclaw/scripts/exoclaw-control --setup-all
-```
-
-For a fresh control agent with a local profile prompt and all adapters:
+To list configured adapters after setup:
 
 ```bash
-PATH="/opt/homebrew/opt/openjdk/bin:$PATH" \
-  examples/exoclaw/scripts/exoclaw-control fresh \
-  --agent exoclaw-agent \
-  --agent-name "Exoclaw" \
-  --conversation dev \
-  --setup-profile \
-  --setup-all
+$EXO --harness typescript adapters list
 ```
 
-This will:
+Adapter setup usually means creating a library adapter through the agent
+(`create_adapter`) or running a local control script that sends the setup
+prompts in `adapters/*/setup-prompt.md`. Each adapter README documents its
+secrets and config JSON.
 
-- Prompt you for any needed adapter configuration (such as nicknames, channel/server info for IRC, or pairing for WhatsApp/Signal).
-- Write adapter configuration to `.exo/adapters/`.
-- Start the background adapter runner so the agent can receive and react to external messages in real time.
+## Identity and local profile
 
-The adapter runner starts by default. Use `--no-adapters` to skip it, or
-`--adapters` to force it on when an environment override disabled it.
+`prompts/me.md` is the committed WorkerClaw identity — keep it generic.
 
-You can list configured adapters with:
+For machine-specific instructions (your name, repo paths, style preferences),
+create a local profile file. The harness loads it when present:
 
-```bash
-target/debug/exo --harness exoclaw adapters list
+```text
+.exo/workerclaw-profile.md
 ```
 
-See the sections below for more details on individual adapter configuration.
+This file is git-ignored by convention. Override the path with
+`WORKERCLAW_LOCAL_PROMPT_FILE`.
 
-### IRC
+## Self-inspection
 
-The first built-in adapter is IRC. It runs as a host-supervised Node.js worker
-that connects to a configured server/channel, responds to `PING`, parses
-`PRIVMSG`, and wakes the conversation when the trigger policy matches. The
-recommended trigger is `mention`, which only wakes the conversation when a
-channel message mentions the adapter nick. `all_messages` is available for
-quieter channels.
+When the repo is mounted into the sandbox (for example at `/workspace/exo`),
+WorkerClaw can read its own source. The self map at
+`examples/workerclaw/SELF.md` points to harness code, adapter workers, and
+executor modules. Set `WORKERCLAW_REPO` to the mount path and
+`WORKERCLAW_SELF_MAP` to the map file if your layout differs.
 
-### WhatsApp
+## Environment
 
-Exoclaw also includes an experimental WhatsApp adapter using Baileys. The Rust
-adapter runtime owns supervision, durable events, conversation wakeups, and
-outbox draining; workers own protocol-specific sockets and parsing. When first
-run, the WhatsApp worker emits a QR pairing event into adapter history and logs;
-after pairing, Baileys auth state is stored under
-`.exo/adapters/whatsapp/<adapter-id>/auth` by default.
+| Variable                       | Purpose                                                       |
+| ------------------------------ | ------------------------------------------------------------- |
+| `WORKERCLAW_REPO`              | Sandbox mount path to this repo (default `/workspace/exo`)    |
+| `WORKERCLAW_SELF_MAP`          | Path to `SELF.md` inside the mount                            |
+| `WORKERCLAW_LOCAL_PROMPT_FILE` | Optional local profile (default `.exo/workerclaw-profile.md`) |
+| `WORKERCLAW_ENABLE_SCHEDULER`  | Set to `true` to register scheduler tools                     |
 
-### Signal
+Deployment-specific secrets (API keys, Twilio, OAuth tokens) belong in exo
+secrets or conversation secrets — not in this tree. Use `exo secret set` or
+your host's secret sync before starting adapters or injected tool modules.
 
-The Signal adapter uses `signal-cli` as a linked device. If its `account` config
-is null, the worker starts `signal-cli link`, logs a QR code for the phone's
-linked-device flow, discovers the linked account with `signal-cli listAccounts`,
-then runs `signal-cli -a <account> jsonRpc`. Outbound DM targets should be
-Signal usernames with the `u:` prefix, such as `u:example.01`, unless an inbound
-wakeup provides a more precise target.
+## Further reading
 
-## Sandbox Modes
-
-Exoclaw conversations default to `sandboxScope: "agent"`. The `shell` tool uses
-the sticky agent sandbox, so packages installed through the Exoclaw REPL, such as
-`curl` or `python3`, are available to scheduled task runs and future
-conversations for the same agent while that warm sandbox is still alive. Normal
-REPL exits leave the warm sandbox running so the next Exoclaw process can
-reattach to it.
-
-Because exoclaw defaults to agent scope, you don't need to specify anything from
-the cli. The following command will create a REPL with the agent and a
-persistent sandbox that will be durable across conversations
-
-```bash
-examples/exoclaw/scripts/exoclaw-control --pull-sandbox
-```
-
-If you want a conversation to have its own sandbox, use `sandboxScope: "conversation"`:
-
-```bash
-examples/exoclaw/scripts/exoclaw-control --conversation isolated-dev --sandbox-scope conversation
-exo --harness exoclaw conversation update exoclaw-agent isolated-dev --sandbox-scope conversation
-```
-
-Scheduled tasks also default to `sandboxMode: "agent"`. A task can explicitly use
-`sandboxMode: "conversation"` to run in the current conversation's sandbox, or
-`sandboxMode: "task_fresh"` to create a separate task-owned sandbox.
-
-Important limitation: the current sandbox filesystem is not durable across warm
-container death. Exoclaw stores a durable pointer to the agent's sandbox, but
-package installs made interactively live in the running warm container. If the
-host restarts or the container backend cleans up the warm container, a later
-scheduled task may recreate the sandbox from the base image and lose packages
-installed with commands like `apt-get install python3`. Stale warm containers are
-eligible for orphan cleanup after roughly 24 hours.
-
-For reliable scheduled tasks, prefer one of these:
-
-- Use a sandbox image that already contains required dependencies.
-- Include a `setupCommand` that installs required packages before the task runs.
-- Keep task code/data on mounted storage instead of relying on mutated container
-  filesystem state.
-
-The task-owned sandbox starts from the configured image and mounts. It is reused
-across the task's runs and stopped when the task is cancelled.
-
-The current scope model is Exoclaw-specific policy on top of conversation-owned
-exoharness sandbox records. The default mental model is agent-scoped, while
-conversation and task scopes remain available for isolation.
+- [`SELF.md`](./SELF.md) — path map for changing WorkerClaw itself
+- [`adapter-architecture.md`](./adapter-architecture.md) — adapter store, runtime, and worker protocol
+- [`docs/SELF-CONTROL.md`](./docs/SELF-CONTROL.md) — durable state, introspection, and service lifecycle
