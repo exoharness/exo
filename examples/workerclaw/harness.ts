@@ -12,45 +12,45 @@ import {
   type TurnContext,
 } from "@exo/harness";
 
-import { registerFalTools } from "./tools/fal/fal-tools";
-import { registerSchedulerTools } from "./scheduler-tools";
-import { registerSandboxTools } from "./sandbox-tools";
-import { registerGuardianTools } from "./guardian-tools";
 import { registerIntrospectionTools } from "./introspection-tools";
+import { registerSandboxTools } from "./sandbox-tools";
+import { registerTaskTreeTools } from "./task-tree-tools";
+import { registerSchedulerTools } from "./scheduler-tools";
 import {
   basicHarnessInstructions,
   defaultBuiltInToolNames,
   runResponsesHarnessTurn,
 } from "../typescript/turn-loop";
 
-const EXOCLAW_IDENTITY_PROMPT = readFileSync(
+const WORKERCLAW_IDENTITY_PROMPT = readFileSync(
   new URL("./prompts/me.md", import.meta.url),
   "utf8",
 ).trim();
-const DEFAULT_LOCAL_PROMPT_PATH = ".exo/exoclaw-profile.md";
-const DEFAULT_EXOCLAW_REPO = "/workspace/exo";
-const DEFAULT_EXOCLAW_SELF_MAP = `${DEFAULT_EXOCLAW_REPO}/examples/exoclaw/SELF.md`;
+const DEFAULT_LOCAL_PROMPT_PATH = ".exo/workerclaw-profile.md";
+const DEFAULT_WORKERCLAW_REPO = "/workspace/exo";
+const DEFAULT_WORKERCLAW_SELF_MAP = `${DEFAULT_WORKERCLAW_REPO}/examples/workerclaw/SELF.md`;
 
 export default defineHarness({
   async runTurn(context) {
     await runResponsesHarnessTurn(context, {
-      instructions: exoclawInstructions,
-      registerTools: registerExoclawTools,
+      instructions: workerclawInstructions,
+      registerTools: registerWorkerclawTools,
     });
   },
 });
 
-async function registerExoclawTools(
+async function registerWorkerclawTools(
   tools: HarnessToolRegistry,
   context: TurnContext,
 ): Promise<void> {
   registerBuiltInTools(tools, context, builtInToolNames(context));
-  registerSchedulerTools(tools);
+  registerTaskTreeTools(tools);
   registerAdapterTools(tools);
   registerIntrospectionTools(tools);
-  registerFalTools(tools);
   registerSandboxTools(tools);
-  registerGuardianTools(tools);
+  if (process.env.WORKERCLAW_ENABLE_SCHEDULER === "true") {
+    registerSchedulerTools(tools);
+  }
   for (const modulePath of context.agentConfig.typescript?.toolModulePaths ??
     []) {
     await registerLibraryToolModulePath(tools, context, modulePath);
@@ -64,28 +64,24 @@ function builtInToolNames(context: TurnContext): BuiltInToolName[] {
   return defaultBuiltInToolNames(context);
 }
 
-function exoclawInstructions(context: TurnContext): Message[] {
-  const repoPath = process.env.EXOCLAW_REPO ?? DEFAULT_EXOCLAW_REPO;
-  const selfMapPath = process.env.EXOCLAW_SELF_MAP ?? DEFAULT_EXOCLAW_SELF_MAP;
+function workerclawInstructions(context: TurnContext): Message[] {
+  const repoPath = process.env.WORKERCLAW_REPO ?? DEFAULT_WORKERCLAW_REPO;
+  const selfMapPath =
+    process.env.WORKERCLAW_SELF_MAP ?? DEFAULT_WORKERCLAW_SELF_MAP;
   const instructions: Message[] = [
     ...basicHarnessInstructions(context),
     {
       role: "developer",
-      content: EXOCLAW_IDENTITY_PROMPT,
+      content: WORKERCLAW_IDENTITY_PROMPT,
     },
     {
       role: "developer",
       content:
-        'This is the Exoclaw long-running agent harness. You can schedule recurring sandbox work with schedule_sandbox_task, inspect active tasks with list_scheduled_tasks, cancel tasks with cancel_scheduled_task, and permanently delete tasks with delete_scheduled_task. You can inspect sandbox filesystem snapshots with list_sandbox_snapshots, capture a checkpoint with snapshot_sandbox, and rewind to a previous checkpoint with rewind_sandbox. You can use guardian_action for host-side self-maintenance such as checking service status, building Exoclaw, viewing logs, and restarting the scheduler or adapter runners while preserving .exo state. guardian_action restart actions are deferred briefly so the current turn can finish before services stop; guardian builds also ask the control REPL wrapper to refresh its child process without closing the user\'s terminal. After requesting one, report that it was scheduled and use status/logs after services come back. You can also create long-running external adapters with create_adapter, inspect them with list_adapters, disable/delete them, and send explicit outbound replies with send_adapter_message. Use cancel_scheduled_task or disable_adapter when history should be preserved; use delete_scheduled_task or delete_adapter when the user asks to remove something entirely. Conversations default to sandboxScope: "agent", so shell commands use this agent\'s shared sandbox unless the conversation was configured with sandboxScope: "conversation". Scheduled tasks default to sandboxMode: "agent". Use sandboxMode: "conversation" when the task should run in this conversation\'s sandbox, and sandboxMode: "task_fresh" when the task should have a separate fresh sandbox that is reused across that task\'s runs. IRC, WhatsApp, Signal, and Discord adapters wake this conversation when their trigger policy matches; do not auto-send model text to external services. Call send_adapter_message only for intentional external replies, using the target value from the inbound wakeup when one is provided. For Discord, the target is a channel id unless the adapter has a defaultChannelId. If an adapter message asks you to schedule future work and the future result should appear externally, include the adapterId and target in the scheduled task reportPrompt so the scheduler wakeup can call send_adapter_message.',
+        "You have full autonomy to plan and execute work. Maintain a task tree throughout the job using task_tree_init, task_tree_upsert_node, and task_tree_update_status. Depth 1 = objectives, depth 2 = sub-objectives, depth 3 = TODO leaves (isLeaf true). Update node status as you work: pending → in_progress → completed/failed. Report outputs with report_deliverable. When all work is done, call complete_task once. You may create external adapters (Slack, WhatsApp, Signal, Discord, IRC) with create_adapter and reply with send_adapter_message; do not auto-send model text externally. Extra tools may be loaded from toolModulePaths — use them for execution.",
     },
     {
       role: "developer",
-      content: `Your own source tree is mounted in the sandbox at ${repoPath}. Start with ${selfMapPath} when you need to inspect or modify Exoclaw itself. Use guardian_action for host-side builds and service restarts after code changes.`,
-    },
-    {
-      role: "developer",
-      content:
-        "Fal image generation: use fal_generate_image to create images with Ideogram 4.0. It requires FAL_KEY in the host environment. The tool caches generated images under /fal in the sandbox; post them to Discord with send_adapter_message attachments (kind=image, sandboxPath=images[0].sandboxPath). Leave attachToConversation null/false when the goal is posting externally; set it true only when you need to inspect the first image visually in the next model round.",
+      content: `WorkerClaw source is at ${repoPath}. See ${selfMapPath} for layout. Local overrides may live in ${process.env.WORKERCLAW_LOCAL_PROMPT_FILE ?? DEFAULT_LOCAL_PROMPT_PATH}.`,
     },
   ];
   const localPrompt = readLocalPrompt();
@@ -100,7 +96,7 @@ function exoclawInstructions(context: TurnContext): Message[] {
 
 function readLocalPrompt(): string | null {
   const path =
-    process.env.EXOCLAW_LOCAL_PROMPT_FILE ?? DEFAULT_LOCAL_PROMPT_PATH;
+    process.env.WORKERCLAW_LOCAL_PROMPT_FILE ?? DEFAULT_LOCAL_PROMPT_PATH;
   if (!existsSync(path)) {
     return null;
   }
