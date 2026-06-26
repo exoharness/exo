@@ -1,14 +1,30 @@
-Set up a WhatsApp adapter for testing.
+# WhatsApp adapter (Twilio)
 
-Create a library WhatsApp adapter if one does not already exist for this conversation, then make sure it is ready for the background adapter runner. Use these settings:
+Outbound-only Twilio WhatsApp adapter for WorkerClaw.
 
-- name: `whatsapp-dev`
-- source: `library`
-- type: `whatsapp`
-- authDir: `null`
-- linkMethod: `qr` unless the user asks for a pairing code
-- phoneNumber: `null` unless linkMethod is `pairing-code`
-- trigger: `all_messages`
-- allowedChats: `null`
+## Secrets
 
-After creating or confirming the adapter, explain that the setup script will try to print the QR code from `.exo/exoclaw-adapters.log`. If it does not appear immediately, tell the user to watch that log and scan the QR code with WhatsApp's linked-device flow. Briefly tell me the adapter id, where the auth state will be stored, and what message I should send from WhatsApp to test it.
+Provide via exo conversation or agent secrets (or env in the adapter process):
+
+- `TWILIO_ACCOUNT_SID`
+- `TWILIO_AUTH_TOKEN`
+- `TWILIO_WHATSAPP_FROM`
+
+## Config
+
+```json
+{
+  "type": "whatsapp",
+  "defaultTo": "+15551234567",
+  "trigger": "all_messages"
+}
+```
+
+This adapter sends outbound messages only.
+
+**Inbound:** Twilio posts incoming messages to a webhook URL you configure in
+the Twilio console — not to this sidecar worker. To handle inbound WhatsApp in
+exo you need either (a) a host webhook that wakes the adapter conversation, or
+(b) the Baileys linked-device worker under `examples/exoclaw/adapters/whatsapp/`
+for socket-based inbound inside a worker process. See
+[`README.md`](./README.md) for details.
