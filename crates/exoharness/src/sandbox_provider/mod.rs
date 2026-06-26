@@ -27,6 +27,8 @@ mod aws_agentcore {
     }
 }
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+mod cloud_workstations;
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod e2b;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod process_bridge;
@@ -48,6 +50,12 @@ pub use aws_agentcore::default_aws_agentcore_image;
     feature = "aws-agentcore"
 ))]
 pub use aws_agentcore::{AwsAgentCoreConfig, AwsAgentCoreCredentials, AwsAgentCoreSandboxBackend};
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+pub use cloud_workstations::{
+    CloudWorkstationsConfig, CloudWorkstationsSandboxBackend, DEFAULT_CLOUD_WORKSTATIONS_CLUSTER,
+    DEFAULT_CLOUD_WORKSTATIONS_CONFIG, DEFAULT_CLOUD_WORKSTATIONS_PROJECT,
+    DEFAULT_CLOUD_WORKSTATIONS_REGION, DEFAULT_GCLOUD_BIN,
+};
 pub use daytona::default_daytona_image;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub use daytona::{

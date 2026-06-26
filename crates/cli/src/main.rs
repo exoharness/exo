@@ -25,17 +25,19 @@ use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use executor::{
     AgentHarnessKind, BasicExoHarness, BasicExoHarnessConfig, BasicHarness, BasicToolRuntime,
     Binding, BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig,
-    ConversationModelConfig, CreateAgentRequest, CreateConversationRequest, DaytonaBackendSpec,
-    E2bBackendSpec, EventKind, EventQuery, EventQueryDirection, ExoHarness,
-    ExoHarnessHttpServeOptions, ExoclawToolRuntime, FileSystemMount, FileSystemMountMode,
-    ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET, Harness, HarnessAgent,
-    HarnessConversation, HttpExoHarness, LocalSandboxExoHarness, PutSecretRequest, RlmHarness,
-    SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxProvider, SandboxProviderConfig,
-    SandboxScope, Secret, SecretBackendChoice, SpritesBackendSpec, ToolRequest, ToolRuntime,
-    TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, VercelBackendSpec,
-    default_aws_agentcore_image, default_daytona_image, default_docker_image, default_e2b_template,
-    default_vercel_image, effective_sandbox_scope, load_agent_config, send_conversation_wakeup,
-    serve_exoharness_http_listener_with_options,
+    CloudWorkstationsBackendSpec, ConversationModelConfig, CreateAgentRequest,
+    CreateConversationRequest, DaytonaBackendSpec, E2bBackendSpec, EventKind, EventQuery,
+    EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions, ExoclawToolRuntime,
+    FileSystemMount, FileSystemMountMode, ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET,
+    Harness, HarnessAgent, HarnessConversation, HttpExoHarness, LocalSandboxExoHarness,
+    PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxProvider,
+    SandboxProviderConfig, SandboxScope, Secret, SecretBackendChoice, SpritesBackendSpec,
+    ToolRequest, ToolRuntime, TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, VercelBackendSpec,
+    default_aws_agentcore_image, default_cloud_workstations_cluster,
+    default_cloud_workstations_config, default_cloud_workstations_project,
+    default_cloud_workstations_region, default_daytona_image, default_docker_image,
+    default_e2b_template, default_vercel_image, effective_sandbox_scope, load_agent_config,
+    send_conversation_wakeup, serve_exoharness_http_listener_with_options,
 };
 use lingua::Message;
 use lingua::universal::{AssistantContent, AssistantContentPart, ToolContentPart, UserContent};
@@ -226,6 +228,8 @@ enum SandboxProviderArg {
     Docker,
     #[value(name = "local-process")]
     LocalProcess,
+    #[value(name = "cloud-workstations")]
+    CloudWorkstations,
 }
 
 impl From<SandboxProviderArg> for SandboxProvider {
@@ -239,6 +243,7 @@ impl From<SandboxProviderArg> for SandboxProvider {
             SandboxProviderArg::AppleContainer => Self::AppleContainer,
             SandboxProviderArg::Docker => Self::Docker,
             SandboxProviderArg::LocalProcess => Self::LocalProcess,
+            SandboxProviderArg::CloudWorkstations => Self::CloudWorkstations,
         }
     }
 }
@@ -300,6 +305,7 @@ fn default_sandbox_backends() -> Vec<SandboxBackendChoice> {
         SandboxBackendChoice::Sprites(SpritesBackendSpec::default()),
         SandboxBackendChoice::Vercel(VercelBackendSpec::with_conventional_secrets()),
         SandboxBackendChoice::AwsAgentCore,
+        SandboxBackendChoice::CloudWorkstations(CloudWorkstationsBackendSpec::default()),
     ]
 }
 
@@ -666,6 +672,21 @@ struct ProviderConfigureArgs {
     /// Extra Sprites labels (repeatable). Exo resume labels are added on create.
     #[arg(long = "label")]
     labels: Vec<String>,
+    /// Cloud Workstations: the workstation instance id (e.g. wiley). Required for cloud-workstations.
+    #[arg(long)]
+    workstation: Option<String>,
+    /// Cloud Workstations: the workstation cluster (default: remoco).
+    #[arg(long)]
+    cluster: Option<String>,
+    /// Cloud Workstations: the workstation config / machine class (default: wiley-xl).
+    #[arg(long = "workstation-config")]
+    workstation_config: Option<String>,
+    /// Cloud Workstations: GCP project (default: remoco-cloud). Reuses --project-id when unset.
+    #[arg(long)]
+    project: Option<String>,
+    /// Cloud Workstations: suspend the workstation on sandbox release.
+    #[arg(long)]
+    stop_on_release: bool,
 }
 
 #[derive(Debug, Clone, Default, Args)]
@@ -1821,6 +1842,11 @@ async fn main() -> Result<()> {
                     default_image,
                     url_auth,
                     labels,
+                    workstation,
+                    cluster,
+                    workstation_config,
+                    project,
+                    stop_on_release,
                 } = *args;
                 let binding_name =
                     name.unwrap_or_else(|| SandboxProvider::from(provider).as_str().to_string());
@@ -1915,6 +1941,22 @@ async fn main() -> Result<()> {
                             url_auth,
                             organization: organization_id,
                             labels,
+                        }
+                    }
+                    SandboxProviderArg::CloudWorkstations => {
+                        let workstation = workstation.ok_or_else(|| {
+                            anyhow!("--workstation is required for cloud-workstations")
+                        })?;
+                        SandboxProviderConfig::CloudWorkstations {
+                            workstation,
+                            project: project
+                                .or(project_id)
+                                .unwrap_or_else(default_cloud_workstations_project),
+                            cluster: cluster.unwrap_or_else(default_cloud_workstations_cluster),
+                            config: workstation_config
+                                .unwrap_or_else(default_cloud_workstations_config),
+                            region: region.unwrap_or_else(default_cloud_workstations_region),
+                            stop_on_release,
                         }
                     }
                     other => bail!("provider {other:?} has no binding-based config yet"),

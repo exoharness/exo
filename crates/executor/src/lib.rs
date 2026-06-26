@@ -50,15 +50,17 @@ pub use executor_types::{
 };
 pub use exoharness::{
     AgentHandle, BasicExoHarness, BasicExoHarnessConfig, Binding, BindingRecord,
-    ConversationHandle, DEFAULT_SANDBOX_IMAGE, DaytonaBackendSpec, E2bBackendSpec, EventData,
-    EventId, EventKind, EventQuery, EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions,
-    FileSystemMount, FileSystemMountMode, ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET,
-    HttpExoHarness, PutSecretRequest, SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxId,
-    SandboxProvider, SandboxProviderConfig, Secret, SecretBackendChoice, SecretMetadata, SessionId,
-    SnapshotId, SpritesBackendSpec, StartSandboxRequest, ToolRequest, Uuid7, VercelBackendSpec,
-    default_aws_agentcore_image, default_daytona_image, default_docker_image, default_e2b_template,
-    default_vercel_image, serve_exoharness_http_listener,
-    serve_exoharness_http_listener_with_options,
+    CloudWorkstationsBackendSpec, ConversationHandle, DEFAULT_SANDBOX_IMAGE, DaytonaBackendSpec,
+    E2bBackendSpec, EventData, EventId, EventKind, EventQuery, EventQueryDirection, ExoHarness,
+    ExoHarnessHttpServeOptions, FileSystemMount, FileSystemMountMode, ForkConversationRequest,
+    HTTP_EXOHARNESS_TRACING_TARGET, HttpExoHarness, PutSecretRequest, SANDBOX_MAIN_MOUNT_DIR,
+    SandboxBackendChoice, SandboxId, SandboxProvider, SandboxProviderConfig, Secret,
+    SecretBackendChoice, SecretMetadata, SessionId, SnapshotId, SpritesBackendSpec,
+    StartSandboxRequest, ToolRequest, Uuid7, VercelBackendSpec, default_aws_agentcore_image,
+    default_cloud_workstations_cluster, default_cloud_workstations_config,
+    default_cloud_workstations_project, default_cloud_workstations_region, default_daytona_image,
+    default_docker_image, default_e2b_template, default_vercel_image,
+    serve_exoharness_http_listener, serve_exoharness_http_listener_with_options,
 };
 pub use harness_basic::BasicHarness;
 pub use harness_config::load_agent_config;

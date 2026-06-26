@@ -69,6 +69,7 @@ pub enum SandboxBackendChoice {
     Sprites(SpritesBackendSpec),
     Vercel(VercelBackendSpec),
     AwsAgentCore,
+    CloudWorkstations(CloudWorkstationsBackendSpec),
 }
 
 impl SandboxBackendChoice {
@@ -82,6 +83,39 @@ impl SandboxBackendChoice {
             Self::Sprites(_) => SandboxProvider::Sprites,
             Self::Vercel(_) => SandboxProvider::Vercel,
             Self::AwsAgentCore => SandboxProvider::AwsAgentCore,
+            Self::CloudWorkstations(_) => SandboxProvider::CloudWorkstations,
+        }
+    }
+}
+
+/// Cloud Workstations connection coords. Unlike the HTTP backends there is no
+/// secret to lease: `gcloud` carries its own ADC/IAP auth. The spec is just the
+/// resource coords + the target workstation id, resolved from a
+/// `Binding::Sandbox` when present, otherwise these conventional defaults.
+#[derive(Debug, Clone)]
+pub struct CloudWorkstationsBackendSpec {
+    pub project: String,
+    pub cluster: String,
+    pub config: String,
+    pub region: String,
+    /// Workstation instance id; may be empty here and supplied per-request via
+    /// the sandbox image field.
+    pub workstation: String,
+    pub gcloud_bin: String,
+    pub stop_on_release: bool,
+}
+
+impl Default for CloudWorkstationsBackendSpec {
+    fn default() -> Self {
+        let config = crate::CloudWorkstationsConfig::default();
+        Self {
+            project: config.project,
+            cluster: config.cluster,
+            config: config.config,
+            region: config.region,
+            workstation: config.workstation,
+            gcloud_bin: crate::DEFAULT_GCLOUD_BIN.to_string(),
+            stop_on_release: config.stop_on_release,
         }
     }
 }
@@ -293,8 +327,60 @@ impl BasicExoHarnessInner {
                     );
                 }
             }
+            SandboxBackendChoice::CloudWorkstations(spec) => {
+                // Prefer a root `Binding::Sandbox` for cloud-workstations; fall
+                // back to the spec's conventional coords (remoco defaults).
+                let config = match self.cloud_workstations_config_from_binding().await? {
+                    Some(config) => config,
+                    None => cloud_workstations_config_from_spec(spec),
+                };
+                Arc::new(crate::CloudWorkstationsSandboxBackend::new(config)?)
+            }
         };
         Ok(backend)
+    }
+
+    async fn cloud_workstations_config_from_binding(
+        &self,
+    ) -> Result<Option<crate::CloudWorkstationsConfig>> {
+        let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
+        let Some((workstation, project, cluster, config, region, stop_on_release)) = bindings
+            .into_iter()
+            .rev()
+            .find_map(|record| match record.binding {
+                Binding::Sandbox {
+                    config:
+                        SandboxProviderConfig::CloudWorkstations {
+                            workstation,
+                            project,
+                            cluster,
+                            config,
+                            region,
+                            stop_on_release,
+                        },
+                    ..
+                } => Some((
+                    workstation,
+                    project,
+                    cluster,
+                    config,
+                    region,
+                    stop_on_release,
+                )),
+                _ => None,
+            })
+        else {
+            return Ok(None);
+        };
+        Ok(Some(crate::CloudWorkstationsConfig {
+            project,
+            cluster,
+            config,
+            region,
+            workstation,
+            gcloud_bin: std::path::PathBuf::from(crate::DEFAULT_GCLOUD_BIN),
+            stop_on_release,
+        }))
     }
 
     /// `DaytonaConfig` from the conventional `DAYTONA_*` secret-name spec.
@@ -659,6 +745,22 @@ impl BasicExoHarnessInner {
                 .then(|| config.default_image().map(str::to_string))
                 .flatten()
         }))
+    }
+}
+
+/// `CloudWorkstationsConfig` from the conventional spec (no secret I/O: gcloud
+/// carries its own ADC/IAP auth).
+fn cloud_workstations_config_from_spec(
+    spec: &CloudWorkstationsBackendSpec,
+) -> crate::CloudWorkstationsConfig {
+    crate::CloudWorkstationsConfig {
+        project: spec.project.clone(),
+        cluster: spec.cluster.clone(),
+        config: spec.config.clone(),
+        region: spec.region.clone(),
+        workstation: spec.workstation.clone(),
+        gcloud_bin: std::path::PathBuf::from(&spec.gcloud_bin),
+        stop_on_release: spec.stop_on_release,
     }
 }
 

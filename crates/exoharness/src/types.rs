@@ -537,6 +537,8 @@ pub enum SandboxProvider {
     Docker,
     #[serde(alias = "local")]
     LocalProcess,
+    #[serde(rename = "cloud_workstations", alias = "cloud-workstations")]
+    CloudWorkstations,
 }
 
 impl SandboxProvider {
@@ -557,6 +559,7 @@ impl SandboxProvider {
             Self::AppleContainer => "apple-container",
             Self::Docker => "docker",
             Self::LocalProcess => "local-process",
+            Self::CloudWorkstations => "cloud-workstations",
         }
     }
 }
@@ -580,6 +583,7 @@ impl FromStr for SandboxProvider {
             "apple-container" | "apple_container" => Ok(Self::AppleContainer),
             "docker" => Ok(Self::Docker),
             "local" | "local-process" | "local_process" => Ok(Self::LocalProcess),
+            "cloud-workstations" | "cloud_workstations" => Ok(Self::CloudWorkstations),
             provider => Err(anyhow::anyhow!("unsupported sandbox provider: {provider}")),
         }
     }
@@ -881,6 +885,38 @@ pub enum SandboxProviderConfig {
         #[serde(default = "crate::sandbox_provider::default_aws_agentcore_image")]
         default_image: String,
     },
+    #[serde(rename = "cloud_workstations", alias = "cloud-workstations")]
+    CloudWorkstations {
+        /// The workstation instance id (e.g. `wiley`).
+        workstation: String,
+        #[serde(default = "default_cloud_workstations_project")]
+        project: String,
+        #[serde(default = "default_cloud_workstations_cluster")]
+        cluster: String,
+        #[serde(default = "default_cloud_workstations_config")]
+        config: String,
+        #[serde(default = "default_cloud_workstations_region")]
+        region: String,
+        /// If true, releasing the sandbox suspends the workstation.
+        #[serde(default)]
+        stop_on_release: bool,
+    },
+}
+
+// Defaults inlined (not referencing the backend consts) so this enum compiles
+// without the `basic-backend` feature, matching how the other provider configs
+// stay buildable in the wasm/no-backend build.
+pub fn default_cloud_workstations_project() -> String {
+    "remoco-cloud".to_string()
+}
+pub fn default_cloud_workstations_cluster() -> String {
+    "remoco".to_string()
+}
+pub fn default_cloud_workstations_config() -> String {
+    "wiley-xl".to_string()
+}
+pub fn default_cloud_workstations_region() -> String {
+    "us-central1".to_string()
 }
 
 pub fn default_e2b_template() -> String {
@@ -896,6 +932,7 @@ impl SandboxProviderConfig {
             Self::Vercel { .. } => SandboxProvider::Vercel,
             Self::Docker { .. } => SandboxProvider::Docker,
             Self::AwsAgentCore { .. } => SandboxProvider::AwsAgentCore,
+            Self::CloudWorkstations { .. } => SandboxProvider::CloudWorkstations,
         }
     }
 
@@ -907,7 +944,9 @@ impl SandboxProviderConfig {
             | Self::Docker { default_image, .. }
             | Self::E2b { default_image, .. }
             | Self::AwsAgentCore { default_image, .. } => Some(default_image),
-            Self::Sprites { .. } => None,
+            // No base image concept: a workstation is a long-lived instance, not
+            // an image the backend boots per-acquire.
+            Self::Sprites { .. } | Self::CloudWorkstations { .. } => None,
         }
     }
 }
