@@ -5,6 +5,7 @@ import {
   initLogger,
   traced,
   wrapAnthropic,
+  wrapOpenAI,
   type Span,
   type StartSpanArgs,
 } from "braintrust";
@@ -133,12 +134,18 @@ export class ResponsesRuntime implements ResponsesRuntimeLike {
 
   constructor(options: ResponsesRuntimeOptions = {}) {
     ensureBraintrustLogger(options.braintrust ?? null);
-    this.client = new OpenAI({
-      apiKey: options.apiKey,
-      baseURL: options.baseURL,
-      organization: options.organization,
-      project: options.project,
-    });
+    // wrapOpenAI auto-instruments chat.completions/responses calls with a
+    // braintrust LLM span. Also covers the OpenRouter path (same OpenAI client,
+    // just a different base URL) — braintrust's wrapOpenRouter is for their
+    // native SDK, not the OpenAI SDK, so it doesn't apply here.
+    this.client = wrapOpenAI(
+      new OpenAI({
+        apiKey: options.apiKey,
+        baseURL: options.baseURL,
+        organization: options.organization,
+        project: options.project,
+      }),
+    );
   }
 
   static fromEnvironment(agentConfig?: AgentConfig): ResponsesRuntime {
@@ -233,50 +240,13 @@ export class ResponsesRuntime implements ResponsesRuntimeLike {
     request: NativeResponsesRequest,
     options: NativeLlmTraceOptions,
   ): Promise<NativeLlmResult> {
-    const toolNames = (request.tools ?? []).map((tool) => tool.name);
-    const run = async (span: Span): Promise<NativeLlmResult> => {
-      try {
-        const result = options.streamed
-          ? await this.completeStreamRaw(
-              buildStreamingBody(request),
-              options.handlers,
-            )
-          : {
-              response: await this.completeRaw(buildNonStreamingBody(request)),
-              ttftMs: null,
-            };
-
-        span.log({
-          output: llmOutputTraceValue(result.response),
-          metadata: {
-            response_id: result.response.id,
-          },
-          metrics: responseUsageMetrics(result.response, result.ttftMs),
-        });
-        return result;
-      } catch (error) {
-        span.log({ error: errorMessage(error) });
-        throw error;
-      }
+    if (options.streamed) {
+      return this.completeStreamRaw(buildStreamingBody(request), options.handlers);
+    }
+    return {
+      response: await this.completeRaw(buildNonStreamingBody(request)),
+      ttftMs: null,
     };
-    const spanArgs = {
-      name: `responses:${request.model}`,
-      type: "llm" as const,
-      event: {
-        input: llmInputTraceValue(request),
-        metadata: {
-          round_index: options.roundIndex,
-          runtime: "responses",
-          model: request.model,
-          max_output_tokens: request.maxOutputTokens ?? null,
-          tool_count: toolNames.length,
-          tools: toolNames,
-          streamed: options.streamed,
-        },
-      },
-    };
-
-    return tracedUnderParent(options.parent, run, spanArgs);
   }
 
   private async completeRaw(
@@ -372,12 +342,18 @@ export class ChatCompletionsRuntime implements ResponsesRuntimeLike {
 
   constructor(options: ResponsesRuntimeOptions = {}) {
     ensureBraintrustLogger(options.braintrust ?? null);
-    this.client = new OpenAI({
-      apiKey: options.apiKey,
-      baseURL: options.baseURL,
-      organization: options.organization,
-      project: options.project,
-    });
+    // wrapOpenAI auto-instruments chat.completions/responses calls with a
+    // braintrust LLM span. Also covers the OpenRouter path (same OpenAI client,
+    // just a different base URL) — braintrust's wrapOpenRouter is for their
+    // native SDK, not the OpenAI SDK, so it doesn't apply here.
+    this.client = wrapOpenAI(
+      new OpenAI({
+        apiKey: options.apiKey,
+        baseURL: options.baseURL,
+        organization: options.organization,
+        project: options.project,
+      }),
+    );
   }
 
   static fromModelBinding(
@@ -462,50 +438,18 @@ export class ChatCompletionsRuntime implements ResponsesRuntimeLike {
     request: NativeResponsesRequest,
     options: NativeLlmTraceOptions,
   ): Promise<NativeLlmResult> {
-    const toolNames = (request.tools ?? []).map((tool) => tool.name);
-    const run = async (span: Span): Promise<NativeLlmResult> => {
-      try {
-        const result = options.streamed
-          ? await this.completeStreamRaw(
-              buildChatStreamingBody(request),
-              options.handlers,
-            )
-          : {
-              response: chatCompletionToResponse(
-                await this.completeRaw(buildChatNonStreamingBody(request)),
-              ),
-              ttftMs: null,
-            };
-
-        span.log({
-          output: llmOutputTraceValue(result.response),
-          metadata: {
-            response_id: result.response.id,
-          },
-          metrics: responseUsageMetrics(result.response, result.ttftMs),
-        });
-        return result;
-      } catch (error) {
-        span.log({ error: errorMessage(error) });
-        throw error;
-      }
+    if (options.streamed) {
+      return this.completeStreamRaw(
+        buildChatStreamingBody(request),
+        options.handlers,
+      );
+    }
+    return {
+      response: chatCompletionToResponse(
+        await this.completeRaw(buildChatNonStreamingBody(request)),
+      ),
+      ttftMs: null,
     };
-    return tracedUnderParent(options.parent, run, {
-      name: `chat:${request.model}`,
-      type: "llm",
-      event: {
-        input: llmInputTraceValue(request),
-        metadata: {
-          round_index: options.roundIndex,
-          runtime: "chat_completions",
-          model: request.model,
-          max_output_tokens: request.maxOutputTokens ?? null,
-          tool_count: toolNames.length,
-          tools: toolNames,
-          streamed: options.streamed,
-        },
-      },
-    });
   }
 
   private async completeRaw(
@@ -1396,38 +1340,6 @@ function braintrustOptionsFromAgentConfig(
   }
 
   return options;
-}
-
-function llmInputTraceValue(request: NativeResponsesRequest): unknown {
-  return request.messages ?? request.input ?? null;
-}
-
-function llmOutputTraceValue(response: Response): Record<string, unknown> {
-  return {
-    messages: responseMessages(response),
-    tool_calls: responseToolCalls(response),
-    status: response.status,
-  };
-}
-
-function responseUsageMetrics(
-  response: Response,
-  ttftMs: number | null,
-): Record<string, number> {
-  const metrics: Record<string, number> = {};
-  const usage = response.usage;
-  if (usage) {
-    metrics.prompt_tokens = usage.input_tokens;
-    metrics.completion_tokens = usage.output_tokens;
-    metrics.tokens = usage.total_tokens;
-    metrics.prompt_cached_tokens = usage.input_tokens_details.cached_tokens;
-    metrics.completion_reasoning_tokens =
-      usage.output_tokens_details.reasoning_tokens;
-  }
-  if (ttftMs !== null) {
-    metrics.time_to_first_token = ttftMs / 1000;
-  }
-  return metrics;
 }
 
 function toolResultTraceOutput(events: EventData[]): unknown {
