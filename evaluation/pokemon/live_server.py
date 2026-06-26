@@ -43,6 +43,7 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>exo plays Poke
  .coach{border:1px solid #2d2f55} input{width:100%;background:#0c0d18;border:1px solid #2d2f55;color:#e8e8f0;border-radius:7px;padding:9px 11px;font:14px system-ui}
  .btns{display:flex;gap:8px;margin-top:8px} button{background:#3550e0;color:#fff;border:0;border-radius:7px;padding:8px 16px;font-weight:600;cursor:pointer;font-size:13px} button.sec{background:#2a2c4a}
  .gcur{margin-top:9px;font-size:13px;color:#ffd479;min-height:18px} .gcur b{color:#7e84a8;font-weight:600}
+ details{margin:5px 0;font-size:13px} summary{cursor:pointer;color:#8fd} pre{background:#0c0d18;border:1px solid #2d2f55;border-radius:7px;padding:8px;overflow:auto;font-size:11px;max-height:240px;white-space:pre-wrap}
 </style></head><body>
 <div class="wrap">
  <h1>🎮 exo plays Pok&eacute;mon &mdash; live</h1>
@@ -59,6 +60,10 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>exo plays Poke
    </div>
    <div class="panel" style="margin-top:14px"><p class="lbl">reasoning</p><div class="reason" id="reason">&mdash;</div></div>
    <div class="panel" style="margin-top:14px"><p class="lbl">durable memory</p><ul id="mem"></ul></div>
+   <div class="panel" style="margin-top:14px"><p class="lbl">🛠️ self-improvement</p>
+     <div class="gcur" id="selfedits"></div>
+     <div id="tools"></div>
+   </div>
  </div>
 </div>
 <script>
@@ -73,6 +78,12 @@ async function tick(){
       document.getElementById('buttons').innerHTML=(s.buttons||[]).map(b=>'<span class="chip">'+b+'</span>').join(' ');
       document.getElementById('reason').textContent=s.reasoning||'—';
       document.getElementById('mem').innerHTML=(s.memory||[]).map(m=>'<li>'+(m.text||m).replace(/</g,'&lt;')+'</li>').join('');
+      const se=document.getElementById('selfedits');
+      if(se) se.innerHTML = (typeof s.self_edits==='number') ? ('<b>policy self-edits:</b> '+s.self_edits) : '<b>self-edits:</b> —';
+      const td=document.getElementById('tools');
+      if(td) td.innerHTML=(s.tools&&s.tools.length)
+        ? ('<p class="lbl" style="margin-top:9px">agent-created tools ('+s.tools.length+')</p>'+s.tools.map(t=>'<details><summary>'+(t.name||'tool').replace(/</g,'&lt;')+'</summary><pre>'+(t.source||'').replace(/</g,'&lt;').slice(0,2000)+'</pre></details>').join(''))
+        : '<div class="gcur" style="margin-top:6px"><b>created tools:</b> none yet</div>';
       if(s.turn!==last){ last=s.turn; document.getElementById('screen').src='/screen.png?t='+s.turn+'_'+Date.now(); }
     }
   }catch(e){ document.getElementById('dot').className='dot off'; document.getElementById('live').textContent='no game running'; }

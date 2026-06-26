@@ -3,3 +3,4 @@ runs/
 *.gb
 *.gbc
 *.state
+*.ram

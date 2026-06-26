@@ -110,12 +110,58 @@ def read_memory(root: str) -> list:
     return best
 
 
+# --- self-improvement helpers --------------------------------------------
+_SELFIMPROVE_SRC = os.path.join(_EXO_REPO, "examples", "simple-coding-agent", "harness-pokemon-selfimprove.ts")
+_SELF_HARNESS = os.path.join(_EXO_REPO, "examples", "simple-coding-agent", "harness-pokemon-self.ts")
+_HARNESS_MOUNT_HOST = os.path.join(_EXO_REPO, "examples", "simple-coding-agent")
+_AGENT_TOOLS_DIR = os.path.join(_EXO_REPO, ".exo", "agent-tools")
+
+
+def validate_harness(path: str) -> bool:
+    """True if the harness module loads (catches the agent breaking its own policy)."""
+    proc = subprocess.run(
+        ["node", "--import", "tsx", "-e",
+         f"import({json.dumps(path)}).then(()=>process.exit(0)).catch(()=>process.exit(1))"],
+        cwd=_EXO_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120,
+    )
+    return proc.returncode == 0
+
+
+def quarantine_tool(function_name: str) -> bool:
+    """Move an agent-created tool whose schema the API rejected out of the load
+    dir (one bad tool 400s the whole request). Returns True if something moved."""
+    qdir = _AGENT_TOOLS_DIR + "-quarantine"
+    os.makedirs(qdir, exist_ok=True)
+    moved = False
+    for p in glob.glob(os.path.join(_AGENT_TOOLS_DIR, "*.ts")):
+        try:
+            if function_name in open(p).read():
+                shutil.move(p, os.path.join(qdir, os.path.basename(p)))
+                moved = True
+        except Exception:
+            continue
+    return moved
+
+
+def read_created_tools() -> list:
+    """Agent-created tools (name + source) from .exo/agent-tools, for the live view."""
+    out = []
+    for p in sorted(glob.glob(os.path.join(_AGENT_TOOLS_DIR, "*.ts"))):
+        try:
+            out.append({"name": os.path.basename(p)[:-3], "source": open(p).read()})
+        except Exception:
+            continue
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="exo plays Pokémon via PyBoy.")
     ap.add_argument("--rom", default=os.environ.get("POKEMON_ROM"), help="path to a .gb/.gbc ROM you own")
     ap.add_argument("--state", default=os.environ.get("POKEMON_STATE"), help="optional PyBoy save state to start from")
     ap.add_argument("--save-state", default=os.environ.get("POKEMON_SAVE_STATE"), help="write a PyBoy save state at the end (e.g. to skip the intro next time)")
     ap.add_argument("--exo-root", default=os.environ.get("POKEMON_EXO_ROOT"), help="reuse an existing exo --root (continuation: keeps the agent + durable memory)")
+    ap.add_argument("--self-improve", action="store_true", default=bool(os.environ.get("POKEMON_SELF_IMPROVE")),
+                    help="let the agent create tools + rewrite its OWN harness (mounted rw); validate + roll back broken self-edits")
     ap.add_argument("--steps", type=int, default=int(os.environ.get("POKEMON_STEPS", "40")))
     ap.add_argument("--press-frames", type=int, default=8, help="frames a button is held")
     ap.add_argument("--settle-frames", type=int, default=24, help="frames to advance after a press")
@@ -144,9 +190,17 @@ def main() -> None:
             for _ in range(args.boot_frames):
                 pyboy.tick()
 
+        # Self-improve: the agent edits its OWN harness. Use a gitignored COPY so
+        # the repo's committed harness stays clean, and keep a known-good backup.
+        harness = _HARNESS
+        if args.self_improve:
+            shutil.copyfile(_SELFIMPROVE_SRC, _SELF_HARNESS)
+            shutil.copyfile(_SELF_HARNESS, _SELF_HARNESS + ".good")
+            harness = _SELF_HARNESS
+            print(f"self-improve: agent will edit {_SELF_HARNESS}")
+
         # Continuation mode: reuse an existing exo root so the agent + its durable
-        # memory carry across runs (e.g. extending a finished run). Otherwise make
-        # a fresh agent.
+        # memory carry across runs. Otherwise make a fresh agent.
         if args.exo_root and os.path.isdir(args.exo_root):
             root = args.exo_root
             base = [_EXO_BIN, "--root", root, "--secret-backend", "file"]
@@ -157,10 +211,20 @@ def main() -> None:
             _run(base + ["secret", "set", "openai", "--env", "OPENAI_API_KEY"])
             _run(base + ["model", "register", _MODEL, "--secret", "openai"])
             _run(base + ["agent", "create", "--slug", "t", "--model", _MODEL,
-                         "--harness", _HARNESS, "--sandbox-provider", "docker", "Pokemon"])
+                         "--harness", harness, "--sandbox-provider", "docker", "Pokemon"])
         conv_n = 0
         conv = f"c{conv_n}"
         _run(base + ["conversation", "create", "t", conv])
+        if args.self_improve:
+            # Mount the harness dir read-write so the agent's shell can edit its
+            # own policy; edits propagate to the host and reload next turn.
+            _run(base + ["conversation", "mount", "add", "t", conv,
+                         _HARNESS_MOUNT_HOST, "/workspace/agent", "--rw"], check=False)
+        mem_dir = os.path.join(args.out, "memory")
+        if args.memory_snapshot_every:
+            os.makedirs(mem_dir, exist_ok=True)
+        self_edits = 0
+        last_harness_hash = None
         mem_dir = os.path.join(args.out, "memory")
         if args.memory_snapshot_every:
             os.makedirs(mem_dir, exist_ok=True)
@@ -174,11 +238,42 @@ def main() -> None:
                 conv_n += 1
                 conv = f"c{conv_n}"
                 _run(base + ["conversation", "create", "t", conv])
+                if args.self_improve:  # mount is per-conversation; re-attach it
+                    _run(base + ["conversation", "mount", "add", "t", conv,
+                                 _HARNESS_MOUNT_HOST, "/workspace/agent", "--rw"], check=False)
+            # Self-edit guard: if the agent changed its harness last turn, validate
+            # it before relying on it; roll back to the last good version if broken.
+            if args.self_improve:
+                try:
+                    h = open(_SELF_HARNESS).read()
+                    hh = hash(h)
+                    if hh != last_harness_hash:
+                        if validate_harness(_SELF_HARNESS):
+                            shutil.copyfile(_SELF_HARNESS, _SELF_HARNESS + ".good")
+                            if last_harness_hash is not None:
+                                self_edits += 1
+                                print(f"  [self-edit] harness changed + validated at turn {step}", flush=True)
+                        else:
+                            shutil.copyfile(_SELF_HARNESS + ".good", _SELF_HARNESS)
+                            print(f"  [self-edit] broken harness at turn {step} -> ROLLED BACK", flush=True)
+                        last_harness_hash = hash(open(_SELF_HARNESS).read())
+                except Exception:
+                    pass
             frame = pyboy.screen.image.convert("RGB")
             frame.save(_SCREEN)                                   # what the harness reads
             frame.resize((480, 432)).save(os.path.join(frames_dir, f"{step:04d}.png"))
-            _run(base + ["conversation", "send", "t", conv, "--",
-                         f"Turn {step}: here is the current screen. Choose your next button(s)."], check=False)
+            send = base + ["conversation", "send", "t", conv, "--",
+                           f"Turn {step}: here is the current screen. Choose your next button(s)."]
+            out = _run(send, check=False)
+            # Self-heal: a malformed agent-created tool 400s the WHOLE request, which
+            # would blind+mute the agent for the rest of the run. Quarantine the
+            # offending tool and retry so one bad tool can't brick the game.
+            for _ in range(2):
+                m = re.search(r"Invalid schema for function '([^']+)'", out)
+                if not (args.self_improve and m and quarantine_tool(m.group(1))):
+                    break
+                print(f"  [self-heal] quarantined malformed tool '{m.group(1)}' and retried", flush=True)
+                out = _run(send, check=False)
             reply = _last_assistant(root)
             buttons = parse_buttons(reply)
             print(f"[{step:03d}] conv={conv} buttons={buttons}  reply={reply[:110]!r}", flush=True)
@@ -186,9 +281,16 @@ def main() -> None:
             # live state for the web view (live_server.py serves it)
             try:
                 reasoning = (re.search(r'"reasoning"\s*:\s*"([^"]*)"', reply) or [None, ""])[1]
-                json.dump({"turn": step, "total": args.steps, "conv": conv, "buttons": buttons,
-                           "reasoning": reasoning, "memory": read_memory(root)},
-                          open(os.path.join(os.path.dirname(_SCREEN), "state.json"), "w"))
+                state = {"turn": step, "total": args.steps, "conv": conv, "buttons": buttons,
+                         "reasoning": reasoning, "memory": read_memory(root)}
+                if args.self_improve:
+                    state["self_edits"] = self_edits
+                    state["tools"] = read_created_tools()
+                    try:
+                        state["harness"] = open(_SELF_HARNESS).read()
+                    except Exception:
+                        pass
+                json.dump(state, open(os.path.join(os.path.dirname(_SCREEN), "state.json"), "w"))
             except Exception:
                 pass
             if args.memory_snapshot_every and step % args.memory_snapshot_every == 0:
