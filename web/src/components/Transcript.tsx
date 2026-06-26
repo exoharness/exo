@@ -348,6 +348,7 @@ export function Transcript({
   // currently on screen. The range comes from virtuoso's rangeChanged (the same
   // signal find repaints on), so the indicator tracks the real viewport.
   const minimapMarkers = useMemo(() => rows.map(markerKindForRow), [rows]);
+  const minimapIntensity = useMemo(() => rows.map(intensityForRow), [rows]);
   const [visibleRange, setVisibleRange] = useState<{
     startIndex: number;
     endIndex: number;
@@ -673,6 +674,7 @@ export function Transcript({
           {hasRows && conversation ? (
             <TimelineMinimap
               markers={minimapMarkers}
+              intensity={minimapIntensity}
               startIndex={visibleRange.startIndex}
               endIndex={visibleRange.endIndex}
               onJump={scrollToRow}
@@ -983,6 +985,21 @@ function markerKindForRow(row: TimelineRowItem): MarkerKind {
   return conversationEventKind(row.event) === "tool" ? "tool" : "message";
 }
 
+// Per-row "how much was going on" for the minimap heat: output + reasoning tokens
+// the model spent on that turn. Non-model rows (user text, tools, artifacts) have
+// no cost and read as flat, and a turn whose usage was not recorded is treated as
+// zero, so the heat degrades gracefully to a plain strip.
+function intensityForRow(row: TimelineRowItem): number {
+  const data = row.event.data;
+  if (data.type === "messages" && data.usage) {
+    return (
+      (data.usage.completion_tokens ?? 0) +
+      (data.usage.completion_reasoning_tokens ?? 0)
+    );
+  }
+  return 0;
+}
+
 // Highest-signal kind wins when several rows collapse into one minimap segment,
 // so an error or tool call is never hidden behind a plain message.
 const MARKER_PRIORITY: Record<MarkerKind, number> = {
@@ -999,34 +1016,50 @@ const MINIMAP_MAX_SEGMENTS = 240;
 // Below this, a minimap adds clutter without helping you navigate.
 const MINIMAP_MIN_ROWS = 8;
 
+// Marker width range (px) for the token-heat ridge: a turn that spent no model
+// tokens sits at the minimum, the busiest turn at the maximum.
+const MINIMAP_DOT_MIN_PX = 4;
+const MINIMAP_DOT_MAX_PX = 20;
+
 function TimelineMinimap({
   markers,
+  intensity,
   startIndex,
   endIndex,
   onJump,
 }: {
   markers: MarkerKind[];
+  intensity: number[];
   startIndex: number;
   endIndex: number;
   onJump: (rowIndex: number) => void;
 }) {
-  const segments = useMemo(() => {
+  const { segments, maxHeat } = useMemo(() => {
     const total = markers.length;
     const count = Math.min(MINIMAP_MAX_SEGMENTS, total);
-    const out: Array<{ kind: MarkerKind; rowIndex: number; span: number }> = [];
+    const out: Array<{
+      kind: MarkerKind;
+      rowIndex: number;
+      span: number;
+      heat: number;
+    }> = [];
+    let peak = 0;
     for (let segment = 0; segment < count; segment += 1) {
       const lo = Math.floor((segment * total) / count);
       const hi = Math.max(lo + 1, Math.floor(((segment + 1) * total) / count));
       let kind: MarkerKind = markers[lo] ?? "system";
+      let heat = intensity[lo] ?? 0;
       for (let i = lo + 1; i < hi; i += 1) {
         if (MARKER_PRIORITY[markers[i]!] > MARKER_PRIORITY[kind]) {
           kind = markers[i]!;
         }
+        heat = Math.max(heat, intensity[i] ?? 0);
       }
-      out.push({ kind, rowIndex: lo, span: hi - lo });
+      peak = Math.max(peak, heat);
+      out.push({ kind, rowIndex: lo, span: hi - lo, heat });
     }
-    return out;
-  }, [markers]);
+    return { segments: out, maxHeat: peak };
+  }, [markers, intensity]);
 
   if (markers.length < MINIMAP_MIN_ROWS) {
     return null;
@@ -1039,6 +1072,15 @@ function TimelineMinimap({
         const segLo = segment.rowIndex;
         const segHi = segLo + segment.span;
         const inView = segLo <= endIndex && segHi > startIndex;
+        // sqrt so a moderately busy turn still reads next to one giant spike.
+        // With no token data at all, fall back to a uniform marker so the strip
+        // looks like the plain type minimap instead of a row of slivers.
+        const norm = maxHeat > 0 ? Math.sqrt(segment.heat / maxHeat) : 0;
+        const widthPx =
+          maxHeat > 0
+            ? MINIMAP_DOT_MIN_PX +
+              norm * (MINIMAP_DOT_MAX_PX - MINIMAP_DOT_MIN_PX)
+            : 6;
         return (
           <button
             className={`timeline-minimap-tick kind-${segment.kind}${
@@ -1047,9 +1089,17 @@ function TimelineMinimap({
             key={index}
             onClick={() => onJump(segment.rowIndex)}
             tabIndex={-1}
+            title={
+              segment.heat > 0
+                ? `${segment.kind} · ${segment.heat.toLocaleString()} tokens`
+                : segment.kind
+            }
             type="button"
           >
-            <span className="timeline-minimap-dot" />
+            <span
+              className="timeline-minimap-dot"
+              style={{ width: `${widthPx}px` }}
+            />
           </button>
         );
       })}

@@ -2282,7 +2282,7 @@ pre {
   display: flex;
   flex-direction: column;
   gap: 0;
-  width: 12px;
+  width: 26px;
   padding: 3px 2px;
   border-radius: 7px;
   background: transparent;
@@ -2305,7 +2305,8 @@ pre {
   min-height: 0;
   display: flex;
   align-items: stretch;
-  justify-content: center;
+  /* Right-align so heavier turns grow leftward into a token-usage ridge. */
+  justify-content: flex-end;
   padding: 0;
   border: 0;
   background: transparent;
@@ -2318,18 +2319,19 @@ pre {
 }
 
 .timeline-minimap-dot {
-  width: 6px;
+  /* width is set inline from the row's token heat; this is just a fallback. */
+  width: 5px;
   height: 100%;
   min-height: 0;
   border-radius: 1px;
   background: var(--text-faint);
   transition:
     width 0.1s ease,
-    background 0.1s ease;
+    filter 0.1s ease;
 }
 
 .timeline-minimap-tick:hover .timeline-minimap-dot {
-  width: 12px;
+  filter: brightness(1.35);
 }
 
 .timeline-minimap-tick.kind-message .timeline-minimap-dot {
