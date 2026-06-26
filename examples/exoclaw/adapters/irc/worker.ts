@@ -67,6 +67,13 @@ const lines = readline.createInterface({
   crlfDelay: Number.POSITIVE_INFINITY,
 });
 
+lines.on("error", (error) => {
+  writeWorkerEvent({
+    type: "error",
+    message: `IRC socket read error: ${error.message}`,
+  });
+});
+
 let registered = false;
 let joined = false;
 
@@ -127,6 +134,13 @@ const input = inputReadline.createInterface({
   crlfDelay: Number.POSITIVE_INFINITY,
 });
 
+input.on("error", (error) => {
+  writeWorkerEvent({
+    type: "error",
+    message: `IRC adapter command stream error: ${error.message}`,
+  });
+});
+
 for await (const line of input) {
   if (line.trim().length === 0) {
     continue;
@@ -166,7 +180,14 @@ function onceConnected(socket: net.Socket): Promise<void> {
 }
 
 function writeIrcCommand(command: string): void {
-  socket.write(`${command}\r\n`);
+  socket.write(`${command}\r\n`, (error) => {
+    if (error) {
+      writeWorkerEvent({
+        type: "error",
+        message: `IRC socket write error: ${error.message}`,
+      });
+    }
+  });
 }
 
 function isJoinConfirmation(raw: string): boolean {

@@ -15,6 +15,14 @@ MODULE="${EXO_MODULE:-examples/exoclaw/harness.ts}"
 HARNESS="exoclaw"
 LOCAL_PROMPT_FILE="${EXOCLAW_LOCAL_PROMPT_FILE:-$ROOT_DIR/.exo/exoclaw-profile.md}"
 SANDBOX_IMAGE="${EXO_SANDBOX_IMAGE:-ubuntu:24.04}"
+SANDBOX_PROVIDER="${EXO_SANDBOX_PROVIDER:-}"
+SANDBOX_BACKEND="${EXO_SANDBOX_BACKEND:-}"
+SELF_REPO_MOUNT_PATH="${EXOCLAW_REPO:-/workspace/exo}"
+SELF_MAP_PATH="$SELF_REPO_MOUNT_PATH/examples/exoclaw/SELF.md"
+AGENT_CLI_MOUNT_ROOT="${EXOCLAW_AGENT_CLI_ROOT:-}"
+AGENT_CLI_MOUNT_PATH="${EXOCLAW_AGENT_CLI_MOUNT:-/agent-cli}"
+FAL_IMAGE_CACHE_ROOT="${EXOCLAW_FAL_IMAGE_CACHE:-/tmp/exoclaw-fal}"
+FAL_IMAGE_MOUNT_PATH="${EXOCLAW_FAL_IMAGE_MOUNT:-/fal}"
 NETWORKING="${EXO_NETWORKING:-enabled}"
 SHELL_PROGRAM="${EXO_SHELL_PROGRAM:-/bin/bash}"
 SANDBOX_SCOPE="${EXO_SANDBOX_SCOPE:-}"
@@ -27,6 +35,9 @@ START_ADAPTERS="${EXO_START_ADAPTERS:-true}"
 ADAPTER_LIMIT="${EXO_ADAPTER_LIMIT:-50}"
 CONTROL=false
 SETUP_PROFILE=false
+CANONICAL_SETUP=false
+SANDBOX_PROVIDER_EXPLICIT=false
+SANDBOX_BACKEND_EXPLICIT=false
 declare -a CONTROL_PIDS=()
 SETUP_ADAPTER="${EXO_SETUP_ADAPTER:-}"
 declare -a SETUP_ADAPTERS=()
@@ -39,13 +50,14 @@ export EXOCLAW_LOCAL_PROMPT_FILE="$LOCAL_PROMPT_FILE"
 usage() {
   cat <<'EOF'
 Usage:
-  examples/exoclaw/scripts/exoclaw-repl [options]
-  examples/exoclaw/scripts/exoclaw-repl list
-  examples/exoclaw/scripts/exoclaw-repl delall all
-  examples/exoclaw/scripts/exoclaw-repl fresh
-  examples/exoclaw/scripts/exoclaw-repl stop-all
-  examples/exoclaw/scripts/exoclaw-repl setup-profile
-  examples/exoclaw/scripts/exoclaw-repl setup-sandbox
+  examples/exoclaw/scripts/exoclaw-control [options]
+  examples/exoclaw/scripts/exoclaw-control list
+  examples/exoclaw/scripts/exoclaw-control delall all
+  examples/exoclaw/scripts/exoclaw-control fresh
+  examples/exoclaw/scripts/exoclaw-control canonical
+  examples/exoclaw/scripts/exoclaw-control stop-all
+  examples/exoclaw/scripts/exoclaw-control setup-profile
+  examples/exoclaw/scripts/exoclaw-control setup-sandbox
 
 Default behavior creates or reuses an Exoclaw agent and conversation, starts the
 local scheduler and adapter loops, then starts a REPL. It reads .env by default
@@ -59,7 +71,17 @@ Options:
   --agent-name <name>          Agent display name (default: Exoclaw Agent)
   --conversation-name <name>   Conversation display name (default: Dev)
   --module <path>              Exoclaw TypeScript harness module
+  --canonical                  Docker sandbox, repo self-map mount, IRC+Discord setup,
+                               control logs, and guardian config
   --sandbox-image <image>      Sandbox image (default: ubuntu:24.04)
+  --sandbox-provider <provider>
+                                Sandbox provider: daytona, apple-container, docker, or local-process
+  --sandbox-backend <backend>   Local sandbox backend: apple-container, docker, or local-process.
+                                Defaults to --sandbox-provider when that provider is local.
+  --self-repo-mount <path>      Sandbox path for this repo (default: /workspace/exo)
+  --agent-cli-mount <host-dir>  Bind-mount this host directory read-write into the
+                                sandbox for the agent-cli adapter (default: none)
+  --agent-cli-mount-path <path> Sandbox path for the agent-cli mount (default: /agent-cli)
   --networking <mode>          enabled or disabled (default: enabled)
   --shell-program <path>       Shell in the sandbox (default: /bin/bash)
   --sandbox-scope <scope>      agent or conversation (default: Exoclaw agent)
@@ -87,9 +109,10 @@ Options:
 Environment overrides:
   EXO_MODEL, EXO_AGENT, EXO_CONVERSATION, EXO_AGENT_NAME,
   EXO_CONVERSATION_NAME, EXO_MODULE, EXO_SANDBOX_IMAGE,
-  EXO_NETWORKING, EXO_SHELL_PROGRAM, EXO_SANDBOX_SCOPE, EXO_ENV_FILE,
-  EXOCLAW_LOCAL_PROMPT_FILE,
-  EXO_BIN, EXO_START_SCHEDULER, EXO_START_ADAPTERS,
+  EXO_SANDBOX_PROVIDER, EXO_SANDBOX_BACKEND, EXO_NETWORKING,
+  EXO_SHELL_PROGRAM, EXO_SANDBOX_SCOPE, EXO_ENV_FILE, EXOCLAW_LOCAL_PROMPT_FILE,
+  EXO_BIN, EXO_START_SCHEDULER, EXO_START_ADAPTERS, EXOCLAW_REPO,
+  EXOCLAW_AGENT_CLI_ROOT, EXOCLAW_AGENT_CLI_MOUNT,
   EXOCLAW_SCHEDULER_BIN, EXO_SCHEDULER_INTERVAL_SECONDS, EXO_ADAPTER_LIMIT,
   EXO_SETUP_ADAPTER, EXO_INITIAL_PROMPT_FILE
 EOF
@@ -183,6 +206,41 @@ add_setup_adapter() {
   SETUP_ADAPTERS+=("$adapter")
 }
 
+apply_canonical_setup_defaults() {
+  if [[ "$CANONICAL_SETUP" != true ]]; then
+    return
+  fi
+
+  USE_SANDBOX=true
+  PULL_SANDBOX=true
+  START_SCHEDULER=true
+  START_ADAPTERS=true
+  CONTROL=true
+  if [[ "$SANDBOX_PROVIDER_EXPLICIT" != true ]]; then
+    SANDBOX_PROVIDER="docker"
+  fi
+  if [[ "$SANDBOX_BACKEND_EXPLICIT" != true ]]; then
+    SANDBOX_BACKEND="docker"
+  fi
+  add_setup_adapter "irc"
+  add_setup_adapter "discord"
+}
+
+configure_guardian_for_current_launch() {
+  if [[ "$CANONICAL_SETUP" != true ]]; then
+    return
+  fi
+
+  "$ROOT_DIR/examples/exoclaw/scripts/exoclaw-service-guardian" configure \
+    --env-file "$ENV_FILE" \
+    --exo-bin "$EXO_BIN" \
+    --scheduler-bin "$SCHEDULER_BIN" \
+    --sandbox-backend "$SANDBOX_BACKEND" \
+    --scheduler-interval "$SCHEDULER_INTERVAL_SECONDS" \
+    --adapter-limit "$ADAPTER_LIMIT" >/dev/null
+  echo "Configured guardian for Docker-backed Exoclaw services."
+}
+
 build_exo() {
   echo "Building exo binary..."
   (cd "$ROOT_DIR" && CARGO_TARGET_DIR=target cargo build -p exo --ignore-rust-version)
@@ -208,20 +266,63 @@ scheduler_source_newer_than() {
   return 1
 }
 
+effective_sandbox_backend() {
+  if [[ -n "$SANDBOX_BACKEND" ]]; then
+    printf '%s\n' "$SANDBOX_BACKEND"
+    return
+  fi
+  case "$SANDBOX_PROVIDER" in
+    apple-container|docker|local-process)
+      printf '%s\n' "$SANDBOX_PROVIDER"
+      ;;
+  esac
+}
+
+append_exo_global_args() {
+  local backend
+  EXO_GLOBAL_ARGS=(--env-file-if-exists "$ENV_FILE")
+  backend="$(effective_sandbox_backend)"
+  if [[ -n "$backend" ]]; then
+    EXO_GLOBAL_ARGS+=(--sandbox-backend "$backend")
+  fi
+}
+
 exo() {
-  "$EXO_BIN" --env-file-if-exists "$ENV_FILE" "$@"
+  EXO_GLOBAL_ARGS=()
+  append_exo_global_args
+  "$EXO_BIN" "${EXO_GLOBAL_ARGS[@]}" "$@"
 }
 
 scheduler_pid_file() {
   echo "$ROOT_DIR/.exo/exoclaw-scheduler.pid"
 }
 
+scheduler_lock_file() {
+  echo "$ROOT_DIR/.exo/exoclaw-scheduler.lock"
+}
+
 scheduler_log_file() {
   echo "$ROOT_DIR/.exo/exoclaw-scheduler.log"
 }
 
+repl_restart_file() {
+  echo "$ROOT_DIR/.exo/exoclaw-control.restart"
+}
+
 adapters_pid_file() {
   echo "$ROOT_DIR/.exo/exoclaw-adapters.pid"
+}
+
+adapters_lock_file() {
+  echo "$ROOT_DIR/.exo/exoclaw-adapters.lock"
+}
+
+adapters_restart_file() {
+  echo "$ROOT_DIR/.exo/exoclaw-adapters.restart"
+}
+
+reboot_notice_file() {
+  echo "$ROOT_DIR/.exo/exoclaw-reboot-notice.json"
 }
 
 adapters_log_file() {
@@ -292,9 +393,15 @@ ensure_scheduler() {
   pid_file="$(scheduler_pid_file)"
   log_file="$(scheduler_log_file)"
   echo "Starting scheduler loop..."
-  nohup "$SCHEDULER_BIN" --env-file-if-exists "$ENV_FILE" \
-    run --watch --interval-seconds "$SCHEDULER_INTERVAL_SECONDS" \
-    >>"$log_file" 2>&1 &
+  rm -f "$(scheduler_lock_file)"
+  local scheduler_args=(--env-file-if-exists "$ENV_FILE")
+  local backend
+  backend="$(effective_sandbox_backend)"
+  if [[ -n "$backend" ]]; then
+    scheduler_args+=(--sandbox-backend "$backend")
+  fi
+  nohup "$SCHEDULER_BIN" "${scheduler_args[@]}" run --watch \
+    --interval-seconds "$SCHEDULER_INTERVAL_SECONDS" >>"$log_file" 2>&1 &
   echo "$!" >"$pid_file"
   echo "Scheduler log: $log_file"
 }
@@ -312,8 +419,14 @@ ensure_adapters() {
   pid_file="$(adapters_pid_file)"
   log_file="$(adapters_log_file)"
   echo "Starting adapter runner..."
-  nohup "$EXO_BIN" --env-file-if-exists "$ENV_FILE" --harness "$HARNESS" \
-    adapters run --limit "$ADAPTER_LIMIT" \
+  EXO_GLOBAL_ARGS=()
+  append_exo_global_args
+  nohup "$EXO_BIN" "${EXO_GLOBAL_ARGS[@]}" --harness "$HARNESS" \
+    adapters run \
+      --limit "$ADAPTER_LIMIT" \
+      --lock-file "$(adapters_lock_file)" \
+      --drain-marker "$(adapters_restart_file)" \
+      --reboot-notice "$(reboot_notice_file)" \
     >>"$log_file" 2>&1 &
   echo "$!" >"$pid_file"
   echo "Adapter log: $log_file"
@@ -392,15 +505,24 @@ ensure_agent() {
   )
   if [[ "$USE_SANDBOX" == true ]]; then
     args+=(--sandbox-image "$SANDBOX_IMAGE" --networking "$NETWORKING")
+    if [[ -n "$SANDBOX_PROVIDER" ]]; then
+      args+=(--sandbox-provider "$SANDBOX_PROVIDER")
+    fi
   fi
   exo "${args[@]}"
 }
 
 ensure_conversation() {
   if conversation_exists; then
-    if [[ -n "$SANDBOX_SCOPE" ]]; then
-      exo conversation update "$AGENT" "$CONVERSATION" \
-        --sandbox-scope "$SANDBOX_SCOPE" >/dev/null
+    if [[ "$USE_SANDBOX" == true && ( -n "$SANDBOX_SCOPE" || -n "$SANDBOX_PROVIDER" ) ]]; then
+      local update_args=(conversation update "$AGENT" "$CONVERSATION")
+      if [[ -n "$SANDBOX_SCOPE" ]]; then
+        update_args+=(--sandbox-scope "$SANDBOX_SCOPE")
+      fi
+      if [[ -n "$SANDBOX_PROVIDER" ]]; then
+        update_args+=(--sandbox-provider "$SANDBOX_PROVIDER")
+      fi
+      exo "${update_args[@]}" >/dev/null
     fi
     return
   fi
@@ -410,14 +532,59 @@ ensure_conversation() {
   if [[ -n "$SANDBOX_SCOPE" ]]; then
     args+=(--sandbox-scope "$SANDBOX_SCOPE")
   fi
+  if [[ -n "$SANDBOX_PROVIDER" ]]; then
+    args+=(--sandbox-provider "$SANDBOX_PROVIDER")
+  fi
   exo "${args[@]}"
   if [[ "$USE_SANDBOX" == true ]]; then
     local update_args=(conversation update "$AGENT" "$CONVERSATION" --shell-program "$SHELL_PROGRAM")
     if [[ -n "$SANDBOX_SCOPE" ]]; then
       update_args+=(--sandbox-scope "$SANDBOX_SCOPE")
     fi
+    if [[ -n "$SANDBOX_PROVIDER" ]]; then
+      update_args+=(--sandbox-provider "$SANDBOX_PROVIDER")
+    fi
     exo "${update_args[@]}" >/dev/null
   fi
+}
+
+ensure_self_repo_mount() {
+  if [[ "$USE_SANDBOX" != true ]]; then
+    return
+  fi
+  if [[ ! "$SELF_REPO_MOUNT_PATH" = /* ]]; then
+    die "self repo mount path must be absolute: $SELF_REPO_MOUNT_PATH"
+  fi
+  if [[ ! -f "$ROOT_DIR/examples/exoclaw/SELF.md" ]]; then
+    die "Exoclaw self map is missing: examples/exoclaw/SELF.md"
+  fi
+
+  exo conversation mount add "$AGENT" "$CONVERSATION" "$ROOT_DIR" "$SELF_REPO_MOUNT_PATH" --rw >/dev/null
+}
+
+ensure_fal_image_mount() {
+  if [[ "$USE_SANDBOX" != true ]]; then
+    return
+  fi
+  mkdir -p "$FAL_IMAGE_CACHE_ROOT"
+  exo conversation mount add "$AGENT" "$CONVERSATION" "$FAL_IMAGE_CACHE_ROOT" "$FAL_IMAGE_MOUNT_PATH" >/dev/null
+}
+
+ensure_agent_cli_mount() {
+  if [[ "$USE_SANDBOX" != true || -z "$AGENT_CLI_MOUNT_ROOT" ]]; then
+    return
+  fi
+  if [[ ! "$AGENT_CLI_MOUNT_ROOT" = /* ]]; then
+    die "agent-cli mount root must be absolute: $AGENT_CLI_MOUNT_ROOT"
+  fi
+  if [[ ! -d "$AGENT_CLI_MOUNT_ROOT" ]]; then
+    die "agent-cli mount root does not exist: $AGENT_CLI_MOUNT_ROOT"
+  fi
+  if [[ ! "$AGENT_CLI_MOUNT_PATH" = /* ]]; then
+    die "agent-cli mount path must be absolute: $AGENT_CLI_MOUNT_PATH"
+  fi
+
+  exo conversation mount add "$AGENT" "$CONVERSATION" "$AGENT_CLI_MOUNT_ROOT" "$AGENT_CLI_MOUNT_PATH" --rw >/dev/null
 }
 
 list_agents_and_conversations() {
@@ -461,6 +628,7 @@ stop_scheduler() {
     fi
   fi
   pkill -f "exoclaw-scheduler-runner .*run --watch" >/dev/null 2>&1 || true
+  rm -f "$(scheduler_lock_file)"
   rm -f "$pid_file"
 }
 
@@ -561,9 +729,49 @@ setup_local_profile() {
   echo "Wrote local profile prompt. The harness will load it from EXOCLAW_LOCAL_PROMPT_FILE."
 }
 
+# During fresh, all agents and conversations from this checkout are deleted, so
+# sandbox containers left behind by earlier runs of this checkout are obsolete.
+# Remove exo sandbox containers whose creating process is gone, plus any exo
+# sandbox container that has this repo mounted. Containers from other checkouts
+# with live owners are left alone, as is anything without exo sandbox labels.
+cleanup_stale_sandbox_containers() {
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    return
+  fi
+  local container key owner name removed=0
+  for container in $(docker ps -a --filter "name=exo-" --format '{{.ID}}' 2>/dev/null); do
+    name="$(docker inspect "$container" --format '{{.Name}}' 2>/dev/null | sed 's|^/||')"
+    [[ "$name" == exo-* ]] || continue
+    key="$(docker inspect "$container" --format '{{index .Config.Labels "exo.sandbox.key"}}' 2>/dev/null)"
+    [[ -n "$key" ]] || continue
+    owner="$(docker inspect "$container" --format '{{index .Config.Labels "exo.sandbox.owner-pid"}}' 2>/dev/null || true)"
+    if [[ -n "$owner" ]] && kill -0 "$owner" 2>/dev/null && ! container_mounts_current_checkout "$container"; then
+      continue
+    fi
+    echo "Removing stale sandbox container $name..."
+    docker rm -f "$container" >/dev/null 2>&1 || true
+    removed=$((removed + 1))
+  done
+  if [[ "$removed" -gt 0 ]]; then
+    echo "Removed $removed stale sandbox container(s)."
+  fi
+}
+
+container_mounts_current_checkout() {
+  local container="$1"
+  local source
+  while IFS= read -r source; do
+    if [[ "$source" == "$ROOT_DIR" ]]; then
+      return 0
+    fi
+  done < <(docker inspect "$container" --format '{{range .Mounts}}{{println .Source}}{{end}}' 2>/dev/null || true)
+  return 1
+}
+
 fresh_start() {
   build_exo
   delete_all_agents_and_conversations
+  cleanup_stale_sandbox_containers
   if [[ "$USE_SANDBOX" == true ]]; then
     PULL_SANDBOX=true
   fi
@@ -581,6 +789,10 @@ run_repl() {
   fi
   ensure_agent
   ensure_conversation
+  ensure_self_repo_mount
+  ensure_fal_image_mount
+  ensure_agent_cli_mount
+  configure_guardian_for_current_launch
   local scheduler_log_start_line
   scheduler_log_start_line="$(scheduler_log_line_count)"
   ensure_scheduler
@@ -593,7 +805,9 @@ run_repl() {
   if [[ "$CONTROL" == true ]]; then
     run_control_repl "$scheduler_log_start_line" "$adapter_log_start_line"
   else
-    exec "$EXO_BIN" --env-file-if-exists "$ENV_FILE" repl \
+    EXO_GLOBAL_ARGS=()
+    append_exo_global_args
+    exec "$EXO_BIN" "${EXO_GLOBAL_ARGS[@]}" repl \
       --agent "$AGENT" \
       --conversation "$CONVERSATION"
   fi
@@ -622,16 +836,23 @@ scheduler_log_line_count() {
 run_control_repl() {
   local scheduler_start_line="$1"
   local adapter_start_line="$2"
+  local repl_pid=""
+  local restart_watcher_pid=""
 
   cleanup_control_logs() {
     local pid
     for pid in "${CONTROL_PIDS[@]:-}"; do
       kill "$pid" >/dev/null 2>&1 || true
     done
+    if [[ -n "${restart_watcher_pid:-}" ]]; then
+      kill "$restart_watcher_pid" >/dev/null 2>&1 || true
+    fi
+    kill_repl_children "$$"
   }
   trap cleanup_control_logs EXIT INT TERM
 
-  echo "Control console enabled. Streaming scheduler and adapter logs into this REPL."
+  echo "Control console enabled. Streaming scheduler and adapter logs beside the REPL."
+  echo "The control wrapper will restart the REPL child when $(repl_restart_file) appears."
   if [[ "$START_SCHEDULER" == true ]]; then
     start_control_log_tail "scheduler" "$(scheduler_log_file)" "$scheduler_start_line"
   fi
@@ -639,9 +860,66 @@ run_control_repl() {
     start_control_log_tail "adapters" "$(adapters_log_file)" "$adapter_start_line"
   fi
 
-  "$EXO_BIN" --env-file-if-exists "$ENV_FILE" repl \
-    --agent "$AGENT" \
-    --conversation "$CONVERSATION"
+  EXO_GLOBAL_ARGS=()
+  append_exo_global_args
+  while true; do
+    rm -f "$(repl_restart_file)"
+    watch_repl_restart_request "$$" &
+    restart_watcher_pid="$!"
+
+    local repl_exit
+    if "$EXO_BIN" "${EXO_GLOBAL_ARGS[@]}" repl \
+      --agent "$AGENT" \
+      --conversation "$CONVERSATION"; then
+      repl_exit=0
+    else
+      repl_exit=$?
+    fi
+
+    if [[ -n "${restart_watcher_pid:-}" ]]; then
+      kill "$restart_watcher_pid" >/dev/null 2>&1 || true
+      wait "$restart_watcher_pid" >/dev/null 2>&1 || true
+      restart_watcher_pid=""
+    fi
+
+    if [[ -f "$(repl_restart_file)" ]]; then
+      rm -f "$(repl_restart_file)"
+      echo "Restarting Exoclaw REPL child after guardian rebuild request..."
+      continue
+    fi
+    return "$repl_exit"
+  done
+}
+
+kill_repl_children() {
+  local control_pid="$1"
+  local child_pid
+  while IFS= read -r child_pid; do
+    if [[ -n "$child_pid" ]]; then
+      kill "$child_pid" >/dev/null 2>&1 || true
+    fi
+  done < <(find_repl_children "$control_pid")
+}
+
+find_repl_children() {
+  local control_pid="$1"
+  ps ax -o pid= -o ppid= -o command= | awk -v ppid="$control_pid" -v exo="$EXO_BIN" '
+    $2 == ppid && index($0, exo) > 0 && index($0, " repl") > 0 { print $1 }
+  '
+}
+
+watch_repl_restart_request() {
+  local control_pid="$1"
+  local marker
+  marker="$(repl_restart_file)"
+  while true; do
+    if [[ -f "$marker" ]]; then
+      echo "Guardian requested REPL child restart; stopping current child..."
+      kill_repl_children "$control_pid"
+      return
+    fi
+    sleep 2
+  done
 }
 
 start_control_log_tail() {
@@ -684,12 +962,35 @@ send_startup_prompt() {
 
   local adapter
   for adapter in "${SETUP_ADAPTERS[@]}"; do
-    send_prompt_from_files "$(adapter_setup_prompt_file "$adapter")"
+    send_adapter_setup_prompt "$adapter"
   done
 
   if [[ -n "$INITIAL_PROMPT_FILE" ]]; then
     send_prompt_from_files "$(startup_prompt_file "$INITIAL_PROMPT_FILE")"
   fi
+}
+
+send_adapter_setup_prompt() {
+  local adapter="$1"
+  local file prompt
+  file="$(adapter_setup_prompt_file "$adapter")"
+  prompt="$(<"$file")"
+
+  # The agent-cli setup prompt asks for the host workspace root, which the
+  # sandboxed agent cannot determine on its own. Inject it when known so the
+  # non-interactive setup can complete without waiting for an answer.
+  if [[ "$adapter" == "agent-cli" ]]; then
+    if [[ -z "$AGENT_CLI_MOUNT_ROOT" ]]; then
+      die "--setup agent-cli requires --agent-cli-mount <host-dir> so the host workspace root can be provided to the agent"
+    fi
+    prompt+=$'\n\n'"The host workspace root bind-mounted at $AGENT_CLI_MOUNT_PATH is: $AGENT_CLI_MOUNT_ROOT"
+  fi
+
+  if [[ -z "${prompt//[[:space:]]/}" ]]; then
+    die "startup prompt is empty: $file"
+  fi
+  echo "Sending startup prompt from: $file"
+  exo conversation send "$AGENT" "$CONVERSATION" "$prompt"
 }
 
 send_prompt_from_files() {
@@ -827,6 +1128,11 @@ while [[ $# -gt 0 ]]; do
       shift
       COMMAND="fresh"
       ;;
+    canonical|dev|docker-dev)
+      shift
+      COMMAND="repl"
+      CANONICAL_SETUP=true
+      ;;
     stop-all|stop)
       shift
       [[ $# -eq 0 ]] || die "stop-all does not accept additional arguments"
@@ -873,6 +1179,44 @@ while [[ $# -gt 0 ]]; do
     --sandbox-image)
       SANDBOX_IMAGE="${2:-}"
       [[ -n "$SANDBOX_IMAGE" ]] || die "--sandbox-image requires a value"
+      shift 2
+      ;;
+    --sandbox-provider)
+      SANDBOX_PROVIDER="${2:-}"
+      case "$SANDBOX_PROVIDER" in
+        daytona|apple-container|docker|local-process) ;;
+        *) die "--sandbox-provider must be daytona, apple-container, docker, or local-process" ;;
+      esac
+      SANDBOX_PROVIDER_EXPLICIT=true
+      shift 2
+      ;;
+    --sandbox-backend)
+      SANDBOX_BACKEND="${2:-}"
+      case "$SANDBOX_BACKEND" in
+        apple-container|docker|local-process) ;;
+        *) die "--sandbox-backend must be apple-container, docker, or local-process" ;;
+      esac
+      SANDBOX_BACKEND_EXPLICIT=true
+      shift 2
+      ;;
+    --canonical)
+      CANONICAL_SETUP=true
+      shift
+      ;;
+    --self-repo-mount)
+      SELF_REPO_MOUNT_PATH="${2:-}"
+      [[ -n "$SELF_REPO_MOUNT_PATH" ]] || die "--self-repo-mount requires a value"
+      SELF_MAP_PATH="$SELF_REPO_MOUNT_PATH/examples/exoclaw/SELF.md"
+      shift 2
+      ;;
+    --agent-cli-mount)
+      AGENT_CLI_MOUNT_ROOT="${2:-}"
+      [[ -n "$AGENT_CLI_MOUNT_ROOT" ]] || die "--agent-cli-mount requires a value"
+      shift 2
+      ;;
+    --agent-cli-mount-path)
+      AGENT_CLI_MOUNT_PATH="${2:-}"
+      [[ -n "$AGENT_CLI_MOUNT_PATH" ]] || die "--agent-cli-mount-path requires a value"
       shift 2
       ;;
     --networking)
@@ -978,7 +1322,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+apply_canonical_setup_defaults
+
 export EXOCLAW_LOCAL_PROMPT_FILE="$LOCAL_PROMPT_FILE"
+export EXOCLAW_REPO="$SELF_REPO_MOUNT_PATH"
+export EXOCLAW_SELF_MAP="$SELF_MAP_PATH"
 
 case "$COMMAND" in
   repl)

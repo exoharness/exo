@@ -108,9 +108,22 @@ pub struct AdapterOutboundMessageRecord {
 #[serde(rename_all = "snake_case")]
 pub enum AdapterEventType {
     Connected,
+    Disconnected,
     Inbound,
     Outbound,
     Error,
+    /// Worker lifecycle notices (send progress, reconnect attempts, ...) that
+    /// are neither traffic nor errors.
+    Lifecycle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdapterTargetConversationRecord {
+    pub adapter_id: String,
+    pub target: String,
+    pub conversation_id: String,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -119,6 +132,23 @@ pub struct AdapterInboundMessageRecord {
     pub target: String,
     pub message_id: String,
     pub first_seen_at_ms: u64,
+}
+
+impl AdapterTargetConversationRecord {
+    pub fn new(
+        adapter_id: String,
+        target: String,
+        conversation_id: String,
+        now_ms: u64,
+    ) -> Result<Self> {
+        Ok(Self {
+            adapter_id: non_empty("adapterId", adapter_id)?,
+            target: non_empty("target", target)?,
+            conversation_id: non_empty("conversationId", conversation_id)?,
+            created_at_ms: now_ms,
+            updated_at_ms: now_ms,
+        })
+    }
 }
 
 impl AdapterRecord {

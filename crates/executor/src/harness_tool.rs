@@ -2,11 +2,15 @@ use std::path::PathBuf;
 
 use crate::adapter::AdapterStore;
 use crate::adapter::tools::{
-    execute_create_adapter_tool, execute_delete_adapter_tool, execute_disable_adapter_tool,
-    execute_list_adapters_tool, execute_send_adapter_message_tool,
+    AdapterCreationOptions, execute_create_adapter_tool, execute_delete_adapter_tool,
+    execute_disable_adapter_tool, execute_list_adapter_events_tool, execute_list_adapters_tool,
+    execute_send_adapter_message_tool,
 };
-use crate::agent_sandbox::ensure_agent_sandbox;
-use crate::conversation_sandbox::ensure_conversation_sandbox;
+use crate::agent_sandbox::{current_agent_sandbox, ensure_agent_sandbox};
+use crate::conversation_events::execute_list_conversation_events_tool;
+use crate::conversation_sandbox::{
+    conversation_sandbox_spec, conversation_sandboxes, ensure_conversation_sandbox,
+};
 use crate::scheduler_store::SchedulerStore;
 use crate::scheduler_types::{
     DEFAULT_MAX_OUTPUT_BYTES, NewScheduledTask, ScheduledTaskSandboxMode,
@@ -15,13 +19,16 @@ use crate::{AgentConfig, ConversationConfig, ToolRuntime};
 use crate::{SandboxScope, effective_sandbox_scope};
 use async_trait::async_trait;
 use exoharness::{
-    AgentHandle, ConversationHandle, CreateSandboxRequest, EventData, EventKind, EventQuery,
-    EventQueryDirection, FileSystemMount, FileSystemMountMode, Result, RunInSandboxRequest,
-    SandboxProcess, SandboxProvider, ToolRequest, ToolResult,
+    AgentHandle, Artifact, ArtifactVersion, ConversationHandle, CreateSandboxRequest, EventData,
+    EventKind, EventQuery, EventQueryDirection, FileSystemMount, FileSystemMountMode,
+    ReadArtifactRequest, Result, RunInSandboxRequest, SandboxProcess, SandboxProvider, SnapshotId,
+    StartSandboxRequest, ToolRequest, ToolResult, TurnHandle, WriteArtifactRequest,
 };
 use futures::io::AsyncReadExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+const SANDBOX_SNAPSHOT_REGISTRY_ARTIFACT_PATH: &str = "config/sandbox-snapshots.json";
 
 #[derive(Debug, Clone, Default)]
 pub struct BasicToolRuntime;
@@ -30,16 +37,19 @@ pub struct BasicToolRuntime;
 pub struct ExoclawToolRuntime {
     scheduler_store: SchedulerStore,
     adapter_store: AdapterStore,
+    adapter_creation_options: AdapterCreationOptions,
 }
 
 impl ExoclawToolRuntime {
     pub fn with_roots(
         scheduler_root: impl Into<PathBuf>,
         adapter_root: impl Into<PathBuf>,
+        adapter_worker_root: impl Into<PathBuf>,
     ) -> Self {
         Self {
             scheduler_store: SchedulerStore::new(scheduler_root),
             adapter_store: AdapterStore::new(adapter_root),
+            adapter_creation_options: AdapterCreationOptions::new(adapter_worker_root),
         }
     }
 }
@@ -60,6 +70,7 @@ impl ToolRuntime for BasicToolRuntime {
         &self,
         _agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
+        _turn: Option<&dyn TurnHandle>,
         agent_config: &AgentConfig,
         config: &ConversationConfig,
         request: &ToolRequest,
@@ -84,7 +95,7 @@ impl ToolRuntime for ExoclawToolRuntime {
     ) -> Result<()> {
         match effective_sandbox_scope(agent_config, config) {
             SandboxScope::Agent => {
-                ensure_agent_sandbox(agent, conversation, agent_config, config).await?;
+                ensure_agent_sandbox(agent, agent_config, config).await?;
             }
             SandboxScope::Conversation => {
                 ensure_conversation_sandbox(conversation, agent_config, config).await?;
@@ -97,6 +108,7 @@ impl ToolRuntime for ExoclawToolRuntime {
         &self,
         agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
+        turn: Option<&dyn TurnHandle>,
         agent_config: &AgentConfig,
         config: &ConversationConfig,
         request: &ToolRequest,
@@ -137,10 +149,24 @@ impl ToolRuntime for ExoclawToolRuntime {
                 .await
             }
             "create_adapter" => {
-                execute_create_adapter_tool(agent, conversation, &self.adapter_store, request).await
+                execute_create_adapter_tool(
+                    agent,
+                    conversation,
+                    &self.adapter_store,
+                    &self.adapter_creation_options,
+                    request,
+                )
+                .await
             }
             "list_adapters" => {
                 execute_list_adapters_tool(agent, conversation, &self.adapter_store, request).await
+            }
+            "list_adapter_events" => {
+                execute_list_adapter_events_tool(agent, conversation, &self.adapter_store, request)
+                    .await
+            }
+            "list_conversation_events" => {
+                execute_list_conversation_events_tool(conversation, request).await
             }
             "disable_adapter" => {
                 execute_disable_adapter_tool(conversation, agent, &self.adapter_store, request)
@@ -156,6 +182,44 @@ impl ToolRuntime for ExoclawToolRuntime {
                     agent_config,
                     config,
                     &self.adapter_store,
+                    request,
+                )
+                .await
+            }
+            "list_sandbox_snapshots" => {
+                execute_list_sandbox_snapshots_tool(
+                    agent,
+                    conversation,
+                    agent_config,
+                    config,
+                    request,
+                )
+                .await
+            }
+            "snapshot_sandbox" => {
+                let turn = turn.ok_or_else(|| {
+                    anyhow::anyhow!("snapshot_sandbox must run inside an active turn")
+                })?;
+                execute_snapshot_sandbox_tool(
+                    agent,
+                    conversation,
+                    turn,
+                    agent_config,
+                    config,
+                    request,
+                )
+                .await
+            }
+            "rewind_sandbox" => {
+                let turn = turn.ok_or_else(|| {
+                    anyhow::anyhow!("rewind_sandbox must run inside an active turn")
+                })?;
+                execute_rewind_sandbox_tool(
+                    agent,
+                    conversation,
+                    turn,
+                    agent_config,
+                    config,
                     request,
                 )
                 .await
@@ -201,6 +265,77 @@ struct ConversationScopedArguments {
 #[serde(rename_all = "camelCase")]
 struct ScheduledTaskIdArguments {
     task_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum SandboxControlScope {
+    Agent,
+    Conversation,
+}
+
+impl SandboxControlScope {
+    fn or_default(scope: Option<Self>) -> Self {
+        scope.unwrap_or(Self::Agent)
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Conversation => "conversation",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SandboxScopeArguments {
+    scope: Option<SandboxControlScope>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RewindSandboxArguments {
+    scope: Option<SandboxControlScope>,
+    snapshot_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SandboxSnapshotInfo {
+    snapshot_id: String,
+    sandbox_id: String,
+    owner_conversation_id: Option<String>,
+    scope: SandboxControlScope,
+    created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SandboxSnapshotRegistry {
+    #[serde(default)]
+    snapshots: Vec<SandboxSnapshotRecord>,
+    #[serde(default)]
+    current: Vec<SandboxSnapshotCurrent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct SandboxSnapshotRecord {
+    snapshot_id: String,
+    sandbox_id: String,
+    owner_conversation_id: String,
+    scope: SandboxControlScope,
+    created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct SandboxSnapshotCurrent {
+    scope: SandboxControlScope,
+    owner_conversation_id: String,
+    sandbox_id: String,
+    snapshot_id: String,
 }
 
 async fn execute_schedule_task_tool(
@@ -325,6 +460,351 @@ async fn execute_delete_scheduled_task_tool(
     }))
 }
 
+async fn execute_list_sandbox_snapshots_tool(
+    agent: &dyn AgentHandle,
+    conversation: &dyn ConversationHandle,
+    agent_config: &AgentConfig,
+    config: &ConversationConfig,
+    request: &ToolRequest,
+) -> Result<ToolResult> {
+    let args =
+        serde_json::from_value::<SandboxScopeArguments>(Value::Object(request.arguments.clone()))?;
+    let scope = SandboxControlScope::or_default(args.scope);
+    match scope {
+        SandboxControlScope::Agent => {
+            let spec = conversation_sandbox_spec(agent_config, config);
+            let Some(handle) = current_agent_sandbox(agent, &spec).await? else {
+                return Ok(empty_sandbox_snapshot_result(scope));
+            };
+            sandbox_snapshot_result(agent, scope, None, handle.sandbox_id).await
+        }
+        SandboxControlScope::Conversation => {
+            let spec = conversation_sandbox_spec(agent_config, config);
+            let sandbox = conversation_sandboxes(conversation)
+                .await?
+                .into_iter()
+                .find(|sandbox| sandbox.matches_spec(&spec));
+            let Some(sandbox) = sandbox else {
+                return Ok(empty_sandbox_snapshot_result(scope));
+            };
+            sandbox_snapshot_result(
+                agent,
+                scope,
+                Some(conversation.record().id.to_string()),
+                sandbox.id,
+            )
+            .await
+        }
+    }
+}
+
+async fn execute_snapshot_sandbox_tool(
+    agent: &dyn AgentHandle,
+    conversation: &dyn ConversationHandle,
+    turn: &dyn TurnHandle,
+    agent_config: &AgentConfig,
+    config: &ConversationConfig,
+    request: &ToolRequest,
+) -> Result<ToolResult> {
+    let args =
+        serde_json::from_value::<SandboxScopeArguments>(Value::Object(request.arguments.clone()))?;
+    let scope = SandboxControlScope::or_default(args.scope);
+    match scope {
+        SandboxControlScope::Agent => {
+            let handle = ensure_agent_sandbox(agent, agent_config, config).await?;
+            let snapshot_id = agent.snapshot_sandbox(handle.sandbox_id.clone()).await?;
+            turn.add_events(vec![EventData::SandboxSnapshotted {
+                sandbox_id: handle.sandbox_id.clone(),
+                snapshot_id,
+            }])
+            .await?;
+            record_sandbox_snapshot(
+                agent,
+                scope,
+                String::new(),
+                handle.sandbox_id.clone(),
+                snapshot_id.to_string(),
+            )
+            .await?;
+            Ok(serde_json::json!({
+                "ok": true,
+                "scope": scope.as_str(),
+                "sandboxId": handle.sandbox_id,
+                "ownerConversationId": null,
+                "snapshotId": snapshot_id.to_string(),
+            }))
+        }
+        SandboxControlScope::Conversation => {
+            let sandbox_id =
+                ensure_conversation_sandbox(conversation, agent_config, config).await?;
+            let snapshot_id = turn.snapshot_sandbox(sandbox_id.clone()).await?;
+            record_sandbox_snapshot(
+                agent,
+                scope,
+                conversation.record().id.to_string(),
+                sandbox_id.clone(),
+                snapshot_id.to_string(),
+            )
+            .await?;
+            Ok(serde_json::json!({
+                "ok": true,
+                "scope": scope.as_str(),
+                "sandboxId": sandbox_id,
+                "ownerConversationId": conversation.record().id.to_string(),
+                "snapshotId": snapshot_id.to_string(),
+            }))
+        }
+    }
+}
+
+async fn execute_rewind_sandbox_tool(
+    agent: &dyn AgentHandle,
+    conversation: &dyn ConversationHandle,
+    turn: &dyn TurnHandle,
+    agent_config: &AgentConfig,
+    config: &ConversationConfig,
+    request: &ToolRequest,
+) -> Result<ToolResult> {
+    let args =
+        serde_json::from_value::<RewindSandboxArguments>(Value::Object(request.arguments.clone()))?;
+    let scope = SandboxControlScope::or_default(args.scope);
+    let snapshot_id = parse_snapshot_id(&args.snapshot_id)?;
+    let spec = conversation_sandbox_spec(agent_config, config);
+    match scope {
+        SandboxControlScope::Agent => {
+            let handle = ensure_agent_sandbox(agent, agent_config, config).await?;
+            agent
+                .start_sandbox(StartSandboxRequest {
+                    id: handle.sandbox_id.clone(),
+                    snapshot_id,
+                    idle_seconds: Some(spec.idle_seconds),
+                })
+                .await?;
+            turn.add_events(vec![EventData::SandboxStarted {
+                sandbox_id: handle.sandbox_id.clone(),
+                snapshot_id: Some(snapshot_id),
+            }])
+            .await?;
+            record_current_sandbox_snapshot(
+                agent,
+                scope,
+                String::new(),
+                handle.sandbox_id.clone(),
+                args.snapshot_id.clone(),
+            )
+            .await?;
+            Ok(serde_json::json!({
+                "ok": true,
+                "scope": scope.as_str(),
+                "sandboxId": handle.sandbox_id,
+                "ownerConversationId": null,
+                "snapshotId": args.snapshot_id,
+                "rewound": true,
+            }))
+        }
+        SandboxControlScope::Conversation => {
+            let sandbox_id =
+                ensure_conversation_sandbox(conversation, agent_config, config).await?;
+            turn.start_sandbox(StartSandboxRequest {
+                id: sandbox_id.clone(),
+                snapshot_id,
+                idle_seconds: Some(spec.idle_seconds),
+            })
+            .await?;
+            record_current_sandbox_snapshot(
+                agent,
+                scope,
+                conversation.record().id.to_string(),
+                sandbox_id.clone(),
+                args.snapshot_id.clone(),
+            )
+            .await?;
+            Ok(serde_json::json!({
+                "ok": true,
+                "scope": scope.as_str(),
+                "sandboxId": sandbox_id,
+                "ownerConversationId": conversation.record().id.to_string(),
+                "snapshotId": args.snapshot_id,
+                "rewound": true,
+            }))
+        }
+    }
+}
+
+async fn sandbox_snapshot_result(
+    agent: &dyn AgentHandle,
+    scope: SandboxControlScope,
+    owner_conversation_id: Option<String>,
+    sandbox_id: String,
+) -> Result<ToolResult> {
+    let owner_conversation_id = owner_conversation_id.unwrap_or_default();
+    let owner_conversation_id_result = match scope {
+        SandboxControlScope::Agent => None,
+        SandboxControlScope::Conversation => Some(owner_conversation_id.clone()),
+    };
+    let registry = load_sandbox_snapshot_registry(agent).await?;
+    let snapshots = registry
+        .snapshots
+        .iter()
+        .filter(|snapshot| {
+            snapshot.scope == scope
+                && snapshot.owner_conversation_id == owner_conversation_id
+                && snapshot.sandbox_id == sandbox_id
+        })
+        .map(|snapshot| SandboxSnapshotInfo {
+            snapshot_id: snapshot.snapshot_id.clone(),
+            sandbox_id: snapshot.sandbox_id.clone(),
+            owner_conversation_id: owner_conversation_id_result.clone(),
+            scope: snapshot.scope,
+            created_at_ms: snapshot.created_at_ms,
+        })
+        .collect::<Vec<_>>();
+    let current_snapshot_id = registry
+        .current
+        .iter()
+        .rev()
+        .find(|current| {
+            current.scope == scope
+                && current.owner_conversation_id == owner_conversation_id
+                && current.sandbox_id == sandbox_id
+        })
+        .map(|current| current.snapshot_id.clone());
+    Ok(serde_json::json!({
+        "ok": true,
+        "scope": scope.as_str(),
+        "sandboxId": sandbox_id,
+        "ownerConversationId": owner_conversation_id_result,
+        "currentSnapshotId": current_snapshot_id,
+        "snapshots": snapshots,
+    }))
+}
+
+fn empty_sandbox_snapshot_result(scope: SandboxControlScope) -> ToolResult {
+    serde_json::json!({
+        "ok": true,
+        "scope": scope.as_str(),
+        "sandboxId": null,
+        "ownerConversationId": null,
+        "currentSnapshotId": null,
+        "snapshots": [],
+    })
+}
+
+async fn record_sandbox_snapshot(
+    agent: &dyn AgentHandle,
+    scope: SandboxControlScope,
+    owner_conversation_id: String,
+    sandbox_id: String,
+    snapshot_id: String,
+) -> Result<()> {
+    let mut registry = load_sandbox_snapshot_registry(agent).await?;
+    if !registry.snapshots.iter().any(|snapshot| {
+        snapshot.scope == scope
+            && snapshot.owner_conversation_id == owner_conversation_id
+            && snapshot.sandbox_id == sandbox_id
+            && snapshot.snapshot_id == snapshot_id
+    }) {
+        registry.snapshots.push(SandboxSnapshotRecord {
+            snapshot_id: snapshot_id.clone(),
+            sandbox_id: sandbox_id.clone(),
+            owner_conversation_id: owner_conversation_id.clone(),
+            scope,
+            created_at_ms: crate::scheduler_types::now_ms(),
+        });
+    }
+    upsert_current_sandbox_snapshot(
+        &mut registry,
+        SandboxSnapshotCurrent {
+            scope,
+            owner_conversation_id,
+            sandbox_id,
+            snapshot_id,
+        },
+    );
+    store_sandbox_snapshot_registry(agent, &registry).await
+}
+
+async fn record_current_sandbox_snapshot(
+    agent: &dyn AgentHandle,
+    scope: SandboxControlScope,
+    owner_conversation_id: String,
+    sandbox_id: String,
+    snapshot_id: String,
+) -> Result<()> {
+    let mut registry = load_sandbox_snapshot_registry(agent).await?;
+    upsert_current_sandbox_snapshot(
+        &mut registry,
+        SandboxSnapshotCurrent {
+            scope,
+            owner_conversation_id,
+            sandbox_id,
+            snapshot_id,
+        },
+    );
+    store_sandbox_snapshot_registry(agent, &registry).await
+}
+
+fn upsert_current_sandbox_snapshot(
+    registry: &mut SandboxSnapshotRegistry,
+    current: SandboxSnapshotCurrent,
+) {
+    registry.current.retain(|existing| {
+        !(existing.scope == current.scope
+            && existing.owner_conversation_id == current.owner_conversation_id
+            && existing.sandbox_id == current.sandbox_id)
+    });
+    registry.current.push(current);
+}
+
+async fn load_sandbox_snapshot_registry(
+    agent: &dyn AgentHandle,
+) -> Result<SandboxSnapshotRegistry> {
+    let Some(artifact) =
+        latest_agent_artifact(agent, SANDBOX_SNAPSHOT_REGISTRY_ARTIFACT_PATH).await?
+    else {
+        return Ok(SandboxSnapshotRegistry::default());
+    };
+    Ok(serde_json::from_slice(&artifact.contents)?)
+}
+
+async fn store_sandbox_snapshot_registry(
+    agent: &dyn AgentHandle,
+    registry: &SandboxSnapshotRegistry,
+) -> Result<()> {
+    agent
+        .write_artifact(WriteArtifactRequest {
+            path: SANDBOX_SNAPSHOT_REGISTRY_ARTIFACT_PATH.to_string(),
+            contents: serde_json::to_vec_pretty(registry)?,
+        })
+        .await?;
+    Ok(())
+}
+
+async fn latest_agent_artifact(agent: &dyn AgentHandle, path: &str) -> Result<Option<Artifact>> {
+    let Some(version) = latest_artifact_version(agent.list_artifacts().await?, path) else {
+        return Ok(None);
+    };
+    agent
+        .read_artifact(ReadArtifactRequest {
+            artifact_id: version.artifact_id,
+            version: Some(version.version),
+        })
+        .await
+}
+
+fn latest_artifact_version(artifacts: Vec<ArtifactVersion>, path: &str) -> Option<ArtifactVersion> {
+    artifacts
+        .into_iter()
+        .filter(|artifact| artifact.path == path)
+        .max_by_key(|artifact| artifact.version)
+}
+
+fn parse_snapshot_id(value: &str) -> Result<SnapshotId> {
+    value
+        .parse()
+        .map_err(|error| anyhow::anyhow!("invalid snapshotId {value}: {error}"))
+}
+
 async fn execute_shell_tool(
     conversation: &dyn ConversationHandle,
     agent_config: &AgentConfig,
@@ -389,9 +869,8 @@ async fn execute_exoclaw_shell_tool(
         .shell_program
         .clone()
         .ok_or_else(|| anyhow::anyhow!("shell tool is not enabled for this conversation"))?;
-    let agent_sandbox = ensure_agent_sandbox(agent, conversation, agent_config, config).await?;
-    let process = agent_sandbox
-        .conversation
+    let agent_sandbox = ensure_agent_sandbox(agent, agent_config, config).await?;
+    let process = agent
         .run_in_sandbox(RunInSandboxRequest {
             id: agent_sandbox.sandbox_id,
             command: vec![program, "-lc".to_string(), args.command],

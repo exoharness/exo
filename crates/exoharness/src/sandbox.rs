@@ -23,6 +23,10 @@ use crate::DurableFileSystem;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SandboxKey {
+    AgentSandbox {
+        agent_id: String,
+        sandbox_id: String,
+    },
     ConversationSandbox {
         conversation_id: String,
         sandbox_id: String,
@@ -32,6 +36,10 @@ pub enum SandboxKey {
 impl fmt::Display for SandboxKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::AgentSandbox {
+                agent_id,
+                sandbox_id,
+            } => write!(f, "agent:{agent_id}:{sandbox_id}"),
             Self::ConversationSandbox {
                 conversation_id,
                 sandbox_id,
@@ -189,6 +197,8 @@ const WARM_SANDBOX_KEEPALIVE_ARGV: &[&str] = &["sleep", "infinity"];
 const WARM_SANDBOX_HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(3);
 const WARM_SANDBOX_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const ORPHANED_WARM_SANDBOX_MIN_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const DEFAULT_NETWORK_CREATE_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_NETWORK_CREATE_RETRY_DELAY: Duration = Duration::from_millis(200);
 pub(crate) const WARM_SANDBOX_KEY_LABEL: &str = "exo.sandbox.key";
 pub(crate) const WARM_SANDBOX_SPEC_HASH_LABEL: &str = "exo.sandbox.spec-hash";
 const WARM_SANDBOX_OWNER_PID_LABEL: &str = "exo.sandbox.owner-pid";
@@ -312,24 +322,34 @@ impl CliContainerSandboxBackend {
             return Ok(());
         }
 
-        let output = Command::new(&self.container_bin)
-            .arg("network")
-            .arg("create")
-            .arg(DEFAULT_ENABLED_NETWORK_NAME)
-            .kill_on_drop(true)
-            .output()
-            .await?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            if !stderr.contains("already exists") {
-                return Err(anyhow!(
-                    "failed to create default container network {DEFAULT_ENABLED_NETWORK_NAME}: {stderr}"
-                ));
+        let deadline = Instant::now() + DEFAULT_NETWORK_CREATE_TIMEOUT;
+        loop {
+            let output = Command::new(&self.container_bin)
+                .arg("network")
+                .arg("create")
+                .arg(DEFAULT_ENABLED_NETWORK_NAME)
+                .kill_on_drop(true)
+                .output()
+                .await?;
+            if output.status.success() {
+                *created = true;
+                return Ok(());
             }
-        }
 
-        *created = true;
-        Ok(())
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if stderr.contains("already exists") {
+                *created = true;
+                return Ok(());
+            }
+            if stderr.contains("pending operation") && Instant::now() < deadline {
+                tokio::time::sleep(DEFAULT_NETWORK_CREATE_RETRY_DELAY).await;
+                continue;
+            }
+
+            return Err(anyhow!(
+                "failed to create default container network {DEFAULT_ENABLED_NETWORK_NAME}: {stderr}"
+            ));
+        }
     }
 
     async fn prepare_request(&self, request: SandboxRequest) -> Result<SandboxRequest> {
@@ -411,8 +431,8 @@ impl CliContainerSandboxBackend {
 impl Drop for CliContainerSandboxBackend {
     fn drop(&mut self) {
         // Warm sandboxes intentionally outlive a single CLI/REPL process so a
-        // restarted Exoclaw agent can reattach to the same environment. Stale
-        // containers are cleaned by the orphan reaper on later backend startup.
+        // restarted agent can reattach to the same environment. Stale containers
+        // are cleaned by the orphan reaper on later backend startup.
     }
 }
 
@@ -1000,7 +1020,7 @@ async fn find_running_warm_sandbox(
 ) -> Result<Option<String>> {
     match cli {
         ContainerCliFlavor::AppleContainer => {
-            find_running_apple_warm_sandbox(container_bin, request).await
+            find_running_apple_container_warm_sandbox(container_bin, request).await
         }
         ContainerCliFlavor::Docker => {
             find_running_docker_warm_sandbox(container_bin, request).await
@@ -1008,7 +1028,7 @@ async fn find_running_warm_sandbox(
     }
 }
 
-async fn find_running_apple_warm_sandbox(
+async fn find_running_apple_container_warm_sandbox(
     container_bin: &Path,
     request: &SandboxRequest,
 ) -> Result<Option<String>> {
@@ -1062,6 +1082,8 @@ async fn find_running_docker_warm_sandbox(
             key_filter.as_str(),
             "--filter",
             spec_filter.as_str(),
+            "--filter",
+            "status=running",
             "--format",
             "{{.Names}}",
         ],
@@ -1855,6 +1877,7 @@ async fn docker_snapshot_container(
         .arg("-p")
         .arg(container_name)
         .arg(&snap_tag)
+        .kill_on_drop(true)
         .output()
         .await
         .with_context(|| format!("running `docker commit` for {container_name}"))?;
@@ -1870,6 +1893,7 @@ async fn docker_snapshot_container(
         .arg(&snap_tag)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .output()
         .await
         .with_context(|| format!("running `docker save {snap_tag}`"))?;
@@ -1879,6 +1903,7 @@ async fn docker_snapshot_container(
             .arg("image")
             .arg("rm")
             .arg(&snap_tag)
+            .kill_on_drop(true)
             .output()
             .await;
         bail!(
@@ -1894,6 +1919,7 @@ async fn docker_snapshot_container(
         .arg("image")
         .arg("rm")
         .arg(&snap_tag)
+        .kill_on_drop(true)
         .output()
         .await;
     if let Ok(output) = &rm_output
@@ -2027,6 +2053,8 @@ mod tests {
                 key_filter.as_str(),
                 "--filter",
                 spec_filter.as_str(),
+                "--filter",
+                "status=running",
                 "--format",
                 "{{.Names}}",
             ]

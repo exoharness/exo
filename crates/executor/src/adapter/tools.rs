@@ -15,16 +15,40 @@ use tokio::fs;
 use super::runtime::send_adapter_message_with_handles;
 use super::store::AdapterStore;
 use super::types::{
-    AdapterAttachment, AdapterConfig, AdapterSource, NewAdapter, WorkerSecretEnvVar,
+    AdapterAttachment, AdapterConfig, AdapterEventType, AdapterSource, NewAdapter,
+    WorkerSecretEnvVar,
 };
 use crate::agent_sandbox::ensure_agent_sandbox;
 use crate::conversation_sandbox::ensure_conversation_sandbox;
 use crate::{AgentConfig, ConversationConfig, SandboxScope, effective_sandbox_scope};
 
+const DEFAULT_EVENT_LIMIT: usize = 50;
+const MAX_EVENT_LIMIT: usize = 200;
 const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_ATTACHMENT_BASE64_BYTES: usize = MAX_ATTACHMENT_BYTES.div_ceil(3) * 4 + 4;
 const ATTACHMENT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_ATTACHMENT_STDERR_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone)]
+pub struct AdapterCreationOptions {
+    worker_root: PathBuf,
+    default_irc_nick_prefix: String,
+    default_irc_username: String,
+}
+
+impl AdapterCreationOptions {
+    pub fn new(worker_root: impl Into<PathBuf>) -> Self {
+        Self {
+            worker_root: worker_root.into(),
+            default_irc_nick_prefix: "exo".to_string(),
+            default_irc_username: "exo".to_string(),
+        }
+    }
+
+    fn worker_command(&self, adapter_type: &str) -> Vec<String> {
+        worker_command(self.worker_root.join(adapter_type).join("worker.ts"))
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,6 +72,15 @@ struct AdapterIdArguments {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ListAdapterEventsArguments {
+    adapter_id: String,
+    event_type: Option<AdapterEventType>,
+    since_ms: Option<u64>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SendAdapterMessageArguments {
     adapter_id: String,
     text: String,
@@ -63,6 +96,7 @@ enum AdapterCreationConfig {
     Whatsapp(WhatsappAdapterCreationConfig),
     Signal(SignalAdapterCreationConfig),
     Discord(DiscordAdapterCreationConfig),
+    AgentCli(AgentCliAdapterCreationConfig),
 }
 
 #[derive(Debug, Deserialize)]
@@ -115,12 +149,38 @@ struct DiscordAdapterCreationConfig {
     trigger: DiscordTrigger,
     allowed_channels: Option<Vec<String>>,
     allow_bots: bool,
+    /// Enable voice: join voice channels and hold a spoken conversation. Needs
+    /// an OpenAI secret (see `openai_secret_id`) for STT/TTS.
+    #[serde(default)]
+    voice: bool,
+    /// Secret id holding the OpenAI API key for voice STT/TTS. Defaults to
+    /// `openai` when voice is enabled and no id is given.
+    #[serde(default)]
+    openai_secret_id: Option<String>,
+    #[serde(default)]
+    conversation_scope: Option<AdapterConversationScope>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentCliAdapterCreationConfig {
+    #[serde(rename = "type")]
+    _adapter_type: AgentCliAdapterType,
+    socket_path: Option<String>,
+    mount_root: String,
+    mount_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum IrcAdapterType {
     Irc,
+}
+
+#[derive(Debug, Deserialize)]
+enum AgentCliAdapterType {
+    #[serde(rename = "agent-cli")]
+    AgentCli,
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,6 +229,32 @@ enum DiscordTrigger {
     MentionsOnly,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AdapterConversationScope {
+    Adapter,
+    Target,
+}
+
+impl AdapterConversationScope {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Adapter => "adapter",
+            Self::Target => "target",
+        }
+    }
+}
+
+fn default_irc_nick(prefix: &str) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() % 10_000)
+        .unwrap_or(0);
+    format!("{prefix}{suffix:04}")
+}
+
 impl AdapterCreationConfig {
     fn adapter_type(&self) -> &'static str {
         match self {
@@ -176,24 +262,27 @@ impl AdapterCreationConfig {
             Self::Whatsapp(_) => "whatsapp",
             Self::Signal(_) => "signal",
             Self::Discord(_) => "discord",
+            Self::AgentCli(_) => "agent-cli",
         }
     }
 
-    fn into_adapter_config(self, source: AdapterSource) -> Result<AdapterConfig> {
+    fn into_adapter_config(
+        self,
+        source: AdapterSource,
+        options: &AdapterCreationOptions,
+    ) -> Result<AdapterConfig> {
         match self {
             Self::Irc(config) => {
                 require_source(source, AdapterSource::BuiltIn, "irc")?;
                 Ok(AdapterConfig {
                     adapter_type: "irc".to_string(),
-                    worker_command: bundled_worker_command(
-                        "examples/exoclaw/adapters/irc/worker.ts",
-                    ),
+                    worker_command: options.worker_command("irc"),
                     initialization: serde_json::json!({
                         "server": config.server,
                         "port": config.port,
                         "tls": config.tls,
-                        "nick": config.nick,
-                        "username": config.username,
+                        "nick": if config.nick.trim().is_empty() { default_irc_nick(&options.default_irc_nick_prefix) } else { config.nick },
+                        "username": if config.username.trim().is_empty() { options.default_irc_username.clone() } else { config.username },
                         "realname": config.realname,
                         "channel": config.channel,
                         "trigger": config.trigger.as_str(),
@@ -222,9 +311,7 @@ impl AdapterCreationConfig {
                 }
                 Ok(AdapterConfig {
                     adapter_type: "whatsapp".to_string(),
-                    worker_command: bundled_worker_command(
-                        "examples/exoclaw/adapters/whatsapp/worker.ts",
-                    ),
+                    worker_command: options.worker_command("whatsapp"),
                     initialization: serde_json::json!({
                         "authDir": config.auth_dir,
                         "linkMethod": config.link_method.map(|method| method.as_str()),
@@ -240,9 +327,7 @@ impl AdapterCreationConfig {
                 require_source(source, AdapterSource::Library, "signal")?;
                 Ok(AdapterConfig {
                     adapter_type: "signal".to_string(),
-                    worker_command: bundled_worker_command(
-                        "examples/exoclaw/adapters/signal/worker.ts",
-                    ),
+                    worker_command: options.worker_command("signal"),
                     initialization: serde_json::json!({
                         "account": config.account,
                         "deviceName": config.device_name,
@@ -256,23 +341,61 @@ impl AdapterCreationConfig {
             }
             Self::Discord(config) => {
                 require_source(source, AdapterSource::Library, "discord")?;
+                // Voice STT/TTS run in the worker against the OpenAI secret;
+                // bind it only when voice is on so text-only adapters need no
+                // OpenAI key.
+                let mut secret_env = vec![WorkerSecretEnvVar {
+                    env: "EXO_DISCORD_BOT_TOKEN".to_string(),
+                    secret_id: config.bot_token_secret_id,
+                }];
+                if config.voice {
+                    secret_env.push(WorkerSecretEnvVar {
+                        env: "OPENAI_API_KEY".to_string(),
+                        secret_id: config
+                            .openai_secret_id
+                            .unwrap_or_else(|| "openai".to_string()),
+                    });
+                }
                 Ok(AdapterConfig {
                     adapter_type: "discord".to_string(),
-                    worker_command: bundled_worker_command(
-                        "examples/exoclaw/adapters/discord/worker.ts",
-                    ),
+                    worker_command: options.worker_command("discord"),
                     initialization: serde_json::json!({
                         "tokenEnv": "EXO_DISCORD_BOT_TOKEN",
                         "defaultChannelId": config.default_channel_id,
                         "trigger": config.trigger.as_str(),
                         "allowedChannels": config.allowed_channels,
                         "allowBots": config.allow_bots,
+                        "voice": config.voice,
+                        "conversationScope": config
+                            .conversation_scope
+                            .map(|scope| scope.as_str())
+                            .unwrap_or("adapter"),
                     }),
                     state_dir: None,
-                    secret_env: vec![WorkerSecretEnvVar {
-                        env: "EXO_DISCORD_BOT_TOKEN".to_string(),
-                        secret_id: config.bot_token_secret_id,
-                    }],
+                    secret_env,
+                })
+            }
+            Self::AgentCli(config) => {
+                require_source(source, AdapterSource::BuiltIn, "agent-cli")?;
+                if !config.mount_root.starts_with('/') {
+                    bail!("agent-cli mountRoot must be an absolute host path");
+                }
+                let mount_path = config
+                    .mount_path
+                    .unwrap_or_else(|| "/agent-cli".to_string());
+                if !mount_path.starts_with('/') {
+                    bail!("agent-cli mountPath must be an absolute sandbox path");
+                }
+                Ok(AdapterConfig {
+                    adapter_type: "agent-cli".to_string(),
+                    worker_command: options.worker_command("agent-cli"),
+                    initialization: serde_json::json!({
+                        "socketPath": config.socket_path,
+                        "mountRoot": config.mount_root,
+                        "mountPath": mount_path,
+                    }),
+                    state_dir: None,
+                    secret_env: Vec::new(),
                 })
             }
         }
@@ -326,10 +449,7 @@ fn require_source(
     Ok(())
 }
 
-fn bundled_worker_command(relative_path: &str) -> Vec<String> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(relative_path);
+fn worker_command(path: PathBuf) -> Vec<String> {
     vec![
         "pnpm".to_string(),
         "tsx".to_string(),
@@ -341,12 +461,13 @@ pub async fn execute_create_adapter_tool(
     agent: &dyn AgentHandle,
     conversation: &dyn ConversationHandle,
     store: &AdapterStore,
+    options: &AdapterCreationOptions,
     request: &ToolRequest,
 ) -> Result<ToolResult> {
     let args =
         serde_json::from_value::<CreateAdapterArguments>(Value::Object(request.arguments.clone()))?;
     let adapter_type = args.config.adapter_type();
-    let config = args.config.into_adapter_config(args.source)?;
+    let config = args.config.into_adapter_config(args.source, options)?;
     let adapter = store
         .create_adapter(NewAdapter {
             agent_id: agent.record().id.to_string(),
@@ -384,6 +505,38 @@ pub async fn execute_list_adapters_tool(
     Ok(serde_json::json!({
         "ok": true,
         "adapters": adapters,
+    }))
+}
+
+pub async fn execute_list_adapter_events_tool(
+    agent: &dyn AgentHandle,
+    conversation: &dyn ConversationHandle,
+    store: &AdapterStore,
+    request: &ToolRequest,
+) -> Result<ToolResult> {
+    let args = serde_json::from_value::<ListAdapterEventsArguments>(Value::Object(
+        request.arguments.clone(),
+    ))?;
+    let Some(adapter) = store.get_adapter(&args.adapter_id).await? else {
+        return Ok(not_found());
+    };
+    if adapter.agent_id != agent.record().id.to_string()
+        || adapter.conversation_id != conversation.record().id.to_string()
+    {
+        return Ok(not_found());
+    }
+    let limit = args
+        .limit
+        .unwrap_or(DEFAULT_EVENT_LIMIT)
+        .clamp(1, MAX_EVENT_LIMIT);
+    let events = store
+        .list_events(&args.adapter_id, args.event_type, args.since_ms, limit)
+        .await?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "adapterId": args.adapter_id,
+        "adapterName": adapter.name,
+        "events": events,
     }))
 }
 
@@ -450,11 +603,11 @@ pub async fn execute_send_adapter_message_tool(
     let Some(adapter) = store.get_adapter(&args.adapter_id).await? else {
         return Ok(not_found());
     };
-    if adapter.agent_id != agent.record().id.to_string()
-        || adapter.conversation_id != conversation.record().id.to_string()
-    {
+    let Some(scoped_target) = adapter_access_target(store, agent, conversation, &adapter).await?
+    else {
         return Ok(not_found());
-    }
+    };
+    let target = resolve_send_target(scoped_target.as_deref(), args.target.as_deref())?;
     let attachments = args.attachments.unwrap_or_default();
     if !attachments.is_empty()
         && adapter.config.adapter_type != "whatsapp"
@@ -482,7 +635,7 @@ pub async fn execute_send_adapter_message_tool(
         store,
         &adapter,
         &args.text,
-        args.target.as_deref(),
+        target.as_deref(),
         attachments,
     )
     .await?;
@@ -491,6 +644,71 @@ pub async fn execute_send_adapter_message_tool(
         "adapterId": args.adapter_id,
         "sent": true,
     }))
+}
+
+/// Determine whether `conversation` may send through `adapter`, gathering the
+/// target-conversation mappings from the store and delegating the decision to
+/// the pure [`classify_adapter_access`]. The outer `Option` is authorization
+/// (None = denied); the inner `Option` is the send constraint (None = root
+/// conversation, any target allowed; `Some(target)` = scoped, that target only).
+async fn adapter_access_target(
+    store: &AdapterStore,
+    agent: &dyn AgentHandle,
+    conversation: &dyn ConversationHandle,
+    adapter: &super::types::AdapterRecord,
+) -> Result<Option<Option<String>>> {
+    let conversation_id = conversation.record().id.to_string();
+    let mappings = store.list_target_conversations(&adapter.id).await?;
+    Ok(classify_adapter_access(
+        &adapter.agent_id,
+        &adapter.conversation_id,
+        &agent.record().id.to_string(),
+        &conversation_id,
+        mappings
+            .iter()
+            .map(|m| (m.conversation_id.as_str(), m.target.as_str())),
+    ))
+}
+
+/// Pure authorization decision. `None`: this conversation may not use the
+/// adapter. `Some(None)`: the adapter's root conversation — may send to any
+/// target. `Some(Some(target))`: a target-scoped conversation — may send only
+/// to `target`.
+fn classify_adapter_access<'a>(
+    adapter_agent_id: &str,
+    adapter_root_conversation_id: &str,
+    agent_id: &str,
+    conversation_id: &str,
+    target_mappings: impl Iterator<Item = (&'a str, &'a str)>,
+) -> Option<Option<String>> {
+    if adapter_agent_id != agent_id {
+        return None;
+    }
+    if adapter_root_conversation_id == conversation_id {
+        return Some(None);
+    }
+    for (mapped_conversation, target) in target_mappings {
+        if mapped_conversation == conversation_id {
+            return Some(Some(target.to_string()));
+        }
+    }
+    None
+}
+
+/// Resolve the effective send target, enforcing that a target-scoped
+/// conversation may only send to its mapped target (a missing target defaults
+/// to it). A root conversation sends to whatever it requested.
+fn resolve_send_target(scoped: Option<&str>, requested: Option<&str>) -> Result<Option<String>> {
+    match scoped {
+        Some(scoped) => match requested {
+            Some(requested) if requested != scoped => {
+                bail!("target-scoped conversation may only send to mapped target {scoped}")
+            }
+            Some(requested) => Ok(Some(requested.to_string())),
+            None => Ok(Some(scoped.to_string())),
+        },
+        None => Ok(requested.map(str::to_string)),
+    }
 }
 
 async fn resolve_sandbox_attachments(
@@ -555,13 +773,8 @@ async fn read_sandbox_file(
 ) -> Result<Vec<u8>> {
     match effective_sandbox_scope(agent_config, config) {
         SandboxScope::Agent => {
-            let sandbox = ensure_agent_sandbox(agent, conversation, agent_config, config).await?;
-            read_sandbox_file_bytes(
-                sandbox.conversation.as_ref(),
-                sandbox.sandbox_id,
-                sandbox_path,
-            )
-            .await
+            let sandbox = ensure_agent_sandbox(agent, agent_config, config).await?;
+            read_agent_sandbox_file_bytes(agent, sandbox.sandbox_id, sandbox_path).await
         }
         SandboxScope::Conversation => {
             let sandbox_id =
@@ -571,7 +784,7 @@ async fn read_sandbox_file(
     }
 }
 
-async fn download_attachment(url: &str) -> Result<Vec<u8>> {
+pub(crate) async fn download_attachment(url: &str) -> Result<Vec<u8>> {
     let client = reqwest::Client::builder()
         .timeout(ATTACHMENT_DOWNLOAD_TIMEOUT)
         .build()
@@ -629,6 +842,41 @@ async fn read_sandbox_file_bytes(
     sandbox_path: &str,
 ) -> Result<Vec<u8>> {
     let process = conversation
+        .run_in_sandbox(RunInSandboxRequest {
+            id: sandbox_id,
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "cat -- \"$1\"".to_string(),
+                "exo-read-attachment".to_string(),
+                sandbox_path.to_string(),
+            ],
+            env: Default::default(),
+        })
+        .await?;
+    let output = read_process_limited(process, MAX_ATTACHMENT_BYTES).await?;
+    if output.exit_code != 0 {
+        bail!(
+            "failed to read sandbox attachment {}: {}",
+            sandbox_path,
+            output.stderr.trim()
+        );
+    }
+    if output.truncated {
+        bail!(
+            "sandbox attachment is too large: exceeds {} bytes",
+            MAX_ATTACHMENT_BYTES
+        );
+    }
+    Ok(output.stdout)
+}
+
+async fn read_agent_sandbox_file_bytes(
+    agent: &dyn AgentHandle,
+    sandbox_id: String,
+    sandbox_path: &str,
+) -> Result<Vec<u8>> {
+    let process = agent
         .run_in_sandbox(RunInSandboxRequest {
             id: sandbox_id,
             command: vec![
@@ -777,6 +1025,63 @@ mod tests {
     use crate::test_support::local_test_config;
     use crate::{AgentConfig, AgentHarnessKind, ConversationConfig};
 
+    fn test_creation_options() -> AdapterCreationOptions {
+        AdapterCreationOptions::new("/tmp/exo-adapters")
+    }
+
+    #[test]
+    fn access_denied_for_other_agent() {
+        assert_eq!(
+            classify_adapter_access("agent-1", "root", "agent-2", "root", std::iter::empty()),
+            None
+        );
+    }
+
+    #[test]
+    fn root_conversation_may_send_to_any_target() {
+        // Some(None) => root conversation, no target constraint.
+        assert_eq!(
+            classify_adapter_access("a", "root", "a", "root", std::iter::empty()),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn scoped_conversation_is_constrained_to_its_mapped_target() {
+        let mappings = [("conv-A", "chan-A"), ("conv-B", "chan-B")];
+        assert_eq!(
+            classify_adapter_access("a", "root", "a", "conv-B", mappings.into_iter()),
+            Some(Some("chan-B".to_string()))
+        );
+        // A conversation with no mapping and not the root is denied.
+        assert_eq!(
+            classify_adapter_access("a", "root", "a", "conv-Z", mappings.into_iter()),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_send_target_enforces_scope() {
+        // Root (unscoped) passes the requested target through, or none.
+        assert_eq!(
+            resolve_send_target(None, Some("x")).unwrap(),
+            Some("x".into())
+        );
+        assert_eq!(resolve_send_target(None, None).unwrap(), None);
+        // Scoped: missing target defaults to the mapped one.
+        assert_eq!(
+            resolve_send_target(Some("chan-A"), None).unwrap(),
+            Some("chan-A".into())
+        );
+        // Scoped: matching target is allowed.
+        assert_eq!(
+            resolve_send_target(Some("chan-A"), Some("chan-A")).unwrap(),
+            Some("chan-A".into())
+        );
+        // Scoped: a different target is refused — the key cross-channel guard.
+        assert!(resolve_send_target(Some("chan-A"), Some("chan-B")).is_err());
+    }
+
     #[tokio::test]
     async fn create_and_list_adapter_tools_are_conversation_scoped() {
         let tempdir = TempDir::new().unwrap();
@@ -802,6 +1107,7 @@ mod tests {
             agent.as_ref(),
             conversation.as_ref(),
             &store,
+            &test_creation_options(),
             &tool_request(
                 "create_adapter",
                 serde_json::json!({
@@ -836,9 +1142,7 @@ mod tests {
         );
         assert_eq!(adapter.config.worker_command[0], "pnpm");
         assert_eq!(adapter.config.worker_command[1], "tsx");
-        assert!(
-            adapter.config.worker_command[2].ends_with("examples/exoclaw/adapters/irc/worker.ts")
-        );
+        assert!(adapter.config.worker_command[2].ends_with("/tmp/exo-adapters/irc/worker.ts"));
 
         let list_result = execute_list_adapters_tool(
             agent.as_ref(),
@@ -856,6 +1160,157 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(list_result["adapters"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn agent_cli_config_applies_defaults() {
+        let config: AdapterCreationConfig = serde_json::from_value(serde_json::json!({
+            "type": "agent-cli",
+            "socketPath": null,
+            "mountRoot": "/Users/me/projects",
+            "mountPath": null,
+        }))
+        .unwrap();
+        assert_eq!(config.adapter_type(), "agent-cli");
+        let adapter_config = config
+            .into_adapter_config(AdapterSource::BuiltIn, &test_creation_options())
+            .unwrap();
+        assert_eq!(adapter_config.adapter_type, "agent-cli");
+        assert!(
+            adapter_config.worker_command[2].ends_with("/tmp/exo-adapters/agent-cli/worker.ts")
+        );
+        assert_eq!(
+            adapter_config.initialization,
+            serde_json::json!({
+                "socketPath": null,
+                "mountRoot": "/Users/me/projects",
+                "mountPath": "/agent-cli",
+            })
+        );
+        assert!(adapter_config.secret_env.is_empty());
+    }
+
+    #[test]
+    fn agent_cli_config_rejects_relative_mount_root_and_wrong_source() {
+        let parse = |mount_root: &str| -> AdapterCreationConfig {
+            serde_json::from_value(serde_json::json!({
+                "type": "agent-cli",
+                "socketPath": null,
+                "mountRoot": mount_root,
+                "mountPath": null,
+            }))
+            .unwrap()
+        };
+        let error = parse("projects")
+            .into_adapter_config(AdapterSource::BuiltIn, &test_creation_options())
+            .unwrap_err();
+        assert!(error.to_string().contains("absolute host path"));
+        let error = parse("/Users/me/projects")
+            .into_adapter_config(AdapterSource::Library, &test_creation_options())
+            .unwrap_err();
+        assert!(error.to_string().contains("source"));
+    }
+
+    #[tokio::test]
+    async fn list_adapter_events_is_conversation_scoped() {
+        let tempdir = TempDir::new().unwrap();
+        let exoharness = BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
+            .await
+            .unwrap();
+        let agent = exoharness
+            .new_agent(NewAgentRequest {
+                slug: "agent".to_string(),
+                name: "Agent".to_string(),
+            })
+            .await
+            .unwrap();
+        let conversation = agent
+            .new_conversation(NewConversationRequest {
+                slug: Some("conversation".to_string()),
+                name: Some("Conversation".to_string()),
+            })
+            .await
+            .unwrap();
+        let store = AdapterStore::new(tempdir.path().join("adapters"));
+        let owned = store
+            .create_adapter(NewAdapter {
+                agent_id: agent.record().id.to_string(),
+                conversation_id: conversation.record().id.to_string(),
+                name: "discord".to_string(),
+                source: AdapterSource::Library,
+                config: AdapterConfig {
+                    adapter_type: "discord".to_string(),
+                    worker_command: vec!["pnpm".to_string(), "tsx".to_string()],
+                    initialization: serde_json::json!({}),
+                    state_dir: None,
+                    secret_env: Vec::new(),
+                },
+            })
+            .await
+            .unwrap();
+        store
+            .record_event(
+                owned.id.clone(),
+                AdapterEventType::Error,
+                "shard error".to_string(),
+            )
+            .await
+            .unwrap();
+        let foreign = store
+            .create_adapter(NewAdapter {
+                agent_id: "other-agent".to_string(),
+                conversation_id: "other-conversation".to_string(),
+                name: "foreign".to_string(),
+                source: AdapterSource::Library,
+                config: AdapterConfig {
+                    adapter_type: "discord".to_string(),
+                    worker_command: vec!["pnpm".to_string(), "tsx".to_string()],
+                    initialization: serde_json::json!({}),
+                    state_dir: None,
+                    secret_env: Vec::new(),
+                },
+            })
+            .await
+            .unwrap();
+
+        let result = execute_list_adapter_events_tool(
+            agent.as_ref(),
+            conversation.as_ref(),
+            &store,
+            &tool_request(
+                "list_adapter_events",
+                serde_json::json!({
+                    "adapterId": owned.id,
+                    "eventType": "error",
+                    "sinceMs": null,
+                    "limit": null
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["ok"], true);
+        let events = result["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["summary"], "shard error");
+
+        let foreign_result = execute_list_adapter_events_tool(
+            agent.as_ref(),
+            conversation.as_ref(),
+            &store,
+            &tool_request(
+                "list_adapter_events",
+                serde_json::json!({
+                    "adapterId": foreign.id,
+                    "eventType": null,
+                    "sinceMs": null,
+                    "limit": null
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(foreign_result["ok"], false);
     }
 
     #[tokio::test]
@@ -884,6 +1339,7 @@ mod tests {
             agent.as_ref(),
             conversation.as_ref(),
             &store,
+            &test_creation_options(),
             &tool_request(
                 "create_adapter",
                 serde_json::json!({

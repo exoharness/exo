@@ -179,6 +179,7 @@ where
         conversation: &dyn ConversationHandle,
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
+        turn: Arc<dyn TurnHandle>,
         request: RuntimeRequest,
     ) -> Result<RuntimeResponsePayload> {
         match request {
@@ -188,6 +189,7 @@ where
                     .execute(
                         agent,
                         conversation,
+                        Some(turn.as_ref()),
                         agent_config,
                         conversation_config,
                         &request,
@@ -380,6 +382,7 @@ impl TypeScriptRunnerProcess {
                                     conversation,
                                     agent_config,
                                     conversation_config,
+                                    Arc::clone(&turn),
                                     request,
                                 )
                                 .await;
@@ -456,6 +459,7 @@ impl TypeScriptRunnerProcess {
         conversation: &dyn ConversationHandle,
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
+        turn: Arc<dyn TurnHandle>,
         request: RuntimeRequest,
     ) -> Result<RuntimeResponsePayload>
     where
@@ -469,6 +473,7 @@ impl TypeScriptRunnerProcess {
                         conversation,
                         agent_config,
                         conversation_config,
+                        Arc::clone(&turn),
                         RuntimeRequest::ExecuteTool { request },
                     )
                     .await
@@ -849,9 +854,11 @@ impl TypeScriptHarness<ExoclawToolRuntime> {
             .context("failed to resolve current directory for Exoclaw harness")?;
         let root = root.as_ref();
         let exoharness: Arc<dyn ExoHarness> = Arc::new(BasicExoHarness::new(exo_config).await?);
+        let adapter_worker_root = workspace_root.join("examples/exoclaw/adapters");
         let tools = Arc::new(ExoclawToolRuntime::with_roots(
             root.join("scheduled-tasks"),
             root.join("adapters"),
+            adapter_worker_root,
         ));
         let runtime = ExecutorHarnessRuntime::new(
             TypeScriptExecutor::new(Arc::clone(&exoharness), workspace_root, env, tools),

@@ -34,7 +34,45 @@ pub trait ExoHarness: Send + Sync {
 }
 
 #[async_trait]
-pub trait AgentHandle: Send + Sync {
+pub trait SnapshotHandle: Send + Sync {
+    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId>;
+    async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()>;
+}
+
+#[async_trait]
+pub trait SandboxHandle: SnapshotHandle {
+    async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId>;
+    async fn stop_sandbox(&self, id: SandboxId) -> Result<()>;
+    async fn start_sandbox_process(
+        &self,
+        request: StartSandboxProcessRequest,
+    ) -> Result<SandboxProcessRecord>;
+    async fn write_sandbox_process_input(
+        &self,
+        request: WriteSandboxProcessInputRequest,
+    ) -> Result<()>;
+    async fn close_sandbox_process_input(
+        &self,
+        request: CloseSandboxProcessInputRequest,
+    ) -> Result<()>;
+    async fn get_sandbox_process_events(
+        &self,
+        query: SandboxProcessEventQuery,
+    ) -> Result<GetSandboxProcessEventsResult>;
+    async fn wait_sandbox_process(
+        &self,
+        request: WaitSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus>;
+    async fn cancel_sandbox_process(
+        &self,
+        request: CancelSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus>;
+    async fn run_in_sandbox(&self, request: RunInSandboxRequest)
+    -> Result<Box<dyn SandboxProcess>>;
+}
+
+#[async_trait]
+pub trait AgentHandle: SandboxHandle {
     fn record(&self) -> &AgentRecord;
 
     async fn list_conversations(
@@ -65,7 +103,7 @@ pub trait AgentHandle: Send + Sync {
 }
 
 #[async_trait]
-pub trait ConversationHandle: Send + Sync {
+pub trait ConversationHandle: SandboxHandle {
     fn record(&self) -> &ConversationRecord;
 
     async fn start_session(&self) -> Result<SessionId>;
@@ -86,37 +124,6 @@ pub trait ConversationHandle: Send + Sync {
     async fn read_artifact(&self, request: ReadArtifactRequest) -> Result<Option<Artifact>>;
     async fn list_artifacts(&self) -> Result<Vec<ArtifactVersion>>;
 
-    async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId>;
-    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId>;
-    async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()>;
-    async fn stop_sandbox(&self, id: SandboxId) -> Result<()>;
-    async fn start_sandbox_process(
-        &self,
-        request: StartSandboxProcessRequest,
-    ) -> Result<SandboxProcessRecord>;
-    async fn write_sandbox_process_input(
-        &self,
-        request: WriteSandboxProcessInputRequest,
-    ) -> Result<()>;
-    async fn close_sandbox_process_input(
-        &self,
-        request: CloseSandboxProcessInputRequest,
-    ) -> Result<()>;
-    async fn get_sandbox_process_events(
-        &self,
-        query: SandboxProcessEventQuery,
-    ) -> Result<GetSandboxProcessEventsResult>;
-    async fn wait_sandbox_process(
-        &self,
-        request: WaitSandboxProcessRequest,
-    ) -> Result<SandboxProcessStatus>;
-    async fn cancel_sandbox_process(
-        &self,
-        request: CancelSandboxProcessRequest,
-    ) -> Result<SandboxProcessStatus>;
-    async fn run_in_sandbox(&self, request: RunInSandboxRequest)
-    -> Result<Box<dyn SandboxProcess>>;
-
     async fn list_bindings(&self) -> Result<Vec<BindingRecord>>;
     async fn put_binding(&self, binding: Binding) -> Result<BindingId>;
     async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>>;
@@ -127,7 +134,7 @@ pub trait ConversationHandle: Send + Sync {
 }
 
 #[async_trait]
-pub trait TurnHandle: Send + Sync {
+pub trait TurnHandle: SnapshotHandle {
     fn record(&self) -> &TurnRecord;
 
     async fn add_events(&self, data: Vec<EventData>) -> Result<AddEventsResult>;

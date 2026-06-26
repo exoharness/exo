@@ -1,4 +1,48 @@
-import type { WorkerInboundEvent } from "../protocol";
+import type { AdapterAttachment, WorkerInboundEvent } from "../protocol";
+
+export type DiscordAttachmentLike = {
+  url: string;
+  contentType?: string | null;
+  name?: string | null;
+};
+
+export function attachmentKindForContentType(
+  contentType: string | null | undefined,
+): AdapterAttachment["kind"] {
+  const mime = (contentType ?? "").toLowerCase();
+  if (mime.startsWith("image/")) {
+    return "image";
+  }
+  if (mime.startsWith("video/")) {
+    return "video";
+  }
+  if (mime.startsWith("audio/")) {
+    return "audio";
+  }
+  return "document";
+}
+
+/// Maps inbound Discord attachments to protocol attachments. Discord CDN URLs
+/// carry expiring signatures, so the host downloads them promptly.
+export function inboundAttachments(
+  attachments: Iterable<DiscordAttachmentLike>,
+): AdapterAttachment[] {
+  const mapped: AdapterAttachment[] = [];
+  for (const attachment of attachments) {
+    if (!attachment.url) {
+      continue;
+    }
+    mapped.push({
+      kind: attachmentKindForContentType(attachment.contentType),
+      path: null,
+      url: attachment.url,
+      data: null,
+      mimeType: attachment.contentType ?? null,
+      fileName: attachment.name ?? null,
+    });
+  }
+  return mapped;
+}
 
 export function errorMessage(value: unknown): string {
   if (value instanceof Error) {
@@ -9,6 +53,16 @@ export function errorMessage(value: unknown): string {
   } catch {
     return "unknown error";
   }
+}
+
+export function isTlsAccessDeniedError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const code = (error as { code?: unknown }).code;
+  return (
+    code === "EPROTO" && error.message.includes("tlsv1 alert access denied")
+  );
 }
 
 // Gateway close codes discord.js will not reconnect from. Each is a
@@ -46,12 +100,12 @@ export type ResilienceHandlers = {
   onLoginFailure: (error: unknown) => void;
 };
 
-// The worker is a child process the adapter runner restarts on every exit
-// (a fixed 5s delay, with no give-up). So it should exit only when a fresh
-// start can plausibly help; for a failure a restart cannot fix it stays up and
-// reports the cause rather than churning. The emit/exit side effects are
-// injected so the decisions can be unit-tested without a real process or
-// gateway.
+// The worker is a child process the adapter runner restarts on exit with
+// exponential backoff (5s doubling to 5min). Exiting is therefore the safe
+// default for any state a fresh start could improve, and the backoff bounds
+// the reconnect churn even for failures a restart cannot fix. The emit/exit
+// side effects are injected so the decisions can be unit-tested without a
+// real process or gateway.
 export function createResilienceHandlers(
   deps: ResilienceDeps,
 ): ResilienceHandlers {
@@ -66,6 +120,13 @@ export function createResilienceHandlers(
       deps.exit(1);
     },
     onUncaughtException(error) {
+      if (isTlsAccessDeniedError(error)) {
+        deps.emit({
+          type: "error",
+          message: `Discord TLS stream error: ${errorMessage(error)}`,
+        });
+        return;
+      }
       deps.emit({
         type: "error",
         message: `uncaught exception: ${errorMessage(error)}`,
@@ -74,10 +135,12 @@ export function createResilienceHandlers(
     },
     onShardDisconnect(code) {
       // discord.js emits shardDisconnect only for close codes it will not
-      // reconnect from, and all of them are configuration errors. A restart
-      // cannot fix those and would just reconnect-storm Discord, so report the
-      // cause and stay up instead of exiting into a 5s restart loop.
+      // reconnect from. Staying up here leaves a zombie worker that looks
+      // alive to the runner but will never receive a message again, so exit
+      // and let the runner's backoff bound the retry rate while the cause
+      // (usually configuration) is fixed.
       deps.emit({ type: "disconnected", reason: describeCloseCode(code) });
+      deps.exit(1);
     },
     onShardError(error) {
       // Shard errors are transient; discord.js keeps reconnecting, so report
@@ -98,4 +161,41 @@ export function createResilienceHandlers(
       deps.exit(1);
     },
   };
+}
+
+export type ConnectionWatchdogDeps = {
+  isReady: () => boolean;
+  emit: (event: WorkerInboundEvent) => void;
+  exit: (code: number) => void;
+  intervalMs?: number;
+  timeoutMs?: number;
+};
+
+// Some failures leave the gateway dead without any event firing (e.g. DNS
+// breaks mid-session and discord.js wedges while retrying). The watchdog
+// covers that gap: if the client has not been ready for timeoutMs, the worker
+// exits so the runner restarts it on a fresh connection. Returns a stop
+// function.
+export function startConnectionWatchdog(
+  deps: ConnectionWatchdogDeps,
+): () => void {
+  const intervalMs = deps.intervalMs ?? 30_000;
+  const timeoutMs = deps.timeoutMs ?? 5 * 60_000;
+  let lastReadyAtMs = Date.now();
+  const timer = setInterval(() => {
+    if (deps.isReady()) {
+      lastReadyAtMs = Date.now();
+      return;
+    }
+    const staleMs = Date.now() - lastReadyAtMs;
+    if (staleMs >= timeoutMs) {
+      deps.emit({
+        type: "error",
+        message: `discord gateway not ready for ${Math.round(staleMs / 1000)}s; exiting so the runner restarts the worker`,
+      });
+      deps.exit(1);
+    }
+  }, intervalMs);
+  timer.unref?.();
+  return () => clearInterval(timer);
 }

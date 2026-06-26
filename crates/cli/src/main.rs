@@ -62,6 +62,8 @@ struct Cli {
     secret_backend: Option<SecretBackendArg>,
     #[arg(long, global = true, env = "EXO_MASTER_KEY_PATH")]
     master_key_path: Option<PathBuf>,
+    #[arg(long, global = true, value_enum, env = "EXO_SANDBOX_BACKEND")]
+    sandbox_backend: Option<SandboxBackendArg>,
     #[arg(long, global = true)]
     env_file: Option<PathBuf>,
     #[arg(long, global = true)]
@@ -241,6 +243,25 @@ impl From<SandboxProviderArg> for SandboxProvider {
     }
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SandboxBackendArg {
+    #[value(name = "apple-container")]
+    AppleContainer,
+    Docker,
+    #[value(name = "local-process")]
+    LocalProcess,
+}
+
+impl From<SandboxBackendArg> for SandboxBackendChoice {
+    fn from(value: SandboxBackendArg) -> Self {
+        match value {
+            SandboxBackendArg::AppleContainer => Self::AppleContainer,
+            SandboxBackendArg::Docker => Self::Docker,
+            SandboxBackendArg::LocalProcess => Self::LocalProcess,
+        }
+    }
+}
+
 fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
     let secret_backend = match cli.secret_backend.unwrap_or_else(default_secret_backend) {
         SecretBackendArg::AppleKeychain => SecretBackendChoice::AppleKeychain,
@@ -248,11 +269,23 @@ fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
             path: cli.master_key_path.clone(),
         },
     };
+    let sandbox_backend = cli
+        .sandbox_backend
+        .map(SandboxBackendChoice::from)
+        .unwrap_or_else(default_sandbox_backend);
+    let sandbox_default = sandbox_backend.provider();
+    let mut sandbox_backends = default_sandbox_backends();
+    if !sandbox_backends
+        .iter()
+        .any(|backend| backend.provider() == sandbox_default)
+    {
+        sandbox_backends.push(sandbox_backend);
+    }
     Ok(BasicExoHarnessConfig {
         root: cli.root.join("exoharness"),
         secret_backend,
-        sandbox_default: default_local_sandbox_provider(),
-        sandbox_backends: default_sandbox_backends(),
+        sandbox_default,
+        sandbox_backends,
     })
 }
 
@@ -2582,6 +2615,7 @@ async fn run_sandbox_shell_command(
         .execute(
             agent_handle.as_ref(),
             conversation_handle.as_ref(),
+            None,
             &agent_config,
             &config,
             &ToolRequest {

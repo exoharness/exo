@@ -4,6 +4,7 @@ import readline from "node:readline/promises";
 import {
   ChannelType,
   Client,
+  Events,
   GatewayIntentBits,
   Partials,
   type Message,
@@ -17,7 +18,12 @@ import {
   parseWorkerCommand,
   writeWorkerEvent,
 } from "../protocol";
-import { createResilienceHandlers } from "./discord";
+import {
+  createResilienceHandlers,
+  inboundAttachments,
+  startConnectionWatchdog,
+} from "./discord";
+import type { DiscordVoice as DiscordVoiceInstance } from "./voice";
 
 const SEND_TIMEOUT_MS = 60_000;
 
@@ -32,6 +38,7 @@ const trigger = optionalStringField(config, "trigger") ?? "mentions_only";
 const defaultChannelId = optionalStringField(config, "defaultChannelId");
 const allowedChannels = stringArrayOrNull(config.allowedChannels);
 const allowBots = config.allowBots === true;
+const voiceEnabled = config.voice === true;
 if (trigger !== "all_messages" && trigger !== "mentions_only") {
   throw new Error("Discord trigger must be all_messages or mentions_only");
 }
@@ -55,15 +62,34 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.DirectMessages,
     GatewayIntentBits.MessageContent,
+    // GuildVoiceStates (non-privileged) is needed to track who is in a voice
+    // channel and to join it; added only when voice is enabled.
+    ...(voiceEnabled ? [GatewayIntentBits.GuildVoiceStates] : []),
   ],
   partials: [Partials.Channel],
 });
 
+// Voice is a microphone and speaker on the text pipe: a spoken utterance
+// becomes a normal `message` event (target = voice channel id); an outbound
+// send to that target is spoken back. All audio stays in this worker.
+let voice: DiscordVoiceInstance | null = null;
+if (voiceEnabled) {
+  const openaiKey = process.env.OPENAI_API_KEY;
+  if (!openaiKey) {
+    throw new Error(
+      "Discord voice requires OPENAI_API_KEY in the worker environment",
+    );
+  }
+  const { DiscordVoice } = await import("./voice");
+  voice = new DiscordVoice(client, openaiKey, writeWorkerEvent);
+  voice.register();
+}
+
 client.on("error", (error) => {
-  writeWorkerEvent({ type: "error", message: error.message });
+  reportWorkerError(error.message);
 });
 
-client.once("ready", () => {
+client.once(Events.ClientReady, () => {
   writeWorkerEvent({
     type: "connected",
     subject: client.user?.id ?? null,
@@ -75,6 +101,12 @@ client.once("ready", () => {
 
 client.on("shardDisconnect", (event) => {
   resilience.onShardDisconnect(event.code);
+});
+
+startConnectionWatchdog({
+  isReady: () => client.isReady(),
+  emit: writeWorkerEvent,
+  exit: (code) => process.exit(code),
 });
 
 client.on("shardError", (error) => {
@@ -103,6 +135,7 @@ client.on("messageCreate", (message) => {
       guildId: message.guildId,
       channelType: message.channel.type,
     },
+    attachments: inboundAttachments(message.attachments.values()),
   });
 });
 
@@ -117,55 +150,68 @@ const input = readline.createInterface({
   crlfDelay: Number.POSITIVE_INFINITY,
 });
 
-for await (const line of input) {
-  if (line.trim().length === 0) {
-    continue;
-  }
-  let commandId: string | null = null;
-  try {
-    const command = parseWorkerCommand(JSON.parse(line));
-    commandId = command.id;
-    const target = command.target ?? defaultChannelId;
-    if (!target) {
-      throw new Error(
-        "Discord send_message requires a target channel id or configured defaultChannelId",
-      );
+input.on("error", (error) => {
+  reportWorkerError(`Discord adapter command stream error: ${error.message}`);
+});
+
+try {
+  for await (const line of input) {
+    if (line.trim().length === 0) {
+      continue;
     }
-    writeWorkerEvent({
-      type: "lifecycle",
-      name: "send_starting",
-      metadata: {
-        target,
-        attachmentCount: command.attachments.length,
-      },
-    });
-    await sendDiscordMessage(target, {
-      content: command.text,
-      files: await discordAttachmentFiles(command.attachments),
-    });
-    writeWorkerEvent({
-      type: "lifecycle",
-      name: "send_result",
-      metadata: {
-        target,
-        attachmentCount: command.attachments.length,
-      },
-    });
-    writeWorkerEvent({ type: "command_ack", command_id: command.id });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    writeWorkerEvent({
-      type: "error",
-      message,
-    });
-    if (commandId !== null) {
+    let commandId: string | null = null;
+    try {
+      const command = parseWorkerCommand(JSON.parse(line));
+      commandId = command.id;
+      const target = command.target ?? defaultChannelId;
+      if (!target) {
+        throw new Error(
+          "Discord send_message requires a target channel id or configured defaultChannelId",
+        );
+      }
       writeWorkerEvent({
-        type: "command_nack",
-        command_id: commandId,
-        message,
+        type: "lifecycle",
+        name: "send_starting",
+        metadata: {
+          target,
+          attachmentCount: command.attachments.length,
+        },
       });
+      await sendDiscordMessage(target, {
+        content: command.text,
+        files: await discordAttachmentFiles(command.attachments),
+      });
+      // If this target has an active voice session, also speak the reply. The
+      // text send above doubles as the inspectable transcript of the voice turn.
+      if (voice) {
+        await voice.maybeSpeak(target, command.text);
+      }
+      writeWorkerEvent({
+        type: "lifecycle",
+        name: "send_result",
+        metadata: {
+          target,
+          attachmentCount: command.attachments.length,
+        },
+      });
+      writeWorkerEvent({ type: "command_ack", command_id: command.id });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      reportWorkerError(message);
+      if (commandId !== null) {
+        writeWorkerEvent({
+          type: "command_nack",
+          command_id: commandId,
+          message,
+        });
+      }
     }
   }
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  reportWorkerError(
+    `Discord adapter command stream closed with error: ${message}`,
+  );
 }
 
 async function sendDiscordMessage(
@@ -275,6 +321,10 @@ function base64Payload(data: string): string {
     return data.slice(dataUrlSeparator + 1);
   }
   return data;
+}
+
+function reportWorkerError(message: string): void {
+  writeWorkerEvent({ type: "error", message });
 }
 
 function stringArrayOrNull(value: unknown): string[] | null {

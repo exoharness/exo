@@ -24,7 +24,7 @@ import { ensureTable } from "@exo/model-runtime/cost";
 import { resolveLlmBinding } from "./shared";
 
 export interface ResponsesTurnLoopOptions {
-  instructions?: (context: TurnContext) => Message[];
+  instructions?: (context: TurnContext) => Message[] | Promise<Message[]>;
   registerTools?: (
     tools: HarnessToolRegistry,
     context: TurnContext,
@@ -70,7 +70,7 @@ export function defaultBuiltInToolNames(
 ): BuiltInToolName[] {
   const names: BuiltInToolName[] = ["shell"];
   if (context.agentConfig.enableAgentToolCreation) {
-    names.push("install_agent_tool");
+    names.push("install_agent_tool", "uninstall_agent_tool");
   }
   return names;
 }
@@ -85,7 +85,7 @@ export function agentToolCreationInstruction(): Message {
   return {
     role: "developer",
     content:
-      "Agent-created tools are supported. When the user asks you to create a reusable tool, call install_agent_tool with a complete TypeScript moduleSource. Do not claim the tool was created unless install_agent_tool returns ok: true. The moduleSource must use type-only imports from @exo/harness/tool and default-export a Tool using { definition, initializationParameters, initialize(...) } satisfies Tool; definition.parameters must be a strict JSON schema object with additionalProperties: false; handlers must implement execute(args, execution), not invoke or call. Do not use zod, inputSchema, external npm packages, or runtime imports from @exo/harness/tool. After install_agent_tool succeeds, the new tool is available in the next model round of the same turn, so use it directly rather than falling back to shell.",
+      "Agent-created tools are supported. When the user asks you to create a reusable tool, call install_agent_tool with a complete TypeScript moduleSource. Do not claim the tool was created unless install_agent_tool returns ok: true. The moduleSource must use type-only imports from @exo/harness/tool and default-export a Tool using { definition, initializationParameters, initialize(...) } satisfies Tool; definition.parameters must be a strict JSON schema object with additionalProperties: false; handlers must implement execute(args, execution), not invoke or call. Do not use zod, inputSchema, external npm packages, or runtime imports from @exo/harness/tool. After install_agent_tool succeeds, the new tool is available in the next model round of the same turn, so use it directly rather than falling back to shell. Use uninstall_agent_tool to remove an agent-created tool that is obsolete or conflicts with another tool name.",
   };
 }
 
@@ -117,7 +117,9 @@ async function runResponsesTurnLoop(
     }
     const messages = await materializePromptMessages(
       conversation,
-      options.instructions?.(context) ?? basicHarnessInstructions(context),
+      options.instructions
+        ? await options.instructions(context)
+        : basicHarnessInstructions(context),
     );
     const request: NativeResponsesRequest = {
       model,
