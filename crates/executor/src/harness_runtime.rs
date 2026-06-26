@@ -108,9 +108,53 @@ fn resolve_runtime_config(
 ) -> Result<ResolvedRuntimeConfig> {
     if is_anthropic_model(&request.model) {
         resolve_anthropic_config(request, env)
+    } else if is_openrouter_request(request) {
+        resolve_openrouter_config(request, env)
     } else {
         resolve_openai_config(request, env)
     }
+}
+
+/// OpenRouter is an OpenAI-compatible aggregator selected by its base URL (it
+/// has no Responses API, so it can't be detected by model name the way native
+/// Anthropic is). A binding pointed at `openrouter.ai` routes through the
+/// OpenAI provider in Chat Completions mode.
+fn is_openrouter_request(request: &ModelRequest) -> bool {
+    request
+        .base_url
+        .as_deref()
+        .is_some_and(|url| url.contains("openrouter.ai"))
+}
+
+fn resolve_openrouter_config(
+    request: &ModelRequest,
+    env: &HashMap<String, String>,
+) -> Result<ResolvedRuntimeConfig> {
+    let key = request
+        .api_key
+        .clone()
+        .or_else(|| optional_env(env, "OPENROUTER_API_KEY"))
+        .ok_or_else(|| anyhow::anyhow!("model request is missing an API key"))?;
+    let endpoint = request
+        .base_url
+        .clone()
+        .map(|raw| Url::parse(&raw))
+        .transpose()?;
+    Ok(ResolvedRuntimeConfig {
+        provider_alias: "openrouter".to_string(),
+        // OpenRouter speaks the OpenAI Chat Completions wire format, so reuse
+        // the OpenAI provider but force Chat Completions (not Responses).
+        provider_kind: "openai".to_string(),
+        format: ProviderFormat::ChatCompletions,
+        endpoint,
+        endpoint_template: None,
+        metadata: HashMap::new(),
+        auth: AuthConfig::ApiKey {
+            key,
+            header: Some("authorization".to_string()),
+            prefix: Some("Bearer".to_string()),
+        },
+    })
 }
 
 /// Anthropic model bindings route to the native Messages API. We detect them by
@@ -368,6 +412,26 @@ mod tests {
 
         assert_eq!(config.provider_kind, "openai");
         assert_eq!(config.format, ProviderFormat::Responses);
+    }
+
+    #[test]
+    fn openrouter_bindings_use_openai_chat_completions() {
+        let mut request = model_request();
+        request.model = "openai/gpt-4o-mini".to_string();
+        request.api_key = Some("sk-or-test".to_string());
+        request.base_url = Some("https://openrouter.ai/api/v1".to_string());
+
+        let config = resolve_runtime_config(&request, &HashMap::new()).unwrap();
+
+        assert_eq!(config.provider_alias, "openrouter");
+        assert_eq!(config.provider_kind, "openai");
+        assert_eq!(config.format, ProviderFormat::ChatCompletions);
+        assert!(matches!(
+            config.auth,
+            AuthConfig::ApiKey { ref header, ref prefix, .. }
+                if header.as_deref() == Some("authorization")
+                    && prefix.as_deref() == Some("Bearer")
+        ));
     }
 
     #[test]

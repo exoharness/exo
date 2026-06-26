@@ -332,6 +332,11 @@ export function runtimeFromModelBinding(
   if (isAnthropicModel(model)) {
     return AnthropicRuntime.fromModelBinding(agentConfig, binding);
   }
+  // OpenRouter is OpenAI-compatible but Chat Completions only (no Responses
+  // API), so force the chat path regardless of how the model name looks.
+  if (isOpenRouterBinding(binding)) {
+    return ChatCompletionsRuntime.fromModelBinding(agentConfig, binding);
+  }
   return modelRequiresResponsesApi(model)
     ? ResponsesRuntime.fromModelBinding(agentConfig, binding)
     : ChatCompletionsRuntime.fromModelBinding(agentConfig, binding);
@@ -342,6 +347,12 @@ export function runtimeFromModelBinding(
 // ids carry provider prefixes and intentionally don't match here.
 export function isAnthropicModel(model: string): boolean {
   return model.toLowerCase().startsWith("claude");
+}
+
+// OpenRouter is selected by its base URL (it aggregates many vendors, so the
+// model name isn't a reliable signal), mirroring the Rust runtime.
+export function isOpenRouterBinding(binding: ResponsesModelBinding): boolean {
+  return (binding.baseUrl ?? "").includes("openrouter.ai");
 }
 
 export function modelRequiresResponsesApi(model: string): boolean {
