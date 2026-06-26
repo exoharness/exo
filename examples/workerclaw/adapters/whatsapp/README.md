@@ -64,6 +64,7 @@ Or rely on `defaultTo` in config and omit the target in `send_adapter_message`.
 
 ## TODOs
 
+- **Executor WhatsApp config (upstream exo)** — `create_adapter` still validates Baileys-shaped WhatsApp config in `crates/executor`. Twilio fields (`defaultTo`, secret refs) belong in a separate exo-core change, not in WorkerClaw-only diffs. Until then this `worker.ts` is the sidecar implementation ready for when that lands.
 - **Twilio inbound webhook (later)** — Optional exo-native path: HTTP handler receives Twilio POSTs, validates signature, emits adapter `message` events / wakes the conversation. Not needed when a host platform already owns ingress (e.g. a Receiver on a webhook service that creates tasks and only uses this worker for outbound `send_adapter_message` during execution).
 - **Rich attachments** — Outbound media (image, document) via Twilio; inbound media parsing if inbound is added.
 - **`trigger` / `allowedChats`** — Wire config fields once inbound filtering exists.
