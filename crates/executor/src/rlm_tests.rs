@@ -30,6 +30,7 @@ async fn rlm_send_executes_repl_steps_and_persists_final_answer() {
     ) as Arc<dyn ExoHarness>;
     let model = Arc::new(FakeModelClient::new(vec![
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("Inspecting the transcript.")],
             tool_calls: vec![PendingToolCall {
@@ -51,6 +52,7 @@ async fn rlm_send_executes_repl_steps_and_persists_final_answer() {
             duration: None,
         },
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("FINAL(done)")],
             tool_calls: Vec::new(),
@@ -136,6 +138,7 @@ async fn rlm_subquery_variable_can_store_final_answer() {
     ) as Arc<dyn ExoHarness>;
     let model = Arc::new(FakeModelClient::new(vec![
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("Preparing a smaller prompt.")],
             tool_calls: vec![PendingToolCall {
@@ -154,6 +157,7 @@ async fn rlm_subquery_variable_can_store_final_answer() {
             duration: None,
         },
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("Delegating the arithmetic.")],
             tool_calls: vec![PendingToolCall {
@@ -182,6 +186,7 @@ async fn rlm_subquery_variable_can_store_final_answer() {
             duration: None,
         },
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("4")],
             tool_calls: Vec::new(),
@@ -191,6 +196,7 @@ async fn rlm_subquery_variable_can_store_final_answer() {
             duration: None,
         },
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("FINAL_VAR(final_answer)")],
             tool_calls: Vec::new(),
@@ -260,6 +266,7 @@ async fn rlm_send_stream_suppresses_internal_control_text() {
             UniversalStreamChunk::finish(0, "stop"),
         ],
         final_response: ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("FINAL(2)")],
             tool_calls: Vec::new(),
@@ -332,6 +339,7 @@ async fn rlm_exposes_history_via_get_messages() {
     ) as Arc<dyn ExoHarness>;
     let model = Arc::new(FakeModelClient::new(vec![
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("FINAL(recorded)")],
             tool_calls: Vec::new(),
@@ -341,6 +349,7 @@ async fn rlm_exposes_history_via_get_messages() {
             duration: None,
         },
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("Checking prior user content.")],
             tool_calls: vec![PendingToolCall {
@@ -372,6 +381,7 @@ globalThis.answer = String(\n\
             duration: None,
         },
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("FINAL_VAR(answer)")],
             tool_calls: Vec::new(),
@@ -438,6 +448,7 @@ async fn rlm_can_finish_by_setting_final_in_repl() {
             .expect("basic exoharness should initialize"),
     ) as Arc<dyn ExoHarness>;
     let model = Arc::new(FakeModelClient::new(vec![ModelResponse {
+        provider_cost_usd: None,
         response_id: Some(Uuid7::now()),
         messages: vec![assistant_message("Setting Final in the REPL.")],
         tool_calls: vec![PendingToolCall {

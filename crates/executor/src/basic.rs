@@ -537,19 +537,23 @@ fn build_usage_record(
         None => (None, None, None, None, None),
     };
 
-    let cost_usd = if has_usage && !model.is_empty() {
-        pricing.compute_cost_usd(
-            &model,
-            TokenCounts {
-                prompt: prompt_tokens,
-                completion: completion_tokens,
-                prompt_cached: prompt_cached_tokens,
-                prompt_cache_creation: prompt_cache_creation_tokens,
-            },
-        )
-    } else {
-        None
-    };
+    // Prefer the provider-reported cost (e.g. OpenRouter's `usage.cost`); fall
+    // back to the local price-table estimate when the provider doesn't send one.
+    let cost_usd = response.provider_cost_usd.or_else(|| {
+        if has_usage && !model.is_empty() {
+            pricing.compute_cost_usd(
+                &model,
+                TokenCounts {
+                    prompt: prompt_tokens,
+                    completion: completion_tokens,
+                    prompt_cached: prompt_cached_tokens,
+                    prompt_cache_creation: prompt_cache_creation_tokens,
+                },
+            )
+        } else {
+            None
+        }
+    });
 
     Some(Box::new(UsageRecord {
         model,

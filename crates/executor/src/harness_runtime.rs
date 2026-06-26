@@ -23,7 +23,16 @@ use lingua::universal::{
 use lingua::{Message, ProviderFormat};
 use reqwest::Url;
 
-type UniversalChunkStream = Pin<Box<dyn Stream<Item = Result<UniversalStreamChunk>> + Send>>;
+type RawChunkStream = Pin<
+    Box<
+        dyn Stream<
+                Item = std::result::Result<
+                    braintrust_llm_router::StreamChunk,
+                    braintrust_llm_router::Error,
+                >,
+            > + Send,
+    >,
+>;
 
 #[derive(Debug, Default, Clone)]
 pub struct RouterModelClient {
@@ -47,8 +56,11 @@ impl ModelClient for RouterModelClient {
         let route = resolve_provider_route(&router, &request.model, format)?;
         let (prepared, _router_metadata) = router.create_request(payload, format, &route).await?;
         let body = router.complete(prepared, &ClientHeaders::new()).await?;
+        let provider_cost_usd = extract_provider_cost(&body);
         let response = lingua::response_to_universal(body)?;
-        normalize_model_response(response)
+        let mut model_response = normalize_model_response(response)?;
+        model_response.provider_cost_usd = provider_cost_usd;
+        Ok(model_response)
     }
 
     async fn complete_stream(&self, request: ModelRequest) -> Result<Box<dyn ModelResponseStream>> {
@@ -65,29 +77,52 @@ impl ModelClient for RouterModelClient {
             .complete_stream(prepared, &ClientHeaders::new(), None)
             .await?;
         Ok(Box::new(RouterModelResponseStream {
-            stream: map_universal_stream(raw_stream, format),
+            raw: Box::pin(raw_stream),
+            format,
             accumulator: UniversalResponseAccumulator::default(),
+            provider_cost_usd: None,
         }))
     }
 }
 
 struct RouterModelResponseStream {
-    stream: UniversalChunkStream,
+    raw: RawChunkStream,
+    format: ProviderFormat,
     accumulator: UniversalResponseAccumulator,
+    provider_cost_usd: Option<f64>,
 }
 
 #[async_trait]
 impl ModelResponseStream for RouterModelResponseStream {
     async fn next_chunk(&mut self) -> Result<Option<UniversalStreamChunk>> {
-        let Some(chunk) = self.stream.next().await.transpose()? else {
-            return Ok(None);
-        };
-        self.accumulator.push(&chunk);
-        Ok(Some(chunk))
+        // Map raw provider chunks to universal chunks inline (rather than via a
+        // pre-mapped stream) so we can also read the provider-reported cost off
+        // the raw bytes — it rides in `usage.cost` on the final chunk and isn't
+        // preserved by lingua's UniversalUsage.
+        loop {
+            let Some(raw) = self.raw.next().await.transpose()? else {
+                return Ok(None);
+            };
+            if let Some(cost) = extract_provider_cost(&raw.data) {
+                self.provider_cost_usd = Some(cost);
+            }
+            match lingua::parse_stream_event(raw.data, self.format, self.format) {
+                Ok(parsed) => {
+                    if let Some(chunk) = parsed.universal {
+                        self.accumulator.push(&chunk);
+                        return Ok(Some(chunk));
+                    }
+                    // Non-content event (e.g. a usage-only final chunk): keep reading.
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 
     async fn finish(self: Box<Self>) -> Result<ModelResponse> {
-        normalize_model_response(self.accumulator.finalize())
+        let mut response = normalize_model_response(self.accumulator.finalize())?;
+        response.provider_cost_usd = self.provider_cost_usd;
+        Ok(response)
     }
 }
 
@@ -435,6 +470,16 @@ mod tests {
     }
 
     #[test]
+    fn extracts_provider_reported_cost_from_usage() {
+        let body = br#"{"usage":{"prompt_tokens":16,"completion_tokens":6,"cost":0.000006}}"#;
+        assert_eq!(extract_provider_cost(body), Some(0.000006));
+
+        // No cost field (OpenAI/Anthropic) -> None, and cheaply skipped.
+        let no_cost = br#"{"usage":{"prompt_tokens":16,"completion_tokens":6}}"#;
+        assert_eq!(extract_provider_cost(no_cost), None);
+    }
+
+    #[test]
     fn chat_completions_stream_request_includes_lingua_usage_stream_option() {
         let request = build_universal_request(&model_request(), true).unwrap();
         let serialized = serialize_request(ProviderFormat::ChatCompletions, &request).unwrap();
@@ -527,25 +572,18 @@ fn serialize_request(format: ProviderFormat, request: &UniversalRequest) -> Resu
     Ok(Bytes::from(lingua_json::to_vec(&payload)?))
 }
 
-fn map_universal_stream<S>(raw_stream: S, format: ProviderFormat) -> UniversalChunkStream
-where
-    S: Stream<
-            Item = std::result::Result<
-                braintrust_llm_router::StreamChunk,
-                braintrust_llm_router::Error,
-            >,
-        > + Send
-        + 'static,
-{
-    Box::pin(raw_stream.filter_map(move |item| async move {
-        match item {
-            Ok(chunk) => match lingua::parse_stream_event(chunk.data, format, format) {
-                Ok(parsed) => parsed.universal.map(Ok),
-                Err(error) => Some(Err(error.into())),
-            },
-            Err(error) => Some(Err(error.into())),
-        }
-    }))
+/// Some providers (e.g. OpenRouter) report the authoritative dollar cost of a
+/// request in `usage.cost`. lingua's `UniversalUsage` doesn't carry that field,
+/// so we read it straight off the raw response/stream JSON. Returns `None` when
+/// absent (the common case — OpenAI and Anthropic don't send it).
+fn extract_provider_cost(data: &[u8]) -> Option<f64> {
+    // Cheap guard so we don't JSON-parse every streamed content chunk; only the
+    // final usage chunk carries a cost field.
+    if !data.windows(6).any(|window| window == b"\"cost\"") {
+        return None;
+    }
+    let value: lingua_json::Value = lingua_json::from_slice(data).ok()?;
+    value.get("usage")?.get("cost")?.as_f64()
 }
 
 fn normalize_model_response(response: UniversalResponse) -> Result<ModelResponse> {
@@ -553,6 +591,7 @@ fn normalize_model_response(response: UniversalResponse) -> Result<ModelResponse
     let tool_calls = extract_tool_calls(&response.messages)?;
 
     Ok(ModelResponse {
+        provider_cost_usd: None,
         response_id,
         messages: response.messages,
         tool_calls,

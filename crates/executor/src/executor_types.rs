@@ -198,6 +198,10 @@ pub struct ModelResponse {
     /// Wall-clock duration from request start to end of response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<Duration>,
+    /// Authoritative cost in USD reported by the provider (e.g. OpenRouter's
+    /// `usage.cost`), if any. Preferred over the price-table estimate when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
