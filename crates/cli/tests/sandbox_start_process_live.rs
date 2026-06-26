@@ -7,6 +7,7 @@
 //! `SPRITES_TOKEN=... cargo test -p exo --test sandbox_start_process_live sprites_ -- --ignored --nocapture`
 
 use std::collections::HashMap;
+use std::env;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -19,7 +20,17 @@ use futures::io::AsyncReadExt;
 use tokio::time::timeout;
 
 fn e2b_template_id() -> String {
-    std::env::var("E2B_TEMPLATE_ID").unwrap_or_else(|_| "base".into())
+    env::var("E2B_TEMPLATE_ID").unwrap_or_else(|_| "base".into())
+}
+
+fn live_provider_secret(provider: &str, secret_name: &str) -> Option<String> {
+    match env::var(secret_name) {
+        Ok(value) if !value.is_empty() => Some(value),
+        _ => {
+            eprintln!("skipping real {provider} start_process test: {secret_name} is not set");
+            None
+        }
+    }
 }
 
 fn make_e2b_request(conversation_id: &str, sandbox_id: &str) -> SandboxRequest {
@@ -41,15 +52,33 @@ fn make_e2b_request(conversation_id: &str, sandbox_id: &str) -> SandboxRequest {
     }
 }
 
-fn sprites_config_from_env() -> SpritesConfig {
-    SpritesConfig {
-        token: std::env::var("SPRITES_TOKEN").expect("SPRITES_TOKEN must be set"),
-        api_url: std::env::var("SPRITES_API_URL")
+fn e2b_backend_from_env() -> Option<E2bSandboxBackend> {
+    let api_key = live_provider_secret("e2b", "E2B_API_KEY")?;
+    let template_id = e2b_template_id();
+    Some(
+        E2bSandboxBackend::new(E2bConfig {
+            api_key,
+            api_url: exoharness::DEFAULT_E2B_API_URL.into(),
+            template_id,
+            envd_port: exoharness::DEFAULT_E2B_ENVD_PORT,
+            envd_base_url: None,
+            secure: env::var("E2B_SECURE")
+                .ok()
+                .is_some_and(|value| value != "0"),
+        })
+        .expect("E2bSandboxBackend::new"),
+    )
+}
+
+fn sprites_config_from_env() -> Option<SpritesConfig> {
+    Some(SpritesConfig {
+        token: live_provider_secret("sprites", "SPRITES_TOKEN")?,
+        api_url: env::var("SPRITES_API_URL")
             .unwrap_or_else(|_| exoharness::DEFAULT_SPRITES_API_URL.into()),
-        url_auth: std::env::var("SPRITES_URL_AUTH").ok(),
-        organization: std::env::var("SPRITES_ORGANIZATION").ok(),
+        url_auth: env::var("SPRITES_URL_AUTH").ok(),
+        organization: env::var("SPRITES_ORGANIZATION").ok(),
         extra_labels: Vec::new(),
-    }
+    })
 }
 
 fn make_sprites_request(conversation_id: &str, sandbox_id: &str) -> SandboxRequest {
@@ -74,19 +103,9 @@ fn make_sprites_request(conversation_id: &str, sandbox_id: &str) -> SandboxReque
 #[tokio::test]
 #[ignore = "requires E2B_API_KEY"]
 async fn e2b_start_process_streams_incrementally() {
-    let api_key = std::env::var("E2B_API_KEY").expect("E2B_API_KEY must be set");
-    let template_id = e2b_template_id();
-    let backend = E2bSandboxBackend::new(E2bConfig {
-        api_key,
-        api_url: exoharness::DEFAULT_E2B_API_URL.into(),
-        template_id: template_id.clone(),
-        envd_port: exoharness::DEFAULT_E2B_ENVD_PORT,
-        envd_base_url: None,
-        secure: std::env::var("E2B_SECURE")
-            .ok()
-            .is_some_and(|value| value != "0"),
-    })
-    .expect("E2bSandboxBackend::new");
+    let Some(backend) = e2b_backend_from_env() else {
+        return;
+    };
 
     let handle = backend
         .acquire(make_e2b_request("live-e2b-stream", "sandbox-live-stream"))
@@ -98,8 +117,10 @@ async fn e2b_start_process_streams_incrementally() {
 #[tokio::test]
 #[ignore = "requires SPRITES_TOKEN"]
 async fn sprites_start_process_streams_incrementally() {
-    let backend =
-        SpritesSandboxBackend::new(sprites_config_from_env()).expect("SpritesSandboxBackend::new");
+    let Some(config) = sprites_config_from_env() else {
+        return;
+    };
+    let backend = SpritesSandboxBackend::new(config).expect("SpritesSandboxBackend::new");
 
     let handle = backend
         .acquire(make_sprites_request(
@@ -114,19 +135,9 @@ async fn sprites_start_process_streams_incrementally() {
 #[tokio::test]
 #[ignore = "requires E2B_API_KEY"]
 async fn e2b_start_process_contract() {
-    let api_key = std::env::var("E2B_API_KEY").expect("E2B_API_KEY must be set");
-    let template_id = e2b_template_id();
-    let backend = E2bSandboxBackend::new(E2bConfig {
-        api_key,
-        api_url: exoharness::DEFAULT_E2B_API_URL.into(),
-        template_id: template_id.clone(),
-        envd_port: exoharness::DEFAULT_E2B_ENVD_PORT,
-        envd_base_url: None,
-        secure: std::env::var("E2B_SECURE")
-            .ok()
-            .is_some_and(|value| value != "0"),
-    })
-    .expect("E2bSandboxBackend::new");
+    let Some(backend) = e2b_backend_from_env() else {
+        return;
+    };
 
     let handle = backend
         .acquire(make_e2b_request(
@@ -145,8 +156,10 @@ async fn e2b_start_process_contract() {
 #[tokio::test]
 #[ignore = "requires SPRITES_TOKEN"]
 async fn sprites_start_process_contract() {
-    let backend =
-        SpritesSandboxBackend::new(sprites_config_from_env()).expect("SpritesSandboxBackend::new");
+    let Some(config) = sprites_config_from_env() else {
+        return;
+    };
+    let backend = SpritesSandboxBackend::new(config).expect("SpritesSandboxBackend::new");
 
     let handle = backend
         .acquire(make_sprites_request(
