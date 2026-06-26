@@ -4,6 +4,7 @@ import {
   flush,
   initLogger,
   traced,
+  wrapAnthropic,
   type Span,
   type StartSpanArgs,
 } from "braintrust";
@@ -545,10 +546,14 @@ export class AnthropicRuntime implements ResponsesRuntimeLike {
 
   constructor(options: ResponsesRuntimeOptions = {}) {
     ensureBraintrustLogger(options.braintrust ?? null);
-    this.client = new Anthropic({
-      apiKey: options.apiKey,
-      baseURL: options.baseURL,
-    });
+    // wrapAnthropic auto-instruments every messages.create/.stream call with a
+    // braintrust LLM span (input/output/usage), so we don't hand-roll spans.
+    this.client = wrapAnthropic(
+      new Anthropic({
+        apiKey: options.apiKey,
+        baseURL: options.baseURL,
+      }),
+    );
   }
 
   static fromModelBinding(
@@ -631,48 +636,16 @@ export class AnthropicRuntime implements ResponsesRuntimeLike {
     request: NativeResponsesRequest,
     options: NativeLlmTraceOptions,
   ): Promise<NativeLlmResult> {
-    const toolNames = (request.tools ?? []).map((tool) => tool.name);
     const body = buildAnthropicBody(request);
-    const run = async (span: Span): Promise<NativeLlmResult> => {
-      try {
-        const result = options.streamed
-          ? await this.completeStreamRaw(body, options.handlers)
-          : {
-              response: anthropicMessageToResponse(
-                await this.client.messages.create(body),
-              ),
-              ttftMs: null,
-            };
-
-        span.log({
-          output: llmOutputTraceValue(result.response),
-          metadata: {
-            response_id: result.response.id,
-          },
-          metrics: responseUsageMetrics(result.response, result.ttftMs),
-        });
-        return result;
-      } catch (error) {
-        span.log({ error: errorMessage(error) });
-        throw error;
-      }
+    if (options.streamed) {
+      return this.completeStreamRaw(body, options.handlers);
+    }
+    return {
+      response: anthropicMessageToResponse(
+        await this.client.messages.create(body),
+      ),
+      ttftMs: null,
     };
-    return tracedUnderParent(options.parent, run, {
-      name: `anthropic:${request.model}`,
-      type: "llm",
-      event: {
-        input: llmInputTraceValue(request),
-        metadata: {
-          round_index: options.roundIndex,
-          runtime: "anthropic",
-          model: request.model,
-          max_output_tokens: request.maxOutputTokens ?? null,
-          tool_count: toolNames.length,
-          tools: toolNames,
-          streamed: options.streamed,
-        },
-      },
-    });
   }
 
   private async completeStreamRaw(
