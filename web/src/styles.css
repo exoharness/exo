@@ -961,25 +961,35 @@ pre {
   white-space: nowrap;
 }
 
+/* The reply content is the focus; its metrics sit quietly beneath it, set off by a
+   little more breathing room than the chips have between themselves. */
 .message-meta {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 6px;
-  padding-top: 2px;
+  margin-top: 4px;
 }
 
+/* Compact, refined pills: uniform height, hairline border and a faint fill so they
+   read as one quiet row under the reply. Tabular numerals keep the token and latency
+   figures aligned as they change. */
 .metric-chip {
   display: inline-flex;
   align-items: center;
-  min-height: 22px;
-  border: 1px solid rgba(var(--fg-overlay-rgb), 0.065);
-  border-radius: 999px;
-  background: rgba(var(--fg-overlay-rgb), 0.024);
-  color: var(--text-faint);
+  height: 21px;
   padding: 0 8px;
+  border: 0.5px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 10.5px;
+  font-weight: 400;
   line-height: 1;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  white-space: nowrap;
 }
 
 .markdown-content {

@@ -53,6 +53,17 @@ const ROW_GAP_PX = 22;
 // Tool calls, their results and written artifacts read as one block of activity,
 // so they sit tighter together than the breathing room between message turns.
 const TOOL_ROW_GAP_PX = 10;
+// How long after the last polled event arrives we keep showing "working". Long
+// enough to bridge the gap between a tool call landing and the model's reply, short
+// enough that a finished turn settles back to quiet within a beat or two.
+const IN_FLIGHT_GRACE_MS = 15000;
+// An unanswered user message only counts as "in flight" while it is this fresh — a
+// turn that errored or was abandoned on a user message must not show a perpetual
+// "working" indicator.
+const AWAITING_REPLY_MAX_MS = 180000;
+// How often the in-flight clock re-evaluates the grace window. Fast enough to feel
+// live, slow enough to stay cheap.
+const IN_FLIGHT_TICK_MS = 2000;
 
 interface TranscriptProps {
   conversation: ConversationHandleInfo | null;
@@ -127,6 +138,16 @@ export function Transcript({
   const rowCountRef = useRef(0);
   const cancelRequestedRef = useRef(false);
   const prevTurnPendingRef = useRef(false);
+  // Track the newest event id we've seen and when it last changed, so the transcript
+  // can show "working" for turns driven from OUTSIDE the inspector (e.g. someone runs
+  // `exo conversation send` in a terminal while this read-only view polls). The first
+  // events load for a conversation is the baseline, NOT new activity — otherwise every
+  // conversation you opened would falsely animate.
+  const lastEventIdRef = useRef<string | null>(null);
+  const lastEventChangeAtRef = useRef<number | null>(null);
+  // A ticking clock that only advances while a turn plausibly remains in flight, so
+  // the grace window can expire on its own without an event or poll to re-render us.
+  const [inFlightClock, setInFlightClock] = useState(0);
   // Stick to the newest message unless the reader has scrolled up to read history.
   const stickRef = useRef(true);
   // True once the reader has deliberately scrolled away (a real wheel/touch gesture,
@@ -225,11 +246,15 @@ export function Transcript({
     }
   }, [events, pending]);
 
-  // Switching conversations resets stick + clears any open detail.
+  // Switching conversations resets stick + clears any open detail. Also re-arm the
+  // in-flight baseline so the new conversation's first events load counts as the
+  // baseline, not fresh activity.
   useEffect(() => {
     stickRef.current = true;
     userScrolledAwayRef.current = false;
     setDetailSelection(null);
+    lastEventIdRef.current = null;
+    lastEventChangeAtRef.current = null;
   }, [conversation?.record.id]);
 
   const showEventDetails = useCallback<ShowEventDetails>((event, focus) => {
@@ -333,6 +358,69 @@ export function Transcript({
     [conversation],
   );
 
+  // The id of the newest stored event, used to notice externally-driven activity.
+  const latestEventId =
+    orderedEvents.length > 0
+      ? (orderedEvents[orderedEvents.length - 1]?.id ?? null)
+      : null;
+  // True when the conversation ends on a recent user message and so still owes a
+  // reply — the agent is (or is about to be) working even before its first event
+  // lands. Bounded by AWAITING_REPLY_MAX_MS so an errored or abandoned turn that
+  // ends on a user message never shows a perpetual indicator; inFlightClock lapses it.
+  const awaitingReply = useMemo(() => {
+    const owedAt = latestUserOwedReplyAt(orderedEvents);
+    if (owedAt === null) {
+      return false;
+    }
+    const ts = Date.parse(owedAt);
+    return Number.isFinite(ts) && Date.now() - ts < AWAITING_REPLY_MAX_MS;
+  }, [inFlightClock, latestEventId]);
+
+  // Notice when a new event arrives over the poll and stamp the time, so the grace
+  // window below can keep the indicator alive between a turn's events. The very first
+  // events load for a conversation only sets the baseline (no stamp), so opening a
+  // settled conversation never flashes "working".
+  useEffect(() => {
+    if (lastEventIdRef.current === null) {
+      // Baseline: first time we see events for this conversation. Record the head
+      // without treating it as new activity.
+      lastEventIdRef.current = latestEventId;
+      return;
+    }
+    if (latestEventId !== null && latestEventId !== lastEventIdRef.current) {
+      lastEventIdRef.current = latestEventId;
+      lastEventChangeAtRef.current = Date.now();
+    }
+  }, [latestEventId]);
+
+  // Did fresh events land within the grace window? Recomputed on every clock tick so
+  // the window can lapse without another event to nudge a render.
+  const recentlyActive = useMemo(() => {
+    const changedAt = lastEventChangeAtRef.current;
+    if (changedAt === null) {
+      return false;
+    }
+    return Date.now() - changedAt < IN_FLIGHT_GRACE_MS;
+    // inFlightClock is the intentional trigger: it advances only while plausibly
+    // in-flight (see the interval effect), expiring the window on its own.
+  }, [inFlightClock, latestEventId]);
+
+  const observedInFlight = awaitingReply || recentlyActive;
+
+  // Tick the in-flight clock while a turn plausibly remains in flight, and stop once
+  // it settles so an idle conversation costs no timers. turnPending/pending cover the
+  // inspector's own sends; observedInFlight covers externally-driven turns.
+  const shouldTick = turnPending || pending != null || observedInFlight;
+  useEffect(() => {
+    if (!shouldTick) {
+      return;
+    }
+    const timer = setInterval(() => {
+      setInFlightClock((value) => value + 1);
+    }, IN_FLIGHT_TICK_MS);
+    return () => clearInterval(timer);
+  }, [shouldTick]);
+
   const scrollToRow = useCallback((rowIndex: number) => {
     virtuosoRef.current?.scrollToIndex({ index: rowIndex, align: "center" });
   }, []);
@@ -392,15 +480,19 @@ export function Transcript({
 
   // New events are followed by virtuoso (followOutput). The optimistic bubble and
   // typing indicator render BELOW the virtualized list, so when they appear while
-  // stuck to the bottom, nudge the scroll parent down to reveal them.
+  // stuck to the bottom, nudge the scroll parent down to reveal them. This covers the
+  // externally-driven indicator (observedInFlight) too, so it stays in view.
   useEffect(() => {
-    if (stickRef.current && (pending != null || turnPending)) {
+    if (
+      stickRef.current &&
+      (pending != null || turnPending || observedInFlight)
+    ) {
       const el = scrollRef.current;
       if (el) {
         el.scrollTop = el.scrollHeight;
       }
     }
-  }, [pending, turnPending]);
+  }, [pending, turnPending, observedInFlight]);
 
   function jumpToLatest() {
     stickRef.current = true;
@@ -648,10 +740,10 @@ export function Transcript({
                     atBottomStateChange={handleAtBottomChange}
                   />
                 ) : null}
-                {pending != null || turnPending ? (
+                {pending != null || turnPending || observedInFlight ? (
                   <div className="timeline-live-rows">
                     {pending != null ? <PendingMessage text={pending} /> : null}
-                    {turnPending || pending != null ? (
+                    {turnPending || pending != null || observedInFlight ? (
                       <TypingIndicator agentLabel={agentLabel} />
                     ) : null}
                   </div>
@@ -716,15 +808,16 @@ function PendingMessage({ text }: { text: string }) {
 }
 
 function TypingIndicator({ agentLabel }: { agentLabel: string }) {
+  const label = agentLabel || "agent";
   return (
     <div
       className="message-block role-assistant typing-row"
-      aria-label={`${agentLabel || "agent"} is replying`}
+      aria-label={`${label} is working`}
     >
       <div className="message-header">
         <span className="message-identity">
           <RoleAvatar label={agentLabel || "assistant"} role="assistant" />
-          <span className="role-label">{agentLabel || "assistant"}</span>
+          <span className="role-label">{label} is working</span>
         </span>
       </div>
       <div className="typing-indicator" aria-hidden="true">
@@ -2569,6 +2662,30 @@ function conversationEventKind(event: Event): "message" | "tool" {
     return hasMessageRole ? "message" : "tool";
   }
   return "message";
+}
+
+// The agent owes a reply when the most recent message in the conversation is from
+// the user — that is the externally-visible signal that a turn is (about to be)
+// running, even before its first assistant/tool event lands. We walk back from the
+// newest event to the last one that carries a real message role.
+function latestUserOwedReplyAt(orderedEvents: Event[]): string | null {
+  for (let i = orderedEvents.length - 1; i >= 0; i -= 1) {
+    const event = orderedEvents[i];
+    const data = event?.data;
+    if (data?.type !== "messages") {
+      continue;
+    }
+    for (let j = data.messages.length - 1; j >= 0; j -= 1) {
+      const role = data.messages[j]?.role;
+      if (typeof role !== "string") {
+        continue;
+      }
+      // The newest real message either still owes a user-driven reply (role
+      // "user") or the agent has already started responding (assistant/tool/etc).
+      return role === "user" ? (event?.created_at ?? null) : null;
+    }
+  }
+  return null;
 }
 
 function hasRenderableConversationContent(
