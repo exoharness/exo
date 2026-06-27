@@ -7,6 +7,7 @@ INSTALL_DIR="${EXO_INSTALL_DIR:-$PWD}"
 MODEL_NAME="${EXO_MODEL:-gpt-5.4}"
 UPSTREAM_MODEL="${EXO_UPSTREAM_MODEL:-$MODEL_NAME}"
 AGENT_NAME="${EXO_AGENT_NAME:-ExoClaw}"
+USER_NAME="${EXO_USER_NAME:-}"
 
 die() {
   echo "error: $*" >&2
@@ -31,7 +32,7 @@ Options:
 
 Environment overrides:
   EXO_REPO_URL, EXO_REPO_REF, EXO_INSTALL_DIR, EXO_MODEL, EXO_UPSTREAM_MODEL,
-  EXO_AGENT_NAME
+  EXO_AGENT_NAME, EXO_USER_NAME, EXOCLAW_LOCAL_PROMPT_FILE
 EOF
 }
 
@@ -224,6 +225,22 @@ trust_mise_config() {
   mise trust "$config"
 }
 
+write_local_profile() {
+  local file="$1"
+  local user_name="$2"
+  mkdir -p "$(dirname "$file")"
+  {
+    echo "# Local Exoclaw Profile"
+    echo
+    echo "This file is local to this machine and should not be committed."
+    if [[ -n "$user_name" ]]; then
+      echo
+      echo "The user's name is $user_name."
+    fi
+  } >"$file"
+  chmod 600 "$file"
+}
+
 choose_install_dir() {
   if is_exo_checkout "$PWD"; then
     echo "Using current Exo checkout: $PWD" >&2
@@ -302,7 +319,11 @@ main() {
   echo "Canonical setup uses WhatsApp as the default external adapter and will show a QR code to scan."
 
   info "Configure Exoclaw"
+  USER_NAME="$(prompt_text "Your name, or blank to skip" "$USER_NAME")"
   AGENT_NAME="$(prompt_text "Agent display name" "$AGENT_NAME")"
+  local profile_file="${EXOCLAW_LOCAL_PROMPT_FILE:-$install_dir/.exo/exoclaw-profile.md}"
+  write_local_profile "$profile_file" "$USER_NAME"
+  echo "Wrote local Exoclaw profile: $profile_file"
 
   info "Install dependencies"
   pnpm install
@@ -315,7 +336,7 @@ main() {
   ./target/debug/exo --env-file-if-exists "$env_file" model register "$MODEL_NAME" --model "$UPSTREAM_MODEL" --secret openai
 
   info "Start canonical Exoclaw"
-  local control_args=(fresh --canonical --setup-profile --agent-name "$AGENT_NAME")
+  local control_args=(fresh --canonical --agent-name "$AGENT_NAME")
   unset EXO_SETUP_ADAPTER
   export EXO_CANONICAL_PROFILE=user
   exec examples/exoclaw/scripts/exoclaw-control "${control_args[@]}"
