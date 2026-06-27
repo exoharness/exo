@@ -8,6 +8,7 @@ MODEL_NAME="${EXO_MODEL:-gpt-5.4}"
 UPSTREAM_MODEL="${EXO_UPSTREAM_MODEL:-$MODEL_NAME}"
 AGENT_NAME="${EXO_AGENT_NAME:-ExoClaw}"
 USER_NAME="${EXO_USER_NAME:-}"
+FORCE_INSTALL="${EXO_SETUP_FORCE:-false}"
 
 die() {
   echo "error: $*" >&2
@@ -28,11 +29,13 @@ Options:
   --branch <branch>     Git branch to clone for testing (default: main)
   --ref <ref>           Git ref to clone; alias for --branch
   --repo-ref <ref>      Git ref to clone; alias for --branch
+  --force               Back up existing files and install into a non-empty
+                        directory; refuses to run directly in $HOME or /
   --help                Show this help
 
 Environment overrides:
   EXO_REPO_URL, EXO_REPO_REF, EXO_INSTALL_DIR, EXO_MODEL, EXO_UPSTREAM_MODEL,
-  EXO_AGENT_NAME, EXO_USER_NAME, EXOCLAW_LOCAL_PROMPT_FILE
+  EXO_AGENT_NAME, EXO_USER_NAME, EXOCLAW_LOCAL_PROMPT_FILE, EXO_SETUP_FORCE
 EOF
 }
 
@@ -43,6 +46,10 @@ parse_args() {
         REPO_REF="${2:-}"
         [[ -n "$REPO_REF" ]] || die "$1 requires a value"
         shift 2
+        ;;
+      --force)
+        FORCE_INSTALL=true
+        shift
         ;;
       --help|-h)
         usage
@@ -67,17 +74,17 @@ check_dependencies() {
   local missing=()
 
   command -v git >/dev/null 2>&1 ||
-    missing+=("git: install Git")
+    missing+=("git")
   command -v node >/dev/null 2>&1 ||
-    missing+=("node: install Node.js 22+")
+    missing+=("node")
   command -v pnpm >/dev/null 2>&1 ||
-    missing+=("pnpm: install pnpm (https://pnpm.io/installation)")
+    missing+=("pnpm")
   command -v cargo >/dev/null 2>&1 ||
-    missing+=("cargo: install Rust with rustup (https://rustup.rs/)")
+    missing+=("cargo")
   command -v rustc >/dev/null 2>&1 ||
-    missing+=("rustc: install Rust with rustup (https://rustup.rs/)")
+    missing+=("rustc")
   command -v docker >/dev/null 2>&1 ||
-    missing+=("docker: install Docker Desktop (https://www.docker.com/products/docker-desktop/)")
+    missing+=("docker")
 
   if ((${#missing[@]} > 0)); then
     echo "Missing required dependencies:" >&2
@@ -85,8 +92,108 @@ check_dependencies() {
     for item in "${missing[@]}"; do
       echo "  - $item" >&2
     done
+    print_dependency_install_help "${missing[@]}"
     exit 1
   fi
+}
+
+print_dependency_install_help() {
+  echo >&2
+  echo "Install the missing dependencies, then rerun this setup script." >&2
+  case "$(uname -s)" in
+    Darwin)
+      print_macos_dependency_install_help "$@"
+      ;;
+    Linux)
+      print_linux_dependency_install_help "$@"
+      ;;
+    *)
+      print_generic_dependency_install_help "$@"
+      ;;
+  esac
+}
+
+print_macos_dependency_install_help() {
+  echo >&2
+  echo "macOS install commands:" >&2
+  if ! command -v brew >/dev/null 2>&1; then
+    echo "  # Install Homebrew first if you do not have it:" >&2
+    echo '  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"' >&2
+  fi
+  if missing_has git "$@"; then
+    echo "  xcode-select --install  # includes Git, if Apple developer tools are missing" >&2
+  fi
+  local brew_packages=()
+  if missing_has node "$@"; then
+    brew_packages+=("node")
+  fi
+  if missing_has pnpm "$@"; then
+    brew_packages+=("pnpm")
+  fi
+  if missing_has cargo "$@" || missing_has rustc "$@"; then
+    echo '  curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y' >&2
+  fi
+  if ((${#brew_packages[@]} > 0)); then
+    echo "  brew install ${brew_packages[*]}" >&2
+  fi
+  if missing_has docker "$@"; then
+    echo "  brew install --cask docker" >&2
+    echo "  open -a Docker" >&2
+  fi
+}
+
+print_linux_dependency_install_help() {
+  echo >&2
+  echo "Linux install commands:" >&2
+  echo "  # Ubuntu/Debian example:" >&2
+  echo "  sudo apt-get update" >&2
+  local apt_packages=()
+  if missing_has git "$@"; then
+    apt_packages+=("git")
+  fi
+  if missing_has node "$@"; then
+    echo "  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -" >&2
+    apt_packages+=("nodejs")
+  fi
+  if missing_has cargo "$@" || missing_has rustc "$@"; then
+    apt_packages+=("curl" "build-essential" "pkg-config" "libssl-dev")
+  fi
+  if ((${#apt_packages[@]} > 0)); then
+    echo "  sudo apt-get install -y ${apt_packages[*]}" >&2
+  fi
+  if missing_has pnpm "$@"; then
+    echo "  corepack enable pnpm" >&2
+  fi
+  if missing_has cargo "$@" || missing_has rustc "$@"; then
+    echo '  curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y' >&2
+    echo '  source "$HOME/.cargo/env"' >&2
+  fi
+  if missing_has docker "$@"; then
+    echo "  # Install Docker Engine for your distro, then start it:" >&2
+    echo "  # https://docs.docker.com/engine/install/" >&2
+  fi
+}
+
+print_generic_dependency_install_help() {
+  echo >&2
+  echo "Install Git, Node.js 22+, pnpm, Rust via rustup, and Docker Desktop/Engine." >&2
+  echo "  Git: https://git-scm.com/downloads" >&2
+  echo "  Node.js: https://nodejs.org/" >&2
+  echo "  pnpm: https://pnpm.io/installation" >&2
+  echo "  Rust: https://rustup.rs/" >&2
+  echo "  Docker: https://www.docker.com/products/docker-desktop/" >&2
+}
+
+missing_has() {
+  local needle="$1"
+  shift
+  local item
+  for item in "$@"; do
+    if [[ "$item" == "$needle" ]]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 is_exo_checkout() {
@@ -263,6 +370,54 @@ directory_can_receive_checkout() {
   return 0
 }
 
+prepare_non_empty_install_dir() {
+  local dir="$1"
+  if directory_can_receive_checkout "$dir"; then
+    return
+  fi
+  if [[ "$FORCE_INSTALL" != true ]]; then
+    echo "error: $dir is not empty, and setup will not overwrite existing files." >&2
+    echo >&2
+    echo "To continue, choose one of:" >&2
+    echo "  - Run setup from a new empty directory:" >&2
+    echo "      mkdir -p ~/exo && cd ~/exo && bash /path/to/setup.sh" >&2
+    echo "  - Or set an explicit install directory:" >&2
+    echo "      EXO_INSTALL_DIR=~/exo bash setup.sh" >&2
+    echo "  - Or, if this is a failed/throwaway setup directory, rerun with:" >&2
+    echo "      bash setup.sh --force" >&2
+    exit 1
+  fi
+  backup_existing_install_dir "$dir"
+}
+
+backup_existing_install_dir() {
+  local dir="$1"
+  local resolved_dir
+  resolved_dir="$(cd "$dir" && pwd -P)"
+  if [[ "$resolved_dir" == "/" || "$resolved_dir" == "$HOME" ]]; then
+    die "refusing --force in $resolved_dir. Create an empty directory or set EXO_INSTALL_DIR instead."
+  fi
+
+  local backup_dir entry name parent_dir base_name
+  parent_dir="$(dirname "$resolved_dir")"
+  base_name="$(basename "$resolved_dir")"
+  backup_dir="$parent_dir/$base_name.exo-setup-backup-$(date +%Y%m%d%H%M%S)"
+  mkdir -p "$backup_dir"
+  shopt -s nullglob dotglob
+  for entry in "$dir"/*; do
+    name="$(basename "$entry")"
+    case "$name" in
+      .|..|setup.sh|.DS_Store) ;;
+      *) mv "$entry" "$backup_dir/" ;;
+    esac
+  done
+
+  if ! directory_can_receive_checkout "$dir"; then
+    die "could not prepare $dir for checkout after backing up existing files"
+  fi
+  echo "Backed up existing files to $backup_dir"
+}
+
 clone_or_reuse_repo() {
   local install_dir="$1"
   local tmp_parent
@@ -272,9 +427,7 @@ clone_or_reuse_repo() {
     return
   fi
   mkdir -p "$install_dir"
-  if ! directory_can_receive_checkout "$install_dir"; then
-    die "$install_dir is not empty. Run setup from an empty directory or set EXO_INSTALL_DIR."
-  fi
+  prepare_non_empty_install_dir "$install_dir"
   tmp_parent="$(mktemp -d)"
   tmp_checkout="$tmp_parent/exo"
   git clone --branch "$REPO_REF" "$REPO_URL" "$tmp_checkout"
