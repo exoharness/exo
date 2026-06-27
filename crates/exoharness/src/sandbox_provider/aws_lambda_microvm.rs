@@ -305,9 +305,7 @@ impl AwsLambdaMicrovmSandboxBackend {
             microvm_id: output.microvm_id,
             endpoint: normalize_microvm_endpoint(&output.endpoint),
         };
-        self.wait_for_state(&session.microvm_id, MicrovmState::Running)
-            .await?;
-        Ok(session)
+        self.ensure_session_running(&session).await
     }
 
     async fn ensure_session_running(
