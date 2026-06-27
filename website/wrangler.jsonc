@@ -7,4 +7,18 @@
     "directory": ".",
     "run_worker_first": ["/chat", "/chat/*"],
   },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RENDEZVOUS",
+        "class_name": "RendezvousSession",
+      },
+    ],
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RendezvousSession"],
+    },
+  ],
 }
