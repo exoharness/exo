@@ -31,6 +31,7 @@ fn make_request(conversation_id: &str, sandbox_id: &str) -> SandboxRequest {
         lifecycle: SandboxLifecycleConfig {
             idle_ttl: Some(Duration::from_secs(300)),
         },
+        provider_state: None,
     }
 }
 
