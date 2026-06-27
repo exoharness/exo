@@ -286,10 +286,17 @@ prompt_env_secret() {
   local description="$3"
   local required="$4"
   local existing
+  local env_value
   local value
   existing="$(env_value "$key" "$file")"
   if [[ -n "$existing" ]]; then
-    if prompt_yes_no "$key is already set in .env. Keep it?" y; then
+    echo "$key is already set in .env; using it."
+    return
+  fi
+  env_value="${!key:-}"
+  if [[ -n "$env_value" ]]; then
+    if prompt_yes_no "$key is set in your shell environment. Use it for .env?" y; then
+      set_env_value "$key" "$env_value" "$file"
       return
     fi
   fi
