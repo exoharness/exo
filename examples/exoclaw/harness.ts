@@ -69,11 +69,16 @@ function builtInToolNames(context: TurnContext): BuiltInToolName[] {
 async function exoclawInstructions(context: TurnContext): Promise<Message[]> {
   const repoPath = process.env.EXOCLAW_REPO ?? DEFAULT_EXOCLAW_REPO;
   const selfMapPath = process.env.EXOCLAW_SELF_MAP ?? DEFAULT_EXOCLAW_SELF_MAP;
+  const agentName = context.exoharness.current.agent.record.name;
   const instructions: Message[] = [
     ...basicHarnessInstructions(context),
     {
       role: "developer",
       content: EXOCLAW_IDENTITY_PROMPT,
+    },
+    {
+      role: "developer",
+      content: `Your configured display name is ${JSON.stringify(agentName)}. Treat that as your personal name. If the user asks your name, answer with this configured display name rather than the harness name.`,
     },
     {
       role: "developer",
