@@ -336,6 +336,33 @@ async fn aws_lambda_microvm_sandbox_contract_workdir_survives_suspend_and_reacqu
         .expect("Lambda MicroVM sandbox suspend/resume filesystem contract");
 }
 
+#[cfg(feature = "aws-lambda-microvm")]
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "uses a real Lambda MicroVM image; set AWS_LAMBDA_MICROVM_IMAGE_IDENTIFIER and run explicitly"]
+async fn aws_lambda_microvm_sandbox_contract_process_protocol_survives_suspend_and_reacquire() {
+    let Some(backend) = aws_lambda_microvm_contract_backend().await else {
+        return;
+    };
+    let backend_for_contract: Arc<dyn ManagedSandboxBackend> = backend.clone();
+    let result =
+        crate::contract_tests::sandbox_backend_long_running_process_and_workdir_survive_stop_and_reacquire(
+            backend_for_contract,
+            provider_contract_request(
+                "aws-lambda-microvm",
+                "protocol-suspend-resume",
+                env_or(
+                    "AWS_LAMBDA_MICROVM_IMAGE",
+                    &crate::default_aws_lambda_microvm_image(),
+                ),
+                "/home/exo/workspace",
+            ),
+        )
+        .await;
+    terminate_after_microvm_contract(backend, result)
+        .await
+        .expect("Lambda MicroVM sandbox process protocol suspend/resume contract");
+}
+
 async fn local_process_contract_handle(
     tempdir: &TempDir,
     sandbox_id: &str,
@@ -482,6 +509,7 @@ async fn aws_agentcore_contract_backend() -> Option<Arc<dyn ManagedSandboxBacken
 #[cfg(feature = "aws-lambda-microvm")]
 async fn aws_lambda_microvm_contract_backend() -> Option<Arc<crate::AwsLambdaMicrovmSandboxBackend>>
 {
+    init_lambda_microvm_contract_tracing();
     let Some(image_identifier) = nonempty_env("AWS_LAMBDA_MICROVM_IMAGE_IDENTIFIER")
         .or_else(|| nonempty_env("LAMBDA_MICROVM_IMAGE_IDENTIFIER"))
     else {
@@ -521,6 +549,19 @@ async fn aws_lambda_microvm_contract_backend() -> Option<Arc<crate::AwsLambdaMic
     .await
     .expect("AwsLambdaMicrovmSandboxBackend::new");
     Some(Arc::new(backend))
+}
+
+#[cfg(feature = "aws-lambda-microvm")]
+fn init_lambda_microvm_contract_tracing() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        if tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_test_writer()
+            .try_init()
+            .is_err()
+        {}
+    });
 }
 
 #[cfg(feature = "aws-lambda-microvm")]

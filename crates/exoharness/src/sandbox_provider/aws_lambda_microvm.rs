@@ -190,7 +190,11 @@ impl ManagedSandboxBackend for AwsLambdaMicrovmSandboxBackend {
         let spec_hash = sandbox_spec_hash(&request.spec);
         let session_key = lambda_microvm_session_key(&request, &spec_hash);
 
-        if let Some(session) = self.sessions.lock().await.get(&session_key).cloned() {
+        let cached_session = {
+            let sessions = self.sessions.lock().await;
+            sessions.get(&session_key).cloned()
+        };
+        if let Some(session) = cached_session {
             match self.ensure_session_running(&session).await {
                 Ok(running) => {
                     drop(
