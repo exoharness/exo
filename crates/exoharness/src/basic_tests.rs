@@ -11,6 +11,7 @@ use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, Cursor};
 use lingua::Message;
 use lingua::universal::{AssistantContent, UserContent};
+use serde_json::Value;
 use tempfile::TempDir;
 use tokio::fs;
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
@@ -251,6 +252,90 @@ async fn aws_agentcore_sandbox_contract_durable_file_system_survives_stop_and_re
     .expect("AgentCore sandbox durable filesystem contract");
 }
 
+#[cfg(feature = "aws-lambda-microvm")]
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "uses a real Lambda MicroVM image; set AWS_LAMBDA_MICROVM_IMAGE_IDENTIFIER and run explicitly"]
+async fn aws_lambda_microvm_sandbox_contract_start_process_stdio_and_env() {
+    let Some(backend) = aws_lambda_microvm_contract_backend().await else {
+        return;
+    };
+    let handle = backend
+        .acquire(provider_contract_request(
+            "aws-lambda-microvm",
+            "stdio-and-env",
+            env_or(
+                "AWS_LAMBDA_MICROVM_IMAGE",
+                &crate::default_aws_lambda_microvm_image(),
+            ),
+            "/home/exo/workspace",
+        ))
+        .await
+        .expect("acquire Lambda MicroVM sandbox");
+    let result =
+        crate::contract_tests::sandbox_handle_start_process_supports_interactive_stdio_and_env(
+            handle,
+        )
+        .await;
+    terminate_after_microvm_contract(backend, result)
+        .await
+        .expect("Lambda MicroVM sandbox start_process contract");
+}
+
+#[cfg(feature = "aws-lambda-microvm")]
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "uses a real Lambda MicroVM image; set AWS_LAMBDA_MICROVM_IMAGE_IDENTIFIER and run explicitly"]
+async fn aws_lambda_microvm_sandbox_contract_start_process_long_running_protocol() {
+    let Some(backend) = aws_lambda_microvm_contract_backend().await else {
+        return;
+    };
+    let handle = backend
+        .acquire(provider_contract_request(
+            "aws-lambda-microvm",
+            "long-running-protocol",
+            env_or(
+                "AWS_LAMBDA_MICROVM_IMAGE",
+                &crate::default_aws_lambda_microvm_image(),
+            ),
+            "/home/exo/workspace",
+        ))
+        .await
+        .expect("acquire Lambda MicroVM sandbox");
+    let result =
+        crate::contract_tests::sandbox_handle_start_process_supports_long_running_request_response_protocol(
+            handle,
+        )
+        .await;
+    terminate_after_microvm_contract(backend, result)
+        .await
+        .expect("Lambda MicroVM sandbox long-running protocol contract");
+}
+
+#[cfg(feature = "aws-lambda-microvm")]
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "uses a real Lambda MicroVM image; set AWS_LAMBDA_MICROVM_IMAGE_IDENTIFIER and run explicitly"]
+async fn aws_lambda_microvm_sandbox_contract_workdir_survives_suspend_and_reacquire() {
+    let Some(backend) = aws_lambda_microvm_contract_backend().await else {
+        return;
+    };
+    let backend_for_contract: Arc<dyn ManagedSandboxBackend> = backend.clone();
+    let result = crate::contract_tests::sandbox_backend_workdir_survives_stop_and_reacquire(
+        backend_for_contract,
+        provider_contract_request(
+            "aws-lambda-microvm",
+            "suspend-resume",
+            env_or(
+                "AWS_LAMBDA_MICROVM_IMAGE",
+                &crate::default_aws_lambda_microvm_image(),
+            ),
+            "/home/exo/workspace",
+        ),
+    )
+    .await;
+    terminate_after_microvm_contract(backend, result)
+        .await
+        .expect("Lambda MicroVM sandbox suspend/resume filesystem contract");
+}
+
 async fn local_process_contract_handle(
     tempdir: &TempDir,
     sandbox_id: &str,
@@ -271,6 +356,7 @@ async fn local_process_contract_handle(
                 default_workdir: tempdir.path().display().to_string(),
             },
             lifecycle: SandboxLifecycleConfig::default(),
+            provider_state: None,
         })
         .await
         .expect("acquire sandbox")
@@ -393,6 +479,66 @@ async fn aws_agentcore_contract_backend() -> Option<Arc<dyn ManagedSandboxBacken
     Some(Arc::new(backend))
 }
 
+#[cfg(feature = "aws-lambda-microvm")]
+async fn aws_lambda_microvm_contract_backend() -> Option<Arc<crate::AwsLambdaMicrovmSandboxBackend>>
+{
+    let Some(image_identifier) = nonempty_env("AWS_LAMBDA_MICROVM_IMAGE_IDENTIFIER")
+        .or_else(|| nonempty_env("LAMBDA_MICROVM_IMAGE_IDENTIFIER"))
+    else {
+        eprintln!(
+            "skipping real Lambda MicroVM sandbox contract: AWS_LAMBDA_MICROVM_IMAGE_IDENTIFIER or LAMBDA_MICROVM_IMAGE_IDENTIFIER is not set"
+        );
+        return None;
+    };
+    let Some(region) = nonempty_env("AWS_LAMBDA_MICROVM_REGION")
+        .or_else(|| nonempty_env("AWS_REGION"))
+        .or_else(|| nonempty_env("AWS_DEFAULT_REGION"))
+    else {
+        eprintln!(
+            "skipping real Lambda MicroVM sandbox contract: AWS_LAMBDA_MICROVM_REGION or AWS_REGION is not set"
+        );
+        return None;
+    };
+    let backend = crate::AwsLambdaMicrovmSandboxBackend::new(crate::AwsLambdaMicrovmConfig {
+        image_identifier,
+        region,
+        image_version: nonempty_env("AWS_LAMBDA_MICROVM_IMAGE_VERSION"),
+        endpoint_url: nonempty_env("AWS_LAMBDA_MICROVM_ENDPOINT_URL"),
+        credentials: None,
+        ingress_network_connector_arns: env_list(
+            "AWS_LAMBDA_MICROVM_INGRESS_NETWORK_CONNECTOR_ARNS",
+        ),
+        egress_network_connector_arns: env_list("AWS_LAMBDA_MICROVM_EGRESS_NETWORK_CONNECTOR_ARNS"),
+        execution_role_arn: nonempty_env("AWS_LAMBDA_MICROVM_EXECUTION_ROLE_ARN"),
+        max_idle_duration_seconds: env_i32("AWS_LAMBDA_MICROVM_MAX_IDLE_DURATION_SECONDS"),
+        suspended_duration_seconds: env_i32("AWS_LAMBDA_MICROVM_SUSPENDED_DURATION_SECONDS"),
+        auto_resume_enabled: None,
+        maximum_duration_seconds: env_i32("AWS_LAMBDA_MICROVM_MAXIMUM_DURATION_SECONDS"),
+        auth_token_expiration_minutes: env_i32("AWS_LAMBDA_MICROVM_AUTH_TOKEN_EXPIRATION_MINUTES"),
+        runtime_port: env_i32("AWS_LAMBDA_MICROVM_RUNTIME_PORT")
+            .unwrap_or_else(crate::default_aws_lambda_microvm_port),
+    })
+    .await
+    .expect("AwsLambdaMicrovmSandboxBackend::new");
+    Some(Arc::new(backend))
+}
+
+#[cfg(feature = "aws-lambda-microvm")]
+async fn terminate_after_microvm_contract(
+    backend: Arc<crate::AwsLambdaMicrovmSandboxBackend>,
+    result: crate::Result<()>,
+) -> crate::Result<()> {
+    let cleanup = backend.terminate_all().await;
+    match (result, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(cleanup_error)) => Err(anyhow::anyhow!(
+            "{error:#}; also failed to terminate Lambda MicroVM sandbox after contract: {cleanup_error:#}"
+        )),
+    }
+}
+
 fn nonempty_env(name: &str) -> Option<String> {
     env::var(name)
         .ok()
@@ -402,6 +548,29 @@ fn nonempty_env(name: &str) -> Option<String> {
 
 fn env_or(name: &str, default: &str) -> String {
     nonempty_env(name).unwrap_or_else(|| default.to_string())
+}
+
+#[cfg(feature = "aws-lambda-microvm")]
+fn env_list(name: &str) -> Vec<String> {
+    nonempty_env(name)
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "aws-lambda-microvm")]
+fn env_i32(name: &str) -> Option<i32> {
+    nonempty_env(name).map(|value| {
+        value
+            .parse::<i32>()
+            .unwrap_or_else(|error| panic!("{name} must be an integer: {error}"))
+    })
 }
 
 fn provider_contract_request(
@@ -425,6 +594,7 @@ fn provider_contract_request(
         lifecycle: SandboxLifecycleConfig {
             idle_ttl: Some(Duration::from_secs(300)),
         },
+        provider_state: None,
     }
 }
 
@@ -1689,6 +1859,152 @@ async fn advertised_daytona_without_secret_errors_at_first_use() {
         .expect_err("daytona requires DAYTONA_API_KEY to be set");
 
     assert!(error.to_string().contains("DAYTONA_API_KEY"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sandbox_provider_state_persists_through_events_after_harness_reload() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let state = serde_json::json!({
+        "microvm_id": "microvm-test",
+        "endpoint": "https://example.com"
+    });
+    let first_backend = Arc::new(TestProviderStateBackend::new(state.clone()));
+    let harness =
+        BasicExoHarness::new_with_sandbox_backend(local_test_config(tempdir.path()), first_backend)
+            .await
+            .expect("harness should initialize");
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let agent_id = agent.record().id.clone();
+    let conversation = agent
+        .new_conversation(NewConversationRequest::default())
+        .await
+        .expect("conversation");
+    let conversation_id = conversation.record().id.clone();
+    let sandbox_id = conversation
+        .create_sandbox(provider_state_test_create_request())
+        .await
+        .expect("sandbox should be created");
+    let events = conversation
+        .get_events(Some(EventQuery {
+            types: Some(vec![EventKind::custom("sandbox_provider_state")]),
+            ..Default::default()
+        }))
+        .await
+        .expect("events should load")
+        .events;
+    assert_eq!(events.len(), 1);
+
+    let second_backend = Arc::new(TestProviderStateBackend::new(state.clone()));
+    let reloaded = BasicExoHarness::new_with_sandbox_backend(
+        local_test_config(tempdir.path()),
+        second_backend.clone(),
+    )
+    .await
+    .expect("reloaded harness should initialize");
+    let reloaded_agent = reloaded
+        .get_agent(&agent_id)
+        .await
+        .expect("agent lookup should succeed")
+        .expect("agent should exist");
+    let reloaded_conversation = reloaded_agent
+        .get_conversation(&conversation_id)
+        .await
+        .expect("conversation lookup should succeed")
+        .expect("conversation should exist");
+    let reused_sandbox_id = reloaded_conversation
+        .create_sandbox(provider_state_test_create_request())
+        .await
+        .expect("sandbox should be reused");
+    assert_eq!(reused_sandbox_id, sandbox_id);
+    assert_eq!(
+        second_backend.requests.lock().await.as_slice(),
+        &[Some(state)]
+    );
+}
+
+fn provider_state_test_create_request() -> CreateSandboxRequest {
+    CreateSandboxRequest {
+        name: Some("stateful".to_string()),
+        provider: SandboxProvider::LocalProcess,
+        image: "test-sandbox".to_string(),
+        default_workdir: Some("/".to_string()),
+        file_system_mounts: None,
+        durable_file_systems: None,
+        enable_networking: Some(true),
+        idle_seconds: Some(60),
+    }
+}
+
+struct TestProviderStateBackend {
+    state: Value,
+    requests: Arc<AsyncMutex<Vec<Option<Value>>>>,
+}
+
+impl TestProviderStateBackend {
+    fn new(state: Value) -> Self {
+        Self {
+            state,
+            requests: Arc::new(AsyncMutex::new(Vec::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl ManagedSandboxBackend for TestProviderStateBackend {
+    async fn acquire(
+        &self,
+        request: SandboxRequest,
+    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+        self.requests.lock().await.push(request.provider_state);
+        Ok(Arc::new(TestProviderStateHandle {
+            state: self.state.clone(),
+        }))
+    }
+
+    async fn acquire_from_snapshot(
+        &self,
+        _request: SandboxRequest,
+        _payload: SnapshotPayload,
+    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+        bail!("test provider-state backend does not support snapshot restore")
+    }
+}
+
+struct TestProviderStateHandle {
+    state: Value,
+}
+
+#[async_trait]
+impl ManagedSandboxHandle for TestProviderStateHandle {
+    fn id(&self) -> &str {
+        "test-provider-state"
+    }
+
+    fn provider_state(&self) -> Option<Value> {
+        Some(self.state.clone())
+    }
+
+    async fn exec(&self, _command: &SandboxCommand) -> crate::Result<SandboxCommandOutput> {
+        bail!("test provider-state handle does not support exec")
+    }
+
+    async fn start_process(&self, _command: &SandboxCommand) -> crate::Result<SandboxProcessParts> {
+        bail!("test provider-state handle does not support start_process")
+    }
+
+    async fn stop(&self) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn snapshot(&self) -> crate::Result<SnapshotPayload> {
+        bail!("test provider-state handle does not support snapshots")
+    }
 }
 
 struct TestSandboxBackend {

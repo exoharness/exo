@@ -13,6 +13,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::time;
@@ -87,6 +88,7 @@ pub struct SandboxRequest {
     pub key: SandboxKey,
     pub spec: SandboxSpec,
     pub lifecycle: SandboxLifecycleConfig,
+    pub provider_state: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +143,10 @@ pub enum SnapshotKind {
 #[async_trait]
 pub trait ManagedSandboxHandle: Send + Sync {
     fn id(&self) -> &str;
+
+    fn provider_state(&self) -> Option<Value> {
+        None
+    }
 
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput>;
 
@@ -397,6 +403,7 @@ impl CliContainerSandboxBackend {
                 default_workdir: request.spec.default_workdir,
             },
             lifecycle: request.lifecycle,
+            provider_state: request.provider_state,
         })
     }
 
@@ -2034,6 +2041,7 @@ mod tests {
             lifecycle: SandboxLifecycleConfig {
                 idle_ttl: Some(Duration::from_secs(60)),
             },
+            provider_state: None,
         };
         let spec_hash = sandbox_spec_hash(&request.spec);
 
@@ -2109,6 +2117,7 @@ mod tests {
             lifecycle: SandboxLifecycleConfig {
                 idle_ttl: Some(Duration::from_secs(60)),
             },
+            provider_state: None,
         };
 
         backend

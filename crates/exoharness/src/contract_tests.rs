@@ -425,6 +425,28 @@ pub async fn sandbox_backend_durable_file_system_survives_stop_and_reacquire(
     .await
 }
 
+pub async fn sandbox_backend_workdir_survives_stop_and_reacquire(
+    backend: Arc<dyn ManagedSandboxBackend>,
+    request: SandboxRequest,
+) -> crate::Result<()> {
+    let mount_path = request.spec.default_workdir.clone();
+    let marker = format!("workdir-{}", Uuid7::now());
+
+    let first = backend
+        .acquire(request.clone())
+        .await
+        .context("acquire sandbox for workdir write")?;
+    let write_result = write_durable_marker(Arc::clone(&first), &mount_path, &marker).await;
+    stop_after_contract(first, write_result, "stop sandbox after workdir write").await?;
+
+    let second = backend
+        .acquire(request)
+        .await
+        .context("reacquire sandbox for workdir read")?;
+    let read_result = read_durable_marker(Arc::clone(&second), &mount_path, &marker).await;
+    stop_after_contract(second, read_result, "stop sandbox after workdir read").await
+}
+
 async fn sandbox_handle_start_process_supports_interactive_stdio_and_env_inner(
     handle: Arc<dyn ManagedSandboxHandle>,
 ) -> crate::Result<()> {

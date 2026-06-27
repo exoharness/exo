@@ -33,8 +33,9 @@ use executor::{
     SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxProvider, SandboxProviderConfig,
     SandboxScope, Secret, SecretBackendChoice, SpritesBackendSpec, ToolRequest, ToolRuntime,
     TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, VercelBackendSpec,
-    default_aws_agentcore_image, default_daytona_image, default_docker_image, default_e2b_template,
-    default_vercel_image, effective_sandbox_scope, load_agent_config, send_conversation_wakeup,
+    default_aws_agentcore_image, default_aws_lambda_microvm_image, default_aws_lambda_microvm_port,
+    default_daytona_image, default_docker_image, default_e2b_template, default_vercel_image,
+    effective_sandbox_scope, load_agent_config, send_conversation_wakeup,
     serve_exoharness_http_listener_with_options,
 };
 use lingua::Message;
@@ -221,6 +222,8 @@ enum SandboxProviderArg {
     Vercel,
     #[value(name = "aws-agentcore")]
     AwsAgentCore,
+    #[value(name = "aws-lambda-microvm")]
+    AwsLambdaMicrovm,
     #[value(name = "apple-container")]
     AppleContainer,
     Docker,
@@ -236,6 +239,7 @@ impl From<SandboxProviderArg> for SandboxProvider {
             SandboxProviderArg::Sprites => Self::Sprites,
             SandboxProviderArg::Vercel => Self::Vercel,
             SandboxProviderArg::AwsAgentCore => Self::AwsAgentCore,
+            SandboxProviderArg::AwsLambdaMicrovm => Self::AwsLambdaMicrovm,
             SandboxProviderArg::AppleContainer => Self::AppleContainer,
             SandboxProviderArg::Docker => Self::Docker,
             SandboxProviderArg::LocalProcess => Self::LocalProcess,
@@ -300,16 +304,17 @@ fn default_sandbox_backends() -> Vec<SandboxBackendChoice> {
         SandboxBackendChoice::Sprites(SpritesBackendSpec::default()),
         SandboxBackendChoice::Vercel(VercelBackendSpec::with_conventional_secrets()),
         SandboxBackendChoice::AwsAgentCore,
+        SandboxBackendChoice::AwsLambdaMicrovm,
     ]
 }
 
-fn agentcore_region_from_arn(runtime_arn: &str) -> Option<String> {
-    let mut parts = runtime_arn.split(':');
+fn aws_region_from_arn(resource_arn: &str, expected_service: &str) -> Option<String> {
+    let mut parts = resource_arn.split(':');
     let arn = parts.next()?;
     let _partition = parts.next()?;
     let service = parts.next()?;
     let region = parts.next()?;
-    if arn == "arn" && service == "bedrock-agentcore" && !region.is_empty() {
+    if arn == "arn" && service == expected_service && !region.is_empty() {
         return Some(region.to_string());
     }
     None
@@ -652,6 +657,28 @@ struct ProviderConfigureArgs {
     api_url: Option<String>,
     #[arg(long = "runtime-arn")]
     runtime_arn: Option<String>,
+    #[arg(long = "image-identifier")]
+    image_identifier: Option<String>,
+    #[arg(long = "image-version")]
+    image_version: Option<String>,
+    #[arg(long = "ingress-network-connector-arn")]
+    ingress_network_connector_arns: Vec<String>,
+    #[arg(long = "egress-network-connector-arn")]
+    egress_network_connector_arns: Vec<String>,
+    #[arg(long = "execution-role-arn")]
+    execution_role_arn: Option<String>,
+    #[arg(long = "max-idle-duration-seconds")]
+    max_idle_duration_seconds: Option<i32>,
+    #[arg(long = "suspended-duration-seconds")]
+    suspended_duration_seconds: Option<i32>,
+    #[arg(long = "auto-resume-enabled")]
+    auto_resume_enabled: Option<bool>,
+    #[arg(long = "maximum-duration-seconds")]
+    maximum_duration_seconds: Option<i32>,
+    #[arg(long = "auth-token-expiration-minutes")]
+    auth_token_expiration_minutes: Option<i32>,
+    #[arg(long = "runtime-port")]
+    runtime_port: Option<i32>,
     #[arg(long)]
     qualifier: Option<String>,
     /// AgentCore managed session storage mount path configured on the runtime.
@@ -1816,6 +1843,17 @@ async fn main() -> Result<()> {
                     project_id,
                     api_url,
                     runtime_arn,
+                    image_identifier,
+                    image_version,
+                    ingress_network_connector_arns,
+                    egress_network_connector_arns,
+                    execution_role_arn,
+                    max_idle_duration_seconds,
+                    suspended_duration_seconds,
+                    auto_resume_enabled,
+                    maximum_duration_seconds,
+                    auth_token_expiration_minutes,
+                    runtime_port,
                     qualifier,
                     session_storage_mount_path,
                     default_image,
@@ -1870,7 +1908,7 @@ async fn main() -> Result<()> {
                         })?;
                         let region = match region {
                             Some(region) => region,
-                            None => agentcore_region_from_arn(&runtime_arn).ok_or_else(|| {
+                            None => aws_region_from_arn(&runtime_arn, "bedrock-agentcore").ok_or_else(|| {
                                 anyhow!(
                                     "--region is required when the AgentCore runtime ARN does not include a region"
                                 )
@@ -1884,6 +1922,37 @@ async fn main() -> Result<()> {
                             session_storage_mount_path,
                             default_image: default_image
                                 .unwrap_or_else(default_aws_agentcore_image),
+                        }
+                    }
+                    SandboxProviderArg::AwsLambdaMicrovm => {
+                        let image_identifier = image_identifier.ok_or_else(|| {
+                            anyhow!("--image-identifier is required for aws-lambda-microvm")
+                        })?;
+                        let region = match region {
+                            Some(region) => region,
+                            None => aws_region_from_arn(&image_identifier, "lambda").ok_or_else(|| {
+                                anyhow!(
+                                    "--region is required when the Lambda MicroVM image identifier does not include a region"
+                                )
+                            })?,
+                        };
+                        SandboxProviderConfig::AwsLambdaMicrovm {
+                            image_identifier,
+                            region,
+                            image_version,
+                            endpoint_url: api_url,
+                            ingress_network_connector_arns,
+                            egress_network_connector_arns,
+                            execution_role_arn,
+                            max_idle_duration_seconds,
+                            suspended_duration_seconds,
+                            auto_resume_enabled,
+                            maximum_duration_seconds,
+                            auth_token_expiration_minutes,
+                            runtime_port: runtime_port
+                                .unwrap_or_else(default_aws_lambda_microvm_port),
+                            default_image: default_image
+                                .unwrap_or_else(default_aws_lambda_microvm_image),
                         }
                     }
                     SandboxProviderArg::Docker => SandboxProviderConfig::Docker {

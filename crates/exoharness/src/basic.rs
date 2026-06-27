@@ -13,6 +13,7 @@ use futures::future::BoxFuture;
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use futures::stream::{self, BoxStream};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -21,7 +22,7 @@ use crate::sandbox::{
     CliContainerSandboxBackend, LocalProcessSandboxBackend, ManagedSandboxBackend,
     ManagedSandboxHandle, SANDBOX_MAIN_MOUNT_DIR, SandboxCommand, SandboxKey,
     SandboxLifecycleConfig, SandboxMount, SandboxMountAccess, SandboxNetworkPolicy, SandboxRequest,
-    SandboxSpec, SnapshotKind, SnapshotPayload,
+    SandboxSpec, SnapshotKind, SnapshotPayload, sandbox_spec_hash,
 };
 #[cfg(feature = "apple-keychain")]
 use crate::secrets::AppleKeychainSecretKeyProvider;
@@ -47,6 +48,16 @@ use crate::{
     Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
+const SANDBOX_PROVIDER_STATE_EVENT: &str = "sandbox_provider_state";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct SandboxProviderStatePayload {
+    sandbox_id: SandboxId,
+    provider: SandboxProvider,
+    state_key: String,
+    state: Value,
+}
+
 #[derive(Debug, Clone)]
 pub enum SecretBackendChoice {
     #[cfg(feature = "apple-keychain")]
@@ -69,6 +80,7 @@ pub enum SandboxBackendChoice {
     Sprites(SpritesBackendSpec),
     Vercel(VercelBackendSpec),
     AwsAgentCore,
+    AwsLambdaMicrovm,
 }
 
 impl SandboxBackendChoice {
@@ -82,6 +94,7 @@ impl SandboxBackendChoice {
             Self::Sprites(_) => SandboxProvider::Sprites,
             Self::Vercel(_) => SandboxProvider::Vercel,
             Self::AwsAgentCore => SandboxProvider::AwsAgentCore,
+            Self::AwsLambdaMicrovm => SandboxProvider::AwsLambdaMicrovm,
         }
     }
 }
@@ -290,6 +303,23 @@ impl BasicExoHarnessInner {
                 {
                     bail!(
                         "aws-agentcore sandbox backend requires building exoharness with the aws-agentcore feature"
+                    );
+                }
+            }
+            SandboxBackendChoice::AwsLambdaMicrovm => {
+                #[cfg(feature = "aws-lambda-microvm")]
+                {
+                    let config = self.aws_lambda_microvm_config_from_binding().await?.ok_or_else(|| {
+                        anyhow!(
+                            "aws-lambda-microvm sandbox requested but no sandbox provider binding is configured; run `exo provider configure --provider aws-lambda-microvm --image-identifier <arn>`"
+                        )
+                    })?;
+                    Arc::new(crate::AwsLambdaMicrovmSandboxBackend::new(config).await?)
+                }
+                #[cfg(not(feature = "aws-lambda-microvm"))]
+                {
+                    bail!(
+                        "aws-lambda-microvm sandbox backend requires building exoharness with the aws-lambda-microvm feature"
                     );
                 }
             }
@@ -646,6 +676,86 @@ impl BasicExoHarnessInner {
         }))
     }
 
+    #[cfg(feature = "aws-lambda-microvm")]
+    async fn aws_lambda_microvm_config_from_binding(
+        &self,
+    ) -> Result<Option<crate::AwsLambdaMicrovmConfig>> {
+        let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
+        let Some((
+            image_identifier,
+            region,
+            image_version,
+            endpoint_url,
+            ingress_network_connector_arns,
+            egress_network_connector_arns,
+            execution_role_arn,
+            max_idle_duration_seconds,
+            suspended_duration_seconds,
+            auto_resume_enabled,
+            maximum_duration_seconds,
+            auth_token_expiration_minutes,
+            runtime_port,
+        )) = bindings
+            .into_iter()
+            .rev()
+            .find_map(|record| match record.binding {
+                Binding::Sandbox {
+                    config:
+                        SandboxProviderConfig::AwsLambdaMicrovm {
+                            image_identifier,
+                            region,
+                            image_version,
+                            endpoint_url,
+                            ingress_network_connector_arns,
+                            egress_network_connector_arns,
+                            execution_role_arn,
+                            max_idle_duration_seconds,
+                            suspended_duration_seconds,
+                            auto_resume_enabled,
+                            maximum_duration_seconds,
+                            auth_token_expiration_minutes,
+                            runtime_port,
+                            ..
+                        },
+                    ..
+                } => Some((
+                    image_identifier,
+                    region,
+                    image_version,
+                    endpoint_url,
+                    ingress_network_connector_arns,
+                    egress_network_connector_arns,
+                    execution_role_arn,
+                    max_idle_duration_seconds,
+                    suspended_duration_seconds,
+                    auto_resume_enabled,
+                    maximum_duration_seconds,
+                    auth_token_expiration_minutes,
+                    runtime_port,
+                )),
+                _ => None,
+            })
+        else {
+            return Ok(None);
+        };
+        Ok(Some(crate::AwsLambdaMicrovmConfig {
+            image_identifier,
+            region,
+            image_version,
+            endpoint_url,
+            credentials: aws_lambda_microvm_credentials_from_env(),
+            ingress_network_connector_arns,
+            egress_network_connector_arns,
+            execution_role_arn,
+            max_idle_duration_seconds,
+            suspended_duration_seconds,
+            auto_resume_enabled,
+            maximum_duration_seconds,
+            auth_token_expiration_minutes,
+            runtime_port,
+        }))
+    }
+
     /// The configured default base image for `provider`, from the newest
     /// `Binding::Sandbox` for it. `None` when no such binding exists, so the
     /// backend applies its own intrinsic default.
@@ -675,6 +785,25 @@ fn aws_agentcore_credentials_from_env() -> Option<crate::AwsAgentCoreCredentials
         .filter(|value| !value.trim().is_empty());
 
     Some(crate::AwsAgentCoreCredentials {
+        access_key_id,
+        secret_access_key,
+        session_token,
+    })
+}
+
+#[cfg(feature = "aws-lambda-microvm")]
+fn aws_lambda_microvm_credentials_from_env() -> Option<crate::AwsLambdaMicrovmCredentials> {
+    let access_key_id = std::env::var("AWS_LAMBDA_MICROVM_ACCESS_KEY_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())?;
+    let secret_access_key = std::env::var("AWS_LAMBDA_MICROVM_SECRET_ACCESS_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())?;
+    let session_token = std::env::var("AWS_LAMBDA_MICROVM_SESSION_TOKEN")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+
+    Some(crate::AwsLambdaMicrovmCredentials {
         access_key_id,
         secret_access_key,
         session_token,
@@ -1443,7 +1572,17 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         let prepared = prepare_sandbox_request(self.harness, request).await?;
         let _guard = self.harness.inner.write_lock.lock().await;
         if let Some((sandbox_id, sandbox)) = self.find_matching_sandbox(&prepared).await? {
-            active_sandbox_handle(self.harness, self.owner, &sandbox_id, &sandbox).await?;
+            let (_handle, provider_state_event) = active_sandbox_handle(
+                self.harness,
+                &self.owner_dir,
+                self.owner,
+                &sandbox_id,
+                &sandbox,
+            )
+            .await?;
+            if let Some(event) = provider_state_event {
+                self.append_events_locked(vec![event]).await?;
+            }
             return Ok(sandbox_id);
         }
         self.create_new_sandbox_locked(prepared).await
@@ -1505,8 +1644,12 @@ impl<'a> BasicScopedSandboxHandle<'a> {
             request,
         )
         .await?;
-        self.append_events(vec![pending.started_event.clone()])
-            .await?;
+        let mut events = Vec::new();
+        if let Some(event) = pending.provider_state_event.clone() {
+            events.push(event);
+        }
+        events.push(pending.started_event.clone());
+        self.append_events(events).await?;
         spawn_pending_sandbox_process(self.harness, pending).await
     }
 
@@ -1614,8 +1757,17 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         if request.command.is_empty() {
             bail!("sandbox command must not be empty");
         }
-        let sandbox_handle =
-            active_sandbox_handle(self.harness, self.owner, &request.id, &sandbox).await?;
+        let (sandbox_handle, provider_state_event) = active_sandbox_handle(
+            self.harness,
+            &self.owner_dir,
+            self.owner,
+            &request.id,
+            &sandbox,
+        )
+        .await?;
+        if let Some(event) = provider_state_event {
+            self.append_events(vec![event]).await?;
+        }
         let parts = sandbox_handle
             .start_process(&SandboxCommand {
                 argv: request.command.clone(),
@@ -1640,10 +1792,16 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         let prepared = prepare_sandbox_request(self.harness, request).await?;
         let sandbox_id = format!("sandbox-{}", Uuid7::now());
         let sandbox = prepared.stored_sandbox(sandbox_id.clone());
-        let sandbox_handle =
-            create_sandbox_handle(self.harness, self.owner, &sandbox_id, &sandbox).await?;
+        let (sandbox_handle, provider_state_event) = create_sandbox_handle(
+            self.harness,
+            &self.owner_dir,
+            self.owner,
+            &sandbox_id,
+            &sandbox,
+        )
+        .await?;
         let _guard = self.harness.inner.write_lock.lock().await;
-        self.persist_created_sandbox_locked(sandbox, sandbox_handle)
+        self.persist_created_sandbox_locked(sandbox, sandbox_handle, provider_state_event)
             .await
     }
 
@@ -1653,9 +1811,15 @@ impl<'a> BasicScopedSandboxHandle<'a> {
     ) -> Result<SandboxId> {
         let sandbox_id = format!("sandbox-{}", Uuid7::now());
         let sandbox = request.stored_sandbox(sandbox_id.clone());
-        let sandbox_handle =
-            create_sandbox_handle(self.harness, self.owner, &sandbox_id, &sandbox).await?;
-        self.persist_created_sandbox_locked(sandbox, sandbox_handle)
+        let (sandbox_handle, provider_state_event) = create_sandbox_handle(
+            self.harness,
+            &self.owner_dir,
+            self.owner,
+            &sandbox_id,
+            &sandbox,
+        )
+        .await?;
+        self.persist_created_sandbox_locked(sandbox, sandbox_handle, provider_state_event)
             .await
     }
 
@@ -1663,6 +1827,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         &self,
         sandbox: StoredSandbox,
         sandbox_handle: Arc<dyn ManagedSandboxHandle>,
+        provider_state_event: Option<EventData>,
     ) -> Result<SandboxId> {
         let sandbox_id = sandbox.id.clone();
         self.harness
@@ -1679,7 +1844,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
             .lock()
             .await
             .insert(sandbox_id.clone(), sandbox_handle);
-        self.append_events_locked(vec![
+        let mut events = vec![
             EventData::SandboxCreated {
                 sandbox_id: sandbox_id.clone(),
                 name: sandbox.name,
@@ -1695,8 +1860,11 @@ impl<'a> BasicScopedSandboxHandle<'a> {
                 sandbox_id: sandbox_id.clone(),
                 snapshot_id: None,
             },
-        ])
-        .await?;
+        ];
+        if let Some(event) = provider_state_event {
+            events.push(event);
+        }
+        self.append_events_locked(events).await?;
         Ok(sandbox_id)
     }
 
@@ -2525,7 +2693,7 @@ async fn start_sandbox_side_effect(
         .inner
         .sandbox_backend_for_provider(sandbox.provider)
         .await?
-        .acquire_from_snapshot(sandbox_request(owner, &request.id, &sandbox), payload)
+        .acquire_from_snapshot(sandbox_request(owner, &request.id, &sandbox, None), payload)
         .await?;
 
     let _guard = harness.inner.write_lock.lock().await;
@@ -2627,10 +2795,11 @@ async fn find_matching_stored_sandbox(
 
 async fn active_sandbox_handle(
     harness: &BasicExoHarness,
+    owner_dir: &Path,
     owner: SandboxOwner,
     sandbox_id: &SandboxId,
     sandbox: &StoredSandbox,
-) -> Result<Arc<dyn ManagedSandboxHandle>> {
+) -> Result<(Arc<dyn ManagedSandboxHandle>, Option<EventData>)> {
     if let Some(handle) = harness
         .inner
         .running_sandboxes
@@ -2639,31 +2808,130 @@ async fn active_sandbox_handle(
         .get(sandbox_id)
         .cloned()
     {
-        return Ok(handle);
+        return Ok((handle, None));
     }
 
-    let handle = create_sandbox_handle(harness, owner, sandbox_id, sandbox).await?;
+    let (handle, provider_state_event) =
+        create_sandbox_handle(harness, owner_dir, owner, sandbox_id, sandbox).await?;
     harness
         .inner
         .running_sandboxes
         .lock()
         .await
         .insert(sandbox_id.clone(), Arc::clone(&handle));
-    Ok(handle)
+    Ok((handle, provider_state_event))
 }
 
 async fn create_sandbox_handle(
     harness: &BasicExoHarness,
+    owner_dir: &Path,
     owner: SandboxOwner,
     sandbox_id: &SandboxId,
     sandbox: &StoredSandbox,
-) -> Result<Arc<dyn ManagedSandboxHandle>> {
-    harness
+) -> Result<(Arc<dyn ManagedSandboxHandle>, Option<EventData>)> {
+    let state_key = sandbox_provider_state_key(owner, sandbox_id, sandbox);
+    let previous_state = load_sandbox_provider_state(
+        harness,
+        owner_dir,
+        owner,
+        sandbox_id,
+        sandbox.provider,
+        &state_key,
+    )
+    .await?;
+    let handle = harness
         .inner
         .sandbox_backend_for_provider(sandbox.provider)
         .await?
-        .acquire(sandbox_request(owner, sandbox_id, sandbox))
-        .await
+        .acquire(sandbox_request(
+            owner,
+            sandbox_id,
+            sandbox,
+            previous_state.clone(),
+        ))
+        .await?;
+    let provider_state_event = sandbox_provider_state_event(
+        sandbox_id,
+        sandbox.provider,
+        state_key,
+        previous_state,
+        &handle,
+    )?;
+    Ok((handle, provider_state_event))
+}
+
+fn sandbox_provider_state_key(
+    owner: SandboxOwner,
+    sandbox_id: &SandboxId,
+    sandbox: &StoredSandbox,
+) -> String {
+    let request = sandbox_request(owner, sandbox_id, sandbox, None);
+    format!("{}\n{}", request.key, sandbox_spec_hash(&request.spec))
+}
+
+async fn load_sandbox_provider_state(
+    harness: &BasicExoHarness,
+    owner_dir: &Path,
+    owner: SandboxOwner,
+    sandbox_id: &SandboxId,
+    provider: SandboxProvider,
+    state_key: &str,
+) -> Result<Option<Value>> {
+    let SandboxOwner::Conversation(_) = owner else {
+        return Ok(None);
+    };
+    let mut events = load_events(&harness.inner.storage, &owner_dir.join("events"))
+        .await?
+        .into_iter()
+        .filter(|event| event.data.kind() == EventKind::custom(SANDBOX_PROVIDER_STATE_EVENT))
+        .collect::<Vec<_>>();
+    events.sort_by_key(|event| event.id);
+    for event in events.into_iter().rev() {
+        let EventData::Custom {
+            event_type,
+            payload,
+        } = event.data
+        else {
+            continue;
+        };
+        if event_type != SANDBOX_PROVIDER_STATE_EVENT {
+            continue;
+        }
+        let Ok(payload) = serde_json::from_value::<SandboxProviderStatePayload>(payload) else {
+            continue;
+        };
+        if payload.sandbox_id == *sandbox_id
+            && payload.provider == provider
+            && payload.state_key == state_key
+        {
+            return Ok(Some(payload.state));
+        }
+    }
+    Ok(None)
+}
+
+fn sandbox_provider_state_event(
+    sandbox_id: &SandboxId,
+    provider: SandboxProvider,
+    state_key: String,
+    previous_state: Option<Value>,
+    handle: &Arc<dyn ManagedSandboxHandle>,
+) -> Result<Option<EventData>> {
+    let Some(state) = handle.provider_state() else {
+        return Ok(None);
+    };
+    if previous_state.as_ref() == Some(&state) {
+        return Ok(None);
+    }
+    Ok(Some(EventData::Custom {
+        event_type: SANDBOX_PROVIDER_STATE_EVENT.to_string(),
+        payload: serde_json::to_value(SandboxProviderStatePayload {
+            sandbox_id: sandbox_id.clone(),
+            provider,
+            state_key,
+            state,
+        })?,
+    }))
 }
 
 async fn require_running_sandbox_process(
@@ -2903,6 +3171,7 @@ struct PendingSandboxProcess {
     stderr: BoxAsyncRead,
     wait: BoxFuture<'static, Result<i32>>,
     started_event: EventData,
+    provider_state_event: Option<EventData>,
 }
 
 async fn prepare_sandbox_process(
@@ -2922,8 +3191,8 @@ async fn prepare_sandbox_process(
     if request.mode != SandboxProcessMode::Exec {
         bail!("basic sandbox backend only supports exec-mode processes");
     }
-    let sandbox_handle =
-        active_sandbox_handle(harness, owner, &request.sandbox_id, &sandbox).await?;
+    let (sandbox_handle, provider_state_event) =
+        active_sandbox_handle(harness, owner_dir, owner, &request.sandbox_id, &sandbox).await?;
     let process_id = format!("process-{}", Uuid7::now());
     let sandbox_id = request.sandbox_id.clone();
     let command = request.command.clone();
@@ -2989,6 +3258,7 @@ async fn prepare_sandbox_process(
             status: SandboxProcessStatus::Running,
             provider_state: None,
         },
+        provider_state_event,
     })
 }
 
@@ -3336,6 +3606,7 @@ fn sandbox_request(
     owner: SandboxOwner,
     sandbox_id: &str,
     sandbox: &StoredSandbox,
+    provider_state: Option<Value>,
 ) -> SandboxRequest {
     SandboxRequest {
         key: match owner {
@@ -3377,6 +3648,7 @@ fn sandbox_request(
         lifecycle: SandboxLifecycleConfig {
             idle_ttl: Some(std::time::Duration::from_secs(sandbox.idle_seconds)),
         },
+        provider_state,
     }
 }
 
