@@ -30,7 +30,7 @@ export default {
       return acceptSignalingSocket(request, wsMatch[1], url);
     }
 
-    if (SESSION_PATH_PATTERN.test(url.pathname)) {
+    if (isSessionPage(url)) {
       const chatUrl = new URL("/chat.html", url);
       const response = await env.ASSETS.fetch(new Request(chatUrl, request));
       return withSecurityHeaders(response);
@@ -104,6 +104,20 @@ function acceptSignalingSocket(request, channelId, url) {
     status: 101,
     webSocket: client,
   });
+}
+
+function isSessionPage(url) {
+  if (SESSION_PATH_PATTERN.test(url.pathname)) {
+    return true;
+  }
+
+  if (url.pathname !== "/chat" && url.pathname !== "/chat/") {
+    return false;
+  }
+
+  return Boolean(
+    url.searchParams.get("c") && parseRole(url.searchParams.get("role")),
+  );
 }
 
 function getRoom(channelId) {

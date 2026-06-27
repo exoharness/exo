@@ -10,8 +10,8 @@ const baseUrl = normalizeBaseUrl(
 const channelId = randomBase64url(18);
 const secret = randomBase64url(32);
 
-const phoneUrl = `${baseUrl}/chat/s/${channelId}#k=${secret}`;
-const agentUrl = `${baseUrl}/chat/agent/${channelId}#k=${secret}`;
+const phoneUrl = sessionUrl(baseUrl, "user", channelId, secret);
+const agentUrl = sessionUrl(baseUrl, "agent", channelId, secret);
 
 console.log("");
 console.log("Open this agent peer URL on your computer:");
@@ -27,6 +27,14 @@ console.log("");
 
 function randomBase64url(bytes) {
   return crypto.randomBytes(bytes).toString("base64url");
+}
+
+function sessionUrl(baseUrl, role, channelId, secret) {
+  const url = new URL(`${baseUrl}/chat`);
+  url.searchParams.set("role", role);
+  url.searchParams.set("c", channelId);
+  url.hash = `k=${secret}`;
+  return url.toString();
 }
 
 function normalizeBaseUrl(value) {

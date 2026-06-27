@@ -1,7 +1,8 @@
 (async () => {
+  const session = readSession();
   const state = {
-    channelId: readChannelId(),
-    role: location.pathname.includes("/chat/agent/") ? "agent" : "user",
+    channelId: session.channelId,
+    role: session.role,
     secret: readSecret(),
     seq: 0,
     ws: null,
@@ -295,9 +296,16 @@
   }
 })();
 
-function readChannelId() {
-  const match = location.pathname.match(/^\/chat\/(?:s|agent)\/([^/]+)\/?$/);
-  return match?.[1] ?? "";
+function readSession() {
+  const params = new URLSearchParams(location.search);
+  const pathMatch = location.pathname.match(/^\/chat\/(s|agent)\/([^/]+)\/?$/);
+  const role =
+    params.get("role") ?? (pathMatch?.[1] === "agent" ? "agent" : "user");
+
+  return {
+    channelId: params.get("c") ?? pathMatch?.[2] ?? "",
+    role: role === "agent" ? "agent" : "user",
+  };
 }
 
 function readSecret() {
