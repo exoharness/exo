@@ -12,6 +12,7 @@
     "lint": "oxlint --deny-warnings .",
     "lint:fix": "oxlint --fix --deny-warnings .",
     "prepare": "node scripts/setup-hooks.mjs",
+    "rendezvous:demo": "node scripts/webrtc-rendezvous-demo.mjs",
     "test": "vitest run",
     "typecheck": "tsgo --noEmit -p tsconfig.json"
   },
