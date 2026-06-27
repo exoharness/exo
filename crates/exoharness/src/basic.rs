@@ -205,31 +205,6 @@ impl SandboxBackendRegistration {
         })
     }
 
-    pub fn aws_lambda_microvm() -> Self {
-        Self::from_factory(SandboxProvider::AwsLambdaMicrovm, |_inner| {
-            Box::pin(async move {
-                #[cfg(feature = "aws-lambda-microvm")]
-                {
-                    let config = _inner.aws_lambda_microvm_config_from_binding().await?.ok_or_else(|| {
-                        anyhow!(
-                            "aws-lambda-microvm sandbox requested but no sandbox provider binding is configured; run `exo provider configure --provider aws-lambda-microvm --image-identifier <arn>`"
-                        )
-                    })?;
-                    Ok(
-                        Arc::new(crate::AwsLambdaMicrovmSandboxBackend::new(config).await?)
-                            as Arc<dyn ManagedSandboxBackend>,
-                    )
-                }
-                #[cfg(not(feature = "aws-lambda-microvm"))]
-                {
-                    bail!(
-                        "aws-lambda-microvm sandbox backend requires building exoharness with the aws-lambda-microvm feature"
-                    );
-                }
-            })
-        })
-    }
-
     pub fn provider(&self) -> SandboxProvider {
         self.provider
     }
@@ -749,86 +724,6 @@ impl BasicExoHarnessInner {
         }))
     }
 
-    #[cfg(feature = "aws-lambda-microvm")]
-    async fn aws_lambda_microvm_config_from_binding(
-        &self,
-    ) -> Result<Option<crate::AwsLambdaMicrovmConfig>> {
-        let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
-        let Some((
-            image_identifier,
-            region,
-            image_version,
-            endpoint_url,
-            ingress_network_connector_arns,
-            egress_network_connector_arns,
-            execution_role_arn,
-            max_idle_duration_seconds,
-            suspended_duration_seconds,
-            auto_resume_enabled,
-            maximum_duration_seconds,
-            auth_token_expiration_minutes,
-            runtime_port,
-        )) = bindings
-            .into_iter()
-            .rev()
-            .find_map(|record| match record.binding {
-                Binding::Sandbox {
-                    config:
-                        SandboxProviderConfig::AwsLambdaMicrovm {
-                            image_identifier,
-                            region,
-                            image_version,
-                            endpoint_url,
-                            ingress_network_connector_arns,
-                            egress_network_connector_arns,
-                            execution_role_arn,
-                            max_idle_duration_seconds,
-                            suspended_duration_seconds,
-                            auto_resume_enabled,
-                            maximum_duration_seconds,
-                            auth_token_expiration_minutes,
-                            runtime_port,
-                            ..
-                        },
-                    ..
-                } => Some((
-                    image_identifier,
-                    region,
-                    image_version,
-                    endpoint_url,
-                    ingress_network_connector_arns,
-                    egress_network_connector_arns,
-                    execution_role_arn,
-                    max_idle_duration_seconds,
-                    suspended_duration_seconds,
-                    auto_resume_enabled,
-                    maximum_duration_seconds,
-                    auth_token_expiration_minutes,
-                    runtime_port,
-                )),
-                _ => None,
-            })
-        else {
-            return Ok(None);
-        };
-        Ok(Some(crate::AwsLambdaMicrovmConfig {
-            image_identifier,
-            region,
-            image_version,
-            endpoint_url,
-            credentials: aws_lambda_microvm_credentials_from_env(),
-            ingress_network_connector_arns,
-            egress_network_connector_arns,
-            execution_role_arn,
-            max_idle_duration_seconds,
-            suspended_duration_seconds,
-            auto_resume_enabled,
-            maximum_duration_seconds,
-            auth_token_expiration_minutes,
-            runtime_port,
-        }))
-    }
-
     /// The configured default base image for `provider`, from the newest
     /// `Binding::Sandbox` for it. `None` when no such binding exists, so the
     /// backend applies its own intrinsic default.
@@ -858,25 +753,6 @@ fn aws_agentcore_credentials_from_env() -> Option<crate::AwsAgentCoreCredentials
         .filter(|value| !value.trim().is_empty());
 
     Some(crate::AwsAgentCoreCredentials {
-        access_key_id,
-        secret_access_key,
-        session_token,
-    })
-}
-
-#[cfg(feature = "aws-lambda-microvm")]
-fn aws_lambda_microvm_credentials_from_env() -> Option<crate::AwsLambdaMicrovmCredentials> {
-    let access_key_id = std::env::var("AWS_LAMBDA_MICROVM_ACCESS_KEY_ID")
-        .ok()
-        .filter(|value| !value.trim().is_empty())?;
-    let secret_access_key = std::env::var("AWS_LAMBDA_MICROVM_SECRET_ACCESS_KEY")
-        .ok()
-        .filter(|value| !value.trim().is_empty())?;
-    let session_token = std::env::var("AWS_LAMBDA_MICROVM_SESSION_TOKEN")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
-
-    Some(crate::AwsLambdaMicrovmCredentials {
         access_key_id,
         secret_access_key,
         session_token,

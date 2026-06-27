@@ -56,8 +56,7 @@ pub use exoharness::{
     HttpExoHarness, PutSecretRequest, SANDBOX_MAIN_MOUNT_DIR, SandboxBackendRegistration,
     SandboxId, SandboxProvider, SandboxProviderConfig, Secret, SecretBackendChoice, SecretMetadata,
     SessionId, SnapshotId, SpritesBackendSpec, StartSandboxRequest, ToolRequest, Uuid7,
-    VercelBackendSpec, default_aws_agentcore_image, default_aws_lambda_microvm_image,
-    default_aws_lambda_microvm_port, default_daytona_image, default_docker_image,
+    VercelBackendSpec, default_aws_agentcore_image, default_daytona_image, default_docker_image,
     default_e2b_template, default_vercel_image, serve_exoharness_http_listener,
     serve_exoharness_http_listener_with_options,
 };

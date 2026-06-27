@@ -27,12 +27,6 @@ aws-agentcore = [
   "dep:aws-credential-types",
   "dep:aws-sdk-bedrockagentcore",
 ]
-aws-lambda-microvm = [
-  "basic-backend",
-  "dep:aws-config",
-  "dep:aws-credential-types",
-  "dep:aws-sdk-lambdamicrovms",
-]
 contract-tests = []
 
 [dependencies]
@@ -43,7 +37,6 @@ async-trait.workspace = true
 aws-config = { workspace = true, optional = true }
 aws-credential-types = { workspace = true, optional = true }
 aws-sdk-bedrockagentcore = { workspace = true, optional = true }
-aws-sdk-lambdamicrovms = { workspace = true, optional = true }
 base64 = { version = "0.22.1", optional = true }
 bytes.workspace = true
 chrono.workspace = true

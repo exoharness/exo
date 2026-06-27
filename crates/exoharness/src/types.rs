@@ -533,10 +533,9 @@ pub enum SandboxProvider {
     Vercel,
     #[serde(rename = "aws_agentcore", alias = "aws-agentcore")]
     AwsAgentCore,
-    #[serde(rename = "aws_lambda_microvm", alias = "aws-lambda-microvm")]
-    AwsLambdaMicrovm,
     AppleContainer,
     Docker,
+    External,
     #[serde(alias = "local")]
     LocalProcess,
 }
@@ -556,9 +555,9 @@ impl SandboxProvider {
             Self::Sprites => "sprites",
             Self::Vercel => "vercel",
             Self::AwsAgentCore => "aws-agentcore",
-            Self::AwsLambdaMicrovm => "aws-lambda-microvm",
             Self::AppleContainer => "apple-container",
             Self::Docker => "docker",
+            Self::External => "external",
             Self::LocalProcess => "local-process",
         }
     }
@@ -580,9 +579,9 @@ impl FromStr for SandboxProvider {
             "sprites" => Ok(Self::Sprites),
             "vercel" => Ok(Self::Vercel),
             "aws-agentcore" | "aws_agentcore" => Ok(Self::AwsAgentCore),
-            "aws-lambda-microvm" | "aws_lambda_microvm" => Ok(Self::AwsLambdaMicrovm),
             "apple-container" | "apple_container" => Ok(Self::AppleContainer),
             "docker" => Ok(Self::Docker),
+            "external" => Ok(Self::External),
             "local" | "local-process" | "local_process" => Ok(Self::LocalProcess),
             provider => Err(anyhow::anyhow!("unsupported sandbox provider: {provider}")),
         }
@@ -885,35 +884,6 @@ pub enum SandboxProviderConfig {
         #[serde(default = "crate::sandbox_provider::default_aws_agentcore_image")]
         default_image: String,
     },
-    #[serde(rename = "aws_lambda_microvm", alias = "aws-lambda-microvm")]
-    AwsLambdaMicrovm {
-        image_identifier: String,
-        region: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        image_version: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        endpoint_url: Option<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        ingress_network_connector_arns: Vec<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        egress_network_connector_arns: Vec<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        execution_role_arn: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        max_idle_duration_seconds: Option<i32>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        suspended_duration_seconds: Option<i32>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        auto_resume_enabled: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        maximum_duration_seconds: Option<i32>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        auth_token_expiration_minutes: Option<i32>,
-        #[serde(default = "crate::sandbox_provider::default_aws_lambda_microvm_port")]
-        runtime_port: i32,
-        #[serde(default = "crate::sandbox_provider::default_aws_lambda_microvm_image")]
-        default_image: String,
-    },
 }
 
 pub fn default_e2b_template() -> String {
@@ -929,7 +899,6 @@ impl SandboxProviderConfig {
             Self::Vercel { .. } => SandboxProvider::Vercel,
             Self::Docker { .. } => SandboxProvider::Docker,
             Self::AwsAgentCore { .. } => SandboxProvider::AwsAgentCore,
-            Self::AwsLambdaMicrovm { .. } => SandboxProvider::AwsLambdaMicrovm,
         }
     }
 
@@ -940,8 +909,7 @@ impl SandboxProviderConfig {
             | Self::Vercel { default_image, .. }
             | Self::Docker { default_image, .. }
             | Self::E2b { default_image, .. }
-            | Self::AwsAgentCore { default_image, .. }
-            | Self::AwsLambdaMicrovm { default_image, .. } => Some(default_image),
+            | Self::AwsAgentCore { default_image, .. } => Some(default_image),
             Self::Sprites { .. } => None,
         }
     }

@@ -21,7 +21,6 @@ actix-web = "4.9.0"
 aws-config = "1.8.17"
 aws-credential-types = "1.2.14"
 aws-sdk-bedrockagentcore = "1.45.0"
-aws-sdk-lambdamicrovms = "1.0.0"
 braintrust-sdk-rust = { git = "https://github.com/braintrustdata/braintrust-sdk-rust", rev = "55dcefd989b6038edb5ef8dfc438384340d5f4ae" }
 bytes = "1.10.1"
 chrono = { version = "0.4.42", features = ["serde"] }

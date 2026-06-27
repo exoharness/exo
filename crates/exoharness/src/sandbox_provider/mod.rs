@@ -26,30 +26,10 @@ mod aws_agentcore {
         String::new()
     }
 }
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    feature = "basic-backend",
-    feature = "aws-lambda-microvm"
-))]
-mod aws_lambda_microvm;
-#[cfg(not(all(
-    not(target_arch = "wasm32"),
-    feature = "basic-backend",
-    feature = "aws-lambda-microvm"
-)))]
-mod aws_lambda_microvm {
-    pub fn default_aws_lambda_microvm_image() -> String {
-        String::new()
-    }
-
-    pub fn default_aws_lambda_microvm_port() -> i32 {
-        8080
-    }
-}
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod e2b;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
-mod process_bridge;
+pub mod process_bridge;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod sprites;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
@@ -68,15 +48,6 @@ pub use aws_agentcore::default_aws_agentcore_image;
     feature = "aws-agentcore"
 ))]
 pub use aws_agentcore::{AwsAgentCoreConfig, AwsAgentCoreCredentials, AwsAgentCoreSandboxBackend};
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    feature = "basic-backend",
-    feature = "aws-lambda-microvm"
-))]
-pub use aws_lambda_microvm::{
-    AwsLambdaMicrovmConfig, AwsLambdaMicrovmCredentials, AwsLambdaMicrovmSandboxBackend,
-};
-pub use aws_lambda_microvm::{default_aws_lambda_microvm_image, default_aws_lambda_microvm_port};
 pub use daytona::default_daytona_image;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub use daytona::{
