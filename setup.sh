@@ -17,6 +17,41 @@ info() {
   echo "==> $*"
 }
 
+usage() {
+  cat <<'EOF'
+Usage:
+  bash setup.sh [options]
+
+Options:
+  --branch <branch>     Git branch to clone for testing (default: main)
+  --ref <ref>           Git ref to clone; alias for --branch
+  --repo-ref <ref>      Git ref to clone; alias for --branch
+  --help                Show this help
+
+Environment overrides:
+  EXO_REPO_URL, EXO_REPO_REF, EXO_INSTALL_DIR, EXO_MODEL, EXO_UPSTREAM_MODEL
+EOF
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --branch|--ref|--repo-ref)
+        REPO_REF="${2:-}"
+        [[ -n "$REPO_REF" ]] || die "$1 requires a value"
+        shift 2
+        ;;
+      --help|-h)
+        usage
+        exit 0
+        ;;
+      *)
+        die "unknown option: $1"
+        ;;
+    esac
+  done
+}
+
 require_command() {
   local command="$1"
   local install_hint="$2"
@@ -218,8 +253,12 @@ clone_or_reuse_repo() {
 }
 
 main() {
+  parse_args "$@"
+
   echo "Exo canonical setup"
   echo "This will install Exo into the current directory, write local keys to .env, and start Exoclaw."
+  echo "Repository: $REPO_URL"
+  echo "Git ref: $REPO_REF"
 
   check_dependencies
   ensure_docker_running
