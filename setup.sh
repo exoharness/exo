@@ -6,7 +6,7 @@ REPO_REF="${EXO_REPO_REF:-main}"
 INSTALL_DIR="${EXO_INSTALL_DIR:-$PWD}"
 MODEL_NAME="${EXO_MODEL:-gpt-5.4}"
 UPSTREAM_MODEL="${EXO_UPSTREAM_MODEL:-$MODEL_NAME}"
-AGENT_NAME="${EXO_AGENT_NAME:-ExoClaw}"
+AGENT_NAME="${EXO_AGENT_NAME:-Exo}"
 USER_NAME="${EXO_USER_NAME:-}"
 FORCE_INSTALL="${EXO_SETUP_FORCE:-false}"
 
@@ -344,7 +344,7 @@ write_local_profile() {
   local user_name="$2"
   mkdir -p "$(dirname "$file")"
   {
-    echo "# Local Exoclaw Profile"
+    echo "# Local Exo Profile"
     echo
     echo "This file is local to this machine and should not be committed."
     if [[ -n "$user_name" ]]; then
@@ -452,7 +452,7 @@ main() {
   parse_args "$@"
 
   echo "Exo canonical setup"
-  echo "This will install Exo into the current directory, write local keys to .env, and start Exoclaw."
+  echo "This will install Exo into the current directory, write local keys to .env, and start Exo."
   echo "Repository: $REPO_URL"
   echo "Git ref: $REPO_REF"
 
@@ -478,12 +478,12 @@ main() {
   prompt_env_secret "OPENAI_API_KEY" "$env_file" "OpenAI API key" true
   echo "Canonical setup uses WhatsApp as the default external adapter and will show a QR code to scan."
 
-  info "Configure Exoclaw"
+  info "Configure Exo"
   USER_NAME="$(prompt_text "Your name, or blank to skip" "$USER_NAME")"
   AGENT_NAME="$(prompt_text "Agent display name" "$AGENT_NAME")"
   local profile_file="${EXOCLAW_LOCAL_PROMPT_FILE:-$install_dir/.exo/exoclaw-profile.md}"
   write_local_profile "$profile_file" "$USER_NAME"
-  echo "Wrote local Exoclaw profile: $profile_file"
+  echo "Wrote local Exo profile: $profile_file"
 
   info "Install dependencies"
   pnpm install
@@ -495,7 +495,7 @@ main() {
   ./target/debug/exo --env-file-if-exists "$env_file" secret set openai --env OPENAI_API_KEY
   ./target/debug/exo --env-file-if-exists "$env_file" model register "$MODEL_NAME" --model "$UPSTREAM_MODEL" --secret openai
 
-  info "Start canonical Exoclaw"
+  info "Start canonical Exo"
   local control_args=(fresh --canonical --agent-name "$AGENT_NAME")
   unset EXO_SETUP_ADAPTER
   export EXO_CANONICAL_PROFILE=user
