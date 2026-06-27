@@ -6,6 +6,7 @@ REPO_REF="${EXO_REPO_REF:-main}"
 INSTALL_DIR="${EXO_INSTALL_DIR:-$PWD}"
 MODEL_NAME="${EXO_MODEL:-gpt-5.4}"
 UPSTREAM_MODEL="${EXO_UPSTREAM_MODEL:-$MODEL_NAME}"
+AGENT_NAME="${EXO_AGENT_NAME:-ExoClaw}"
 
 die() {
   echo "error: $*" >&2
@@ -29,7 +30,8 @@ Options:
   --help                Show this help
 
 Environment overrides:
-  EXO_REPO_URL, EXO_REPO_REF, EXO_INSTALL_DIR, EXO_MODEL, EXO_UPSTREAM_MODEL
+  EXO_REPO_URL, EXO_REPO_REF, EXO_INSTALL_DIR, EXO_MODEL, EXO_UPSTREAM_MODEL,
+  EXO_AGENT_NAME
 EOF
 }
 
@@ -118,6 +120,14 @@ read_secret() {
   read -r -s -p "$prompt: " value
   echo >&2
   printf '%s' "$value"
+}
+
+prompt_text() {
+  local prompt="$1"
+  local default="$2"
+  local value
+  read -r -p "$prompt [$default]: " value
+  printf '%s' "${value:-$default}"
 }
 
 env_value() {
@@ -291,6 +301,9 @@ main() {
   prompt_env_secret "OPENAI_API_KEY" "$env_file" "OpenAI API key" true
   echo "Canonical setup uses WhatsApp as the default external adapter and will show a QR code to scan."
 
+  info "Configure Exoclaw"
+  AGENT_NAME="$(prompt_text "Agent display name" "$AGENT_NAME")"
+
   info "Install dependencies"
   pnpm install
 
@@ -302,7 +315,7 @@ main() {
   ./target/debug/exo --env-file-if-exists "$env_file" model register "$MODEL_NAME" --model "$UPSTREAM_MODEL" --secret openai
 
   info "Start canonical Exoclaw"
-  local control_args=(fresh --canonical --setup-profile)
+  local control_args=(fresh --canonical --setup-profile --agent-name "$AGENT_NAME")
   unset EXO_SETUP_ADAPTER
   export EXO_CANONICAL_PROFILE=user
   exec examples/exoclaw/scripts/exoclaw-control "${control_args[@]}"
