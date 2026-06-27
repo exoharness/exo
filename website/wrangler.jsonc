@@ -10,14 +10,14 @@
     "bindings": [
       {
         "name": "RENDEZVOUS",
-        "class_name": "RendezvousSession"
-      }
-    ]
+        "class_name": "RendezvousSession",
+      },
+    ],
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["RendezvousSession"]
-    }
-  ]
+      "new_sqlite_classes": ["RendezvousSession"],
+    },
+  ],
 }
