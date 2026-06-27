@@ -3,7 +3,7 @@
 exo plays **Pokémon Red** from the screen: each turn it sees the current
 screenshot (plus the previous one) and chooses button presses; the emulator
 advances; repeat. The twist versus a normal "agent plays Pokémon" demo: **the
-agent improves *itself* as it plays** — it has durable memory, can write its own
+agent improves _itself_ as it plays** — it has durable memory, can write its own
 tools, and can rewrite its own policy, all live, mid-run, with no resets.
 
 It's a standalone eval (no external benchmark framework) — just a
@@ -24,7 +24,7 @@ The agent's entire "brain" is a single TypeScript harness,
 - **what it perceives** (it injects the current + previous screenshot each turn),
 - **the self-improvement levers it can use** (memory, building tools, self-edit, introspection).
 
-The agent is given generic self-improvement machinery and asked to *learn to play*
+The agent is given generic self-improvement machinery and asked to _learn to play_
 — it is **not** given Pokémon knowledge (no maps, routes, or battle tactics baked
 in). It improves itself the exoclaw way, with named, durable levers (it has a
 shell, and its harness file is mounted read-write into its sandbox):
@@ -61,15 +61,15 @@ progress** — this is never shown to the agent; it plays from the screen alone.
 
 ## What's here
 
-| Path                | What                                                                          |
-| ------------------- | ---------------------------------------------------------------------------- |
-| `pokemon_runner.py` | PyBoy driver + exo turn loop; self-edit validate/rollback; game-RAM scoring. |
-| `examples/simple-coding-agent/harness-pokemon-selfimprove.ts` | The self-evolving harness (policy + perception + memory/build-tools/self-edit/introspection levers). |
-| `live_server.py`    | Web frontend: game screen, reasoning, memory, tools it built, a cumulative-spend chart with self-improvement markers, and a game-progress/minimap panel. |
-| `safe_run.sh`       | Launch ONE run with an OOM/container watchdog (recommended wrapper).         |
-| `analyze_run.py`    | Summarize a finished run (maps, progress, cost, tools, memory).              |
-| `run.sh` / `setup.sh` | Convenience run wrapper; one-time Python/PyBoy setup.                      |
-| `EXPLORATION.md`    | Lab notebook — the experiments and findings behind the current design.       |
+| Path                                                          | What                                                                                                                                                     |
+| ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pokemon_runner.py`                                           | PyBoy driver + exo turn loop; self-edit validate/rollback; game-RAM scoring.                                                                             |
+| `examples/simple-coding-agent/harness-pokemon-selfimprove.ts` | The self-evolving harness (policy + perception + memory/build-tools/self-edit/introspection levers).                                                     |
+| `live_server.py`                                              | Web frontend: game screen, reasoning, memory, tools it built, a cumulative-spend chart with self-improvement markers, and a game-progress/minimap panel. |
+| `safe_run.sh`                                                 | Launch ONE run with an OOM/container watchdog (recommended wrapper).                                                                                     |
+| `analyze_run.py`                                              | Summarize a finished run (maps, progress, cost, tools, memory).                                                                                          |
+| `run.sh` / `setup.sh`                                         | Convenience run wrapper; one-time Python/PyBoy setup.                                                                                                    |
+| `EXPLORATION.md`                                              | Lab notebook — the experiments and findings behind the current design.                                                                                   |
 
 ---
 
@@ -115,14 +115,14 @@ OPENAI_API_KEY=sk-... POKEMON_ROM=$PWD/pokemon_red.gb \
 
 Everything after `--` is forwarded to `pokemon_runner.py`. Useful flags:
 
-| Flag | Meaning |
-| ---- | ------- |
-| `--steps N`            | number of turns (one continuous playthrough). |
+| Flag                   | Meaning                                                                                 |
+| ---------------------- | --------------------------------------------------------------------------------------- |
+| `--steps N`            | number of turns (one continuous playthrough).                                           |
 | `--self-improve`       | enable memory + agent-built tools + policy self-edit + introspection (the whole point). |
-| `--conv-reset-every N` | roll the conversation every N turns (bounds context/latency; memory persists). |
-| `--state FILE`         | start from a PyBoy save state. |
-| `--save-state FILE`    | write a save state at the end. |
-| `--out DIR`            | output dir (frames, logs, session.json). |
+| `--conv-reset-every N` | roll the conversation every N turns (bounds context/latency; memory persists).          |
+| `--state FILE`         | start from a PyBoy save state.                                                          |
+| `--save-state FILE`    | write a save state at the end.                                                          |
+| `--out DIR`            | output dir (frames, logs, session.json).                                                |
 
 Pick the model with `MODEL=` (default `gpt-5.5`); to use an Anthropic model,
 register it / supply `ANTHROPIC_API_KEY` accordingly.
