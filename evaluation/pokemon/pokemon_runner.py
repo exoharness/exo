@@ -219,6 +219,29 @@ def read_new_cost(root: str, seen: set, acc: dict) -> float:
 _SELFIMPROVE_SRC = os.path.join(_EXO_REPO, "examples", "simple-coding-agent", "harness-pokemon-selfimprove.ts")
 _SELF_HARNESS = os.path.join(_EXO_REPO, "examples", "simple-coding-agent", "harness-pokemon-self.ts")
 _HARNESS_MOUNT_HOST = os.path.join(_EXO_REPO, "examples", "simple-coding-agent")
+# Exoclaw-style: tools the agent builds with install_agent_tool live as modules
+# here (relative to the harness process CWD = the repo), loaded fresh each turn.
+_AGENT_TOOLS_DIR = os.path.join(_EXO_REPO, ".exo", "agent-tools")
+
+
+def quarantine_agent_tool(name: str) -> list:
+    """Move an installed agent-tool module out of the load directory so it stops
+    loading. Used when a tool's JSON schema is rejected by the API: such a tool
+    imports fine but 400s every request, and (unlike the old inline tools) it
+    lives in a module file, so rolling back the harness can't remove it. The
+    function name in the API error matches the installed module name."""
+    moved = []
+    qdir = os.path.join(_AGENT_TOOLS_DIR, ".quarantine")
+    for fn in (f"{name}.ts", f"{name}.source.ts"):
+        src = os.path.join(_AGENT_TOOLS_DIR, fn)
+        if os.path.exists(src):
+            try:
+                os.makedirs(qdir, exist_ok=True)
+                shutil.move(src, os.path.join(qdir, fn))
+                moved.append(fn)
+            except OSError:
+                pass
+    return moved
 
 
 def validate_harness(path: str) -> bool:
@@ -232,19 +255,29 @@ def validate_harness(path: str) -> bool:
 
 
 def read_created_tools() -> list:
-    """Inline tools (name + description) parsed from the single harness file, for
-    the live view. Tools now live inline in the harness, not in a directory."""
+    """Tools the agent has built, for the live view. Exoclaw-style: tools are
+    installed as modules in .exo/agent-tools/<name>.ts (not inline in the
+    harness), so list each module and pull a description from its source."""
     try:
-        text = open(_SELF_HARNESS).read()
-    except Exception:
+        names = sorted(
+            f[:-3] for f in os.listdir(_AGENT_TOOLS_DIR)
+            if f.endswith(".ts") and not f.endswith(".source.ts")
+        )
+    except OSError:
         return []
-    # Drop // line comments so the example tool in the header comment isn't matched.
-    code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("//"))
     out = []
-    for m in re.finditer(
-        r"""name:\s*["']([^"']+)["']\s*,\s*description:\s*["']([^"']+)["']""", code
-    ):
-        out.append({"name": m.group(1), "source": m.group(2)})
+    for name in names:
+        desc = ""
+        for cand in (f"{name}.source.ts", f"{name}.ts"):
+            try:
+                src = open(os.path.join(_AGENT_TOOLS_DIR, cand)).read()
+            except OSError:
+                continue
+            m = re.search(r"""description:\s*["'`]([^"'`]+)""", src)
+            if m:
+                desc = m.group(1)
+                break
+        out.append({"name": name, "source": desc})
     return out
 
 
@@ -317,6 +350,11 @@ def main() -> None:
         else:
             root = tempfile.mkdtemp(prefix="exo-pokemon-")
             base = [_EXO_BIN, "--root", root, "--secret-backend", "file"]
+            # Fresh agent → fresh tools. The agent-tools dir lives in the repo (not
+            # the per-run root), so a fresh run would otherwise inherit tools built
+            # by previous runs — including any that were quarantined for bad schemas.
+            if args.self_improve:
+                shutil.rmtree(_AGENT_TOOLS_DIR, ignore_errors=True)
             _run(base + ["secret", "set", "openai", "--env", "OPENAI_API_KEY"])
             _run(base + ["model", "register", _MODEL, "--secret", "openai"])
             _run(base + ["agent", "create", "--slug", "t", "--model", _MODEL,
@@ -472,19 +510,24 @@ def main() -> None:
             harness_used = open(_SELF_HARNESS).read() if args.self_improve else None
             send = base + ["conversation", "send", "t", conv, "--", msg]
             out = _run(send, check=False)
-            # Self-heal: an inline tool with valid TS but a bad JSON schema imports
-            # fine yet 400s the WHOLE request. Roll the single harness file back to the
-            # last cleanly-working version (.good) and retry, so one bad edit can't
-            # brick the game. (No per-tool quarantine — tools live inline now.)
+            # Self-heal: a tool with valid TS but a bad JSON schema imports fine yet
+            # 400s the WHOLE request. Exoclaw-style tools live as modules in
+            # .exo/agent-tools/, so the offending one would reload and re-400 every
+            # turn — rolling back the harness can't remove it. QUARANTINE the named
+            # module so it stops loading, then retry. (Also roll back the harness in
+            # case a self-edit was involved.) Without this, one bad tool bricks the run.
             rolled_back = False
             for _ in range(2):
                 m = re.search(r"Invalid schema for function '([^']+)'", out)
                 if not (args.self_improve and m):
                     break
+                bad = m.group(1)
+                quarantined = quarantine_agent_tool(bad)
                 shutil.copyfile(_SELF_HARNESS + ".good", _SELF_HARNESS)
                 last_harness_hash = hash(open(_SELF_HARNESS).read())
                 rolled_back = True
-                print(f"  [self-heal] bad tool schema ('{m.group(1)}') -> ROLLED BACK harness + retried", flush=True)
+                print(f"  [self-heal] bad tool schema ('{bad}') -> QUARANTINED {quarantined or '(no module file)'} "
+                      f"+ rolled back harness + retried", flush=True)
                 out = _run(send, check=False)
             # Promote to .good only after a turn that ran cleanly on harness_used.
             if args.self_improve and not rolled_back and harness_used is not None \
