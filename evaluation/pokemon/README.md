@@ -22,17 +22,22 @@ The agent's entire "brain" is a single TypeScript harness,
 
 - **how it plays** (the prompt / policy),
 - **what it perceives** (it injects the current + previous screenshot each turn),
-- **the tools it can call** (defined inline in an `INLINE_TOOLS` array).
+- **the self-improvement levers it can use** (memory, building tools, self-edit, introspection).
 
 The agent is given generic self-improvement machinery and asked to *learn to play*
 — it is **not** given Pokémon knowledge (no maps, routes, or battle tactics baked
-in). It improves itself three ways, all by editing that one file (it has a shell,
-and the file is mounted read-write into its sandbox):
+in). It improves itself the exoclaw way, with named, durable levers (it has a
+shell, and its harness file is mounted read-write into its sandbox):
 
-1. **Durable memory** (`remember` / `forget`) — facts that persist across turns.
-2. **Build its own tools** — append a `Tool` to `INLINE_TOOLS` (e.g. a screen
-   reader, a route tracker).
-3. **Rewrite its own policy** — change strategy, perception, anything.
+1. **Durable memory** (`remember` / `forget`) — facts that persist across turns
+   and even conversation resets.
+2. **Build its own tools** (`install_agent_tool` / `uninstall_agent_tool`) —
+   create persistent, reusable tool modules (e.g. a screen reader, a route
+   tracker) that load every later turn, not just this one.
+3. **Rewrite its own policy** — edit that one harness file to change strategy,
+   perception, anything.
+4. **Inspect itself** (`list_conversation_events`) — review its own recent
+   history to catch loops and failed actions.
 
 The runner re-imports the file **every turn** (hot-swap), so edits take effect
 immediately; it **validates each edit and rolls back** to the last working version
@@ -59,7 +64,7 @@ progress** — this is never shown to the agent; it plays from the screen alone.
 | Path                | What                                                                          |
 | ------------------- | ---------------------------------------------------------------------------- |
 | `pokemon_runner.py` | PyBoy driver + exo turn loop; self-edit validate/rollback; game-RAM scoring. |
-| `examples/simple-coding-agent/harness-pokemon-selfimprove.ts` | The single self-evolving harness (policy + perception + inline tools). |
+| `examples/simple-coding-agent/harness-pokemon-selfimprove.ts` | The self-evolving harness (policy + perception + memory/build-tools/self-edit/introspection levers). |
 | `live_server.py`    | Web frontend: game screen, reasoning, memory, tools it built, a cumulative-spend chart with self-improvement markers, and a game-progress/minimap panel. |
 | `safe_run.sh`       | Launch ONE run with an OOM/container watchdog (recommended wrapper).         |
 | `analyze_run.py`    | Summarize a finished run (maps, progress, cost, tools, memory).              |
@@ -113,7 +118,7 @@ Everything after `--` is forwarded to `pokemon_runner.py`. Useful flags:
 | Flag | Meaning |
 | ---- | ------- |
 | `--steps N`            | number of turns (one continuous playthrough). |
-| `--self-improve`       | enable memory + inline tools + policy self-edit (the whole point). |
+| `--self-improve`       | enable memory + agent-built tools + policy self-edit + introspection (the whole point). |
 | `--conv-reset-every N` | roll the conversation every N turns (bounds context/latency; memory persists). |
 | `--state FILE`         | start from a PyBoy save state. |
 | `--save-state FILE`    | write a save state at the end. |

@@ -1,116 +1,123 @@
-// Self-evolving Pokémon harness — ONE self-contained file that is the agent's
-// entire brain: how it plays (POKEMON_PROMPT), what it perceives (instructions),
-// and the tools it can call (INLINE_TOOLS), all here. The agent (or an outer
-// evolve loop) rewrites ANY part of THIS file to improve itself; the runner
-// re-imports the file every turn (hot-swap) and rolls back if an edit won't load.
+// Self-improving Pokémon harness — exoclaw-style. This ONE file is the agent's
+// whole brain: how it plays (the self-control prompt), what it perceives
+// (instructions), and which self-improvement levers it has (tools). The agent
+// rewrites THIS file to evolve its policy/perception, and builds durable,
+// reusable tools the exoclaw way (install_agent_tool), so capabilities persist
+// across turns and even across conversation resets. The runner re-imports this
+// file every turn (hot-swap) and rolls back any edit that won't load.
 //
 // DESIGN PRINCIPLE: no Pokémon knowledge baked in. The harness only shows the
 // screen (+ the previous frame, so the agent can see what its last action did)
-// and gives generic self-improvement machinery: durable memory, a shell, its own
-// source mounted read-write, and tools it defines INLINE in this file. How to
-// read the screen, navigate, and fight is for the agent to figure out and encode
-// here itself.
+// and gives generic self-improvement machinery — durable memory, a shell, the
+// ability to build its own tools, inspect its own history, and edit its own
+// source. How to read the screen, navigate, and fight is for the agent to
+// figure out and encode here (or in a tool / in memory) itself.
 //
 // THE ONE CONTRACT to preserve if you (the agent) edit this file: still show
 // yourself the screenshot each turn, and still END every turn with the JSON
-// buttons object. The Python driver presses those buttons in the emulator.
+// buttons object on the last line. The Python driver presses those buttons.
 
 import { readFileSync } from "node:fs";
 
 import {
   defineHarness,
   registerBuiltInTools,
-  registerAgentTools,
+  registerAgentToolsFromDirectoryIfExists,
   type HarnessToolRegistry,
   type Message,
   type TurnContext,
 } from "@exo/harness";
-import type { Tool } from "@exo/harness/tool";
 
-import { runResponsesHarnessTurn } from "../typescript/turn-loop";
+import {
+  agentToolCreationInstruction,
+  defaultBuiltInToolNames,
+  runResponsesHarnessTurn,
+} from "../typescript/turn-loop";
 import {
   memoryInstruction,
   registerMemoryTools,
 } from "../exoclaw/memory-tools";
+import { registerHostTool } from "../exoclaw/host-tools";
 
 // Fixed paths shared with pokemon_runner.py / live_server.py (keep in sync).
 const SCREEN_PATH = "/tmp/exo-pokemon/screen.png";
 const PREV_SCREEN_PATH = "/tmp/exo-pokemon/prev_screen.png"; // frame before your last action
 const GUIDANCE_PATH = "/tmp/exo-pokemon/guidance.json"; // optional live human channel
+// Objective, structured state the runner writes each turn (position, map,
+// progress) and your running spend. You can `cat` these in the shell to assess
+// yourself — they are NOT shown to you automatically (perception is the screen).
+const GAME_STATE_PATH = "/tmp/exo-pokemon/game.json";
+const COST_PATH = "/tmp/exo-pokemon/cost.json";
 // This file as seen from inside the sandbox (mounted read-write). You edit THIS
-// path to rewrite your policy AND your tools — it's all one file.
+// path to rewrite your policy and perception — it's all one file.
 const SELF_PATH_IN_SANDBOX = "/workspace/agent/harness-pokemon-self.ts";
 
-// ───────────────────────────────────────────────────────────────────────────
-// YOUR TOOLS — defined inline. Add a tool by appending a Tool object here (edit
-// this file with your shell); it loads next turn. A Tool looks like:
-//
-//   {
-//     definition: {
-//       name: "my_tool",
-//       description: "What it does and WHEN to call it.",
-//       parameters: { type: "object", additionalProperties: false,
-//                     properties: {}, required: [] },
-//     },
-//     initializationParameters: { type: "object", additionalProperties: false,
-//                                 properties: {}, required: [] },
-//     initialize() { return { async execute(args) { return { ok: true }; } }; },
-//   }
-//
-// REQUIRED FIELDS: definition, initializationParameters, and initialize (a
-// function) — all three, or the tool is rejected at load.
-// STRICT SCHEMA RULE (or the whole turn is rejected): BOTH `parameters` and
-// `initializationParameters` MUST be JSON Schema objects with
-// "additionalProperties": false AND a "required" array listing EVERY key in
-// "properties" (optional params: still list them, allow null in their type).
-// ───────────────────────────────────────────────────────────────────────────
-const INLINE_TOOLS: Tool[] = [
-  {
-    definition: {
-      name: "echo_note",
-      description:
-        "Sample inline tool (remove me): echoes back the text you pass, to prove inline tools register and run. Call it any time to test.",
-      parameters: {
-        type: "object",
-        additionalProperties: false,
-        properties: { text: { type: "string" } },
-        required: ["text"],
-      },
-    },
-    initializationParameters: {
+// Read-only introspection over your own history (exoclaw-style self-knowledge):
+// the canonical conversation event log. Use it to reconstruct what you actually
+// did over recent turns — tool calls, errors, session boundaries — so you can
+// notice loops and mistakes instead of repeating them.
+function registerPokemonIntrospection(registry: HarnessToolRegistry): void {
+  registerHostTool(registry, {
+    name: "list_conversation_events",
+    description:
+      "List this conversation's event log, newest first. By default returns lifecycle/host events (session_started/ended, errors, sandbox lifecycle). Pass explicit kinds (e.g. tool_requested, tool_result, messages) to review what you recently did and whether it worked. Use this to catch loops, failed actions, and broken self-edits. Read-only.",
+    parameters: {
       type: "object",
       additionalProperties: false,
-      properties: {},
-      required: [],
-    },
-    initialize() {
-      return {
-        async execute(args: { text: string }) {
-          return { ok: true, echoed: args.text };
+      properties: {
+        kinds: {
+          type: ["array", "null"],
+          items: { type: "string" },
+          description:
+            'Event kinds to return (e.g. ["messages","tool_requested","tool_result"]). Null for the default lifecycle/host set.',
         },
-      };
+        limit: {
+          type: ["number", "null"],
+          description:
+            "Max events (default 50, capped at 200). Null for default.",
+        },
+        cursor: {
+          type: ["string", "null"],
+          description:
+            "Event id cursor from a previous call's result, for pagination. Null to start from the newest.",
+        },
+        direction: {
+          type: ["string", "null"],
+          enum: ["asc", "desc", null],
+          description: "Listing order. Null for desc (newest first).",
+        },
+      },
+      required: ["kinds", "limit", "cursor", "direction"],
     },
-  } as Tool,
-];
+  });
+}
 
-const POKEMON_PROMPT = `You are an AI agent playing Pokémon Red on a Game Boy. Your job is to LEARN TO PLAY THE GAME WELL and make as much progress as you can. Each turn you see the current screen and respond with button presses. The buttons are: up, down, left, right, a, b, start, select. Figure out how the game works by playing it.
+const POKEMON_PROMPT = `You are an AI agent playing Pokémon Red on a Game Boy. Your job is to LEARN TO PLAY THE GAME WELL and make as much progress as you can, and to GET BETTER AT IT OVER TIME by improving yourself. Each turn you see the current screen and respond with button presses. The buttons are: up, down, left, right, a, b, start, select. Figure out how the game works by playing it — no strategy is baked in for you.
 
-Each turn you are shown the PREVIOUS frame (the screen just before your last action) next to the CURRENT one. Compare them to see what your last action actually did — if they look the same, your action had no effect, so don't just repeat it: try something else or improve yourself.
+Each turn you are shown the PREVIOUS frame (the screen just before your last action) next to the CURRENT one. Compare them to see what your last action actually did — if they look the same, your action had no effect, so don't just repeat it: try something else, or improve yourself.
 
-YOU IMPROVE YOURSELF BY EDITING YOUR OWN SOURCE. Everything about you — how you play AND the tools you can call — lives in ONE file at ${SELF_PATH_IN_SANDBOX}, mounted read-write. You have a \`shell\`. \`cat\` the file, then rewrite any part of it to get better. It reloads next turn; if an edit won't load, the system restores the last working version and tells you, so small experiments are safe. Three things you can change:
-1. YOUR POLICY (the prompt/strategy text in that file) — bake in strategies you learn.
-2. YOUR TOOLS — they're defined in the INLINE_TOOLS array in that file. Add a tool by appending a Tool object; change or remove one by editing the array. A Tool object MUST have all three of: \`definition\` (with name/description/parameters), \`initializationParameters\`, and an \`initialize()\` function — copy the shape of the existing entry. STRICT SCHEMA RULE (or the tool is rejected and breaks the turn): BOTH \`parameters\` and \`initializationParameters\` must be JSON Schema objects with "additionalProperties": false AND a "required" array listing EVERY key in "properties" (optional params: still list them, allow null in their type). A tool only helps if you actually CALL it — give it a description that says plainly WHEN to use it, and if you want it used every turn, wire that into your policy text.
-3. HOW YOU PERCEIVE — e.g. change how the screen is presented to you.
-You also have durable MEMORY (\`remember\`/\`forget\`) for facts that should persist across turns (memory survives even when your conversation resets; keep it lean, not a diary).
+═══ YOUR SELF-IMPROVEMENT LEVERS ═══
+You are a self-improving agent. Everything about you is yours to change. You have FIVE levers — use them deliberately, not just reflexively pressing buttons:
 
-WORK TOWARD A GOAL, don't just react. Keep an explicit objective in memory and each turn check whether you're actually progressing toward it. If you've been wandering, repeating, or revisiting the same places, that's a signal you've LOST THE THREAD — stop and reconsider, or improve yourself. Reaching new places / advancing the game is progress; circling the same area is not.
+1. DURABLE MEMORY (\`remember\` / \`forget\`). Save facts that must outlive the current turn — your objective, routes/exits that worked, party state, what just happened. Memory survives even when your conversation is reset, so it is the thread that carries the game forward. Keep it LEAN and high-signal (sharp facts, not a diary); your saved memory is shown back to you each turn — consult it FIRST.
 
-You do NOT have to press a button every turn — when it's worth it, spend a turn improving yourself (edit your file / save memory) and reply with EMPTY buttons.
+2. BUILD YOUR OWN TOOLS (\`install_agent_tool\` / \`uninstall_agent_tool\`). When you find yourself doing the same fiddly thing repeatedly, build a reusable tool for it instead. Installed tools PERSIST into later turns (and later conversations) — this is how you accumulate real capability. A great first tool: one that reads ${GAME_STATE_PATH} and returns your structured position/map/visited-tiles/frontier so you can navigate deliberately instead of guessing from pixels. (The exact moduleSource contract for install_agent_tool is given to you separately — follow it precisely or the install is rejected.) A tool only helps if you actually CALL it: give it a description that says plainly WHEN to use it, and if it should run every turn, say so in your policy.
+
+3. SELF-EDIT YOUR POLICY (\`shell\`, editing ${SELF_PATH_IN_SANDBOX}). This file IS your brain — your prompt, your strategy, and how you perceive the screen. \`cat\` it, then rewrite any part to bake in what you've learned. It reloads next turn; if an edit won't load, the system restores the last working version and tells you, so small experiments are safe. Change your strategy text, change how the screen is presented to you, anything.
+
+4. INSPECT YOURSELF (\`list_conversation_events\`). Review what you actually did over recent turns — your tool calls, their results, errors, failed self-edits. Use this when you suspect you're looping or something quietly broke.
+
+5. SHELL for self-assessment. You can \`cat ${GAME_STATE_PATH}\` for objective ground truth (your map, x/y, whether your last move actually moved you, a minimap, and the unexplored frontier) and \`cat ${COST_PATH}\` to see your spend — aim to make real progress efficiently, not to burn tokens spinning.
+
+You do NOT have to press a button every turn. When it's worth it, spend a turn improving yourself (build a tool, edit your policy, bank a memory) and reply with EMPTY buttons.
+
+═══ HOW TO PLAY ═══
+WORK TOWARD A GOAL, don't just react. Keep an explicit objective in memory and each turn check whether you're actually progressing toward it. Reaching new places / advancing the game is progress; circling the same area, repeating, or revisiting the same tiles is LOSING THE THREAD — when that happens, stop and reconsider, or use a self-improvement lever above.
 
 THINK FIRST, THEN ACT. Before choosing buttons, reason in plain text for a few sentences:
-- What is on the screen RIGHT NOW, and what KIND of screen is it? (Look carefully — different screens need different inputs; the same button does different things on different screens.)
-- Compare to the PREVIOUS frame: did my last action actually change anything, or did nothing happen? If nothing changed, what I tried did not work — don't just repeat it.
-- Given what's actually on screen, what are my real options, and what is the best next action toward my objective?
+- What is on the screen RIGHT NOW, and what KIND of screen is it? (Different screens — overworld, dialogue, menu, battle — need different inputs; the same button does different things on different screens.)
+- Compare to the PREVIOUS frame: did my last action change anything? If nothing changed, what I tried did not work — don't just repeat it.
+- Given what's actually on screen and my objective, what is the best next action? (And is this a turn better spent improving myself?)
 Work it out — do not skip straight to buttons.
 
 THEN, on the LAST line of your reply, output ONLY the action as JSON (nothing after it):
@@ -118,6 +125,11 @@ THEN, on the LAST line of your reply, output ONLY the action as JSON (nothing af
 
 async function instructions(context: TurnContext): Promise<Message[]> {
   const messages: Message[] = [{ role: "developer", content: POKEMON_PROMPT }];
+  // Precise contract for building tools with install_agent_tool (only when tool
+  // creation is enabled for this agent).
+  if (context.agentConfig.enableAgentToolCreation) {
+    messages.push(agentToolCreationInstruction());
+  }
   const memory = await memoryInstruction(context);
   if (memory !== null) messages.push(memory);
   // Optional live human channel (a person watching can send a hint). Not game
@@ -133,8 +145,8 @@ async function instructions(context: TurnContext): Promise<Message[]> {
   } catch {
     /* no guidance */
   }
-  // Generic observation (NOT game knowledge): the PREVIOUS frame (before your last
-  // action) next to the current one, so you can see what your last action did.
+  // Generic observation (NOT game knowledge): the PREVIOUS frame (before your
+  // last action) next to the current one, so you can see what your last action did.
   try {
     const pb64 = readFileSync(PREV_SCREEN_PATH).toString("base64");
     messages.push({
@@ -174,10 +186,15 @@ export default defineHarness({
     await runResponsesHarnessTurn(context, {
       instructions,
       registerTools: async (tools: HarnessToolRegistry, ctx: TurnContext) => {
-        registerBuiltInTools(tools, ctx, ["shell"]);
+        // shell + (when enabled) install_agent_tool / uninstall_agent_tool.
+        registerBuiltInTools(tools, ctx, defaultBuiltInToolNames(ctx));
         registerMemoryTools(tools);
-        // The agent's own tools, defined inline in this file (above).
-        await registerAgentTools(tools, ctx, INLINE_TOOLS);
+        registerPokemonIntrospection(tools);
+        // Load every tool the agent has built so far (persisted to disk),
+        // exoclaw-style, so capabilities accumulate across turns.
+        if (ctx.agentConfig.enableAgentToolCreation) {
+          await registerAgentToolsFromDirectoryIfExists(tools, ctx);
+        }
       },
     });
   },
