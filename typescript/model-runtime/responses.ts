@@ -234,7 +234,10 @@ export class ResponsesRuntime implements ResponsesRuntimeLike {
     options: NativeLlmTraceOptions,
   ): Promise<Response> {
     if (options.streamed) {
-      return this.completeStreamRaw(buildStreamingBody(request), options.handlers);
+      return this.completeStreamRaw(
+        buildStreamingBody(request),
+        options.handlers,
+      );
     }
     return this.completeRaw(buildNonStreamingBody(request));
   }
@@ -572,9 +575,7 @@ export class AnthropicRuntime implements ResponsesRuntimeLike {
     if (options.streamed) {
       return this.completeStreamRaw(body, options.handlers);
     }
-    return anthropicMessageToResponse(
-      await this.client.messages.create(body),
-    );
+    return anthropicMessageToResponse(await this.client.messages.create(body));
   }
 
   private async completeStreamRaw(
