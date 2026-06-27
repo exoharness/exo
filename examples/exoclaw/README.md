@@ -38,13 +38,14 @@ examples/exoclaw/scripts/exoclaw-control fresh --canonical
 
 This builds the `exo` binary, creates the agent and a `dev` conversation, pulls
 the Docker sandbox image, mounts this repo at `/workspace/exo`, starts the
-scheduler and adapter runner, sets up the IRC and Discord adapters, and drops
-you into a REPL.
+scheduler and adapter runner, sets up the WhatsApp adapter, and drops you into
+a REPL.
 
-Note that we've decided to support Discord as the primary control channel for
-Exoclaw because the integration is less complicated than WhatsApp and Signal and
-it supports rich content (voice, audio, images, and attachments). However, to
-use it, you need a bot token. See below for setup.
+For developer testing with IRC and Discord instead, use `canonical-dev`:
+
+```bash
+examples/exoclaw/scripts/exoclaw-control fresh --canonical-dev
+```
 
 4. Chat with Exoclaw in the REPL:
 
@@ -100,11 +101,11 @@ path is:
    examples/exoclaw/scripts/exoclaw-control --setup discord
    ```
 
-   If you are starting from scratch, you can include Discord in the normal
-   canonical setup:
+   If you are starting from scratch for adapter development, you can include
+   Discord in the developer canonical setup:
 
    ```bash
-   examples/exoclaw/scripts/exoclaw-control fresh --canonical --setup discord
+   examples/exoclaw/scripts/exoclaw-control fresh --canonical-dev
    ```
 
 6. Copy a Discord channel id for testing. In Discord, enable **User Settings** >
@@ -237,10 +238,16 @@ started by `examples/exoclaw/scripts/exoclaw-control` keeps them connected.
 
 Exoclaw ships with IRC, WhatsApp, Signal, Discord, and agent-cli adapters
 (see `adapters/agent-cli/README.md` for the shell CLI). The canonical local
-setup turns on IRC and Discord:
+setup turns on WhatsApp:
 
 ```bash
 examples/exoclaw/scripts/exoclaw-control canonical
+```
+
+For developer testing with IRC and Discord, use:
+
+```bash
+examples/exoclaw/scripts/exoclaw-control canonical-dev
 ```
 
 To send every setup prompt before opening the REPL:

@@ -8,7 +8,26 @@ On startup, the worker opens a TCP or TLS socket to the configured IRC server, o
 
 The worker handles `PING` with `PONG`, parses `PRIVMSG` lines, and emits Exoclaw message events when the configured trigger policy matches. Outbound `send_adapter_message` calls are converted into `PRIVMSG <channel> :<text>` on the existing IRC connection.
 
-## Setup
+## Quick Start
+
+For a fresh machine, use the canonical Exo installer. It clones the repo, asks
+for local keys, writes `.env`, starts Docker-backed Exoclaw, and configures the
+default WhatsApp control adapter:
+
+```bash
+mkdir exo && cd exo
+curl -fsSL https://raw.githubusercontent.com/ankrgyl/exo/main/setup.sh -o setup.sh
+bash setup.sh
+```
+
+For IRC plus Discord developer testing, run the developer canonical profile from
+the repo after setup:
+
+```bash
+examples/exoclaw/scripts/exoclaw-control fresh --canonical-dev
+```
+
+## Adapter Setup
 
 Use the Exoclaw setup flow:
 
