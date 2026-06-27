@@ -68,33 +68,184 @@ pub enum SecretBackendChoice {
     Static([u8; 32]),
 }
 
-/// How to build the backend for a [`SandboxProvider`]. Remote backends carry
-/// secret-name references, resolved from the store on first use.
-#[derive(Debug, Clone)]
-pub enum SandboxBackendChoice {
-    AppleContainer,
-    Docker,
-    LocalProcess,
-    Daytona(DaytonaBackendSpec),
-    E2b(E2bBackendSpec),
-    Sprites(SpritesBackendSpec),
-    Vercel(VercelBackendSpec),
-    AwsAgentCore,
-    AwsLambdaMicrovm,
+type SandboxBackendFactory = Arc<
+    dyn for<'a> Fn(
+            &'a BasicExoHarnessInner,
+        ) -> BoxFuture<'a, Result<Arc<dyn ManagedSandboxBackend>>>
+        + Send
+        + Sync,
+>;
+
+/// Registers a backend implementation for a [`SandboxProvider`].
+///
+/// Built-in registrations resolve remote-provider secrets lazily on first use.
+/// Callers with their own provider implementation can register an already-built
+/// trait object with [`SandboxBackendRegistration::from_backend`].
+#[derive(Clone)]
+pub struct SandboxBackendRegistration {
+    provider: SandboxProvider,
+    factory: SandboxBackendFactory,
 }
 
-impl SandboxBackendChoice {
+impl SandboxBackendRegistration {
+    pub fn from_backend(
+        provider: SandboxProvider,
+        backend: Arc<dyn ManagedSandboxBackend>,
+    ) -> Self {
+        Self::from_factory(provider, move |_| {
+            let backend = Arc::clone(&backend);
+            Box::pin(async move { Ok(backend) })
+        })
+    }
+
+    pub fn apple_container() -> Self {
+        Self::from_factory(SandboxProvider::AppleContainer, |_| {
+            Box::pin(async {
+                Ok(Arc::new(CliContainerSandboxBackend::apple_container())
+                    as Arc<dyn ManagedSandboxBackend>)
+            })
+        })
+    }
+
+    pub fn docker() -> Self {
+        Self::from_factory(SandboxProvider::Docker, |_| {
+            Box::pin(async {
+                Ok(Arc::new(CliContainerSandboxBackend::docker())
+                    as Arc<dyn ManagedSandboxBackend>)
+            })
+        })
+    }
+
+    pub fn local_process() -> Self {
+        Self::from_factory(SandboxProvider::LocalProcess, |_| {
+            Box::pin(async {
+                Ok(Arc::new(LocalProcessSandboxBackend::new()) as Arc<dyn ManagedSandboxBackend>)
+            })
+        })
+    }
+
+    pub fn daytona(spec: DaytonaBackendSpec) -> Self {
+        Self::from_factory(SandboxProvider::Daytona, move |inner| {
+            let spec = spec.clone();
+            Box::pin(async move {
+                let config = match inner.daytona_config_from_binding().await? {
+                    Some(config) => config,
+                    None => inner.daytona_config_from_spec(&spec).await?,
+                };
+                Ok(Arc::new(crate::DaytonaSandboxBackend::new(config)?)
+                    as Arc<dyn ManagedSandboxBackend>)
+            })
+        })
+    }
+
+    pub fn e2b(spec: E2bBackendSpec) -> Self {
+        Self::from_factory(SandboxProvider::E2b, move |inner| {
+            let spec = spec.clone();
+            Box::pin(async move {
+                let config = match inner.e2b_config_from_binding().await? {
+                    Some(config) => config,
+                    None => inner.e2b_config_from_spec(&spec).await?,
+                };
+                Ok(Arc::new(crate::E2bSandboxBackend::new(config)?)
+                    as Arc<dyn ManagedSandboxBackend>)
+            })
+        })
+    }
+
+    pub fn sprites(spec: SpritesBackendSpec) -> Self {
+        Self::from_factory(SandboxProvider::Sprites, move |inner| {
+            let spec = spec.clone();
+            Box::pin(async move {
+                let config = match inner.sprites_config_from_binding().await? {
+                    Some(config) => config,
+                    None => inner.sprites_config_from_spec(&spec).await?,
+                };
+                Ok(Arc::new(crate::SpritesSandboxBackend::new(config)?)
+                    as Arc<dyn ManagedSandboxBackend>)
+            })
+        })
+    }
+
+    pub fn vercel(spec: VercelBackendSpec) -> Self {
+        Self::from_factory(SandboxProvider::Vercel, move |inner| {
+            let spec = spec.clone();
+            Box::pin(async move {
+                let config = match inner.vercel_config_from_binding().await? {
+                    Some(config) => config,
+                    None => inner.vercel_config_from_spec(&spec).await?,
+                };
+                Ok(Arc::new(crate::VercelSandboxBackend::new(config)?)
+                    as Arc<dyn ManagedSandboxBackend>)
+            })
+        })
+    }
+
+    pub fn aws_agentcore() -> Self {
+        Self::from_factory(SandboxProvider::AwsAgentCore, |_inner| {
+            Box::pin(async move {
+                #[cfg(feature = "aws-agentcore")]
+                {
+                    let config = _inner.aws_agentcore_config_from_binding().await?.ok_or_else(|| {
+                        anyhow!(
+                            "aws-agentcore sandbox requested but no sandbox provider binding is configured; run `exo provider configure --provider aws-agentcore --runtime-arn <arn>`"
+                        )
+                    })?;
+                    Ok(
+                        Arc::new(crate::AwsAgentCoreSandboxBackend::new(config).await?)
+                            as Arc<dyn ManagedSandboxBackend>,
+                    )
+                }
+                #[cfg(not(feature = "aws-agentcore"))]
+                {
+                    bail!(
+                        "aws-agentcore sandbox backend requires building exoharness with the aws-agentcore feature"
+                    );
+                }
+            })
+        })
+    }
+
+    pub fn aws_lambda_microvm() -> Self {
+        Self::from_factory(SandboxProvider::AwsLambdaMicrovm, |_inner| {
+            Box::pin(async move {
+                #[cfg(feature = "aws-lambda-microvm")]
+                {
+                    let config = _inner.aws_lambda_microvm_config_from_binding().await?.ok_or_else(|| {
+                        anyhow!(
+                            "aws-lambda-microvm sandbox requested but no sandbox provider binding is configured; run `exo provider configure --provider aws-lambda-microvm --image-identifier <arn>`"
+                        )
+                    })?;
+                    Ok(
+                        Arc::new(crate::AwsLambdaMicrovmSandboxBackend::new(config).await?)
+                            as Arc<dyn ManagedSandboxBackend>,
+                    )
+                }
+                #[cfg(not(feature = "aws-lambda-microvm"))]
+                {
+                    bail!(
+                        "aws-lambda-microvm sandbox backend requires building exoharness with the aws-lambda-microvm feature"
+                    );
+                }
+            })
+        })
+    }
+
     pub fn provider(&self) -> SandboxProvider {
-        match self {
-            Self::AppleContainer => SandboxProvider::AppleContainer,
-            Self::Docker => SandboxProvider::Docker,
-            Self::LocalProcess => SandboxProvider::LocalProcess,
-            Self::Daytona(_) => SandboxProvider::Daytona,
-            Self::E2b(_) => SandboxProvider::E2b,
-            Self::Sprites(_) => SandboxProvider::Sprites,
-            Self::Vercel(_) => SandboxProvider::Vercel,
-            Self::AwsAgentCore => SandboxProvider::AwsAgentCore,
-            Self::AwsLambdaMicrovm => SandboxProvider::AwsLambdaMicrovm,
+        self.provider
+    }
+
+    fn from_factory<F>(provider: SandboxProvider, factory: F) -> Self
+    where
+        F: for<'a> Fn(
+                &'a BasicExoHarnessInner,
+            ) -> BoxFuture<'a, Result<Arc<dyn ManagedSandboxBackend>>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self {
+            provider,
+            factory: Arc::new(factory),
         }
     }
 }
@@ -206,7 +357,7 @@ pub struct BasicExoHarnessConfig {
     /// Default when a caller doesn't request a provider. Must be in `sandbox_backends`.
     pub sandbox_default: SandboxProvider,
     /// Supported providers; anything not listed is rejected.
-    pub sandbox_backends: Vec<SandboxBackendChoice>,
+    pub sandbox_backends: Vec<SandboxBackendRegistration>,
 }
 
 #[derive(Clone)]
@@ -218,7 +369,7 @@ struct BasicExoHarnessInner {
     storage: BasicObjectStore,
     write_lock: AsyncMutex<()>,
     subscribers: Mutex<HashMap<ConversationId, Vec<mpsc::UnboundedSender<Result<Event>>>>>,
-    sandbox_registry: HashMap<SandboxProvider, SandboxBackendChoice>,
+    sandbox_registry: HashMap<SandboxProvider, SandboxBackendRegistration>,
     /// Backends built (and secrets read) lazily on first use, cached by provider.
     sandbox_backends: AsyncMutex<HashMap<SandboxProvider, Arc<dyn ManagedSandboxBackend>>>,
     running_sandboxes: AsyncMutex<HashMap<SandboxId, Arc<dyn ManagedSandboxHandle>>>,
@@ -234,12 +385,12 @@ impl BasicExoHarnessInner {
         if let Some(backend) = self.sandbox_backends.lock().await.get(&provider) {
             return Ok(Arc::clone(backend));
         }
-        let choice = self.sandbox_registry.get(&provider).ok_or_else(|| {
+        let registration = self.sandbox_registry.get(&provider).ok_or_else(|| {
             anyhow!("sandbox provider {provider:?} is not supported by this harness")
         })?;
         // Build without the cache lock so a slow build (secret I/O) doesn't
         // serialize other providers; a concurrent build loses to `or_insert`.
-        let backend = self.build_backend(choice).await?;
+        let backend = (registration.factory)(self).await?;
         Ok(Arc::clone(
             self.sandbox_backends
                 .lock()
@@ -247,84 +398,6 @@ impl BasicExoHarnessInner {
                 .entry(provider)
                 .or_insert(backend),
         ))
-    }
-
-    async fn build_backend(
-        &self,
-        choice: &SandboxBackendChoice,
-    ) -> Result<Arc<dyn ManagedSandboxBackend>> {
-        let backend: Arc<dyn ManagedSandboxBackend> = match choice {
-            SandboxBackendChoice::AppleContainer => {
-                Arc::new(CliContainerSandboxBackend::apple_container())
-            }
-            SandboxBackendChoice::Docker => Arc::new(CliContainerSandboxBackend::docker()),
-            SandboxBackendChoice::LocalProcess => Arc::new(LocalProcessSandboxBackend::new()),
-            SandboxBackendChoice::Daytona(spec) => {
-                // Prefer a root `Binding::Sandbox` for Daytona; fall back to the
-                // spec's conventional `DAYTONA_*` secret-name lookups.
-                let config = match self.daytona_config_from_binding().await? {
-                    Some(config) => config,
-                    None => self.daytona_config_from_spec(spec).await?,
-                };
-                Arc::new(crate::DaytonaSandboxBackend::new(config)?)
-            }
-            SandboxBackendChoice::E2b(spec) => {
-                let config = match self.e2b_config_from_binding().await? {
-                    Some(config) => config,
-                    None => self.e2b_config_from_spec(spec).await?,
-                };
-                Arc::new(crate::E2bSandboxBackend::new(config)?)
-            }
-            SandboxBackendChoice::Sprites(spec) => {
-                let config = match self.sprites_config_from_binding().await? {
-                    Some(config) => config,
-                    None => self.sprites_config_from_spec(spec).await?,
-                };
-                Arc::new(crate::SpritesSandboxBackend::new(config)?)
-            }
-            SandboxBackendChoice::Vercel(spec) => {
-                let config = match self.vercel_config_from_binding().await? {
-                    Some(config) => config,
-                    None => self.vercel_config_from_spec(spec).await?,
-                };
-                Arc::new(crate::VercelSandboxBackend::new(config)?)
-            }
-            SandboxBackendChoice::AwsAgentCore => {
-                #[cfg(feature = "aws-agentcore")]
-                {
-                    let config = self.aws_agentcore_config_from_binding().await?.ok_or_else(|| {
-                        anyhow!(
-                            "aws-agentcore sandbox requested but no sandbox provider binding is configured; run `exo provider configure --provider aws-agentcore --runtime-arn <arn>`"
-                        )
-                    })?;
-                    Arc::new(crate::AwsAgentCoreSandboxBackend::new(config).await?)
-                }
-                #[cfg(not(feature = "aws-agentcore"))]
-                {
-                    bail!(
-                        "aws-agentcore sandbox backend requires building exoharness with the aws-agentcore feature"
-                    );
-                }
-            }
-            SandboxBackendChoice::AwsLambdaMicrovm => {
-                #[cfg(feature = "aws-lambda-microvm")]
-                {
-                    let config = self.aws_lambda_microvm_config_from_binding().await?.ok_or_else(|| {
-                        anyhow!(
-                            "aws-lambda-microvm sandbox requested but no sandbox provider binding is configured; run `exo provider configure --provider aws-lambda-microvm --image-identifier <arn>`"
-                        )
-                    })?;
-                    Arc::new(crate::AwsLambdaMicrovmSandboxBackend::new(config).await?)
-                }
-                #[cfg(not(feature = "aws-lambda-microvm"))]
-                {
-                    bail!(
-                        "aws-lambda-microvm sandbox backend requires building exoharness with the aws-lambda-microvm feature"
-                    );
-                }
-            }
-        };
-        Ok(backend)
     }
 
     /// `DaytonaConfig` from the conventional `DAYTONA_*` secret-name spec.

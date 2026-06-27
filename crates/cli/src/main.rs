@@ -30,7 +30,7 @@ use executor::{
     ExoHarnessHttpServeOptions, ExoclawToolRuntime, FileSystemMount, FileSystemMountMode,
     ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET, Harness, HarnessAgent,
     HarnessConversation, HttpExoHarness, LocalSandboxExoHarness, PutSecretRequest, RlmHarness,
-    SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxProvider, SandboxProviderConfig,
+    SANDBOX_MAIN_MOUNT_DIR, SandboxBackendRegistration, SandboxProvider, SandboxProviderConfig,
     SandboxScope, Secret, SecretBackendChoice, SpritesBackendSpec, ToolRequest, ToolRuntime,
     TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, VercelBackendSpec,
     default_aws_agentcore_image, default_aws_lambda_microvm_image, default_aws_lambda_microvm_port,
@@ -256,12 +256,12 @@ enum SandboxBackendArg {
     LocalProcess,
 }
 
-impl From<SandboxBackendArg> for SandboxBackendChoice {
+impl From<SandboxBackendArg> for SandboxBackendRegistration {
     fn from(value: SandboxBackendArg) -> Self {
         match value {
-            SandboxBackendArg::AppleContainer => Self::AppleContainer,
-            SandboxBackendArg::Docker => Self::Docker,
-            SandboxBackendArg::LocalProcess => Self::LocalProcess,
+            SandboxBackendArg::AppleContainer => Self::apple_container(),
+            SandboxBackendArg::Docker => Self::docker(),
+            SandboxBackendArg::LocalProcess => Self::local_process(),
         }
     }
 }
@@ -275,7 +275,7 @@ fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
     };
     let sandbox_backend = cli
         .sandbox_backend
-        .map(SandboxBackendChoice::from)
+        .map(SandboxBackendRegistration::from)
         .unwrap_or_else(default_sandbox_backend);
     let sandbox_default = sandbox_backend.provider();
     let mut sandbox_backends = default_sandbox_backends();
@@ -295,16 +295,16 @@ fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
 
 /// Default providers: the OS-local container backend, local processes, and
 /// Daytona (offered even with no key set — credentials resolve lazily).
-fn default_sandbox_backends() -> Vec<SandboxBackendChoice> {
+fn default_sandbox_backends() -> Vec<SandboxBackendRegistration> {
     vec![
         default_sandbox_backend(),
-        SandboxBackendChoice::LocalProcess,
-        SandboxBackendChoice::Daytona(DaytonaBackendSpec::default()),
-        SandboxBackendChoice::E2b(E2bBackendSpec::default()),
-        SandboxBackendChoice::Sprites(SpritesBackendSpec::default()),
-        SandboxBackendChoice::Vercel(VercelBackendSpec::with_conventional_secrets()),
-        SandboxBackendChoice::AwsAgentCore,
-        SandboxBackendChoice::AwsLambdaMicrovm,
+        SandboxBackendRegistration::local_process(),
+        SandboxBackendRegistration::daytona(DaytonaBackendSpec::default()),
+        SandboxBackendRegistration::e2b(E2bBackendSpec::default()),
+        SandboxBackendRegistration::sprites(SpritesBackendSpec::default()),
+        SandboxBackendRegistration::vercel(VercelBackendSpec::with_conventional_secrets()),
+        SandboxBackendRegistration::aws_agentcore(),
+        SandboxBackendRegistration::aws_lambda_microvm(),
     ]
 }
 
@@ -331,13 +331,13 @@ fn default_secret_backend() -> SecretBackendArg {
 }
 
 #[cfg(target_os = "macos")]
-fn default_sandbox_backend() -> SandboxBackendChoice {
-    SandboxBackendChoice::AppleContainer
+fn default_sandbox_backend() -> SandboxBackendRegistration {
+    SandboxBackendRegistration::apple_container()
 }
 
 #[cfg(not(target_os = "macos"))]
-fn default_sandbox_backend() -> SandboxBackendChoice {
-    SandboxBackendChoice::Docker
+fn default_sandbox_backend() -> SandboxBackendRegistration {
+    SandboxBackendRegistration::docker()
 }
 
 #[cfg(target_os = "macos")]
