@@ -1,0 +1,9 @@
+.venv/
+runs/
+*.gb
+*.gbc
+*.state
+*.ram
+__pycache__/
+*.pyc
+*.log

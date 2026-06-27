@@ -26,5 +26,9 @@
     "incremental": true
   },
   "include": ["**/*.ts"],
-  "exclude": ["node_modules"]
+  "exclude": [
+    "node_modules",
+    "examples/simple-coding-agent/harness-pokemon-self.ts",
+    "examples/simple-coding-agent/harness-pokemon-self.ts.good"
+  ]
 }
