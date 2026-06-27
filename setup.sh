@@ -205,6 +205,15 @@ ensure_docker_running() {
   die "Docker is not running. Start Docker Desktop, then rerun this script."
 }
 
+trust_mise_config() {
+  local config="$1"
+  if [[ ! -f "$config" ]] || ! command -v mise >/dev/null 2>&1; then
+    return
+  fi
+  echo "Trusting local mise config: $config"
+  mise trust "$config"
+}
+
 choose_install_dir() {
   if is_exo_checkout "$PWD"; then
     echo "Using current Exo checkout: $PWD" >&2
@@ -267,6 +276,7 @@ main() {
   install_dir="$(choose_install_dir)"
   clone_or_reuse_repo "$install_dir"
   cd "$install_dir"
+  trust_mise_config "$install_dir/mise.toml"
 
   local env_file="$install_dir/.env"
   if [[ ! -f "$env_file" && -f "$install_dir/.env.example" ]]; then
