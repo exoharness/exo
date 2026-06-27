@@ -1880,12 +1880,12 @@ async fn sandbox_provider_state_persists_through_events_after_harness_reload() {
         })
         .await
         .expect("agent");
-    let agent_id = agent.record().id.clone();
+    let agent_id = agent.record().id;
     let conversation = agent
         .new_conversation(NewConversationRequest::default())
         .await
         .expect("conversation");
-    let conversation_id = conversation.record().id.clone();
+    let conversation_id = conversation.record().id;
     let sandbox_id = conversation
         .create_sandbox(provider_state_test_create_request())
         .await
