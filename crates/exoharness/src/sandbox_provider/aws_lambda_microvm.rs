@@ -26,6 +26,8 @@ const DEFAULT_AUTH_TOKEN_EXPIRATION_MINUTES: i32 = 30;
 const DEFAULT_RUNTIME_PORT: i32 = 8080;
 const WAIT_RETRY_DELAY: Duration = Duration::from_secs(2);
 const WAIT_MAX_ATTEMPTS: usize = 60;
+const INVOKE_RETRY_DELAY: Duration = Duration::from_secs(2);
+const INVOKE_MAX_ATTEMPTS: usize = 5;
 
 pub fn default_aws_lambda_microvm_image() -> String {
     String::new()
@@ -588,31 +590,68 @@ where
         .get("X-aws-proxy-auth")
         .cloned()
         .context("Lambda MicroVM auth token response missing X-aws-proxy-auth")?;
-    let response = backend
-        .http
-        .post(format!(
-            "{}/invocations",
-            session.endpoint.trim_end_matches('/')
-        ))
-        .header("X-aws-proxy-auth", token)
-        .header("X-aws-proxy-port", backend.runtime_port.to_string())
-        .json(body)
-        .send()
-        .await
-        .with_context(|| format!("invoking Lambda MicroVM {}", session.microvm_id))?;
-    let status = response.status();
-    let bytes = response
-        .bytes()
-        .await
-        .context("reading Lambda MicroVM response body")?;
-    if !status.is_success() {
+    let url = format!("{}/invocations", session.endpoint.trim_end_matches('/'));
+    for attempt in 1..=INVOKE_MAX_ATTEMPTS {
+        let response = backend
+            .http
+            .post(&url)
+            .header("X-aws-proxy-auth", token.clone())
+            .header("X-aws-proxy-port", backend.runtime_port.to_string())
+            .json(body)
+            .send()
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(error)
+                if attempt < INVOKE_MAX_ATTEMPTS && retryable_microvm_invocation_error(&error) =>
+            {
+                tracing::info!(
+                    microvm_id = %session.microvm_id,
+                    attempt,
+                    error = %error,
+                    "Lambda MicroVM invocation failed with retryable transport error"
+                );
+                sleep(INVOKE_RETRY_DELAY).await;
+                continue;
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("invoking Lambda MicroVM {}", session.microvm_id));
+            }
+        };
+        let status = response.status();
+        let bytes = response
+            .bytes()
+            .await
+            .context("reading Lambda MicroVM response body")?;
+        if status.is_success() {
+            return serde_json::from_slice(&bytes).with_context(|| {
+                let text = String::from_utf8_lossy(&bytes);
+                format!("decoding Lambda MicroVM JSON response: {text}")
+            });
+        }
         let text = String::from_utf8_lossy(&bytes);
+        if attempt < INVOKE_MAX_ATTEMPTS && retryable_microvm_invocation_status(status) {
+            tracing::info!(
+                microvm_id = %session.microvm_id,
+                attempt,
+                %status,
+                "Lambda MicroVM invocation returned retryable status"
+            );
+            sleep(INVOKE_RETRY_DELAY).await;
+            continue;
+        }
         bail!("Lambda MicroVM returned status {status}: {text}");
     }
-    serde_json::from_slice(&bytes).with_context(|| {
-        let text = String::from_utf8_lossy(&bytes);
-        format!("decoding Lambda MicroVM JSON response: {text}")
-    })
+    unreachable!("Lambda MicroVM invocation retry loop should return or bail");
+}
+
+fn retryable_microvm_invocation_status(status: reqwest::StatusCode) -> bool {
+    status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+}
+
+fn retryable_microvm_invocation_error(error: &reqwest::Error) -> bool {
+    error.is_connect() || error.is_timeout()
 }
 
 async fn wait_for_microvm_state(
