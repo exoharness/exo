@@ -2119,6 +2119,7 @@ esac
             lifecycle: SandboxLifecycleConfig {
                 idle_ttl: Some(Duration::from_secs(60)),
             },
+            provider_state: None,
         };
 
         backend
