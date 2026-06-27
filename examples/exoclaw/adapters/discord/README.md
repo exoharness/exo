@@ -42,13 +42,13 @@ The setup prompt below expects the secret name to be `discord-bot-token`.
 Run the Exoclaw setup prompt:
 
 ```bash
-examples/exoclaw/scripts/exoclaw-control --setup discord
+scripts/exo.sh --setup discord
 ```
 
 If you are setting up a fresh local Exoclaw agent, use the same flags you normally use for your agent/conversation, for example:
 
 ```bash
-examples/exoclaw/scripts/exoclaw-control \
+scripts/exo.sh \
   --agent exospooky \
   --conversation dev \
   --setup discord

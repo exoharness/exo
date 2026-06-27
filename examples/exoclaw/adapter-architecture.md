@@ -38,7 +38,7 @@ The implementation is split across a few small executor and CLI modules:
   used by Exoclaw.
 - `typescript/harness/adapter-tools.ts` exposes the model-facing Exoclaw tools.
 - `crates/cli/src/adapters.rs` provides `exo --harness exoclaw adapters ...`.
-- `examples/exoclaw/scripts/exoclaw-control` starts the adapter runner next to the scheduler.
+- `scripts/exo.sh` starts the adapter runner next to the scheduler.
 
 At a high level:
 
@@ -266,7 +266,7 @@ The adapter runner is started by:
 ./target/debug/exo --harness exoclaw adapters run --limit 50
 ```
 
-`examples/exoclaw/scripts/exoclaw-control` starts this automatically unless `--no-adapters` is
+`scripts/exo.sh` starts this automatically unless `--no-adapters` is
 provided. It also records a pid file at `.exo/exoclaw-adapters.pid`.
 
 The runtime periodically lists enabled adapters and starts one supervision task

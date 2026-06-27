@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 EXO_BIN="${EXO_BIN:-$ROOT_DIR/target/debug/exo}"
 SCHEDULER_BIN="${EXOCLAW_SCHEDULER_BIN:-$ROOT_DIR/target/debug/exoclaw-scheduler-runner}"
@@ -51,15 +51,15 @@ export EXOCLAW_LOCAL_PROMPT_FILE="$LOCAL_PROMPT_FILE"
 usage() {
   cat <<'EOF'
 Usage:
-  examples/exoclaw/scripts/exoclaw-control [options]
-  examples/exoclaw/scripts/exoclaw-control list
-  examples/exoclaw/scripts/exoclaw-control delall all
-  examples/exoclaw/scripts/exoclaw-control fresh
-  examples/exoclaw/scripts/exoclaw-control canonical
-  examples/exoclaw/scripts/exoclaw-control canonical-dev
-  examples/exoclaw/scripts/exoclaw-control stop-all
-  examples/exoclaw/scripts/exoclaw-control setup-profile
-  examples/exoclaw/scripts/exoclaw-control setup-sandbox
+  scripts/exo.sh [options]
+  scripts/exo.sh list
+  scripts/exo.sh delall all
+  scripts/exo.sh fresh
+  scripts/exo.sh canonical
+  scripts/exo.sh canonical-dev
+  scripts/exo.sh stop-all
+  scripts/exo.sh setup-profile
+  scripts/exo.sh setup-sandbox
 
 Default behavior creates or reuses an Exoclaw agent and conversation, starts the
 local scheduler and adapter loops, then starts a REPL. It reads .env by default
@@ -320,7 +320,7 @@ scheduler_log_file() {
 }
 
 repl_restart_file() {
-  echo "$ROOT_DIR/.exo/exoclaw-control.restart"
+  echo "$ROOT_DIR/.exo/exo-control.restart"
 }
 
 adapters_pid_file() {

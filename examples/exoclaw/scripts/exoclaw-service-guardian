@@ -154,7 +154,7 @@ scheduler_lock_file() {
 }
 
 repl_restart_file() {
-  echo "$STATE_DIR/exoclaw-control.restart"
+  echo "$STATE_DIR/exo-control.restart"
 }
 
 adapters_pid_file() {

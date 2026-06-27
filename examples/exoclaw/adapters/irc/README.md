@@ -24,7 +24,7 @@ For IRC plus Discord developer testing, run the developer canonical profile from
 the repo after setup:
 
 ```bash
-examples/exoclaw/scripts/exoclaw-control fresh --canonical-dev
+scripts/exo.sh fresh --canonical-dev
 ```
 
 ## Adapter Setup
@@ -32,7 +32,7 @@ examples/exoclaw/scripts/exoclaw-control fresh --canonical-dev
 Use the Exoclaw setup flow:
 
 ```bash
-examples/exoclaw/scripts/exoclaw-control fresh --pull-sandbox --setup irc
+scripts/exo.sh fresh --pull-sandbox --setup irc
 ```
 
 The setup prompt at `setup-prompt.md` asks Exoclaw to create a built-in adapter similar to:

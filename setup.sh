@@ -198,7 +198,7 @@ missing_has() {
 
 is_exo_checkout() {
   local dir="$1"
-  [[ -d "$dir/.git" && -f "$dir/examples/exoclaw/scripts/exoclaw-control" ]]
+  [[ -d "$dir/.git" && -f "$dir/scripts/exo.sh" ]]
 }
 
 prompt_yes_no() {
@@ -499,7 +499,7 @@ main() {
   local control_args=(fresh --canonical --agent-name "$AGENT_NAME")
   unset EXO_SETUP_ADAPTER
   export EXO_CANONICAL_PROFILE=user
-  exec examples/exoclaw/scripts/exoclaw-control "${control_args[@]}"
+  exec scripts/exo.sh "${control_args[@]}"
 }
 
 main "$@"
