@@ -31,7 +31,7 @@ export default {
     }
 
     if (isSessionPage(url)) {
-      const chatUrl = new URL("/chat.html", url);
+      const chatUrl = new URL("/chat", url);
       const response = await env.ASSETS.fetch(new Request(chatUrl, request));
       return withSecurityHeaders(response);
     }
