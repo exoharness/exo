@@ -2,7 +2,6 @@ import * as React from "react";
 import { createRoot } from "react-dom/client";
 import {
   ActivityIcon,
-  ArrowDownIcon,
   CircleIcon,
   CopyIcon,
   HammerIcon,
@@ -14,7 +13,8 @@ import {
 import {
   Attachment,
   AttachmentContent,
-  AttachmentMeta,
+  AttachmentDescription,
+  AttachmentTitle,
 } from "./components/ui/attachment.jsx";
 import { Avatar, AvatarFallback } from "./components/ui/avatar.jsx";
 import { Badge } from "./components/ui/badge.jsx";
@@ -488,9 +488,10 @@ function ChatApp() {
               ))}
             </MessageScrollerContent>
           </MessageScrollerViewport>
-          <MessageScrollerButton aria-label="Scroll to latest" direction="end">
-            <ArrowDownIcon />
-          </MessageScrollerButton>
+          <MessageScrollerButton
+            aria-label="Scroll to latest"
+            direction="end"
+          />
         </MessageScroller>
       </MessageScrollerProvider>
 
@@ -557,8 +558,9 @@ function ConversationEvent({ event }) {
   if (event.kind === "notice") {
     return (
       <Marker
+        className={`notice-marker notice-marker-${event.tone ?? "neutral"}`}
         role={event.tone === "danger" ? "alert" : "status"}
-        variant={event.tone}
+        variant={event.tone === "neutral" ? "separator" : "default"}
       >
         <MarkerIcon>
           <ActivityIcon />
@@ -587,16 +589,16 @@ function ChatMessage({ event }) {
         </Avatar>
       </MessageAvatar>
       <MessageContent>
-        <MessageHeader>
+        <MessageHeader className="message-meta">
           <span>{labelForRole(from)}</span>
           <time>{formatTime(event.createdAt)}</time>
         </MessageHeader>
-        <Bubble align={align} variant={event.self ? "default" : "ghost"}>
+        <Bubble align={align} variant={event.self ? "default" : "secondary"}>
           <BubbleContent>
             <RichText text={event.text} />
           </BubbleContent>
         </Bubble>
-        <MessageFooter>
+        <MessageFooter className="message-meta">
           <Button
             aria-label="Copy message"
             onClick={() => copyText(event.text)}
@@ -628,17 +630,18 @@ function ToolMessage({ event }) {
         </Avatar>
       </MessageAvatar>
       <MessageContent>
-        <MessageHeader>
+        <MessageHeader className="message-meta">
           <span>{name}</span>
           <Badge variant={status === "error" ? "destructive" : "secondary"}>
             {status}
           </Badge>
         </MessageHeader>
-        <Attachment>
+        <Attachment className="tool-attachment">
           <AttachmentContent>
+            <AttachmentTitle>{name}</AttachmentTitle>
+            <AttachmentDescription>tool frame</AttachmentDescription>
             <pre>{formatToolBody(frame)}</pre>
           </AttachmentContent>
-          <AttachmentMeta>tool frame</AttachmentMeta>
         </Attachment>
       </MessageContent>
     </Message>
