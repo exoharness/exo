@@ -9,6 +9,7 @@ const SECURITY_HEADERS = {
 };
 
 const SESSION_TTL_MS = 30 * 60 * 1000;
+const MAX_RELAY_MESSAGE_BYTES = 10 * 1024 * 1024;
 
 export class RendezvousSession {
   constructor(ctx) {
@@ -60,12 +61,12 @@ export class RendezvousSession {
 
   webSocketMessage(socket, message) {
     if (typeof message !== "string") {
-      socket.close(1003, "Only text signaling messages are supported");
+      socket.close(1003, "Only text relay messages are supported");
       return;
     }
 
-    if (message.length > 64 * 1024) {
-      socket.close(1009, "Signaling message too large");
+    if (message.length > MAX_RELAY_MESSAGE_BYTES) {
+      socket.close(1009, "Relay message too large");
       return;
     }
 
@@ -159,7 +160,7 @@ export default {
 
     if (url.pathname === "/chat" || url.pathname === "/chat/") {
       return new Response(
-        "Create a session with scripts/webrtc-rendezvous-demo.mjs\n",
+        "Create a session with scripts/rendezvous-demo.mjs\n",
         {
           status: 200,
           headers: {

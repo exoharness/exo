@@ -109,6 +109,7 @@ async fn send_persists_messages_through_harness() {
     let harness = BasicHarness::new(
         exoharness,
         Arc::new(FakeModelClient::new(vec![ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("pong")],
             tool_calls: Vec::new(),
@@ -202,6 +203,7 @@ async fn usage_record_is_persisted_with_computed_cost() {
     let harness = BasicHarness::with_pricing_table(
         Arc::clone(&exoharness),
         Arc::new(FakeModelClient::new(vec![ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("pong")],
             tool_calls: Vec::new(),
@@ -347,6 +349,7 @@ async fn usage_record_with_anthropic_cache_hits() {
     let harness = BasicHarness::with_pricing_table(
         Arc::clone(&exoharness),
         Arc::new(FakeModelClient::new(vec![ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("pong")],
             tool_calls: Vec::new(),
@@ -465,6 +468,7 @@ async fn usage_record_with_openai_inclusive_accounting() {
     let harness = BasicHarness::with_pricing_table(
         Arc::clone(&exoharness),
         Arc::new(FakeModelClient::new(vec![ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("pong")],
             tool_calls: Vec::new(),
@@ -573,6 +577,7 @@ async fn close_session_appends_session_ended_event() {
     let harness = BasicHarness::new(
         Arc::clone(&exoharness),
         Arc::new(FakeModelClient::new(vec![ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("pong")],
             tool_calls: Vec::new(),
@@ -651,6 +656,7 @@ async fn updating_agent_config_refreshes_executor_cache() {
     );
     let model = Arc::new(FakeModelClient::new(vec![
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("pong-1")],
             tool_calls: Vec::new(),
@@ -660,6 +666,7 @@ async fn updating_agent_config_refreshes_executor_cache() {
             duration: None,
         },
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("pong-2")],
             tool_calls: Vec::new(),
@@ -733,6 +740,7 @@ async fn send_executes_shell_tool_when_enabled() {
     );
     let model = Arc::new(FakeModelClient::new(vec![
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: Vec::new(),
             tool_calls: vec![PendingToolCall {
@@ -748,6 +756,7 @@ async fn send_executes_shell_tool_when_enabled() {
             duration: None,
         },
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("done")],
             tool_calls: Vec::new(),
@@ -921,6 +930,7 @@ async fn updating_mounts_recreates_conversation_sandbox() {
     );
     let model = Arc::new(FakeModelClient::new(vec![
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: Vec::new(),
             tool_calls: vec![PendingToolCall {
@@ -936,6 +946,7 @@ async fn updating_mounts_recreates_conversation_sandbox() {
             duration: None,
         },
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("done-1")],
             tool_calls: Vec::new(),
@@ -945,6 +956,7 @@ async fn updating_mounts_recreates_conversation_sandbox() {
             duration: None,
         },
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: Vec::new(),
             tool_calls: vec![PendingToolCall {
@@ -960,6 +972,7 @@ async fn updating_mounts_recreates_conversation_sandbox() {
             duration: None,
         },
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("done-2")],
             tool_calls: Vec::new(),
@@ -1175,6 +1188,7 @@ async fn conversation_model_override_changes_effective_model() {
     );
     let model = Arc::new(FakeModelClient::new(vec![
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("first")],
             tool_calls: Vec::new(),
@@ -1184,6 +1198,7 @@ async fn conversation_model_override_changes_effective_model() {
             duration: None,
         },
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("second")],
             tool_calls: Vec::new(),
@@ -1193,6 +1208,7 @@ async fn conversation_model_override_changes_effective_model() {
             duration: None,
         },
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("third")],
             tool_calls: Vec::new(),

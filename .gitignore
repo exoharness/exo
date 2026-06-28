@@ -8,5 +8,6 @@ node_modules
 target
 tsconfig.tsbuildinfo
 website/dist
+website/.wrangler
 .exo
 .brain
