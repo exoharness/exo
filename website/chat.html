@@ -5,56 +5,9 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <meta name="referrer" content="no-referrer" />
     <title>exo chat</title>
-    <script type="module" src="/src/chat.js"></script>
+    <script type="module" src="/src/chat.jsx"></script>
   </head>
   <body>
-    <div class="chat-shell">
-      <header class="topbar">
-        <div class="identity">
-          <div class="brand-mark">ex</div>
-          <div>
-            <h1 id="title">exo chat</h1>
-            <p id="subtitle">secure peer session</p>
-          </div>
-        </div>
-
-        <div class="status-rail" aria-label="Connection status">
-          <span id="role" class="status-pill">role</span>
-          <span id="signal" class="status-pill">signaling</span>
-          <span id="peer" class="status-pill">peer</span>
-          <span id="data" class="status-pill">datachannel</span>
-        </div>
-      </header>
-
-      <main id="scroll" class="conversation" aria-live="polite">
-        <div id="log" class="message-list"></div>
-      </main>
-
-      <form id="form" class="composer">
-        <div class="composer-card">
-          <textarea
-            id="input"
-            autocomplete="off"
-            placeholder="Message exo..."
-            rows="1"
-            disabled
-          ></textarea>
-          <div class="composer-actions">
-            <span id="hint" class="composer-hint">Waiting for connection</span>
-            <button id="send" class="send-button" type="submit" disabled>
-              <svg
-                aria-hidden="true"
-                viewBox="0 0 24 24"
-                width="18"
-                height="18"
-              >
-                <path d="M5 12h13m0 0-5-5m5 5-5 5" />
-              </svg>
-              <span class="sr-only">Send</span>
-            </button>
-          </div>
-        </div>
-      </form>
-    </div>
+    <div id="root"></div>
   </body>
 </html>
