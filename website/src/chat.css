@@ -69,31 +69,38 @@
 
 :root {
   color-scheme: dark;
-  --background: #09090b;
+  --background: #0a0a0a;
   --foreground: #fafafa;
-  --card: #0f0f12;
+  --card: #171717;
   --card-foreground: #fafafa;
-  --popover: #121216;
+  --popover: #171717;
   --popover-foreground: #fafafa;
-  --primary: #fafafa;
-  --primary-foreground: #09090b;
-  --secondary: #18181b;
-  --secondary-foreground: #e4e4e7;
-  --muted: #18181b;
-  --muted-foreground: #a1a1aa;
-  --accent: #27272a;
+  --primary: #193cb8;
+  --primary-foreground: #eff6ff;
+  --secondary: #27272a;
+  --secondary-foreground: #fafafa;
+  --muted: #262626;
+  --muted-foreground: #a1a1a1;
+  --accent: #262626;
   --accent-foreground: #fafafa;
-  --destructive: #ef4444;
-  --destructive-foreground: #fef2f2;
-  --success: #22c55e;
-  --success-foreground: #052e16;
-  --warning: #eab308;
+  --destructive: #ff6568;
+  --destructive-foreground: #df2225;
+  --success: #90c5ff;
+  --success-foreground: #eff6ff;
+  --warning: #fcbb00;
   --warning-foreground: #422006;
-  --border: #27272a;
-  --input: #3f3f46;
-  --ring: #a1a1aa;
-  --tool: #a78bfa;
-  --radius: 8px;
+  --border: #ffffff1a;
+  --input: #ffffff26;
+  --ring: #737373;
+  --chart-1: #90c5ff;
+  --chart-2: #3080ff;
+  --chart-3: #155dfc;
+  --chart-4: #1447e6;
+  --chart-5: #193cb8;
+  --surface: #161616;
+  --surface-foreground: #a1a1a1;
+  --tool: var(--chart-2);
+  --radius: 0.625rem;
   --shadow: rgb(0 0 0 / 30%);
   --font:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
@@ -141,9 +148,7 @@ svg {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   min-height: 100svh;
-  background:
-    linear-gradient(180deg, rgb(255 255 255 / 3%), transparent 210px),
-    var(--background);
+  background: var(--background);
 }
 
 .topbar {
@@ -154,7 +159,7 @@ svg {
   min-height: 72px;
   padding: 14px clamp(14px, 3vw, 28px);
   border-bottom: 1px solid var(--border);
-  background: rgb(9 9 11 / 88%);
+  background: color-mix(in oklab, var(--background) 92%, transparent);
   backdrop-filter: blur(16px);
 }
 
@@ -214,8 +219,8 @@ h1 {
 
 .status-badge-success,
 .composer-status-success {
-  border-color: color-mix(in oklch, var(--success) 38%, transparent);
-  background: color-mix(in oklch, var(--success) 12%, transparent);
+  border-color: color-mix(in oklch, var(--success) 34%, transparent);
+  background: color-mix(in oklch, var(--primary) 16%, transparent);
   color: var(--success);
 }
 
@@ -245,7 +250,7 @@ h1 {
 }
 
 .notice-marker-success {
-  color: var(--success);
+  color: var(--chart-1);
 }
 
 .notice-marker-danger {
@@ -349,20 +354,41 @@ h1 {
 .composer {
   padding: 14px clamp(12px, 3vw, 30px) 18px;
   border-top: 1px solid var(--border);
-  background: rgb(9 9 11 / 92%);
+  background: color-mix(in oklab, var(--background) 94%, transparent);
   backdrop-filter: blur(16px);
 }
 
 .composer-surface {
   display: grid;
-  gap: 8px;
+  gap: 14px;
   width: min(100%, 920px);
   margin: 0 auto;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--card);
-  box-shadow: 0 18px 50px var(--shadow);
-  padding: 10px;
+  border-radius: 28px;
+  background: var(--muted);
+  box-shadow: none;
+  padding: 18px;
+}
+
+.composer-input {
+  min-height: 54px;
+  border-color: transparent !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+  color: var(--foreground);
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+.composer-input:focus-visible {
+  border-color: transparent !important;
+  box-shadow: none !important;
+}
+
+.composer-input::placeholder {
+  color: var(--muted-foreground);
 }
 
 .composer-bar {
@@ -377,6 +403,26 @@ h1 {
   align-items: center;
   min-width: 0;
   gap: 6px;
+}
+
+.composer-tool-button {
+  width: 40px;
+  height: 40px;
+  border-color: color-mix(in oklab, var(--foreground) 14%, transparent);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted-foreground);
+}
+
+.composer-tool-button:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--foreground) 8%, transparent);
+  color: var(--foreground);
+}
+
+.composer-send-button {
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
 }
 
 @media (max-width: 720px) {

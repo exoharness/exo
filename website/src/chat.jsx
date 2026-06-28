@@ -5,6 +5,7 @@ import {
   CircleIcon,
   CopyIcon,
   HammerIcon,
+  PlusIcon,
   SendHorizontalIcon,
   WifiIcon,
   WifiOffIcon,
@@ -41,17 +42,31 @@ import "./chat.css";
 
 function ChatApp() {
   const session = React.useMemo(() => readSession(), []);
-  const [events, setEvents] = React.useState([]);
+  const [events, setEvents] = React.useState(() =>
+    session.demo ? demoEvents(session.role) : [],
+  );
   const [input, setInput] = React.useState("");
   const [composer, setComposer] = React.useState({
-    enabled: false,
-    label: "Waiting",
+    enabled: session.demo,
+    label: session.demo ? "Preview" : "Waiting",
   });
   const [status, setStatus] = React.useState({
-    data: { label: "DataChannel", tone: "idle", value: "closed" },
-    peer: { label: "Peer", tone: "warning", value: "waiting" },
+    data: {
+      label: "DataChannel",
+      tone: session.demo ? "success" : "idle",
+      value: session.demo ? "preview" : "closed",
+    },
+    peer: {
+      label: "Peer",
+      tone: session.demo ? "success" : "warning",
+      value: session.demo ? "demo" : "waiting",
+    },
     role: { label: "Role", tone: "success", value: session.role },
-    signal: { label: "Signal", tone: "warning", value: "connecting" },
+    signal: {
+      label: "Signal",
+      tone: session.demo ? "success" : "warning",
+      value: session.demo ? "local" : "connecting",
+    },
   });
 
   const channelRef = React.useRef(null);
@@ -103,6 +118,10 @@ function ChatApp() {
   }, [input]);
 
   React.useEffect(() => {
+    if (session.demo) {
+      return;
+    }
+
     if (!session.channelId || !session.secret) {
       addNotice(
         "Missing channel id or secret. Start from the URL printed by the demo script.",
@@ -415,6 +434,44 @@ function ChatApp() {
 
   const sendChat = React.useCallback(() => {
     const text = input.trim();
+    if (session.demo) {
+      if (!text) {
+        return;
+      }
+
+      const frame = {
+        type: "chat",
+        id: crypto.randomUUID(),
+        from: session.role,
+        text,
+        createdAt: Date.now(),
+      };
+      addEvent({
+        frame,
+        from: session.role,
+        kind: "message",
+        self: true,
+        text,
+      });
+      setInput("");
+      window.setTimeout(() => {
+        addEvent({
+          frame: {
+            type: "chat",
+            id: crypto.randomUUID(),
+            from: session.role === "agent" ? "user" : "agent",
+            text: "This is local UI preview mode. The real rendezvous path still waits for a WebRTC DataChannel before enabling chat.",
+            createdAt: Date.now(),
+          },
+          from: session.role === "agent" ? "user" : "agent",
+          kind: "message",
+          self: false,
+          text: "This is local UI preview mode. The real rendezvous path still waits for a WebRTC DataChannel before enabling chat.",
+        });
+      }, 240);
+      return;
+    }
+
     const channel = channelRef.current;
     if (!text || !channel || channel.readyState !== "open") {
       return;
@@ -436,7 +493,7 @@ function ChatApp() {
       text,
     });
     setInput("");
-  }, [addEvent, input, session.role]);
+  }, [addEvent, input, session.demo, session.role]);
 
   const submitComposer = React.useCallback(
     (event) => {
@@ -500,6 +557,7 @@ function ChatApp() {
           <Textarea
             ref={textareaRef}
             autoComplete="off"
+            className="composer-input"
             disabled={!composer.enabled}
             onChange={(event) => setInput(event.target.value)}
             onKeyDown={(event) => {
@@ -508,21 +566,27 @@ function ChatApp() {
                 sendChat();
               }
             }}
-            placeholder="Message exo..."
+            placeholder={composer.enabled ? "Message exo..." : composer.label}
             rows={1}
             value={input}
           />
           <div className="composer-bar">
             <div className="composer-tools">
-              <Badge
-                className={`composer-status composer-status-${composer.enabled ? "success" : "idle"}`}
-                variant={composer.enabled ? "outline" : "secondary"}
+              <Button
+                aria-label="Add attachment or tool"
+                className="composer-tool-button"
+                disabled={!composer.enabled}
+                size="icon"
+                title={composer.label}
+                type="button"
+                variant="outline"
               >
-                {composer.label}
-              </Badge>
+                <PlusIcon />
+              </Button>
             </div>
             <Button
               aria-label="Send message"
+              className="composer-send-button"
               disabled={!composer.enabled || !input.trim()}
               size="icon"
               type="submit"
@@ -681,9 +745,65 @@ function readSession() {
 
   return {
     channelId: params.get("c") ?? pathMatch?.[2] ?? "",
+    demo: params.has("demo"),
     role: role === "agent" ? "agent" : "user",
     secret: readSecret(),
   };
+}
+
+function demoEvents(role) {
+  const now = Date.now();
+  const peer = role === "agent" ? "user" : "agent";
+
+  return [
+    {
+      id: crypto.randomUUID(),
+      createdAt: now - 210000,
+      kind: "notice",
+      text: "Local UI preview mode. Signaling and WebRTC are skipped.",
+      tone: "success",
+    },
+    {
+      id: crypto.randomUUID(),
+      createdAt: now - 180000,
+      frame: {
+        type: "chat",
+        from: peer,
+      },
+      from: peer,
+      kind: "message",
+      self: false,
+      text: "Can you inspect the build logs and tell me why Cloudflare did not create a preview URL?",
+    },
+    {
+      id: crypto.randomUUID(),
+      createdAt: now - 120000,
+      frame: {
+        name: "cloudflare.deployments.lookup",
+        status: "completed",
+        type: "tool",
+        result: {
+          worker: "exo",
+          deployCommand: "wrangler versions upload",
+          durableObject: "RendezvousSession",
+        },
+      },
+      kind: "tool",
+      self: true,
+    },
+    {
+      id: crypto.randomUUID(),
+      createdAt: now - 60000,
+      frame: {
+        type: "chat",
+        from: role,
+      },
+      from: role,
+      kind: "message",
+      self: true,
+      text: "The build uploaded a new Worker version, but did not promote it to active traffic.\n\n```sh\nnpx wrangler deploy -c wrangler.staging.jsonc\n```\n\nFor Durable Objects, use a real staging Worker instead of relying on Cloudflare Preview URLs.",
+    },
+  ];
 }
 
 function readSecret() {
