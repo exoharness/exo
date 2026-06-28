@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-type HarnessKey = "codex" | "claude" | "cursor";
+type HarnessKey = "codex" | "claude" | "cursor" | "opencode";
 
 interface HarnessDefinition {
   key: HarnessKey;
@@ -115,6 +115,15 @@ const harnesses: HarnessDefinition[] = [
     module: "examples/typescript/cursor-sdk-harness.ts",
     image: "exo-cursor-sdk-sandbox:latest",
     imageBuildArgs: ["-f", "containers/cursor-sdk-sandbox/Containerfile", "."],
+  },
+  {
+    key: "opencode",
+    envName: "ANTHROPIC_API_KEY",
+    secret: "anthropic",
+    model: "anthropic/claude-sonnet-4-6",
+    module: "examples/typescript/opencode-harness.ts",
+    image: "exo-opencode-sandbox:latest",
+    imageBuildArgs: ["-f", "containers/opencode-sandbox/Containerfile", "."],
   },
 ];
 
@@ -585,8 +594,9 @@ function verifyBraintrust(
 }
 
 function buildImage(harness: HarnessDefinition): void {
-  log(`building ${harness.image}`);
-  run("container", ["build", "-t", harness.image, ...harness.imageBuildArgs], {
+  const cli = process.env.EXO_CONTAINER_CLI ?? "container";
+  log(`building ${harness.image} with ${cli}`);
+  run(cli, ["build", "-t", harness.image, ...harness.imageBuildArgs], {
     timeoutMs: 20 * 60_000,
   });
 }
@@ -685,7 +695,12 @@ function parseArgs(rawArgs: string[]): CliArgs {
 }
 
 function isHarnessKey(value: string): value is HarnessKey {
-  return value === "codex" || value === "claude" || value === "cursor";
+  return (
+    value === "codex" ||
+    value === "claude" ||
+    value === "cursor" ||
+    value === "opencode"
+  );
 }
 
 function readArgValue(rawArgs: string[], index: number, flag: string): string {
@@ -786,10 +801,10 @@ function fail(message: string): never {
 function printHelpAndExit(): never {
   console.log(`Usage: pnpm e2e:agent-harnesses [options]
 
-Runs live Codex/Claude/Cursor history replay checks against exoharness.
+Runs live Codex/Claude/Cursor/Opencode history replay checks against exoharness.
 
 Options:
-  --only <codex|claude|cursor>  Run one harness. Repeatable.
+  --only <codex|claude|cursor|opencode>  Run one harness. Repeatable.
   --sandbox                     Also run sandbox escape/network-denial checks.
   --build-images                Build the required Apple container images first.
   --braintrust                  Verify traces using BRAINTRUST_* env vars.

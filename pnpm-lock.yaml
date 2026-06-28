@@ -26,6 +26,9 @@ importers:
       '@discordjs/voice':
         specifier: ^0.19.0
         version: 0.19.2(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)(opusscript@0.1.1)
+      '@opencode-ai/sdk':
+        specifier: ^1.17.11
+        version: 1.17.11
       '@shadcn/react':
         specifier: ^0.1.0
         version: 0.1.0(@types/react@19.2.17)(react@19.2.7)
@@ -840,6 +843,9 @@ packages:
     resolution: {integrity: sha512-1SUf/Cg2GzGDyaf15aR9St9TWlb+XvbZXWpDx8YKs7MLzMH/BCeopv+y9vzrzgkfykCGuWOlSu3mZhj2+FQcrg==}
     engines: {node: '>=10'}
     deprecated: This functionality has been moved to @npmcli/fs
+
+  '@opencode-ai/sdk@1.17.11':
+    resolution: {integrity: sha512-UdSwnNM4/cD5rHnI8O7VaHuiwYnsEOglpRPVeeYE2S5Nm1K34ijCyZGDvBecb0ShdBQgn49XvyQWJH6cREsIPw==}
 
   '@oxc-project/types@0.122.0':
     resolution: {integrity: sha512-oLAl5kBpV4w69UtFZ9xqcmTi+GENWOcPF7FCrczTiBbmC0ibXxCwyvZGbO39rCVEuLGAZM84DH0pUIyyv/YJzA==}
@@ -5339,6 +5345,10 @@ snapshots:
       mkdirp: 1.0.4
       rimraf: 3.0.2
     optional: true
+
+  '@opencode-ai/sdk@1.17.11':
+    dependencies:
+      cross-spawn: 7.0.6
 
   '@oxc-project/types@0.122.0': {}
 

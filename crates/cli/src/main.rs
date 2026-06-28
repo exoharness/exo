@@ -55,7 +55,7 @@ use tui::run_chat_repl;
 struct Cli {
     #[arg(long, global = true, default_value = ".exo")]
     root: PathBuf,
-    /// Executor runtime: basic, rlm, typescript, codex, claude-code, cursor, or a TypeScript module path.
+    /// Executor runtime: basic, rlm, typescript, codex, claude-code, cursor, opencode, or a TypeScript module path.
     #[arg(long, global = true, value_name = "HARNESS")]
     harness: Option<HarnessSelection>,
     #[arg(long, global = true, value_enum, env = "EXO_SECRET_BACKEND")]
@@ -122,6 +122,7 @@ enum TypeScriptHarnessPreset {
     Codex,
     ClaudeCode,
     Cursor,
+    Opencode,
 }
 
 impl HarnessSelection {
@@ -168,11 +169,12 @@ impl FromStr for HarnessSelection {
             "codex" => Ok(Self::TypeScriptPreset(TypeScriptHarnessPreset::Codex)),
             "claude-code" => Ok(Self::TypeScriptPreset(TypeScriptHarnessPreset::ClaudeCode)),
             "cursor" | "cursor-sdk" => Ok(Self::TypeScriptPreset(TypeScriptHarnessPreset::Cursor)),
+            "opencode" => Ok(Self::TypeScriptPreset(TypeScriptHarnessPreset::Opencode)),
             value if looks_like_typescript_module_path(value) => {
                 Ok(Self::TypeScriptModule(PathBuf::from(value)))
             }
             _ => Err(format!(
-                "unknown harness `{raw}`; expected basic, rlm, typescript, exoclaw, codex, claude-code, cursor, or a TypeScript module path"
+                "unknown harness `{raw}`; expected basic, rlm, typescript, exoclaw, codex, claude-code, cursor, opencode, or a TypeScript module path"
             )),
         }
     }
@@ -184,6 +186,7 @@ impl TypeScriptHarnessPreset {
             Self::Codex => "codex",
             Self::ClaudeCode => "claude-code",
             Self::Cursor => "cursor",
+            Self::Opencode => "opencode",
         }
     }
 
@@ -192,6 +195,7 @@ impl TypeScriptHarnessPreset {
             Self::Codex => Path::new("examples/typescript/codex-harness.ts"),
             Self::ClaudeCode => Path::new("examples/typescript/claude-code-harness.ts"),
             Self::Cursor => Path::new("examples/typescript/cursor-sdk-harness.ts"),
+            Self::Opencode => Path::new("examples/typescript/opencode-harness.ts"),
         }
     }
 
@@ -200,6 +204,7 @@ impl TypeScriptHarnessPreset {
             Self::Codex => Some("exo-codex-sandbox:latest"),
             Self::ClaudeCode => Some("exo-claude-code-sandbox:latest"),
             Self::Cursor => Some("exo-cursor-sdk-sandbox:latest"),
+            Self::Opencode => Some("exo-opencode-sandbox:latest"),
         }
     }
 }
@@ -858,7 +863,7 @@ async fn main() -> Result<()> {
                     };
                     if matches!(harness_kind, HarnessKind::TypeScript) && typescript.is_none() {
                         bail!(
-                            "repl --harness typescript needs an existing TypeScript agent; use --harness codex, --harness claude-code, --harness cursor, or --harness <module.ts> to create one"
+                            "repl --harness typescript needs an existing TypeScript agent; use --harness codex, --harness claude-code, --harness cursor, --harness opencode, or --harness <module.ts> to create one"
                         );
                     }
                     harness
@@ -2204,7 +2209,7 @@ fn build_typescript_harness_config(
             )?))
         }
         (_, HarnessKind::TypeScript, None) => Err(anyhow!(
-            "typescript agents require --module <path>, or use --harness codex, --harness claude-code, --harness cursor, or --harness <module.ts>"
+            "typescript agents require --module <path>, or use --harness codex, --harness claude-code, --harness cursor, --harness opencode, or --harness <module.ts>"
         )),
         (_, HarnessKind::Exoclaw, None) => Err(anyhow!("exoclaw agents require --module <path>")),
         (_, _, Some(_)) => Err(anyhow!(
@@ -2308,6 +2313,7 @@ fn format_harness_selection(selection: &HarnessSelection) -> String {
             TypeScriptHarnessPreset::Codex => "codex".to_string(),
             TypeScriptHarnessPreset::ClaudeCode => "claude-code".to_string(),
             TypeScriptHarnessPreset::Cursor => "cursor".to_string(),
+            TypeScriptHarnessPreset::Opencode => "opencode".to_string(),
         },
         HarnessSelection::TypeScriptModule(path) => path.display().to_string(),
     }

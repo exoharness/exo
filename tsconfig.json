@@ -19,7 +19,9 @@
       "@exo/model-runtime/cost": ["./typescript/model-runtime/cost.ts"],
       "@exo/codex/app-server": ["./typescript/codex/app-server.ts"],
       "@exo/cursor/sdk": ["./typescript/cursor/sdk.ts"],
-      "@exo/cursor/protocol": ["./typescript/cursor/protocol.ts"]
+      "@exo/cursor/protocol": ["./typescript/cursor/protocol.ts"],
+      "@exo/opencode/sdk": ["./typescript/opencode/sdk.ts"],
+      "@exo/opencode/protocol": ["./typescript/opencode/protocol.ts"]
     },
     "resolveJsonModule": true,
     "isolatedModules": true,

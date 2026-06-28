@@ -1,0 +1,31 @@
+FROM docker.io/library/node:22-bookworm
+
+ARG OPENCODE_PACKAGE=opencode-ai
+
+WORKDIR /opt/exo
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    g++ \
+    git \
+    make \
+    pkg-config \
+    python3 \
+  && rm -rf /var/lib/apt/lists/* \
+  && mkdir -p /home/exo/workspace
+
+RUN corepack enable && corepack prepare pnpm@10.26.2 --activate
+
+# The opencode SDK launches `opencode serve` as a subprocess, so the CLI must be
+# on PATH inside the sandbox.
+RUN npm install -g "${OPENCODE_PACKAGE}"
+
+COPY package.json pnpm-lock.yaml tsconfig.json ./
+COPY typescript ./typescript
+COPY scripts ./scripts
+
+RUN pnpm install --frozen-lockfile --config.dangerously-allow-all-builds=true \
+  && pnpm rebuild sqlite3
+
+WORKDIR /home/exo/workspace
