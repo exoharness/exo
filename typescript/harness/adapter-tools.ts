@@ -42,7 +42,7 @@ function createAdapterTool(): ToolInstance {
     definition: {
       name: "create_adapter",
       description:
-        "Create and enable a long-running adapter for this conversation. Use source 'built_in' with config type 'irc' or 'agent-cli'. Use source 'library' with config type 'whatsapp', 'signal', or 'discord' for shipped library adapters.",
+        "Create and enable a long-running adapter for this conversation. Use source 'built_in' with config type 'irc' or 'agent-cli'. Use source 'library' with config type 'exochat', 'whatsapp', 'signal', or 'discord' for shipped library adapters.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -414,6 +414,29 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
         type: "object",
         additionalProperties: false,
         properties: {
+          type: { type: "string", enum: ["exochat"] },
+          baseUrl: {
+            type: ["string", "null"],
+            description:
+              "Base URL of the ExoChat WebSocket relay. Use null for the default hosted service.",
+          },
+          channelId: {
+            type: ["string", "null"],
+            description:
+              "Optional stable relay channel id. Use null to generate and persist one in adapter state.",
+          },
+          secret: {
+            type: ["string", "null"],
+            description:
+              "Optional shared channel secret. Use null to generate and persist one in adapter state.",
+          },
+        },
+        required: ["type", "baseUrl", "channelId", "secret"],
+      },
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: {
           type: { type: "string", enum: ["agent-cli"] },
           socketPath: {
             type: ["string", "null"],
@@ -451,7 +474,10 @@ function validateAdapterSource(source: string, type: string): void {
     throw new Error(`${type} adapters must use source 'built_in'`);
   }
   if (
-    (type === "whatsapp" || type === "signal" || type === "discord") &&
+    (type === "exochat" ||
+      type === "whatsapp" ||
+      type === "signal" ||
+      type === "discord") &&
     source !== "library"
   ) {
     throw new Error(`${type} adapters must use source 'library'`);

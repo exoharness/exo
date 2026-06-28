@@ -12,7 +12,7 @@ The worker handles `PING` with `PONG`, parses `PRIVMSG` lines, and emits Exoclaw
 
 For a fresh machine, use the canonical Exo installer. It clones the repo, asks
 for local keys, writes `.env`, starts Docker-backed Exoclaw, and configures the
-default WhatsApp control adapter:
+default ExoChat control adapter:
 
 ```bash
 mkdir exo && cd exo

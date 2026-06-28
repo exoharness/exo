@@ -96,6 +96,7 @@ enum AdapterCreationConfig {
     Whatsapp(WhatsappAdapterCreationConfig),
     Signal(SignalAdapterCreationConfig),
     Discord(DiscordAdapterCreationConfig),
+    Exochat(ExochatAdapterCreationConfig),
     AgentCli(AgentCliAdapterCreationConfig),
 }
 
@@ -163,6 +164,16 @@ struct DiscordAdapterCreationConfig {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ExochatAdapterCreationConfig {
+    #[serde(rename = "type")]
+    _adapter_type: ExochatAdapterType,
+    base_url: Option<String>,
+    channel_id: Option<String>,
+    secret: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AgentCliAdapterCreationConfig {
     #[serde(rename = "type")]
     _adapter_type: AgentCliAdapterType,
@@ -206,6 +217,12 @@ enum SignalAdapterType {
 #[serde(rename_all = "lowercase")]
 enum DiscordAdapterType {
     Discord,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ExochatAdapterType {
+    Exochat,
 }
 
 #[derive(Debug, Deserialize)]
@@ -262,6 +279,7 @@ impl AdapterCreationConfig {
             Self::Whatsapp(_) => "whatsapp",
             Self::Signal(_) => "signal",
             Self::Discord(_) => "discord",
+            Self::Exochat(_) => "exochat",
             Self::AgentCli(_) => "agent-cli",
         }
     }
@@ -373,6 +391,25 @@ impl AdapterCreationConfig {
                     }),
                     state_dir: None,
                     secret_env,
+                })
+            }
+            Self::Exochat(config) => {
+                require_source(source, AdapterSource::Library, "exochat")?;
+                let channel_id = config.channel_id.filter(|value| !value.trim().is_empty());
+                let secret = config.secret.filter(|value| !value.trim().is_empty());
+                if channel_id.is_some() != secret.is_some() {
+                    bail!("exochat channelId and secret must either both be set or both be null");
+                }
+                Ok(AdapterConfig {
+                    adapter_type: "exochat".to_string(),
+                    worker_command: options.worker_command("exochat"),
+                    initialization: serde_json::json!({
+                        "baseUrl": config.base_url,
+                        "channelId": channel_id,
+                        "secret": secret,
+                    }),
+                    state_dir: None,
+                    secret_env: Vec::new(),
                 })
             }
             Self::AgentCli(config) => {
@@ -1209,6 +1246,44 @@ mod tests {
             .into_adapter_config(AdapterSource::Library, &test_creation_options())
             .unwrap_err();
         assert!(error.to_string().contains("source"));
+    }
+
+    #[test]
+    fn exochat_config_applies_defaults_and_requires_library_source() {
+        let parse =
+            |channel_id: serde_json::Value, secret: serde_json::Value| -> AdapterCreationConfig {
+                serde_json::from_value(serde_json::json!({
+                    "type": "exochat",
+                    "baseUrl": null,
+                    "channelId": channel_id,
+                    "secret": secret,
+                }))
+                .unwrap()
+            };
+        let adapter_config = parse(serde_json::Value::Null, serde_json::Value::Null)
+            .into_adapter_config(AdapterSource::Library, &test_creation_options())
+            .unwrap();
+        assert_eq!(adapter_config.adapter_type, "exochat");
+        assert!(adapter_config.worker_command[2].ends_with("/tmp/exo-adapters/exochat/worker.ts"));
+        assert_eq!(
+            adapter_config.initialization,
+            serde_json::json!({
+                "baseUrl": null,
+                "channelId": null,
+                "secret": null,
+            })
+        );
+        assert!(adapter_config.secret_env.is_empty());
+
+        let error = parse(serde_json::Value::Null, serde_json::Value::Null)
+            .into_adapter_config(AdapterSource::BuiltIn, &test_creation_options())
+            .unwrap_err();
+        assert!(error.to_string().contains("source"));
+
+        let error = parse(serde_json::json!("channel"), serde_json::Value::Null)
+            .into_adapter_config(AdapterSource::Library, &test_creation_options())
+            .unwrap_err();
+        assert!(error.to_string().contains("channelId and secret"));
     }
 
     #[tokio::test]

@@ -9,6 +9,7 @@ UPSTREAM_MODEL="${EXO_UPSTREAM_MODEL:-$MODEL_NAME}"
 AGENT_NAME="${EXO_AGENT_NAME:-Exo}"
 USER_NAME="${EXO_USER_NAME:-}"
 FORCE_INSTALL="${EXO_SETUP_FORCE:-false}"
+DEFAULT_EXO_CHAT_BASE_URL="https://exoharness.ai"
 
 die() {
   echo "error: $*" >&2
@@ -35,7 +36,8 @@ Options:
 
 Environment overrides:
   EXO_REPO_URL, EXO_REPO_REF, EXO_INSTALL_DIR, EXO_MODEL, EXO_UPSTREAM_MODEL,
-  EXO_AGENT_NAME, EXO_USER_NAME, EXOCLAW_LOCAL_PROMPT_FILE, EXO_SETUP_FORCE
+  EXO_AGENT_NAME, EXO_USER_NAME, EXO_CHAT_BASE_URL, EXOCLAW_LOCAL_PROMPT_FILE,
+  EXO_SETUP_FORCE
 EOF
 }
 
@@ -280,6 +282,19 @@ set_env_value() {
   chmod 600 "$file"
 }
 
+set_env_default() {
+  local key="$1"
+  local value="$2"
+  local file="$3"
+  local existing
+  existing="$(env_value "$key" "$file")"
+  if [[ -n "$existing" ]]; then
+    echo "$key is already set in .env; using it."
+    return
+  fi
+  set_env_value "$key" "$value" "$file"
+}
+
 prompt_env_secret() {
   local key="$1"
   local file="$2"
@@ -476,7 +491,8 @@ main() {
 
   info "Configure API keys"
   prompt_env_secret "OPENAI_API_KEY" "$env_file" "OpenAI API key" true
-  echo "Canonical setup uses WhatsApp as the default external adapter and will show a QR code to scan."
+  set_env_default "EXO_CHAT_BASE_URL" "${EXO_CHAT_BASE_URL:-$DEFAULT_EXO_CHAT_BASE_URL}" "$env_file"
+  echo "Canonical setup uses ExoChat as the default external adapter and will show a browser URL to open."
 
   info "Configure Exo"
   USER_NAME="$(prompt_text "Your name, or blank to skip" "$USER_NAME")"
