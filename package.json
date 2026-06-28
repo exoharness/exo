@@ -14,7 +14,10 @@
     "prepare": "node scripts/setup-hooks.mjs",
     "rendezvous:demo": "node scripts/webrtc-rendezvous-demo.mjs",
     "test": "vitest run",
-    "typecheck": "tsgo --noEmit -p tsconfig.json"
+    "typecheck": "tsgo --noEmit -p tsconfig.json",
+    "website:build": "vite build --config website/vite.config.js",
+    "website:dev": "vite --config website/vite.config.js",
+    "website:preview": "vite preview --config website/vite.config.js"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.126",
@@ -23,22 +26,37 @@
     "@braintrust/lingua-wasm": "^0.1.0",
     "@cursor/sdk": "^1.0.12",
     "@discordjs/voice": "^0.19.0",
+    "@shadcn/react": "^0.1.0",
     "@whiskeysockets/baileys": "7.0.0-rc13",
     "braintrust": "3.7.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
     "discord.js": "^14.26.4",
+    "lucide-react": "^1.21.0",
     "openai": "6.33.0",
     "opusscript": "^0.1.1",
     "prism-media": "^1.3.5",
     "qrcode-terminal": "^0.12.0",
-    "sodium-native": "^5.1.0"
+    "radix-ui": "^1.6.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "sodium-native": "^5.1.0",
+    "tailwind-merge": "^3.6.0"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.1",
     "@types/node": "25.5.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
     "@typescript/native-preview": "7.0.0-dev.20260328.1",
+    "@vitejs/plugin-react": "^6.0.3",
     "oxfmt": "^0.42.0",
     "oxlint": "^1.57.0",
+    "shadcn": "^4.12.0",
+    "tailwindcss": "^4.3.1",
     "tsx": "4.21.0",
     "typescript": "^5.9.0",
+    "vite": "8.0.3",
     "vitest": "4.1.2"
   },
   "packageManager": "pnpm@10.26.2"
