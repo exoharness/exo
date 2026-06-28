@@ -143,8 +143,56 @@ h1 {
 }
 
 .ui-message-scroller {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ui-message-scroller-viewport {
+  height: 100%;
   overflow-y: auto;
   padding: 22px clamp(12px, 3vw, 30px);
+  outline: none;
+  scroll-padding-block: 28px;
+}
+
+.ui-message-scroller-viewport:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--ring);
+}
+
+.ui-message-scroller-content {
+  min-height: 100%;
+}
+
+.ui-message-scroller-item {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 96px;
+}
+
+.ui-message-scroller-button {
+  position: absolute;
+  right: clamp(18px, 4vw, 46px);
+  bottom: 18px;
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) - 2px);
+  background: var(--card);
+  color: var(--foreground);
+  box-shadow: 0 18px 50px var(--shadow);
+  cursor: pointer;
+  opacity: 1;
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+
+.ui-message-scroller-button[data-active="false"] {
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(6px);
 }
 
 .conversation-inner {
@@ -182,9 +230,49 @@ h1 {
   font-weight: 650;
 }
 
-.notice-row {
-  display: flex;
-  justify-content: center;
+.ui-marker {
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  max-width: min(100%, 680px);
+  min-height: 28px;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) - 2px);
+  background: var(--secondary);
+  color: var(--muted-foreground);
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.ui-marker[data-variant="success"] {
+  border-color: color-mix(in srgb, var(--success) 45%, var(--border));
+  background: color-mix(in srgb, var(--success) 11%, transparent);
+  color: var(--success);
+}
+
+.ui-marker[data-variant="danger"],
+.ui-marker[data-variant="destructive"] {
+  border-color: color-mix(in srgb, var(--destructive) 45%, var(--border));
+  background: color-mix(in srgb, var(--destructive) 11%, transparent);
+  color: var(--destructive);
+}
+
+.ui-marker-icon {
+  display: inline-flex;
+  align-items: center;
+}
+
+.ui-marker-icon svg {
+  width: 13px;
+  height: 13px;
+}
+
+.ui-marker-content {
+  min-width: 0;
 }
 
 .ui-message {

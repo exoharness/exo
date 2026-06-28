@@ -2,6 +2,7 @@ import * as React from "react";
 import { createRoot } from "react-dom/client";
 import {
   ActivityIcon,
+  ArrowDownIcon,
   CircleIcon,
   CopyIcon,
   HammerIcon,
@@ -19,6 +20,7 @@ import { Avatar, AvatarFallback } from "./components/ui/avatar.jsx";
 import { Badge } from "./components/ui/badge.jsx";
 import { Bubble, BubbleContent } from "./components/ui/bubble.jsx";
 import { Button } from "./components/ui/button.jsx";
+import { Marker, MarkerContent, MarkerIcon } from "./components/ui/marker.jsx";
 import {
   Message,
   MessageAvatar,
@@ -26,7 +28,14 @@ import {
   MessageFooter,
   MessageHeader,
 } from "./components/ui/message.jsx";
-import { MessageScroller } from "./components/ui/message-scroller.jsx";
+import {
+  MessageScroller,
+  MessageScrollerButton,
+  MessageScrollerContent,
+  MessageScrollerItem,
+  MessageScrollerProvider,
+  MessageScrollerViewport,
+} from "./components/ui/message-scroller.jsx";
 import { Textarea } from "./components/ui/textarea.jsx";
 import "./chat.css";
 
@@ -52,7 +61,6 @@ function ChatApp() {
   const offerStartedRef = React.useRef(false);
   const pcRef = React.useRef(null);
   const remoteSeenRef = React.useRef(false);
-  const scrollerRef = React.useRef(null);
   const seqRef = React.useRef(0);
   const textareaRef = React.useRef(null);
   const wsRef = React.useRef(null);
@@ -84,14 +92,6 @@ function ChatApp() {
       },
     }));
   }, []);
-
-  React.useEffect(() => {
-    const el = scrollerRef.current;
-    if (!el) {
-      return;
-    }
-    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  }, [events.length]);
 
   React.useEffect(() => {
     const el = textareaRef.current;
@@ -472,14 +472,27 @@ function ChatApp() {
         </div>
       </header>
 
-      <MessageScroller ref={scrollerRef}>
-        <div className="conversation-inner" aria-live="polite">
-          {events.length === 0 ? <EmptyState role={session.role} /> : null}
-          {events.map((event) => (
-            <ConversationEvent event={event} key={event.id} />
-          ))}
-        </div>
-      </MessageScroller>
+      <MessageScrollerProvider autoScroll defaultScrollPosition="end">
+        <MessageScroller>
+          <MessageScrollerViewport>
+            <MessageScrollerContent className="conversation-inner">
+              {events.length === 0 ? <EmptyState role={session.role} /> : null}
+              {events.map((event) => (
+                <MessageScrollerItem
+                  key={event.id}
+                  messageId={event.id}
+                  scrollAnchor={event.kind !== "notice"}
+                >
+                  <ConversationEvent event={event} />
+                </MessageScrollerItem>
+              ))}
+            </MessageScrollerContent>
+          </MessageScrollerViewport>
+          <MessageScrollerButton aria-label="Scroll to latest" direction="end">
+            <ArrowDownIcon />
+          </MessageScrollerButton>
+        </MessageScroller>
+      </MessageScrollerProvider>
 
       <form className="composer" onSubmit={submitComposer}>
         <div className="composer-surface">
@@ -543,11 +556,15 @@ function EmptyState({ role }) {
 function ConversationEvent({ event }) {
   if (event.kind === "notice") {
     return (
-      <div className="notice-row">
-        <Badge variant={event.tone === "danger" ? "destructive" : event.tone}>
-          {event.text}
-        </Badge>
-      </div>
+      <Marker
+        role={event.tone === "danger" ? "alert" : "status"}
+        variant={event.tone}
+      >
+        <MarkerIcon>
+          <ActivityIcon />
+        </MarkerIcon>
+        <MarkerContent>{event.text}</MarkerContent>
+      </Marker>
     );
   }
 
