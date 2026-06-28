@@ -58,6 +58,7 @@ class ExoSystem(ContinualLearningSystem):
         self._model = model
         self._pending_feedback: Optional[str] = None
         self._root: Optional[str] = None
+        self._cwd: Optional[str] = None  # per-run cwd so .exo/agent-tools is isolated
         self._base: list[str] = []
         self._agent_inited = False
         self._conv: Optional[str] = None  # current per-instance conversation slug
@@ -77,6 +78,19 @@ class ExoSystem(ContinualLearningSystem):
         if not os.path.exists(_EXO_BIN):
             raise RuntimeError(f"exo binary not found at {_EXO_BIN}; build it or set EXO_BIN")
         self._root = tempfile.mkdtemp(prefix="exo-clbench-root-")
+        # Per-run cwd: exo resolves its harness runner + @exo/harness relative to
+        # cwd, and agent-built tools (install_agent_tool) land in cwd/.exo/agent-tools.
+        # A shared cwd (_EXO_REPO) would leak learned tools across parallel runs and
+        # into the stateless baseline (contaminating Gain). So give each run its own
+        # cwd that symlinks just the resolution bits back to the repo.
+        self._cwd = tempfile.mkdtemp(prefix="exo-clbench-cwd-")
+        for x in ("tsconfig.json", "node_modules", "typescript", "examples", "package.json"):
+            src = os.path.join(_EXO_REPO, x)
+            if os.path.exists(src):
+                try:
+                    os.symlink(src, os.path.join(self._cwd, x))
+                except FileExistsError:
+                    pass
         self._base = [_EXO_BIN, "--root", self._root, "--secret-backend", "file"]
         self._run(self._base + ["secret", "set", "openai", "--env", "OPENAI_API_KEY"])
         self._run(self._base + ["model", "register", self._model, "--secret", "openai"])
@@ -86,7 +100,8 @@ class ExoSystem(ContinualLearningSystem):
         self._run(
             self._base
             + ["agent", "create", "--slug", "t", "--model", self._model,
-               "--harness", _HARNESS, "--sandbox-provider", "docker", "Exo"]
+               "--harness", _HARNESS, "--tool-creation", "enabled",
+               "--sandbox-provider", "docker", "Exo"]
         )
         self._agent_inited = True
 
@@ -102,7 +117,7 @@ class ExoSystem(ContinualLearningSystem):
 
     def _run(self, argv: list[str], check: bool = True) -> str:
         proc = subprocess.run(
-            argv, cwd=_EXO_REPO, env=os.environ.copy(),
+            argv, cwd=(self._cwd or _EXO_REPO), env=os.environ.copy(),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
         if check and proc.returncode != 0:
@@ -254,7 +269,10 @@ class ExoSystem(ContinualLearningSystem):
         # EXO_KEEP_ROOT=1 leaves temp roots on disk for memory inspection/debugging.
         if os.environ.get("EXO_KEEP_ROOT") != "1" and self._root:
             shutil.rmtree(self._root, ignore_errors=True)
+        if os.environ.get("EXO_KEEP_ROOT") != "1" and self._cwd:
+            shutil.rmtree(self._cwd, ignore_errors=True)
         self._root = None
+        self._cwd = None
         self._base = []
         self._pending_feedback = None
         self._agent_inited = False
