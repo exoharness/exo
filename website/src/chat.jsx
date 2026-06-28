@@ -5,10 +5,10 @@ import {
   CircleIcon,
   CopyIcon,
   HammerIcon,
+  LockIcon,
   PlusIcon,
   SendHorizontalIcon,
   WifiIcon,
-  WifiOffIcon,
 } from "lucide-react";
 
 import {
@@ -52,9 +52,9 @@ function ChatApp() {
   });
   const [status, setStatus] = React.useState({
     data: {
-      label: "DataChannel",
+      label: "Crypto",
       tone: session.demo ? "success" : "idle",
-      value: session.demo ? "preview" : "closed",
+      value: session.demo ? "preview" : "locked",
     },
     peer: {
       label: "Peer",
@@ -63,18 +63,13 @@ function ChatApp() {
     },
     role: { label: "Role", tone: "success", value: session.role },
     signal: {
-      label: "Signal",
+      label: "Socket",
       tone: session.demo ? "success" : "warning",
       value: session.demo ? "local" : "connecting",
     },
   });
 
-  const channelRef = React.useRef(null);
-  const connectedRef = React.useRef(false);
-  const failureTimerRef = React.useRef(null);
-  const hmacKeyRef = React.useRef(null);
-  const offerStartedRef = React.useRef(false);
-  const pcRef = React.useRef(null);
+  const relayKeyRef = React.useRef(null);
   const remoteSeenRef = React.useRef(false);
   const seqRef = React.useRef(0);
   const textareaRef = React.useRef(null);
@@ -84,7 +79,7 @@ function ChatApp() {
     setEvents((current) => [
       ...current,
       {
-        id: crypto.randomUUID(),
+        id: randomId(),
         createdAt: Date.now(),
         ...event,
       },
@@ -141,82 +136,31 @@ function ChatApp() {
 
     return () => {
       disposed = true;
-      if (failureTimerRef.current) {
-        clearTimeout(failureTimerRef.current);
-      }
-      channelRef.current?.close();
       wsRef.current?.close();
-      pcRef.current?.close();
     };
 
     async function start() {
-      hmacKeyRef.current = await crypto.subtle.importKey(
-        "raw",
-        base64urlToBytes(session.secret),
-        { name: "HMAC", hash: "SHA-256" },
-        false,
-        ["sign", "verify"],
+      relayKeyRef.current = await deriveRelayKey(
+        session.secret,
+        session.channelId,
       );
       if (disposed) {
         return;
       }
 
-      pcRef.current = createPeerConnection();
-      wsRef.current = connectSignaling();
+      setStatusPart("data", { tone: "success", value: "ready" });
+      wsRef.current = connectRelay();
     }
 
-    function createPeerConnection() {
-      const pc = new RTCPeerConnection({
-        iceServers: [{ urls: "stun:stun.cloudflare.com:3478" }],
-      });
-
-      pc.addEventListener("icecandidate", (event) => {
-        if (event.candidate) {
-          sendSignal({
-            type: "candidate",
-            candidate: event.candidate.toJSON(),
-          });
-        }
-      });
-
-      pc.addEventListener("connectionstatechange", () => {
-        const value = pc.connectionState;
-        setStatusPart("peer", {
-          tone:
-            value === "connected"
-              ? "success"
-              : value === "failed" || value === "disconnected"
-                ? "danger"
-                : "warning",
-          value,
-        });
-      });
-
-      if (session.role === "user") {
-        attachDataChannel(pc.createDataChannel("exo", { ordered: true }));
-      } else {
-        pc.addEventListener("datachannel", (event) => {
-          attachDataChannel(event.channel);
-        });
-      }
-
-      return pc;
-    }
-
-    function connectSignaling() {
+    function connectRelay() {
       const wsUrl = new URL(`/chat/ws/${session.channelId}`, location.href);
       wsUrl.protocol = location.protocol === "https:" ? "wss:" : "ws:";
       wsUrl.searchParams.set("role", session.role);
 
       const ws = new WebSocket(wsUrl);
 
-      ws.addEventListener("open", async () => {
+      ws.addEventListener("open", () => {
         setStatusPart("signal", { tone: "success", value: "open" });
-        await sendSignal({
-          type: "hello",
-          role: session.role,
-          nonce: bytesToBase64url(crypto.getRandomValues(new Uint8Array(16))),
-        });
         addNotice(
           session.role === "user"
             ? "Waiting for the desktop peer..."
@@ -225,10 +169,8 @@ function ChatApp() {
       });
 
       ws.addEventListener("close", () => {
-        setStatusPart("signal", {
-          tone: connectedRef.current ? "idle" : "danger",
-          value: "closed",
-        });
+        setStatusPart("signal", { tone: "danger", value: "closed" });
+        setStatusPart("peer", { tone: "warning", value: "waiting" });
         setComposer({ enabled: false, label: "Closed" });
       });
 
@@ -238,170 +180,70 @@ function ChatApp() {
       });
 
       ws.addEventListener("message", async (event) => {
-        const message = JSON.parse(event.data);
-        if (message.channel === "rendezvous" && message.type === "presence") {
-          await handlePresence(message.roles ?? []);
+        let message;
+        try {
+          message = JSON.parse(event.data);
+        } catch (error) {
+          console.warn("Unable to parse relay message", error);
+          addNotice("Rejected a malformed relay message.", "danger");
           return;
         }
 
-        if (!(await verifySignedSignal(message))) {
+        if (!isRecord(message)) {
           addNotice(
-            "Rejected a signaling message with an invalid signature.",
+            "Rejected a relay message that was not an object.",
             "danger",
           );
           return;
         }
 
-        await handleSignal(message.body);
+        if (message.channel === "rendezvous" && message.type === "presence") {
+          handlePresence(Array.isArray(message.roles) ? message.roles : []);
+          return;
+        }
+
+        const frame = await decryptRelayFrame(
+          message,
+          relayKeyRef.current,
+          session.channelId,
+        );
+        if (!frame) {
+          addNotice(
+            "Rejected a relay message that could not be decrypted.",
+            "danger",
+          );
+          return;
+        }
+
+        renderFrame(frame, false);
       });
 
       return ws;
     }
 
-    async function handlePresence(roles) {
+    function handlePresence(roles) {
       const remoteRole = session.role === "agent" ? "user" : "agent";
-      if (roles.includes(remoteRole) && !remoteSeenRef.current) {
-        remoteSeenRef.current = true;
-        setStatusPart("peer", { tone: "warning", value: "connecting" });
-        addNotice(
-          session.role === "agent"
-            ? "Phone peer joined. Starting direct connection..."
-            : "Desktop peer joined. Starting direct connection...",
-        );
-        startFailureTimer();
-      }
+      if (roles.includes(remoteRole)) {
+        setStatusPart("peer", { tone: "success", value: "online" });
+        setComposer({ enabled: true, label: "Ready" });
 
-      await maybeStartOffer(roles);
-    }
-
-    function startFailureTimer() {
-      if (failureTimerRef.current) {
-        clearTimeout(failureTimerRef.current);
-      }
-
-      failureTimerRef.current = setTimeout(() => {
-        if (!connectedRef.current) {
-          setStatusPart("peer", { tone: "danger", value: "failed" });
-          setComposer({ enabled: false, label: "Failed" });
+        if (!remoteSeenRef.current) {
           addNotice(
-            "Could not establish a direct connection. Try switching Wi-Fi/cellular, disabling VPN or Private Relay, and keeping the desktop peer open.",
-            "danger",
+            session.role === "agent"
+              ? "Phone peer joined. Relay is ready."
+              : "Desktop peer joined. Relay is ready.",
+            "success",
           );
         }
-      }, 12000);
-    }
-
-    async function maybeStartOffer(roles) {
-      if (
-        session.role !== "user" ||
-        offerStartedRef.current ||
-        !roles.includes("agent") ||
-        pcRef.current?.signalingState !== "stable"
-      ) {
+        remoteSeenRef.current = true;
         return;
       }
 
-      offerStartedRef.current = true;
-      const offer = await pcRef.current.createOffer();
-      await pcRef.current.setLocalDescription(offer);
-      await sendSignal({ type: "offer", sdp: offer.sdp });
-    }
-
-    async function handleSignal(body) {
-      if (body.type === "hello") {
-        return;
+      setStatusPart("peer", { tone: "warning", value: "waiting" });
+      setComposer({ enabled: false, label: "Waiting" });
+      if (remoteSeenRef.current) {
+        addNotice("Peer left. Messages are not queued by the relay.");
       }
-
-      if (body.type === "offer" && session.role === "agent") {
-        await pcRef.current.setRemoteDescription({
-          type: "offer",
-          sdp: body.sdp,
-        });
-        const answer = await pcRef.current.createAnswer();
-        await pcRef.current.setLocalDescription(answer);
-        await sendSignal({ type: "answer", sdp: answer.sdp });
-        return;
-      }
-
-      if (body.type === "answer" && session.role === "user") {
-        await pcRef.current.setRemoteDescription({
-          type: "answer",
-          sdp: body.sdp,
-        });
-        return;
-      }
-
-      if (body.type === "candidate" && body.candidate) {
-        await pcRef.current.addIceCandidate(body.candidate);
-      }
-    }
-
-    function attachDataChannel(channel) {
-      channelRef.current = channel;
-
-      channel.addEventListener("open", () => {
-        connectedRef.current = true;
-        if (failureTimerRef.current) {
-          clearTimeout(failureTimerRef.current);
-          failureTimerRef.current = null;
-        }
-        setStatusPart("peer", { tone: "success", value: "connected" });
-        setStatusPart("data", { tone: "success", value: "open" });
-        setComposer({ enabled: true, label: "Ready" });
-        addNotice("Direct WebRTC DataChannel connected.", "success");
-      });
-
-      channel.addEventListener("close", () => {
-        setStatusPart("data", {
-          tone: connectedRef.current ? "idle" : "danger",
-          value: "closed",
-        });
-        setComposer({ enabled: false, label: "Closed" });
-      });
-
-      channel.addEventListener("message", (event) => {
-        renderFrame(JSON.parse(event.data), false);
-      });
-    }
-
-    async function sendSignal(body) {
-      const signal = {
-        channelId: session.channelId,
-        from: session.role,
-        seq: ++seqRef.current,
-        body,
-      };
-      const mac = await signSignal(signal);
-      wsRef.current?.send(JSON.stringify({ ...signal, mac }));
-    }
-
-    async function signSignal(signal) {
-      const bytes = new TextEncoder().encode(canonicalSignal(signal));
-      const signature = await crypto.subtle.sign(
-        "HMAC",
-        hmacKeyRef.current,
-        bytes,
-      );
-      return bytesToBase64url(new Uint8Array(signature));
-    }
-
-    async function verifySignedSignal(signal) {
-      if (!signal || signal.channelId !== session.channelId || !signal.mac) {
-        return false;
-      }
-      const unsigned = {
-        channelId: signal.channelId,
-        from: signal.from,
-        seq: signal.seq,
-        body: signal.body,
-      };
-      const bytes = new TextEncoder().encode(canonicalSignal(unsigned));
-      return crypto.subtle.verify(
-        "HMAC",
-        hmacKeyRef.current,
-        base64urlToBytes(signal.mac),
-        bytes,
-      );
     }
 
     function renderFrame(frame, self) {
@@ -432,7 +274,7 @@ function ChatApp() {
     }
   }, [addEvent, addNotice, session, setStatusPart]);
 
-  const sendChat = React.useCallback(() => {
+  const sendChat = React.useCallback(async () => {
     const text = input.trim();
     if (session.demo) {
       if (!text) {
@@ -441,7 +283,7 @@ function ChatApp() {
 
       const frame = {
         type: "chat",
-        id: crypto.randomUUID(),
+        id: randomId(),
         from: session.role,
         text,
         createdAt: Date.now(),
@@ -458,33 +300,46 @@ function ChatApp() {
         addEvent({
           frame: {
             type: "chat",
-            id: crypto.randomUUID(),
+            id: randomId(),
             from: session.role === "agent" ? "user" : "agent",
-            text: "This is local UI preview mode. The real rendezvous path still waits for a WebRTC DataChannel before enabling chat.",
+            text: "This is local UI preview mode. The real rendezvous path sends encrypted frames through the hibernatable websocket relay.",
             createdAt: Date.now(),
           },
           from: session.role === "agent" ? "user" : "agent",
           kind: "message",
           self: false,
-          text: "This is local UI preview mode. The real rendezvous path still waits for a WebRTC DataChannel before enabling chat.",
+          text: "This is local UI preview mode. The real rendezvous path sends encrypted frames through the hibernatable websocket relay.",
         });
       }, 240);
       return;
     }
 
-    const channel = channelRef.current;
-    if (!text || !channel || channel.readyState !== "open") {
+    const socket = wsRef.current;
+    if (!text || !socket || socket.readyState !== WebSocket.OPEN) {
       return;
     }
 
     const frame = {
       type: "chat",
-      id: crypto.randomUUID(),
+      id: randomId(),
       from: session.role,
       text,
       createdAt: Date.now(),
     };
-    channel.send(JSON.stringify(frame));
+    try {
+      const envelope = await encryptRelayFrame(
+        frame,
+        relayKeyRef.current,
+        session,
+        ++seqRef.current,
+      );
+      socket.send(JSON.stringify(envelope));
+    } catch (error) {
+      console.warn("Unable to encrypt relay message", error);
+      addNotice("Could not encrypt the message for the relay.", "danger");
+      return;
+    }
+
     addEvent({
       frame,
       from: session.role,
@@ -493,12 +348,12 @@ function ChatApp() {
       text,
     });
     setInput("");
-  }, [addEvent, input, session.demo, session.role]);
+  }, [addEvent, addNotice, input, session]);
 
   const submitComposer = React.useCallback(
     (event) => {
       event.preventDefault();
-      sendChat();
+      void sendChat();
     },
     [sendChat],
   );
@@ -525,7 +380,7 @@ function ChatApp() {
           <StatusBadge icon={CircleIcon} status={status.role} />
           <StatusBadge icon={WifiIcon} status={status.signal} />
           <StatusBadge icon={ActivityIcon} status={status.peer} />
-          <StatusBadge icon={WifiOffIcon} status={status.data} />
+          <StatusBadge icon={LockIcon} status={status.data} />
         </div>
       </header>
 
@@ -563,7 +418,7 @@ function ChatApp() {
             onKeyDown={(event) => {
               if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();
-                sendChat();
+                void sendChat();
               }
             }}
             placeholder={composer.enabled ? "Message exo..." : composer.label}
@@ -728,12 +583,95 @@ function RichText({ text }) {
   });
 }
 
-function canonicalSignal(signal) {
+async function deriveRelayKey(secret, channelId) {
+  const subtle = getSubtleCrypto();
+  const baseKey = await subtle.importKey(
+    "raw",
+    base64urlToBytes(secret),
+    "HKDF",
+    false,
+    ["deriveKey"],
+  );
+  return subtle.deriveKey(
+    {
+      name: "HKDF",
+      hash: "SHA-256",
+      salt: encode(channelId),
+      info: encode("exo-chat-relay:aes-gcm:v1"),
+    },
+    baseKey,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+async function encryptRelayFrame(frame, key, session, seq) {
+  const subtle = getSubtleCrypto();
+  const envelope = {
+    channel: "exo.chat",
+    channelId: session.channelId,
+    ciphertext: "",
+    from: session.role,
+    nonce: bytesToBase64url(crypto.getRandomValues(new Uint8Array(12))),
+    seq,
+    version: 1,
+  };
+  const ciphertext = await subtle.encrypt(
+    {
+      name: "AES-GCM",
+      iv: base64urlToBytes(envelope.nonce),
+      additionalData: encode(canonicalEnvelope(envelope)),
+    },
+    key,
+    encode(JSON.stringify(frame)),
+  );
+  envelope.ciphertext = bytesToBase64url(new Uint8Array(ciphertext));
+  return envelope;
+}
+
+async function decryptRelayFrame(envelope, key, channelId) {
+  if (
+    !envelope ||
+    envelope.channel !== "exo.chat" ||
+    envelope.version !== 1 ||
+    envelope.channelId !== channelId ||
+    (envelope.from !== "agent" && envelope.from !== "user") ||
+    !envelope.nonce ||
+    !envelope.ciphertext
+  ) {
+    return null;
+  }
+
+  try {
+    const plaintext = await getSubtleCrypto().decrypt(
+      {
+        name: "AES-GCM",
+        iv: base64urlToBytes(envelope.nonce),
+        additionalData: encode(canonicalEnvelope(envelope)),
+      },
+      key,
+      base64urlToBytes(envelope.ciphertext),
+    );
+    const frame = JSON.parse(decode(new Uint8Array(plaintext)));
+    return {
+      ...frame,
+      from: envelope.from,
+    };
+  } catch (error) {
+    console.warn("Unable to decrypt relay message", error);
+    return null;
+  }
+}
+
+function canonicalEnvelope(envelope) {
   return JSON.stringify({
-    channelId: signal.channelId,
-    from: signal.from,
-    seq: signal.seq,
-    body: signal.body,
+    channel: envelope.channel,
+    channelId: envelope.channelId,
+    from: envelope.from,
+    nonce: envelope.nonce,
+    seq: envelope.seq,
+    version: envelope.version,
   });
 }
 
@@ -757,14 +695,14 @@ function demoEvents(role) {
 
   return [
     {
-      id: crypto.randomUUID(),
+      id: randomId(),
       createdAt: now - 210000,
       kind: "notice",
-      text: "Local UI preview mode. Signaling and WebRTC are skipped.",
+      text: "Local UI preview mode. The hibernatable websocket relay is skipped.",
       tone: "success",
     },
     {
-      id: crypto.randomUUID(),
+      id: randomId(),
       createdAt: now - 180000,
       frame: {
         type: "chat",
@@ -776,7 +714,7 @@ function demoEvents(role) {
       text: "Can you inspect the build logs and tell me why Cloudflare did not create a preview URL?",
     },
     {
-      id: crypto.randomUUID(),
+      id: randomId(),
       createdAt: now - 120000,
       frame: {
         name: "cloudflare.deployments.lookup",
@@ -792,7 +730,7 @@ function demoEvents(role) {
       self: true,
     },
     {
-      id: crypto.randomUUID(),
+      id: randomId(),
       createdAt: now - 60000,
       frame: {
         type: "chat",
@@ -853,6 +791,10 @@ function formatToolBody(frame) {
   return JSON.stringify(body, null, 2);
 }
 
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 async function copyText(value) {
   try {
     await navigator.clipboard.writeText(String(value ?? ""));
@@ -863,6 +805,34 @@ async function copyText(value) {
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function getSubtleCrypto() {
+  if (globalThis.crypto?.subtle) {
+    return globalThis.crypto.subtle;
+  }
+
+  throw new Error(
+    "Encrypted relay requires HTTPS or localhost. Plain LAN HTTP disables Web Crypto in this browser.",
+  );
+}
+
+function randomId() {
+  if (globalThis.crypto?.randomUUID) {
+    return globalThis.crypto.randomUUID();
+  }
+
+  return `id-${bytesToBase64url(
+    globalThis.crypto.getRandomValues(new Uint8Array(16)),
+  )}`;
+}
+
+function encode(value) {
+  return new TextEncoder().encode(value);
+}
+
+function decode(bytes) {
+  return new TextDecoder().decode(bytes);
 }
 
 function bytesToBase64url(bytes) {
