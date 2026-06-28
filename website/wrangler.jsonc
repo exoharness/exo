@@ -1,7 +1,27 @@
 {
   "name": "exo",
+  "main": "src/worker.js",
   "compatibility_date": "2026-05-24",
-  "assets": {
-    "directory": ".",
+  "build": {
+    "command": "pnpm --dir .. website:build",
   },
+  "assets": {
+    "binding": "ASSETS",
+    "directory": "dist",
+    "run_worker_first": ["/chat", "/chat/*"],
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RENDEZVOUS",
+        "class_name": "RendezvousSession",
+      },
+    ],
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RendezvousSession"],
+    },
+  ],
 }

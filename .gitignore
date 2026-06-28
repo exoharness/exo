@@ -7,5 +7,6 @@ coverage
 node_modules
 target
 tsconfig.tsbuildinfo
+website/dist
 .exo
 .brain
