@@ -1,3 +1,5 @@
+import "./chat.css";
+
 (async () => {
   const session = readSession();
   const state = {
@@ -9,19 +11,24 @@
     pc: null,
     dc: null,
     connected: false,
+    remoteSeen: false,
+    failureTimer: null,
     offerStarted: false,
   };
 
   const els = {
     title: document.querySelector("#title"),
+    subtitle: document.querySelector("#subtitle"),
     role: document.querySelector("#role"),
     signal: document.querySelector("#signal"),
     peer: document.querySelector("#peer"),
     data: document.querySelector("#data"),
     log: document.querySelector("#log"),
+    scroll: document.querySelector("#scroll"),
     form: document.querySelector("#form"),
     input: document.querySelector("#input"),
     send: document.querySelector("#send"),
+    hint: document.querySelector("#hint"),
   };
 
   if (!state.channelId || !state.secret) {
@@ -35,10 +42,12 @@
     state.role === "agent"
       ? "exo chat - desktop peer"
       : "exo chat - phone peer";
+  els.subtitle.textContent = `session ${state.channelId.slice(0, 8)}`;
   setPill(els.role, state.role, "good");
-  setPill(els.signal, "signaling: connecting");
-  setPill(els.peer, "peer: new");
+  setPill(els.signal, "signaling: connecting", "warn");
+  setPill(els.peer, "peer: waiting", "warn");
   setPill(els.data, "datachannel: closed");
+  setComposer(false, "Waiting for peer connection");
 
   const hmacKey = await crypto.subtle.importKey(
     "raw",
@@ -53,22 +62,21 @@
 
   els.form.addEventListener("submit", (event) => {
     event.preventDefault();
-    const text = els.input.value.trim();
-    if (!text || !state.dc || state.dc.readyState !== "open") {
-      return;
-    }
-    sendChat(text);
-    els.input.value = "";
+    submitComposer();
   });
 
-  setTimeout(() => {
-    if (!state.connected) {
-      setPill(els.peer, "peer: failed", "bad");
-      addNotice(
-        "Could not establish a direct connection. Try switching Wi-Fi/cellular, disabling VPN or Private Relay, and keeping the desktop peer open.",
-      );
+  els.input.addEventListener("input", () => {
+    autosizeComposer();
+  });
+
+  els.input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.shiftKey) {
+      return;
     }
-  }, 12000);
+
+    event.preventDefault();
+    submitComposer();
+  });
 
   function createPeerConnection() {
     const pc = new RTCPeerConnection({
@@ -89,7 +97,11 @@
       setPill(
         els.peer,
         `peer: ${status}`,
-        status === "connected" ? "good" : status === "failed" ? "bad" : "",
+        status === "connected"
+          ? "good"
+          : status === "failed" || status === "disconnected"
+            ? "bad"
+            : "warn",
       );
     });
 
@@ -127,16 +139,18 @@
 
     ws.addEventListener("close", () => {
       setPill(els.signal, "signaling: closed", state.connected ? "" : "bad");
+      setComposer(false, "Signaling closed");
     });
 
     ws.addEventListener("error", () => {
       setPill(els.signal, "signaling: error", "bad");
+      setComposer(false, "Signaling error");
     });
 
     ws.addEventListener("message", async (event) => {
       const message = JSON.parse(event.data);
       if (message.channel === "rendezvous" && message.type === "presence") {
-        await maybeStartOffer(message.roles ?? []);
+        await handlePresence(message.roles ?? []);
         return;
       }
 
@@ -149,6 +163,38 @@
     });
 
     return ws;
+  }
+
+  async function handlePresence(roles) {
+    const remoteRole = state.role === "agent" ? "user" : "agent";
+    if (roles.includes(remoteRole) && !state.remoteSeen) {
+      state.remoteSeen = true;
+      setPill(els.peer, "peer: connecting", "warn");
+      addNotice(
+        state.role === "agent"
+          ? "Phone peer joined. Starting direct connection..."
+          : "Desktop peer joined. Starting direct connection...",
+      );
+      startFailureTimer();
+    }
+
+    await maybeStartOffer(roles);
+  }
+
+  function startFailureTimer() {
+    if (state.failureTimer) {
+      clearTimeout(state.failureTimer);
+    }
+
+    state.failureTimer = setTimeout(() => {
+      if (!state.connected) {
+        setPill(els.peer, "peer: failed", "bad");
+        setComposer(false, "Direct connection failed");
+        addNotice(
+          "Could not establish a direct connection. Try switching Wi-Fi/cellular, disabling VPN or Private Relay, and keeping the desktop peer open.",
+        );
+      }
+    }, 12000);
   }
 
   async function maybeStartOffer(roles) {
@@ -195,24 +241,35 @@
 
     channel.addEventListener("open", () => {
       state.connected = true;
+      if (state.failureTimer) {
+        clearTimeout(state.failureTimer);
+        state.failureTimer = null;
+      }
+      setPill(els.peer, "peer: connected", "good");
       setPill(els.data, "datachannel: open", "good");
-      els.input.disabled = false;
-      els.send.disabled = false;
+      setComposer(true, "Enter to send, Shift+Enter for newline");
       addNotice("Direct WebRTC DataChannel connected.");
     });
 
     channel.addEventListener("close", () => {
       setPill(els.data, "datachannel: closed", state.connected ? "" : "bad");
-      els.input.disabled = true;
-      els.send.disabled = true;
+      setComposer(false, "Connection closed");
     });
 
     channel.addEventListener("message", (event) => {
-      const frame = JSON.parse(event.data);
-      if (frame.type === "chat") {
-        addMessage(frame.from, frame.text, false);
-      }
+      renderFrame(JSON.parse(event.data), false);
     });
+  }
+
+  function submitComposer() {
+    const text = els.input.value.trim();
+    if (!text || !state.dc || state.dc.readyState !== "open") {
+      return;
+    }
+
+    sendChat(text);
+    els.input.value = "";
+    autosizeComposer();
   }
 
   function sendChat(text) {
@@ -224,7 +281,7 @@
       createdAt: Date.now(),
     };
     state.dc.send(JSON.stringify(frame));
-    addMessage(state.role, text, true);
+    renderFrame(frame, true);
   }
 
   async function sendSignal(body) {
@@ -272,27 +329,158 @@
     });
   }
 
+  function renderFrame(frame, self) {
+    if (frame.type === "chat") {
+      addMessage(frame.from ?? (self ? state.role : "peer"), frame.text, self);
+      return;
+    }
+
+    if (frame.type === "status" || frame.type === "error") {
+      addNotice(frame.message ?? frame.text ?? JSON.stringify(frame));
+      return;
+    }
+
+    if (frame.type === "tool_call" || frame.type === "tool_result") {
+      addToolFrame(frame, self);
+      return;
+    }
+
+    addToolFrame(
+      {
+        type: "event",
+        name: frame.type ?? "unknown",
+        output: frame,
+      },
+      self,
+    );
+  }
+
   function addMessage(from, text, self) {
-    const el = document.createElement("div");
-    el.className = `message${self ? " self" : ""}`;
-    el.innerHTML = `<div class="meta"></div><div></div>`;
-    el.children[0].textContent = from;
-    el.children[1].textContent = text;
-    els.log.append(el);
-    el.scrollIntoView({ block: "end" });
+    const row = document.createElement("div");
+    row.className = `turn${self ? " self" : ""}`;
+
+    const avatar = document.createElement("div");
+    avatar.className = "avatar";
+    avatar.textContent = initials(from);
+
+    const stack = document.createElement("div");
+    stack.className = "message-stack";
+
+    const meta = document.createElement("div");
+    meta.className = "message-meta";
+    meta.textContent = labelForRole(from);
+
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    appendTextWithCode(bubble, text);
+
+    stack.append(meta, bubble);
+    row.append(avatar, stack);
+    els.log.append(row);
+    scrollToBottom();
+  }
+
+  function addToolFrame(frame, self) {
+    const row = document.createElement("div");
+    row.className = `turn${self ? " self" : ""}`;
+
+    const avatar = document.createElement("div");
+    avatar.className = "avatar";
+    avatar.textContent = "tl";
+
+    const stack = document.createElement("div");
+    stack.className = "message-stack";
+
+    const meta = document.createElement("div");
+    meta.className = "message-meta";
+    meta.textContent = frame.type === "tool_result" ? "tool result" : "tool";
+
+    const card = document.createElement("div");
+    card.className = "tool-card";
+
+    const header = document.createElement("div");
+    header.className = "tool-header";
+
+    const name = document.createElement("span");
+    name.textContent = frame.name ?? frame.tool ?? frame.type ?? "tool";
+
+    const stateLabel = document.createElement("span");
+    stateLabel.textContent = frame.status ?? frame.type ?? "event";
+
+    const body = document.createElement("pre");
+    body.className = "tool-body";
+    body.textContent = formatToolBody(frame);
+
+    header.append(name, stateLabel);
+    card.append(header, body);
+    stack.append(meta, card);
+    row.append(avatar, stack);
+    els.log.append(row);
+    scrollToBottom();
   }
 
   function addNotice(text) {
-    const el = document.createElement("div");
-    el.className = "notice";
-    el.textContent = text;
-    els.log.append(el);
-    el.scrollIntoView({ block: "end" });
+    const row = document.createElement("div");
+    row.className = "event-row";
+
+    const chip = document.createElement("div");
+    chip.className = "event-chip";
+    chip.textContent = text;
+
+    row.append(chip);
+    els.log.append(row);
+    scrollToBottom();
+  }
+
+  function appendTextWithCode(parent, text) {
+    const parts = String(text ?? "").split(/```/g);
+    for (let index = 0; index < parts.length; index += 1) {
+      if (index % 2 === 1) {
+        const pre = document.createElement("pre");
+        pre.textContent = stripCodeLanguage(parts[index]);
+        parent.append(pre);
+      } else if (parts[index]) {
+        const paragraph = document.createElement("p");
+        paragraph.textContent = parts[index];
+        parent.append(paragraph);
+      }
+    }
+  }
+
+  function stripCodeLanguage(value) {
+    return value.replace(/^[a-zA-Z0-9_-]+\n/, "");
+  }
+
+  function formatToolBody(frame) {
+    const body =
+      frame.output ?? frame.result ?? frame.arguments ?? frame.input ?? frame;
+    if (typeof body === "string") {
+      return body;
+    }
+    return JSON.stringify(body, null, 2);
   }
 
   function setPill(el, text, stateClass = "") {
-    el.className = `pill${stateClass ? ` ${stateClass}` : ""}`;
+    el.className = `status-pill${stateClass ? ` ${stateClass}` : ""}`;
     el.textContent = text;
+  }
+
+  function setComposer(enabled, hint) {
+    els.input.disabled = !enabled;
+    els.send.disabled = !enabled;
+    els.hint.textContent = hint;
+  }
+
+  function autosizeComposer() {
+    els.input.style.height = "auto";
+    els.input.style.height = `${Math.min(180, els.input.scrollHeight)}px`;
+  }
+
+  function scrollToBottom() {
+    els.scroll.scrollTo({
+      top: els.scroll.scrollHeight,
+      behavior: "smooth",
+    });
   }
 })();
 
@@ -311,6 +499,28 @@ function readSession() {
 function readSecret() {
   const hash = new URLSearchParams(location.hash.slice(1));
   return hash.get("k") ?? "";
+}
+
+function labelForRole(role) {
+  if (role === "agent") {
+    return "exo";
+  }
+  if (role === "user") {
+    return "you";
+  }
+  return role;
+}
+
+function initials(role) {
+  if (role === "agent") {
+    return "ex";
+  }
+  if (role === "user") {
+    return "yo";
+  }
+  return String(role ?? "??")
+    .slice(0, 2)
+    .toLowerCase();
 }
 
 function bytesToBase64url(bytes) {
