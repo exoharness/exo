@@ -180,14 +180,25 @@ function ChatApp() {
       });
 
       ws.addEventListener("message", async (event) => {
-        const message = parseRelayMessage(event.data);
-        if (!message) {
-          addNotice("Rejected a relay message that was not JSON.", "danger");
+        let message;
+        try {
+          message = JSON.parse(event.data);
+        } catch (error) {
+          console.warn("Unable to parse relay message", error);
+          addNotice("Rejected a malformed relay message.", "danger");
+          return;
+        }
+
+        if (!isRecord(message)) {
+          addNotice(
+            "Rejected a relay message that was not an object.",
+            "danger",
+          );
           return;
         }
 
         if (message.channel === "rendezvous" && message.type === "presence") {
-          handlePresence(message.roles ?? []);
+          handlePresence(Array.isArray(message.roles) ? message.roles : []);
           return;
         }
 
@@ -780,12 +791,8 @@ function formatToolBody(frame) {
   return JSON.stringify(body, null, 2);
 }
 
-function parseRelayMessage(value) {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function copyText(value) {
