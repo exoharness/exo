@@ -5,6 +5,7 @@ import {
   AnthropicRuntime,
   ChatCompletionsRuntime,
   isAnthropicModel,
+  isOpenRouterBinding,
   modelRequiresResponsesApi,
   responseToLinguaEvents,
   responseToolCalls,
@@ -62,6 +63,21 @@ describe("model runtime dispatch", () => {
         apiKey: "key",
       }),
     ).toBeInstanceOf(AnthropicRuntime);
+  });
+
+  it("routes OpenRouter bindings through chat completions by base URL", () => {
+    expect(
+      isOpenRouterBinding({ baseUrl: "https://openrouter.ai/api/v1" }),
+    ).toBe(true);
+    expect(isOpenRouterBinding({ baseUrl: null })).toBe(false);
+    // A Responses-looking model name over OpenRouter still uses chat completions.
+    expect(
+      runtimeFromModelBinding(undefined, {
+        model: "openai/gpt-5-pro",
+        apiKey: "key",
+        baseUrl: "https://openrouter.ai/api/v1",
+      }),
+    ).toBeInstanceOf(ChatCompletionsRuntime);
   });
 });
 
