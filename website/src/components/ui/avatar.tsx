@@ -1,8 +1,15 @@
+import * as React from "react";
 import { Avatar as AvatarPrimitive } from "radix-ui";
 
-import { cn } from "../../lib/utils.js";
+import { cn } from "@/lib/utils";
 
-export function Avatar({ className, size = "default", ...props }) {
+function Avatar({
+  className,
+  size = "default",
+  ...props
+}: React.ComponentProps<typeof AvatarPrimitive.Root> & {
+  size?: "default" | "sm" | "lg";
+}) {
   return (
     <AvatarPrimitive.Root
       data-slot="avatar"
@@ -16,7 +23,10 @@ export function Avatar({ className, size = "default", ...props }) {
   );
 }
 
-export function AvatarImage({ className, ...props }) {
+function AvatarImage({
+  className,
+  ...props
+}: React.ComponentProps<typeof AvatarPrimitive.Image>) {
   return (
     <AvatarPrimitive.Image
       data-slot="avatar-image"
@@ -29,7 +39,10 @@ export function AvatarImage({ className, ...props }) {
   );
 }
 
-export function AvatarFallback({ className, ...props }) {
+function AvatarFallback({
+  className,
+  ...props
+}: React.ComponentProps<typeof AvatarPrimitive.Fallback>) {
   return (
     <AvatarPrimitive.Fallback
       data-slot="avatar-fallback"
@@ -42,7 +55,7 @@ export function AvatarFallback({ className, ...props }) {
   );
 }
 
-export function AvatarBadge({ className, ...props }) {
+function AvatarBadge({ className, ...props }: React.ComponentProps<"span">) {
   return (
     <span
       data-slot="avatar-badge"
@@ -58,7 +71,7 @@ export function AvatarBadge({ className, ...props }) {
   );
 }
 
-export function AvatarGroup({ className, ...props }) {
+function AvatarGroup({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="avatar-group"
@@ -71,7 +84,10 @@ export function AvatarGroup({ className, ...props }) {
   );
 }
 
-export function AvatarGroupCount({ className, ...props }) {
+function AvatarGroupCount({
+  className,
+  ...props
+}: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="avatar-group-count"
@@ -83,3 +99,12 @@ export function AvatarGroupCount({ className, ...props }) {
     />
   );
 }
+
+export {
+  Avatar,
+  AvatarImage,
+  AvatarFallback,
+  AvatarGroup,
+  AvatarGroupCount,
+  AvatarBadge,
+};

@@ -15,19 +15,19 @@ import {
   AttachmentContent,
   AttachmentDescription,
   AttachmentTitle,
-} from "./components/ui/attachment.jsx";
-import { Avatar, AvatarFallback } from "./components/ui/avatar.jsx";
-import { Badge } from "./components/ui/badge.jsx";
-import { Bubble, BubbleContent } from "./components/ui/bubble.jsx";
-import { Button } from "./components/ui/button.jsx";
-import { Marker, MarkerContent, MarkerIcon } from "./components/ui/marker.jsx";
+} from "@/components/ui/attachment";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
+import { Bubble, BubbleContent } from "@/components/ui/bubble";
+import { Button } from "@/components/ui/button";
+import { Marker, MarkerContent, MarkerIcon } from "@/components/ui/marker";
 import {
   Message,
   MessageAvatar,
   MessageContent,
   MessageFooter,
   MessageHeader,
-} from "./components/ui/message.jsx";
+} from "@/components/ui/message";
 import {
   MessageScroller,
   MessageScrollerButton,
@@ -35,8 +35,8 @@ import {
   MessageScrollerItem,
   MessageScrollerProvider,
   MessageScrollerViewport,
-} from "./components/ui/message-scroller.jsx";
-import { Textarea } from "./components/ui/textarea.jsx";
+} from "@/components/ui/message-scroller";
+import { Textarea } from "@/components/ui/textarea";
 import "./chat.css";
 
 function ChatApp() {
@@ -514,7 +514,10 @@ function ChatApp() {
           />
           <div className="composer-bar">
             <div className="composer-tools">
-              <Badge variant={composer.enabled ? "success" : "secondary"}>
+              <Badge
+                className={`composer-status composer-status-${composer.enabled ? "success" : "idle"}`}
+                variant={composer.enabled ? "outline" : "secondary"}
+              >
                 {composer.label}
               </Badge>
             </div>
@@ -535,7 +538,10 @@ function ChatApp() {
 
 function StatusBadge({ icon: Icon, status }) {
   return (
-    <Badge className="status-badge" variant={status.tone}>
+    <Badge
+      className={`status-badge status-badge-${status.tone}`}
+      variant={status.tone === "idle" ? "secondary" : "outline"}
+    >
       <Icon />
       <span>{status.label}</span>
       <strong>{status.value}</strong>

@@ -1,6 +1,8 @@
-import { cn } from "../../lib/utils.js";
+import * as React from "react";
 
-export function MessageGroup({ className, ...props }) {
+import { cn } from "@/lib/utils";
+
+function MessageGroup({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="message-group"
@@ -10,7 +12,11 @@ export function MessageGroup({ className, ...props }) {
   );
 }
 
-export function Message({ align = "start", className, ...props }) {
+function Message({
+  className,
+  align = "start",
+  ...props
+}: React.ComponentProps<"div"> & { align?: "start" | "end" }) {
   return (
     <div
       data-slot="message"
@@ -24,7 +30,7 @@ export function Message({ align = "start", className, ...props }) {
   );
 }
 
-export function MessageAvatar({ className, ...props }) {
+function MessageAvatar({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="message-avatar"
@@ -37,7 +43,7 @@ export function MessageAvatar({ className, ...props }) {
   );
 }
 
-export function MessageContent({ className, ...props }) {
+function MessageContent({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="message-content"
@@ -50,7 +56,7 @@ export function MessageContent({ className, ...props }) {
   );
 }
 
-export function MessageHeader({ className, ...props }) {
+function MessageHeader({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="message-header"
@@ -63,7 +69,7 @@ export function MessageHeader({ className, ...props }) {
   );
 }
 
-export function MessageFooter({ className, ...props }) {
+function MessageFooter({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="message-footer"
@@ -75,3 +81,12 @@ export function MessageFooter({ className, ...props }) {
     />
   );
 }
+
+export {
+  MessageGroup,
+  Message,
+  MessageAvatar,
+  MessageContent,
+  MessageFooter,
+  MessageHeader,
+};

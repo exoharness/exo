@@ -212,6 +212,30 @@ h1 {
   font-weight: 650;
 }
 
+.status-badge-success,
+.composer-status-success {
+  border-color: color-mix(in oklch, var(--success) 38%, transparent);
+  background: color-mix(in oklch, var(--success) 12%, transparent);
+  color: var(--success);
+}
+
+.status-badge-warning {
+  border-color: color-mix(in oklch, var(--warning) 38%, transparent);
+  background: color-mix(in oklch, var(--warning) 12%, transparent);
+  color: var(--warning);
+}
+
+.status-badge-danger {
+  border-color: color-mix(in oklch, var(--destructive) 38%, transparent);
+  background: color-mix(in oklch, var(--destructive) 12%, transparent);
+  color: var(--destructive);
+}
+
+.status-badge-idle,
+.composer-status-idle {
+  color: var(--muted-foreground);
+}
+
 .message-meta {
   gap: 8px;
 }
