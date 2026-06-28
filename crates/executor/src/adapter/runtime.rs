@@ -746,7 +746,7 @@ async fn handle_worker_message(
     sender: Option<String>,
     text: String,
     message_id: Option<String>,
-    _metadata: serde_json::Value,
+    metadata: serde_json::Value,
     attachments: Vec<AdapterAttachment>,
 ) -> Result<()> {
     if let Some(message_id) = &message_id
@@ -784,6 +784,7 @@ async fn handle_worker_message(
         &target,
         sender.as_deref(),
         &text,
+        &metadata,
         &attachments,
         image_parts.len(),
     );
@@ -897,6 +898,7 @@ fn compose_inbound_wakeup_prompt(
     target: &str,
     sender: Option<&str>,
     text: &str,
+    metadata: &serde_json::Value,
     attachments: &[AdapterAttachment],
     attached_image_count: usize,
 ) -> String {
@@ -905,6 +907,13 @@ fn compose_inbound_wakeup_prompt(
         "{} message received at target `{}` from {} via adapter `{}`:\n\n{}",
         config.adapter_type, target, sender, adapter.name, text,
     );
+    if config.adapter_type == "slack"
+        && let Some(dm_target) = metadata.get("dmTarget").and_then(|value| value.as_str())
+    {
+        prompt.push_str(&format!(
+            "\n\nSlack sender DM target: `{dm_target}`. Use this only for appropriate private follow-up; do not use DM to bypass safety policy.",
+        ));
+    }
     if !attachments.is_empty() {
         prompt.push_str("\n\nThe message includes these attachments:\n");
         for attachment in attachments {
@@ -1158,6 +1167,7 @@ mod tests {
             "channel-9",
             Some("martin"),
             "hello",
+            &serde_json::json!({}),
             &[],
             0,
         );
@@ -1180,6 +1190,7 @@ mod tests {
             "channel-9",
             None,
             "look at this",
+            &serde_json::json!({}),
             &attachments,
             1,
         );
@@ -1189,5 +1200,24 @@ mod tests {
         assert!(prompt.contains("- document `photo.png` (image/png) — https://a/doc.pdf"));
         assert!(prompt.contains("1 image(s) are attached to this message"));
         assert!(prompt.contains("Attachment URLs may expire quickly"));
+    }
+
+    #[test]
+    fn wakeup_prompt_includes_slack_dm_target() {
+        let mut adapter = test_adapter_record();
+        adapter.config.adapter_type = "slack".to_string();
+        adapter.name = "slack-dev".to_string();
+        let prompt = compose_inbound_wakeup_prompt(
+            &adapter.config,
+            &adapter,
+            "C123:1700000000.000000",
+            Some("U123"),
+            "hello",
+            &serde_json::json!({ "dmTarget": "dm:U123" }),
+            &[],
+            0,
+        );
+        assert!(prompt.contains("Slack sender DM target: `dm:U123`"));
+        assert!(prompt.contains("do not use DM to bypass safety policy"));
     }
 }

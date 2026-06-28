@@ -42,7 +42,7 @@ function createAdapterTool(): ToolInstance {
     definition: {
       name: "create_adapter",
       description:
-        "Create and enable a long-running adapter for this conversation. Use source 'built_in' with config type 'irc' or 'agent-cli'. Use source 'library' with config type 'whatsapp', 'signal', or 'discord' for shipped library adapters.",
+        "Create and enable a long-running adapter for this conversation. Use source 'built_in' with config type 'irc' or 'agent-cli'. Use source 'library' with config type 'whatsapp', 'signal', 'discord', or 'slack' for shipped library adapters.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -118,7 +118,7 @@ function sendAdapterMessageTool(): ToolInstance {
   return hostTool({
     name: "send_adapter_message",
     description:
-      "Send an explicit outbound message through an adapter. For IRC this sends PRIVMSG to the adapter channel. For WhatsApp, provide target as the chat id from the inbound message. For Signal, provide a username such as u:example.01, a phone number, UUID, or group id. For Discord, provide a channel id unless defaultChannelId was configured. Only call this when the user or conversation context makes the external side effect appropriate.",
+      "Send an explicit outbound message through an adapter. For IRC this sends PRIVMSG to the adapter channel. For WhatsApp, provide target as the chat id from the inbound message. For Signal, provide a username such as u:example.01, a phone number, UUID, or group id. For Discord, provide a channel id unless defaultChannelId was configured. For Slack, provide a channel id, CHANNEL_ID:THREAD_TS, or dm:USER_ID unless defaultChannelId was configured. Only call this when the user or conversation context makes the external side effect appropriate.",
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -135,7 +135,7 @@ function sendAdapterMessageTool(): ToolInstance {
         target: {
           type: ["string", "null"],
           description:
-            "External destination for adapters that need one. Use the target from the inbound wakeup when available; WhatsApp requires a chat id, Signal requires a username/phone/UUID/group id, and Discord requires a channel id unless defaultChannelId was configured.",
+            "External destination for adapters that need one. Use the target from the inbound wakeup when available; WhatsApp requires a chat id, Signal requires a username/phone/UUID/group id, Discord requires a channel id unless defaultChannelId was configured, and Slack accepts CHANNEL_ID, CHANNEL_ID:THREAD_TS, or dm:USER_ID.",
         },
         attachments: {
           anyOf: [
@@ -256,6 +256,81 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
           "channel",
           "passwordSecretId",
           "trigger",
+        ],
+      },
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          type: { type: "string", enum: ["slack"] },
+          botTokenSecretId: {
+            type: "string",
+            description:
+              "Secret name or id containing the Slack Bot User OAuth Token. The worker receives it as EXO_SLACK_BOT_TOKEN.",
+          },
+          signingSecretId: {
+            type: "string",
+            description:
+              "Secret name or id containing the Slack Signing Secret. The worker receives it as EXO_SLACK_SIGNING_SECRET and verifies every Events API request.",
+          },
+          port: {
+            type: "number",
+            description:
+              "Local HTTP port where the Slack worker listens. Use 3939 for the default ngrok setup.",
+          },
+          path: {
+            type: "string",
+            description:
+              "Local HTTP request path for Slack Events API callbacks. Use /slack/events.",
+          },
+          defaultChannelId: {
+            type: ["string", "null"],
+            description:
+              "Optional Slack channel id, CHANNEL_ID:THREAD_TS, or dm:USER_ID used when send_adapter_message target is null.",
+          },
+          trigger: {
+            type: "string",
+            enum: ["all_messages", "mentions_only"],
+            description:
+              "Wake policy. Use mentions_only for local Slack testing; all_messages requires extra Slack events and scopes.",
+          },
+          allowedChannels: {
+            anyOf: [
+              { type: "array", items: { type: "string" } },
+              { type: "null" },
+            ],
+            description:
+              "Optional list of Slack channel ids to wake on. Use null to allow every channel Slack sends to this app.",
+          },
+          allowBots: {
+            type: "boolean",
+            description:
+              "When true, messages from other Slack bot accounts wake this adapter. Defaults to false. The adapter never wakes on its own messages.",
+          },
+          threadReplies: {
+            type: "boolean",
+            description:
+              "When true, inbound targets include the Slack thread timestamp as CHANNEL_ID:THREAD_TS so replies go to the same thread.",
+          },
+          conversationScope: {
+            type: "string",
+            enum: ["adapter", "target"],
+            description:
+              "Conversation routing mode. Use target to create and wake a separate conversation per Slack target. Defaults to target.",
+          },
+        },
+        required: [
+          "type",
+          "botTokenSecretId",
+          "signingSecretId",
+          "port",
+          "path",
+          "defaultChannelId",
+          "trigger",
+          "allowedChannels",
+          "allowBots",
+          "threadReplies",
+          "conversationScope",
         ],
       },
       {
@@ -451,7 +526,10 @@ function validateAdapterSource(source: string, type: string): void {
     throw new Error(`${type} adapters must use source 'built_in'`);
   }
   if (
-    (type === "whatsapp" || type === "signal" || type === "discord") &&
+    (type === "whatsapp" ||
+      type === "signal" ||
+      type === "discord" ||
+      type === "slack") &&
     source !== "library"
   ) {
     throw new Error(`${type} adapters must use source 'library'`);

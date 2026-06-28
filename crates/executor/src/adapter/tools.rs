@@ -96,6 +96,7 @@ enum AdapterCreationConfig {
     Whatsapp(WhatsappAdapterCreationConfig),
     Signal(SignalAdapterCreationConfig),
     Discord(DiscordAdapterCreationConfig),
+    Slack(SlackAdapterCreationConfig),
     AgentCli(AgentCliAdapterCreationConfig),
 }
 
@@ -163,6 +164,24 @@ struct DiscordAdapterCreationConfig {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SlackAdapterCreationConfig {
+    #[serde(rename = "type")]
+    _adapter_type: SlackAdapterType,
+    bot_token_secret_id: String,
+    signing_secret_id: String,
+    port: u16,
+    path: String,
+    default_channel_id: Option<String>,
+    trigger: SlackTrigger,
+    allowed_channels: Option<Vec<String>>,
+    allow_bots: bool,
+    thread_replies: bool,
+    #[serde(default)]
+    conversation_scope: Option<AdapterConversationScope>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AgentCliAdapterCreationConfig {
     #[serde(rename = "type")]
     _adapter_type: AgentCliAdapterType,
@@ -209,6 +228,12 @@ enum DiscordAdapterType {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum SlackAdapterType {
+    Slack,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum IrcTrigger {
     Mention,
@@ -225,6 +250,13 @@ enum ChatTrigger {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum DiscordTrigger {
+    AllMessages,
+    MentionsOnly,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SlackTrigger {
     AllMessages,
     MentionsOnly,
 }
@@ -262,6 +294,7 @@ impl AdapterCreationConfig {
             Self::Whatsapp(_) => "whatsapp",
             Self::Signal(_) => "signal",
             Self::Discord(_) => "discord",
+            Self::Slack(_) => "slack",
             Self::AgentCli(_) => "agent-cli",
         }
     }
@@ -375,6 +408,42 @@ impl AdapterCreationConfig {
                     secret_env,
                 })
             }
+            Self::Slack(config) => {
+                require_source(source, AdapterSource::Library, "slack")?;
+                if !config.path.starts_with('/') {
+                    bail!("slack path must start with /");
+                }
+                Ok(AdapterConfig {
+                    adapter_type: "slack".to_string(),
+                    worker_command: options.worker_command("slack"),
+                    initialization: serde_json::json!({
+                        "botTokenEnv": "EXO_SLACK_BOT_TOKEN",
+                        "signingSecretEnv": "EXO_SLACK_SIGNING_SECRET",
+                        "port": config.port,
+                        "path": config.path,
+                        "defaultChannelId": config.default_channel_id,
+                        "trigger": config.trigger.as_str(),
+                        "allowedChannels": config.allowed_channels,
+                        "allowBots": config.allow_bots,
+                        "threadReplies": config.thread_replies,
+                        "conversationScope": config
+                            .conversation_scope
+                            .map(|scope| scope.as_str())
+                            .unwrap_or("target"),
+                    }),
+                    state_dir: None,
+                    secret_env: vec![
+                        WorkerSecretEnvVar {
+                            env: "EXO_SLACK_BOT_TOKEN".to_string(),
+                            secret_id: config.bot_token_secret_id,
+                        },
+                        WorkerSecretEnvVar {
+                            env: "EXO_SLACK_SIGNING_SECRET".to_string(),
+                            secret_id: config.signing_secret_id,
+                        },
+                    ],
+                })
+            }
             Self::AgentCli(config) => {
                 require_source(source, AdapterSource::BuiltIn, "agent-cli")?;
                 if !config.mount_root.starts_with('/') {
@@ -430,6 +499,15 @@ impl WhatsappLinkMethod {
 }
 
 impl DiscordTrigger {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::AllMessages => "all_messages",
+            Self::MentionsOnly => "mentions_only",
+        }
+    }
+}
+
+impl SlackTrigger {
     fn as_str(&self) -> &'static str {
         match self {
             Self::AllMessages => "all_messages",
@@ -607,7 +685,11 @@ pub async fn execute_send_adapter_message_tool(
     else {
         return Ok(not_found());
     };
-    let target = resolve_send_target(scoped_target.as_deref(), args.target.as_deref())?;
+    let target = resolve_send_target(
+        &adapter.config.adapter_type,
+        scoped_target.as_deref(),
+        args.target.as_deref(),
+    )?;
     let attachments = args.attachments.unwrap_or_default();
     if !attachments.is_empty()
         && adapter.config.adapter_type != "whatsapp"
@@ -698,10 +780,17 @@ fn classify_adapter_access<'a>(
 /// Resolve the effective send target, enforcing that a target-scoped
 /// conversation may only send to its mapped target (a missing target defaults
 /// to it). A root conversation sends to whatever it requested.
-fn resolve_send_target(scoped: Option<&str>, requested: Option<&str>) -> Result<Option<String>> {
+fn resolve_send_target(
+    adapter_type: &str,
+    scoped: Option<&str>,
+    requested: Option<&str>,
+) -> Result<Option<String>> {
     match scoped {
         Some(scoped) => match requested {
-            Some(requested) if requested != scoped => {
+            Some(requested)
+                if requested != scoped
+                    && !allows_scoped_alternate_target(adapter_type, requested) =>
+            {
                 bail!("target-scoped conversation may only send to mapped target {scoped}")
             }
             Some(requested) => Ok(Some(requested.to_string())),
@@ -709,6 +798,10 @@ fn resolve_send_target(scoped: Option<&str>, requested: Option<&str>) -> Result<
         },
         None => Ok(requested.map(str::to_string)),
     }
+}
+
+fn allows_scoped_alternate_target(adapter_type: &str, requested: &str) -> bool {
+    adapter_type == "slack" && requested.starts_with("dm:") && requested.len() > "dm:".len()
 }
 
 async fn resolve_sandbox_attachments(
@@ -1064,22 +1157,26 @@ mod tests {
     fn resolve_send_target_enforces_scope() {
         // Root (unscoped) passes the requested target through, or none.
         assert_eq!(
-            resolve_send_target(None, Some("x")).unwrap(),
+            resolve_send_target("discord", None, Some("x")).unwrap(),
             Some("x".into())
         );
-        assert_eq!(resolve_send_target(None, None).unwrap(), None);
+        assert_eq!(resolve_send_target("discord", None, None).unwrap(), None);
         // Scoped: missing target defaults to the mapped one.
         assert_eq!(
-            resolve_send_target(Some("chan-A"), None).unwrap(),
+            resolve_send_target("discord", Some("chan-A"), None).unwrap(),
             Some("chan-A".into())
         );
         // Scoped: matching target is allowed.
         assert_eq!(
-            resolve_send_target(Some("chan-A"), Some("chan-A")).unwrap(),
+            resolve_send_target("discord", Some("chan-A"), Some("chan-A")).unwrap(),
             Some("chan-A".into())
         );
         // Scoped: a different target is refused — the key cross-channel guard.
-        assert!(resolve_send_target(Some("chan-A"), Some("chan-B")).is_err());
+        assert!(resolve_send_target("discord", Some("chan-A"), Some("chan-B")).is_err());
+        assert_eq!(
+            resolve_send_target("slack", Some("C123:1700000000.000000"), Some("dm:U123")).unwrap(),
+            Some("dm:U123".into())
+        );
     }
 
     #[tokio::test]
