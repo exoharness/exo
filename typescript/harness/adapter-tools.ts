@@ -77,7 +77,7 @@ function listAdaptersTool(): ToolInstance {
   return hostTool({
     name: "list_adapters",
     description:
-      "List adapters for this conversation. Disabled adapters are hidden unless includeDisabled is true. Each record includes health fields: last_connected_at_ms and last_error.",
+      "List adapters for this conversation. Disabled adapters are hidden unless includeDisabled is true. Each record includes health fields: last_connected_at_ms and last_error. ExoChat records include chatUrl.",
     parameters: {
       type: "object",
       additionalProperties: false,

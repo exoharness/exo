@@ -28,7 +28,7 @@ use, research, coding etc.) but can also extent itself as needed.
 To use Exo as an agent, you'll ned an OpenAI API key. If you have that, simply do the following:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/61cygni/exo/main/public/setup.sh -o setup.sh
+curl -fsSL https://raw.githubusercontent.com/ankrgyl/exo/main/public/setup.sh -o setup.sh
 bash setup.sh
 ```
 
@@ -47,17 +47,16 @@ Open that URL in your browser or on your phone.
 When complete, the script will drop you to a prompt you can use to talk to your
 agent locally.
 
-## Using Exo
-
-The setup script above creates a minima Exo agent you can chat with directly on
-the command line or via ExoChat. Once it's running you can have it start to build
-itself for whatever use you have in mind. For example, try telling it to do the following:
+A good end to end test is to have it install a tool in the sanbox and use it with the task scheduler. For example,
+try the following prompt:
 
 ```
 Install python3 and curl in the sandbox. You don't need sudo, just use apt-get. Once you've done that, please
 schedule a task to run every minute that grabs news headlines from the BBC RSS feed. Only print new headlines you've
 not printed before. Please print them here.
 ```
+
+## Exo Basics
 
 ## Architecture
 

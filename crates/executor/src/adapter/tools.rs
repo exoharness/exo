@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
-use base64::Engine;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use exoharness::{
     AgentHandle, ConversationHandle, Result, RunInSandboxRequest, SandboxProcess, ToolRequest,
     ToolResult, Uuid7,
@@ -28,6 +28,7 @@ const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_ATTACHMENT_BASE64_BYTES: usize = MAX_ATTACHMENT_BYTES.div_ceil(3) * 4 + 4;
 const ATTACHMENT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_ATTACHMENT_STDERR_BYTES: usize = 64 * 1024;
+const DEFAULT_EXOCHAT_BASE_URL: &str = "https://exoharness.ai";
 
 #[derive(Debug, Clone)]
 pub struct AdapterCreationOptions {
@@ -400,13 +401,14 @@ impl AdapterCreationConfig {
                 if channel_id.is_some() != secret.is_some() {
                     bail!("exochat channelId and secret must either both be set or both be null");
                 }
+                let base_url = exochat_base_url(config.base_url)?;
                 Ok(AdapterConfig {
                     adapter_type: "exochat".to_string(),
                     worker_command: options.worker_command("exochat"),
                     initialization: serde_json::json!({
-                        "baseUrl": config.base_url,
-                        "channelId": channel_id,
-                        "secret": secret,
+                        "baseUrl": base_url,
+                        "channelId": channel_id.unwrap_or_else(|| Uuid7::now().to_string()),
+                        "secret": secret.unwrap_or_else(exochat_secret),
                     }),
                     state_dir: None,
                     secret_env: Vec::new(),
@@ -486,6 +488,22 @@ fn require_source(
     Ok(())
 }
 
+fn exochat_base_url(value: Option<String>) -> Result<String> {
+    let value = value
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| std::env::var("EXO_CHAT_BASE_URL").ok())
+        .unwrap_or_else(|| DEFAULT_EXOCHAT_BASE_URL.to_string());
+    let value = value.trim().trim_end_matches('/').to_string();
+    if !value.starts_with("https://") && !value.starts_with("http://") {
+        bail!("exochat baseUrl must start with http:// or https://");
+    }
+    Ok(value)
+}
+
+fn exochat_secret() -> String {
+    URL_SAFE_NO_PAD.encode(format!("{}:{}", Uuid7::now(), Uuid7::now()))
+}
+
 fn worker_command(path: PathBuf) -> Vec<String> {
     vec![
         "pnpm".to_string(),
@@ -519,7 +537,7 @@ pub async fn execute_create_adapter_tool(
     }
     Ok(serde_json::json!({
         "ok": true,
-        "adapter": adapter,
+        "adapter": adapter_tool_result(adapter),
     }))
 }
 
@@ -539,10 +557,35 @@ pub async fn execute_list_adapters_tool(
             args.include_disabled.unwrap_or(false),
         )
         .await?;
+    let adapters = adapters
+        .into_iter()
+        .map(adapter_tool_result)
+        .collect::<Vec<_>>();
     Ok(serde_json::json!({
         "ok": true,
         "adapters": adapters,
     }))
+}
+
+fn adapter_tool_result(adapter: super::types::AdapterRecord) -> serde_json::Value {
+    let mut value = serde_json::to_value(&adapter).expect("adapter record serializes");
+    if adapter.config.adapter_type == "exochat"
+        && let Some(chat_url) = exochat_chat_url(&adapter.config)
+        && let serde_json::Value::Object(object) = &mut value
+    {
+        object.insert("chatUrl".to_string(), serde_json::Value::String(chat_url));
+    }
+    value
+}
+
+fn exochat_chat_url(config: &AdapterConfig) -> Option<String> {
+    let init = config.initialization.as_object()?;
+    let base_url = init.get("baseUrl")?.as_str()?.trim_end_matches('/');
+    let channel_id = init.get("channelId")?.as_str()?;
+    let secret = init.get("secret")?.as_str()?;
+    Some(format!(
+        "{base_url}/chat?role=user&c={channel_id}#k={secret}"
+    ))
 }
 
 pub async fn execute_list_adapter_events_tool(
@@ -1266,13 +1309,18 @@ mod tests {
         assert_eq!(adapter_config.adapter_type, "exochat");
         assert!(adapter_config.worker_command[2].ends_with("/tmp/exo-adapters/exochat/worker.ts"));
         assert_eq!(
-            adapter_config.initialization,
-            serde_json::json!({
-                "baseUrl": null,
-                "channelId": null,
-                "secret": null,
-            })
+            adapter_config.initialization["baseUrl"],
+            serde_json::json!(DEFAULT_EXOCHAT_BASE_URL)
         );
+        assert!(
+            adapter_config.initialization["channelId"]
+                .as_str()
+                .is_some()
+        );
+        assert!(adapter_config.initialization["secret"].as_str().is_some());
+        let chat_url = exochat_chat_url(&adapter_config).unwrap();
+        assert!(chat_url.starts_with("https://exoharness.ai/chat?role=user&c="));
+        assert!(chat_url.contains("#k="));
         assert!(adapter_config.secret_env.is_empty());
 
         let error = parse(serde_json::Value::Null, serde_json::Value::Null)
@@ -1284,6 +1332,37 @@ mod tests {
             .into_adapter_config(AdapterSource::Library, &test_creation_options())
             .unwrap_err();
         assert!(error.to_string().contains("channelId and secret"));
+    }
+
+    #[tokio::test]
+    async fn exochat_adapter_tool_result_includes_chat_url() {
+        let tempdir = TempDir::new().unwrap();
+        let store = AdapterStore::new(tempdir.path().join("adapters"));
+        let adapter = store
+            .create_adapter(NewAdapter {
+                agent_id: "agent".to_string(),
+                conversation_id: "conversation".to_string(),
+                name: "exochat".to_string(),
+                source: AdapterSource::Library,
+                config: AdapterConfig {
+                    adapter_type: "exochat".to_string(),
+                    worker_command: vec!["pnpm".to_string(), "tsx".to_string()],
+                    initialization: serde_json::json!({
+                        "baseUrl": "https://chat.example.test",
+                        "channelId": "channel-123",
+                        "secret": "secret-456",
+                    }),
+                    state_dir: None,
+                    secret_env: Vec::new(),
+                },
+            })
+            .await
+            .unwrap();
+        let result = adapter_tool_result(adapter);
+        assert_eq!(
+            result["chatUrl"],
+            "https://chat.example.test/chat?role=user&c=channel-123#k=secret-456"
+        );
     }
 
     #[tokio::test]
