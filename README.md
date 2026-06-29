@@ -14,8 +14,7 @@ and (mostly) safely. The only thing it can't muck with is an event log which
 provides canonical history.
 
 The goal is to give an agent maximum power anbd flexibility to improve itself.
-Or customize itself for whatever purpose. For example an Exo agent can cost optimize
-itself, build custom tools, or even evolve itself to learn to play a game:
+Or customize itself for whatever purpose. For example an Exo agent can evolve to a better version of itself that is cheaper to run, or it can impprove itself to get better at tasks.
 
 <!-- ![Exo playinb pokemon go](docs/images/exo_playing.gif) -->
 
