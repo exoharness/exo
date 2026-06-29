@@ -12,7 +12,6 @@ import {
   type TurnContext,
 } from "@exo/harness";
 
-import { registerFalTools } from "./tools/fal/fal-tools";
 import { registerSchedulerTools } from "./scheduler-tools";
 import { registerSandboxTools } from "./sandbox-tools";
 import { registerGuardianTools } from "./guardian-tools";
@@ -49,7 +48,6 @@ async function registerExoclawTools(
   registerSchedulerTools(tools);
   registerAdapterTools(tools);
   registerIntrospectionTools(tools);
-  registerFalTools(tools);
   registerSandboxTools(tools);
   registerGuardianTools(tools);
   registerMemoryTools(tools);
@@ -88,11 +86,6 @@ async function exoclawInstructions(context: TurnContext): Promise<Message[]> {
     {
       role: "developer",
       content: `Your own source tree is mounted in the sandbox at ${repoPath}. Start with ${selfMapPath} when you need to inspect or modify Exoclaw itself. Use guardian_action for host-side builds and service restarts after code changes.`,
-    },
-    {
-      role: "developer",
-      content:
-        "Fal image generation: use fal_generate_image to create images with Ideogram 4.0. It requires FAL_KEY in the host environment. The tool caches generated images under /fal in the sandbox; post them to Discord with send_adapter_message attachments (kind=image, sandboxPath=images[0].sandboxPath). ExoChat is text-only right now, so do not send image attachments there. Leave attachToConversation null/false when the goal is posting externally; set it true only when you need to inspect the first image visually in the next model round.",
     },
   ];
   const localPrompt = readLocalPrompt();
