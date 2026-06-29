@@ -11,6 +11,7 @@ use crate::conversation_events::execute_list_conversation_events_tool;
 use crate::conversation_sandbox::{
     conversation_sandbox_spec, conversation_sandboxes, ensure_conversation_sandbox,
 };
+use crate::policy_sandbox::ensure_policy_sandbox;
 use crate::scheduler_store::SchedulerStore;
 use crate::scheduler_types::{
     DEFAULT_MAX_OUTPUT_BYTES, NewScheduledTask, ScheduledTaskSandboxMode,
@@ -116,6 +117,9 @@ impl ToolRuntime for ExoclawToolRuntime {
         match request.function_name.as_str() {
             "shell" => {
                 execute_exoclaw_shell_tool(agent, conversation, agent_config, config, request).await
+            }
+            "policy_shell" => {
+                execute_policy_shell_tool(agent, conversation, agent_config, config, request).await
             }
             "schedule_sandbox_task" => {
                 execute_schedule_task_tool(agent, conversation, &self.scheduler_store, request)
@@ -873,6 +877,36 @@ async fn execute_exoclaw_shell_tool(
     let process = agent
         .run_in_sandbox(RunInSandboxRequest {
             id: agent_sandbox.sandbox_id,
+            command: vec![program, "-lc".to_string(), args.command],
+            env: Default::default(),
+        })
+        .await?;
+    read_shell_process(process).await
+}
+
+// Runs a command in the agent's dedicated policy sandbox (its own source/code
+// box), distinct from the env sandbox used by `shell`. This is the self-edit
+// surface: the agent inspects, edits, and builds its own code here. Always
+// agent-scoped — there is one policy sandbox per agent regardless of the
+// conversation's env sandbox scope.
+async fn execute_policy_shell_tool(
+    agent: &dyn AgentHandle,
+    conversation: &dyn ConversationHandle,
+    agent_config: &AgentConfig,
+    config: &ConversationConfig,
+    request: &ToolRequest,
+) -> Result<ToolResult> {
+    let args =
+        serde_json::from_value::<ShellToolArguments>(Value::Object(request.arguments.clone()))?;
+    let program = config
+        .shell_program
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("shell tool is not enabled for this conversation"))?;
+    let policy_sandbox = ensure_policy_sandbox(agent, conversation, agent_config, config).await?;
+    let process = policy_sandbox
+        .conversation
+        .run_in_sandbox(RunInSandboxRequest {
+            id: policy_sandbox.sandbox_id,
             command: vec![program, "-lc".to_string(), args.command],
             env: Default::default(),
         })

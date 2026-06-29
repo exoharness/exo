@@ -23,6 +23,7 @@ mod harness_runtime;
 mod harness_tool;
 mod harness_types;
 mod local_sandbox;
+mod policy_sandbox;
 mod rlm;
 #[cfg(test)]
 mod rlm_tests;

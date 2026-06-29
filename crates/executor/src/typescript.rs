@@ -850,10 +850,24 @@ impl TypeScriptHarness<ExoclawToolRuntime> {
         runtime_config: Option<BraintrustRuntimeConfig>,
         env: HashMap<String, String>,
     ) -> Result<Self> {
+        let exoharness: Arc<dyn ExoHarness> = Arc::new(BasicExoHarness::new(exo_config).await?);
+        Self::exoclaw_from_exoharness(root, exoharness, runtime_config, env)
+    }
+
+    /// Build an Exoclaw harness over a caller-provided exoharness instead of a
+    /// fresh local one. This is what lets `--exoharness-url` work for Exoclaw:
+    /// the executor runs the turn while durable state lives in a remote kernel.
+    /// The scheduler/adapter tool stores stay rooted at `root` (host-side
+    /// concerns); only the exoharness (state) comes from the caller.
+    pub fn exoclaw_from_exoharness(
+        root: impl AsRef<Path>,
+        exoharness: Arc<dyn ExoHarness>,
+        runtime_config: Option<BraintrustRuntimeConfig>,
+        env: HashMap<String, String>,
+    ) -> Result<Self> {
         let workspace_root = std::env::current_dir()
             .context("failed to resolve current directory for Exoclaw harness")?;
         let root = root.as_ref();
-        let exoharness: Arc<dyn ExoHarness> = Arc::new(BasicExoHarness::new(exo_config).await?);
         let adapter_worker_root = workspace_root.join("examples/exoclaw/adapters");
         let tools = Arc::new(ExoclawToolRuntime::with_roots(
             root.join("scheduled-tasks"),

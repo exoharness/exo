@@ -809,7 +809,6 @@ async fn main() -> Result<()> {
     let pricing = Arc::new(cost::load(cli.pricing_path.clone(), cli.pricing_url.clone()).await);
     let harness = instantiate_harness(
         &cli.root,
-        &exo_config,
         exoharness,
         harness_kind,
         runtime_config.clone(),
@@ -2011,9 +2010,16 @@ async fn serve_exoharness_http(
     config: ServeConfig,
 ) -> Result<()> {
     init_serve_tracing(config.verbosity);
-    if !config.bind.ip().is_loopback() {
+    // Loopback binds are always allowed. A non-loopback bind (e.g. the Docker
+    // bridge gateway, so sandboxed executors can reach the kernel) is allowed
+    // only when EXO_SERVE_BEARER_TOKEN is set, so the kernel is never reachable
+    // unauthenticated off-host. The server enforces the token per request.
+    let bearer_token = std::env::var("EXO_SERVE_BEARER_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty());
+    if !config.bind.ip().is_loopback() && bearer_token.is_none() {
         anyhow::bail!(
-            "exo serve only binds loopback addresses; got {}",
+            "exo serve binds non-loopback address {} only when EXO_SERVE_BEARER_TOKEN is set (auth-gated)",
             config.bind
         );
     }
@@ -2030,6 +2036,7 @@ async fn serve_exoharness_http(
         exoharness,
         ExoHarnessHttpServeOptions {
             verbosity: config.verbosity,
+            bearer_token,
         },
     )
     .await?;
@@ -2089,6 +2096,18 @@ async fn instantiate_exoharness(
             harness = harness.with_bearer_token(bearer_token);
         }
         let remote: Arc<dyn ExoHarness> = Arc::new(harness);
+        // EXO_REMOTE_SANDBOX makes the kernel own sandboxes too: every op,
+        // including run_in_sandbox, routes to the remote kernel, which tracks
+        // the containers and execs into them by id. Used by an executor that
+        // runs inside a kernel-owned sandbox (it has no local backend of its
+        // own). Without it, the default LocalSandboxExoHarness keeps sandbox
+        // exec local for latency while only state goes remote.
+        let remote_sandbox = std::env::var("EXO_REMOTE_SANDBOX")
+            .ok()
+            .is_some_and(|value| !value.is_empty());
+        if remote_sandbox {
+            return Ok(remote);
+        }
         let local: Arc<dyn ExoHarness> = Arc::new(BasicExoHarness::new(exo_config.clone()).await?);
         return Ok(Arc::new(LocalSandboxExoHarness::new_with_force_local(
             remote, local, false,
@@ -2099,7 +2118,6 @@ async fn instantiate_exoharness(
 
 async fn instantiate_harness(
     root: &Path,
-    exo_config: &BasicExoHarnessConfig,
     exoharness: Arc<dyn ExoHarness>,
     kind: HarnessKind,
     runtime_config: Option<BraintrustRuntimeConfig>,
@@ -2119,13 +2137,12 @@ async fn instantiate_harness(
             env_vars,
         )),
         HarnessKind::Exoclaw => Arc::new(
-            TypeScriptHarness::<ExoclawToolRuntime>::exoclaw_from_root(
+            TypeScriptHarness::<ExoclawToolRuntime>::exoclaw_from_exoharness(
                 root,
-                exo_config.clone(),
+                exoharness,
                 runtime_config,
                 env_vars,
-            )
-            .await?,
+            )?,
         ),
         HarnessKind::TypeScript => Arc::new(TypeScriptHarness::from_exoharness(
             exoharness,

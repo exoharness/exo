@@ -9,9 +9,13 @@ use crate::protocol::{ClientMessage, Response, ServerMessage};
 use crate::server::ExoHarnessServer;
 use crate::{ExoHarness, Result};
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ExoHarnessHttpServeOptions {
     pub verbosity: u8,
+    /// When set, every `/request` call must present `Authorization: Bearer
+    /// <token>`. Required by `exo serve` whenever it binds a non-loopback
+    /// address, so the kernel is never reachable unauthenticated off-host.
+    pub bearer_token: Option<String>,
 }
 
 struct HttpServerState {
@@ -73,10 +77,28 @@ async fn health() -> impl Responder {
 }
 
 async fn handle_http_request(
+    req: actix_web::HttpRequest,
     state: web::Data<Arc<HttpServerState>>,
-    message: web::Json<ClientMessage>,
+    body: web::Bytes,
 ) -> impl Responder {
-    let ClientMessage::Request { id, request } = message.into_inner();
+    // Authenticate before doing any work, including body parsing, so an
+    // unauthenticated caller cannot reach the deserializer.
+    if let Some(expected) = &state.options.bearer_token {
+        let provided = req
+            .headers()
+            .get(actix_web::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok());
+        if provided != Some(format!("Bearer {expected}").as_str()) {
+            return HttpResponse::Unauthorized().body("unauthorized\n");
+        }
+    }
+    let message: ClientMessage = match serde_json::from_slice(&body) {
+        Ok(message) => message,
+        Err(error) => {
+            return HttpResponse::BadRequest().body(format!("invalid request: {error}\n"));
+        }
+    };
+    let ClientMessage::Request { id, request } = message;
     let kind = request.kind();
     let start = Instant::now();
     if state.options.verbosity > 0 {
