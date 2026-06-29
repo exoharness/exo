@@ -21,8 +21,6 @@ SELF_REPO_MOUNT_PATH="${EXOCLAW_REPO:-/workspace/exo}"
 SELF_MAP_PATH="$SELF_REPO_MOUNT_PATH/examples/exoclaw/SELF.md"
 AGENT_CLI_MOUNT_ROOT="${EXOCLAW_AGENT_CLI_ROOT:-}"
 AGENT_CLI_MOUNT_PATH="${EXOCLAW_AGENT_CLI_MOUNT:-/agent-cli}"
-FAL_IMAGE_CACHE_ROOT="${EXOCLAW_FAL_IMAGE_CACHE:-/tmp/exoclaw-fal}"
-FAL_IMAGE_MOUNT_PATH="${EXOCLAW_FAL_IMAGE_MOUNT:-/fal}"
 NETWORKING="${EXO_NETWORKING:-enabled}"
 SHELL_PROGRAM="${EXO_SHELL_PROGRAM:-/bin/bash}"
 SANDBOX_SCOPE="${EXO_SANDBOX_SCOPE:-}"
@@ -585,14 +583,6 @@ ensure_self_repo_mount() {
   exo conversation mount add "$AGENT" "$CONVERSATION" "$ROOT_DIR" "$SELF_REPO_MOUNT_PATH" --rw >/dev/null
 }
 
-ensure_fal_image_mount() {
-  if [[ "$USE_SANDBOX" != true ]]; then
-    return
-  fi
-  mkdir -p "$FAL_IMAGE_CACHE_ROOT"
-  exo conversation mount add "$AGENT" "$CONVERSATION" "$FAL_IMAGE_CACHE_ROOT" "$FAL_IMAGE_MOUNT_PATH" >/dev/null
-}
-
 ensure_agent_cli_mount() {
   if [[ "$USE_SANDBOX" != true || -z "$AGENT_CLI_MOUNT_ROOT" ]]; then
     return
@@ -817,7 +807,6 @@ run_repl() {
   ensure_agent
   ensure_conversation
   ensure_self_repo_mount
-  ensure_fal_image_mount
   ensure_agent_cli_mount
   configure_guardian_for_current_launch
   local scheduler_log_start_line
