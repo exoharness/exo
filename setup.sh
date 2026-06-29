@@ -354,6 +354,11 @@ trust_mise_config() {
   mise trust "$config"
 }
 
+control_script_supports() {
+  local flag="$1"
+  scripts/exo.sh --help 2>/dev/null | grep -q -- "$flag"
+}
+
 write_local_profile() {
   local file="$1"
   local user_name="$2"
@@ -512,7 +517,10 @@ main() {
   ./target/debug/exo --env-file-if-exists "$env_file" model register "$MODEL_NAME" --model "$UPSTREAM_MODEL" --secret openai
 
   info "Start canonical Exo"
-  local control_args=(fresh --canonical --skip-build --agent-name "$AGENT_NAME")
+  local control_args=(fresh --canonical --agent-name "$AGENT_NAME")
+  if control_script_supports "--skip-build"; then
+    control_args=(fresh --canonical --skip-build --agent-name "$AGENT_NAME")
+  fi
   unset EXO_SETUP_ADAPTER
   export EXO_CANONICAL_PROFILE=user
   exec scripts/exo.sh "${control_args[@]}"
