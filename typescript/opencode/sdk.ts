@@ -1,8 +1,12 @@
+import net from "node:net";
+
 import { createOpencode, type Config } from "@opencode-ai/sdk";
 
 import { opencodeModelRef, type OpencodeModelRef } from "./protocol";
 
 type OpencodeInstance = Awaited<ReturnType<typeof createOpencode>>;
+
+const OPENCODE_SERVER_START_ATTEMPTS = 4;
 
 export interface ObservedTool {
   callId: string;
@@ -52,10 +56,7 @@ export class OpencodeSdkSession {
       await this.close();
     }
     if (!this.instance) {
-      this.instance = await createOpencode({
-        hostname: "127.0.0.1",
-        config: buildConfig(ref, options),
-      });
+      this.instance = await startOpencodeServer(buildConfig(ref, options));
       this.key = key;
     }
 
@@ -202,6 +203,48 @@ async function emitToolPart(
       result: state.error ?? state.output ?? null,
     });
   }
+}
+
+// opencode's server defaults to port 4096 and ignores `--port 0`, so a reused
+// sandbox that already has a server bound there fails to start ("ServeError").
+// Bind a fresh ephemeral port per server, retrying in case of a TOCTOU race.
+async function startOpencodeServer(
+  config: Config | undefined,
+): Promise<OpencodeInstance> {
+  let lastError: unknown;
+  for (
+    let attempt = 0;
+    attempt < OPENCODE_SERVER_START_ATTEMPTS;
+    attempt += 1
+  ) {
+    const port = await findFreePort();
+    try {
+      return await createOpencode({ hostname: "127.0.0.1", port, config });
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(
+    `failed to start opencode server after ${OPENCODE_SERVER_START_ATTEMPTS} attempts: ${describeError(lastError)}`,
+  );
+}
+
+function findFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : null;
+      server.close(() => {
+        if (port) {
+          resolve(port);
+        } else {
+          reject(new Error("could not determine a free port"));
+        }
+      });
+    });
+  });
 }
 
 function buildConfig(

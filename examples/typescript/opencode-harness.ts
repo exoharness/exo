@@ -37,6 +37,10 @@ import {
   type ResolvedLlmBinding,
 } from "./shared";
 
+const OPENCODE_PRIOR_MESSAGE_MAX_CHARS = 8_000;
+const OPENCODE_PRIOR_TOOL_RESULT_MAX_CHARS = 4_000;
+const OPENCODE_PRIOR_HISTORY_MAX_CHARS = 24_000;
+
 interface OpencodeTraceState {
   finalText: string;
   llmPromptMessages: Message[];
@@ -71,6 +75,8 @@ async function runOpencodeHarnessTurn(
   turnParent: TraceParent,
   modelBinding: ResolvedLlmBinding,
 ): Promise<string | null> {
+  const priorMessages = await materializePriorConversationMessages(context);
+  const cappedPrior = capPriorHistory(priorMessages);
   const state: OpencodeTraceState = {
     finalText: "",
     llmPromptMessages: [],
@@ -79,7 +85,10 @@ async function runOpencodeHarnessTurn(
     streamedText: "",
     ttftMs: null,
     sawTextDelta: false,
-    promptMessages: await materializeOpencodePromptMessages(context),
+    promptMessages: [
+      ...context.agentConfig.instructions,
+      ...cappedPrior.messages,
+    ],
     runResult: null,
     observedToolCalls: new Map(),
   };
@@ -95,6 +104,9 @@ async function runOpencodeHarnessTurn(
       cwd: sandboxCwd(context),
       hydrated_from: "exoharness_events",
       sandbox_command: opencodeSandboxCommand(context).join(" "),
+      prior_source_messages: priorMessages.length,
+      prior_dropped_messages: cappedPrior.droppedMessageCount,
+      prior_truncated_messages: cappedPrior.truncatedMessageCount,
     },
   );
 
@@ -222,13 +234,29 @@ async function startOpencodeSandboxWorker(
   context: TurnContext,
   modelBinding: ResolvedLlmBinding,
 ): Promise<OpencodeSandboxWorker> {
+  // Reuse the sandbox process across turns and exo invocations: the worker is a
+  // long-lived node process holding one warm opencode server, so a stable
+  // reuseKey lets later turns attach to it instead of paying server cold-start
+  // (and stops orphaned servers piling up in a warm container).
+  const sandboxProcess = await context.startSandboxProcess({
+    command: opencodeSandboxCommand(context),
+    env: opencodeSandboxEnv(modelBinding),
+    reuseKey: opencodeWarmWorkerKey(context, modelBinding),
+  });
+  await appendCustomEvent(
+    context.exoharness.current.turn,
+    "opencode_worker_process",
+    {
+      metadata: turnMetadata(context),
+      sandbox_process_reused: sandboxProcess.reused,
+      sandbox_id: sandboxProcess.sandboxId ?? null,
+      sandbox_process_id: sandboxProcess.sandboxProcessId ?? null,
+    },
+  );
   return new WarmJsonlSandboxWorker({
     name: "opencode sandbox worker",
     parseEvent: parseWorkerEvent,
-    process: await context.startSandboxProcess({
-      command: opencodeSandboxCommand(context),
-      env: opencodeSandboxEnv(modelBinding),
-    }),
+    process: sandboxProcess,
   });
 }
 
@@ -420,11 +448,69 @@ function opencodePromptMessage(prompt: string): Message {
   };
 }
 
-async function materializeOpencodePromptMessages(
-  context: TurnContext,
-): Promise<Message[]> {
-  const priorMessages = await materializePriorConversationMessages(context);
-  return [...context.agentConfig.instructions, ...priorMessages];
+interface CappedPriorHistory {
+  messages: Message[];
+  droppedMessageCount: number;
+  truncatedMessageCount: number;
+}
+
+// opencode is stateless across turns: the full exoharness transcript is injected
+// into every prompt. Cap it so long conversations don't grow the prompt without
+// bound (mirrors the codex harness's prior-history limits).
+function capPriorHistory(messages: Message[]): CappedPriorHistory {
+  const candidates = messages.map((message) => {
+    const max =
+      message.role === "tool"
+        ? OPENCODE_PRIOR_TOOL_RESULT_MAX_CHARS
+        : OPENCODE_PRIOR_MESSAGE_MAX_CHARS;
+    const { text, truncated } = truncatePriorText(messageText(message), max);
+    return {
+      message: truncated
+        ? ({ role: message.role, content: text } as Message)
+        : message,
+      chars: text.length,
+      truncated,
+    };
+  });
+
+  const selected: Message[] = [];
+  let totalChars = 0;
+  let droppedMessageCount = 0;
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const candidate = candidates[index];
+    if (
+      selected.length > 0 &&
+      totalChars + candidate.chars > OPENCODE_PRIOR_HISTORY_MAX_CHARS
+    ) {
+      droppedMessageCount += 1;
+      continue;
+    }
+    selected.push(candidate.message);
+    totalChars += candidate.chars;
+  }
+  selected.reverse();
+
+  return {
+    messages: selected,
+    droppedMessageCount,
+    truncatedMessageCount: candidates.filter((candidate) => candidate.truncated)
+      .length,
+  };
+}
+
+function truncatePriorText(
+  text: string,
+  maxChars: number,
+): { text: string; truncated: boolean } {
+  if (text.length <= maxChars) {
+    return { text, truncated: false };
+  }
+  const omitted = text.length - maxChars;
+  const suffix = `\n\n[truncated ${omitted} characters from prior conversation history]`;
+  return {
+    text: `${text.slice(0, Math.max(0, maxChars - suffix.length))}${suffix}`,
+    truncated: true,
+  };
 }
 
 function opencodeTraceOutput(
