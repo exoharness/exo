@@ -907,12 +907,21 @@ fn compose_inbound_wakeup_prompt(
         "{} message received at target `{}` from {} via adapter `{}`:\n\n{}",
         config.adapter_type, target, sender, adapter.name, text,
     );
-    if config.adapter_type == "slack"
-        && let Some(dm_target) = metadata.get("dmTarget").and_then(|value| value.as_str())
-    {
-        prompt.push_str(&format!(
-            "\n\nSlack sender DM target: `{dm_target}`. Use this only for appropriate private follow-up; do not use DM to bypass safety policy.",
-        ));
+    if config.adapter_type == "slack" {
+        if let Some(dm_target) = metadata.get("dmTarget").and_then(|value| value.as_str()) {
+            prompt.push_str(&format!(
+                "\n\nSlack sender DM target: `{dm_target}`. Use this only for appropriate private follow-up; do not use DM to bypass safety policy.",
+            ));
+        }
+        if metadata
+            .get("isActiveThread")
+            .and_then(|value| value.as_bool())
+            == Some(true)
+        {
+            prompt.push_str(
+                "\n\nThis Slack message is from an active thread, but it may be ambient conversation. Only call send_adapter_message if the message appears directed at Exo, asks Exo to do something, or clearly needs an Exo response. If no response is needed, do nothing.",
+            );
+        }
     }
     if !attachments.is_empty() {
         prompt.push_str("\n\nThe message includes these attachments:\n");
@@ -950,10 +959,20 @@ async fn record_worker_lifecycle(
     adapter: &AdapterRecord,
     config: &AdapterConfig,
     event_type: &str,
-    _payload: serde_json::Value,
+    payload: serde_json::Value,
 ) -> Result<()> {
     // Note: lifecycle events are recorded only in the AdapterStore so adapter
     // bookkeeping does not pollute the agent-visible conversation history.
+    let payload_json =
+        serde_json::to_string(&payload).unwrap_or_else(|_| "<unserializable>".into());
+    let summary = if payload_json == "null" || payload_json == "{}" {
+        format!("{} worker {event_type}", config.adapter_type)
+    } else {
+        format!(
+            "{} worker {event_type}: {payload_json}",
+            config.adapter_type
+        )
+    };
     store
         .record_event(
             adapter.id.clone(),
@@ -963,7 +982,7 @@ async fn record_worker_lifecycle(
                 "error" => AdapterEventType::Error,
                 _ => AdapterEventType::Lifecycle,
             },
-            format!("{} worker {event_type}", config.adapter_type),
+            summary,
         )
         .await?;
     Ok(())
@@ -1213,11 +1232,13 @@ mod tests {
             "C123:1700000000.000000",
             Some("U123"),
             "hello",
-            &serde_json::json!({ "dmTarget": "dm:U123" }),
+            &serde_json::json!({ "dmTarget": "dm:U123", "isActiveThread": true }),
             &[],
             0,
         );
         assert!(prompt.contains("Slack sender DM target: `dm:U123`"));
         assert!(prompt.contains("do not use DM to bypass safety policy"));
+        assert!(prompt.contains("Only call send_adapter_message"));
+        assert!(prompt.contains("If no response is needed, do nothing"));
     }
 }

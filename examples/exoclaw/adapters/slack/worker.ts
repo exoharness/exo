@@ -51,6 +51,7 @@ process.on("uncaughtException", (error) => {
 const auth = await slackAuthTest();
 const botUserId = optionalApiString(auth.user_id);
 const botId = optionalApiString(auth.bot_id);
+const activeThreads = new Set<string>();
 
 const server = http.createServer((request, response) => {
   void handleRequest(request, response).catch((error) => {
@@ -184,7 +185,12 @@ async function readCommands(): Promise<void> {
           dmUserId: destination.dmUserId,
         },
       });
-      await postSlackMessage(destination, command.text);
+      const result = await postSlackMessage(destination, command.text);
+      if (destination.threadTs !== null) {
+        activeThreads.add(
+          slackThreadKey(destination.channel, destination.threadTs),
+        );
+      }
       writeWorkerEvent({
         type: "lifecycle",
         name: "send_result",
@@ -193,6 +199,11 @@ async function readCommands(): Promise<void> {
           channel: destination.channel,
           threadTs: destination.threadTs,
           dmUserId: destination.dmUserId,
+          slackChannel: result.channel,
+          slackTs: result.ts,
+          slackMessageTs: result.messageTs,
+          slackText: result.text,
+          slackWarning: result.warning,
         },
       });
       writeWorkerEvent({ type: "command_ack", command_id: command.id });
@@ -234,13 +245,29 @@ async function slackAuthTest(): Promise<SlackAuthTestResponse> {
 async function postSlackMessage(
   destination: SlackDestination,
   text: string,
-): Promise<void> {
-  await slackApiPost("chat.postMessage", {
+): Promise<SlackPostMessageResult> {
+  const payload = await slackApiPost("chat.postMessage", {
     channel: destination.channel,
     text,
     ...(destination.threadTs ? { thread_ts: destination.threadTs } : {}),
   });
+  const message = payload.message;
+  return {
+    channel: optionalApiString(payload.channel),
+    ts: optionalApiString(payload.ts),
+    messageTs: isRecord(message) ? optionalApiString(message.ts) : null,
+    text: isRecord(message) ? optionalApiString(message.text) : null,
+    warning: optionalApiString(payload.warning),
+  };
 }
+
+type SlackPostMessageResult = {
+  channel: string | null;
+  ts: string | null;
+  messageTs: string | null;
+  text: string | null;
+  warning: string | null;
+};
 
 async function openSlackDm(userId: string): Promise<string> {
   const payload = await slackApiPost("conversations.open", {
@@ -341,13 +368,23 @@ function inboundMessageFromPayload(
   const ts = optionalApiString(event.ts);
   const channelType = optionalApiString(event.channel_type);
   const isDm = channelType === "im";
-  if (trigger === "mentions_only" && eventType !== "app_mention" && !isDm) {
-    return null;
-  }
   if (channel === null || ts === null) {
     return null;
   }
   if (allowedChannels !== null && !allowedChannels.includes(channel)) {
+    return null;
+  }
+  const eventThreadTs = optionalApiString(event.thread_ts);
+  const isActiveThread =
+    eventType === "message" &&
+    eventThreadTs !== null &&
+    activeThreads.has(slackThreadKey(channel, eventThreadTs));
+  if (
+    trigger === "mentions_only" &&
+    eventType !== "app_mention" &&
+    !isDm &&
+    !isActiveThread
+  ) {
     return null;
   }
 
@@ -368,9 +405,10 @@ function inboundMessageFromPayload(
 
   const rawText = typeof event.text === "string" ? event.text : "";
   const text = stripOwnMention(rawText);
-  const threadTs = threadReplies
-    ? (optionalApiString(event.thread_ts) ?? ts)
-    : null;
+  const threadTs = threadReplies ? (eventThreadTs ?? ts) : null;
+  if (eventType === "app_mention" && threadTs !== null) {
+    activeThreads.add(slackThreadKey(channel, threadTs));
+  }
   const dmTarget = userId === null ? null : `dm:${userId}`;
   const target =
     isDm && dmTarget !== null
@@ -394,6 +432,7 @@ function inboundMessageFromPayload(
       eventType,
       channelType,
       isDm,
+      isActiveThread,
       teamId,
       user: userId,
       botId: eventBotId,
@@ -439,6 +478,10 @@ async function slackDestination(target: string): Promise<SlackDestination> {
     );
   }
   return { channel, threadTs, dmUserId: null };
+}
+
+function slackThreadKey(channel: string, threadTs: string): string {
+  return `${channel}:${threadTs}`;
 }
 
 function verifySlackSignature(request: IncomingMessage, body: Buffer): boolean {

@@ -292,7 +292,7 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
             type: "string",
             enum: ["all_messages", "mentions_only"],
             description:
-              "Wake policy. Use mentions_only for local Slack testing; all_messages requires extra Slack events and scopes.",
+              "Wake policy. Use mentions_only for local Slack testing; it wakes mentions, DMs if message.im is subscribed, and active thread follow-ups if channel message events are subscribed. all_messages wakes every subscribed channel message.",
           },
           allowedChannels: {
             anyOf: [
