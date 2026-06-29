@@ -20,7 +20,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use executor::{
     AgentHarnessKind, BasicExoHarness, BasicExoHarnessConfig, BasicHarness, BasicToolRuntime,
@@ -31,11 +31,11 @@ use executor::{
     ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET, Harness, HarnessAgent,
     HarnessConversation, HttpExoHarness, LocalSandboxExoHarness, PutSecretRequest, RlmHarness,
     SANDBOX_MAIN_MOUNT_DIR, SandboxBackendChoice, SandboxProvider, SandboxProviderConfig,
-    SandboxScope, Secret, SecretBackendChoice, SpritesBackendSpec, ToolRequest, ToolRuntime,
-    TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, VercelBackendSpec,
+    SandboxScope, Secret, SecretBackendChoice, SnapshotId, SpritesBackendSpec, ToolRequest,
+    ToolRuntime, TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, VercelBackendSpec,
     default_aws_agentcore_image, default_daytona_image, default_docker_image, default_e2b_template,
-    default_vercel_image, effective_sandbox_scope, load_agent_config, send_conversation_wakeup,
-    serve_exoharness_http_listener_with_options,
+    default_vercel_image, effective_sandbox_scope, load_agent_config, rewind_policy_sandbox,
+    send_conversation_wakeup, serve_exoharness_http_listener_with_options, snapshot_policy_sandbox,
 };
 use lingua::Message;
 use lingua::universal::{AssistantContent, AssistantContentPart, ToolContentPart, UserContent};
@@ -593,6 +593,17 @@ enum ConversationSandboxCommands {
         agent: String,
         conversation: String,
         command: String,
+    },
+    /// Snapshot the agent's policy sandbox (host-side) and print the snapshot id.
+    PolicySnapshot {
+        agent: String,
+        conversation: String,
+    },
+    /// Rewind the agent's policy sandbox to a snapshot (host-side rollback).
+    PolicyRewind {
+        agent: String,
+        conversation: String,
+        snapshot_id: String,
     },
 }
 
@@ -1573,6 +1584,51 @@ async fn main() -> Result<()> {
                         bail!("sandbox command exited with status {}", output.exit_code);
                     }
                 }
+                ConversationSandboxCommands::PolicySnapshot {
+                    agent,
+                    conversation,
+                } => {
+                    let agent_handle = must_get_agent(harness.as_ref(), &agent).await?;
+                    let conversation = agent_handle
+                        .get_conversation(&conversation)
+                        .await?
+                        .ok_or_else(|| anyhow!("conversation not found: {}", conversation))?;
+                    let agent_config = agent_handle.config().await?;
+                    let config = conversation.config().await?;
+                    let snapshot_id = snapshot_policy_sandbox(
+                        agent_handle.exoharness_handle().as_ref(),
+                        conversation.exoharness_handle().as_ref(),
+                        &agent_config,
+                        &config,
+                    )
+                    .await?;
+                    println!("{snapshot_id}");
+                }
+                ConversationSandboxCommands::PolicyRewind {
+                    agent,
+                    conversation,
+                    snapshot_id,
+                } => {
+                    let snapshot = snapshot_id
+                        .parse::<SnapshotId>()
+                        .with_context(|| format!("invalid snapshot id: {snapshot_id}"))?;
+                    let agent_handle = must_get_agent(harness.as_ref(), &agent).await?;
+                    let conversation = agent_handle
+                        .get_conversation(&conversation)
+                        .await?
+                        .ok_or_else(|| anyhow!("conversation not found: {}", conversation))?;
+                    let agent_config = agent_handle.config().await?;
+                    let config = conversation.config().await?;
+                    rewind_policy_sandbox(
+                        agent_handle.exoharness_handle().as_ref(),
+                        conversation.exoharness_handle().as_ref(),
+                        &agent_config,
+                        &config,
+                        snapshot,
+                    )
+                    .await?;
+                    println!("rewound policy sandbox to {snapshot_id}");
+                }
             },
             ConversationCommands::Show {
                 agent,
@@ -1977,7 +2033,9 @@ fn command_agent_ref(command: &Commands) -> Option<&str> {
                 | ConversationMountCommands::Remove { agent, .. } => Some(agent.as_str()),
             },
             ConversationCommands::Sandbox { command } => match command {
-                ConversationSandboxCommands::Run { agent, .. } => Some(agent.as_str()),
+                ConversationSandboxCommands::Run { agent, .. }
+                | ConversationSandboxCommands::PolicySnapshot { agent, .. }
+                | ConversationSandboxCommands::PolicyRewind { agent, .. } => Some(agent.as_str()),
             },
         },
         Commands::Repl { agent, .. } => Some(agent.as_deref().unwrap_or(DEFAULT_REPL_SLUG)),

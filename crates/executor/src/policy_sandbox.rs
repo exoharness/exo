@@ -9,7 +9,8 @@
 
 use exoharness::{
     AgentHandle, Artifact, ConversationHandle, CreateSandboxRequest, DurableFileSystem,
-    FileSystemMountMode, ReadArtifactRequest, Result, SandboxProvider, Uuid7, WriteArtifactRequest,
+    FileSystemMountMode, ReadArtifactRequest, Result, SandboxProvider, SnapshotId,
+    StartSandboxRequest, Uuid7, WriteArtifactRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -74,6 +75,41 @@ impl PolicySandboxRecord {
             && self.enable_networking == spec.enable_networking
             && self.idle_seconds == spec.idle_seconds
     }
+}
+
+/// Snapshot the agent's policy sandbox and return the snapshot id. Host-side
+/// entry point (no turn handle) so a supervisor outside the sandbox can record a
+/// known-good baseline. The policy sandbox is agent-owned, so this mirrors the
+/// `Agent` snapshot path (`agent.snapshot_sandbox`).
+pub async fn snapshot_policy_sandbox(
+    agent: &dyn AgentHandle,
+    conversation: &dyn ConversationHandle,
+    agent_config: &AgentConfig,
+    conversation_config: &ConversationConfig,
+) -> Result<SnapshotId> {
+    let handle = ensure_policy_sandbox(agent, conversation, agent_config, conversation_config).await?;
+    agent.snapshot_sandbox(handle.sandbox_id).await
+}
+
+/// Rewind the agent's policy sandbox to a snapshot. Host-side entry point so the
+/// supervisor can roll back from *outside* the sandbox after a bad self-change —
+/// the in-sandbox executor can't rewind the container it runs in.
+pub async fn rewind_policy_sandbox(
+    agent: &dyn AgentHandle,
+    conversation: &dyn ConversationHandle,
+    agent_config: &AgentConfig,
+    conversation_config: &ConversationConfig,
+    snapshot_id: SnapshotId,
+) -> Result<()> {
+    let spec = policy_sandbox_spec(agent_config, conversation_config);
+    let handle = ensure_policy_sandbox(agent, conversation, agent_config, conversation_config).await?;
+    agent
+        .start_sandbox(StartSandboxRequest {
+            id: handle.sandbox_id,
+            snapshot_id,
+            idle_seconds: Some(spec.idle_seconds),
+        })
+        .await
 }
 
 pub(crate) async fn ensure_policy_sandbox(
