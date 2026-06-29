@@ -35,6 +35,7 @@ START_ADAPTERS="${EXO_START_ADAPTERS:-true}"
 ADAPTER_LIMIT="${EXO_ADAPTER_LIMIT:-50}"
 CONTROL=false
 SETUP_PROFILE=false
+SKIP_BUILD="${EXO_SKIP_BUILD:-false}"
 CANONICAL_SETUP=false
 CANONICAL_PROFILE="${EXO_CANONICAL_PROFILE:-user}"
 SANDBOX_PROVIDER_EXPLICIT=false
@@ -106,6 +107,8 @@ Options:
                                 print pairing QR and pause.
   --initial-prompt-file <path> Send this file as the first message before REPL
   --pull-sandbox               Pull the sandbox image before starting
+  --skip-build                 Do not build the exo CLI before starting; requires
+                               --exo-bin to already exist
   --no-sandbox                 Do not require or configure sandbox shell support
   --env-file <path>            Env file to read if present (default: .env)
   --exo-bin <path>             exo binary path (default: ./target/debug/exo)
@@ -120,7 +123,8 @@ Environment overrides:
   EXO_BIN, EXO_START_SCHEDULER, EXO_START_ADAPTERS, EXOCLAW_REPO,
   EXOCLAW_AGENT_CLI_ROOT, EXOCLAW_AGENT_CLI_MOUNT,
   EXOCLAW_SCHEDULER_BIN, EXO_SCHEDULER_INTERVAL_SECONDS, EXO_ADAPTER_LIMIT,
-  EXO_SETUP_ADAPTER, EXO_INITIAL_PROMPT_FILE, EXO_CANONICAL_PROFILE
+  EXO_SETUP_ADAPTER, EXO_INITIAL_PROMPT_FILE, EXO_CANONICAL_PROFILE,
+  EXO_SKIP_BUILD
 EOF
 }
 
@@ -153,6 +157,9 @@ kill_process_tree() {
 ensure_exo_bin() {
   if [[ -x "$EXO_BIN" ]]; then
     return
+  fi
+  if [[ "$SKIP_BUILD" == true ]]; then
+    die "exo binary is not executable: $EXO_BIN (--skip-build was set)"
   fi
   if [[ "$EXO_BIN" != "$ROOT_DIR/target/debug/exo" ]]; then
     die "exo binary is not executable: $EXO_BIN"
@@ -785,7 +792,11 @@ container_mounts_current_checkout() {
 }
 
 fresh_start() {
-  build_exo
+  if [[ "$SKIP_BUILD" == true ]]; then
+    ensure_exo_bin
+  else
+    build_exo
+  fi
   delete_all_agents_and_conversations
   cleanup_stale_sandbox_containers
   if [[ "$USE_SANDBOX" == true ]]; then

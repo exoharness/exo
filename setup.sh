@@ -512,7 +512,7 @@ main() {
   ./target/debug/exo --env-file-if-exists "$env_file" model register "$MODEL_NAME" --model "$UPSTREAM_MODEL" --secret openai
 
   info "Start canonical Exo"
-  local control_args=(fresh --canonical --agent-name "$AGENT_NAME")
+  local control_args=(fresh --canonical --skip-build --agent-name "$AGENT_NAME")
   unset EXO_SETUP_ADAPTER
   export EXO_CANONICAL_PROFILE=user
   exec scripts/exo.sh "${control_args[@]}"
