@@ -106,6 +106,7 @@ The setup prompt creates a library adapter similar to:
     "allowedChannels": null,
     "allowBots": false,
     "threadReplies": true,
+    "progressMode": "update",
     "conversationScope": "target"
   }
 }
@@ -153,7 +154,7 @@ Mention the bot in Slack:
 
 The adapter wakes Exo with a target shaped as `CHANNEL_ID:THREAD_TS` for mentions. Use that target for channel replies; the worker posts back into the same Slack thread. With an active-thread profile, after Exo is mentioned or replies in a thread, later messages in that thread can wake Exo without another mention. The wakeup prompt tells Exo to reply only when the message appears directed at Exo, asks Exo to do something, or clearly needs an Exo response.
 
-Slack DMs use synthetic targets shaped as `dm:USER_ID`; the worker opens the DM with `conversations.open` and sends there.
+Slack DMs use synthetic targets shaped as `dm:USER_ID` for top-level DMs and `dm:USER_ID:THREAD_TS` for replies inside Slack DM threads. The worker opens the DM with `conversations.open` and sends to the matching DM or DM thread.
 
 ## Configuration
 
@@ -163,6 +164,7 @@ Slack DMs use synthetic targets shaped as `dm:USER_ID`; the worker opens the DM 
 - `trigger` is `mentions_only` or `all_messages`. With active-thread setup, `mentions_only` still wakes on Slack DMs from the `message.im` event and on active thread follow-ups from the `message.channels` and `message.groups` events.
 - `allowedChannels` optionally restricts inbound wakeups to Slack channel ids.
 - `threadReplies` makes inbound targets `CHANNEL_ID:THREAD_TS`, so replies post into the same Slack thread.
+- `progressMode: "update"` posts a normal Slack progress message for explicit mentions and DMs, then replaces that same message with Exo's final reply. Use `"stream"` for Slack's native threaded streaming UI, or `"off"` if you only want final Slack messages.
 - `conversationScope: "target"` creates a separate Exo conversation for each Slack target.
 
 For all channel messages, set `trigger: "all_messages"`.

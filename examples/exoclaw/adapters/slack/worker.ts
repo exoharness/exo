@@ -12,6 +12,8 @@ import {
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const SEND_TIMEOUT_MS = 60_000;
+const PROGRESS_START_TIMEOUT_MS = 5_000;
+const MAX_ACTIVE_STREAM_AGE_MS = 10 * 60_000;
 
 const config = adapterConfig();
 const botTokenEnv =
@@ -31,6 +33,7 @@ const trigger = optionalStringField(config, "trigger") ?? "mentions_only";
 const allowedChannels = stringArrayOrNull(config.allowedChannels);
 const allowBots = config.allowBots === true;
 const threadReplies = config.threadReplies !== false;
+const progressMode = slackProgressMode(config.progressMode);
 if (trigger !== "all_messages" && trigger !== "mentions_only") {
   throw new Error("Slack trigger must be all_messages or mentions_only");
 }
@@ -52,6 +55,7 @@ const auth = await slackAuthTest();
 const botUserId = optionalApiString(auth.user_id);
 const botId = optionalApiString(auth.bot_id);
 const activeThreads = new Set<string>();
+const activeProgress = new Map<string, SlackProgressState>();
 
 const server = http.createServer((request, response) => {
   void handleRequest(request, response).catch((error) => {
@@ -77,6 +81,7 @@ writeWorkerEvent({
     botId,
     port,
     path: requestPath,
+    progressMode,
   },
 });
 
@@ -134,17 +139,28 @@ async function handleRequest(
 
   const message = inboundMessageFromPayload(payload);
   if (message !== null) {
-    writeWorkerEvent({
-      type: "message",
-      target: message.target,
-      sender: message.sender,
-      text: message.text,
-      message_id: message.messageId,
-      metadata: message.metadata,
-      attachments: [],
+    sendJson(response, 200, { ok: true });
+    void emitInboundMessage(message).catch((error) => {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      reportWorkerError(errorMessage);
     });
+    return;
   }
   sendJson(response, 200, { ok: true });
+}
+
+async function emitInboundMessage(message: SlackInboundMessage): Promise<void> {
+  await startSlackProgress(message);
+  writeWorkerEvent({
+    type: "message",
+    target: message.target,
+    sender: message.sender,
+    text: message.text,
+    message_id: message.messageId,
+    metadata: message.metadata,
+    attachments: [],
+  });
 }
 
 async function readCommands(): Promise<void> {
@@ -183,9 +199,34 @@ async function readCommands(): Promise<void> {
           channel: destination.channel,
           threadTs: destination.threadTs,
           dmUserId: destination.dmUserId,
+          progressPending: activeProgress.has(target),
         },
       });
-      const result = await postSlackMessage(destination, command.text);
+      let sendMode: "message" | "stream" | "update" = "message";
+      let result: SlackPostMessageResult | null = null;
+      try {
+        const progressResult = await finishSlackProgress(target, command.text);
+        if (progressResult !== null) {
+          sendMode = progressResult.mode;
+          result = progressResult.result;
+        }
+      } catch (error) {
+        const progressError =
+          error instanceof Error ? error.message : String(error);
+        writeWorkerEvent({
+          type: "lifecycle",
+          name: "send_progress_fallback",
+          metadata: {
+            target,
+            channel: destination.channel,
+            threadTs: destination.threadTs,
+            error: progressError,
+          },
+        });
+      }
+      if (result === null) {
+        result = await postSlackMessage(destination, command.text);
+      }
       if (destination.threadTs !== null) {
         activeThreads.add(
           slackThreadKey(destination.channel, destination.threadTs),
@@ -199,6 +240,7 @@ async function readCommands(): Promise<void> {
           channel: destination.channel,
           threadTs: destination.threadTs,
           dmUserId: destination.dmUserId,
+          sendMode,
           slackChannel: result.channel,
           slackTs: result.ts,
           slackMessageTs: result.messageTs,
@@ -242,15 +284,264 @@ async function slackAuthTest(): Promise<SlackAuthTestResponse> {
   };
 }
 
+type SlackProgressState = {
+  mode: "stream" | "update";
+  target: string;
+  channel: string;
+  threadTs: string | null;
+  messageTs: string;
+  startedAtMs: number;
+};
+
+type SlackProgressRequest = {
+  mode: "stream" | "update";
+  channel: string;
+  threadTs: string | null;
+  recipientUserId: string | null;
+  recipientTeamId: string | null;
+  isDm: boolean;
+};
+
+type SlackProgressResult = {
+  mode: "stream" | "update";
+  result: SlackPostMessageResult;
+};
+
+async function startSlackProgress(message: SlackInboundMessage): Promise<void> {
+  const progress = message.progress;
+  if (progress === null) {
+    return;
+  }
+  pruneExpiredSlackProgress();
+  if (activeProgress.has(message.target)) {
+    return;
+  }
+  if (progress.mode === "update") {
+    await startSlackUpdateProgress(message, progress);
+    return;
+  }
+  await startSlackStreamProgress(message, progress);
+}
+
+async function startSlackUpdateProgress(
+  message: SlackInboundMessage,
+  progress: SlackProgressRequest,
+): Promise<void> {
+  try {
+    const result = await postSlackMessage(
+      {
+        channel: progress.channel,
+        threadTs: progress.threadTs,
+        dmUserId: null,
+      },
+      "Exo is working...",
+      PROGRESS_START_TIMEOUT_MS,
+      slackProgressBlocks(),
+    );
+    const messageTs = result.messageTs ?? result.ts;
+    if (messageTs === null) {
+      throw new Error("Slack chat.postMessage returned no ts");
+    }
+    const channel = result.channel ?? progress.channel;
+    activeProgress.set(message.target, {
+      mode: "update",
+      target: message.target,
+      channel,
+      threadTs: progress.threadTs,
+      messageTs,
+      startedAtMs: Date.now(),
+    });
+    writeWorkerEvent({
+      type: "lifecycle",
+      name: "progress_update_started",
+      metadata: {
+        target: message.target,
+        channel,
+        threadTs: progress.threadTs,
+        messageTs,
+      },
+    });
+  } catch (error) {
+    const messageText = error instanceof Error ? error.message : String(error);
+    writeWorkerEvent({
+      type: "lifecycle",
+      name: "progress_update_failed",
+      metadata: {
+        target: message.target,
+        channel: progress.channel,
+        threadTs: progress.threadTs,
+        error: messageText,
+      },
+    });
+  }
+}
+
+async function startSlackStreamProgress(
+  message: SlackInboundMessage,
+  progress: SlackProgressRequest,
+): Promise<void> {
+  if (progress.threadTs === null) {
+    return;
+  }
+  try {
+    const body: Record<string, unknown> = {
+      channel: progress.channel,
+      thread_ts: progress.threadTs,
+      task_display_mode: "plan",
+      chunks: [
+        {
+          type: "plan_update",
+          title: "Exo is working",
+        },
+        {
+          type: "task_update",
+          id: "exo_response",
+          title: "Prepare response",
+          status: "in_progress",
+          details: "Reading the request",
+        },
+      ],
+    };
+    if (!progress.isDm) {
+      if (progress.recipientUserId !== null) {
+        body.recipient_user_id = progress.recipientUserId;
+      }
+      if (progress.recipientTeamId !== null) {
+        body.recipient_team_id = progress.recipientTeamId;
+      }
+    }
+    const payload = await slackApiPost(
+      "chat.startStream",
+      body,
+      PROGRESS_START_TIMEOUT_MS,
+    );
+    const streamTs = optionalApiString(payload.ts);
+    if (streamTs === null) {
+      throw new Error("Slack chat.startStream returned no ts");
+    }
+    const channel = optionalApiString(payload.channel) ?? progress.channel;
+    activeProgress.set(message.target, {
+      mode: "stream",
+      target: message.target,
+      channel,
+      threadTs: progress.threadTs,
+      messageTs: streamTs,
+      startedAtMs: Date.now(),
+    });
+    writeWorkerEvent({
+      type: "lifecycle",
+      name: "progress_stream_started",
+      metadata: {
+        target: message.target,
+        channel,
+        threadTs: progress.threadTs,
+        streamTs,
+      },
+    });
+  } catch (error) {
+    const messageText = error instanceof Error ? error.message : String(error);
+    writeWorkerEvent({
+      type: "lifecycle",
+      name: "progress_stream_failed",
+      metadata: {
+        target: message.target,
+        channel: progress.channel,
+        threadTs: progress.threadTs,
+        error: messageText,
+      },
+    });
+  }
+}
+
+async function finishSlackProgress(
+  target: string,
+  text: string,
+): Promise<SlackProgressResult | null> {
+  pruneExpiredSlackProgress();
+  const progress = activeProgress.get(target);
+  if (progress === undefined) {
+    return null;
+  }
+  if (progress.mode === "update") {
+    return {
+      mode: "update",
+      result: await updateSlackProgressMessage(progress, text),
+    };
+  }
+  return {
+    mode: "stream",
+    result: await stopSlackStreamProgress(progress, text),
+  };
+}
+
+async function updateSlackProgressMessage(
+  progress: SlackProgressState,
+  text: string,
+): Promise<SlackPostMessageResult> {
+  const payload = await slackApiPost("chat.update", {
+    channel: progress.channel,
+    ts: progress.messageTs,
+    text,
+    blocks: [],
+  });
+  activeProgress.delete(progress.target);
+  const message = payload.message;
+  return {
+    channel: optionalApiString(payload.channel) ?? progress.channel,
+    ts: optionalApiString(payload.ts) ?? progress.messageTs,
+    messageTs: isRecord(message)
+      ? optionalApiString(message.ts)
+      : optionalApiString(payload.ts),
+    text: isRecord(message) ? optionalApiString(message.text) : null,
+    warning: optionalApiString(payload.warning),
+  };
+}
+
+async function stopSlackStreamProgress(
+  progress: SlackProgressState,
+  text: string,
+): Promise<SlackPostMessageResult> {
+  const payload = await slackApiPost("chat.stopStream", {
+    channel: progress.channel,
+    ts: progress.messageTs,
+    markdown_text: text,
+  });
+  activeProgress.delete(progress.target);
+  const message = payload.message;
+  return {
+    channel: optionalApiString(payload.channel),
+    ts: optionalApiString(payload.ts),
+    messageTs: isRecord(message) ? optionalApiString(message.ts) : null,
+    text: isRecord(message) ? optionalApiString(message.text) : null,
+    warning: optionalApiString(payload.warning),
+  };
+}
+
+function pruneExpiredSlackProgress(): void {
+  const cutoff = Date.now() - MAX_ACTIVE_STREAM_AGE_MS;
+  for (const [target, progress] of activeProgress.entries()) {
+    if (progress.startedAtMs < cutoff) {
+      activeProgress.delete(target);
+    }
+  }
+}
+
 async function postSlackMessage(
   destination: SlackDestination,
   text: string,
+  timeoutMs = SEND_TIMEOUT_MS,
+  blocks?: SlackBlock[],
 ): Promise<SlackPostMessageResult> {
-  const payload = await slackApiPost("chat.postMessage", {
-    channel: destination.channel,
-    text,
-    ...(destination.threadTs ? { thread_ts: destination.threadTs } : {}),
-  });
+  const payload = await slackApiPost(
+    "chat.postMessage",
+    {
+      channel: destination.channel,
+      text,
+      ...(blocks ? { blocks } : {}),
+      ...(destination.threadTs ? { thread_ts: destination.threadTs } : {}),
+    },
+    timeoutMs,
+  );
   const message = payload.message;
   return {
     channel: optionalApiString(payload.channel),
@@ -268,6 +559,33 @@ type SlackPostMessageResult = {
   text: string | null;
   warning: string | null;
 };
+
+type SlackBlock = Record<string, unknown>;
+
+function slackProgressBlocks(): SlackBlock[] {
+  return [
+    {
+      type: "task_card",
+      task_id: "exo_response",
+      title: "Exo is working",
+      status: "in_progress",
+      details: {
+        type: "rich_text",
+        elements: [
+          {
+            type: "rich_text_section",
+            elements: [
+              {
+                type: "text",
+                text: "Preparing a response",
+              },
+            ],
+          },
+        ],
+      },
+    },
+  ];
+}
 
 async function openSlackDm(userId: string): Promise<string> {
   const payload = await slackApiPost("conversations.open", {
@@ -296,13 +614,14 @@ async function slackApiGet(method: string): Promise<Record<string, unknown>> {
 async function slackApiPost(
   method: string,
   body: Record<string, unknown>,
+  timeoutMs = SEND_TIMEOUT_MS,
 ): Promise<Record<string, unknown>> {
   let timeout: NodeJS.Timeout | null = null;
   const controller = new AbortController();
   try {
     timeout = setTimeout(() => {
       controller.abort(new Error(`Slack ${method} timed out`));
-    }, SEND_TIMEOUT_MS);
+    }, timeoutMs);
     const response = await fetch(`https://slack.com/api/${method}`, {
       method: "POST",
       headers: {
@@ -347,6 +666,7 @@ type SlackInboundMessage = {
   text: string;
   messageId: string | null;
   metadata: Record<string, unknown>;
+  progress: SlackProgressRequest | null;
 };
 
 function inboundMessageFromPayload(
@@ -410,20 +730,36 @@ function inboundMessageFromPayload(
     activeThreads.add(slackThreadKey(channel, threadTs));
   }
   const dmTarget = userId === null ? null : `dm:${userId}`;
+  const dmThreadTarget =
+    dmTarget !== null && eventThreadTs !== null
+      ? `${dmTarget}:${eventThreadTs}`
+      : null;
   const target =
     isDm && dmTarget !== null
-      ? dmTarget
+      ? (dmThreadTarget ?? dmTarget)
       : threadTs === null
         ? channel
         : `${channel}:${threadTs}`;
   const eventId = optionalApiString(payload.event_id);
-  const teamId = optionalApiString(payload.team_id);
+  const teamId =
+    optionalApiString(payload.team_id) ??
+    optionalApiString(event.team) ??
+    optionalApiString(event.user_team);
+  const progress = slackProgressRequest({
+    channel,
+    threadTs: isDm ? eventThreadTs : threadTs,
+    userId,
+    teamId,
+    eventType,
+    isDm,
+  });
 
   return {
     target,
     sender,
     text: text.length > 0 ? text : rawText,
     messageId: `${channel}:${ts}`,
+    progress,
     metadata: {
       channel,
       threadTs,
@@ -437,7 +773,37 @@ function inboundMessageFromPayload(
       user: userId,
       botId: eventBotId,
       dmTarget,
+      dmThreadTarget,
+      progressMode,
+      progressEligible: progress !== null,
     },
+  };
+}
+
+function slackProgressRequest(input: {
+  channel: string;
+  threadTs: string | null;
+  userId: string | null;
+  teamId: string | null;
+  eventType: string | null;
+  isDm: boolean;
+}): SlackProgressRequest | null {
+  if (progressMode === "off" || input.userId === null) {
+    return null;
+  }
+  if (input.eventType !== "app_mention" && !input.isDm) {
+    return null;
+  }
+  if (progressMode === "stream" && input.threadTs === null) {
+    return null;
+  }
+  return {
+    mode: progressMode,
+    channel: input.channel,
+    threadTs: input.threadTs,
+    recipientUserId: input.userId,
+    recipientTeamId: input.teamId,
+    isDm: input.isDm,
   };
 }
 
@@ -456,13 +822,21 @@ type SlackDestination = {
 
 async function slackDestination(target: string): Promise<SlackDestination> {
   if (target.startsWith("dm:")) {
-    const dmUserId = target.slice("dm:".length);
+    const dmTarget = target.slice("dm:".length);
+    const separator = dmTarget.indexOf(":");
+    const dmUserId = separator === -1 ? dmTarget : dmTarget.slice(0, separator);
+    const threadTs = separator === -1 ? null : dmTarget.slice(separator + 1);
     if (dmUserId.length === 0) {
-      throw new Error("Slack DM target must be dm:USER_ID");
+      throw new Error(
+        "Slack DM target must be dm:USER_ID or dm:USER_ID:THREAD_TS",
+      );
+    }
+    if (threadTs !== null && threadTs.length === 0) {
+      throw new Error("Slack DM thread target must include THREAD_TS");
     }
     return {
       channel: await openSlackDm(dmUserId),
-      threadTs: null,
+      threadTs,
       dmUserId,
     };
   }
@@ -474,7 +848,7 @@ async function slackDestination(target: string): Promise<SlackDestination> {
   const threadTs = target.slice(separator + 1);
   if (channel.length === 0 || threadTs.length === 0) {
     throw new Error(
-      "Slack target must be CHANNEL_ID, CHANNEL_ID:THREAD_TS, or dm:USER_ID",
+      "Slack target must be CHANNEL_ID, CHANNEL_ID:THREAD_TS, dm:USER_ID, or dm:USER_ID:THREAD_TS",
     );
   }
   return { channel, threadTs, dmUserId: null };
@@ -600,6 +974,18 @@ function optionalPort(value: unknown): number {
     throw new Error("Slack port must be an integer from 1 to 65535");
   }
   return value;
+}
+
+type SlackProgressMode = "update" | "stream" | "off";
+
+function slackProgressMode(value: unknown): SlackProgressMode {
+  if (value === undefined || value === null) {
+    return "update";
+  }
+  if (value === "update" || value === "stream" || value === "off") {
+    return value;
+  }
+  throw new Error("Slack progressMode must be update, stream, or off");
 }
 
 function requiredEnv(name: string, label: string): string {

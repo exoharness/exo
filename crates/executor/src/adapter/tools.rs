@@ -176,6 +176,7 @@ struct SlackAdapterCreationConfig {
     allowed_channels: Option<Vec<String>>,
     allow_bots: bool,
     thread_replies: bool,
+    progress_mode: SlackProgressMode,
     #[serde(default)]
     conversation_scope: Option<AdapterConversationScope>,
 }
@@ -259,6 +260,14 @@ enum DiscordTrigger {
 enum SlackTrigger {
     AllMessages,
     MentionsOnly,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum SlackProgressMode {
+    Update,
+    Stream,
+    Off,
 }
 
 #[derive(Debug, Deserialize)]
@@ -426,6 +435,7 @@ impl AdapterCreationConfig {
                         "allowedChannels": config.allowed_channels,
                         "allowBots": config.allow_bots,
                         "threadReplies": config.thread_replies,
+                        "progressMode": config.progress_mode.as_str(),
                         "conversationScope": config
                             .conversation_scope
                             .map(|scope| scope.as_str())
@@ -512,6 +522,16 @@ impl SlackTrigger {
         match self {
             Self::AllMessages => "all_messages",
             Self::MentionsOnly => "mentions_only",
+        }
+    }
+}
+
+impl SlackProgressMode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Update => "update",
+            Self::Stream => "stream",
+            Self::Off => "off",
         }
     }
 }

@@ -286,7 +286,7 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
           defaultChannelId: {
             type: ["string", "null"],
             description:
-              "Optional Slack channel id, CHANNEL_ID:THREAD_TS, or dm:USER_ID used when send_adapter_message target is null.",
+              "Optional Slack channel id, CHANNEL_ID:THREAD_TS, dm:USER_ID, or dm:USER_ID:THREAD_TS used when send_adapter_message target is null.",
           },
           trigger: {
             type: "string",
@@ -312,6 +312,12 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
             description:
               "When true, inbound targets include the Slack thread timestamp as CHANNEL_ID:THREAD_TS so replies go to the same thread.",
           },
+          progressMode: {
+            type: "string",
+            enum: ["update", "stream", "off"],
+            description:
+              "Slack progress UI mode. Use update to post a normal progress message and replace it with the final reply, stream for native threaded Slack streaming, or off to send only final messages.",
+          },
           conversationScope: {
             type: "string",
             enum: ["adapter", "target"],
@@ -330,6 +336,7 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
           "allowedChannels",
           "allowBots",
           "threadReplies",
+          "progressMode",
           "conversationScope",
         ],
       },
