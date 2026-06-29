@@ -99,6 +99,22 @@ If you have your agent up and running, there really is little else you need to u
 
 While there are many, the most obvious is that right now there isn't a simple way for Exo to do generalized computer use of a windowed system. This is in the works and should land shortly. But in the meantime, you can get a long way by asking Exo the build such a thing for itself.
 
+## Tweaking Prompts
+
+There are a numebr of prompt files that Exo uses during runtime. You can edit these directly or ask Exo to.
+
+- `examples/exoclaw/prompts/me.md`: the committed core identity and operating
+  rules for the default Exoclaw agent.
+- `.exo/exoclaw-profile.md`: local, git-ignored profile instructions such as
+  your name and machine-specific preferences. Create or update it with
+  `scripts/exo.sh setup-profile`.
+- `examples/exoclaw/harness.ts`: assembles the full prompt sent each turn,
+  including dynamic instructions about tools, adapters, memory, sandbox behavior,
+  and self-maintenance.
+
+After changing prompt files, ask Exo to rebuild/restart itself for them to go in
+use.
+
 ## License
 
 MIT
