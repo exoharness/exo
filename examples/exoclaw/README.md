@@ -3,7 +3,7 @@
 Exoclaw is a persistent agent built on Exo designed to be helpful wherever
 there is a task to do from a computer. It supports task scheduling, a full
 sandbox where it can install its own tools and integrations, and right now
-supports IRC, WhatsApp, Signal, Discord, and a shell CLI (`exo-cli`) out of
+supports ExoChat, IRC, WhatsApp, Signal, Discord, and a shell CLI (`exo-cli`) out of
 the box.
 
 ## Quickstart
@@ -38,8 +38,9 @@ scripts/exo.sh fresh --canonical
 
 This builds the `exo` binary, creates the agent and a `dev` conversation, pulls
 the Docker sandbox image, mounts this repo at `/workspace/exo`, starts the
-scheduler and adapter runner, sets up the WhatsApp adapter, and drops you into
-a REPL.
+scheduler and adapter runner, sets up the ExoChat adapter, prints a browser
+chat URL using the hosted control plane at `https://exoharness.ai`, and drops
+you into a REPL.
 
 For developer testing with IRC and Discord instead, use `canonical-dev`:
 
@@ -236,9 +237,9 @@ reconnect behavior, inbound message parsing, event history, and conversation
 wake-ups. Agents configure adapters with tools, and the local adapter runner
 started by `scripts/exo.sh` keeps them connected.
 
-Exoclaw ships with IRC, WhatsApp, Signal, Discord, and agent-cli adapters
+Exoclaw ships with ExoChat, IRC, WhatsApp, Signal, Discord, and agent-cli adapters
 (see `adapters/agent-cli/README.md` for the shell CLI). The canonical local
-setup turns on WhatsApp:
+setup turns on ExoChat:
 
 ```bash
 scripts/exo.sh canonical

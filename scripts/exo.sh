@@ -35,6 +35,7 @@ START_ADAPTERS="${EXO_START_ADAPTERS:-true}"
 ADAPTER_LIMIT="${EXO_ADAPTER_LIMIT:-50}"
 CONTROL=false
 SETUP_PROFILE=false
+SKIP_BUILD="${EXO_SKIP_BUILD:-false}"
 CANONICAL_SETUP=false
 CANONICAL_PROFILE="${EXO_CANONICAL_PROFILE:-user}"
 SANDBOX_PROVIDER_EXPLICIT=false
@@ -73,7 +74,7 @@ Options:
   --agent-name <name>          Agent display name (default: Exoclaw Agent)
   --conversation-name <name>   Conversation display name (default: Dev)
   --module <path>              Exoclaw TypeScript harness module
-  --canonical                  Docker sandbox, repo self-map mount, WhatsApp setup,
+  --canonical                  Docker sandbox, repo self-map mount, ExoChat setup,
                                control logs, and guardian config
   --canonical-dev              Docker sandbox, repo self-map mount, IRC+Discord setup,
                                control logs, and guardian config
@@ -100,10 +101,14 @@ Options:
   --local-prompt-file <path>    Local profile prompt path (default: .exo/exoclaw-profile.md)
   --setup <adapter>            Send adapters/<adapter>/setup-prompt.md.
                                 May be passed more than once.
-  --setup-all                  Equivalent to --setup signal --setup whatsapp --setup irc --setup discord
-                                For whatsapp/signal, print pairing QR and pause.
+  --setup-all                  Equivalent to --setup exochat --setup signal
+                               --setup whatsapp --setup irc --setup discord.
+                                For exochat, print a browser URL; for whatsapp/signal,
+                                print pairing QR and pause.
   --initial-prompt-file <path> Send this file as the first message before REPL
   --pull-sandbox               Pull the sandbox image before starting
+  --skip-build                 Do not build the exo CLI before starting; requires
+                               --exo-bin to already exist
   --no-sandbox                 Do not require or configure sandbox shell support
   --env-file <path>            Env file to read if present (default: .env)
   --exo-bin <path>             exo binary path (default: ./target/debug/exo)
@@ -118,7 +123,8 @@ Environment overrides:
   EXO_BIN, EXO_START_SCHEDULER, EXO_START_ADAPTERS, EXOCLAW_REPO,
   EXOCLAW_AGENT_CLI_ROOT, EXOCLAW_AGENT_CLI_MOUNT,
   EXOCLAW_SCHEDULER_BIN, EXO_SCHEDULER_INTERVAL_SECONDS, EXO_ADAPTER_LIMIT,
-  EXO_SETUP_ADAPTER, EXO_INITIAL_PROMPT_FILE, EXO_CANONICAL_PROFILE
+  EXO_SETUP_ADAPTER, EXO_INITIAL_PROMPT_FILE, EXO_CANONICAL_PROFILE,
+  EXO_SKIP_BUILD
 EOF
 }
 
@@ -151,6 +157,9 @@ kill_process_tree() {
 ensure_exo_bin() {
   if [[ -x "$EXO_BIN" ]]; then
     return
+  fi
+  if [[ "$SKIP_BUILD" == true ]]; then
+    die "exo binary is not executable: $EXO_BIN (--skip-build was set)"
   fi
   if [[ "$EXO_BIN" != "$ROOT_DIR/target/debug/exo" ]]; then
     die "exo binary is not executable: $EXO_BIN"
@@ -228,7 +237,7 @@ apply_canonical_setup_defaults() {
   fi
   case "$CANONICAL_PROFILE" in
     user)
-      add_setup_adapter "whatsapp"
+      add_setup_adapter "exochat"
       ;;
     dev)
       add_setup_adapter "irc"
@@ -783,7 +792,11 @@ container_mounts_current_checkout() {
 }
 
 fresh_start() {
-  build_exo
+  if [[ "$SKIP_BUILD" == true ]]; then
+    ensure_exo_bin
+  else
+    build_exo
+  fi
   delete_all_agents_and_conversations
   cleanup_stale_sandbox_containers
   if [[ "$USE_SANDBOX" == true ]]; then
@@ -814,6 +827,7 @@ run_repl() {
   adapter_log_start_line="$(adapter_log_line_count)"
   send_startup_prompt
   ensure_adapters
+  show_exochat_url_if_needed "$adapter_log_start_line"
   show_signal_qr_if_needed "$adapter_log_start_line"
   show_whatsapp_qr_if_needed "$adapter_log_start_line"
   if [[ "$CONTROL" == true ]]; then
@@ -1074,6 +1088,46 @@ show_whatsapp_qr_if_needed() {
   read -r -p "Press Enter to continue to the REPL..."
 }
 
+show_exochat_url_if_needed() {
+  if ! setup_requested "exochat"; then
+    return
+  fi
+
+  local start_line="${1:-0}"
+  local log_file
+  log_file="$(adapters_log_file)"
+  echo "Waiting for ExoChat URL in $log_file..."
+
+  local attempt url
+  for attempt in {1..30}; do
+    if [[ -f "$log_file" ]]; then
+      url="$(awk -v start="$start_line" '
+        NR <= start { next }
+        /\[exochat-adapter\] Open this ExoChat URL/ {
+          capture = 1
+          next
+        }
+        capture && /^https?:\/\// {
+          print
+          exit
+        }
+      ' "$log_file")"
+      if [[ -n "$url" ]]; then
+        echo
+        echo "Open this ExoChat URL in a browser or on your phone:"
+        printf '%s\n' "$url"
+        echo
+        read -r -p "Press Enter after opening ExoChat..."
+        return
+      fi
+    fi
+    sleep 1
+  done
+
+  echo "No ExoChat URL found yet. Watch the adapter log with: tail -f $log_file"
+  read -r -p "Press Enter to continue to the REPL..."
+}
+
 show_signal_qr_if_needed() {
   if ! setup_requested "signal"; then
     return
@@ -1305,6 +1359,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --setup-all)
+      add_setup_adapter "exochat"
       add_setup_adapter "signal"
       add_setup_adapter "whatsapp"
       add_setup_adapter "irc"
@@ -1318,6 +1373,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --pull-sandbox)
       PULL_SANDBOX=true
+      shift
+      ;;
+    --skip-build)
+      SKIP_BUILD=true
       shift
       ;;
     --no-sandbox)

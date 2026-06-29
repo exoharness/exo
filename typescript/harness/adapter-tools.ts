@@ -42,7 +42,7 @@ function createAdapterTool(): ToolInstance {
     definition: {
       name: "create_adapter",
       description:
-        "Create and enable a long-running adapter for this conversation. Use source 'built_in' with config type 'irc' or 'agent-cli'. Use source 'library' with config type 'whatsapp', 'signal', 'discord', or 'slack' for shipped library adapters.",
+        "Create and enable a long-running adapter for this conversation. Use source 'built_in' with config type 'irc' or 'agent-cli'. Use source 'library' with config type 'exochat', 'whatsapp', 'signal', 'discord', or 'slack' for shipped library adapters.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -77,7 +77,7 @@ function listAdaptersTool(): ToolInstance {
   return hostTool({
     name: "list_adapters",
     description:
-      "List adapters for this conversation. Disabled adapters are hidden unless includeDisabled is true. Each record includes health fields: last_connected_at_ms and last_error.",
+      "List adapters for this conversation. Disabled adapters are hidden unless includeDisabled is true. Each record includes health fields: last_connected_at_ms and last_error. ExoChat records include chatUrl.",
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -118,7 +118,7 @@ function sendAdapterMessageTool(): ToolInstance {
   return hostTool({
     name: "send_adapter_message",
     description:
-      "Send an explicit outbound message through an adapter. For IRC this sends PRIVMSG to the adapter channel. For WhatsApp, provide target as the chat id from the inbound message. For Signal, provide a username such as u:example.01, a phone number, UUID, or group id. For Discord, provide a channel id unless defaultChannelId was configured. For Slack, provide a channel id, CHANNEL_ID:THREAD_TS, or dm:USER_ID unless defaultChannelId was configured. Only call this when the user or conversation context makes the external side effect appropriate.",
+      "Send an explicit outbound message through an adapter. For IRC this sends PRIVMSG to the adapter channel. For ExoChat, omit target or use the session channel id. For WhatsApp, provide target as the chat id from the inbound message. For Signal, provide a username such as u:example.01, a phone number, UUID, or group id. For Discord, provide a channel id unless defaultChannelId was configured. For Slack, provide a channel id, CHANNEL_ID:THREAD_TS, dm:USER_ID, or dm:USER_ID:THREAD_TS unless defaultChannelId was configured. Only call this when the user or conversation context makes the external side effect appropriate.",
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -135,7 +135,7 @@ function sendAdapterMessageTool(): ToolInstance {
         target: {
           type: ["string", "null"],
           description:
-            "External destination for adapters that need one. Use the target from the inbound wakeup when available; WhatsApp requires a chat id, Signal requires a username/phone/UUID/group id, Discord requires a channel id unless defaultChannelId was configured, and Slack accepts CHANNEL_ID, CHANNEL_ID:THREAD_TS, or dm:USER_ID.",
+            "External destination for adapters that need one. Use the target from the inbound wakeup when available; ExoChat accepts null or the session channel id, WhatsApp requires a chat id, Signal requires a username/phone/UUID/group id, Discord requires a channel id unless defaultChannelId was configured, and Slack accepts CHANNEL_ID, CHANNEL_ID:THREAD_TS, dm:USER_ID, or dm:USER_ID:THREAD_TS.",
         },
         attachments: {
           anyOf: [
@@ -496,6 +496,29 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
         type: "object",
         additionalProperties: false,
         properties: {
+          type: { type: "string", enum: ["exochat"] },
+          baseUrl: {
+            type: ["string", "null"],
+            description:
+              "Base URL of the ExoChat WebSocket relay. Use null for the default hosted service.",
+          },
+          channelId: {
+            type: ["string", "null"],
+            description:
+              "Optional stable relay channel id. Use null to generate and persist one in adapter state.",
+          },
+          secret: {
+            type: ["string", "null"],
+            description:
+              "Optional shared channel secret. Use null to generate and persist one in adapter state.",
+          },
+        },
+        required: ["type", "baseUrl", "channelId", "secret"],
+      },
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: {
           type: { type: "string", enum: ["agent-cli"] },
           socketPath: {
             type: ["string", "null"],
@@ -533,7 +556,8 @@ function validateAdapterSource(source: string, type: string): void {
     throw new Error(`${type} adapters must use source 'built_in'`);
   }
   if (
-    (type === "whatsapp" ||
+    (type === "exochat" ||
+      type === "whatsapp" ||
       type === "signal" ||
       type === "discord" ||
       type === "slack") &&

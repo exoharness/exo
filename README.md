@@ -1,10 +1,10 @@
 # exo
 
 Exo is a systems approach to recursive self improvement. In short, it's a
-complete agent harnes that has support for tools, tasks, adapters (e.g. WhatsApp
-or Slack), full computer use, and state management (snapshot, clone, migrate,
-rewind). But most importantly it has full visbility of both its code and runtime
-logs and can incrementally improve every aspect of itself.
+complete agent harnes that has support for tools, tasks, adapters (e.g.
+WhatsApp, Discord or Slack), full computer use, and state management (snapshot,
+clone, migrate, rewind). But most importantly it has full visbility of both its
+code and runtime logs and can incrementally improve every aspect of itself.
 
 While most agents can do some form of self improvement, such as evolve their
 prompts or add tools, Exo is fully recursive in that can clone or operate on any
@@ -28,31 +28,35 @@ use, research, coding etc.) but can also extent itself as needed.
 To use Exo as an agent, you'll ned an OpenAI API key. If you have that, simply do the following:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/61cygni/exo/main/public/setup.sh -o setup.sh
+curl -fsSL https://raw.githubusercontent.com/ankrgyl/exo/main/public/setup.sh -o setup.sh
 bash setup.sh
 ```
 
 _Note that Exo requires git, cargo, pnpm, and Docker_
 
 It'll ask for the API key and your name and your agent's name. Once you enter
-these it'll show a QR code for you to link your WhatsApp with, if you don't
-want to configure WhatsApp you can just press enter and ignore that step.
+these, the setup will start the agent. It will also print an URL of the form.
+
+```
+https://exoharness.ai/chat?role=user&c=...#k=...
+```
+
+This is a minimal remote chat interface to your agent you can access from anywhere.
+Open that URL in your browser or on your phone.
 
 When complete, the script will drop you to a prompt you can use to talk to your
-agent. If you paired with WhatsApp you should also be able to chat with your
-agent over WhatsApp provided you have a separate account to chat with it from.
+agent locally.
 
-## Using Exo
-
-The setup script above creates a minima Exo agent you can chat with directly on
-the command line or via WhatsApp. Once it's running you can have it start to build
-itself for whatever use you have in mind. For example, try telling it to do the following:
+A good end to end test is to have it install a tool in the sanbox and use it with the task scheduler. For example,
+try the following prompt:
 
 ```
 Install python3 and curl in the sandbox. You don't need sudo, just use apt-get. Once you've done that, please
 schedule a task to run every minute that grabs news headlines from the BBC RSS feed. Only print new headlines you've
 not printed before. Please print them here.
 ```
+
+## Exo Basics
 
 ## Architecture
 

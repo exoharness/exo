@@ -2,7 +2,7 @@
 
 Exoclaw adapters are host-owned long-running integrations between an Exoclaw
 conversation and an external application. The first adapter is IRC, but the
-same worker shape now supports IRC, WhatsApp, and Signal, and is intended to
+same worker shape now supports ExoChat, IRC, WhatsApp, and Signal, and is intended to
 support Slack, Discord, IRC networks, and custom local services.
 
 Adapters are deliberately not scheduled sandbox tasks. A scheduled task is a
@@ -145,7 +145,7 @@ bridge.
 
 ## Worker Protocol
 
-IRC, WhatsApp, and Signal are implemented as Node.js workers. Rust launches each
+ExoChat, IRC, WhatsApp, and Signal are implemented as Node.js workers. Rust launches each
 worker with:
 
 - `EXO_ADAPTER_ID`
