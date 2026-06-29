@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# policy-supervisor: host-side supervisor for in-sandbox policy self-evolution.
+#
+# It lives OUTSIDE the policy sandbox (P) -- where the executor (EE) runs -- so it
+# can verify a self-change and roll it back even when the change has broken EE.
+# A process cannot verify or rewind the container it runs in, which is why this
+# is on the host and not part of the agent.
+#
+# It composes the generic primitives we already have:
+#   - health-check: run a turn INSIDE P (so it loads the new code)
+#   - on pass: `exo conversation sandbox policy-snapshot` -> new known-good baseline
+#   - on fail: `exo conversation sandbox policy-rewind <baseline>` -> roll back
+#
+# The baseline is the snapshot from the last successful evolve (or `baseline`);
+# the supervisor only ever snapshots a state that passed the health check.
+#
+# Required env:
+#   EH_URL            kernel address, e.g. http://172.18.0.1:4766
+#   POLICY_AGENT      agent slug
+#   POLICY_CONV       main conversation slug
+#   POLICY_CONTAINER  docker id/name of the policy sandbox (where EE runs)
+#   <bearer env>      the token value, named by EXO_BEARER_ENV (default EXO_TOK)
+# Optional:
+#   EXO_BIN (default ./target/debug/exo), EXO_BEARER_ENV (default EXO_TOK),
+#   POLICY_PROBE_CONV (default a dedicated "<conv>-probe"), CONTAINER_EXO
+#   (default /home/worker/exo/target/debug/exo), POLICY_SUPERVISOR_STATE.
+set -euo pipefail
+
+ROOT_DIR="${EXOCLAW_ROOT:-$(pwd)}"
+EXO_BIN="${EXO_BIN:-$ROOT_DIR/target/debug/exo}"
+CONTAINER_EXO="${CONTAINER_EXO:-/home/worker/exo/target/debug/exo}"
+EH_URL="${EH_URL:?set EH_URL to the kernel address}"
+BEARER_ENV="${EXO_BEARER_ENV:-EXO_TOK}"
+AGENT="${POLICY_AGENT:?set POLICY_AGENT}"
+CONV="${POLICY_CONV:?set POLICY_CONV}"
+PROBE_CONV="${POLICY_PROBE_CONV:-${CONV}-probe}"
+POLICY_CONTAINER="${POLICY_CONTAINER:?set POLICY_CONTAINER (docker id/name where EE runs)}"
+STATE_DIR="${POLICY_SUPERVISOR_STATE:-$ROOT_DIR/.exo/policy-supervisor}"
+BASELINE_FILE="$STATE_DIR/baseline-$AGENT"
+
+mkdir -p "$STATE_DIR"
+
+host_exo() { "$EXO_BIN" --exoharness-url "$EH_URL" --bearer-env "$BEARER_ENV" "$@"; }
+
+take_snapshot() {
+  # CLI prints the snapshot id on the last line.
+  host_exo conversation sandbox policy-snapshot "$AGENT" "$CONV" | tail -1
+}
+
+rewind_to() { host_exo conversation sandbox policy-rewind "$AGENT" "$CONV" "$1" >/dev/null; }
+
+probe() {
+  # Run a turn INSIDE the policy container so it loads the (possibly new) code.
+  local out
+  if ! out=$(docker exec -w /home/worker/exo \
+      -e "$BEARER_ENV=${!BEARER_ENV}" -e EXO_REMOTE_SANDBOX=1 \
+      "$POLICY_CONTAINER" \
+      "$CONTAINER_EXO" --exoharness-url "$EH_URL" --bearer-env "$BEARER_ENV" --harness exoclaw \
+      conversation send "$AGENT" "$PROBE_CONV" \
+      "Health check. Reply with exactly the word READY and nothing else." 2>&1); then
+    echo "  probe failed (executor error):" >&2
+    echo "$out" | tail -6 | sed 's/^/    /' >&2
+    return 1
+  fi
+  if echo "$out" | grep -q "READY"; then
+    return 0
+  fi
+  echo "  probe failed (no READY in reply):" >&2
+  echo "$out" | tail -6 | sed 's/^/    /' >&2
+  return 1
+}
+
+case "${1:-}" in
+  baseline)
+    snap=$(take_snapshot)
+    echo "$snap" >"$BASELINE_FILE"
+    echo "baseline set: $snap"
+    ;;
+  evolve)
+    [ -f "$BASELINE_FILE" ] || {
+      echo "no baseline yet; run '$0 baseline' first" >&2
+      exit 1
+    }
+    base=$(cat "$BASELINE_FILE")
+    echo "verifying new policy (last-good baseline: $base) ..."
+    if probe; then
+      new=$(take_snapshot)
+      echo "$new" >"$BASELINE_FILE"
+      echo "ACCEPTED: health check passed; new baseline $new"
+    else
+      echo "REJECTED: rolling back to $base ..."
+      rewind_to "$base"
+      echo "ROLLED BACK to $base"
+    fi
+    ;;
+  status)
+    echo "agent=$AGENT container=$POLICY_CONTAINER"
+    echo "baseline: $([ -f "$BASELINE_FILE" ] && cat "$BASELINE_FILE" || echo none)"
+    ;;
+  *)
+    echo "usage: policy-supervisor {baseline|evolve|status}" >&2
+    exit 1
+    ;;
+esac

@@ -17,6 +17,7 @@ import { registerSchedulerTools } from "./scheduler-tools";
 import { registerSandboxTools } from "./sandbox-tools";
 import { registerGuardianTools } from "./guardian-tools";
 import { registerPolicyTools } from "./policy-tools";
+import { registerEvolveTools } from "./policy-evolve-tools";
 import { registerIntrospectionTools } from "./introspection-tools";
 import { memoryInstruction, registerMemoryTools } from "./memory-tools";
 import {
@@ -54,6 +55,7 @@ async function registerExoclawTools(
   registerSandboxTools(tools);
   registerGuardianTools(tools);
   registerPolicyTools(tools);
+  registerEvolveTools(tools);
   registerMemoryTools(tools);
   for (const modulePath of context.agentConfig.typescript?.toolModulePaths ??
     []) {
