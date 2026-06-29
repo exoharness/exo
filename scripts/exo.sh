@@ -1375,6 +1375,10 @@ while [[ $# -gt 0 ]]; do
       PULL_SANDBOX=true
       shift
       ;;
+    --skip-build)
+      SKIP_BUILD=true
+      shift
+      ;;
     --no-sandbox)
       USE_SANDBOX=false
       shift
