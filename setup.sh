@@ -445,12 +445,29 @@ backup_existing_install_dir() {
   echo "Backed up existing files to $backup_dir"
 }
 
+update_existing_checkout() {
+  local dir="$1"
+  echo "Updating existing Exo checkout at $dir"
+  if git -C "$dir" rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
+    git -C "$dir" pull --rebase --autostash
+    return
+  fi
+
+  echo "No upstream branch is configured; fetching $REPO_REF from origin."
+  git -C "$dir" fetch origin "$REPO_REF"
+  if [[ "$(git -C "$dir" rev-parse --abbrev-ref HEAD)" == "HEAD" ]]; then
+    git -C "$dir" checkout FETCH_HEAD
+  else
+    git -C "$dir" rebase --autostash FETCH_HEAD
+  fi
+}
+
 clone_or_reuse_repo() {
   local install_dir="$1"
   local tmp_parent
   local tmp_checkout
   if is_exo_checkout "$install_dir"; then
-    echo "Using existing Exo checkout at $install_dir"
+    update_existing_checkout "$install_dir"
     return
   fi
   mkdir -p "$install_dir"
