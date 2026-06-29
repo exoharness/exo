@@ -88,8 +88,8 @@ function scopeParameters(): ToolDefinition["parameters"] {
 function scopeProperty(): ToolDefinition["parameters"] {
   return {
     type: ["string", "null"],
-    enum: ["agent", "conversation", null],
+    enum: ["agent", "conversation", "policy", null],
     description:
-      "Sandbox scope. Use 'agent' or null for Exoclaw's shared persistent agent sandbox; use 'conversation' for this conversation's sandbox.",
+      "Sandbox scope. Use 'agent' or null for Exoclaw's shared persistent agent sandbox; 'conversation' for this conversation's sandbox; 'policy' for the dedicated policy sandbox (the agent's own code/runtime box, used by policy_shell and policy self-evolution).",
   };
 }

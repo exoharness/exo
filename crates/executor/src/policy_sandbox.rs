@@ -30,7 +30,7 @@ const POLICY_MARKER_FS_PATH: &str = "/policy";
 // but adds the marker durable filesystem so it resolves to its own warm
 // container. Keep this the single source of truth for the policy spec so the
 // create path and the matches_spec reuse check stay in sync.
-fn policy_sandbox_spec(
+pub(crate) fn policy_sandbox_spec(
     agent_config: &AgentConfig,
     conversation_config: &ConversationConfig,
 ) -> ConversationSandboxSpec {

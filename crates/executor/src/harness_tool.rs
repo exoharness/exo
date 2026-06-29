@@ -11,7 +11,7 @@ use crate::conversation_events::execute_list_conversation_events_tool;
 use crate::conversation_sandbox::{
     conversation_sandbox_spec, conversation_sandboxes, ensure_conversation_sandbox,
 };
-use crate::policy_sandbox::ensure_policy_sandbox;
+use crate::policy_sandbox::{current_policy_sandbox, ensure_policy_sandbox, policy_sandbox_spec};
 use crate::scheduler_store::SchedulerStore;
 use crate::scheduler_types::{
     DEFAULT_MAX_OUTPUT_BYTES, NewScheduledTask, ScheduledTaskSandboxMode,
@@ -276,6 +276,7 @@ struct ScheduledTaskIdArguments {
 enum SandboxControlScope {
     Agent,
     Conversation,
+    Policy,
 }
 
 impl SandboxControlScope {
@@ -287,6 +288,7 @@ impl SandboxControlScope {
         match self {
             Self::Agent => "agent",
             Self::Conversation => "conversation",
+            Self::Policy => "policy",
         }
     }
 }
@@ -499,6 +501,13 @@ async fn execute_list_sandbox_snapshots_tool(
             )
             .await
         }
+        SandboxControlScope::Policy => {
+            let spec = policy_sandbox_spec(agent_config, config);
+            let Some(handle) = current_policy_sandbox(agent, &spec).await? else {
+                return Ok(empty_sandbox_snapshot_result(scope));
+            };
+            sandbox_snapshot_result(agent, scope, None, handle.sandbox_id).await
+        }
     }
 }
 
@@ -555,6 +564,30 @@ async fn execute_snapshot_sandbox_tool(
                 "scope": scope.as_str(),
                 "sandboxId": sandbox_id,
                 "ownerConversationId": conversation.record().id.to_string(),
+                "snapshotId": snapshot_id.to_string(),
+            }))
+        }
+        SandboxControlScope::Policy => {
+            let handle = ensure_policy_sandbox(agent, conversation, agent_config, config).await?;
+            let snapshot_id = agent.snapshot_sandbox(handle.sandbox_id.clone()).await?;
+            turn.add_events(vec![EventData::SandboxSnapshotted {
+                sandbox_id: handle.sandbox_id.clone(),
+                snapshot_id,
+            }])
+            .await?;
+            record_sandbox_snapshot(
+                agent,
+                scope,
+                String::new(),
+                handle.sandbox_id.clone(),
+                snapshot_id.to_string(),
+            )
+            .await?;
+            Ok(serde_json::json!({
+                "ok": true,
+                "scope": scope.as_str(),
+                "sandboxId": handle.sandbox_id,
+                "ownerConversationId": null,
                 "snapshotId": snapshot_id.to_string(),
             }))
         }
@@ -632,6 +665,37 @@ async fn execute_rewind_sandbox_tool(
                 "rewound": true,
             }))
         }
+        SandboxControlScope::Policy => {
+            let handle = ensure_policy_sandbox(agent, conversation, agent_config, config).await?;
+            agent
+                .start_sandbox(StartSandboxRequest {
+                    id: handle.sandbox_id.clone(),
+                    snapshot_id,
+                    idle_seconds: Some(spec.idle_seconds),
+                })
+                .await?;
+            turn.add_events(vec![EventData::SandboxStarted {
+                sandbox_id: handle.sandbox_id.clone(),
+                snapshot_id: Some(snapshot_id),
+            }])
+            .await?;
+            record_current_sandbox_snapshot(
+                agent,
+                scope,
+                String::new(),
+                handle.sandbox_id.clone(),
+                args.snapshot_id.clone(),
+            )
+            .await?;
+            Ok(serde_json::json!({
+                "ok": true,
+                "scope": scope.as_str(),
+                "sandboxId": handle.sandbox_id,
+                "ownerConversationId": null,
+                "snapshotId": args.snapshot_id,
+                "rewound": true,
+            }))
+        }
     }
 }
 
@@ -643,7 +707,7 @@ async fn sandbox_snapshot_result(
 ) -> Result<ToolResult> {
     let owner_conversation_id = owner_conversation_id.unwrap_or_default();
     let owner_conversation_id_result = match scope {
-        SandboxControlScope::Agent => None,
+        SandboxControlScope::Agent | SandboxControlScope::Policy => None,
         SandboxControlScope::Conversation => Some(owner_conversation_id.clone()),
     };
     let registry = load_sandbox_snapshot_registry(agent).await?;
