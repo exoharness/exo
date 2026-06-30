@@ -113,6 +113,44 @@ A probe turn the supervisor runs in P on the new binary, e.g.
 `exo conversation send <agent> <probe-conv> "reply READY"`. Healthy =
 exit 0 + `READY` in the reply. Failure = crash / nonzero / wrong output.
 
+### 3g. Host-driven policy repl (`conversation sandbox policy-repl`) — implemented
+The interactive twin of the §3f probe, and the answer to "how do I talk to the
+in-sandbox executor without `docker exec`-ing into a container whose id changes
+on rollback." A host-side repl whose **loop runs on the host** but whose **turns
+execute inside P** (so they load P's own, possibly evolved, `harness.ts`):
+
+```
+exo --exoharness-url <kernel> --bearer-env EXO_TOK \
+    conversation sandbox policy-repl <agent> <conversation>
+```
+
+Each line dispatches `exo conversation send <agent> <conv> <line>` **inside P**
+via EH `run_in_sandbox` (the same primitive as `policy_shell`), reusing the
+fresh-`exo`-per-turn model so the in-P harness is loaded fresh every turn. The
+in-P process is a pure remote client (`EXO_REMOTE_SANDBOX=1`, same kernel URL +
+bearer) so state stays kernel-owned; the user's message travels via
+`$EXO_POLICY_REPL_LINE` (never interpolated into the shell line), and the command
+`cd /home/worker/exo` first because `run_in_sandbox` carries no workdir and the
+in-P exo resolves the TS runner relative to cwd.
+
+**Why it's the right driver for a self-evolving box (vs `docker exec -it P …`):**
+- The loop lives on the **host**, so a rollback that recreates P cannot kill it
+  (an in-P repl would be killed when its own container is rewound).
+- It dispatches by the **stable exo sandbox id**, not a docker container id. Rewind
+  swaps the container behind that id; the next turn lands in the new container
+  with no reconnect. Verified end-to-end: destroying the policy container outright
+  and the next `policy-repl` turn auto-materialized a fresh one and replied
+  normally.
+
+This is exactly the role the old `exoclaw-control` REPL child + scheduler wakeup
+played (drive turns into the agent, survive restarts), but the persistent listener
+moves to the host and the turn execution moves into P. Note the v1 caveat: turns
+are **non-streaming** — `run_in_sandbox` returns the completed stdout, so you see
+the final reply, not the live tool-call/token stream a local TUI shows.
+
+Mechanics: `executor::policy_repl_turn` (in `policy_sandbox.rs`) is the one
+round-trip primitive; the CLI arm is a `rustyline` loop over it.
+
 ---
 
 ## 4. "Switch to the new code"
@@ -215,3 +253,11 @@ Caveats:
   cold start doesn't replay a long snapshot chain?
 - **Supervisor placement:** host process vs an EH-native `evolve_sandbox`
   operation (cleaner ownership, bigger kernel change).
+- **Streaming for `policy-repl` (§3g):** v1 is non-streaming (final stdout only).
+  Live streaming would need P's in-turn events forwarded back to the host renderer
+  — only worth it if the play-by-play matters.
+- **Autonomous inbound:** `policy-repl` still requires a human/supervisor to push
+  each turn. A real unattended agent needs an inbound path (adapter →
+  kernel → turn dispatched into P) so external messages wake EE without a driver
+  on the host — the piece neither the probe nor the old scheduler-wake covers for
+  the in-sandbox topology.

@@ -68,7 +68,7 @@ pub use harness_types::{
     CreateAgentRequest, CreateConversationRequest, Harness, HarnessAgent, HarnessConversation,
 };
 pub use local_sandbox::LocalSandboxExoHarness;
-pub use policy_sandbox::{rewind_policy_sandbox, snapshot_policy_sandbox};
+pub use policy_sandbox::{policy_repl_turn, rewind_policy_sandbox, snapshot_policy_sandbox};
 pub use rlm::RlmHarness;
 pub use scheduler_runtime::{SchedulerRunOptions, run_due_tasks, run_task};
 pub use scheduler_store::SchedulerStore;

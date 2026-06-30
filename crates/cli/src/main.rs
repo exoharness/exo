@@ -34,8 +34,9 @@ use executor::{
     SandboxScope, Secret, SecretBackendChoice, SnapshotId, SpritesBackendSpec, ToolRequest,
     ToolRuntime, TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, VercelBackendSpec,
     default_aws_agentcore_image, default_daytona_image, default_docker_image, default_e2b_template,
-    default_vercel_image, effective_sandbox_scope, load_agent_config, rewind_policy_sandbox,
-    send_conversation_wakeup, serve_exoharness_http_listener_with_options, snapshot_policy_sandbox,
+    default_vercel_image, effective_sandbox_scope, load_agent_config, policy_repl_turn,
+    rewind_policy_sandbox, send_conversation_wakeup, serve_exoharness_http_listener_with_options,
+    snapshot_policy_sandbox,
 };
 use lingua::Message;
 use lingua::universal::{AssistantContent, AssistantContentPart, ToolContentPart, UserContent};
@@ -604,6 +605,13 @@ enum ConversationSandboxCommands {
         agent: String,
         conversation: String,
         snapshot_id: String,
+    },
+    /// Host-driven repl whose turns execute INSIDE the agent's policy sandbox,
+    /// so they load the sandbox's own (possibly evolved) harness.ts. The loop
+    /// runs on the host, so it survives a rollback that recreates the container.
+    PolicyRepl {
+        agent: String,
+        conversation: String,
     },
 }
 
@@ -1597,7 +1605,6 @@ async fn main() -> Result<()> {
                     let config = conversation.config().await?;
                     let snapshot_id = snapshot_policy_sandbox(
                         agent_handle.exoharness_handle().as_ref(),
-                        conversation.exoharness_handle().as_ref(),
                         &agent_config,
                         &config,
                     )
@@ -1621,13 +1628,70 @@ async fn main() -> Result<()> {
                     let config = conversation.config().await?;
                     rewind_policy_sandbox(
                         agent_handle.exoharness_handle().as_ref(),
-                        conversation.exoharness_handle().as_ref(),
                         &agent_config,
                         &config,
                         snapshot,
                     )
                     .await?;
                     println!("rewound policy sandbox to {snapshot_id}");
+                }
+                ConversationSandboxCommands::PolicyRepl {
+                    agent,
+                    conversation,
+                } => {
+                    let eh_url = cli.exoharness_url.clone().ok_or_else(|| {
+                        anyhow!(
+                            "policy-repl requires --exoharness-url: the kernel owns the policy sandbox"
+                        )
+                    })?;
+                    let bearer_env = cli.bearer_env.clone();
+                    let bearer_value = bearer_env
+                        .as_deref()
+                        .map(|env| env_value_from_arg("--bearer-env", env, &env_vars))
+                        .transpose()?;
+                    let agent_handle = must_get_agent(harness.as_ref(), &agent).await?;
+                    let conversation_handle = agent_handle
+                        .get_conversation(&conversation)
+                        .await?
+                        .ok_or_else(|| anyhow!("conversation not found: {}", conversation))?;
+                    let agent_config = agent_handle.config().await?;
+                    let config = conversation_handle.config().await?;
+                    let exoharness = agent_handle.exoharness_handle();
+
+                    eprintln!(
+                        "policy repl: turns run inside '{agent}' policy sandbox (loads its harness.ts). Ctrl-D to exit."
+                    );
+                    let mut editor = rustyline::DefaultEditor::new()?;
+                    loop {
+                        match editor.readline("you> ") {
+                            Ok(line) => {
+                                let line = line.trim();
+                                if line.is_empty() {
+                                    continue;
+                                }
+                                let _ = editor.add_history_entry(line);
+                                match policy_repl_turn(
+                                    exoharness.as_ref(),
+                                    &agent_config,
+                                    &config,
+                                    &eh_url,
+                                    bearer_env.as_deref(),
+                                    bearer_value.as_deref(),
+                                    &agent,
+                                    &conversation,
+                                    line,
+                                )
+                                .await
+                                {
+                                    Ok(reply) => println!("{}", reply.trim_end()),
+                                    Err(err) => eprintln!("error: {err:#}"),
+                                }
+                            }
+                            Err(rustyline::error::ReadlineError::Eof)
+                            | Err(rustyline::error::ReadlineError::Interrupted) => break,
+                            Err(err) => return Err(err.into()),
+                        }
+                    }
                 }
             },
             ConversationCommands::Show {
@@ -2035,7 +2099,8 @@ fn command_agent_ref(command: &Commands) -> Option<&str> {
             ConversationCommands::Sandbox { command } => match command {
                 ConversationSandboxCommands::Run { agent, .. }
                 | ConversationSandboxCommands::PolicySnapshot { agent, .. }
-                | ConversationSandboxCommands::PolicyRewind { agent, .. } => Some(agent.as_str()),
+                | ConversationSandboxCommands::PolicyRewind { agent, .. }
+                | ConversationSandboxCommands::PolicyRepl { agent, .. } => Some(agent.as_str()),
             },
         },
         Commands::Repl { agent, .. } => Some(agent.as_deref().unwrap_or(DEFAULT_REPL_SLUG)),

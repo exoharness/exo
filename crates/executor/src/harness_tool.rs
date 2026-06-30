@@ -119,7 +119,7 @@ impl ToolRuntime for ExoclawToolRuntime {
                 execute_exoclaw_shell_tool(agent, conversation, agent_config, config, request).await
             }
             "policy_shell" => {
-                execute_policy_shell_tool(agent, conversation, agent_config, config, request).await
+                execute_policy_shell_tool(agent, agent_config, config, request).await
             }
             "schedule_sandbox_task" => {
                 execute_schedule_task_tool(agent, conversation, &self.scheduler_store, request)
@@ -568,7 +568,7 @@ async fn execute_snapshot_sandbox_tool(
             }))
         }
         SandboxControlScope::Policy => {
-            let handle = ensure_policy_sandbox(agent, conversation, agent_config, config).await?;
+            let handle = ensure_policy_sandbox(agent, agent_config, config).await?;
             let snapshot_id = agent.snapshot_sandbox(handle.sandbox_id.clone()).await?;
             turn.add_events(vec![EventData::SandboxSnapshotted {
                 sandbox_id: handle.sandbox_id.clone(),
@@ -666,7 +666,7 @@ async fn execute_rewind_sandbox_tool(
             }))
         }
         SandboxControlScope::Policy => {
-            let handle = ensure_policy_sandbox(agent, conversation, agent_config, config).await?;
+            let handle = ensure_policy_sandbox(agent, agent_config, config).await?;
             agent
                 .start_sandbox(StartSandboxRequest {
                     id: handle.sandbox_id.clone(),
@@ -955,7 +955,6 @@ async fn execute_exoclaw_shell_tool(
 // conversation's env sandbox scope.
 async fn execute_policy_shell_tool(
     agent: &dyn AgentHandle,
-    conversation: &dyn ConversationHandle,
     agent_config: &AgentConfig,
     config: &ConversationConfig,
     request: &ToolRequest,
@@ -966,9 +965,8 @@ async fn execute_policy_shell_tool(
         .shell_program
         .clone()
         .ok_or_else(|| anyhow::anyhow!("shell tool is not enabled for this conversation"))?;
-    let policy_sandbox = ensure_policy_sandbox(agent, conversation, agent_config, config).await?;
-    let process = policy_sandbox
-        .conversation
+    let policy_sandbox = ensure_policy_sandbox(agent, agent_config, config).await?;
+    let process = agent
         .run_in_sandbox(RunInSandboxRequest {
             id: policy_sandbox.sandbox_id,
             command: vec![program, "-lc".to_string(), args.command],
