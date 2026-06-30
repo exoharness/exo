@@ -16,6 +16,7 @@ import {
   defineHarness,
   registerBuiltInTools,
   registerAgentToolsFromDirectoryIfExists,
+  registerLibraryToolModulePath,
   type HarnessToolRegistry,
   type Message,
   type TurnContext,
@@ -28,6 +29,7 @@ import {
 } from "../typescript/turn-loop";
 import { memoryInstruction, registerMemoryTools } from "../exoclaw/memory-tools";
 import { registerSandboxTools } from "../exoclaw/sandbox-tools";
+import { registerIntrospectionTools } from "../exoclaw/introspection-tools";
 
 const SELF_IMPROVE_PROMPT = `You are an agent evaluated over a sequence of related episodes in a shared setting. Your goal is to perform well across the WHOLE sequence by improving yourself from feedback — not to treat each episode in isolation.
 
@@ -62,6 +64,11 @@ export default defineHarness({
         registerBuiltInTools(tools, ctx, defaultBuiltInToolNames(ctx));
         registerMemoryTools(tools);
         registerSandboxTools(tools);
+        registerIntrospectionTools(tools); // reflect on own history (list_conversation_events)
+        // Operator-provided tool libraries, if any are configured (no-op otherwise).
+        for (const modulePath of ctx.agentConfig.typescript?.toolModulePaths ?? []) {
+          await registerLibraryToolModulePath(tools, ctx, modulePath);
+        }
         if (ctx.agentConfig.enableAgentToolCreation) {
           await registerAgentToolsFromDirectoryIfExists(tools, ctx);
         }
