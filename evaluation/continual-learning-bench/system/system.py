@@ -184,8 +184,41 @@ class ExoSystem(ContinualLearningSystem):
                               "given earlier — no prose, no code fences. Output it now."], check=False)
             action = self._parse(query.response_schema)
         if action is None:
-            raise RuntimeError("exo did not produce a schema-valid response after one repair")
+            # exo never emitted a schema-valid answer (e.g. it rabbit-holed on
+            # exploration without concluding). Treat that as a failed-to-answer
+            # instance — zero credit — rather than crashing the whole run, which
+            # would also abort every other (good) instance in the baseline.
+            fallback = self._fallback_action(query.response_schema)
+            if fallback is None:
+                raise RuntimeError("exo did not produce a schema-valid response after one repair")
+            return Response(action=fallback, metadata={"no_valid_answer": True})
         return Response(action=action)
+
+    @staticmethod
+    def _fallback_action(schema: type[BaseModel]) -> Optional[BaseModel]:
+        """Build a minimal schema-valid 'null' answer (type-based zero defaults).
+
+        Used only when exo fails to produce any valid response; the resulting
+        answer is intentionally wrong so the instance scores zero. Returns None
+        if the schema is too complex to default, in which case the caller raises.
+        """
+        defaults: dict[str, Any] = {}
+        for fname, field in schema.model_fields.items():
+            ann = field.annotation
+            if ann in (float, int):
+                defaults[fname] = 0
+            elif ann is str:
+                defaults[fname] = ""
+            elif ann is bool:
+                defaults[fname] = False
+            elif not field.is_required():
+                continue
+            else:
+                return None
+        try:
+            return schema(**defaults)
+        except Exception:
+            return None
 
     def _parse(self, schema: type[BaseModel]) -> Optional[BaseModel]:
         text = self._last_assistant_text()
