@@ -68,7 +68,7 @@ impl ToolRuntime for BasicToolRuntime {
 
     async fn execute(
         &self,
-        _agent: &dyn AgentHandle,
+        agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
         _turn: Option<&dyn TurnHandle>,
         agent_config: &AgentConfig,
@@ -76,7 +76,12 @@ impl ToolRuntime for BasicToolRuntime {
         request: &ToolRequest,
     ) -> Result<ToolResult> {
         match request.function_name.as_str() {
-            "shell" => execute_shell_tool(conversation, agent_config, config, request).await,
+            // Scope-aware: uses the agent-shared sandbox when the conversation
+            // was created with sandboxScope: "agent" (default stays
+            // conversation-scoped for non-exoclaw harnesses).
+            "shell" => {
+                execute_scoped_shell_tool(agent, conversation, agent_config, config, request).await
+            }
             other => Err(anyhow::anyhow!(
                 "tool execution is not configured for {other}"
             )),
@@ -115,7 +120,7 @@ impl ToolRuntime for ExoclawToolRuntime {
     ) -> Result<ToolResult> {
         match request.function_name.as_str() {
             "shell" => {
-                execute_exoclaw_shell_tool(agent, conversation, agent_config, config, request).await
+                execute_scoped_shell_tool(agent, conversation, agent_config, config, request).await
             }
             "schedule_sandbox_task" => {
                 execute_schedule_task_tool(agent, conversation, &self.scheduler_store, request)
@@ -839,7 +844,7 @@ async fn read_shell_process(process: Box<dyn SandboxProcess>) -> Result<ToolResu
     })?)
 }
 
-async fn execute_exoclaw_shell_tool(
+async fn execute_scoped_shell_tool(
     agent: &dyn AgentHandle,
     conversation: &dyn ConversationHandle,
     agent_config: &AgentConfig,
