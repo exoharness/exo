@@ -34,7 +34,7 @@ function evolvePolicyTool(): ToolInstance {
     definition: {
       name: "evolve_policy",
       description:
-        "Request that your just-edited policy code be verified and switched to, with automatic rollback if it fails to run. First edit your code in the policy sandbox with policy_shell, then call this. A supervisor outside your sandbox snapshots a known-good baseline, health-checks the new code, and rewinds to the baseline if it fails to run. Set rebuild=true only if you changed Rust (crates/) so the executor binary must be recompiled; use false for TypeScript-only policy edits (prompts, harness.ts, tools).",
+        "Request that your just-edited policy code be verified and switched to, with automatic rollback if it fails to run. First edit your code in the policy sandbox with policy_shell, then call this. A supervisor outside your sandbox health-checks the new code: if it fails, it rewinds to the last known-good snapshot, discarding this edit; if it passes, it snapshots the new state as the new baseline. (That known-good baseline is the last accepted version, captured before this edit — not taken now, since your code is already changed.) Set rebuild=true only if you changed Rust (crates/) so the executor binary must be recompiled; use false for TypeScript-only policy edits (prompts, harness.ts, tools).",
       parameters: {
         type: "object",
         additionalProperties: false,
