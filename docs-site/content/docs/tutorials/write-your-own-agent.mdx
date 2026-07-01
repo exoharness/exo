@@ -187,14 +187,14 @@ export default defineHarness({
 ```bash
 pnpm install   # once, for the TypeScript runtime
 
-./target/debug/exo secret set openai --env OPENAI_API_KEY
-./target/debug/exo model register gpt-5.5 --secret openai
+exo secret set openai --env OPENAI_API_KEY
+exo model register gpt-5.5 --secret openai
 
-./target/debug/exo --harness typescript agent create "Sysmon" \
+exo --harness typescript agent create "Sysmon" \
   --module examples/typescript/sysmon-harness.ts \
   --model gpt-5.5
-./target/debug/exo conversation create sysmon "Sysmon Test"
-./target/debug/exo repl --agent sysmon --conversation sysmon-test
+exo conversation create sysmon "Sysmon Test"
+exo repl --agent sysmon --conversation sysmon-test
 ```
 
 A real exchange (via `conversation send`):

@@ -16,20 +16,29 @@ description: Build the exo CLI and set up API keys.
 If you use [mise](https://mise.jdx.dev/), `mise install` in the repository
 root installs the pinned Rust and Node versions.
 
-## Build the CLI
+## Install the CLI
 
 ```bash
 git clone https://github.com/ankrgyl/exo
 cd exo
-cargo build -p exo
-./target/debug/exo --help
+cargo install --path crates/cli --locked
+exo --help
 ```
+
+`cargo install` builds a release binary and places `exo` in `~/.cargo/bin`,
+which the Rust installer puts on your `PATH` — so `exo` works from any
+directory. Re-run the same command after pulling changes to update it.
 
 If you plan to use TypeScript harnesses, also install Node dependencies once:
 
 ```bash
 pnpm install
 ```
+
+<Callout type="info">
+  Hacking on exo itself? Skip the install and use a debug build:
+  `cargo build -p exo`, then invoke it as `./target/debug/exo`.
+</Callout>
 
 ## API keys
 
