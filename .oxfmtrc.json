@@ -3,6 +3,7 @@
   "ignorePatterns": [
     ".next/**",
     "coverage/**",
+    "docs-site/**",
     "node_modules/**",
     "scratch/**"
   ],
