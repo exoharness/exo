@@ -1,0 +1,30 @@
+---
+title: exo
+description: A minimal, durable substrate for building AI agents.
+---
+
+Exo separates the trusted infrastructure an agent needs — state, history,
+secrets, sandboxes — from agent-specific policy. It splits an agent into two
+halves:
+
+- **exoharness** — the durable, trusted substrate. Owns identity (agents,
+  conversations, turns), the append-only event log, artifacts, secrets, and
+  sandbox lifecycle.
+- **executor** — the ephemeral, swappable policy layer. Owns prompt assembly,
+  model calls, tool dispatch, memory, and the turn loop.
+
+Because the substrate doesn't depend on the executor, agents built on exo can
+**fork or rewind** to any past event, **swap executors** (Codex, Claude Code,
+Cursor SDK, or your own), and **evolve safely** — modifying their own tools,
+prompts, and harness code without losing critical state.
+
+<Cards>
+  <Card title="Getting Started" href="/docs/getting-started" description="Install exo and chat with your first agent in minutes." />
+  <Card title="Concepts" href="/docs/concepts" description="The architectural model: exoharness, executors, events, and time travel." />
+  <Card title="Tutorials" href="/docs/tutorials" description="Build your own TypeScript harness and custom tools." />
+  <Card title="Examples" href="/docs/examples" description="Exoclaw, coding-agent harnesses, and the self-improving Pokémon agent." />
+</Cards>
+
+<Callout type="warn">
+  Exo is early software. The public API should be treated as unstable.
+</Callout>

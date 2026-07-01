@@ -1,0 +1,52 @@
+---
+title: Installation
+description: Build the exo CLI and set up API keys.
+---
+
+## Prerequisites
+
+- **Rust** — builds the `exo` CLI and the exoharness substrate. The pinned
+  toolchain version is in [`mise.toml`](https://github.com/ankrgyl/exo/blob/main/mise.toml).
+- **Node.js + pnpm** — only needed for TypeScript harnesses (including the
+  Codex, Claude Code, and Cursor examples, and Exoclaw).
+- **Docker** — only needed for sandboxed conversations using the default
+  `docker` sandbox backend. On macOS, `apple-container` is also supported,
+  and `local-process` runs commands directly on the host with no isolation.
+
+If you use [mise](https://mise.jdx.dev/), `mise install` in the repository
+root installs the pinned Rust and Node versions.
+
+## Build the CLI
+
+```bash
+git clone https://github.com/ankrgyl/exo
+cd exo
+cargo build -p exo
+./target/debug/exo --help
+```
+
+If you plan to use TypeScript harnesses, also install Node dependencies once:
+
+```bash
+pnpm install
+```
+
+## API keys
+
+You'll need an API key for at least one model provider. Copy `.env.example`
+to `.env` and fill in what you have, or just export the variable in your
+shell:
+
+```bash
+export OPENAI_API_KEY=sk-...
+```
+
+Model names starting with `claude` are routed to the Anthropic API
+(`ANTHROPIC_API_KEY`); everything else goes through the OpenAI-compatible
+API, and `exo model register --base-url` lets you point at any
+OpenAI-compatible endpoint.
+
+<Callout type="info">
+  Exo is early software. The CLI and APIs are useful for experimentation, but
+  should be treated as unstable.
+</Callout>

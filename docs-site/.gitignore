@@ -1,4 +1,6 @@
-vendor/
-_site/
-.jekyll-cache/
-.bundle/
+node_modules/
+.next/
+.source/
+out/
+next-env.d.ts
+*.tsbuildinfo
