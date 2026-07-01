@@ -5,10 +5,13 @@
 #   OPENAI_API_KEY=... ARC_N=50 ./run.sh            # more tasks
 #   OPENAI_API_KEY=... ARC_VERSION=2 ./run.sh       # ARC-AGI-2
 #   OPENAI_API_KEY=... ARC_SPLIT=training ./run.sh  # training split
+#   OPENAI_API_KEY=... ARC_VERSION=2 ARC_N=25 ./run.sh --evolve --out results/evolve25.json
+#                                                   # self-evolving persistent agent
 #
-# exo runs host-side (no sandbox tools — the ARC harness is pure reasoning), so
-# the agent can't read the on-disk answer keys. Extra args pass through to
-# arc_runner.py (e.g. --offset 100).
+# Default harness is tool-less pure reasoning, so the agent can't read the
+# on-disk answer keys. --evolve switches to harness-arc-evolve.ts (memory +
+# self-authored tools + docker-sandboxed shell) with ONE persistent agent across
+# the sequence. Extra args pass through to arc_runner.py (e.g. --offset 100).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 export EXO_REPO="$(cd "$HERE/../.." && pwd)"
