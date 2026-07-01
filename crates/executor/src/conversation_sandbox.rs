@@ -149,7 +149,9 @@ pub(crate) fn conversation_sandbox_spec(
             .unwrap_or_else(|| "/".to_string()),
         file_system_mounts: normalize_mounts(&config.mounts),
         durable_file_systems: config.durable_file_systems.clone(),
-        enable_networking: agent_config.enable_networking,
+        enable_networking: config
+            .enable_networking
+            .unwrap_or(agent_config.enable_networking),
         idle_seconds: 300,
     }
 }

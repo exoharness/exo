@@ -902,7 +902,9 @@ pub(crate) async fn ensure_shell_sandbox(
     // Empty means "unspecified"; the harness fills the provider's default.
     let requested_image = config.effective_sandbox_image(agent_config);
     let desired_image = requested_image.map(str::to_string).unwrap_or_default();
-    let desired_enable_networking = agent_config.enable_networking;
+    let desired_enable_networking = config
+        .enable_networking
+        .unwrap_or(agent_config.enable_networking);
 
     if let Some(sandbox) = latest_shell_sandbox(conversation, desired_provider).await? {
         // When no image was requested, the stored sandbox holds the provider's
