@@ -12,10 +12,10 @@ every aspect of itself.
 Many agents support some form of self-improvement — evolving prompts, adding
 tools. Exo is *fully recursive*: the agent can operate on any layer of
 itself, from prompts to memory to tooling to the harness code it runs on.
-And it's architected so that this evolution happens incrementally and
-(mostly) safely. The one thing it can't touch is the append-only event log
-that provides canonical history — which is exactly what makes every
-experiment recoverable.
+The architecture constrains this evolution to be incremental and
+recoverable: the agent modifies itself above a trusted substrate it cannot
+alter. That substrate's append-only event log records canonical history, so
+any change — successful or not — can be inspected, rewound, or forked from.
 
 <Cards>
   <Card title="Getting Started" href="/docs/getting-started" description="One setup script to a running agent you can chat with from your browser." />
