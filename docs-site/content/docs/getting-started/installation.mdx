@@ -1,22 +1,53 @@
 ---
 title: Installation
-description: Build the exo CLI and set up API keys.
+description: One setup script to a running agent.
 ---
 
 ## Prerequisites
 
-- **Rust** — builds the `exo` CLI and the exoharness substrate. The pinned
-  toolchain version is in [`mise.toml`](https://github.com/ankrgyl/exo/blob/main/mise.toml).
-- **Node.js + pnpm** — only needed for TypeScript harnesses (including the
-  Codex, Claude Code, and Cursor examples, and Exoclaw).
-- **Docker** — only needed for sandboxed conversations using the default
-  `docker` sandbox backend. On macOS, `apple-container` is also supported,
-  and `local-process` runs commands directly on the host with no isolation.
+The setup script checks for these and prints per-platform install
+instructions for anything missing:
 
-If you use [mise](https://mise.jdx.dev/), `mise install` in the repository
-root installs the pinned Rust and Node versions.
+- **git**
+- **Node.js 22+ and pnpm**
+- **Rust** (via [rustup](https://rustup.rs/))
+- **Docker** — running, for the agent's sandbox
 
-## Install the CLI
+You'll also need an **OpenAI API key**.
+
+## Run the setup script
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ankrgyl/exo/main/setup.sh -o setup.sh
+bash setup.sh
+```
+
+The script installs Exo into the current directory and walks you through
+everything:
+
+1. Clones the repository and builds the `exo` CLI.
+2. Asks for your OpenAI API key (stored in a `.env` file with `600`
+   permissions, then registered in exo's secret store).
+3. Asks for your name and your agent's name, and writes a local profile at
+   `.exo/exoclaw-profile.md` (git-ignored — machine-specific instructions
+   live here).
+4. Starts the canonical agent: a sandbox (Ubuntu 24.04 in Docker), the task
+   scheduler, and the ExoChat adapter.
+
+When it finishes, two things happen:
+
+- It prints a URL like
+  `https://exoharness.ai/chat?role=user&c=...#k=...` — a minimal remote chat
+  interface to your agent. Open it in any browser, including your phone.
+- It drops you into a local REPL where you can talk to the agent directly.
+
+Head to [Your First Session](./first-session.mdx) for what to try next.
+
+## Installing just the CLI
+
+If you want the `exo` CLI without the canonical agent — to build your own
+harness from scratch or script against the exoharness — install it from a
+checkout with cargo:
 
 ```bash
 git clone https://github.com/ankrgyl/exo
@@ -25,37 +56,12 @@ cargo install --path crates/cli --locked
 exo --help
 ```
 
-`cargo install` builds a release binary and places `exo` in `~/.cargo/bin`,
-which the Rust installer puts on your `PATH` — so `exo` works from any
-directory. Re-run the same command after pulling changes to update it.
-
-If you plan to use TypeScript harnesses, also install Node dependencies once:
-
-```bash
-pnpm install
-```
+This places a release build at `~/.cargo/bin/exo` (on your `PATH` via
+rustup). See [Using the CLI Directly](./quick-start.mdx) to register a model
+and start a bare REPL, and run `pnpm install` if you'll use TypeScript
+harnesses.
 
 <Callout type="info">
-  Hacking on exo itself? Skip the install and use a debug build:
-  `cargo build -p exo`, then invoke it as `./target/debug/exo`.
-</Callout>
-
-## API keys
-
-You'll need an API key for at least one model provider. Copy `.env.example`
-to `.env` and fill in what you have, or just export the variable in your
-shell:
-
-```bash
-export OPENAI_API_KEY=sk-...
-```
-
-Model names starting with `claude` are routed to the Anthropic API
-(`ANTHROPIC_API_KEY`); everything else goes through the OpenAI-compatible
-API, and `exo model register --base-url` lets you point at any
-OpenAI-compatible endpoint.
-
-<Callout type="info">
-  Exo is early software. The CLI and APIs are useful for experimentation, but
-  should be treated as unstable.
+  Hacking on exo itself? Use a debug build: `cargo build -p exo`, then invoke
+  it as `./target/debug/exo`.
 </Callout>

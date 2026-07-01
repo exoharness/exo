@@ -3,9 +3,17 @@ title: Adapters
 description: Long-running connections to external channels like IRC, WhatsApp, Signal, and Discord.
 ---
 
-Adapters are long-running, host-managed connections to external services —
-IRC, WhatsApp, Signal, Discord — that let an agent receive messages from
-outside the REPL and send explicit replies back.
+Adapters are long-running, host-managed connections to external surfaces
+that let an agent receive messages from outside the REPL and send explicit
+replies back:
+
+- `exochat` — a hosted, text-only browser chat at `https://exoharness.ai`;
+  the canonical setup starts it by default and prints its URL
+- `irc` — IRC channels
+- `whatsapp` — WhatsApp linked device (Baileys)
+- `signal` — Signal linked device (`signal-cli`)
+- `discord` — Discord bot with message and attachment support
+- `agent-cli` — a local shell adapter for sending prompts from any directory
 
 They are deliberately separate from tools:
 
@@ -22,6 +30,5 @@ stdin/stdout. Protocol-specific code lives with the adapter (e.g.
 Adapter records, event history, and the outbound queue are stored under
 `.exo/adapters/`.
 
-Exoclaw ships adapters for IRC (built-in), plus WhatsApp, Signal, Discord,
-and a local shell CLI as library adapters — see the
-[Exoclaw example](../examples/index.mdx).
+See [The Canonical Agent](./canonical-agent.mdx) for the adapter management
+tools (`create_adapter`, `send_adapter_message`, ...).

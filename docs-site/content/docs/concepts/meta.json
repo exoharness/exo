@@ -8,6 +8,7 @@
     "sandboxes",
     "bindings-and-secrets",
     "executors",
-    "adapters"
+    "adapters",
+    "canonical-agent"
   ]
 }
