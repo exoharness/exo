@@ -1,29 +1,50 @@
 ---
 title: Concepts
-description: The architectural model behind exo.
+description: The three core concepts — exoharness, executor, sandbox — and how an agent spans them.
 ---
 
-Exo's core idea is a separation of concerns most agent systems conflate:
-the **trusted infrastructure** an agent runs on, and the **semantics** of
-how the agent thinks and acts.
+Exo is built from three core concepts, each with a different mutability
+contract:
+
+## Exoharness — durable state
+
+The trusted substrate. It owns conversation history (the append-only event
+log), artifacts, bindings, secrets, and sandbox lifecycle. It is the one
+layer the agent **cannot alter**: history can only be appended to, never
+rewritten, which is what makes everything else safe to change.
+
+## Executor — policy and tooling
+
+The layer that decides how the agent thinks and acts: prompt assembly,
+model calls, tool dispatch, memory and compaction. It is **fully editable
+and evolvable** — swappable wholesale (Codex, Claude Code, Cursor SDK, your
+own), and modifiable by the agent itself, because nothing durable lives in
+it.
+
+## Sandbox — the environment
+
+Where the agent's work actually runs: an isolated machine where it
+installs packages, executes commands, and experiments. It is
+**checkpointable and rewindable** — snapshots are recorded in the event
+log, so environment state can travel with conversation state.
+
+## An agent spans all three
+
+```text
+agent = conversation history        (durable state)
+      + executor policy & tooling   (fully editable / evolvable)
+      + sandboxed environment(s)    (checkpoint & rewindable)
+```
 
 ![Exo architecture overview](/images/architecture-overview.svg)
 
-Four terms cover the whole model:
+This decomposition is the whole design: everything an agent might want to
+change about itself lives in the two mutable layers, while the record of
+what happened lives in the immutable one. A failed experiment in policy or
+environment is always recoverable, because the history that defines the
+agent was never at risk.
 
-| Term | What it is |
-|:-----|:-----------|
-| **exoharness** | The durable, trusted substrate. Owns conversations, the append-only event log, artifacts, bindings, secrets, and sandboxes. Stateful; never loses your agent. |
-| **executor** | The policy layer. Owns prompt assembly, model calls, tool dispatch, memory/compaction, approvals — every *semantic* decision. Ephemeral and swappable. |
-| **harness** | An executor running on top of an exoharness. This is what you actually use. |
-| **agent** | The high-level behavior an application implements: instructions, security policies, tools, and shared configuration. |
-
-The rule of thumb for what goes where: any decision that affects what an
-agent *means* or *does* belongs in the executor (or the agent itself). The
-exoharness provides the durable building blocks those decisions run on —
-history, state, secrets, and sandboxing.
-
-Read on:
+## Going deeper
 
 - [Exoharness & Executor](./exoharness-and-executor.mdx) — why the split
   exists and what it buys you.
@@ -31,14 +52,13 @@ Read on:
   events, and artifacts.
 - [Time Travel](./time-travel.mdx) — fork and rewind from any point in the
   event log.
-- [Sandboxes](./sandboxes.mdx) — isolated execution with pluggable local and
-  remote backends.
+- [Sandboxes](./sandboxes.mdx) — backends, scope, and snapshots.
 - [Bindings & Secrets](./bindings-and-secrets.mdx) — how credentials stay
   out of the model's reach.
-- [Executors & Harnesses](./executors.mdx) — the built-in executor runtimes,
-  from `basic` to Codex, Claude Code, and Cursor.
-- [Adapters](./adapters.mdx) — long-running connections to external channels
-  like ExoChat, WhatsApp, Signal, Discord, and IRC.
+- [Executors & Harnesses](./executors.mdx) — the built-in executor
+  runtimes; a *harness* is an executor running on an exoharness.
+- [Adapters](./adapters.mdx) — long-running connections to external
+  channels like ExoChat, WhatsApp, Signal, Discord, and IRC.
 - [The Canonical Agent](./canonical-agent.mdx) — what `setup.sh` runs:
   guardian, scheduler, memory, and the self-improvement loop.
 
