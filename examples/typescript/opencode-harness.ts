@@ -573,6 +573,11 @@ function opencodeSandboxEnv(
   }
   if (modelBinding.apiKey) {
     env.OPENCODE_API_KEY = modelBinding.apiKey;
+    const provider =
+      modelBinding.model.split("/")[0]?.toUpperCase().replace(/-/g, "_") ?? "";
+    if (provider) {
+      env[`${provider}_API_KEY`] = modelBinding.apiKey;
+    }
   }
   return env;
 }

@@ -254,7 +254,15 @@ function runHistoryReplayCheck(
   writeFileSync(join(workspace, "tool-marker.txt"), `${toolMarker}\n`);
 
   const conversation = `history-${harness.key}-${runId}`;
-  runExo(["conversation", "create", agent.slug, "--slug", conversation]);
+  runExo([
+    "conversation",
+    "create",
+    agent.slug,
+    "--slug",
+    conversation,
+    "--networking",
+    "enabled",
+  ]);
   runExo([
     "conversation",
     "mount",
@@ -264,14 +272,6 @@ function runHistoryReplayCheck(
     workspace,
     "/workspace",
     "--rw",
-  ]);
-  runExo([
-    "conversation",
-    "update",
-    agent.slug,
-    conversation,
-    "--networking",
-    "enabled",
   ]);
 
   const codeWord = `${harness.key}-blue-lantern-${runId}`;
@@ -361,7 +361,15 @@ function runFilesystemSandboxCheck(
   writeFileSync(join(outside, "secret.txt"), `${outsideMarker}\n`);
 
   const conversation = `sandbox-${harness.key}-${runId}`;
-  runExo(["conversation", "create", agent.slug, "--slug", conversation]);
+  runExo([
+    "conversation",
+    "create",
+    agent.slug,
+    "--slug",
+    conversation,
+    "--networking",
+    "enabled",
+  ]);
   runExo([
     "conversation",
     "mount",
@@ -371,14 +379,6 @@ function runFilesystemSandboxCheck(
     workspace,
     "/workspace",
     "--rw",
-  ]);
-  runExo([
-    "conversation",
-    "update",
-    agent.slug,
-    conversation,
-    "--networking",
-    "enabled",
   ]);
 
   const outsideSecret = join(outside, "secret.txt");
@@ -454,7 +454,15 @@ function runNetworkDisabledCheck(
     join(tmpdir(), `exo-${harness.key}-network-workspace-`),
   );
   const conversation = `network-${harness.key}-${runId}`;
-  runExo(["conversation", "create", agent.slug, "--slug", conversation]);
+  runExo([
+    "conversation",
+    "create",
+    agent.slug,
+    "--slug",
+    conversation,
+    "--networking",
+    "disabled",
+  ]);
   runExo([
     "conversation",
     "mount",
@@ -464,14 +472,6 @@ function runNetworkDisabledCheck(
     workspace,
     "/workspace",
     "--rw",
-  ]);
-  runExo([
-    "conversation",
-    "update",
-    agent.slug,
-    conversation,
-    "--networking",
-    "disabled",
   ]);
 
   let failedText: string | null = null;

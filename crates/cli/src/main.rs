@@ -681,6 +681,8 @@ struct ConversationSandboxRuntimeArgs {
     sandbox_provider: Option<SandboxProviderArg>,
     #[arg(long)]
     shell_program: Option<String>,
+    #[arg(long, value_enum)]
+    networking: Option<EnabledDisabled>,
 }
 
 impl ConversationSandboxRuntimeArgs {
@@ -713,6 +715,8 @@ struct ConversationSandboxRuntimeUpdateArgs {
     clear_sandbox_image: bool,
     #[arg(long)]
     clear_sandbox_provider: bool,
+    #[arg(long)]
+    clear_networking: bool,
 }
 
 impl ConversationSandboxRuntimeUpdateArgs {
@@ -725,6 +729,9 @@ impl ConversationSandboxRuntimeUpdateArgs {
         }
         if self.clear_sandbox_provider && self.runtime.sandbox_provider.is_some() {
             bail!("provide either --clear-sandbox-provider or --sandbox-provider, not both");
+        }
+        if self.clear_networking && self.runtime.networking.is_some() {
+            bail!("provide either --clear-networking or --networking, not both");
         }
         self.runtime.validate()?;
 
@@ -750,6 +757,14 @@ impl ConversationSandboxRuntimeUpdateArgs {
             changed = true;
         } else if let Some(sandbox_provider) = self.runtime.sandbox_provider {
             config.sandbox_provider = Some(SandboxProvider::from(sandbox_provider));
+            changed = true;
+        }
+
+        if self.clear_networking {
+            config.enable_networking = None;
+            changed = true;
+        } else if let Some(networking) = self.runtime.networking {
+            config.enable_networking = Some(networking.enabled());
             changed = true;
         }
 
@@ -1334,6 +1349,7 @@ async fn main() -> Result<()> {
                             .sandbox_provider
                             .map(SandboxProvider::from),
                         shell_program: sandbox_runtime.shell_program,
+                        enable_networking: sandbox_runtime.networking.map(EnabledDisabled::enabled),
                     })
                     .await?;
                 if let Some(sandbox_scope) = sandbox_scope {

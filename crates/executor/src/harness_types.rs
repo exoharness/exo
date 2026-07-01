@@ -81,4 +81,5 @@ pub struct CreateConversationRequest {
     pub sandbox_image: Option<String>,
     pub sandbox_provider: Option<SandboxProvider>,
     pub shell_program: Option<String>,
+    pub enable_networking: Option<bool>,
 }

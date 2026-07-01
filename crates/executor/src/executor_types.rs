@@ -72,6 +72,8 @@ pub struct ConversationConfig {
     pub durable_file_systems: Vec<DurableFileSystem>,
     #[serde(default)]
     pub sandbox_scope: Option<SandboxScope>,
+    #[serde(default)]
+    pub enable_networking: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +111,7 @@ impl Default for ConversationConfig {
             mounts: Vec::new(),
             durable_file_systems: Vec::new(),
             sandbox_scope: None,
+            enable_networking: None,
         }
     }
 }
