@@ -16,6 +16,7 @@ import { registerSchedulerTools } from "./scheduler-tools";
 import { registerSandboxTools } from "./sandbox-tools";
 import { registerGuardianTools } from "./guardian-tools";
 import { registerIntrospectionTools } from "./introspection-tools";
+import { forkInstruction, registerForkTools } from "./fork-tools";
 import { memoryInstruction, registerMemoryTools } from "./memory-tools";
 import {
   basicHarnessInstructions,
@@ -50,6 +51,7 @@ async function registerExoclawTools(
   registerIntrospectionTools(tools);
   registerSandboxTools(tools);
   registerGuardianTools(tools);
+  registerForkTools(tools);
   registerMemoryTools(tools);
   for (const modulePath of context.agentConfig.typescript?.toolModulePaths ??
     []) {
@@ -81,7 +83,7 @@ async function exoclawInstructions(context: TurnContext): Promise<Message[]> {
     {
       role: "developer",
       content:
-        'This is the Exoclaw long-running agent harness. You can schedule recurring sandbox work with schedule_sandbox_task, inspect active tasks with list_scheduled_tasks, cancel tasks with cancel_scheduled_task, and permanently delete tasks with delete_scheduled_task. You can inspect sandbox filesystem snapshots with list_sandbox_snapshots, capture a checkpoint with snapshot_sandbox, and rewind to a previous checkpoint with rewind_sandbox. You can use guardian_action for host-side self-maintenance such as checking service status, building Exoclaw, viewing logs, and restarting the scheduler or adapter runners while preserving .exo state. guardian_action restart actions are deferred briefly so the current turn can finish before services stop; guardian builds also ask the control REPL wrapper to refresh its child process without closing the user\'s terminal. After requesting one, report that it was scheduled and use status/logs after services come back. You can also create long-running external adapters with create_adapter, inspect them with list_adapters, disable/delete them, and send explicit outbound replies with send_adapter_message. Use cancel_scheduled_task or disable_adapter when history should be preserved; use delete_scheduled_task or delete_adapter when the user asks to remove something entirely. Conversations default to sandboxScope: "agent", so shell commands use this agent\'s shared sandbox unless the conversation was configured with sandboxScope: "conversation". Scheduled tasks default to sandboxMode: "agent". Use sandboxMode: "conversation" when the task should run in this conversation\'s sandbox, and sandboxMode: "task_fresh" when the task should have a separate fresh sandbox that is reused across that task\'s runs. ExoChat, IRC, WhatsApp, Signal, and Discord adapters wake this conversation when their trigger policy matches; do not auto-send model text to external services. Call send_adapter_message only for intentional external replies, using the target value from the inbound wakeup when one is provided. For Discord, the target is a channel id unless the adapter has a defaultChannelId. If an adapter message asks you to schedule future work and the future result should appear externally, include the adapterId and target in the scheduled task reportPrompt so the scheduler wakeup can call send_adapter_message. When the user shares a durable preference or fact about themselves ("remember that ..."), save it with the remember tool; remove stale entries with forget. Saved memory persists across all conversations and is shown back to you each turn in a durable-memory block.',
+        'This is the Exoclaw long-running agent harness. You can schedule recurring sandbox work with schedule_sandbox_task, inspect active tasks with list_scheduled_tasks, cancel tasks with cancel_scheduled_task, and permanently delete tasks with delete_scheduled_task. You can inspect sandbox filesystem snapshots with list_sandbox_snapshots, capture a checkpoint with snapshot_sandbox, and rewind to a previous checkpoint with rewind_sandbox. You can use guardian_action for host-side self-maintenance such as checking service status, building Exoclaw, viewing logs, and restarting the scheduler or adapter runners while preserving .exo state. guardian_action restart actions are deferred briefly so the current turn can finish before services stop; guardian builds also ask the control REPL wrapper to refresh its child process without closing the user\'s terminal. After requesting one, report that it was scheduled and use status/logs after services come back. You can create child agents with fork, inspect them with list_forks/list_fork_events, stop descendants with kill_fork, and coordinate with parent/child agents using send_fork_message. You can also create long-running external adapters with create_adapter, inspect them with list_adapters, disable/delete them, and send explicit outbound replies with send_adapter_message. Use cancel_scheduled_task or disable_adapter when history should be preserved; use delete_scheduled_task or delete_adapter when the user asks to remove something entirely. Conversations default to sandboxScope: "agent", so shell commands use this agent\'s shared sandbox unless the conversation was configured with sandboxScope: "conversation". Scheduled tasks default to sandboxMode: "agent". Use sandboxMode: "conversation" when the task should run in this conversation\'s sandbox, and sandboxMode: "task_fresh" when the task should have a separate fresh sandbox that is reused across that task\'s runs. ExoChat, IRC, WhatsApp, Signal, and Discord adapters wake this conversation when their trigger policy matches; do not auto-send model text to external services. Call send_adapter_message only for intentional external replies, using the target value from the inbound wakeup when one is provided. For Discord, the target is a channel id unless the adapter has a defaultChannelId. If an adapter message asks you to schedule future work and the future result should appear externally, include the adapterId and target in the scheduled task reportPrompt so the scheduler wakeup can call send_adapter_message. When the user shares a durable preference or fact about themselves ("remember that ..."), save it with the remember tool; remove stale entries with forget. Saved memory persists across all conversations and is shown back to you each turn in a durable-memory block.',
     },
     {
       role: "developer",
@@ -94,6 +96,10 @@ async function exoclawInstructions(context: TurnContext): Promise<Message[]> {
       role: "developer",
       content: localPrompt,
     });
+  }
+  const lineage = await forkInstruction(context);
+  if (lineage !== null) {
+    instructions.push(lineage);
   }
   const memory = await memoryInstruction(context);
   if (memory !== null) {

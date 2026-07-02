@@ -663,7 +663,50 @@ stop_adapters() {
 stop_all_processes() {
   stop_scheduler
   stop_adapters
+  prune_orphan_fork_state
   echo "Stopped Exoclaw scheduler and adapter runners. State in .exo was preserved."
+}
+
+# Clear fork git debris that no longer backs a live child: stale worktree
+# registrations whose directories are gone, and fork/* branches that no
+# registered worktree has checked out. Live fork worktrees are untouched.
+prune_orphan_fork_state() {
+  git -C "$ROOT_DIR" worktree prune >/dev/null 2>&1 || true
+  local checked_out_branches branch
+  checked_out_branches="$(git -C "$ROOT_DIR" worktree list --porcelain 2>/dev/null \
+    | awk '/^branch /{print substr($0, 8)}')"
+  while IFS= read -r branch; do
+    [[ -z "$branch" ]] && continue
+    if ! grep -qxF "refs/heads/$branch" <<<"$checked_out_branches"; then
+      echo "Deleting orphaned fork branch $branch..."
+      git -C "$ROOT_DIR" branch -D "$branch" >/dev/null 2>&1 || true
+    fi
+  done < <(git -C "$ROOT_DIR" branch --list 'fork/*' --format='%(refname:short)' 2>/dev/null)
+}
+
+# Remove all fork state: every git worktree under .exo/.tribe, every orphaned
+# fork/* branch, and the tribe directory itself. Only safe when all agents are
+# being deleted anyway (fresh/delall), since it destroys live children too.
+cleanup_fork_state() {
+  # Resolve symlinks (e.g. /var -> /private/var on macOS) because git reports
+  # physical worktree paths.
+  local tribe_dir
+  tribe_dir="$(cd "$ROOT_DIR" 2>/dev/null && pwd -P)/.exo/.tribe"
+  local worktree_path
+  while IFS= read -r worktree_path; do
+    case "$worktree_path" in
+      "$tribe_dir"/*)
+        echo "Removing fork worktree $worktree_path..."
+        git -C "$ROOT_DIR" worktree remove --force "$worktree_path" >/dev/null 2>&1 || true
+        ;;
+    esac
+  done < <(git -C "$ROOT_DIR" worktree list --porcelain 2>/dev/null \
+    | awk '/^worktree /{print substr($0, 10)}')
+  prune_orphan_fork_state
+  if [[ -d "$tribe_dir" ]]; then
+    rm -rf "$tribe_dir"
+    echo "Removed fork tribe state."
+  fi
 }
 
 delete_adapter_state() {
@@ -675,10 +718,35 @@ delete_adapter_state() {
     "$ROOT_DIR/.exo/exoclaw-adapters.lock"
 }
 
+delete_agent_state_dir_by_slug() {
+  local slug="$1"
+  python3 - "$ROOT_DIR/.exo/exoharness/agents" "$slug" <<'PY'
+import json
+import shutil
+import sys
+from pathlib import Path
+
+agents_root = Path(sys.argv[1])
+slug = sys.argv[2]
+for record_path in agents_root.glob("*/record.json"):
+    try:
+        record = json.loads(record_path.read_text())
+    except Exception:
+        continue
+    if record.get("slug") == slug:
+        shutil.rmtree(record_path.parent)
+        print(f"Deleted local agent state directory for {slug}.")
+        sys.exit(0)
+print(f"Warning: no local agent state directory found for {slug}.", file=sys.stderr)
+sys.exit(1)
+PY
+}
+
 delete_all_agents_and_conversations() {
   ensure_exo_bin
   stop_scheduler
   delete_adapter_state
+  cleanup_fork_state
 
   local agents
   agents="$(exo agent list | awk 'NR > 1 { print $1 }')"
@@ -691,7 +759,10 @@ delete_all_agents_and_conversations() {
     [[ -z "$agent" ]] && continue
 
     local conversations
-    conversations="$(exo conversation list "$agent" | awk 'NR > 1 { print $1 }')"
+    if ! conversations="$(exo conversation list "$agent" | awk 'NR > 1 { print $1 }')"; then
+      echo "Warning: could not list conversations for $agent; deleting the agent state directly."
+      conversations=""
+    fi
     while IFS= read -r conversation; do
       [[ -z "$conversation" ]] && continue
       echo "Deleting conversation $agent/$conversation..."
@@ -699,7 +770,10 @@ delete_all_agents_and_conversations() {
     done <<<"$conversations"
 
     echo "Deleting agent $agent..."
-    exo agent delete "$agent" >/dev/null
+    if ! exo agent delete "$agent" >/dev/null; then
+      echo "Warning: could not delete $agent through the CLI; deleting local state directory."
+      delete_agent_state_dir_by_slug "$agent"
+    fi
   done <<<"$agents"
 
   echo "Deleted all agents and conversations."

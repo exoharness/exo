@@ -255,7 +255,11 @@ type RawExoRequest =
   | { type: "get_binding"; binding_id: string }
   | { type: "list_secrets" }
   | { type: "get_secret"; secret_id: string }
-  | { type: "list_conversations"; agent_id: string }
+  | {
+      type: "list_conversations";
+      agent_id: string;
+      request: { cursor?: string | null; limit?: number | null };
+    }
   | { type: "get_conversation"; agent_id: string; conversation_id: string }
   | {
       type: "new_conversation";
@@ -395,7 +399,13 @@ type RawExoResponse =
   | { type: "agents"; agents: RawAgentRecord[] }
   | { type: "agent"; agent: RawAgentRecord | null }
   | { type: "bool"; value: boolean }
-  | { type: "conversations"; conversations: RawConversationHandleInfo[] }
+  | {
+      type: "conversations";
+      result: {
+        conversations: RawConversationHandleInfo[];
+        next_cursor?: string | null;
+      };
+    }
   | { type: "conversation"; conversation: RawConversationHandleInfo | null }
   | { type: "events"; result: RawGetEventsResult }
   | { type: "event"; event: RawEvent | null }
@@ -1084,11 +1094,12 @@ function createAgent(client: ProtocolClient, raw: RawAgentRecord): Agent {
       const payload = await client.requestExo({
         type: "list_conversations",
         agent_id: record.id,
+        request: {},
       });
       if (payload.type !== "conversations") {
         throw new Error(`expected conversations payload, got ${payload.type}`);
       }
-      return payload.conversations.map((conversation) =>
+      return payload.result.conversations.map((conversation) =>
         createConversation(client, conversation),
       );
     },
