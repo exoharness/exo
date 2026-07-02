@@ -149,4 +149,74 @@ describe("response tool-call parsing", () => {
       },
     });
   });
+
+  it("unwraps the lingua {type:valid,value} envelope on tool arguments", () => {
+    const response = {
+      id: "resp_1",
+      output: [
+        {
+          type: "function_call",
+          call_id: "call_1",
+          name: "shell",
+          arguments: '{"type":"valid","value":"{\\"command\\":\\"ls -la\\"}"}',
+        },
+      ],
+    } as unknown as Response;
+
+    expect(responseToolCalls(response)).toEqual([
+      {
+        toolCallId: "call_1",
+        request: { functionName: "shell", arguments: { command: "ls -la" } },
+      },
+    ]);
+  });
+
+  it("unwraps serde_json::private::Number leaks inside tool arguments", () => {
+    const response = {
+      id: "resp_1",
+      output: [
+        {
+          type: "function_call",
+          call_id: "call_1",
+          name: "web_fetch",
+          arguments:
+            '{"type":"valid","value":"{\\"url\\":\\"https://x.test/\\",\\"maxChars\\":{\\"$serde_json::private::Number\\":\\"3000\\"}}"}',
+        },
+      ],
+    } as unknown as Response;
+
+    expect(responseToolCalls(response)).toEqual([
+      {
+        toolCallId: "call_1",
+        request: {
+          functionName: "web_fetch",
+          arguments: { url: "https://x.test/", maxChars: 3000 },
+        },
+      },
+    ]);
+  });
+
+  it("leaves well-formed tool arguments untouched", () => {
+    const response = {
+      id: "resp_1",
+      output: [
+        {
+          type: "function_call",
+          call_id: "call_1",
+          name: "web_search",
+          arguments: '{"query":"rust release","count":5}',
+        },
+      ],
+    } as unknown as Response;
+
+    expect(responseToolCalls(response)).toEqual([
+      {
+        toolCallId: "call_1",
+        request: {
+          functionName: "web_search",
+          arguments: { query: "rust release", count: 5 },
+        },
+      },
+    ]);
+  });
 });

@@ -1233,17 +1233,74 @@ function responseToolCallResults(response: Response): ResponseToolCallResult[] {
           error: `Invalid JSON arguments for ${item.name}: ${parsed.error}`,
         };
       }
+      const unwrapped = unwrapLinguaToolArguments(parsed.value);
+      if (!isRecord(unwrapped)) {
+        return {
+          type: "parse_error",
+          toolCallId: item.call_id,
+          error: `Tool arguments for ${item.name} did not resolve to a JSON object`,
+        };
+      }
       return {
         type: "tool_call",
         toolCall: {
           toolCallId: item.call_id,
           request: {
             functionName: item.name,
-            arguments: parsed.value,
+            arguments: unwrapped as JsonObject,
           },
         },
       };
     });
+}
+
+// The braintrust/lingua model router can serialize tool-call arguments through
+// its internal serde representation, leaking two shapes into the arguments
+// JSON that make the real arguments unreachable by tools (e.g. the shell tool
+// sees no `command` field) and send the model into a retry loop:
+//   1. a Result envelope wrapping the real args as a JSON string:
+//        {"type":"valid","value":"{\"command\":\"ls\"}"}
+//   2. serde_json::Value numbers as a tagged object:
+//        {"$serde_json::private::Number":"3000"}
+// Undo both, recursively, before dispatch so tools receive the arguments the
+// model actually produced. Anything that does not match these shapes is
+// returned unchanged.
+const SERDE_JSON_NUMBER_KEY = "$serde_json::private::Number";
+
+function unwrapLinguaToolArguments(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(unwrapLinguaToolArguments);
+  }
+  if (!isRecord(value)) {
+    return value;
+  }
+  const keys = Object.keys(value);
+  if (keys.length === 1 && keys[0] === SERDE_JSON_NUMBER_KEY) {
+    const raw = value[SERDE_JSON_NUMBER_KEY];
+    if (typeof raw === "string" && raw.trim() !== "") {
+      const parsed = Number(raw);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+    return value;
+  }
+  if (
+    keys.length === 2 &&
+    value.type === "valid" &&
+    typeof value.value === "string"
+  ) {
+    try {
+      return unwrapLinguaToolArguments(JSON.parse(value.value));
+    } catch {
+      return value;
+    }
+  }
+  const result: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    result[key] = unwrapLinguaToolArguments(entry);
+  }
+  return result;
 }
 
 export function toolDefinitionsToResponsesTools(
