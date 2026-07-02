@@ -97,6 +97,8 @@ class Emulator:
         return self.checkpoint_dir / f"{name}.state"
 
     def save_checkpoint(self, name: str) -> None:
+        # Recreate in case the runtime dir was cleaned while running.
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         with open(self.checkpoint_path(name), "wb") as handle:
             self.pyboy.save_state(handle)
 

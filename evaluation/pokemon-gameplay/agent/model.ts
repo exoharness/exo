@@ -66,7 +66,10 @@ export async function callModel(
       strict: false,
     })),
     max_output_tokens: config.maxOutputTokens,
+    // Stateless usage: nothing persists server-side, so reasoning items must
+    // carry encrypted content to be echoed back on the next round trip.
     store: false,
+    include: ["reasoning.encrypted_content"],
   };
   if (config.reasoningEffort !== null) {
     body.reasoning = { effort: config.reasoningEffort };
@@ -137,7 +140,15 @@ function parseResponse(payload: {
     }
   }
   return {
-    outputItems: payload.output,
+    // Strip server-side item ids: with store:false they reference items that
+    // no longer exist, and resending them 404s the next round trip.
+    outputItems: payload.output.map((item) => {
+      if (item !== null && typeof item === "object" && "id" in item) {
+        const { id: _id, ...rest } = item as Record<string, unknown>;
+        return rest;
+      }
+      return item;
+    }),
     toolCalls,
     text: textParts.join("\n").trim(),
     inputTokens: payload.usage?.input_tokens ?? 0,
