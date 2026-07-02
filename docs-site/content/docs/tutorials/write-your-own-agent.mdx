@@ -127,9 +127,9 @@ by `install_agent_tool`) appear in the very next round.
 
 ## Step 3: non-standard context building
 
-The `instructions` hook is where exo's design pays off: the durable event log
-is *not* the prompt. Whatever you return here is assembled fresh for each
-model round and never written to history — perfect for volatile telemetry:
+The `instructions` hook runs before every model round and returns the
+messages prepended to the prompt. Because it re-runs each round, it's the
+place to inject live context — here, the host's current memory usage:
 
 ```ts
 import { type Message } from "@exo/harness";
@@ -156,13 +156,11 @@ function gibibytes(bytes: number): string {
 }
 ```
 
-Two properties worth internalizing:
-
-- **Per-round freshness.** If a turn takes five tool round-trips, each model
-  call sees the memory number *as of that call*, not as of the turn start.
-- **No history pollution.** The developer message is derived at prompt-build
-  time, so the event log stays a clean record of what actually happened.
-  Rewinding or forking the conversation never replays stale telemetry.
+Because the hook re-runs each round, a turn with five tool round-trips sees
+the memory number as of each call, not frozen at the turn's start. (These
+injected messages are rebuilt every round rather than stored in the
+conversation history — see [Data Model](../concepts/data-model.mdx) if you
+want the details on why.)
 
 The same pattern scales to anything derivable: Exoclaw's harness
 ([`examples/exoclaw/harness.ts`](https://github.com/ankrgyl/exo/blob/main/examples/exoclaw/harness.ts))
