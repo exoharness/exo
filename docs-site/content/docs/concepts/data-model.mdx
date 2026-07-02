@@ -46,14 +46,10 @@ concepts like compaction stay out of the substrate: an executor writes a
 custom event pointing at a derived context view or summary. Compaction
 never needs to be a first-class exoharness concept.
 
-<Callout title="Important">
-  The durable conversation does not have to equal the prompt. A conversation
-  might contain millions of raw events while the executor sends only a
-  compacted slice or derived view to the LLM. Because the raw log stays
-  queryable, an agent can revisit older material, inspect a failed
-  compaction, or try a different strategy later. This is the main design
-  space the exoharness opens up.
-</Callout>
+Note that the full event log is not the same as the prompt: the executor
+decides which events (or which summary of them) to send to the model on a
+given round. The log is the durable record; the prompt is a view the
+executor builds from it.
 
 ## Artifact
 
