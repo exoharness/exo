@@ -247,31 +247,36 @@ export default defineHarness({
 exo --harness typescript agent create "Coder" \
   --module examples/typescript/coding-agent-harness.ts \
   --model gpt-5.5
-exo conversation create coder "Build"
+exo conversation create coder "Build" --sandbox-image python:3.12-slim
 exo repl --agent coder --conversation coder-build
 ```
 
+The default sandbox image is `ubuntu:24.04`, which is bare — no Python,
+Node, etc. Pass `--sandbox-image` to boot something with the toolchain your
+agent needs (`python:3.12-slim` here); the model will install anything else
+it wants with the shell tool.
+
 A real run (via `conversation send`), asking it to write a buggy
-`count.sh`, find the bug, and fix it — abbreviated to show the shape:
+`fizzbuzz.py`, find the bug, and fix it — abbreviated to show the shape:
 
 ```text
-user: write count.sh that prints 1..15 but with an off-by-one that stops
-      at 14; plan with todowrite, run it, fix it, run again to confirm.
+user: write fizzbuzz.py for 1..15 with an off-by-one that stops at 14;
+      plan with todowrite, run it, fix it, run again to confirm.
 
-assistant: [tool_call todowrite]  # 5-item plan, one in_progress
-assistant: [tool_call shell] cat > count.sh …   # for ((i=1; i<15; i++))
-assistant: [tool_call shell] ./count.sh         # → 1..14, "last=14, lines=14"
+assistant: [tool_call todowrite]  # 4-item plan, one in_progress
+assistant: [tool_call shell] cat > fizzbuzz.py …   # range(1, 15)
+assistant: [tool_call shell] python3 fizzbuzz.py    # → 1..14, last line "14"
 assistant: [tool_call todowrite]  # mark "observe bug" done, next in_progress
-assistant: [tool_call shell] sed -i 's/i < 15/i <= 15/' count.sh
-assistant: [tool_call shell] ./count.sh         # → 1..15, "last=15, lines=15"
+assistant: [tool_call shell] # replace range(1, 15) → range(1, 16)
+assistant: [tool_call shell] python3 fizzbuzz.py    # → 1..15, last "FizzBuzz"
 assistant: [tool_call todowrite]  # all completed, remaining: 0
-assistant: Done. Fixed count.sh at count.sh:3 (i < 15 → i <= 15); final
-           run prints 1 through 15.
+assistant: Done. Fixed fizzbuzz.py:1 (range(1, 15) → range(1, 16)); final
+           run reaches 15.
 ```
 
 Every model round in that sequence saw the current todo list re-injected,
-so the plan stayed intact across all eight-plus steps — and the agent only
-marked steps completed after a command confirmed them.
+so the plan stayed intact across all the steps — and the agent only marked
+steps completed after a command confirmed them.
 
 ## Where to go next
 
