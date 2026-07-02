@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import {
   buildTurnInput,
   reflectionDirective,
+  samePositionDirective,
   stuckDirective,
   type TurnRecord,
 } from "./context";
@@ -42,6 +43,7 @@ const HISTORY_PATH = path.join(RUNTIME_DIR, "history.json");
 const MAX_ROUND_TRIPS_PER_TURN = 12;
 const REFLECT_EVERY_TURNS = 10;
 const STUCK_TURNS_BEFORE_NUDGE = 3;
+const SAME_POSITION_TURNS_BEFORE_NUDGE = 3;
 
 async function main(): Promise<void> {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -85,6 +87,8 @@ async function main(): Promise<void> {
 
   let stuckTurns = 0;
   let lastSignature = "";
+  let samePositionTurns = 0;
+  let lastPosition = "";
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
   const startedAtTurn = history.length;
@@ -108,12 +112,20 @@ async function main(): Promise<void> {
 
     const signature = frameSignature(openingFrame);
     stuckTurns = signature === lastSignature ? stuckTurns + 1 : 0;
+    // The full signature includes the screen hash, which bump animations and
+    // wandering NPCs keep changing — so also track position alone to catch
+    // "walking into a wall every turn".
+    const position = positionSignature(openingFrame);
+    samePositionTurns = position === lastPosition ? samePositionTurns + 1 : 0;
+    lastPosition = position;
 
     let directive: string | null = null;
     if (turn > 1 && turn % REFLECT_EVERY_TURNS === 0) {
       directive = reflectionDirective();
     } else if (stuckTurns >= STUCK_TURNS_BEFORE_NUDGE) {
       directive = stuckDirective(stuckTurns);
+    } else if (samePositionTurns >= SAME_POSITION_TURNS_BEFORE_NUDGE) {
+      directive = samePositionDirective(samePositionTurns);
     }
 
     events.append(turn, "turn_started", {
@@ -293,6 +305,11 @@ function handleMilestones(
 function frameSignature(frame: FramePayload): string {
   const state = frame.state;
   return `${state.map_id}:${state.x}:${state.y}:${state.in_battle}:${frame.screen_hash}`;
+}
+
+function positionSignature(frame: FramePayload): string {
+  const state = frame.state;
+  return `${state.map_id}:${state.x}:${state.y}`;
 }
 
 function narrate(

@@ -136,3 +136,10 @@ export function stuckDirective(stuckTurns: number): string {
     "Options, in order: try genuinely different buttons or timing; re-read the screen carefully; write a memory about what does NOT work here; load_checkpoint to rewind out of the wedge.",
   ].join("\n");
 }
+
+export function samePositionDirective(turns: number): string {
+  return [
+    `NOTE: your map position has not changed for ${turns} consecutive turns (the screen can animate without you moving — walking into a wall does exactly that).`,
+    "If you are mid-dialog this is fine. If you are trying to walk somewhere, you are walking into something solid: verify RAM coordinates actually change after each press, and change route instead of repeating the same direction.",
+  ].join("\n");
+}
