@@ -25,9 +25,9 @@ Exo decouples the two into halves:
 The durable substrate. It owns identity (agents, conversations, turns),
 history (the append-only event log), artifacts, secrets, and sandbox
 management. It is **trusted and stateful** — and deliberately minimal. It
-stops exactly at the point of executing an LLM call, because making that
-call requires semantic choices (how to stitch the prompt, which model,
-what approvals) that don't belong in trusted infrastructure.
+deliberately does *not* call the LLM: that requires semantic choices (how
+to stitch the prompt, which model, what approvals) that belong to the
+executor, not to trusted infrastructure.
 
 ## The executor
 
