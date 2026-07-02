@@ -28,6 +28,10 @@ Env knobs: `POKEMON_MODEL` (default `gpt-5.4`), `POKEMON_REASONING`
 
 ## Watching it
 
+- **Live dashboard**: `python3 viewer.py` then open <http://127.0.0.1:8778> —
+  current game frame, run log, RAM milestones, the agent's todos, and its
+  self-edited playbook, refreshing every second. Reads only `runtime/`, so it
+  never slows the agent down.
 - Console: one line per turn (location, party, actions, token spend) with
   `★ MILESTONE` banners and self-improvement markers (`[PLAYBOOK updated]`,
   `[NEW TOOL: walk_path]`, `[MEMORY: pallet_town_map]`, `[REWIND: ...]`).
