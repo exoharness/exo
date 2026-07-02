@@ -51,7 +51,15 @@ async function registerSysmonTools(
   tools: HarnessToolRegistry,
   context: TurnContext,
 ): Promise<void> {
-  registerBuiltInTools(tools, context, ["shell"]);
+  // Existing tools that ship with exo. shell runs commands in the sandbox;
+  // install_agent_tool / uninstall_agent_tool let the agent write and remove
+  // its own tools at runtime.
+  registerBuiltInTools(tools, context, [
+    "shell",
+    "install_agent_tool",
+    "uninstall_agent_tool",
+  ]);
+  // Our custom tool.
   await registerLibraryTools(tools, context, systemInfoTool);
 }
 

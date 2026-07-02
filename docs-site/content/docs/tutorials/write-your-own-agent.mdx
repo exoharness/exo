@@ -1,14 +1,16 @@
 ---
 title: Custom Agent Quickstart
-description: Build a TypeScript harness with a dedicated tool and custom context building.
+description: Build a TypeScript harness that reuses built-in tools, adds a custom tool, and customizes context.
 ---
 
 In this tutorial you'll build a small "system monitor" agent as a single
-TypeScript harness module. It demonstrates the two things most custom agents
+TypeScript harness module. It covers the three things most custom agents
 need:
 
-1. **Dedicated tools** — a `system_info` tool the model can call.
-2. **Non-standard context building** — the host's live memory utilization is
+1. **Reuse tools that ship with exo** — register the built-in `shell` tool
+   (and its siblings) in one call.
+2. **Add a custom tool** — a `system_info` tool the model can call.
+3. **Customize context building** — the host's live memory utilization is
    injected into the prompt on *every model round*, so the agent always knows
    the current number without calling a tool.
 
@@ -45,7 +47,42 @@ customization surface for this tutorial:
 - `registerTools(tools, context)` — populate the tool registry for each model
   round.
 
-## Step 1: a dedicated tool
+## Step 1: reuse tools that ship with exo
+
+When you pass a `registerTools` hook, you own the whole registry — so
+built-in tools are opt-in, and you add the ones you want in a single call.
+exo ships three built-ins:
+
+- `shell` — run commands in the conversation's sandbox.
+- `install_agent_tool` / `uninstall_agent_tool` — let the agent write and
+  remove its own TypeScript tools at runtime (they land in
+  `.exo/agent-tools/`). Using these well also needs the agent-tool-creation
+  instruction; see [The Canonical Agent](../concepts/canonical-agent.mdx).
+
+```ts
+import {
+  registerBuiltInTools,
+  type HarnessToolRegistry,
+  type TurnContext,
+} from "@exo/harness";
+
+async function registerSysmonTools(
+  tools: HarnessToolRegistry,
+  context: TurnContext,
+): Promise<void> {
+  registerBuiltInTools(tools, context, [
+    "shell",
+    "install_agent_tool",
+    "uninstall_agent_tool",
+  ]);
+  // ...custom tools go here (Step 2)
+}
+```
+
+The registry is rebuilt every model round, so a tool the agent installs
+mid-turn via `install_agent_tool` is visible in the very next round.
+
+## Step 2: add a custom tool
 
 Tools are plain objects: a JSON-schema `definition` the model sees, and an
 `initialize()` that returns the handler which runs when the model calls it.
@@ -100,32 +137,17 @@ Notes:
   For work that belongs in isolation, call the `shell` tool or
   `context.startSandboxProcess(...)` instead.
 
-## Step 2: register tools
-
-When you pass `registerTools`, you own the whole registry — built-ins
-included. Register the `shell` built-in plus the custom tool:
+Register it alongside the built-ins with `registerLibraryTools`, filling in
+the placeholder from Step 1:
 
 ```ts
-import {
-  registerBuiltInTools,
-  registerLibraryTools,
-  type HarnessToolRegistry,
-  type TurnContext,
-} from "@exo/harness";
+import { registerLibraryTools } from "@exo/harness";
 
-async function registerSysmonTools(
-  tools: HarnessToolRegistry,
-  context: TurnContext,
-): Promise<void> {
-  registerBuiltInTools(tools, context, ["shell"]);
-  await registerLibraryTools(tools, context, systemInfoTool);
-}
+// inside registerSysmonTools, after registerBuiltInTools(...):
+await registerLibraryTools(tools, context, systemInfoTool);
 ```
 
-The registry is rebuilt every model round, so tools installed mid-turn (e.g.
-by `install_agent_tool`) appear in the very next round.
-
-## Step 3: non-standard context building
+## Step 3: customize context building
 
 The `instructions` hook runs before every model round and returns the
 messages prepended to the prompt. Because it re-runs each round, it's the
