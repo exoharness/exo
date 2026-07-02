@@ -1,92 +1,32 @@
 ---
 title: Custom Coding Agent
-description: A minimal coding agent — concise prompt, a small tool set, and todo-based task tracking over exo's turn loop.
+description: Build a coding agent one component at a time, and see how the harness supports each.
 ---
 
-This tutorial builds a small **coding agent**: one that reads and edits code
-in a sandbox, runs commands, and works through a multi-step task on its own.
-It reuses the pieces from the
-[Custom Agent Quickstart](./write-your-own-agent.mdx) — a `registerTools`
-hook and an `instructions` hook — and adds the two things a coding agent
-specifically needs: a **good-but-simple system prompt** and **task
-tracking** so the model stays coherent across many steps.
+This tutorial builds a coding agent — one that runs commands in a sandbox
+and works through a multi-step task — by adding **one component at a time**
+and seeing how the harness supports each. It builds directly on the two
+hooks from the [Custom Agent Quickstart](./write-your-own-agent.mdx):
+`registerTools` and `instructions`.
 
-The design here follows the patterns most production coding agents
-converge on, distilled to the minimum. The finished file is
+The finished file is
 [`examples/typescript/coding-agent-harness.ts`](https://github.com/ankrgyl/exo/blob/main/examples/typescript/coding-agent-harness.ts).
 
-## You don't write the loop
+## The loop is already there
 
-A coding agent needs to take many steps per request — read a file, run a
-test, edit, re-run — before it's done. That "keep going while the model
-wants to act" loop is **already built into exo**.
-`runResponsesHarnessTurn` calls the model, executes any tool calls it
-makes, appends the results, and calls the model again — repeating until the
-model stops requesting tools (bounded by the agent's `maxToolRoundTrips`).
+A coding agent takes many steps per request — run a command, read the
+output, run another, edit, re-run. You don't write that loop:
+`runResponsesHarnessTurn` calls the model, runs any tools it requests,
+appends the results, and calls the model again — repeating until the model
+stops requesting tools (bounded by the agent's `maxToolRoundTrips`).
 
-So multi-turn reasoning is free. Your job is three things: the prompt, the
-tools, and keeping the model oriented across all those steps.
+So everything below is just *what you plug into* that loop.
 
-## The system prompt: short and opinionated
+## Component 1: reuse a built-in tool
 
-You do **not** need a giant prompt, and you do not need a different prompt
-per model. One concise prompt that states the role, demands brevity, and
-gives a few working rules goes a long way:
-
-```ts
-const SYSTEM_PROMPT = `You are a coding agent working from a terminal. You have a shell tool that runs commands in a sandbox and a todowrite tool for tracking multi-step work.
-
-Be concise and direct; this is a CLI, so keep prose short and let tool calls do the work. Prioritize technical accuracy over agreement.
-
-Working style:
-- For any task with 3 or more steps, call todowrite first to lay out a plan, then keep it updated as you go. Keep exactly one item in_progress at a time. Mark an item completed only after you have verified it works — a command that ran, a test that passed — never on intent alone.
-- Inspect the codebase with commands (ls, cat, grep) instead of guessing.
-- When you finish, verify your work by running it.
-- Reference code locations as file_path:line_number so they are easy to find.`;
-```
-
-The transferable techniques packed into those few lines:
-
-- **State the role and the medium first** ("coding agent … from a
-  terminal") — it primes short, CLI-appropriate output.
-- **Explicitly demand conciseness.** Models default to verbose; counteract
-  it.
-- **An objectivity clause** ("technical accuracy over agreement") reduces
-  sycophancy.
-- **Tell it to inspect, not guess**, and to **verify by running**.
-- **`file_path:line_number`** makes answers navigable in a terminal.
-
-Keep detailed per-tool rules in the *tool descriptions*, not the system
-prompt — that keeps the prompt small and the rules next to the tool they
-govern.
-
-### Grounding context, generated each round
-
-Alongside the static prompt, inject a small block of live context. This is
-the [context-building](./write-your-own-agent.mdx) hook again — cheap,
-high-value grounding, rebuilt every round:
-
-```ts
-{
-  role: "developer",
-  content:
-    `<env>\n` +
-    `Platform: ${os.platform()}\n` +
-    `Today's date: ${new Date().toDateString()}\n` +
-    `Files live in the sandbox; use the shell tool to read and change them.\n` +
-    `</env>`,
-}
-```
-
-Note it states *where the files are* rather than dumping a file tree — the
-agent is expected to run tools to explore. That keeps the prompt small.
-
-## The minimal tool set
-
-A coding agent needs surprisingly few tools. The single most important one
-is **shell**, and exo ships it as a built-in that runs inside the
-conversation's sandbox. With shell alone the model can read (`cat`), search
-(`grep`), edit (`sed`), build, test, and run:
+The harness ships a `shell` tool that runs commands inside the
+conversation's sandbox. Because a `registerTools` hook owns the whole
+registry, built-ins are opt-in — you add the one you want:
 
 ```ts
 async function registerCodingTools(
@@ -94,29 +34,20 @@ async function registerCodingTools(
   context: TurnContext,
 ): Promise<void> {
   registerBuiltInTools(tools, context, ["shell"]);
-  await registerLibraryTools(tools, context, todoTool); // defined below
+  // (we add a custom tool next)
 }
 ```
 
-<Callout type="info">
-  **What a fuller agent adds.** Production agents wrap common operations in
-  dedicated tools — a line-numbered `read`, and an `edit` that does an exact
-  string replacement and **fails if the target string isn't unique**. That
-  uniqueness guard is the key design choice: it makes edits deterministic and
-  prevents silent wrong-location changes. They're worth adding, but they're
-  refinements on top of `shell`, not prerequisites — so we leave them out of
-  the minimal build.
-</Callout>
+That alone is already a working coding agent: through the shell the model
+can read files, search, edit, build, and run — all in the sandbox.
 
-## Task tracking: a todo tool
+## Component 2: add a custom tool
 
-For any multi-step job, the model needs to remember the plan and where it
-is in it. The pattern that works: a single `todowrite` tool where the model
-**rewrites the entire list** each call, with a small status enum, and the
-current list **re-surfaced to the model every round**.
-
-The tool stores the list as a conversation
-[artifact](../concepts/data-model.mdx) so it survives across turns:
+Now a tool the harness doesn't ship: task tracking, so the model can hold a
+plan across many steps. We define a `todowrite` tool where the model
+rewrites its whole task list each call, and persist that list as a
+conversation [artifact](../concepts/data-model.mdx) — the harness's durable
+key/value storage — so it survives across turns:
 
 ```ts
 const todoTool = defineTool({
@@ -174,36 +105,9 @@ const todoTool = defineTool({
 });
 ```
 
-Three design choices carry most of the value:
-
-- **Full-list rewrite, not incremental patches.** The model resends the
-  whole array; there's no id bookkeeping in the loop, and the tool is
-  stateless.
-- **Exactly one `in_progress`.** This forces linear focus and gives a clear
-  "what's happening now" signal.
-- **"Completed only after verification, never on intent."** The single most
-  important anti-hallucination rule for task tracking — stated in both the
-  tool description and the system prompt.
-
-### Re-surfacing the list each round
-
-Storing the list isn't enough; the model needs to *see* it on every step.
-Read it back in the `instructions` hook and append it — the same per-round
-injection you used for telemetry in the previous tutorial:
-
-```ts
-const todos = await readTodos(conversation);
-if (todos.length > 0) {
-  const rendered = todos.map((t) => `- [${t.status}] ${t.content}`).join("\n");
-  messages.push({
-    role: "developer",
-    content: `Your current task list (from todowrite):\n${rendered}`,
-  });
-}
-```
-
-The artifact helpers are small — write to a fixed path, read the latest
-version back:
+The artifact helpers are small — the conversation exposes `writeArtifactJson`
+/ `listArtifacts` / `readArtifactJson`, so we write the list to a fixed path
+and read the latest version back:
 
 ```ts
 const TODO_ARTIFACT_PATH = "coding-agent/todos.json";
@@ -228,7 +132,81 @@ async function writeTodos(conversation: Conversation, todos: Todo[]) {
 }
 ```
 
+Register it alongside `shell`:
+
+```ts
+await registerLibraryTools(tools, context, todoTool);
+```
+
+## Component 3: feed state back into context
+
+Storing the list isn't enough — the model has to *see* it on every step.
+The `instructions` hook (the same one from the quickstart) runs before each
+model round, so read the list back there and append it:
+
+```ts
+const todos = await readTodos(conversation);
+if (todos.length > 0) {
+  const rendered = todos.map((t) => `- [${t.status}] ${t.content}`).join("\n");
+  messages.push({
+    role: "developer",
+    content: `Your current task list (from todowrite):\n${rendered}`,
+  });
+}
+```
+
+Because the hook re-runs each round, the model always sees the up-to-date
+plan as it works through the loop.
+
+## The prompt
+
+The `instructions` hook also returns the system prompt — it's just messages
+you return. For this agent, a short one that names the tools and asks it to
+verify its work:
+
+```ts
+const SYSTEM_PROMPT = `You are a coding agent working from a terminal. You have a shell tool that runs commands in a sandbox and a todowrite tool for tracking multi-step work.
+
+Be concise and direct; this is a CLI, so keep prose short and let tool calls do the work. Prioritize technical accuracy over agreement.
+
+Working style:
+- For any task with 3 or more steps, call todowrite first to lay out a plan, then keep it updated as you go. Keep exactly one item in_progress at a time. Mark an item completed only after you have verified it works — a command that ran, a test that passed — never on intent alone.
+- Inspect the codebase with commands (ls, cat, grep) instead of guessing.
+- When you finish, verify your work by running it.
+- Reference code locations as file_path:line_number so they are easy to find.`;
+```
+
+The full hook assembles the prompt, a small live-context block, and the
+todo list:
+
+```ts
+async function codingInstructions(context: TurnContext): Promise<Message[]> {
+  const conversation = context.exoharness.current.conversation;
+  const messages: Message[] = [
+    { role: "system", content: SYSTEM_PROMPT },
+    {
+      role: "developer",
+      content:
+        `<env>\nPlatform: ${os.platform()}\n` +
+        `Today's date: ${new Date().toDateString()}\n` +
+        `Files live in the sandbox; use the shell tool to read and change them.\n</env>`,
+    },
+  ];
+  const todos = await readTodos(conversation);
+  if (todos.length > 0) {
+    const rendered = todos.map((t) => `- [${t.status}] ${t.content}`).join("\n");
+    messages.push({
+      role: "developer",
+      content: `Your current task list (from todowrite):\n${rendered}`,
+    });
+  }
+  return messages;
+}
+```
+
 ## Put it together
+
+Both hooks go into the same `runResponsesHarnessTurn` call:
 
 ```ts
 export default defineHarness({
@@ -254,10 +232,8 @@ exo repl --agent coder --conversation coder-build
 
 The default sandbox image is `ubuntu:24.04`, which is bare — no Python,
 Node, etc. Setting `--sandbox-image` on the *agent* makes every
-conversation it owns boot that image (`python:3.12-slim` here), so the
-toolchain is there by default; the model installs anything else it needs
-with the shell tool. A single conversation can still override with its own
-`--sandbox-image`.
+conversation it owns boot that image; the model installs anything else it
+needs with the shell tool.
 
 A real run (via `conversation send`), asking it to write a buggy
 `fizzbuzz.py`, find the bug, and fix it — abbreviated to show the shape:
@@ -277,18 +253,14 @@ assistant: Done. Fixed fizzbuzz.py:1 (range(1, 15) → range(1, 16)); final
            run reaches 15.
 ```
 
-Every model round in that sequence saw the current todo list re-injected,
-so the plan stayed intact across all the steps — and the agent only marked
-steps completed after a command confirmed them.
+Each round saw the current todo list re-injected, so the plan stayed intact
+across all the steps — and the agent only marked steps completed after a
+command confirmed them.
 
 ## Where to go next
 
-- Add the dedicated **`read`** and **`edit`** tools described above; the
-  unique-match guard on `edit` is the highest-leverage refinement.
-- Delegate open-ended exploration to a **sub-agent** so noisy file reads
-  stay out of the main context window.
-- Set a sensible **`maxToolRoundTrips`** on the agent so a runaway task
-  stops cleanly instead of looping.
-- Read [Executors & Harnesses](../concepts/executors.mdx) to see how this
-  compares to the built-in `codex` / `claude-code` / `cursor` harnesses,
-  which wrap full coding-agent runtimes with durable exoharness state.
+- Register more built-in tools, or add custom tools for anything the shell
+  can't express directly.
+- Read [Executors & Harnesses](../concepts/executors.mdx) to see the
+  built-in `codex` / `claude-code` / `cursor` harnesses, which wrap full
+  coding-agent runtimes with durable exoharness state.
