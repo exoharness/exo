@@ -246,15 +246,18 @@ export default defineHarness({
 ```bash
 exo --harness typescript agent create "Coder" \
   --module examples/typescript/coding-agent-harness.ts \
-  --model gpt-5.5
-exo conversation create coder "Build" --sandbox-image python:3.12-slim
+  --model gpt-5.5 \
+  --sandbox-image python:3.12-slim
+exo conversation create coder "Build"
 exo repl --agent coder --conversation coder-build
 ```
 
 The default sandbox image is `ubuntu:24.04`, which is bare — no Python,
-Node, etc. Pass `--sandbox-image` to boot something with the toolchain your
-agent needs (`python:3.12-slim` here); the model will install anything else
-it wants with the shell tool.
+Node, etc. Setting `--sandbox-image` on the *agent* makes every
+conversation it owns boot that image (`python:3.12-slim` here), so the
+toolchain is there by default; the model installs anything else it needs
+with the shell tool. A single conversation can still override with its own
+`--sandbox-image`.
 
 A real run (via `conversation send`), asking it to write a buggy
 `fizzbuzz.py`, find the bug, and fix it — abbreviated to show the shape:
