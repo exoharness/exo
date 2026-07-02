@@ -46,6 +46,11 @@ PAGE = """<!doctype html>
   #playbook { white-space:pre-wrap; max-height:420px; overflow-y:auto; }
   #todos div.done { color:#484f58; text-decoration:line-through; }
   #todos div.in_progress { color:#58a6ff; }
+  #tools summary { color:#3fb950; cursor:pointer; }
+  #memory summary { color:#bc8cff; cursor:pointer; }
+  #tools pre, #memory pre { white-space:pre-wrap; max-height:260px; overflow-y:auto;
+    background:#0d1117; border:1px solid #30363d; border-radius:4px;
+    padding:8px; margin:6px 0; color:#8b949e; }
   .muted { color:#484f58; }
 </style>
 </head>
@@ -61,6 +66,8 @@ PAGE = """<!doctype html>
     </div>
     <div class="panel"><h2>Milestones (from game RAM)</h2><div id="milestones" class="muted">none yet</div></div>
     <div class="panel"><h2>Todos (agent-maintained)</h2><div id="todos" class="muted">none yet</div></div>
+    <div class="panel"><h2>Tools the agent built</h2><div id="tools" class="muted">none yet</div></div>
+    <div class="panel"><h2>Memory (agent-authored)</h2><div id="memory" class="muted">none yet</div></div>
   </div>
   <div>
     <div class="panel"><h2>Run log</h2><div id="log"></div></div>
@@ -86,6 +93,14 @@ async function refresh() {
       ? d.todos.map(t => '<div class="' + t.status + '">' +
           (t.status === 'done' ? '\\u2713 ' : t.status === 'in_progress' ? '\\u25B8 ' : '\\u00B7 ') +
           esc(t.text) + '</div>').join('')
+      : '<span class="muted">none yet</span>';
+    document.getElementById('tools').innerHTML = d.tools.length
+      ? d.tools.map(t => '<details><summary>\\u2699 ' + esc(t.name) + ' (' + t.lines +
+          ' lines)</summary><pre>' + esc(t.source) + '</pre></details>').join('')
+      : '<span class="muted">none yet</span>';
+    document.getElementById('memory').innerHTML = d.memories.length
+      ? d.memories.map(m => '<details><summary>\\u25C6 ' + esc(m.name) +
+          '</summary><pre>' + esc(m.content) + '</pre></details>').join('')
       : '<span class="muted">none yet</span>';
     const log = document.getElementById('log');
     const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 8;
@@ -160,6 +175,27 @@ def latest_payload() -> dict:
         except (json.JSONDecodeError, KeyError, IndexError):
             pass
 
+    tools: list[dict] = []
+    tools_dir = RUNTIME / "tools"
+    if tools_dir.is_dir():
+        for file in sorted(tools_dir.glob("*.mjs")):
+            source = file.read_text(errors="replace")
+            tools.append(
+                {
+                    "name": file.stem,
+                    "lines": source.count("\n") + 1,
+                    "source": source,
+                }
+            )
+
+    memories: list[dict] = []
+    memory_dir = RUNTIME / "memory"
+    if memory_dir.is_dir():
+        for file in sorted(memory_dir.glob("*.md")):
+            memories.append(
+                {"name": file.stem, "content": file.read_text(errors="replace")}
+            )
+
     return {
         "frame": frame,
         "frames": len(frames),
@@ -169,6 +205,8 @@ def latest_payload() -> dict:
         "milestones": milestones,
         "todos": todos,
         "playbook": playbook,
+        "tools": tools,
+        "memories": memories,
     }
 
 
