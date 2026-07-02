@@ -4,7 +4,7 @@ import type {
   ToolInstance,
 } from "@exo/harness";
 
-// Exoclaw tools come in two layers: the TypeScript registry defines what the
+// WorkerClaw tools come in two layers: the TypeScript registry defines what the
 // model can see and call, and the Rust tool runtime (ExoclawToolRuntime /
 // execute_tool in crates/executor) executes anything the TypeScript handler
 // delegates to it. A "host tool" is the standard bridge between the two: its
