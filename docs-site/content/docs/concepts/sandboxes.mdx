@@ -10,24 +10,28 @@ plus arbitrary command execution inside them.
 
 ## Backends
 
-Local backends (selected with `--sandbox-backend` / `EXO_SANDBOX_BACKEND`):
+| Backend | Type | Notes |
+|:--------|:-----|:------|
+| `docker` | Local | Container; the default |
+| `apple-container` | Local | Container (macOS) |
+| `local-process` | Local | No isolation — commands run on the host |
+| `daytona` | Remote | [daytona.io](https://www.daytona.io) |
+| `e2b` | Remote | [e2b.dev](https://e2b.dev) |
+| `sprites` | Remote | [sprites.dev](https://sprites.dev) |
+| `vercel` | Remote | [Vercel Sandbox](https://vercel.com/docs/vercel-sandbox) |
+| `aws-agentcore` | Remote | [Amazon Bedrock AgentCore](https://aws.amazon.com/bedrock/agentcore/) |
 
-| Backend | Isolation |
-|:--------|:----------|
-| `docker` | Container |
-| `apple-container` | Container (macOS) |
-| `local-process` | None — commands run on the host |
+**Local** backends are selected with `--sandbox-backend` (or the
+`EXO_SANDBOX_BACKEND` env var) and need no credentials.
 
-Remote providers, configured as bindings with
-`exo provider configure --provider <name> --secret <secret>`:
+**Remote** backends are configured as bindings and need an API key:
 
-- `daytona`
-- `e2b`
-- `vercel`
-- `sprites`
-- `aws-agentcore`
+```bash
+exo secret set <name> --env <PROVIDER_API_KEY>
+exo provider configure --provider <name> --secret <name>
+```
 
-Remote providers let the sandbox outlive the machine running the executor,
+Remote backends let the sandbox outlive the machine running the executor,
 which matters for long-running agents.
 
 ## Scope
