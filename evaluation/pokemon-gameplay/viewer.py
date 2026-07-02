@@ -94,14 +94,9 @@ async function refresh() {
           (t.status === 'done' ? '\\u2713 ' : t.status === 'in_progress' ? '\\u25B8 ' : '\\u00B7 ') +
           esc(t.text) + '</div>').join('')
       : '<span class="muted">none yet</span>';
-    document.getElementById('tools').innerHTML = d.tools.length
-      ? d.tools.map(t => '<details><summary>\\u2699 ' + esc(t.name) + ' (' + t.lines +
-          ' lines)</summary><pre>' + esc(t.source) + '</pre></details>').join('')
-      : '<span class="muted">none yet</span>';
-    document.getElementById('memory').innerHTML = d.memories.length
-      ? d.memories.map(m => '<details><summary>\\u25C6 ' + esc(m.name) +
-          '</summary><pre>' + esc(m.content) + '</pre></details>').join('')
-      : '<span class="muted">none yet</span>';
+    renderDetails('tools', d.tools, t =>
+      ['\\u2699 ' + t.name + ' (' + t.lines + ' lines)', t.source]);
+    renderDetails('memory', d.memories, m => ['\\u25C6 ' + m.name, m.content]);
     const log = document.getElementById('log');
     const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 8;
     log.innerHTML = d.log.map(line => {
@@ -117,6 +112,25 @@ async function refresh() {
 }
 function esc(s) {
   return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+}
+// Re-rendering every poll would close open <details>; only touch the DOM
+// when the content actually changed, and restore open state when we do.
+const lastRendered = {};
+function renderDetails(id, items, toParts) {
+  const el = document.getElementById(id);
+  const serialized = JSON.stringify(items);
+  if (lastRendered[id] === serialized) return;
+  lastRendered[id] = serialized;
+  const open = new Set([...el.querySelectorAll('details[open]')]
+    .map(x => x.dataset.key));
+  el.innerHTML = items.length
+    ? items.map(item => {
+        const [summary, body] = toParts(item);
+        const key = esc(item.name);
+        return '<details data-key="' + key + '"' + (open.has(key) ? ' open' : '') +
+          '><summary>' + esc(summary) + '</summary><pre>' + esc(body) + '</pre></details>';
+      }).join('')
+    : '<span class="muted">none yet</span>';
 }
 refresh();
 setInterval(refresh, 1000);
