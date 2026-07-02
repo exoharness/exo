@@ -31,8 +31,8 @@ exo secret set <name> --env <PROVIDER_API_KEY>
 exo provider configure --provider <name> --secret <name>
 ```
 
-Remote backends let the sandbox outlive the machine running the executor,
-which matters for long-running agents.
+Remote backends run the sandbox on hosted infrastructure instead of your
+machine, so it keeps running even when your local process stops.
 
 ## Scope
 
