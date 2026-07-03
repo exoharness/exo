@@ -12,10 +12,10 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 const PROCESS_PIPE_BUFFER_SIZE: usize = 64 * 1024;
-pub(crate) const PATH: &str = "/tmp/exo-process-bridge.py";
-pub(crate) const RECV_TIMEOUT: Duration = Duration::from_secs(30);
+pub const PATH: &str = "/tmp/exo-process-bridge.py";
+pub const RECV_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub(crate) const SCRIPT: &str = r###"
+pub const SCRIPT: &str = r###"
 import base64
 import json
 import os
@@ -221,7 +221,7 @@ if __name__ == "__main__":
 "###;
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct Request {
+pub struct Request {
     #[serde(rename = "type")]
     kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -231,7 +231,7 @@ pub(crate) struct Request {
 }
 
 impl Request {
-    pub(crate) fn ping() -> Self {
+    pub fn ping() -> Self {
         Self {
             kind: "ping",
             data: None,
@@ -265,30 +265,30 @@ impl Request {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct Response {
-    pub(crate) ok: bool,
+pub struct Response {
+    pub ok: bool,
     #[serde(default)]
-    pub(crate) timeout: bool,
+    pub timeout: bool,
     #[serde(default)]
-    pub(crate) events: Vec<Event>,
+    pub events: Vec<Event>,
     #[serde(default)]
-    pub(crate) error: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum Event {
+pub enum Event {
     Stdout { data: String },
     Stderr { data: String },
     Exit { exit_code: i32 },
 }
 
 #[async_trait]
-pub(crate) trait Client: Send + Sync + 'static {
+pub trait Client: Send + Sync + 'static {
     async fn request(&self, request: Request) -> Result<Response>;
 }
 
-pub(crate) fn install_script_shell_command() -> String {
+pub fn install_script_shell_command() -> String {
     format!(
         "python3 -c {} {} {}",
         super::shell_quote(
@@ -299,18 +299,18 @@ pub(crate) fn install_script_shell_command() -> String {
     )
 }
 
-pub(crate) fn stop_shell_command() -> String {
+pub fn stop_shell_command() -> String {
     format!(
         "pkill -f {} >/dev/null 2>&1 || true",
         super::shell_quote("[e]xo-process-bridge.py"),
     )
 }
 
-pub(crate) fn server_shell_command() -> String {
+pub fn server_shell_command() -> String {
     format!("python3 {} server", super::shell_quote(PATH))
 }
 
-pub(crate) fn client_argv(request_json: String) -> Vec<String> {
+pub fn client_argv(request_json: String) -> Vec<String> {
     vec![
         "python3".to_string(),
         PATH.to_string(),
@@ -319,7 +319,7 @@ pub(crate) fn client_argv(request_json: String) -> Vec<String> {
     ]
 }
 
-pub(crate) fn process_parts(client: Arc<dyn Client>) -> crate::SandboxProcessParts {
+pub fn process_parts(client: Arc<dyn Client>) -> crate::SandboxProcessParts {
     let (stdout_reader, stdout_writer) = tokio::io::duplex(PROCESS_PIPE_BUFFER_SIZE);
     let (stderr_reader, stderr_writer) = tokio::io::duplex(PROCESS_PIPE_BUFFER_SIZE);
     let (stdin_reader, stdin_writer) = tokio::io::duplex(PROCESS_PIPE_BUFFER_SIZE);

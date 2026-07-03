@@ -11,6 +11,7 @@ use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, Cursor};
 use lingua::Message;
 use lingua::universal::{AssistantContent, UserContent};
+use serde_json::Value;
 use tempfile::TempDir;
 use tokio::fs;
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
@@ -271,6 +272,7 @@ async fn local_process_contract_handle(
                 default_workdir: tempdir.path().display().to_string(),
             },
             lifecycle: SandboxLifecycleConfig::default(),
+            provider_state: None,
         })
         .await
         .expect("acquire sandbox")
@@ -425,6 +427,7 @@ fn provider_contract_request(
         lifecycle: SandboxLifecycleConfig {
             idle_ttl: Some(Duration::from_secs(300)),
         },
+        provider_state: None,
     }
 }
 
@@ -1689,6 +1692,152 @@ async fn advertised_daytona_without_secret_errors_at_first_use() {
         .expect_err("daytona requires DAYTONA_API_KEY to be set");
 
     assert!(error.to_string().contains("DAYTONA_API_KEY"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sandbox_provider_state_persists_through_events_after_harness_reload() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let state = serde_json::json!({
+        "microvm_id": "microvm-test",
+        "endpoint": "https://example.com"
+    });
+    let first_backend = Arc::new(TestProviderStateBackend::new(state.clone()));
+    let harness =
+        BasicExoHarness::new_with_sandbox_backend(local_test_config(tempdir.path()), first_backend)
+            .await
+            .expect("harness should initialize");
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let agent_id = agent.record().id;
+    let conversation = agent
+        .new_conversation(NewConversationRequest::default())
+        .await
+        .expect("conversation");
+    let conversation_id = conversation.record().id;
+    let sandbox_id = conversation
+        .create_sandbox(provider_state_test_create_request())
+        .await
+        .expect("sandbox should be created");
+    let events = conversation
+        .get_events(Some(EventQuery {
+            types: Some(vec![EventKind::custom("sandbox_provider_state")]),
+            ..Default::default()
+        }))
+        .await
+        .expect("events should load")
+        .events;
+    assert_eq!(events.len(), 1);
+
+    let second_backend = Arc::new(TestProviderStateBackend::new(state.clone()));
+    let reloaded = BasicExoHarness::new_with_sandbox_backend(
+        local_test_config(tempdir.path()),
+        second_backend.clone(),
+    )
+    .await
+    .expect("reloaded harness should initialize");
+    let reloaded_agent = reloaded
+        .get_agent(&agent_id)
+        .await
+        .expect("agent lookup should succeed")
+        .expect("agent should exist");
+    let reloaded_conversation = reloaded_agent
+        .get_conversation(&conversation_id)
+        .await
+        .expect("conversation lookup should succeed")
+        .expect("conversation should exist");
+    let reused_sandbox_id = reloaded_conversation
+        .create_sandbox(provider_state_test_create_request())
+        .await
+        .expect("sandbox should be reused");
+    assert_eq!(reused_sandbox_id, sandbox_id);
+    assert_eq!(
+        second_backend.requests.lock().await.as_slice(),
+        &[Some(state)]
+    );
+}
+
+fn provider_state_test_create_request() -> CreateSandboxRequest {
+    CreateSandboxRequest {
+        name: Some("stateful".to_string()),
+        provider: SandboxProvider::LocalProcess,
+        image: "test-sandbox".to_string(),
+        default_workdir: Some("/".to_string()),
+        file_system_mounts: None,
+        durable_file_systems: None,
+        enable_networking: Some(true),
+        idle_seconds: Some(60),
+    }
+}
+
+struct TestProviderStateBackend {
+    state: Value,
+    requests: Arc<AsyncMutex<Vec<Option<Value>>>>,
+}
+
+impl TestProviderStateBackend {
+    fn new(state: Value) -> Self {
+        Self {
+            state,
+            requests: Arc::new(AsyncMutex::new(Vec::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl ManagedSandboxBackend for TestProviderStateBackend {
+    async fn acquire(
+        &self,
+        request: SandboxRequest,
+    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+        self.requests.lock().await.push(request.provider_state);
+        Ok(Arc::new(TestProviderStateHandle {
+            state: self.state.clone(),
+        }))
+    }
+
+    async fn acquire_from_snapshot(
+        &self,
+        _request: SandboxRequest,
+        _payload: SnapshotPayload,
+    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+        bail!("test provider-state backend does not support snapshot restore")
+    }
+}
+
+struct TestProviderStateHandle {
+    state: Value,
+}
+
+#[async_trait]
+impl ManagedSandboxHandle for TestProviderStateHandle {
+    fn id(&self) -> &str {
+        "test-provider-state"
+    }
+
+    fn provider_state(&self) -> Option<Value> {
+        Some(self.state.clone())
+    }
+
+    async fn exec(&self, _command: &SandboxCommand) -> crate::Result<SandboxCommandOutput> {
+        bail!("test provider-state handle does not support exec")
+    }
+
+    async fn start_process(&self, _command: &SandboxCommand) -> crate::Result<SandboxProcessParts> {
+        bail!("test provider-state handle does not support start_process")
+    }
+
+    async fn stop(&self) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn snapshot(&self) -> crate::Result<SnapshotPayload> {
+        bail!("test provider-state handle does not support snapshots")
+    }
 }
 
 struct TestSandboxBackend {
