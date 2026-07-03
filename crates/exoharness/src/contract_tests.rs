@@ -203,7 +203,7 @@ pub async fn begin_turn_tracks_events_through_finish(harness: Arc<dyn ExoHarness
     assert!(
         events
             .iter()
-            .any(|event| matches!(event.data, EventData::TurnStarted))
+            .any(|event| matches!(event.data, EventData::TurnStarted { .. }))
     );
     assert!(
         events

@@ -1,14 +1,15 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::{AgentConfig, ConversationConfig, ExecutionStreamHandle, SendRequest, SendResult};
 use async_trait::async_trait;
 use exoharness::{
-    AgentHandle, AgentRecord, ConversationHandle, ConversationRecord, ExoHarness, NewAgentRequest,
-    NewConversationRequest, Result, SessionId,
+    AgentHandle, AgentRecord, BasicTurnCoordinator, ConversationHandle, ConversationId,
+    ConversationLease, ConversationRecord, EnqueueTurnRequest, ExoHarness, NewAgentRequest,
+    NewConversationRequest, PendingTurn, Result, SessionId, TurnCoordinator, TurnId,
 };
 use lingua::Message;
 
-use crate::conversation_wakeup::conversation_send_lock;
 use crate::harness_helpers::{
     get_conversation_model_override, materialize_conversation_messages,
     put_conversation_model_override, resolve_agent_handle, resolve_conversation_handle,
@@ -16,6 +17,10 @@ use crate::harness_helpers::{
 use crate::harness_types::{
     CreateAgentRequest, CreateConversationRequest, Harness, HarnessAgent, HarnessConversation,
 };
+
+/// How often a waiting sender re-attempts to claim the conversation and check
+/// that its turn reached the head of the queue.
+const CLAIM_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
 #[async_trait]
 pub(crate) trait HarnessRuntime: Send + Sync + Clone + 'static {
@@ -30,19 +35,54 @@ pub(crate) trait HarnessRuntime: Send + Sync + Clone + 'static {
         conversation: &dyn ConversationHandle,
         config: ConversationConfig,
     ) -> Result<()>;
-    async fn send(
+    /// Execute a claimed pending turn: begin it through the coordinator
+    /// (fenced by the lease), run the executor, and finish it. The caller
+    /// completes the turn and releases the lease.
+    async fn execute_pending_turn(
         &self,
         agent: Arc<dyn AgentHandle>,
         conversation: Arc<dyn ConversationHandle>,
-        request: SendRequest,
+        coordinator: Arc<dyn TurnCoordinator>,
+        lease: ConversationLease,
+        pending: PendingTurn,
     ) -> Result<SendResult>;
-    async fn send_stream(
+    /// Streaming variant. The spawned turn task owns completion: it pops the
+    /// turn and releases the lease after the turn finishes.
+    async fn execute_pending_turn_stream(
         &self,
         agent: Arc<dyn AgentHandle>,
         conversation: Arc<dyn ConversationHandle>,
-        request: SendRequest,
+        coordinator: Arc<dyn TurnCoordinator>,
+        lease: ConversationLease,
+        pending: PendingTurn,
     ) -> Result<ExecutionStreamHandle>;
     async fn flush_tracing(&self) -> Result<()>;
+}
+
+/// Wait until this sender's turn is at the head of the conversation queue
+/// and the conversation lease is ours. Turns execute in enqueue order, so a
+/// sender whose turn is behind others releases the lease and retries while
+/// the earlier senders drive their own turns.
+async fn wait_for_pending_turn(
+    coordinator: &Arc<dyn TurnCoordinator>,
+    conversation_id: ConversationId,
+    turn_id: TurnId,
+) -> Result<ConversationLease> {
+    loop {
+        if let Some(lease) = coordinator.claim_conversation(conversation_id).await? {
+            match coordinator.peek_turn(&lease).await {
+                Ok(Some(head)) if head.id == turn_id => return Ok(lease),
+                Ok(_) => {
+                    coordinator.release_idle(&lease).await?;
+                }
+                Err(error) => {
+                    let _ = coordinator.release_idle(&lease).await;
+                    return Err(error);
+                }
+            }
+        }
+        tokio::time::sleep(CLAIM_RETRY_INTERVAL).await;
+    }
 }
 
 pub(crate) trait SharedHarnessBacked: Send + Sync {
@@ -84,6 +124,7 @@ where
 pub(crate) struct SharedHarness<R> {
     exoharness: Arc<dyn ExoHarness>,
     runtime: R,
+    coordinator: Arc<dyn TurnCoordinator>,
 }
 
 impl<R> SharedHarness<R>
@@ -91,9 +132,20 @@ where
     R: HarnessRuntime,
 {
     pub(crate) fn new(exoharness: Arc<dyn ExoHarness>, runtime: R) -> Self {
+        // Prefer the substrate's own coordinator (durable backends share it
+        // across every process on the same store). Backends without one get
+        // process-local coordination, matching their pre-coordinator scope.
+        let coordinator: Arc<dyn TurnCoordinator> =
+            exoharness.turn_coordinator().unwrap_or_else(|| {
+                Arc::new(BasicTurnCoordinator::in_memory(
+                    Arc::clone(&exoharness),
+                    exoharness::DEFAULT_LEASE_TTL,
+                ))
+            });
         Self {
             exoharness,
             runtime,
+            coordinator,
         }
     }
 
@@ -163,6 +215,7 @@ where
         Arc::new(SharedHarnessAgent {
             agent,
             runtime: self.runtime.clone(),
+            coordinator: Arc::clone(&self.coordinator),
         })
     }
 }
@@ -170,6 +223,7 @@ where
 struct SharedHarnessAgent<R> {
     agent: Arc<dyn AgentHandle>,
     runtime: R,
+    coordinator: Arc<dyn TurnCoordinator>,
 }
 
 #[async_trait]
@@ -220,6 +274,7 @@ where
             agent: Arc::clone(&self.agent),
             conversation,
             runtime: self.runtime.clone(),
+            coordinator: Arc::clone(&self.coordinator),
         })))
     }
 
@@ -257,6 +312,7 @@ where
             agent: Arc::clone(&self.agent),
             conversation,
             runtime: self.runtime.clone(),
+            coordinator: Arc::clone(&self.coordinator),
         }))
     }
 
@@ -278,6 +334,7 @@ struct SharedHarnessConversation<R> {
     agent: Arc<dyn AgentHandle>,
     conversation: Arc<dyn ConversationHandle>,
     runtime: R,
+    coordinator: Arc<dyn TurnCoordinator>,
 }
 
 #[async_trait]
@@ -325,28 +382,79 @@ where
     }
 
     async fn send(&self, request: SendRequest) -> Result<SendResult> {
-        let send_lock = conversation_send_lock(&self.conversation.record().id.to_string());
-        let _guard = send_lock.lock().await;
-        self.runtime
-            .send(
+        let conversation_id = self.conversation.record().id;
+        let enqueued = self
+            .coordinator
+            .enqueue_turn(
+                conversation_id,
+                EnqueueTurnRequest {
+                    input: request.input,
+                    session_id: request.session_id,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let turn_id = enqueued.turn.id;
+        let lease = wait_for_pending_turn(&self.coordinator, conversation_id, turn_id).await?;
+        let result = self
+            .runtime
+            .execute_pending_turn(
                 Arc::clone(&self.agent),
                 Arc::clone(&self.conversation),
-                request,
+                Arc::clone(&self.coordinator),
+                lease.clone(),
+                enqueued.turn,
             )
-            .await
+            .await;
+        // Pop the turn and free the lease even when execution failed, so an
+        // errored turn cannot wedge the conversation queue.
+        if let Err(error) = self.coordinator.complete_turn(&lease, turn_id).await {
+            tracing::error!(%error, %turn_id, "failed to complete queued turn");
+        }
+        if let Err(error) = self.coordinator.release_idle(&lease).await {
+            tracing::error!(%error, %conversation_id, "failed to release conversation lease");
+        }
+        result
     }
 
     async fn send_stream(&self, request: SendRequest) -> Result<ExecutionStreamHandle> {
-        let send_lock = conversation_send_lock(&self.conversation.record().id.to_string());
-        let send_guard = send_lock.lock_owned().await;
-        let stream = self
-            .runtime
-            .send_stream(
-                Arc::clone(&self.agent),
-                Arc::clone(&self.conversation),
-                request,
+        let conversation_id = self.conversation.record().id;
+        let enqueued = self
+            .coordinator
+            .enqueue_turn(
+                conversation_id,
+                EnqueueTurnRequest {
+                    input: request.input,
+                    session_id: request.session_id,
+                    ..Default::default()
+                },
             )
             .await?;
-        Ok(stream.with_send_guard(send_guard))
+        let turn_id = enqueued.turn.id;
+        let lease = wait_for_pending_turn(&self.coordinator, conversation_id, turn_id).await?;
+        let stream = self
+            .runtime
+            .execute_pending_turn_stream(
+                Arc::clone(&self.agent),
+                Arc::clone(&self.conversation),
+                Arc::clone(&self.coordinator),
+                lease.clone(),
+                enqueued.turn,
+            )
+            .await;
+        match stream {
+            Ok(stream) => Ok(stream),
+            Err(error) => {
+                // Setup failed before the spawned turn task took ownership of
+                // the lease: clean up here so the queue is not wedged.
+                if let Err(error) = self.coordinator.complete_turn(&lease, turn_id).await {
+                    tracing::error!(%error, %turn_id, "failed to complete queued turn");
+                }
+                if let Err(error) = self.coordinator.release_idle(&lease).await {
+                    tracing::error!(%error, %conversation_id, "failed to release conversation lease");
+                }
+                Err(error)
+            }
+        }
     }
 }

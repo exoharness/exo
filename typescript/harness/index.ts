@@ -616,6 +616,47 @@ export async function materializePromptMessages(
   ];
 }
 
+/**
+ * Tool calls recorded in these events without a matching result, in order.
+ * After a crash, these are the frontier of the interrupted attempt: the
+ * steps whose outcome is unknown. Everything before them is recorded
+ * history and must not be redone; everything after them never happened.
+ */
+export function unfinishedToolCalls(events: Event[]): PendingToolCall[] {
+  const pending = new Map<string, PendingToolCall>();
+  for (const event of events) {
+    if (isToolRequestedEvent(event.data)) {
+      pending.set(event.data.tool_call_id, {
+        toolCallId: event.data.tool_call_id,
+        // The event payload uses the wire (snake_case) request shape.
+        request: {
+          functionName: event.data.request.function_name,
+          arguments: event.data.request.arguments,
+        },
+      });
+    } else if (isToolResultEvent(event.data)) {
+      pending.delete(event.data.tool_call_id);
+    }
+  }
+  return [...pending.values()];
+}
+
+/**
+ * The unfinished tool calls of the current turn, from its durable events.
+ * Empty on a first attempt; non-empty only when a prior attempt crashed
+ * between recording tool calls and recording their results.
+ */
+export async function turnUnfinishedToolCalls(
+  turn: Turn,
+): Promise<PendingToolCall[]> {
+  const result = await turn.conversation.getEvents({
+    turnId: turn.turnId,
+    types: ["tool_requested", "tool_result"],
+    direction: "asc",
+  });
+  return unfinishedToolCalls(result.events);
+}
+
 export function messagesToHistoryMessages(
   messages: Message[],
 ): HistoryMessage[] {

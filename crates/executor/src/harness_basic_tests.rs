@@ -1301,6 +1301,129 @@ async fn conversation_model_override_changes_effective_model() {
     assert_eq!(requests[2].max_output_tokens, Some(512));
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn concurrent_sends_serialize_through_the_turn_queue() {
+    let tempdir = TempDir::new().expect("tempdir should exist");
+    let exoharness = Arc::new(
+        BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
+            .await
+            .expect("basic exoharness should initialize"),
+    ) as Arc<dyn ExoHarness>;
+    let model_response = |text: &str| ModelResponse {
+        provider_cost_usd: None,
+        response_id: Some(Uuid7::now()),
+        messages: vec![assistant_message(text)],
+        tool_calls: Vec::new(),
+        usage: None,
+        model: None,
+        ttft: None,
+        duration: None,
+    };
+    let harness = BasicHarness::new(
+        exoharness,
+        Arc::new(FakeModelClient::new(vec![
+            model_response("pong one"),
+            model_response("pong two"),
+        ])),
+        Arc::new(BasicToolRuntime),
+    );
+    register_test_models(harness.exoharness_handle().as_ref()).await;
+
+    let agent = harness
+        .create_agent(CreateAgentRequest {
+            slug: "demo".to_string(),
+            name: None,
+            harness: crate::AgentHarnessKind::Basic,
+            typescript: None,
+            enable_agent_tool_creation: true,
+            sandbox_image: None,
+            sandbox_provider: SandboxProvider::LocalProcess,
+            enable_networking: false,
+            model: "gpt-5.4".to_string(),
+            max_output_tokens: None,
+            max_tool_round_trips: Some(2),
+            braintrust: None,
+        })
+        .await
+        .expect("agent should be created");
+    let conversation = agent
+        .create_conversation(CreateConversationRequest::default())
+        .await
+        .expect("conversation should be created");
+
+    let (first, second) = tokio::join!(
+        conversation.send(SendRequest {
+            input: vec![user_message("ping one")],
+            session_id: None,
+        }),
+        conversation.send(SendRequest {
+            input: vec![user_message("ping two")],
+            session_id: None,
+        }),
+    );
+    let first = first.expect("first send should succeed");
+    let second = second.expect("second send should succeed");
+    assert_ne!(first.turn_id, second.turn_id);
+
+    // Turns must not interleave: each turn_started is followed by its own
+    // turn_ended before the next turn begins, and turns start in the order
+    // they were enqueued.
+    let events = conversation
+        .exoharness_handle()
+        .get_events(Some(EventQuery {
+            cursor: None,
+            direction: Some(EventQueryDirection::Asc),
+            limit: None,
+            session_id: None,
+            turn_id: None,
+            types: Some(vec![
+                EventKind::TURN_ENQUEUED,
+                EventKind::TURN_STARTED,
+                EventKind::TURN_ENDED,
+            ]),
+        }))
+        .await
+        .expect("turn events should load")
+        .events;
+    let mut enqueued = Vec::new();
+    let mut boundary_order = Vec::new();
+    for event in &events {
+        match &event.data {
+            EventData::TurnEnqueued { turn_id, .. } => enqueued.push(*turn_id),
+            EventData::TurnStarted { .. } => {
+                boundary_order.push(("started", event.turn_id.expect("turn id")));
+            }
+            EventData::TurnEnded => {
+                boundary_order.push(("ended", event.turn_id.expect("turn id")));
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(enqueued.len(), 2);
+    // Queue order is turn-id order (UUIDv7 = generation order); the
+    // turn_enqueued *events* of two racing producers may log in either order.
+    enqueued.sort();
+    let (first_turn, second_turn) = (enqueued[0], enqueued[1]);
+    assert_eq!(
+        boundary_order,
+        vec![
+            ("started", first_turn),
+            ("ended", first_turn),
+            ("started", second_turn),
+            ("ended", second_turn),
+        ]
+    );
+
+    // User/assistant messages alternate rather than interleaving as
+    // user/user/assistant/assistant.
+    let messages = conversation.messages().await.expect("messages should load");
+    assert_eq!(messages.len(), 4);
+    assert!(matches!(messages[0], Message::User { .. }));
+    assert!(matches!(messages[1], Message::Assistant { .. }));
+    assert!(matches!(messages[2], Message::User { .. }));
+    assert!(matches!(messages[3], Message::Assistant { .. }));
+}
+
 #[derive(Default)]
 struct FakeModelClient {
     responses: Mutex<VecDeque<ModelResponse>>,

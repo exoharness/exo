@@ -8,6 +8,10 @@ mod basic_tests;
     feature = "basic-backend"
 ))]
 pub mod contract_tests;
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+mod coordinator;
+#[cfg(all(test, not(target_arch = "wasm32"), feature = "basic-backend"))]
+mod coordinator_tests;
 mod error;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod http;
@@ -30,6 +34,8 @@ mod uuid7;
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub use basic::*;
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+pub use coordinator::*;
 pub use error::*;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub use http::*;

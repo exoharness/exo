@@ -18,6 +18,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
+use crate::coordinator::BasicTurnCoordinator;
 use crate::sandbox::{
     CliContainerSandboxBackend, LocalProcessSandboxBackend, ManagedSandboxBackend,
     ManagedSandboxHandle, SANDBOX_MAIN_MOUNT_DIR, SandboxCommand, SandboxKey,
@@ -44,8 +45,9 @@ use crate::{
     SandboxProcessEventQuery, SandboxProcessId, SandboxProcessMode, SandboxProcessParts,
     SandboxProcessRecord, SandboxProcessStatus, SandboxProcessStdin, SandboxProvider,
     SandboxProviderConfig, Secret, SecretId, SecretMetadata, SecretType, SessionId, SnapshotHandle,
-    SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnHandle, TurnId, TurnRecord,
-    Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
+    SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnCoordinator, TurnHandle,
+    TurnId, TurnRecord, Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest,
+    WriteSandboxProcessInputRequest,
 };
 
 const SANDBOX_PROVIDER_STATE_EVENT: &str = "sandbox_provider_state";
@@ -350,6 +352,10 @@ struct BasicExoHarnessInner {
     running_sandboxes: AsyncMutex<HashMap<SandboxId, Arc<dyn ManagedSandboxHandle>>>,
     running_processes: AsyncMutex<HashMap<SandboxProcessId, Arc<RunningSandboxProcess>>>,
     secret_cipher: SecretCipher,
+    /// Built lazily so every facade over this harness shares one runtime
+    /// identity; the durable queue/lease state lives in `storage`, so
+    /// coordination is shared across processes on the same root.
+    turn_coordinator: std::sync::OnceLock<Arc<dyn TurnCoordinator>>,
 }
 
 impl BasicExoHarnessInner {
@@ -829,6 +835,7 @@ impl BasicExoHarness {
                 running_sandboxes: AsyncMutex::new(HashMap::new()),
                 running_processes: AsyncMutex::new(HashMap::new()),
                 secret_cipher,
+                turn_coordinator: std::sync::OnceLock::new(),
             }),
         })
     }
@@ -865,6 +872,16 @@ impl BasicExoHarness {
 
 #[async_trait]
 impl ExoHarness for BasicExoHarness {
+    fn turn_coordinator(&self) -> Option<Arc<dyn TurnCoordinator>> {
+        Some(Arc::clone(self.inner.turn_coordinator.get_or_init(|| {
+            Arc::new(BasicTurnCoordinator::new(
+                Arc::new(self.clone()),
+                self.inner.storage.clone(),
+                crate::DEFAULT_LEASE_TTL,
+            ))
+        })))
+    }
+
     async fn list_agents(&self) -> Result<Vec<Arc<dyn AgentHandle>>> {
         let mut handles: Vec<Arc<dyn AgentHandle>> = Vec::new();
         for record in self.list_agent_records().await? {
@@ -2034,7 +2051,7 @@ impl ConversationHandle for BasicConversationHandle {
         if request.session_id.is_none() {
             events_to_append.push(EventData::SessionStarted);
         }
-        events_to_append.push(EventData::TurnStarted);
+        events_to_append.push(EventData::TurnStarted { attempt: 1 });
         if !request.input.is_empty() {
             events_to_append.push(EventData::Messages {
                 messages: request.input,

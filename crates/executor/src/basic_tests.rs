@@ -106,7 +106,7 @@ async fn send_appends_user_and_assistant_messages() {
         events[0].session_id.expect("session id")
     );
     assert!(matches!(events[0].data, EventData::SessionStarted));
-    assert!(matches!(events[1].data, EventData::TurnStarted));
+    assert!(matches!(events[1].data, EventData::TurnStarted { .. }));
     assert!(matches!(events[2].data, EventData::Messages { .. }));
     assert!(matches!(events[3].data, EventData::Messages { .. }));
     assert!(matches!(events[4].data, EventData::TurnEnded));
@@ -894,7 +894,7 @@ impl ConversationHandle for FakeConversationHandle {
             &self.state,
             session_id,
             Some(turn_id),
-            EventData::TurnStarted,
+            EventData::TurnStarted { attempt: 1 },
         ));
         if !request.input.is_empty() {
             latest_event_id = Some(append_event(

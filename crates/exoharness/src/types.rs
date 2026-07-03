@@ -25,6 +25,15 @@ pub trait ExoHarness: Send + Sync {
     async fn new_agent(&self, request: NewAgentRequest) -> Result<Arc<dyn AgentHandle>>;
     async fn delete_agent(&self, id: &AgentId) -> Result<bool>;
 
+    /// The substrate's turn coordination facet, when it provides one whose
+    /// scope matches the substrate's own (e.g. a durable store yields a
+    /// coordinator shared by every process on that store). Backends that
+    /// return `None` leave callers to coordinate among themselves — the
+    /// executor falls back to process-local coordination.
+    fn turn_coordinator(&self) -> Option<Arc<dyn TurnCoordinator>> {
+        None
+    }
+
     async fn list_bindings(&self) -> Result<Vec<BindingRecord>>;
     async fn put_binding(&self, binding: Binding) -> Result<BindingId>;
     async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>>;
@@ -161,6 +170,12 @@ pub trait TurnHandle: SnapshotHandle {
 ///   the turn at the head, and once its lease expires any runtime can claim
 ///   the conversation and re-execute it — crash recovery is the ordinary
 ///   claim path, not a repair procedure.
+/// - Failure and crash are distinct. A turn whose execution *fails* is still
+///   completed by its runtime (the error is reported to the caller; the
+///   queue moves on). Only a *crash* — no runtime left to act — leaves the
+///   turn at the head for re-execution. What a re-executing runtime does
+///   with the crashed attempt's partial events (resume, ignore, or unwind)
+///   is deliberately executor policy, not coordinator semantics.
 /// - Leases are fenced. `ConversationLease::token` identifies the live
 ///   grant; `begin_pending_turn()` fails on a stale token, and
 ///   implementations should reject turn-scoped writes made under a lease
@@ -197,6 +212,16 @@ pub trait TurnCoordinator: Send + Sync {
     /// Claim up to `max` conversations that have eligible pending work (a
     /// head turn whose `not_before` has passed) and no live lease.
     async fn claim_ready(&self, max: usize) -> Result<Vec<ConversationLease>>;
+
+    /// Claim one conversation if it has no live lease, returning `None` when
+    /// it is already leased — including by this runtime, so a fresh claim is
+    /// also a mutex between concurrent tasks sharing one coordinator. Unlike
+    /// `claim_ready`, this does not require eligible pending work: a producer
+    /// that just enqueued may claim before the turn's `not_before` passes.
+    async fn claim_conversation(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Option<ConversationLease>>;
 
     /// Extend the lease. Returns false when the lease is no longer held, at
     /// which point the runtime must stop executing. `processing` marks
@@ -314,6 +339,11 @@ pub struct PendingTurn {
     pub id: TurnId,
     pub conversation_id: ConversationId,
     pub input: Vec<Message>,
+    /// Continue an existing session instead of starting a fresh one when the
+    /// turn begins — interactive clients (e.g. a REPL) keep one session
+    /// across queued turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
     pub enqueued_at: DateTimeUtc,
     /// Do not execute before this time. This is the substrate's only
     /// scheduling primitive; recurrence and cron policy stay above it.
@@ -326,6 +356,7 @@ pub struct PendingTurn {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EnqueueTurnRequest {
     pub input: Vec<Message>,
+    pub session_id: Option<SessionId>,
     pub not_before: Option<DateTimeUtc>,
     /// Producer-retry idempotency: two enqueues carrying the same key while
     /// the first turn is still pending yield one turn.
@@ -501,6 +532,10 @@ pub struct Event {
     pub data: EventData,
 }
 
+fn default_turn_attempt() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventData {
@@ -519,7 +554,15 @@ pub enum EventData {
     },
     SessionStarted,
     SessionEnded,
-    TurnStarted,
+    TurnStarted {
+        /// Which execution attempt this is for the turn, starting at 1.
+        /// Coordinated re-execution after a crashed runtime appends a new
+        /// `turn_started` for the same turn id with the next attempt number,
+        /// so crashes are first-class in history and executors can tell
+        /// their own events from a dead attempt's.
+        #[serde(default = "default_turn_attempt")]
+        attempt: u32,
+    },
     TurnEnded,
     /// Input was durably accepted for later execution
     /// (`TurnCoordinator::enqueue_turn()`). Carries the pending turn's id in
@@ -629,7 +672,7 @@ impl EventData {
             Self::ConversationForked { .. } => EventKind::CONVERSATION_FORKED,
             Self::SessionStarted => EventKind::SESSION_STARTED,
             Self::SessionEnded => EventKind::SESSION_ENDED,
-            Self::TurnStarted => EventKind::TURN_STARTED,
+            Self::TurnStarted { .. } => EventKind::TURN_STARTED,
             Self::TurnEnded => EventKind::TURN_ENDED,
             Self::TurnEnqueued { .. } => EventKind::TURN_ENQUEUED,
             Self::TurnCancelled { .. } => EventKind::TURN_CANCELLED,
