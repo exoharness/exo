@@ -1,20 +1,33 @@
 # exo
 
 Exo is a systems approach to recursive self improvement. In short, it's a
-complete agent harnes that has support for tools, tasks, adapters (e.g.
-WhatsApp, Discord or Slack), full computer use, and state management (snapshot,
-clone, migrate, rewind). But most importantly it has full visbility of both its
-code and runtime logs and can incrementally improve every aspect of itself.
+complete agent harnes that has support for tools, tasks, integrations (e.g.
+WhatsApp, Discord or Slack), and general computer use. But most importantly it
+has full visbility of both its code and runtime logs and can incrementally
+improve every aspect of itself, clone itself, and even manage a lineage of
+clones.
 
 While most agents can do some form of self improvement, such as evolve their
 prompts or add tools, Exo is fully recursive in that can clone or operate on any
 aspect of itself, from prompts, to memory, to tooling, to the basic harness
 itself. And it's architected so that this evolution can be done incrementally
 and (mostly) safely. The only thing it can't muck with is an event log which
-provides canonical history.
+provides canonical history of what it's tried to prevent getting stuck in
+recursive loops.
 
-The goal is to give an agent maximum power anbd flexibility to improve itself.
-Or customize itself for whatever purpose. For example an Exo agent can evolve to a better version of itself that is cheaper to run, or it can impprove itself to get better at tasks.
+The goal of Exo is to be the minimal framework possible to give an agent full
+ability for recursive self improvmenet. Why would you want such a thing?
+
+- It's a great agent framework to build exactly the agent you like that's
+  maximally bitter lesson aligned. Future smarter models can evolve every aspect
+  of the system. And do it safely with full history.
+- It'a s great framework to allow AI models to solve complex problems by
+  iterating on system level properties. We've have agents learn to play games,
+  cost optimize themselves, build complex systems. In each case, it required the
+  agents to modify themselves heavily.
+
+In short, we think this is the best way to take advantage of the growing power
+of AI models when building long lived agents.
 
 <!-- ![Exo playinb pokemon go](docs/images/exo_playing.gif) -->
 
@@ -46,7 +59,7 @@ Open that URL in your browser or on your phone.
 When complete, the script will drop you to a prompt you can use to talk to your
 agent locally.
 
-A good end to end test is to have it install a tool in the sanbox and use it with the task scheduler. For example,
+A good end to end test is to have it install a tool in the sandbox and use it with the task scheduler. For example,
 try the following prompt:
 
 ```
@@ -67,7 +80,7 @@ to evolve itself. For a deeper dive into these concepts, see
 events, builds the model context, exposes the active tools, executes tool calls,
 and records the results. This loop runs outside the sandbox.
 
-**Sandbox** In the canonical setup, Exo uses a vanilla unbuntu sandbox where
+**Sandbox** Exo uses a vanilla unbuntu sandbox where
 it can install packages, run commands, and experiment. It can snapshot and
 rewind that sandbox when it needs to back out changes.
 
