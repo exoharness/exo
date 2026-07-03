@@ -9,7 +9,7 @@ use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
 use executor::{
     BasicExoHarnessConfig, BraintrustRuntimeConfig, ExoclawToolRuntime, Harness,
-    SandboxBackendChoice, SchedulerRunOptions, SchedulerStore, SecretBackendChoice,
+    SandboxBackendRegistration, SchedulerRunOptions, SchedulerStore, SecretBackendChoice,
     TypeScriptHarness, run_due_tasks,
 };
 
@@ -111,12 +111,12 @@ enum SandboxBackendArg {
     LocalProcess,
 }
 
-impl From<SandboxBackendArg> for SandboxBackendChoice {
+impl From<SandboxBackendArg> for SandboxBackendRegistration {
     fn from(value: SandboxBackendArg) -> Self {
         match value {
-            SandboxBackendArg::AppleContainer => Self::AppleContainer,
-            SandboxBackendArg::Docker => Self::Docker,
-            SandboxBackendArg::LocalProcess => Self::LocalProcess,
+            SandboxBackendArg::AppleContainer => Self::apple_container(),
+            SandboxBackendArg::Docker => Self::docker(),
+            SandboxBackendArg::LocalProcess => Self::local_process(),
         }
     }
 }
@@ -189,7 +189,7 @@ async fn exoclaw_harness(
     sandbox_backend_arg: Option<SandboxBackendArg>,
 ) -> Result<Arc<dyn Harness>> {
     let sandbox_backend = sandbox_backend_arg
-        .map(SandboxBackendChoice::from)
+        .map(SandboxBackendRegistration::from)
         .unwrap_or_else(default_sandbox_backend);
     let exo_config = BasicExoHarnessConfig {
         root: root.join("exoharness"),
@@ -219,13 +219,13 @@ fn default_secret_backend() -> SecretBackendChoice {
 }
 
 #[cfg(target_os = "macos")]
-fn default_sandbox_backend() -> SandboxBackendChoice {
-    SandboxBackendChoice::AppleContainer
+fn default_sandbox_backend() -> SandboxBackendRegistration {
+    SandboxBackendRegistration::apple_container()
 }
 
 #[cfg(not(target_os = "macos"))]
-fn default_sandbox_backend() -> SandboxBackendChoice {
-    SandboxBackendChoice::Docker
+fn default_sandbox_backend() -> SandboxBackendRegistration {
+    SandboxBackendRegistration::docker()
 }
 
 fn load_env(

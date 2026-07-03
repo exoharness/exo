@@ -78,3 +78,4 @@ tokio = { version = "1.52.1", features = [
   "sync",
   "time",
 ] }
+tracing-subscriber.workspace = true

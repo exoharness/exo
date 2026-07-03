@@ -29,7 +29,7 @@ mod aws_agentcore {
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod e2b;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
-mod process_bridge;
+pub mod process_bridge;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod sprites;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]

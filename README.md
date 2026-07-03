@@ -20,9 +20,9 @@ ability for recursive self improvmenet. Why would you want such a thing?
 
 - It's a great agent framework to build exactly the agent you like that's
   maximally bitter lesson aligned. Future smarter models can evolve every aspect
-  of the system. And do it safely with full history.
+  of the system at runtime. And do it safely with full history.
 - It'a s great framework to allow AI models to solve complex problems by
-  iterating on system level properties. We've have agents learn to play games,
+  iterating on system level properties. We've had agents learn to play games,
   cost optimize themselves, build complex systems. In each case, it required the
   agents to modify themselves heavily.
 
@@ -114,10 +114,10 @@ While there are many, the most obvious is that right now there isn't a simple wa
 
 ## Tweaking Prompts
 
-There are a numebr of prompt files that Exo uses during runtime. You can edit these directly or ask Exo to.
+There are a number of prompt files that Exo uses during runtime. You can edit these directly or ask Exo to.
 
 - `examples/exoclaw/prompts/me.md`: the committed core identity and operating
-  rules for the default Exoclaw agent.
+  rules for the default Exo agent.
 - `.exo/exoclaw-profile.md`: local, git-ignored profile instructions such as
   your name and machine-specific preferences. Create or update it with
   `scripts/exo.sh setup-profile`.

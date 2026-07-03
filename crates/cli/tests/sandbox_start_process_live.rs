@@ -49,6 +49,7 @@ fn make_e2b_request(conversation_id: &str, sandbox_id: &str) -> SandboxRequest {
         lifecycle: SandboxLifecycleConfig {
             idle_ttl: Some(Duration::from_secs(300)),
         },
+        provider_state: None,
     }
 }
 
@@ -97,6 +98,7 @@ fn make_sprites_request(conversation_id: &str, sandbox_id: &str) -> SandboxReque
         lifecycle: SandboxLifecycleConfig {
             idle_ttl: Some(Duration::from_secs(300)),
         },
+        provider_state: None,
     }
 }
 
