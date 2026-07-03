@@ -1,0 +1,73 @@
+---
+title: Tools
+description: Functions the model can call during a turn — an executor concept the exoharness records but does not own.
+---
+
+A **tool** is a function the model can call during a turn: run a shell
+command, write a file, search the web. Tools are an **executor** concept —
+the executor decides which tools the model sees and runs them. The
+exoharness doesn't define tools; it only records `tool_requested` and
+`tool_result` [events](./data-model.mdx) so the activity is durable.
+
+## Anatomy of a tool
+
+A tool is a plain object with a JSON-schema `definition` the model sees and
+an `initialize()` that returns the handler which runs when the model calls
+it:
+
+```ts
+const tool = defineTool({
+  definition: {
+    name: "...",
+    description: "...",
+    parameters: { type: "object", additionalProperties: false, properties: { /* ... */ } },
+  },
+  initializationParameters: { type: "object", additionalProperties: false, properties: {} },
+  initialize() {
+    return { async execute(args, execution) { /* ... */ } };
+  },
+});
+```
+
+`execution.context` is the full turn context, so a tool can run sandbox
+commands, read events, or write artifacts. See the
+[Custom Agent Quickstart](../tutorials/write-your-own-agent.mdx) for building
+one step by step.
+
+## Where tools run
+
+Tool handlers run in the **harness (host) process**, not inside the
+sandbox. To do work in the isolated environment, a tool calls the built-in
+`shell` tool or `context.startSandboxProcess(...)`. This keeps the
+trust boundary clear: the model's requested action runs where the harness
+controls it.
+
+## Where tools come from
+
+The registry a turn exposes is assembled from three sources:
+
+- **Built-in** — shipped with the harness runtime: `shell` (run commands in
+  the sandbox), and `install_agent_tool` / `uninstall_agent_tool` (let the
+  agent write and remove its own tools).
+- **Library** — tool modules you ship and load by path
+  (`--tool-module <path>`), like the tutorials' `todowrite`.
+- **Agent-created** — tools the agent writes at runtime via
+  `install_agent_tool`, stored under `.exo/agent-tools/` and loaded when the
+  agent is configured for tool creation.
+
+## Registration is per round
+
+The tool registry is rebuilt on **every model round**. So a tool the agent
+installs mid-turn with `install_agent_tool` is visible on the very next
+round — which is what lets an agent extend itself and immediately use the
+result.
+
+## Results become durable
+
+A tool's result is recorded as a `tool_result` event. Large results are
+also stored as versioned [artifacts](./data-model.mdx), and the model sees a
+compact inline preview rather than the full payload — so a big command
+output doesn't bloat the prompt while the complete result stays retrievable.
+
+See [The Canonical Agent](./canonical-agent.mdx) for the full tool surface
+of the shipped agent (scheduling, adapters, snapshots, memory, guardian).

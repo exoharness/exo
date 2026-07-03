@@ -1,0 +1,10 @@
+{
+  "title": "Getting Started",
+  "pages": [
+    "index",
+    "installation",
+    "first-session",
+    "quick-start",
+    "sandboxed-conversation"
+  ]
+}

@@ -16,7 +16,8 @@
     "slack:setup": "node scripts/slack-setup.mjs",
     "test": "vitest run",
     "typecheck": "tsgo --noEmit -p tsconfig.json",
-    "website:build": "vite build --config website/vite.config.js",
+    "docs:build": "pnpm --dir docs-site install --frozen-lockfile && pnpm --dir docs-site run build",
+    "website:build": "vite build --config website/vite.config.js && pnpm run docs:build && rm -rf website/dist/docs && cp -r docs-site/out website/dist/docs",
     "website:dev": "vite --config website/vite.config.js",
     "website:preview": "vite preview --config website/vite.config.js"
   },

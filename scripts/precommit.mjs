@@ -41,7 +41,10 @@ function filterByExtension(files, extensions) {
   return files.filter((file) => extensions.has(path.extname(file)));
 }
 
-const stagedFiles = getStagedFiles();
+// docs-site is a Jekyll site; oxfmt breaks its kramdown attribute syntax.
+const stagedFiles = getStagedFiles().filter(
+  (file) => !file.startsWith("docs-site/"),
+);
 
 if (stagedFiles.length === 0) {
   process.exit(0);
