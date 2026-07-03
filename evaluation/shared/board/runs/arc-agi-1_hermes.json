@@ -1,0 +1,382 @@
+{
+  "benchmark": "arc-agi-1",
+  "system": "hermes",
+  "model": "gpt-5.5",
+  "label": "Hermes (gpt-5.5)",
+  "metric": "pass@2",
+  "score": 0.88,
+  "n_tasks": 50,
+  "task_set": {
+    "data_dir": "/home/worker/ARC-AGI/data/evaluation",
+    "offset": 0,
+    "task_ids": [
+      "00576224",
+      "009d5c81",
+      "00dbd492",
+      "03560426",
+      "05a7bcf2",
+      "0607ce86",
+      "0692e18c",
+      "070dd51e",
+      "08573cc6",
+      "0934a4d8",
+      "09c534e7",
+      "0a1d4ef5",
+      "0a2355a6",
+      "0b17323b",
+      "0bb8deee",
+      "0becf7df",
+      "0c786b71",
+      "0c9aba6e",
+      "0d87d2a6",
+      "0e671a1a",
+      "0f63c0b9",
+      "103eff5b",
+      "11e1fe23",
+      "12422b43",
+      "12997ef3",
+      "12eac192",
+      "136b0064",
+      "13713586",
+      "137f0df0",
+      "140c817e",
+      "14754a24",
+      "15113be4",
+      "15663ba9",
+      "15696249",
+      "16b78196",
+      "17b80ad2",
+      "17cae0c1",
+      "18419cfa",
+      "184a9768",
+      "195ba7dc",
+      "1990f7a8",
+      "19bb5feb",
+      "1a2e2828",
+      "1a6449f1",
+      "1acc24af",
+      "1c02dbbe",
+      "1c0d0a4b",
+      "1c56ad9f",
+      "1d0a4b61",
+      "1d398264"
+    ]
+  },
+  "cost": {
+    "input_tokens": 535559,
+    "cached_input_tokens": 1704960,
+    "output_tokens": 208620,
+    "total_usd": 1.2641,
+    "per_task_usd": 0.0253,
+    "prices_as_of": "2026-07-01"
+  },
+  "per_task": [
+    {
+      "task": "00576224",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": -0.0437
+    },
+    {
+      "task": "009d5c81",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": -0.0052
+    },
+    {
+      "task": "00dbd492",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0552
+    },
+    {
+      "task": "03560426",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0015
+    },
+    {
+      "task": "05a7bcf2",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.2063
+    },
+    {
+      "task": "0607ce86",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.1322
+    },
+    {
+      "task": "0692e18c",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": -0.0306
+    },
+    {
+      "task": "070dd51e",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0057
+    },
+    {
+      "task": "08573cc6",
+      "solved": false,
+      "solved_pass2": false,
+      "cost_usd": -0.0242
+    },
+    {
+      "task": "0934a4d8",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.2931
+    },
+    {
+      "task": "09c534e7",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0748
+    },
+    {
+      "task": "0a1d4ef5",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0203
+    },
+    {
+      "task": "0a2355a6",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": -0.0146
+    },
+    {
+      "task": "0b17323b",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": -0.0217
+    },
+    {
+      "task": "0bb8deee",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": -0.003
+    },
+    {
+      "task": "0becf7df",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": -0.0252
+    },
+    {
+      "task": "0c786b71",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": -0.0213
+    },
+    {
+      "task": "0c9aba6e",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": -0.0176
+    },
+    {
+      "task": "0d87d2a6",
+      "solved": false,
+      "solved_pass2": false,
+      "cost_usd": 0.04
+    },
+    {
+      "task": "0e671a1a",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0649
+    },
+    {
+      "task": "0f63c0b9",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0111
+    },
+    {
+      "task": "103eff5b",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.004
+    },
+    {
+      "task": "11e1fe23",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0407
+    },
+    {
+      "task": "12422b43",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": -0.0279
+    },
+    {
+      "task": "12997ef3",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": -0.0258
+    },
+    {
+      "task": "12eac192",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.032
+    },
+    {
+      "task": "136b0064",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0629
+    },
+    {
+      "task": "13713586",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.1487
+    },
+    {
+      "task": "137f0df0",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0011
+    },
+    {
+      "task": "140c817e",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": -0.0171
+    },
+    {
+      "task": "14754a24",
+      "solved": false,
+      "solved_pass2": false,
+      "cost_usd": -0.0038
+    },
+    {
+      "task": "15113be4",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0551
+    },
+    {
+      "task": "15663ba9",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": -0.1996
+    },
+    {
+      "task": "15696249",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0867
+    },
+    {
+      "task": "16b78196",
+      "solved": false,
+      "solved_pass2": false,
+      "cost_usd": -0.0718
+    },
+    {
+      "task": "17b80ad2",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": -0.0092
+    },
+    {
+      "task": "17cae0c1",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": -0.0355
+    },
+    {
+      "task": "18419cfa",
+      "solved": false,
+      "solved_pass2": false,
+      "cost_usd": 0.1475
+    },
+    {
+      "task": "184a9768",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.1172
+    },
+    {
+      "task": "195ba7dc",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0848
+    },
+    {
+      "task": "1990f7a8",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": -0.0041
+    },
+    {
+      "task": "19bb5feb",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": -0.0357
+    },
+    {
+      "task": "1a2e2828",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": -0.0184
+    },
+    {
+      "task": "1a6449f1",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0304
+    },
+    {
+      "task": "1acc24af",
+      "solved": false,
+      "solved_pass2": false,
+      "cost_usd": -0.0216
+    },
+    {
+      "task": "1c02dbbe",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0066
+    },
+    {
+      "task": "1c0d0a4b",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": -0.0405
+    },
+    {
+      "task": "1c56ad9f",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.1462
+    },
+    {
+      "task": "1d0a4b61",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0537
+    },
+    {
+      "task": "1d398264",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0594
+    }
+  ],
+  "run_config": {
+    "backend": "hermes",
+    "harness": null,
+    "evolve": false,
+    "protocol": "stateless"
+  },
+  "created": "2026-07-02T00:33:50.283736+00:00"
+}
