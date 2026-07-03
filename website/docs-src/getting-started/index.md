@@ -5,8 +5,6 @@ description: One setup script to a running, self-improving agent.
 
 # Getting Started
 
-One setup script to a running, self-improving agent.
-
 Get a fully functional agent — sandbox, scheduler, browser chat — with one
 script, then learn what to do with it.
 

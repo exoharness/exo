@@ -5,8 +5,6 @@ description: The built-in executor runtimes, from basic to Codex, Claude Code, a
 
 # Executors & Harnesses
 
-The built-in executor runtimes, from basic to Codex, Claude Code, and Cursor.
-
 A harness is an executor running on the exoharness. The `exo` CLI selects
 one with `--harness`:
 

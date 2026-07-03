@@ -5,8 +5,6 @@ description: Functions the model can call during a turn — an executor concept 
 
 # Tools
 
-Functions the model can call during a turn — an executor concept the exoharness records but does not own.
-
 A **tool** is a function the model can call during a turn: run a shell
 command, write a file, search the web. Tools are an **executor** concept —
 the executor decides which tools the model sees and runs them. The

@@ -5,8 +5,6 @@ description: The three core concepts — exoharness, executor, sandbox — and h
 
 # Concepts
 
-The three core concepts — exoharness, executor, sandbox — and how an agent spans them.
-
 ![Exo architecture overview](/images/architecture-overview.svg)
 
 Exo is built from three core concepts, each with a different mutability

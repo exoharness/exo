@@ -5,8 +5,6 @@ description: Why exo splits trusted infrastructure from agent semantics.
 
 # Exoharness & Executor
 
-Why exo splits trusted infrastructure from agent semantics.
-
 Powerful autonomy requires agents to be two things at once:
 
 1. **Adaptable** — able to change their policies, tools, and architecture to

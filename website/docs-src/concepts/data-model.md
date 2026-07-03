@@ -5,8 +5,6 @@ description: Agents, conversations, sessions, turns, events, and artifacts.
 
 # Data Model
 
-Agents, conversations, sessions, turns, events, and artifacts.
-
 ## Agent
 
 A global configuration object holding shared metadata and secrets that

@@ -5,8 +5,6 @@ description: Store a secret, register a model, and start a bare REPL.
 
 # Using the CLI Directly
 
-Store a secret, register a model, and start a bare REPL.
-
 The [setup script](./installation) does all of this for you. Use this
 page when you've [installed just the CLI](./installation#installing-just-the-cli)
 and want a bare agent — none of the canonical agent's tools or adapters — or want to understand the

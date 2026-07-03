@@ -5,8 +5,6 @@ description: Run recurring work in a sandbox on a schedule, with each run waking
 
 # Task Scheduler
 
-Run recurring work in a sandbox on a schedule, with each run waking the conversation.
-
 The **task scheduler** runs recurring work in a sandbox on a schedule —
 independent of whether anyone is chatting. It's how a long-running agent
 does things like "check the BBC headlines every hour" or "run the test

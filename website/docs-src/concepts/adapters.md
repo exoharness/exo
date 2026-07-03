@@ -5,8 +5,6 @@ description: Long-running connections to external channels — what they are and
 
 # Adapters
 
-Long-running connections to external channels — what they are and how to configure each one.
-
 Adapters are long-running, host-managed connections to external surfaces
 that let an agent receive messages from outside the REPL and send explicit
 replies back:

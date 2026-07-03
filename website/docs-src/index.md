@@ -5,8 +5,6 @@ description: A systems approach to recursive self-improvement.
 
 # exo
 
-A systems approach to recursive self-improvement.
-
 Exo is a complete agent harness with tools, scheduled tasks, adapters
 (ExoChat, WhatsApp, Discord, Signal, IRC), computer use, and state management
 (snapshot, clone, migrate, rewind). Most importantly, an Exo agent has full

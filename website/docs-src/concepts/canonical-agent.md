@@ -5,8 +5,6 @@ description: What setup.sh actually runs — the canonical exo agent, its tools,
 
 # The Canonical Agent
 
-What setup.sh actually runs — the canonical exo agent, its tools, and its self-improvement loop.
-
 The [setup script](../getting-started/installation) launches exo's
 **canonical agent** — a long-running personal agent (its implementation
 lives at `examples/exoclaw/`) that demonstrates the full

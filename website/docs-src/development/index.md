@@ -5,8 +5,6 @@ description: Building, testing, CI, and contribution conventions.
 
 # Development
 
-Building, testing, CI, and contribution conventions.
-
 ::: warning Under construction
   This section is a work in progress and not yet complete.
 :::

@@ -5,8 +5,6 @@ description: Fork and rewind agents from any point in the event log.
 
 # Time Travel
 
-Fork and rewind agents from any point in the event log.
-
 At any point in time, the entire state of an agent is defined by the
 version of its event log. That single invariant is what makes time travel
 possible: you can **rewind or fork from any point in the log**, and every

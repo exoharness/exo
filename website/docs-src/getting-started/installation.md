@@ -5,8 +5,6 @@ description: One setup script to a running agent.
 
 # Installation
 
-One setup script to a running agent.
-
 ## Prerequisites
 
 The setup script checks for these and prints per-platform install

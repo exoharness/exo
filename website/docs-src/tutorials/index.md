@@ -5,8 +5,6 @@ description: Step-by-step guides for building on exo.
 
 # Tutorials
 
-Step-by-step guides for building on exo.
-
 Step-by-step guides for building on exo:
 
 - [Custom Agent Quickstart](./write-your-own-agent) — a TypeScript harness

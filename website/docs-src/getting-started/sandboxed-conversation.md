@@ -5,8 +5,6 @@ description: Give your agent a shell in an isolated sandbox.
 
 # A Sandboxed Conversation
 
-Give your agent a shell in an isolated sandbox.
-
 The default REPL conversation is plain chat. To let the agent run shell
 commands, create an agent and a conversation explicitly — conversations can
 own a sandbox.

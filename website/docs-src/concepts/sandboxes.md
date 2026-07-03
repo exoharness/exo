@@ -5,8 +5,6 @@ description: Isolated execution with pluggable local and remote backends.
 
 # Sandboxes
 
-Isolated execution with pluggable local and remote backends.
-
 Agents benefit from being able to write and run commands in secure
 environments. The exoharness runs sandboxes with pluggable backends and
 gives agents lifecycle control — `create`, `start`, `stop`, `snapshot` —

@@ -5,8 +5,6 @@ description: Talk to your agent, give it a real task, and teach it who you are.
 
 # Your First Session
 
-Talk to your agent, give it a real task, and teach it who you are.
-
 After [setup](./installation) you have two ways to talk to your agent:
 the **local REPL** in your terminal, and **ExoChat** — the
 `https://exoharness.ai/chat?...` URL the setup printed, which works from any

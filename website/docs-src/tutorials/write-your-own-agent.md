@@ -5,8 +5,6 @@ description: Build a TypeScript harness that reuses built-in tools, adds a custo
 
 # Custom Agent Quickstart
 
-Build a TypeScript harness that reuses built-in tools, adds a custom tool, and customizes context.
-
 In this tutorial you'll build a small "system monitor" agent as a single
 TypeScript harness module. It covers the three things most custom agents
 need:

@@ -5,8 +5,6 @@ description: How credentials stay out of the model's reach.
 
 # Bindings & Secrets
 
-How credentials stay out of the model's reach.
-
 Exo splits credentials into two records so that configuration can be
 shared, inspected, and versioned without ever exposing key material.
 

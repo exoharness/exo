@@ -5,8 +5,6 @@ description: Build a coding agent one component at a time, and see how the harne
 
 # Custom Coding Agent
 
-Build a coding agent one component at a time, and see how the harness supports each.
-
 This tutorial builds a coding agent — one that runs commands in a sandbox
 and works through a multi-step task — by adding **one component at a time**
 and seeing how the harness supports each. It builds directly on the two
