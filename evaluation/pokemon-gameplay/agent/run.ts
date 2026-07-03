@@ -29,13 +29,18 @@ import {
   type ModelConfig,
 } from "./model";
 import { SelfStore, selfTools } from "./self-tools";
+import { SkillsStore, skillTools } from "./skills";
 import type { AgentTool } from "./tool-types";
 
 const BASE_DIR = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
-const RUNTIME_DIR = path.join(BASE_DIR, "runtime");
+const RUNTIME_DIR =
+  process.env.POKEMON_RUNTIME_DIR !== undefined &&
+  process.env.POKEMON_RUNTIME_DIR.length > 0
+    ? path.resolve(process.env.POKEMON_RUNTIME_DIR)
+    : path.join(BASE_DIR, "runtime");
 const SYSTEM_PROMPT_PATH = path.join(BASE_DIR, "prompts", "system.md");
 const SEED_PLAYBOOK_PATH = path.join(BASE_DIR, "prompts", "playbook.seed.md");
 const HISTORY_PATH = path.join(RUNTIME_DIR, "history.json");
@@ -66,6 +71,8 @@ async function main(): Promise<void> {
   await fs.mkdir(RUNTIME_DIR, { recursive: true });
   const store = new SelfStore(RUNTIME_DIR);
   await store.init(await fs.readFile(SEED_PLAYBOOK_PATH, "utf8"));
+  const skills = new SkillsStore(RUNTIME_DIR);
+  await skills.init();
   const events = new EventLog(RUNTIME_DIR);
   const progress = new ProgressTracker(RUNTIME_DIR);
   const screenshots = new ScreenshotWriter(RUNTIME_DIR);
@@ -141,6 +148,7 @@ async function main(): Promise<void> {
     const tools: AgentTool[] = [
       ...gameTools(emulator),
       ...selfTools(store),
+      ...skillTools(skills),
       ...(await store.loadAgentTools(toolContext, (warning) =>
         console.warn(`    [warn] ${warning}`),
       )),
@@ -150,6 +158,7 @@ async function main(): Promise<void> {
     let input = await buildTurnInput({
       systemPromptPath: SYSTEM_PROMPT_PATH,
       store,
+      skillsIndex: await skills.index(),
       progress,
       history,
       turn,

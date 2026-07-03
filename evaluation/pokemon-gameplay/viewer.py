@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
-RUNTIME = BASE_DIR / "runtime"
+RUNTIME = BASE_DIR / "runtime"  # overridden by --runtime
 SCREENSHOTS = RUNTIME / "screenshots"
 FRAME_RE = re.compile(r"^frame-\d{6}-t\d+\.png$")
 
@@ -48,6 +48,10 @@ PAGE = """<!doctype html>
   #todos div.in_progress { color:#58a6ff; }
   #tools summary { color:#3fb950; cursor:pointer; }
   #memory summary { color:#bc8cff; cursor:pointer; }
+  #skills summary { color:#f0883e; cursor:pointer; }
+  #skills pre { white-space:pre-wrap; max-height:260px; overflow-y:auto;
+    background:#0d1117; border:1px solid #30363d; border-radius:4px;
+    padding:8px; margin:6px 0; color:#8b949e; }
   #tools pre, #memory pre { white-space:pre-wrap; max-height:260px; overflow-y:auto;
     background:#0d1117; border:1px solid #30363d; border-radius:4px;
     padding:8px; margin:6px 0; color:#8b949e; }
@@ -67,6 +71,7 @@ PAGE = """<!doctype html>
     <div class="panel"><h2>Milestones (from game RAM)</h2><div id="milestones" class="muted">none yet</div></div>
     <div class="panel"><h2>Todos (agent-maintained)</h2><div id="todos" class="muted">none yet</div></div>
     <div class="panel"><h2>Tools the agent built</h2><div id="tools" class="muted">none yet</div></div>
+    <div class="panel"><h2>Skills (durable procedures)</h2><div id="skills" class="muted">none yet</div></div>
     <div class="panel"><h2>Memory (agent-authored)</h2><div id="memory" class="muted">none yet</div></div>
   </div>
   <div>
@@ -97,13 +102,14 @@ async function refresh() {
     renderDetails('tools', d.tools, t =>
       ['\\u2699 ' + t.name + ' (' + t.lines + ' lines)', t.source]);
     renderDetails('memory', d.memories, m => ['\\u25C6 ' + m.name, m.content]);
+    renderDetails('skills', d.skills, sk => ['\\u2726 ' + sk.name, sk.content]);
     const log = document.getElementById('log');
     const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 8;
     log.innerHTML = d.log.map(line => {
       let cls = '';
       if (/^T\\d+/.test(line)) cls = 'turnline';
       if (line.includes('MILESTONE')) cls = 'milestone';
-      if (/\\[(PLAYBOOK|NEW TOOL|MEMORY|TODOS|REWIND)/.test(line)) cls = 'improve';
+      if (/\\[(PLAYBOOK|NEW TOOL|NEW SKILL|SKILL|MEMORY|TODOS|REWIND)/.test(line)) cls = 'improve';
       return '<div class="' + cls + '">' + esc(line) + '</div>';
     }).join('');
     if (atBottom) log.scrollTop = log.scrollHeight;
@@ -202,6 +208,14 @@ def latest_payload() -> dict:
                 }
             )
 
+    skills: list[dict] = []
+    skills_dir = RUNTIME / "skills"
+    if skills_dir.is_dir():
+        for d in sorted(skills_dir.iterdir()):
+            md = d / "SKILL.md"
+            if md.is_file():
+                skills.append({"name": d.name, "content": md.read_text(errors="replace")})
+
     memories: list[dict] = []
     memory_dir = RUNTIME / "memory"
     if memory_dir.is_dir():
@@ -220,6 +234,7 @@ def latest_payload() -> dict:
         "todos": todos,
         "playbook": playbook,
         "tools": tools,
+        "skills": skills,
         "memories": memories,
     }
 
@@ -257,10 +272,14 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    global RUNTIME, SCREENSHOTS
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8778)
     parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--runtime", type=Path, default=RUNTIME)
     args = parser.parse_args()
+    RUNTIME = args.runtime.resolve()
+    SCREENSHOTS = RUNTIME / "screenshots"
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"viewer on http://{args.host}:{args.port}")
     server.serve_forever()

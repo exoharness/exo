@@ -119,13 +119,16 @@ MAP_NAMES = {
     0x2B: "Viridian School",
     0x2C: "Viridian House",
     0x2D: "Viridian Gym",
-    0x33: "Route 2 Gate (Viridian Forest south)",
-    0x36: "Route 2 Gate (Viridian Forest north)",
-    0x3A: "Pewter Gym",
-    0x3B: "Pewter House",
-    0x3E: "Pewter Pokecenter",
-    0xC7: "Viridian Forest",
-    0xC8: "Pewter Museum 1F",
+    0x2E: "Diglett's Cave (Route 2 side)",
+    0x2F: "Viridian Forest North Gate",
+    0x31: "Route 2 Gate",
+    0x32: "Viridian Forest South Gate",
+    0x33: "Viridian Forest",
+    0x34: "Pewter Museum 1F",
+    0x36: "Pewter Gym",
+    0x38: "Pewter Mart",
+    0x3A: "Pewter Pokecenter",
+    0x3B: "Mt Moon 1F",
 }
 
 

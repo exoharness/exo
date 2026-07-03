@@ -8,6 +8,7 @@ import { describeState, type FramePayload } from "./emulator-client";
 import type { ProgressTracker } from "./events";
 import { imageMessage, textMessage } from "./model";
 import type { SelfStore } from "./self-tools";
+import type { SkillIndexEntry } from "./skills";
 
 export interface TurnRecord {
   turn: number;
@@ -22,6 +23,7 @@ const OLDER_TURNS_KEPT = 60;
 export async function buildTurnInput(options: {
   systemPromptPath: string;
   store: SelfStore;
+  skillsIndex: SkillIndexEntry[];
   progress: ProgressTracker;
   history: TurnRecord[];
   turn: number;
@@ -37,6 +39,7 @@ export async function buildTurnInput(options: {
     `# Your playbook (you own this; edit with update_playbook)\n${playbook}`,
     `# Your todos (edit with update_todos)\n${renderTodos(todos)}`,
     `# Your memory files (read with read_memory)\n${renderMemoryIndex(memoryIndex)}`,
+    `# Your skills (load full instructions with use_skill; install/update with install_skill)\n${renderSkills(options.skillsIndex)}`,
     `# Objective progress (derived from game RAM, not your claims)\n${options.progress.summary()}\nRecent milestones:\n${
       options.progress.recentMilestones(8).join("\n") || "(none yet)"
     }`,
@@ -75,6 +78,15 @@ function renderTodos(todos: { text: string; status: string }[]): string {
   };
   return todos
     .map((todo) => `- [${marks[todo.status] ?? " "}] ${todo.text}`)
+    .join("\n");
+}
+
+function renderSkills(index: SkillIndexEntry[]): string {
+  if (index.length === 0) {
+    return "(none yet — install_skill turns a hard-won procedure into a durable, reloadable capability)";
+  }
+  return index
+    .map((entry) => `- ${entry.name}: ${entry.description}`)
     .join("\n");
 }
 
@@ -126,6 +138,7 @@ export function reflectionDirective(): string {
     "- save_memory for larger knowledge (maps, quest steps, NPC info)",
     "- update_todos so your goal stack matches reality",
     "- install_tool if you keep repeating a mechanical sequence a tool could do in one call",
+    "- install_skill if you have proven out a multi-step procedure (a battle recipe, a navigation method, a shop/heal loop) worth reloading on demand instead of rediscovering",
     "Finish with a short summary of what you changed.",
   ].join("\n");
 }

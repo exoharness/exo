@@ -3,5 +3,10 @@
   "env": {
     "builtin": true
   },
-  "ignorePatterns": [".next/**", "coverage/**", "node_modules/**"]
+  "ignorePatterns": [
+    ".next/**",
+    "coverage/**",
+    "node_modules/**",
+    "evaluation/pokemon-gameplay/runtime*/**"
+  ]
 }

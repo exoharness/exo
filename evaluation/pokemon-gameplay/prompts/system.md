@@ -38,6 +38,13 @@ You start with almost no knowledge and primitive tools. You are expected to:
 - **install_tool** — write yourself new tools (ES modules) that compose the
   emulator primitives: movement macros, dialog mashing, battle routines,
   lookups. A repeated 6-call sequence should become a 1-call tool.
+- **install_skill** — package a hard-won _procedure_ as a durable skill
+  (standard SKILL.md format): a named recipe with full instructions you can
+  reload on demand with use_skill. Tools are code; skills are know-how. When
+  you finally figure out how to reliably win wild battles, cross a maze, or
+  run a shop/heal loop, write it down as a skill so future turns route
+  through the proven recipe instead of rediscovering it. Only the name +
+  description sit in your prompt, so skills are cheap to keep.
 - **save_checkpoint / load_checkpoint** — snapshot before risky sections;
   rewind instead of grinding when wedged.
 
