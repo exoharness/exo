@@ -94,6 +94,44 @@ def build_prompt_evolve(task: dict) -> str:
     )
 
 
+# --- usage accounting -------------------------------------------------------
+def _empty_usage() -> dict[str, float]:
+    return {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0,
+            "exo_cost_usd": 0.0}
+
+
+def _usage_for_events(events_dir: str) -> dict[str, float]:
+    """Sum model usage over one conversation's events (exo records usage per
+    assistant message: prompt/completion/cached token counts + its own cost)."""
+    u = _empty_usage()
+    for fp in glob.glob(os.path.join(events_dir, "*.json")):
+        try:
+            data = json.load(open(fp)).get("data") or {}
+        except Exception:
+            continue
+        usage = data.get("usage") or {}
+        if not usage:
+            continue
+        u["input_tokens"] += usage.get("prompt_tokens") or 0
+        u["cached_input_tokens"] += usage.get("prompt_cached_tokens") or 0
+        u["output_tokens"] += usage.get("completion_tokens") or 0
+        u["exo_cost_usd"] += usage.get("cost_usd") or 0.0
+    return u
+
+
+def _usage_for_root(root: str) -> dict[str, float]:
+    total = _empty_usage()
+    for d in glob.glob(os.path.join(root, "**", "conversations", "*", "events"),
+                       recursive=True):
+        for k, v in _usage_for_events(d).items():
+            total[k] += v
+    return total
+
+
+def _add_usage(a: dict[str, float], b: dict[str, float]) -> dict[str, float]:
+    return {k: a[k] + b[k] for k in a}
+
+
 # --- exo driving (mirrors clbench ExoSystem) ------------------------------
 def _run(argv: list[str], check: bool = True, timeout: Optional[float] = None) -> str:
     proc = subprocess.run(
@@ -137,20 +175,130 @@ def _last_assistant_text(root: str) -> str:
     return text
 
 
-def run_exo(prompt: str) -> str:
+def run_exo(prompt: str) -> tuple[str, dict[str, float]]:
     root = tempfile.mkdtemp(prefix="exo-arc-")
     base = [_EXO_BIN, "--root", root, "--secret-backend", "file"]
     try:
         _run(base + ["secret", "set", "openai", "--env", "OPENAI_API_KEY"])
         _run(base + ["model", "register", _MODEL, "--secret", "openai"])
         _run(base + ["agent", "create", "--slug", "t", "--model", _MODEL,
-                     "--harness", _HARNESS, "--sandbox-provider", _SANDBOX, "ARC"])
+                     "--harness", _HARNESS, "--sandbox-provider", _SANDBOX,
+                     "--sandbox-image", _SANDBOX_IMAGE, "ARC"])
         _run(base + ["conversation", "create", "t", "c"])
-        _run(base + ["conversation", "send", "t", "c", "--", prompt], check=False)
-        return _last_assistant_text(root)
+        _run(base + ["conversation", "send", "t", "c", "--", prompt],
+             check=False, timeout=_AGENT_TIMEOUT)
+        return _last_assistant_text(root), _usage_for_root(root)
     finally:
+        _docker_cleanup(_root_sandbox_ids(root), remove=True)
         if os.environ.get("EXO_KEEP_ROOT") != "1":
             shutil.rmtree(root, ignore_errors=True)
+
+
+# --- third-party agent backends (~/baseline-agents; see its README) ----------
+_BASELINE_AGENTS = os.environ.get("BASELINE_AGENTS", "/home/worker/baseline-agents")
+_AGENT_TIMEOUT = float(os.environ.get("ARC_AGENT_TIMEOUT", "1200"))
+
+
+def run_openclaw(prompt: str) -> tuple[str, dict[str, float]]:
+    """One embedded OpenClaw turn (fresh session key per task -> stateless)."""
+    import uuid
+
+    oc_dir = os.path.join(_BASELINE_AGENTS, "openclaw")
+    env = os.environ.copy()
+    env["OPENCLAW_STATE_DIR"] = os.path.join(oc_dir, "state")
+    env["OPENCLAW_CONFIG_PATH"] = os.path.join(oc_dir, "state", "openclaw.json")
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+        f.write(prompt)
+        msg_file = f.name
+    try:
+        proc = subprocess.run(
+            [os.path.join(oc_dir, "node_modules", ".bin", "openclaw"),
+             "agent", "--local", "--message-file", msg_file,
+             "--model", f"openai/{_MODEL}",
+             "--session-key", f"bench-{uuid.uuid4().hex[:12]}", "--json"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            env=env, timeout=_AGENT_TIMEOUT,
+        )
+    finally:
+        os.unlink(msg_file)
+    out = proc.stdout or ""
+    obj = json.JSONDecoder().raw_decode(out[out.index("{"):])[0] if "{" in out else {}
+    text = "\n".join(p.get("text") or "" for p in obj.get("payloads") or [])
+    usage = _empty_usage()
+    au = ((obj.get("meta") or {}).get("agentMeta") or {}).get("usage") or {}
+    cached = au.get("cacheRead") or 0
+    usage["input_tokens"] = (au.get("input") or 0) + cached  # input excl. cache
+    usage["cached_input_tokens"] = cached
+    usage["output_tokens"] = au.get("output") or 0
+    return text, usage
+
+
+def run_hermes(prompt: str) -> tuple[str, dict[str, float]]:
+    """One hermes -z turn; usage read back from its state.db session row."""
+    hermes_home = os.path.join(_BASELINE_AGENTS, "hermes")
+    env = os.environ.copy()
+    env["HERMES_HOME"] = hermes_home
+    proc = subprocess.run(
+        [os.path.expanduser("~/.local/bin/hermes"), "-z", prompt,
+         "-m", _MODEL, "--provider", "custom"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        env=env, timeout=_AGENT_TIMEOUT,
+    )
+    usage = _empty_usage()
+    try:
+        import sqlite3
+
+        db = sqlite3.connect(os.path.join(hermes_home, "state.db"))
+        row = db.execute(
+            "SELECT input_tokens, output_tokens, cache_read_tokens FROM sessions "
+            "ORDER BY started_at DESC LIMIT 1").fetchone()
+        if row:
+            usage["input_tokens"] = row[0] or 0  # includes cached reads
+            usage["cached_input_tokens"] = row[2] or 0
+            usage["output_tokens"] = row[1] or 0
+    except Exception as e:
+        print(f"    (hermes usage lookup failed: {e})")
+    return (proc.stdout or "").strip(), usage
+
+
+# --- direct-API backends (no agent harness; same prompt as the exo baseline) --
+def run_openai(prompt: str) -> tuple[str, dict[str, float]]:
+    from openai import OpenAI
+
+    client = OpenAI()
+    resp = client.responses.create(model=_MODEL, input=prompt)
+    u = _empty_usage()
+    if resp.usage:
+        u["input_tokens"] = resp.usage.input_tokens or 0
+        details = getattr(resp.usage, "input_tokens_details", None)
+        u["cached_input_tokens"] = getattr(details, "cached_tokens", 0) or 0
+        u["output_tokens"] = resp.usage.output_tokens or 0
+    return resp.output_text or "", u
+
+
+def run_anthropic(prompt: str) -> tuple[str, dict[str, float]]:
+    import anthropic
+
+    client = anthropic.Anthropic()
+    # stream + high cap: adaptive thinking can spend >10k tokens on hard grids,
+    # and a 16k non-streaming cap truncated ~20% of ARC answers mid-JSON.
+    with client.messages.stream(
+        model=_MODEL,
+        max_tokens=64000,
+        thinking={"type": "adaptive"},
+        messages=[{"role": "user", "content": prompt}],
+    ) as stream:
+        resp = stream.get_final_message()
+    u = _empty_usage()
+    cached = getattr(resp.usage, "cache_read_input_tokens", 0) or 0
+    # normalize to the OpenAI convention: input_tokens INCLUDES cached reads
+    u["input_tokens"] = (resp.usage.input_tokens or 0) + cached
+    u["cached_input_tokens"] = cached
+    u["output_tokens"] = resp.usage.output_tokens or 0
+    if resp.stop_reason == "refusal":
+        return "", u
+    text = "\n".join(b.text for b in resp.content if b.type == "text")
+    return text, u
 
 
 def _root_sandbox_ids(root: str) -> list[str]:
@@ -198,6 +346,7 @@ class EvolveSession:
         self.root = root
         self.timeout = timeout
         self._n = 0
+        self._usage_mark = _empty_usage()
         os.makedirs(root, exist_ok=True)
         base = self._base()
         _run(base + ["secret", "set", "openai", "--env", "OPENAI_API_KEY"])
@@ -236,6 +385,13 @@ class EvolveSession:
                  check=False, timeout=min(self.timeout, 300))
         except subprocess.TimeoutExpired:
             print("    (feedback turn timed out; continuing)")
+
+    def task_usage(self) -> dict[str, float]:
+        """Usage spent since the last call (i.e. this task's solve + feedback)."""
+        now = _usage_for_root(self.root)
+        diff = {k: now[k] - self._usage_mark[k] for k in now}
+        self._usage_mark = now
+        return diff
 
 
 # --- parsing + scoring ----------------------------------------------------
@@ -309,6 +465,8 @@ def main() -> None:
     ap.add_argument("--n", type=int, default=int(os.environ.get("ARC_N", "10")), help="how many tasks")
     ap.add_argument("--offset", type=int, default=0)
     ap.add_argument("--out", default=os.path.join(here, "results", "latest.json"))
+    ap.add_argument("--backend", choices=["exo", "openai", "anthropic", "openclaw", "hermes"], default="exo",
+                    help="exo agent, or a bare direct API call (no harness)")
     ap.add_argument("--evolve", action="store_true",
                     help="one persistent self-evolving agent across the sequence (serial)")
     ap.add_argument("--feedback", choices=["verdict", "none"], default="verdict",
@@ -318,14 +476,20 @@ def main() -> None:
                     help="evolve mode: seconds per solve turn before scoring a miss")
     args = ap.parse_args()
 
+    global _MODEL
+    if args.backend == "anthropic" and not os.environ.get("MODEL"):
+        _MODEL = "claude-opus-4-8"
+
     files = sorted(glob.glob(os.path.join(args.data_dir, "*.json")))
     files = files[args.offset: args.offset + args.n]
     if not files:
         raise SystemExit(f"no task JSONs in {args.data_dir}")
 
     session = None
-    harness = _HARNESS
+    harness = _HARNESS if args.backend == "exo" else None
     if args.evolve:
+        if args.backend != "exo":
+            raise SystemExit("--evolve requires --backend exo")
         harness = _EVOLVE_HARNESS
         root = os.path.join(here, "results", "evolve-roots",
                             os.path.basename(args.out).removesuffix(".json") or "run")
@@ -334,14 +498,19 @@ def main() -> None:
         session = EvolveSession(root, timeout=args.task_timeout)
         print(f"==> evolve mode: persistent root {root} (kept after the run)")
 
+    solver = {"exo": run_exo, "openai": run_openai, "anthropic": run_anthropic,
+              "openclaw": run_openclaw, "hermes": run_hermes}[args.backend]
+
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     results = []
     n_solved = n_solved2 = 0
+    total_usage = _empty_usage()
     for i, fp in enumerate(files, 1):
         task = json.load(open(fp))
         name = os.path.splitext(os.path.basename(fp))[0]
         preds = preds2 = None
         ok = ok2 = False
+        usage = _empty_usage()
         try:
             if session is not None:
                 try:
@@ -350,7 +519,12 @@ def main() -> None:
                     print(f"  [{i}/{len(files)}] {name}: TIMEOUT after {args.task_timeout:.0f}s")
                     text = _last_assistant_text(session.root)
             else:
-                text = run_exo(build_prompt(task))
+                # ARC_JSON_PROMPT=1: machine-readable prompt for shell-capable
+                # stateless arms (they save the JSON and work programmatically)
+                prompt = (build_prompt_evolve(task)
+                          if os.environ.get("ARC_JSON_PROMPT") == "1"
+                          else build_prompt(task))
+                text, usage = solver(prompt)
             preds, preds2 = parse_outputs(text, len(task["test"]))
             ok = solved(task, preds)
             ok2 = solved_pass2(task, preds, preds2)
@@ -358,17 +532,23 @@ def main() -> None:
             print(f"  [{i}/{len(files)}] {name}: ERROR {e}")
         n_solved += int(ok)
         n_solved2 += int(ok2)
-        results.append({"task": name, "solved": ok, "solved_pass2": ok2,
-                        "n_test": len(task["test"]), "parsed": preds is not None})
-        print(f"  [{i}/{len(files)}] {name}: {'SOLVED' if ok else ('pass@2' if ok2 else 'miss')} "
-              f"(running {n_solved}/{i} = {n_solved/i:.1%}, pass@2 {n_solved2}/{i})")
         if session is not None and args.feedback == "verdict" and i < len(files):
             session.feedback("SOLVED" if ok2 else "FAILED")
+        if session is not None:
+            usage = session.task_usage()  # this task's solve + feedback turns
+        total_usage = _add_usage(total_usage, usage)
+        results.append({"task": name, "solved": ok, "solved_pass2": ok2,
+                        "n_test": len(task["test"]), "parsed": preds is not None,
+                        "usage": usage})
+        print(f"  [{i}/{len(files)}] {name}: {'SOLVED' if ok else ('pass@2' if ok2 else 'miss')} "
+              f"(running {n_solved}/{i} = {n_solved/i:.1%}, pass@2 {n_solved2}/{i})")
 
     summary = {"data_dir": args.data_dir, "model": _MODEL, "harness": harness,
-               "evolve": bool(session), "n": len(files),
+               "backend": args.backend, "evolve": bool(session), "n": len(files),
+               "offset": args.offset,
                "solved": n_solved, "pass_at_1": n_solved / len(files),
                "solved_pass2": n_solved2, "pass_at_2": n_solved2 / len(files),
+               "usage_total": total_usage,
                "results": results}
     if session is not None:
         summary["evolve_root"] = session.root
