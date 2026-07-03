@@ -46,7 +46,7 @@ Host verification:
 
 ```sh
 ./target/debug/exo agent list                          # fork-tester listed
-git worktree list                                      # child repo on branch fork/fork-tester
+git -C .exo/.tribe/fork-parent/root/children/*/repo branch --show-current  # fork/fork-tester (standalone clone)
 ls .exo/.tribe/fork-parent/                            # tribe.json, agents/, events/, root/
 cat .exo/.tribe/fork-parent/root/children/*/agent.json # status active, generation 1
 .exo/.tribe/fork-parent/root/children/*/manage status  # prints agent + source root
@@ -154,7 +154,8 @@ In the child REPL:
 > Fork a grandchild with purpose "grandchild test". Then call list_forks.
 
 Expected: generation 2, `nodePath` nested under the child's node, and on the host
-`git worktree list` shows the grandchild's repo branched from the _child's_ worktree.
+the grandchild's repo under the child's tribe node is a clone of the _child's_ repo
+(check its `origin` remote with `git -C <grandchild repo> remote get-url origin`).
 
 ## Phase 8 — Permission checks (before killing anything)
 
@@ -199,24 +200,24 @@ From the parent REPL:
 Expected: an empty (or explained) `cleanup` array. Host verification:
 
 ```sh
-git worktree list                          # no fork worktrees
-git branch --list 'fork/*'                 # empty
-ls .exo/.tribe/fork-parent/root/children/  # empty
+ls .exo/.tribe/fork-parent/root/children/  # empty (child repos deleted with their nodes)
 ./target/debug/exo agent list              # no fork-tester, no grandchild
 ./target/debug/exo adapters list           # check for orphaned child adapter (known gap)
 ```
 
-Then fork a new child with the same purpose — it should succeed cleanly. Before the
-fail-loud worktree fix, leftover branches were silently swallowed; this verifies
-collisions no longer corrupt new forks.
+Then fork a new child with the same purpose — it should succeed cleanly.
 
 ## Phase 11 — Rollback on failed fork
 
 A failed fork must leave no trace (no orphaned agent record, no suffixed slugs on
-retry). Force a failure by pre-creating a colliding branch on the host:
+retry). Force a failure by pre-creating a non-empty directory where the next child's
+clone will land (`git clone` refuses a non-empty destination). Predict the next node
+name from `list_forks` — indexes are sequential, so if the last fork was
+`fork-004-...`, the next is `fork-005-<purpose>`:
 
 ```sh
-git branch fork/rollback-tester
+mkdir -p .exo/.tribe/fork-parent/root/children/fork-005-rollback-test/repo
+touch .exo/.tribe/fork-parent/root/children/fork-005-rollback-test/repo/bait
 ```
 
 In the parent REPL:
@@ -225,15 +226,13 @@ In the parent REPL:
 > "rollback test".
 
 Expected: the tool returns an error starting with `fork failed and was rolled back:`
-(worktree creation hits the existing branch) with an empty `rollback` notes array.
+(clone refuses the non-empty destination) with an empty `rollback` notes array.
 
 Host verification:
 
 ```sh
-./target/debug/exo agent list           # NO rollback-tester entry
-git worktree list                       # no new worktree
-ls .exo/.tribe/fork-parent/root/children/  # no new node dir
-git branch -D fork/rollback-tester      # clean up the bait branch
+./target/debug/exo agent list              # NO rollback-tester entry
+ls .exo/.tribe/fork-parent/root/children/  # bait node dir was removed by rollback
 ```
 
 Then retry the same fork — it should succeed with the original `rollback-tester`

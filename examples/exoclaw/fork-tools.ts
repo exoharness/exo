@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
+import { closeSync, mkdirSync, openSync } from "node:fs";
 import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -484,7 +484,7 @@ async function executeForkTool(
     });
 
     await materializeTribeNode(family, childRecord);
-    await createSourceWorktree(parent.sourceRoot, sourceRoot, childSlug);
+    await createSourceClone(parent.sourceRoot, sourceRoot, childSlug);
     await writeManageScript(family, childRecord);
     await saveFamily(rootAgent, family);
 
@@ -499,6 +499,9 @@ async function executeForkTool(
         fromAgentName: context.exoharness.current.agent.record.name,
         message: initialPrompt,
         expectsReply: true,
+        sandboxProvider:
+          context.conversationConfig.sandboxProvider ??
+          context.agentConfig.sandboxProvider,
       });
     }
 
@@ -523,9 +526,8 @@ async function executeForkTool(
         : null,
     };
   } catch (error) {
-    const rollback = await rollbackFork(context, family, {
+    const rollback = await rollbackFork(context, {
       childAgentId: child.record.id,
-      childSlug,
       sourceRoot,
     });
     return {
@@ -539,50 +541,16 @@ async function executeForkTool(
 }
 
 // Best-effort teardown of a partially created fork so a failed fork leaves no
-// trace: deregister the git worktree and branch if they were created, remove
-// the tribe node directory, and delete the child agent record.
+// trace: remove the tribe node directory (which contains the child's cloned
+// repo, if it got that far) and delete the child agent record.
 async function rollbackFork(
   context: TurnContext,
-  family: FamilyStore,
   partial: {
     childAgentId: string;
-    childSlug: string;
     sourceRoot: string;
   },
 ): Promise<string[]> {
   const notes: string[] = [];
-  const familyRoot = family.agents.find(
-    (agent) => agent.parentAgentId === null,
-  );
-  const gitRoot = familyRoot?.sourceRoot ?? ROOT_DIR;
-  if (existsSync(partial.sourceRoot)) {
-    try {
-      await execFileAsync("git", [
-        "-C",
-        gitRoot,
-        "worktree",
-        "remove",
-        "--force",
-        partial.sourceRoot,
-      ]);
-    } catch (error) {
-      notes.push(
-        `failed to remove worktree ${partial.sourceRoot}: ${gitErrorMessage(error)}`,
-      );
-    }
-  }
-  try {
-    await execFileAsync("git", [
-      "-C",
-      gitRoot,
-      "branch",
-      "-D",
-      `fork/${partial.childSlug}`,
-    ]);
-  } catch {
-    // The branch usually does not exist because the failure happened before
-    // worktree creation; nothing to report.
-  }
   try {
     await rm(path.dirname(partial.sourceRoot), {
       recursive: true,
@@ -667,10 +635,10 @@ async function executeKillForkTool(
   await saveFamily(rootAgent, family);
   const cleanupNotes: string[] = [];
   if (deleteState) {
-    // Deepest-first so nested worktrees are deregistered from git before the
-    // enclosing node directories disappear.
+    // Child repos are standalone clones, so removing the tribe node
+    // directory (which contains each descendant's repo) is the whole git
+    // cleanup. Agent records are deleted individually first.
     for (const member of [...subtree].reverse()) {
-      cleanupNotes.push(...(await removeChildWorktree(family, member)));
       await context.exoharness.deleteAgent(member.agentId);
     }
     await rm(tribeNodeDir(family, child), { recursive: true, force: true });
@@ -682,7 +650,7 @@ async function executeKillForkTool(
     deleteState,
     cleanup: cleanupNotes as unknown as JsonValue,
     note: deleteState
-      ? "subtree agents, worktrees, and lineage directories were deleted"
+      ? "subtree agents, repos, and lineage directories were deleted"
       : "subtree was marked killed; runtime enforcement will skip future work",
   };
 }
@@ -706,47 +674,6 @@ function collectSubtree(
     }
   }
   return subtree;
-}
-
-// Best-effort worktree/branch cleanup for a hard-deleted fork. Failures are
-// reported in the tool result instead of aborting the deletion.
-async function removeChildWorktree(
-  family: FamilyStore,
-  member: FamilyAgentRecord,
-): Promise<string[]> {
-  const notes: string[] = [];
-  const familyRoot = family.agents.find(
-    (agent) => agent.parentAgentId === null,
-  );
-  const gitRoot = familyRoot?.sourceRoot ?? ROOT_DIR;
-  try {
-    await execFileAsync("git", [
-      "-C",
-      gitRoot,
-      "worktree",
-      "remove",
-      "--force",
-      member.sourceRoot,
-    ]);
-  } catch (error) {
-    notes.push(
-      `failed to remove worktree ${member.sourceRoot}: ${gitErrorMessage(error)}`,
-    );
-  }
-  try {
-    await execFileAsync("git", [
-      "-C",
-      gitRoot,
-      "branch",
-      "-D",
-      `fork/${member.slug}`,
-    ]);
-  } catch (error) {
-    notes.push(
-      `failed to delete branch fork/${member.slug}: ${gitErrorMessage(error)}`,
-    );
-  }
-  return notes;
 }
 
 function gitErrorMessage(error: unknown): string {
@@ -846,6 +773,9 @@ async function executeSendForkMessageTool(
     fromAgentName: sender.name,
     message,
     expectsReply,
+    sandboxProvider:
+      context.conversationConfig.sandboxProvider ??
+      context.agentConfig.sandboxProvider,
   });
   return {
     ok: true,
@@ -1178,6 +1108,7 @@ function deliverForkMessage(args: {
   fromAgentName: string;
   message: string;
   expectsReply: boolean;
+  sandboxProvider: string;
 }): { pid: number | null; logPath: string } {
   const logPath = path.join(
     tribeNodeDir(args.family, args.target),
@@ -1190,6 +1121,11 @@ function deliverForkMessage(args: {
     ? "The sender expects a reply; respond with send_fork_message."
     : "No reply is expected.";
   const prompt = `Internal fork message from ${args.fromAgentName} (agent ${args.fromAgentId}) in your fork family ${args.family.familyId}. ${replyNote}\n\n${args.message}`;
+  // The detached process must run with the same sandbox backend as the
+  // current agent, otherwise the target's turn fails when its configured
+  // sandbox provider (e.g. docker) is not in the spawned CLI's default
+  // backend set. The CLI reads EXO_SANDBOX_BACKEND as the flag fallback.
+  const backend = sandboxBackendFor(args.sandboxProvider);
   const child = spawn(
     EXO_BIN,
     [
@@ -1201,11 +1137,33 @@ function deliverForkMessage(args: {
       args.conversationSlug,
       prompt,
     ],
-    { cwd: ROOT_DIR, detached: true, stdio: ["ignore", logFd, logFd] },
+    {
+      cwd: ROOT_DIR,
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+      env: backend
+        ? { ...process.env, EXO_SANDBOX_BACKEND: backend }
+        : process.env,
+    },
   );
   child.unref();
   closeSync(logFd);
   return { pid: child.pid ?? null, logPath };
+}
+
+// Maps an agent config sandbox provider to the exo CLI --sandbox-backend
+// value that supports it. Daytona is remote and needs no local backend.
+function sandboxBackendFor(provider: string): string | null {
+  switch (provider) {
+    case "docker":
+      return "docker";
+    case "apple_container":
+      return "apple-container";
+    case "local_process":
+      return "local-process";
+    default:
+      return null;
+  }
 }
 
 async function materializeTribeIndex(family: FamilyStore): Promise<void> {
@@ -1251,7 +1209,12 @@ async function materializeTribeNode(
   await writeJsonFile(path.join(nodeDir, "agent.json"), agent);
 }
 
-async function createSourceWorktree(
+// The child repo is a standalone local clone, not a linked git worktree. A
+// worktree's .git is a pointer into the parent repo's .git/worktrees/, which
+// is not mounted into the child's sandbox, so git would be broken there.
+// A local clone hardlinks objects (cheap) and is fully self-contained. The
+// parent can integrate child work with `git fetch <sourceRoot> fork/<slug>`.
+async function createSourceClone(
   baseSourceRoot: string,
   sourceRoot: string,
   childSlug: string,
@@ -1259,21 +1222,24 @@ async function createSourceWorktree(
   await mkdir(path.dirname(sourceRoot), { recursive: true });
   try {
     await execFileAsync("git", [
-      "-C",
+      "clone",
+      "--local",
       baseSourceRoot,
-      "worktree",
-      "add",
+      sourceRoot,
+    ]);
+    await execFileAsync("git", [
+      "-C",
+      sourceRoot,
+      "checkout",
       "-b",
       `fork/${childSlug}`,
-      sourceRoot,
-      "HEAD",
     ]);
   } catch (error) {
-    // A collision here means stale state (for example a worktree or branch
-    // left behind by an earlier fork). Fail loudly rather than silently
-    // returning a child with the wrong or missing repo.
+    // A collision here means stale state (for example a repo left behind by
+    // an earlier fork). Fail loudly rather than silently returning a child
+    // with the wrong or missing repo.
     throw new Error(
-      `failed to create child source worktree at ${sourceRoot} (branch fork/${childSlug}): ${gitErrorMessage(error)}`,
+      `failed to create child source clone at ${sourceRoot} (branch fork/${childSlug}): ${gitErrorMessage(error)}`,
     );
   }
 }

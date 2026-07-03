@@ -165,7 +165,7 @@ contain:
 ```text
 agent.json    # id, slug, display name, parent id, generation, status, purpose
 manage        # child-local management script
-repo/         # child source worktree
+repo/         # child source clone
 state/        # child-local metadata/cache if needed
 children/     # this child's children
 ```
@@ -395,9 +395,12 @@ family ledger provides lineage. If we want history transfer, add an explicit
 
 ### Source Code
 
-Each child should get its own mutable source checkout by default. The safest
-implementation is a git worktree or clone created from the parent's current
-commit/branch, for example:
+Each child should get its own mutable source checkout by default. The
+implementation is a standalone local git clone created from the parent's current
+commit/branch (a linked git worktree does not work here: its `.git` is a pointer
+into the parent repo's `.git/worktrees/`, which is not mounted into the child's
+sandbox, so git would be broken inside the container). Local clones hardlink
+objects, so they are cheap. Example location:
 
 ```text
 .exo/.tribe/<root-agent-slug>/children/<child-agent-slug>/repo
@@ -409,8 +412,9 @@ canonical location.
 
 This matters because source edits are part of identity and evolution. If parent
 and child share one live checkout, a child can accidentally break the parent
-while experimenting. Separate source worktrees let children evolve independently,
-produce diffs, and later ask the parent to merge successful changes.
+while experimenting. Separate source clones let children evolve independently,
+produce diffs, and later ask the parent to merge successful changes (the parent
+can integrate with `git fetch <child sourceRoot> fork/<child-slug>`).
 
 Important runtime implication: giving a child its own source tree is not enough
 unless the host can run that child from that source tree. The fork design should
@@ -421,7 +425,7 @@ host process may still be using the root checkout.
 
 Recommended first implementation:
 
-- create a child git worktree at fork time
+- create a standalone child git clone at fork time, on branch `fork/<child-slug>`
 - place it under the child node in `.exo/.tribe`
 - store the child `sourceRoot` in the fork record or agent config
 - mount that `sourceRoot` into the child sandbox at `/workspace/exo`
@@ -436,7 +440,7 @@ dependencies out from under the parent.
 Recommended first implementation:
 
 - child gets a fresh agent-scoped sandbox using the same sandbox image/provider
-- child gets its own source worktree mounted at `/workspace/exo`
+- child gets its own source clone mounted at `/workspace/exo`
 
 Future option:
 
@@ -570,7 +574,7 @@ parent to recover.
    - initial child conversation
    - child node under `.exo/.tribe`
    - child `manage` script from a checked-in template
-   - child source worktree and `sourceRoot`
+   - child source clone and `sourceRoot`
    - fresh child sandbox using that `sourceRoot` mount
    - copied memory artifact when requested
    - family ledger `AgentForked` event
@@ -628,6 +632,6 @@ Implement `fork`, `kill_fork`, `list_forks`, `list_fork_events`, and
 parent and child a common canonical history while preserving separate
 conversations, sandboxes, adapters, and scheduled work. Keep the first version
 conservative: copy config and memory, start a fresh sandbox, do not copy adapters
-or scheduled tasks, give each child its own source worktree mounted at
+or scheduled tasks, give each child its own source clone mounted at
 `/workspace/exo`, coordinate through internal fork messages, and make killing a
 child non-destructive by default.
