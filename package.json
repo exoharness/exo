@@ -13,6 +13,7 @@
     "lint:fix": "oxlint --fix --deny-warnings .",
     "prepare": "node scripts/setup-hooks.mjs",
     "rendezvous:demo": "node scripts/rendezvous-demo.mjs",
+    "slack:setup": "node scripts/slack-setup.mjs",
     "test": "vitest run",
     "typecheck": "tsgo --noEmit -p tsconfig.json",
     "website:build": "vite build --config website/vite.config.js",
