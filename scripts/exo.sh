@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 EXO_BIN="${EXO_BIN:-$ROOT_DIR/target/debug/exo}"
 SCHEDULER_BIN="${EXOCLAW_SCHEDULER_BIN:-$ROOT_DIR/target/debug/exoclaw-scheduler-runner}"
@@ -21,8 +21,6 @@ SELF_REPO_MOUNT_PATH="${EXOCLAW_REPO:-/workspace/exo}"
 SELF_MAP_PATH="$SELF_REPO_MOUNT_PATH/examples/exoclaw/SELF.md"
 AGENT_CLI_MOUNT_ROOT="${EXOCLAW_AGENT_CLI_ROOT:-}"
 AGENT_CLI_MOUNT_PATH="${EXOCLAW_AGENT_CLI_MOUNT:-/agent-cli}"
-FAL_IMAGE_CACHE_ROOT="${EXOCLAW_FAL_IMAGE_CACHE:-/tmp/exoclaw-fal}"
-FAL_IMAGE_MOUNT_PATH="${EXOCLAW_FAL_IMAGE_MOUNT:-/fal}"
 NETWORKING="${EXO_NETWORKING:-enabled}"
 SHELL_PROGRAM="${EXO_SHELL_PROGRAM:-/bin/bash}"
 SANDBOX_SCOPE="${EXO_SANDBOX_SCOPE:-}"
@@ -35,7 +33,9 @@ START_ADAPTERS="${EXO_START_ADAPTERS:-true}"
 ADAPTER_LIMIT="${EXO_ADAPTER_LIMIT:-50}"
 CONTROL=false
 SETUP_PROFILE=false
+SKIP_BUILD="${EXO_SKIP_BUILD:-false}"
 CANONICAL_SETUP=false
+CANONICAL_PROFILE="${EXO_CANONICAL_PROFILE:-user}"
 SANDBOX_PROVIDER_EXPLICIT=false
 SANDBOX_BACKEND_EXPLICIT=false
 declare -a CONTROL_PIDS=()
@@ -50,14 +50,15 @@ export EXOCLAW_LOCAL_PROMPT_FILE="$LOCAL_PROMPT_FILE"
 usage() {
   cat <<'EOF'
 Usage:
-  examples/exoclaw/scripts/exoclaw-control [options]
-  examples/exoclaw/scripts/exoclaw-control list
-  examples/exoclaw/scripts/exoclaw-control delall all
-  examples/exoclaw/scripts/exoclaw-control fresh
-  examples/exoclaw/scripts/exoclaw-control canonical
-  examples/exoclaw/scripts/exoclaw-control stop-all
-  examples/exoclaw/scripts/exoclaw-control setup-profile
-  examples/exoclaw/scripts/exoclaw-control setup-sandbox
+  scripts/exo.sh [options]
+  scripts/exo.sh list
+  scripts/exo.sh delall all
+  scripts/exo.sh fresh
+  scripts/exo.sh canonical
+  scripts/exo.sh canonical-dev
+  scripts/exo.sh stop-all
+  scripts/exo.sh setup-profile
+  scripts/exo.sh setup-sandbox
 
 Default behavior creates or reuses an Exoclaw agent and conversation, starts the
 local scheduler and adapter loops, then starts a REPL. It reads .env by default
@@ -71,7 +72,9 @@ Options:
   --agent-name <name>          Agent display name (default: Exoclaw Agent)
   --conversation-name <name>   Conversation display name (default: Dev)
   --module <path>              Exoclaw TypeScript harness module
-  --canonical                  Docker sandbox, repo self-map mount, IRC+Discord setup,
+  --canonical                  Docker sandbox, repo self-map mount, ExoChat setup,
+                               control logs, and guardian config
+  --canonical-dev              Docker sandbox, repo self-map mount, IRC+Discord setup,
                                control logs, and guardian config
   --sandbox-image <image>      Sandbox image (default: ubuntu:24.04)
   --sandbox-provider <provider>
@@ -96,10 +99,14 @@ Options:
   --local-prompt-file <path>    Local profile prompt path (default: .exo/exoclaw-profile.md)
   --setup <adapter>            Send adapters/<adapter>/setup-prompt.md.
                                 May be passed more than once.
-  --setup-all                  Equivalent to --setup signal --setup whatsapp --setup irc --setup discord
-                                For whatsapp/signal, print pairing QR and pause.
+  --setup-all                  Equivalent to --setup exochat --setup signal
+                               --setup whatsapp --setup irc --setup discord.
+                                For exochat, print a browser URL; for whatsapp/signal,
+                                print pairing QR and pause.
   --initial-prompt-file <path> Send this file as the first message before REPL
   --pull-sandbox               Pull the sandbox image before starting
+  --skip-build                 Do not build the exo CLI before starting; requires
+                               --exo-bin to already exist
   --no-sandbox                 Do not require or configure sandbox shell support
   --env-file <path>            Env file to read if present (default: .env)
   --exo-bin <path>             exo binary path (default: ./target/debug/exo)
@@ -114,7 +121,8 @@ Environment overrides:
   EXO_BIN, EXO_START_SCHEDULER, EXO_START_ADAPTERS, EXOCLAW_REPO,
   EXOCLAW_AGENT_CLI_ROOT, EXOCLAW_AGENT_CLI_MOUNT,
   EXOCLAW_SCHEDULER_BIN, EXO_SCHEDULER_INTERVAL_SECONDS, EXO_ADAPTER_LIMIT,
-  EXO_SETUP_ADAPTER, EXO_INITIAL_PROMPT_FILE
+  EXO_SETUP_ADAPTER, EXO_INITIAL_PROMPT_FILE, EXO_CANONICAL_PROFILE,
+  EXO_SKIP_BUILD
 EOF
 }
 
@@ -147,6 +155,9 @@ kill_process_tree() {
 ensure_exo_bin() {
   if [[ -x "$EXO_BIN" ]]; then
     return
+  fi
+  if [[ "$SKIP_BUILD" == true ]]; then
+    die "exo binary is not executable: $EXO_BIN (--skip-build was set)"
   fi
   if [[ "$EXO_BIN" != "$ROOT_DIR/target/debug/exo" ]]; then
     die "exo binary is not executable: $EXO_BIN"
@@ -222,8 +233,18 @@ apply_canonical_setup_defaults() {
   if [[ "$SANDBOX_BACKEND_EXPLICIT" != true ]]; then
     SANDBOX_BACKEND="docker"
   fi
-  add_setup_adapter "irc"
-  add_setup_adapter "discord"
+  case "$CANONICAL_PROFILE" in
+    user)
+      add_setup_adapter "exochat"
+      ;;
+    dev)
+      add_setup_adapter "irc"
+      add_setup_adapter "discord"
+      ;;
+    *)
+      die "EXO_CANONICAL_PROFILE must be user or dev"
+      ;;
+  esac
 }
 
 configure_guardian_for_current_launch() {
@@ -306,7 +327,7 @@ scheduler_log_file() {
 }
 
 repl_restart_file() {
-  echo "$ROOT_DIR/.exo/exoclaw-control.restart"
+  echo "$ROOT_DIR/.exo/exo-control.restart"
 }
 
 adapters_pid_file() {
@@ -562,14 +583,6 @@ ensure_self_repo_mount() {
   exo conversation mount add "$AGENT" "$CONVERSATION" "$ROOT_DIR" "$SELF_REPO_MOUNT_PATH" --rw >/dev/null
 }
 
-ensure_fal_image_mount() {
-  if [[ "$USE_SANDBOX" != true ]]; then
-    return
-  fi
-  mkdir -p "$FAL_IMAGE_CACHE_ROOT"
-  exo conversation mount add "$AGENT" "$CONVERSATION" "$FAL_IMAGE_CACHE_ROOT" "$FAL_IMAGE_MOUNT_PATH" >/dev/null
-}
-
 ensure_agent_cli_mount() {
   if [[ "$USE_SANDBOX" != true || -z "$AGENT_CLI_MOUNT_ROOT" ]]; then
     return
@@ -769,7 +782,11 @@ container_mounts_current_checkout() {
 }
 
 fresh_start() {
-  build_exo
+  if [[ "$SKIP_BUILD" == true ]]; then
+    ensure_exo_bin
+  else
+    build_exo
+  fi
   delete_all_agents_and_conversations
   cleanup_stale_sandbox_containers
   if [[ "$USE_SANDBOX" == true ]]; then
@@ -790,7 +807,6 @@ run_repl() {
   ensure_agent
   ensure_conversation
   ensure_self_repo_mount
-  ensure_fal_image_mount
   ensure_agent_cli_mount
   configure_guardian_for_current_launch
   local scheduler_log_start_line
@@ -800,6 +816,7 @@ run_repl() {
   adapter_log_start_line="$(adapter_log_line_count)"
   send_startup_prompt
   ensure_adapters
+  show_exochat_url_if_needed "$adapter_log_start_line"
   show_signal_qr_if_needed "$adapter_log_start_line"
   show_whatsapp_qr_if_needed "$adapter_log_start_line"
   if [[ "$CONTROL" == true ]]; then
@@ -1060,6 +1077,46 @@ show_whatsapp_qr_if_needed() {
   read -r -p "Press Enter to continue to the REPL..."
 }
 
+show_exochat_url_if_needed() {
+  if ! setup_requested "exochat"; then
+    return
+  fi
+
+  local start_line="${1:-0}"
+  local log_file
+  log_file="$(adapters_log_file)"
+  echo "Waiting for ExoChat URL in $log_file..."
+
+  local attempt url
+  for attempt in {1..30}; do
+    if [[ -f "$log_file" ]]; then
+      url="$(awk -v start="$start_line" '
+        NR <= start { next }
+        /\[exochat-adapter\] Open this ExoChat URL/ {
+          capture = 1
+          next
+        }
+        capture && /^https?:\/\// {
+          print
+          exit
+        }
+      ' "$log_file")"
+      if [[ -n "$url" ]]; then
+        echo
+        echo "Open this ExoChat URL in a browser or on your phone:"
+        printf '%s\n' "$url"
+        echo
+        read -r -p "Press Enter after opening ExoChat..."
+        return
+      fi
+    fi
+    sleep 1
+  done
+
+  echo "No ExoChat URL found yet. Watch the adapter log with: tail -f $log_file"
+  read -r -p "Press Enter to continue to the REPL..."
+}
+
 show_signal_qr_if_needed() {
   if ! setup_requested "signal"; then
     return
@@ -1128,10 +1185,17 @@ while [[ $# -gt 0 ]]; do
       shift
       COMMAND="fresh"
       ;;
-    canonical|dev|docker-dev)
+    canonical)
       shift
       COMMAND="repl"
       CANONICAL_SETUP=true
+      CANONICAL_PROFILE="user"
+      ;;
+    canonical-dev|dev|docker-dev)
+      shift
+      COMMAND="repl"
+      CANONICAL_SETUP=true
+      CANONICAL_PROFILE="dev"
       ;;
     stop-all|stop)
       shift
@@ -1201,6 +1265,12 @@ while [[ $# -gt 0 ]]; do
       ;;
     --canonical)
       CANONICAL_SETUP=true
+      CANONICAL_PROFILE="user"
+      shift
+      ;;
+    --canonical-dev)
+      CANONICAL_SETUP=true
+      CANONICAL_PROFILE="dev"
       shift
       ;;
     --self-repo-mount)
@@ -1278,6 +1348,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --setup-all)
+      add_setup_adapter "exochat"
       add_setup_adapter "signal"
       add_setup_adapter "whatsapp"
       add_setup_adapter "irc"
@@ -1291,6 +1362,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --pull-sandbox)
       PULL_SANDBOX=true
+      shift
+      ;;
+    --skip-build)
+      SKIP_BUILD=true
       shift
       ;;
     --no-sandbox)

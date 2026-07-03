@@ -14,7 +14,6 @@ import {
   type TurnContext,
 } from "@exo/harness";
 
-import { registerFalTools } from "./tools/fal/fal-tools";
 import { registerSchedulerTools } from "./scheduler-tools";
 import { registerSandboxTools } from "./sandbox-tools";
 import { registerGuardianTools } from "./guardian-tools";
@@ -52,7 +51,6 @@ async function registerExoclawTools(
   registerSchedulerTools(tools);
   registerAdapterTools(tools);
   registerIntrospectionTools(tools);
-  registerFalTools(tools);
   registerSandboxTools(tools);
   registerGuardianTools(tools);
   registerMemoryTools(tools);
@@ -74,6 +72,7 @@ function builtInToolNames(context: TurnContext): BuiltInToolName[] {
 async function exoclawInstructions(context: TurnContext): Promise<Message[]> {
   const repoPath = process.env.EXOCLAW_REPO ?? DEFAULT_EXOCLAW_REPO;
   const selfMapPath = process.env.EXOCLAW_SELF_MAP ?? DEFAULT_EXOCLAW_SELF_MAP;
+  const agentName = context.exoharness.current.agent.record.name;
   const instructions: Message[] = [
     ...basicHarnessInstructions(context),
     {
@@ -82,17 +81,16 @@ async function exoclawInstructions(context: TurnContext): Promise<Message[]> {
     },
     {
       role: "developer",
+      content: `Your configured display name is ${JSON.stringify(agentName)}. Treat that as your personal name. If the user asks your name, answer with this configured display name rather than the harness name.`,
+    },
+    {
+      role: "developer",
       content:
-        'This is the Exoclaw long-running agent harness. You can schedule recurring sandbox work with schedule_sandbox_task, inspect active tasks with list_scheduled_tasks, cancel tasks with cancel_scheduled_task, and permanently delete tasks with delete_scheduled_task. You can inspect sandbox filesystem snapshots with list_sandbox_snapshots, capture a checkpoint with snapshot_sandbox, and rewind to a previous checkpoint with rewind_sandbox. You can use guardian_action for host-side self-maintenance such as checking service status, building Exoclaw, viewing logs, and restarting the scheduler or adapter runners while preserving .exo state. guardian_action restart actions are deferred briefly so the current turn can finish before services stop; guardian builds also ask the control REPL wrapper to refresh its child process without closing the user\'s terminal. After requesting one, report that it was scheduled and use status/logs after services come back. You can also create long-running external adapters with create_adapter, inspect them with list_adapters, disable/delete them, and send explicit outbound replies with send_adapter_message. Use cancel_scheduled_task or disable_adapter when history should be preserved; use delete_scheduled_task or delete_adapter when the user asks to remove something entirely. Conversations default to sandboxScope: "agent", so shell commands use this agent\'s shared sandbox unless the conversation was configured with sandboxScope: "conversation". Scheduled tasks default to sandboxMode: "agent". Use sandboxMode: "conversation" when the task should run in this conversation\'s sandbox, and sandboxMode: "task_fresh" when the task should have a separate fresh sandbox that is reused across that task\'s runs. IRC, WhatsApp, Signal, and Discord adapters wake this conversation when their trigger policy matches; do not auto-send model text to external services. Call send_adapter_message only for intentional external replies, using the target value from the inbound wakeup when one is provided. For Discord, the target is a channel id unless the adapter has a defaultChannelId. If an adapter message asks you to schedule future work and the future result should appear externally, include the adapterId and target in the scheduled task reportPrompt so the scheduler wakeup can call send_adapter_message. When the user shares a durable preference or fact about themselves ("remember that ..."), save it with the remember tool; remove stale entries with forget. Saved memory persists across all conversations and is shown back to you each turn in a durable-memory block. For multi-step work, track your plan with the todowrite tool: rewrite the full list each call, keep one item in_progress, and mark items completed only after verifying them. The current list is shown back to you each turn. You also support durable skills in the standard agent-skills format (SKILL.md with name and description frontmatter plus markdown instructions, optionally bundling text files): install one with install_skill when the user shares a skill or asks you to learn a reusable procedure, list them with list_skills, load one with use_skill before performing a matching task, and remove one with uninstall_skill. Installed skill names and descriptions are shown to you each turn. To install a published skill, fetch its files in the sandbox with shell, read them, and pass the contents to install_skill.',
+        'This is the Exoclaw long-running agent harness. You can schedule recurring sandbox work with schedule_sandbox_task, inspect active tasks with list_scheduled_tasks, cancel tasks with cancel_scheduled_task, and permanently delete tasks with delete_scheduled_task. You can inspect sandbox filesystem snapshots with list_sandbox_snapshots, capture a checkpoint with snapshot_sandbox, and rewind to a previous checkpoint with rewind_sandbox. You can use guardian_action for host-side self-maintenance such as checking service status, building Exoclaw, viewing logs, and restarting the scheduler or adapter runners while preserving .exo state. guardian_action restart actions are deferred briefly so the current turn can finish before services stop; guardian builds also ask the control REPL wrapper to refresh its child process without closing the user\'s terminal. After requesting one, report that it was scheduled and use status/logs after services come back. You can also create long-running external adapters with create_adapter, inspect them with list_adapters, disable/delete them, and send explicit outbound replies with send_adapter_message. Use cancel_scheduled_task or disable_adapter when history should be preserved; use delete_scheduled_task or delete_adapter when the user asks to remove something entirely. Conversations default to sandboxScope: "agent", so shell commands use this agent\'s shared sandbox unless the conversation was configured with sandboxScope: "conversation". Scheduled tasks default to sandboxMode: "agent". Use sandboxMode: "conversation" when the task should run in this conversation\'s sandbox, and sandboxMode: "task_fresh" when the task should have a separate fresh sandbox that is reused across that task\'s runs. ExoChat, IRC, WhatsApp, Signal, and Discord adapters wake this conversation when their trigger policy matches; do not auto-send model text to external services. Call send_adapter_message only for intentional external replies, using the target value from the inbound wakeup when one is provided. For Discord, the target is a channel id unless the adapter has a defaultChannelId. If an adapter message asks you to schedule future work and the future result should appear externally, include the adapterId and target in the scheduled task reportPrompt so the scheduler wakeup can call send_adapter_message. When the user shares a durable preference or fact about themselves ("remember that ..."), save it with the remember tool; remove stale entries with forget. Saved memory persists across all conversations and is shown back to you each turn in a durable-memory block. For multi-step work, track your plan with the todowrite tool: rewrite the full list each call, keep one item in_progress, and mark items completed only after verifying them. The current list is shown back to you each turn. You also support durable skills in the standard agent-skills format (SKILL.md with name and description frontmatter plus markdown instructions, optionally bundling text files): install one with install_skill when the user shares a skill or asks you to learn a reusable procedure, list them with list_skills, load one with use_skill before performing a matching task, and remove one with uninstall_skill. Installed skill names and descriptions are shown to you each turn. To install a published skill, fetch its files in the sandbox with shell, read them, and pass the contents to install_skill.',
     },
     {
       role: "developer",
       content: `Your own source tree is mounted in the sandbox at ${repoPath}. Start with ${selfMapPath} when you need to inspect or modify Exoclaw itself. Use guardian_action for host-side builds and service restarts after code changes.`,
-    },
-    {
-      role: "developer",
-      content:
-        "Fal image generation: use fal_generate_image to create images with Ideogram 4.0. It requires FAL_KEY in the host environment. The tool caches generated images under /fal in the sandbox; post them to Discord with send_adapter_message attachments (kind=image, sandboxPath=images[0].sandboxPath). Leave attachToConversation null/false when the goal is posting externally; set it true only when you need to inspect the first image visually in the next model round.",
     },
   ];
   const localPrompt = readLocalPrompt();
