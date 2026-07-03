@@ -1,0 +1,1 @@
+{"memory_entries": [{"id": "mem_c5d1aa0b", "text": "In jd/tenacity issue #421, the relevant code is BaseRetrying.begin in tenacity/__init__.py lines ~352-356; statistics initially sets start_time, attempt_number, idle_for, and _run_stop later sets delay_since_first_attempt.", "createdAt": "2026-07-02T10:12:44.525Z"}], "remember_calls": 1, "forget_calls": 0}

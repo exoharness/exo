@@ -7,7 +7,7 @@ exo-bundle.tar.gz
 
 # Run artifacts / generated outputs (regenerated per run)
 jobs/
-reports/
+*/reports/
 
 # Python cruft
 __pycache__/
