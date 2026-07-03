@@ -535,6 +535,7 @@ pub enum SandboxProvider {
     AwsAgentCore,
     AppleContainer,
     Docker,
+    External,
     #[serde(alias = "local")]
     LocalProcess,
 }
@@ -556,6 +557,7 @@ impl SandboxProvider {
             Self::AwsAgentCore => "aws-agentcore",
             Self::AppleContainer => "apple-container",
             Self::Docker => "docker",
+            Self::External => "external",
             Self::LocalProcess => "local-process",
         }
     }
@@ -579,6 +581,7 @@ impl FromStr for SandboxProvider {
             "aws-agentcore" | "aws_agentcore" => Ok(Self::AwsAgentCore),
             "apple-container" | "apple_container" => Ok(Self::AppleContainer),
             "docker" => Ok(Self::Docker),
+            "external" => Ok(Self::External),
             "local" | "local-process" | "local_process" => Ok(Self::LocalProcess),
             provider => Err(anyhow::anyhow!("unsupported sandbox provider: {provider}")),
         }

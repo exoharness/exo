@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::{
-    BasicExoHarnessConfig, DaytonaBackendSpec, SandboxBackendChoice, SandboxProvider,
+    BasicExoHarnessConfig, DaytonaBackendSpec, SandboxBackendRegistration, SandboxProvider,
     SecretBackendChoice,
 };
 
@@ -10,7 +10,7 @@ pub(crate) fn local_test_config(root: impl Into<PathBuf>) -> BasicExoHarnessConf
         root: root.into(),
         secret_backend: SecretBackendChoice::Static([7u8; 32]),
         sandbox_default: SandboxProvider::LocalProcess,
-        sandbox_backends: vec![SandboxBackendChoice::LocalProcess],
+        sandbox_backends: vec![SandboxBackendRegistration::local_process()],
     }
 }
 
@@ -23,8 +23,8 @@ pub(crate) fn local_test_config_with_daytona(root: impl Into<PathBuf>) -> BasicE
         secret_backend: SecretBackendChoice::Static([7u8; 32]),
         sandbox_default: SandboxProvider::LocalProcess,
         sandbox_backends: vec![
-            SandboxBackendChoice::LocalProcess,
-            SandboxBackendChoice::Daytona(DaytonaBackendSpec::default()),
+            SandboxBackendRegistration::local_process(),
+            SandboxBackendRegistration::daytona(DaytonaBackendSpec::default()),
         ],
     }
 }
