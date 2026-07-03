@@ -5,11 +5,14 @@ REPO_URL="${EXO_REPO_URL:-https://github.com/ankrgyl/exo.git}"
 REPO_REF="${EXO_REPO_REF:-main}"
 INSTALL_DIR="${EXO_INSTALL_DIR:-$PWD}"
 MODEL_NAME="${EXO_MODEL:-gpt-5.4}"
-UPSTREAM_MODEL="${EXO_UPSTREAM_MODEL:-$MODEL_NAME}"
+UPSTREAM_MODEL="${EXO_UPSTREAM_MODEL:-}"
+MODEL_PROVIDER="${EXO_MODEL_PROVIDER:-}"
 AGENT_NAME="${EXO_AGENT_NAME:-Exo}"
 USER_NAME="${EXO_USER_NAME:-}"
 FORCE_INSTALL="${EXO_SETUP_FORCE:-false}"
 DEFAULT_EXO_CHAT_BASE_URL="https://exoharness.ai"
+DEFAULT_OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
+DEFAULT_OPENROUTER_MODEL="z-ai/glm-5.2"
 
 die() {
   echo "error: $*" >&2
@@ -35,9 +38,10 @@ Options:
   --help                Show this help
 
 Environment overrides:
-  EXO_REPO_URL, EXO_REPO_REF, EXO_INSTALL_DIR, EXO_MODEL, EXO_UPSTREAM_MODEL,
-  EXO_AGENT_NAME, EXO_USER_NAME, EXO_CHAT_BASE_URL, EXOCLAW_LOCAL_PROMPT_FILE,
-  EXO_SETUP_FORCE
+  EXO_REPO_URL, EXO_REPO_REF, EXO_INSTALL_DIR, EXO_MODEL_PROVIDER, EXO_MODEL,
+  EXO_UPSTREAM_MODEL, EXO_AGENT_NAME, EXO_USER_NAME, EXO_CHAT_BASE_URL,
+  EXOCLAW_LOCAL_PROMPT_FILE, EXO_SETUP_FORCE, OPENAI_API_KEY,
+  OPENROUTER_API_KEY
 EOF
 }
 
@@ -238,6 +242,43 @@ prompt_text() {
   local value
   read -r -p "$prompt [$default]: " value
   printf '%s' "${value:-$default}"
+}
+
+choose_model_provider() {
+  echo "Choose the API provider Exo should use:" >&2
+  echo "1) OpenAI" >&2
+  echo "2) OpenRouter" >&2
+  local choice
+  while true; do
+    read -r -p "Provider [1-2, default 1]: " choice
+    case "${choice:-1}" in
+      1) printf '%s' openai; return ;;
+      2) printf '%s' openrouter; return ;;
+      *) echo "Please choose 1 or 2." >&2 ;;
+    esac
+  done
+}
+
+configure_model_provider() {
+  local provider="$1"
+  case "$provider" in
+    openai)
+      MODEL_PROVIDER_LABEL="OpenAI"
+      MODEL_API_KEY_ENV="OPENAI_API_KEY"
+      MODEL_BASE_URL=""
+      DEFAULT_UPSTREAM_MODEL="$MODEL_NAME"
+      ;;
+    openrouter)
+      MODEL_PROVIDER_LABEL="OpenRouter"
+      MODEL_API_KEY_ENV="OPENROUTER_API_KEY"
+      MODEL_BASE_URL="$DEFAULT_OPENROUTER_BASE_URL"
+      DEFAULT_UPSTREAM_MODEL="$DEFAULT_OPENROUTER_MODEL"
+      ;;
+    *)
+      die "unsupported model provider: $provider" \
+        "(expected openai or openrouter)"
+      ;;
+  esac
 }
 
 env_value() {
@@ -445,29 +486,12 @@ backup_existing_install_dir() {
   echo "Backed up existing files to $backup_dir"
 }
 
-update_existing_checkout() {
-  local dir="$1"
-  echo "Updating existing Exo checkout at $dir"
-  if git -C "$dir" rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
-    git -C "$dir" pull --rebase --autostash
-    return
-  fi
-
-  echo "No upstream branch is configured; fetching $REPO_REF from origin."
-  git -C "$dir" fetch origin "$REPO_REF"
-  if [[ "$(git -C "$dir" rev-parse --abbrev-ref HEAD)" == "HEAD" ]]; then
-    git -C "$dir" checkout FETCH_HEAD
-  else
-    git -C "$dir" rebase --autostash FETCH_HEAD
-  fi
-}
-
 clone_or_reuse_repo() {
   local install_dir="$1"
   local tmp_parent
   local tmp_checkout
   if is_exo_checkout "$install_dir"; then
-    update_existing_checkout "$install_dir"
+    echo "Using existing Exo checkout at $install_dir"
     return
   fi
   mkdir -p "$install_dir"
@@ -511,8 +535,25 @@ main() {
     chmod 600 "$env_file"
   fi
 
+  info "Configure model provider"
+  if [[ -z "$MODEL_PROVIDER" ]]; then
+    MODEL_PROVIDER="$(choose_model_provider)"
+  fi
+  configure_model_provider "$MODEL_PROVIDER"
+  echo "Using $MODEL_PROVIDER_LABEL."
+
+  if [[ -z "$UPSTREAM_MODEL" ]]; then
+    if [[ "$MODEL_PROVIDER" == "openrouter" ]]; then
+      UPSTREAM_MODEL="$(prompt_text "OpenRouter model id" \
+        "$DEFAULT_UPSTREAM_MODEL")"
+    else
+      UPSTREAM_MODEL="$DEFAULT_UPSTREAM_MODEL"
+    fi
+  fi
+
   info "Configure API keys"
-  prompt_env_secret "OPENAI_API_KEY" "$env_file" "OpenAI API key" true
+  prompt_env_secret "$MODEL_API_KEY_ENV" "$env_file" \
+    "$MODEL_PROVIDER_LABEL API key" true
   set_env_default "EXO_CHAT_BASE_URL" "${EXO_CHAT_BASE_URL:-$DEFAULT_EXO_CHAT_BASE_URL}" "$env_file"
   echo "Canonical setup uses ExoChat as the default external adapter and will show a browser URL to open."
 
@@ -530,8 +571,11 @@ main() {
   CARGO_TARGET_DIR=target cargo build -p exo --ignore-rust-version
 
   info "Store secrets and register model"
-  ./target/debug/exo --env-file-if-exists "$env_file" secret set openai --env OPENAI_API_KEY
-  ./target/debug/exo --env-file-if-exists "$env_file" model register "$MODEL_NAME" --model "$UPSTREAM_MODEL" --secret openai
+  ./target/debug/exo --env-file-if-exists "$env_file" \
+    secret set "$MODEL_PROVIDER" --env "$MODEL_API_KEY_ENV"
+  ./target/debug/exo --env-file-if-exists "$env_file" \
+    model register "$MODEL_NAME" --model "$UPSTREAM_MODEL" \
+    --secret "$MODEL_PROVIDER" ${MODEL_BASE_URL:+--base-url "$MODEL_BASE_URL"}
 
   info "Start canonical Exo"
   local control_args=(fresh --canonical --agent-name "$AGENT_NAME")

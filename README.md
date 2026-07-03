@@ -1,23 +1,35 @@
 # exo
 
 Exo is a systems approach to recursive self improvement. In short, it's a
-complete agent harnes that has support for tools, tasks, adapters (e.g.
-WhatsApp, Discord or Slack), full computer use, and state management (snapshot,
-clone, migrate, rewind). But most importantly it has full visbility of both its
-code and runtime logs and can incrementally improve every aspect of itself.
+complete agent harnes that has support for tools, tasks, integrations (e.g.
+WhatsApp, Discord or Slack), and general computer use. But most importantly it
+has full visbility of both its code and runtime logs and can incrementally
+improve every aspect of itself, clone itself, and even manage a lineage of
+clones.
 
 While most agents can do some form of self improvement, such as evolve their
 prompts or add tools, Exo is fully recursive in that can clone or operate on any
 aspect of itself, from prompts, to memory, to tooling, to the basic harness
 itself. And it's architected so that this evolution can be done incrementally
 and (mostly) safely. The only thing it can't muck with is an event log which
-provides canonical history.
+provides canonical history of what it's tried to prevent getting stuck in
+recursive loops.
 
-The goal is to give an agent maximum power anbd flexibility to improve itself.
-Or customize itself for whatever purpose. For example an Exo agent can cost optimize
-itself, build custom tools, or even evolve itself to learn to play a game:
+The goal of Exo is to be the minimal framework possible to give an agent full
+ability for recursive self improvmenet. Why would you want such a thing?
 
-![Exo playinb pokemon go](docs/images/exo_playing.gif)
+- It's a great agent framework to build exactly the agent you like that's
+  maximally bitter lesson aligned. Future smarter models can evolve every aspect
+  of the system. And do it safely with full history.
+- It'a s great framework to allow AI models to solve complex problems by
+  iterating on system level properties. We've have agents learn to play games,
+  cost optimize themselves, build complex systems. In each case, it required the
+  agents to modify themselves heavily.
+
+In short, we think this is the best way to take advantage of the growing power
+of AI models when building long lived agents.
+
+<!-- ![Exo playinb pokemon go](docs/images/exo_playing.gif) -->
 
 ## Quick Start
 
@@ -25,7 +37,8 @@ Exo was designed to be incredibly simple to use. With just a few commands you
 should have a fully functional agent who can do standard agent tasks (computer
 use, research, coding etc.) but can also extent itself as needed.
 
-To use Exo as an agent, you'll ned an OpenAI API key. If you have that, simply do the following:
+To use Exo as an agent, you'll need an OpenAI or OpenRouter API key. If you
+have that, simply do the following:
 
 ```
 curl -fsSL https://raw.githubusercontent.com/ankrgyl/exo/main/public/setup.sh -o setup.sh
@@ -47,7 +60,7 @@ Open that URL in your browser or on your phone.
 When complete, the script will drop you to a prompt you can use to talk to your
 agent locally.
 
-A good end to end test is to have it install a tool in the sanbox and use it with the task scheduler. For example,
+A good end to end test is to have it install a tool in the sandbox and use it with the task scheduler. For example,
 try the following prompt:
 
 ```
@@ -56,102 +69,64 @@ schedule a task to run every minute that grabs news headlines from the BBC RSS f
 not printed before. Please print them here.
 ```
 
-## Exo Basics
+## Understanding Exo
 
-### Key Concepts
+There are only a few key components you need to know about to understand how
+Exo works. You can use Exo like any agent without understanding these internals.
+But having a basic idea will help you more effectively guide Exo if you want it
+to evolve itself. For a deeper dive into these concepts, see
+[`docs/EXO-BASICS.md`](docs/EXO-BASICS.md).
 
-#### Exo source code
+**Basic Loop** Exo runs a host-side loop that receives user messages and adapter
+events, builds the model context, exposes the active tools, executes tool calls,
+and records the results. This loop runs outside the sandbox.
 
-In the canonical Exoclaw setup, the running source tree is mounted into the
-agent sandbox at `/workspace/exo`. This lets the agent inspect its own harness,
-prompts, tools, adapters, scheduler, and startup scripts, and propose or make
-changes to them.
+**Sandbox** Exo uses a vanilla unbuntu sandbox where
+it can install packages, run commands, and experiment. It can snapshot and
+rewind that sandbox when it needs to back out changes.
 
-#### Canonical state
+**Tools and Adapters** These are the core methods for Exo to interact with the
+world and with itself. Tools are functions the model can call, such as executing
+a shell command with the `shell` tool. Adapters are long-running host processes
+for stateful external channels such as ExoChat, IRC, WhatsApp, Signal, and
+Discord.
 
-Exo stores conversation history, tool activity, host lifecycle events, adapter
-events, artifacts, and sandbox records outside the sandbox filesystem. That
-durable history is not rewound when the sandbox is rewound, so the agent can
-reconstruct what happened across restarts, rebuilds, and experiments.
+**Canonical State** Exo stores durable conversation history, tool activity,
+adapter events, artifacts, and sandbox records outside the sandbox filesystem.
+This state is not rewound when the sandbox is rewound, so the agent can
+reconstruct what happened across experiments, restarts, and rebuilds.
 
-#### Sandbox
+**Source Code** Exo's source code is mounted in the
+sandbox at `/workspace/exo`. The agent can read and modify that code and has
+tools that allow it to rebuild and restart itself and all components. This allows Exo to be able to modify every aspect of itself.
 
-Canonical Exoclaw conversations use a shared agent-scoped sandbox by default.
-The agent can run shell commands there, install tools, inspect snapshots, create
-new snapshots, and rewind the sandbox when it needs to back out risky changes.
+**REPL and ExoChat** The minimal setup gives you two ways to talk to Exo: the
+local REPL, which is a command-line chat interface, and ExoChat, a simple
+text-only web chat hosted at `https://exoharness.ai`.
 
-#### Guardian
+## Where to Go From Here
 
-The guardian is a host-side control surface for maintenance that should happen
-outside the sandbox. The agent can call it through `guardian_action` to build
-Exo, inspect service status and logs, and restart the scheduler or adapter
-runners while preserving `.exo` state.
+If you have your agent up and running, there really is little else you need to understand or do other than talk to it and ask it to evolve itself in a direction that you want. It already contains basic support for services such as WhatsApp, Slack, Discord, Signal, and IRC. But it's very easy to extend it to support more things
 
-#### Tools
+## Shortcomings
 
-Tools are functions the model can call during a turn. Core tools expose shell
-access and agent-created tool installation; Exoclaw adds tools for adapters,
-scheduling, sandbox snapshots, memory, introspection, and guardian maintenance.
-Tool definitions are registered each model round, so the agent sees the current
-tool list as part of the model request.
+While there are many, the most obvious is that right now there isn't a simple way for Exo to do generalized computer use of a windowed system. This is in the works and should land shortly. But in the meantime, you can get a long way by asking Exo the build such a thing for itself.
 
-#### Adapters
+## Tweaking Prompts
 
-Adapters are long-running host processes that connect an agent conversation to
-external surfaces such as ExoChat, IRC, WhatsApp, Signal, Discord, or a local
-shell CLI. They own protocol sockets, reconnect behavior, inbound event history,
-conversation wakeups, and outbound sends. The canonical setup starts ExoChat by
-default and prints a browser URL for it.
+There are a numebr of prompt files that Exo uses during runtime. You can edit these directly or ask Exo to.
 
-#### Scheduler
+- `examples/exoclaw/prompts/me.md`: the committed core identity and operating
+  rules for the default Exoclaw agent.
+- `.exo/exoclaw-profile.md`: local, git-ignored profile instructions such as
+  your name and machine-specific preferences. Create or update it with
+  `scripts/exo.sh setup-profile`.
+- `examples/exoclaw/harness.ts`: assembles the full prompt sent each turn,
+  including dynamic instructions about tools, adapters, memory, sandbox behavior,
+  and self-maintenance.
 
-Exo also includes a task scheduling process that manages recurring sandbox work
-(for example, once an hour). The agent can create, list, cancel, and delete
-scheduled tasks, and each completed run can wake the conversation with a compact
-result.
-
-#### Memory
-
-Exoclaw includes `remember` and `forget` tools for durable agent memory. Saved
-memory is stored outside the sandbox and injected back into future turns across
-conversations.
-
-### Tools
-
-Exo has the following minimal set of tools to control and interact with its environme and to evolve itself.
-
-#### Core
-
-- host control : `shell`
-- Tool management :`install_agent_tool`, `uninstall_agent_tool`
-
-#### Agent
-
-- Adapter tools: `create_adapter`, `list_adapters`, `disable_adapter`,
-  `delete_adapter`, `send_adapter_message`.
-- Adapter/event introspection: `list_adapter_events`,
-  `list_conversation_events`.
-- Scheduler tools: `schedule_sandbox_task`, `list_scheduled_tasks`,
-  `cancel_scheduled_task`, `delete_scheduled_task`.
-- Sandbox tools: `list_sandbox_snapshots`, `snapshot_sandbox`,
-  `rewind_sandbox`.
-- Self-maintenance: `guardian_action`.
-- Memory: `remember`, `forget`.
-
-### Adapters
-
-Supported adapters:
-
-- `exochat`: a hosted, text-only browser chat at `https://exoharness.ai`.
-- `irc`: an IRC channel adapter for lightweight text chat.
-- `whatsapp`: a WhatsApp linked-device adapter using Baileys.
-- `signal`: a Signal linked-device adapter using `signal-cli`.
-- `discord`: a Discord bot adapter with message and attachment support.
-- `agent-cli`: a local shell adapter for sending prompts from any directory.
-
-## Minimum Viable Exo
-
-When you run the startup.sh script, it creates what we believe to be a minimum viable Exo agent that has just enough functionality to evolve itself to whatever you want. It has all the core and agent tools. And `exochat` as the single adapter so you can chat with your agent from anywhere on the Internet. It also has a vanilla ubuntu sandbox.
+After changing prompt files, ask Exo to rebuild/restart itself for them to go in
+use.
 
 ## License
 

@@ -229,6 +229,22 @@ And adapter tools:
 record and event history. `delete_adapter` removes the adapter record and stored
 events.
 
+And skill tools (see `skills-arch.md` at the repo root for the design):
+
+- `install_skill`
+- `list_skills`
+- `use_skill`
+- `read_skill_file`
+- `uninstall_skill`
+
+Skills follow the standard agent-skills format (a `SKILL.md` with `name` and
+`description` frontmatter plus markdown instructions, optionally bundling text
+files), so skills published for Claude Code, OpenClaw, or Hermes install
+unchanged. They are stored as agent artifacts, persist across conversations,
+and survive sandbox rewinds. Each turn the agent sees only installed skill
+names and descriptions; it loads a skill's full instructions with `use_skill`
+when a task matches.
+
 ## Adapters
 
 Adapters are host-owned long-running runtimes for external applications. They
