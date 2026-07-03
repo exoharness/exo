@@ -123,6 +123,16 @@ Gap: there is no sandbox _cloning_ — starting a second sandbox from an existin
 
 For agent-generated tools, `install_agent_tool` provides the host-validated installation path: the agent writes a small TypeScript tool module with a strict input schema and a handler, the host validates and installs it as an agent-owned tool, and it becomes available on the next model turn (not halfway through the current call). `uninstall_agent_tool` removes it. Generated tools should use stable platform APIs, avoid extra npm dependencies by default, and declare required initialization such as environment variable names for API keys. New Rust-backed capability goes through the code-edit path instead (area 1): implement the match arm, register the definition, rebuild, restart.
 
+**Skills.** Between prompt text and code-backed tools sits a third extension
+surface: durable skills in the standard agent-skills format (`SKILL.md` with
+`name`/`description` frontmatter plus instructions and optional bundled text
+files). `install_skill`, `list_skills`, `use_skill`, `read_skill_file`, and
+`uninstall_skill` manage them; storage is agent artifacts (`skills/index.json`
+plus `skills/<name>.json`), so skills persist across conversations and survive
+sandbox rewinds, and every install is a versioned, auditable artifact write.
+Only names and descriptions are injected each turn; bodies load on demand. See
+`skills-arch.md` at the repo root.
+
 **Adapters.** Adapters connect conversations to external systems:
 
 - `create_adapter` creates an enabled adapter record for the current conversation; the adapter supervisor notices it and starts the worker process.
