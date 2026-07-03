@@ -53,4 +53,4 @@ for _ in $(seq 1 50); do
   sleep 0.2
 done
 
-POKEMON_EMULATOR_URL="http://127.0.0.1:$PORT" pnpm exec tsx agent/run.ts
+POKEMON_EMULATOR_URL="http://127.0.0.1:$PORT" pnpm exec tsx "$PWD/agent/run.ts"
