@@ -35,9 +35,9 @@ export default defineConfig({
       { text: "Overview", link: "/" },
       {
         text: "Getting Started",
+        link: "/getting-started/",
         collapsed: false,
         items: [
-          { text: "Getting Started", link: "/getting-started/" },
           { text: "Installation", link: "/getting-started/installation" },
           { text: "Your First Session", link: "/getting-started/first-session" },
           { text: "Using the CLI Directly", link: "/getting-started/quick-start" },
@@ -49,9 +49,9 @@ export default defineConfig({
       },
       {
         text: "Concepts",
+        link: "/concepts/",
         collapsed: false,
         items: [
-          { text: "Concepts", link: "/concepts/" },
           {
             text: "Exoharness & Executor",
             link: "/concepts/exoharness-and-executor",
@@ -72,9 +72,9 @@ export default defineConfig({
       },
       {
         text: "Tutorials",
+        link: "/tutorials/",
         collapsed: false,
         items: [
-          { text: "Tutorials", link: "/tutorials/" },
           {
             text: "Custom Agent Quickstart",
             link: "/tutorials/write-your-own-agent",
