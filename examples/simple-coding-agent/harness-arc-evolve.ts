@@ -23,9 +23,13 @@ import {
   defaultBuiltInToolNames,
   agentToolCreationInstruction,
 } from "../typescript/turn-loop";
-import { memoryInstruction, registerMemoryTools } from "../exoclaw/memory-tools";
+import {
+  memoryInstruction,
+  registerMemoryTools,
+} from "../exoclaw/memory-tools";
 import { registerSandboxTools } from "../exoclaw/sandbox-tools";
 import { registerIntrospectionTools } from "../exoclaw/introspection-tools";
+import { registerTodoTools, todoInstruction } from "../exoclaw/todo-tools";
 
 const ARC_EVOLVE_PROMPT = `You are an expert ARC-AGI puzzle solver, evaluated over a SEQUENCE of puzzles. Each puzzle gives several INPUT -> OUTPUT grid examples sharing ONE hidden transformation rule; you must produce the output grid(s) for the held-out TEST input(s). Grids are rectangles of integers 0-9 (colors). Scoring is exact match.
 
@@ -43,15 +47,22 @@ YOU EVOLVE ACROSS TASKS — your memory, installed tools, and sandbox files all 
 - MEMORY (remember/forget): record recurring transformation motifs, pitfalls, and process lessons ("verify dimensions first", "objects = 4-connected components unless diagonal evidence"). Your memory is injected back each turn — consult it before solving.
 - YOUR OWN LIBRARY: maintain a reusable grid toolkit in your sandbox (e.g. /work/arclib.py: parse/print grids, connected components, symmetry detection, color histograms, bounding boxes, train-pair verification loop). Extend it as puzzles demand; import it instead of rewriting the same helpers every task.
 - TOOLS (install_agent_tool/uninstall_agent_tool): promote genuinely recurring multi-step operations into persistent tools. These run OUTSIDE your sandbox on the host: never use them (or any other means) to search the filesystem for ARC datasets or answer files — solve ONLY from the data given in the task message. Attempting to look up answers is cheating and invalidates the run.
+- PLAN WITH TODOS (todowrite): for multi-step solving, track your plan — rewrite the full list each call, one item in_progress, mark completed only after verifying.
 - SNAPSHOT/REWIND (snapshot_sandbox/rewind_sandbox): checkpoint before risky changes to your sandbox (e.g. refactoring your library); rewind if you break it.
 
 After each answer you receive a feedback message: SOLVED or FAILED (nothing more). Use that turn to update your memory/library/tools — e.g. record what family the puzzle was and whether your approach worked — then reply briefly.`;
 
 async function instructions(context: TurnContext): Promise<Message[]> {
-  const messages: Message[] = [{ role: "developer", content: ARC_EVOLVE_PROMPT }];
+  const messages: Message[] = [
+    { role: "developer", content: ARC_EVOLVE_PROMPT },
+  ];
   const memory = await memoryInstruction(context);
   if (memory !== null) {
     messages.push(memory);
+  }
+  const todos = await todoInstruction(context);
+  if (todos !== null) {
+    messages.push(todos);
   }
   if (context.agentConfig.enableAgentToolCreation) {
     messages.push(agentToolCreationInstruction());
@@ -66,9 +77,11 @@ export default defineHarness({
       registerTools: async (tools: HarnessToolRegistry, ctx: TurnContext) => {
         registerBuiltInTools(tools, ctx, defaultBuiltInToolNames(ctx));
         registerMemoryTools(tools);
+        registerTodoTools(tools);
         registerSandboxTools(tools);
         registerIntrospectionTools(tools);
-        for (const modulePath of ctx.agentConfig.typescript?.toolModulePaths ?? []) {
+        for (const modulePath of ctx.agentConfig.typescript?.toolModulePaths ??
+          []) {
           await registerLibraryToolModulePath(tools, ctx, modulePath);
         }
         if (ctx.agentConfig.enableAgentToolCreation) {
