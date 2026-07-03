@@ -50,6 +50,7 @@ async fn creates_agents_and_conversations_with_persisted_config() {
             model: "gpt-5.4".to_string(),
             max_output_tokens: Some(512),
             max_tool_round_trips: Some(3),
+            capture_reasoning: false,
             braintrust: None,
         })
         .await
@@ -135,6 +136,7 @@ async fn send_persists_messages_through_harness() {
             model: "gpt-5.4".to_string(),
             max_output_tokens: None,
             max_tool_round_trips: Some(2),
+            capture_reasoning: false,
             braintrust: None,
         })
         .await
@@ -255,6 +257,7 @@ async fn usage_record_is_persisted_with_computed_cost() {
             model: "claude-sonnet-4-6".to_string(),
             max_output_tokens: None,
             max_tool_round_trips: Some(2),
+            capture_reasoning: false,
             braintrust: None,
         })
         .await
@@ -401,6 +404,7 @@ async fn usage_record_with_anthropic_cache_hits() {
             model: "claude-sonnet-4-6".to_string(),
             max_output_tokens: None,
             max_tool_round_trips: Some(2),
+            capture_reasoning: false,
             braintrust: None,
         })
         .await
@@ -522,6 +526,7 @@ async fn usage_record_with_openai_inclusive_accounting() {
             model: "gpt-4o-mini".to_string(),
             max_output_tokens: None,
             max_tool_round_trips: Some(2),
+            capture_reasoning: false,
             braintrust: None,
         })
         .await
@@ -603,6 +608,7 @@ async fn close_session_appends_session_ended_event() {
             model: "gpt-5.4".to_string(),
             max_output_tokens: None,
             max_tool_round_trips: Some(2),
+            capture_reasoning: false,
             braintrust: None,
         })
         .await
@@ -692,6 +698,7 @@ async fn updating_agent_config_refreshes_executor_cache() {
             model: "gpt-5.4".to_string(),
             max_output_tokens: None,
             max_tool_round_trips: Some(2),
+            capture_reasoning: false,
             braintrust: None,
         })
         .await
@@ -782,6 +789,7 @@ async fn send_executes_shell_tool_when_enabled() {
             model: "gpt-5.4".to_string(),
             max_output_tokens: None,
             max_tool_round_trips: Some(2),
+            capture_reasoning: false,
             braintrust: None,
         })
         .await
@@ -876,6 +884,7 @@ async fn harness_exposes_raw_exoharness_handles() {
             model: "gpt-5.4".to_string(),
             max_output_tokens: None,
             max_tool_round_trips: None,
+            capture_reasoning: false,
             braintrust: None,
         })
         .await
@@ -998,6 +1007,7 @@ async fn updating_mounts_recreates_conversation_sandbox() {
             model: "gpt-5.4".to_string(),
             max_output_tokens: None,
             max_tool_round_trips: Some(1),
+            capture_reasoning: false,
             braintrust: None,
         })
         .await
@@ -1110,6 +1120,7 @@ async fn updating_sandbox_image_recreates_shell_sandbox_without_shell_program() 
             model: "gpt-5.4".to_string(),
             max_output_tokens: None,
             max_tool_round_trips: Some(1),
+            capture_reasoning: false,
             braintrust: None,
         })
         .await
@@ -1234,6 +1245,7 @@ async fn conversation_model_override_changes_effective_model() {
             model: "gpt-5.4".to_string(),
             max_output_tokens: Some(512),
             max_tool_round_trips: Some(2),
+            capture_reasoning: false,
             braintrust: None,
         })
         .await

@@ -448,6 +448,10 @@ enum AgentCommands {
         max_output_tokens: Option<i64>,
         #[arg(long)]
         max_tool_round_trips: Option<u32>,
+        /// Request and store model reasoning summaries in the conversation
+        /// trace (disabled by default).
+        #[arg(long, value_enum)]
+        capture_reasoning: Option<EnabledDisabled>,
         #[arg(long)]
         braintrust_org: Option<String>,
         #[arg(long)]
@@ -487,6 +491,10 @@ enum AgentCommands {
         max_tool_round_trips: Option<u32>,
         #[arg(long)]
         clear_max_tool_round_trips: bool,
+        /// Request and store model reasoning summaries in the conversation
+        /// trace (disabled by default).
+        #[arg(long, value_enum)]
+        capture_reasoning: Option<EnabledDisabled>,
         #[arg(long)]
         clear_braintrust: bool,
         #[arg(long)]
@@ -879,6 +887,7 @@ async fn main() -> Result<()> {
                             model,
                             max_output_tokens: None,
                             max_tool_round_trips: None,
+                            capture_reasoning: false,
                             braintrust: None,
                         })
                         .await?
@@ -923,6 +932,7 @@ async fn main() -> Result<()> {
                 model,
                 max_output_tokens,
                 max_tool_round_trips,
+                capture_reasoning,
                 braintrust_org,
                 braintrust_project,
                 braintrust_project_id,
@@ -972,6 +982,9 @@ async fn main() -> Result<()> {
                         model,
                         max_output_tokens,
                         max_tool_round_trips,
+                        capture_reasoning: capture_reasoning
+                            .map(EnabledDisabled::enabled)
+                            .unwrap_or(false),
                         braintrust: build_braintrust_tracing_config(
                             braintrust_org,
                             braintrust_project,
@@ -1002,6 +1015,7 @@ async fn main() -> Result<()> {
                 clear_max_output_tokens,
                 max_tool_round_trips,
                 clear_max_tool_round_trips,
+                capture_reasoning,
                 clear_braintrust,
                 braintrust_org,
                 braintrust_project,
@@ -1180,6 +1194,13 @@ async fn main() -> Result<()> {
                     config.max_tool_round_trips = Some(max_tool_round_trips);
                     changed = true;
                 }
+                if let Some(capture_reasoning) = capture_reasoning {
+                    let capture_reasoning = capture_reasoning.enabled();
+                    if config.capture_reasoning != capture_reasoning {
+                        config.capture_reasoning = capture_reasoning;
+                        changed = true;
+                    }
+                }
 
                 if clear_braintrust {
                     config.braintrust = None;
@@ -1270,6 +1291,14 @@ async fn main() -> Result<()> {
                         .max_tool_round_trips
                         .map(|value| value.to_string())
                         .unwrap_or_else(|| "none".to_string())
+                );
+                println!(
+                    "capture_reasoning: {}",
+                    if config.capture_reasoning {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
                 );
                 println!(
                     "braintrust: {}",

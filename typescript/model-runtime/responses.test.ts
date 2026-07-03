@@ -84,8 +84,14 @@ describe("model runtime dispatch", () => {
 });
 
 describe("reasoning summaries", () => {
-  it("requests reasoning summaries on both streaming and non-streaming bodies", () => {
+  it("does not request reasoning summaries by default", () => {
     const request = { model: "gpt-5.4", messages: [] };
+    expect(buildStreamingBody(request).reasoning).toBeUndefined();
+    expect(buildNonStreamingBody(request).reasoning).toBeUndefined();
+  });
+
+  it("requests reasoning summaries when captureReasoning is enabled", () => {
+    const request = { model: "gpt-5.4", messages: [], captureReasoning: true };
     expect(buildStreamingBody(request).reasoning).toEqual({ summary: "auto" });
     expect(buildNonStreamingBody(request).reasoning).toEqual({
       summary: "auto",
