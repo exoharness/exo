@@ -27,6 +27,11 @@ echo "==> linking exo system into clbench"
 ln -sfn "$HERE/system" "$CLBENCH/src/systems/exo"
 ls -ld "$CLBENCH/src/systems/exo"
 
+# Third-party comparison systems (baseline-agents), for cross-system boards.
+echo "==> linking baseline-agent systems into clbench"
+ln -sfn "$HERE/systems/openclaw" "$CLBENCH/src/systems/openclaw"
+ls -ld "$CLBENCH/src/systems/openclaw"
+
 # Discovery is filesystem-based on src/tasks/ too; symlink our custom task(s) in.
 echo "==> linking custom tasks into clbench"
 ln -sfn "$HERE/tasks/tool_forge" "$CLBENCH/src/tasks/tool_forge"
