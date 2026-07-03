@@ -41,9 +41,9 @@ function filterByExtension(files, extensions) {
   return files.filter((file) => extensions.has(path.extname(file)));
 }
 
-// docs-site is a Jekyll site; oxfmt breaks its kramdown attribute syntax.
+// oxfmt breaks the VitePress markdown; docs content is authored by hand.
 const stagedFiles = getStagedFiles().filter(
-  (file) => !file.startsWith("docs-site/"),
+  (file) => !file.startsWith("website/docs-src/"),
 );
 
 if (stagedFiles.length === 0) {

@@ -3,8 +3,8 @@
   "ignorePatterns": [
     ".next/**",
     "coverage/**",
-    "docs-site/**",
     "node_modules/**",
+    "website/docs-src/**",
     "scratch/**"
   ],
   "printWidth": 80

@@ -26,5 +26,5 @@
     "incremental": true
   },
   "include": ["**/*.ts"],
-  "exclude": ["node_modules", "docs-site"]
+  "exclude": ["node_modules", "website/docs-src"]
 }
