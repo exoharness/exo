@@ -5,6 +5,7 @@ use std::ops::Bound;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -142,6 +143,118 @@ pub trait TurnHandle: SnapshotHandle {
     async fn finish(&self) -> Result<EventId>;
 }
 
+/// Arbitrates which runtime may execute turns for a conversation.
+///
+/// The handles above stop at durable acceptance: `begin_turn()` fuses
+/// accepting input with starting execution, which is only correct while
+/// exactly one executor drives a conversation. A `TurnCoordinator` covers
+/// every other producer — schedulers, adapters, additional executor
+/// processes — by making the pending turn durable and arbitrating execution
+/// through per-conversation leases.
+///
+/// Semantics:
+///
+/// - Pending turns form a per-conversation FIFO. Only the head turn is
+///   eligible to run, and turns execute in enqueue order.
+/// - Turn execution is at-least-once. The head is peeked, never popped;
+///   only `complete_turn()` removes it. A runtime that dies mid-turn leaves
+///   the turn at the head, and once its lease expires any runtime can claim
+///   the conversation and re-execute it — crash recovery is the ordinary
+///   claim path, not a repair procedure.
+/// - Leases are fenced. `ConversationLease::token` identifies the live
+///   grant; `begin_pending_turn()` fails on a stale token, and
+///   implementations should reject turn-scoped writes made under a lease
+///   that is no longer live.
+/// - Lease churn (claims, renewals, releases) is coordination state, not
+///   history, and appends no events. Enqueueing and cancellation are durable
+///   intent and append `turn_enqueued` / `turn_cancelled`.
+/// - Pending turns are operational state, not history: a forked conversation
+///   starts with an empty queue.
+/// - Mixing direct `ConversationHandle::begin_turn()` and coordinated
+///   execution on the same conversation is undefined; a conversation has one
+///   driving discipline.
+#[async_trait]
+pub trait TurnCoordinator: Send + Sync {
+    /// Identity of this executor process: chosen by the runtime, stable for
+    /// its lifetime, never concurrently reused.
+    fn runtime_id(&self) -> &RuntimeId;
+
+    /// How long a lease survives without renewal. Implementations must
+    /// derive this from the renewal cadence (e.g. three renew intervals) so
+    /// that a configuration where honest renewals cannot keep a lease alive
+    /// is impossible to express.
+    fn lease_ttl(&self) -> Duration;
+
+    /// Durably accept input for a conversation without starting execution.
+    /// Appends `turn_enqueued`; the pending turn survives the death of every
+    /// process in the system.
+    async fn enqueue_turn(
+        &self,
+        conversation_id: ConversationId,
+        request: EnqueueTurnRequest,
+    ) -> Result<EnqueueTurnResult>;
+
+    /// Claim up to `max` conversations that have eligible pending work (a
+    /// head turn whose `not_before` has passed) and no live lease.
+    async fn claim_ready(&self, max: usize) -> Result<Vec<ConversationLease>>;
+
+    /// Extend the lease. Returns false when the lease is no longer held, at
+    /// which point the runtime must stop executing. `processing` marks
+    /// renewals made while a turn is executing.
+    async fn renew(&self, lease: &ConversationLease, processing: bool) -> Result<bool>;
+
+    /// Voluntarily drop a lease whose queue is empty. Returns false when the
+    /// caller no longer held it.
+    async fn release_idle(&self, lease: &ConversationLease) -> Result<bool>;
+
+    /// Read the head pending turn without removing it.
+    async fn peek_turn(&self, lease: &ConversationLease) -> Result<Option<PendingTurn>>;
+
+    /// Begin executing the head pending turn: appends `turn_started` and the
+    /// pending input under the pending turn's id, failing if `turn_id` is
+    /// not the head or the lease token is stale. The returned record
+    /// rebuilds a live handle through `ConversationHandle::turn_handle()`.
+    async fn begin_pending_turn(
+        &self,
+        lease: &ConversationLease,
+        turn_id: TurnId,
+    ) -> Result<TurnRecord>;
+
+    /// Pop the head turn after execution, reporting whether more turns are
+    /// pending so the runtime can keep the lease or release it.
+    async fn complete_turn(
+        &self,
+        lease: &ConversationLease,
+        turn_id: TurnId,
+    ) -> Result<CompleteTurnOutcome>;
+
+    /// Durably request cancellation of a pending or running turn. Appends
+    /// `turn_cancelled`. Cancellation is cooperative: the executing runtime
+    /// observes it through `turn_cancelled()`.
+    async fn cancel_turn(
+        &self,
+        conversation_id: ConversationId,
+        turn_id: TurnId,
+    ) -> Result<CancelTurnOutcome>;
+
+    /// Whether cancellation has been requested for `turn_id`. Polled by the
+    /// executing runtime between model and tool round trips.
+    async fn turn_cancelled(&self, lease: &ConversationLease, turn_id: TurnId) -> Result<bool>;
+
+    /// Observe the leased head turn and its owner without claiming, for
+    /// diagnostics and UIs.
+    async fn leased_head_turn(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Option<LeasedHeadTurn>>;
+
+    /// Stream conversations that gain eligible pending work. A latency
+    /// optimization in the same spirit as `watch_events()`: correctness must
+    /// come from `claim_ready()` alone. In-process implementations push;
+    /// unary transports long-poll.
+    async fn watch_ready(&self) -> Result<ReadyStream>;
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentRecord {
     pub id: AgentId,
@@ -193,6 +306,74 @@ pub struct BeginTurnRequest {
     pub input: Vec<Message>,
 }
 
+/// Input durably accepted for a conversation whose execution has not
+/// started. Pending turns are created by `TurnCoordinator::enqueue_turn()`
+/// and consumed head-first under a conversation lease.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingTurn {
+    pub id: TurnId,
+    pub conversation_id: ConversationId,
+    pub input: Vec<Message>,
+    pub enqueued_at: DateTimeUtc,
+    /// Do not execute before this time. This is the substrate's only
+    /// scheduling primitive; recurrence and cron policy stay above it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_before: Option<DateTimeUtc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedupe_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EnqueueTurnRequest {
+    pub input: Vec<Message>,
+    pub not_before: Option<DateTimeUtc>,
+    /// Producer-retry idempotency: two enqueues carrying the same key while
+    /// the first turn is still pending yield one turn.
+    pub dedupe_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnqueueTurnResult {
+    pub turn: PendingTurn,
+    /// True when `dedupe_key` matched an existing pending turn.
+    pub deduplicated: bool,
+    /// The conversation's live lease owner, if any, so a producer that is
+    /// also a runtime can start executing immediately instead of waiting for
+    /// its next claim sweep.
+    pub leased_by: Option<RuntimeId>,
+}
+
+/// The exclusive, expiring right to execute turns for one conversation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationLease {
+    pub conversation_id: ConversationId,
+    pub runtime_id: RuntimeId,
+    /// Fencing token identifying this grant of the lease. Turn-scoped writes
+    /// made under the lease carry it; a token that is no longer the
+    /// conversation's live lease must be rejected.
+    pub token: LeaseToken,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompleteTurnOutcome {
+    QueueEmpty,
+    MorePending,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CancelTurnOutcome {
+    NotFound,
+    Cancelled { owner: Option<RuntimeId> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LeasedHeadTurn {
+    pub turn_id: TurnId,
+    pub owner: RuntimeId,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EventQuery {
     pub cursor: Option<EventId>,
@@ -225,6 +406,8 @@ impl EventKind {
     pub const SESSION_ENDED: EventKind = EventKind(Cow::Borrowed("session_ended"));
     pub const TURN_STARTED: EventKind = EventKind(Cow::Borrowed("turn_started"));
     pub const TURN_ENDED: EventKind = EventKind(Cow::Borrowed("turn_ended"));
+    pub const TURN_ENQUEUED: EventKind = EventKind(Cow::Borrowed("turn_enqueued"));
+    pub const TURN_CANCELLED: EventKind = EventKind(Cow::Borrowed("turn_cancelled"));
     pub const MESSAGES: EventKind = EventKind(Cow::Borrowed("messages"));
     pub const TOOL_REQUESTED: EventKind = EventKind(Cow::Borrowed("tool_requested"));
     pub const TOOL_RESULT: EventKind = EventKind(Cow::Borrowed("tool_result"));
@@ -338,6 +521,19 @@ pub enum EventData {
     SessionEnded,
     TurnStarted,
     TurnEnded,
+    /// Input was durably accepted for later execution
+    /// (`TurnCoordinator::enqueue_turn()`). Carries the pending turn's id in
+    /// the payload because the event is appended outside any session or
+    /// turn.
+    TurnEnqueued {
+        turn_id: TurnId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        not_before: Option<DateTimeUtc>,
+    },
+    /// Cancellation was durably requested for a pending or running turn.
+    TurnCancelled {
+        turn_id: TurnId,
+    },
     Messages {
         messages: Vec<Message>,
         response_id: Option<ResponseId>,
@@ -435,6 +631,8 @@ impl EventData {
             Self::SessionEnded => EventKind::SESSION_ENDED,
             Self::TurnStarted => EventKind::TURN_STARTED,
             Self::TurnEnded => EventKind::TURN_ENDED,
+            Self::TurnEnqueued { .. } => EventKind::TURN_ENQUEUED,
+            Self::TurnCancelled { .. } => EventKind::TURN_CANCELLED,
             Self::Messages { .. } => EventKind::MESSAGES,
             Self::ToolRequested { .. } => EventKind::TOOL_REQUESTED,
             Self::ToolResult { .. } => EventKind::TOOL_RESULT,
@@ -940,12 +1138,15 @@ pub type SandboxProcessId = String;
 pub type SnapshotId = Uuid7;
 pub type BindingId = Uuid7;
 pub type SecretId = Uuid7;
+pub type RuntimeId = String;
+pub type LeaseToken = String;
 pub type DateTimeUtc = DateTime<Utc>;
 pub type ToolResult = Value;
 pub type ToolArguments = Map<String, Value>;
 pub type BoxAsyncRead = Pin<Box<dyn AsyncRead + Send + Unpin>>;
 pub type BoxAsyncWrite = Pin<Box<dyn AsyncWrite + Send + Unpin>>;
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<Event>> + Send>>;
+pub type ReadyStream = Pin<Box<dyn Stream<Item = Result<ConversationId>> + Send>>;
 
 crate::impl_has_uuid7_id!(AgentRecord, id);
 crate::impl_has_uuid7_id!(ConversationRecord, id);
