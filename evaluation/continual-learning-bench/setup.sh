@@ -27,6 +27,11 @@ echo "==> linking exo system into clbench"
 ln -sfn "$HERE/system" "$CLBENCH/src/systems/exo"
 ls -ld "$CLBENCH/src/systems/exo"
 
+# Discovery is filesystem-based on src/tasks/ too; symlink our custom task(s) in.
+echo "==> linking custom tasks into clbench"
+ln -sfn "$HERE/tasks/tool_forge" "$CLBENCH/src/tasks/tool_forge"
+ls -ld "$CLBENCH/src/tasks/tool_forge"
+
 echo "==> host exo binary (local-process sandbox; built from $EXO_REPO)"
 [ -x "$EXO_REPO/target/release/exo" ] || ( cd "$EXO_REPO" && cargo build --release -p exo )
 
