@@ -379,24 +379,23 @@ impl TurnCoordinator for BasicTurnCoordinator {
         request: EnqueueTurnRequest,
     ) -> Result<EnqueueTurnResult> {
         let conversation = self.resolver.resolve(conversation_id).await?;
-        if let Some(key) = &request.dedupe_key {
-            if let Some(existing) = self
+        if let Some(key) = &request.dedupe_key
+            && let Some(existing) = self
                 .pending_turns(conversation_id)
                 .await?
                 .into_iter()
                 .find(|turn| turn.dedupe_key.as_ref() == Some(key))
-            {
-                let leased_by = self
-                    .read_lease(conversation_id)
-                    .await?
-                    .filter(LeaseRecord::live)
-                    .map(|record| record.runtime_id);
-                return Ok(EnqueueTurnResult {
-                    turn: existing,
-                    deduplicated: true,
-                    leased_by,
-                });
-            }
+        {
+            let leased_by = self
+                .read_lease(conversation_id)
+                .await?
+                .filter(LeaseRecord::live)
+                .map(|record| record.runtime_id);
+            return Ok(EnqueueTurnResult {
+                turn: existing,
+                deduplicated: true,
+                leased_by,
+            });
         }
         let turn = pending_turn_from_request(conversation_id, request);
         self.storage
