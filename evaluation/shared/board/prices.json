@@ -1,0 +1,18 @@
+{
+  "_comment": "Pinned $/Mtok prices used for ALL board cost computations, so cost-per-task is reproducible from token counts. Update deliberately; record the date.",
+  "as_of": "2026-07-01",
+  "models": {
+    "gpt-5.5": {
+      "input_per_mtok": 5.0,
+      "cached_input_per_mtok": 0.5,
+      "output_per_mtok": 30.0,
+      "source": "https://developers.openai.com/api/docs/pricing"
+    },
+    "claude-opus-4-8": {
+      "input_per_mtok": 5.0,
+      "cached_input_per_mtok": 0.5,
+      "output_per_mtok": 25.0,
+      "source": "https://platform.claude.com/docs/en/pricing"
+    }
+  }
+}

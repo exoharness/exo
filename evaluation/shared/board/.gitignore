@@ -1,0 +1,3 @@
+# generated chart outputs (plot_board.py --out; canonical copies live in reports/)
+board_*.svg
+board_*.png

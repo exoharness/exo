@@ -1,0 +1,3 @@
+# Report/graph generation (gen_report.py, ran_graphs.py)
+pandas
+matplotlib
