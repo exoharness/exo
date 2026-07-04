@@ -243,6 +243,31 @@ describe("skill tools", () => {
     expect(noDescription.error).toMatch(/description/);
   });
 
+  it("rejects the reserved name index without touching the catalog", async () => {
+    const { context } = makeContext();
+    await call("install_skill", { skillMd: PDF_SKILL_MD }, context);
+    const result = (await call(
+      "install_skill",
+      {
+        skillMd:
+          "---\nname: index\ndescription: Shadows the catalog artifact.\n---\nbody",
+      },
+      context,
+    )) as { ok: boolean; error: string };
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/reserved/);
+
+    // The catalog must remain readable and unchanged.
+    const listed = (await call("list_skills", {}, context)) as {
+      ok: boolean;
+      skills: { name: string }[];
+    };
+    expect(listed.ok).toBe(true);
+    expect(listed.skills.map((skill) => skill.name)).toEqual([
+      "pdf-processing",
+    ]);
+  });
+
   it("rejects absolute and traversal file paths", async () => {
     const { context } = makeContext();
     for (const path of ["/etc/passwd", "../escape.txt", "a//b"]) {
