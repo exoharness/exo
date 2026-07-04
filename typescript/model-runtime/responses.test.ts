@@ -6,6 +6,7 @@ import {
   ChatCompletionsRuntime,
   isAnthropicModel,
   isOpenRouterBinding,
+  messagesToChatMessages,
   modelRequiresResponsesApi,
   responseToLinguaEvents,
   responseToolCalls,
@@ -218,5 +219,84 @@ describe("response tool-call parsing", () => {
         },
       },
     ]);
+  });
+});
+
+describe("chat-completions history replay", () => {
+  it("unwraps the lingua ToolCallArguments enum when replaying tool calls", () => {
+    const chatMessages = messagesToChatMessages([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_call",
+            tool_call_id: "call_1",
+            tool_name: "shell",
+            arguments: { type: "valid", value: { command: "ls -la" } },
+          },
+        ],
+      },
+    ]);
+
+    expect(chatMessages).toEqual([
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_1",
+            type: "function",
+            function: {
+              name: "shell",
+              arguments: '{"command":"ls -la"}',
+            },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("replays invalid arguments as the raw string the model produced", () => {
+    const [assistant] = messagesToChatMessages([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_call",
+            tool_call_id: "call_1",
+            tool_name: "shell",
+            arguments: { type: "invalid", value: "{not json" },
+          },
+        ],
+      },
+    ]);
+
+    expect(
+      assistant.role === "assistant" &&
+        assistant.tool_calls?.[0]?.type === "function" &&
+        assistant.tool_calls[0].function.arguments,
+    ).toBe("{not json");
+  });
+
+  it("passes through plain-object arguments unchanged", () => {
+    const [assistant] = messagesToChatMessages([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_call",
+            tool_call_id: "call_1",
+            tool_name: "shell",
+            arguments: { command: "ls" },
+          },
+        ],
+      },
+    ]);
+
+    expect(
+      assistant.role === "assistant" &&
+        assistant.tool_calls?.[0]?.type === "function" &&
+        assistant.tool_calls[0].function.arguments,
+    ).toBe('{"command":"ls"}');
   });
 });

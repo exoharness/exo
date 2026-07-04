@@ -853,7 +853,7 @@ function buildChatStreamingBody(
   };
 }
 
-function messagesToChatMessages(
+export function messagesToChatMessages(
   messages: Message[],
 ): ChatCompletionMessageParam[] {
   return messages.map(messageToChatMessage);
@@ -1065,13 +1065,30 @@ function assistantToolCalls(content: unknown): ChatCompletionMessageToolCall[] {
         type: "function",
         function: {
           name: part.tool_name,
-          arguments: JSON.stringify(
-            isRecord(part.arguments) ? part.arguments : {},
-          ),
+          arguments: toolCallArgumentsJson(part.arguments),
         },
       },
     ];
   });
+}
+
+// Stored lingua messages carry tool-call arguments as the tagged
+// ToolCallArguments enum: {type: "valid", value: {...}} | {type: "invalid",
+// value: "raw"}. Replayed history must contain the provider-shaped arguments,
+// not the envelope — models mimic whatever argument shape they see in prior
+// calls, and a mimicked envelope makes the real arguments unreachable by
+// tools. The wasm-backed Responses/Anthropic paths unwrap the enum inside
+// lingua; this hand-rolled chat-completions path must do the same.
+function toolCallArgumentsJson(args: unknown): string {
+  if (isRecord(args) && Object.keys(args).length === 2) {
+    if (args.type === "valid" && isRecord(args.value)) {
+      return JSON.stringify(args.value);
+    }
+    if (args.type === "invalid" && typeof args.value === "string") {
+      return args.value;
+    }
+  }
+  return JSON.stringify(isRecord(args) ? args : {});
 }
 
 function assistantTextContent(content: unknown): string | null {
