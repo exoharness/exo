@@ -1,0 +1,382 @@
+{
+  "benchmark": "arc-agi-1",
+  "system": "opus-4.8-direct",
+  "model": "claude-opus-4-8",
+  "label": "Opus 4.8 (direct)",
+  "metric": "pass@2",
+  "score": 0.9,
+  "n_tasks": 50,
+  "task_set": {
+    "data_dir": "/home/worker/ARC-AGI/data/evaluation",
+    "offset": 0,
+    "task_ids": [
+      "00576224",
+      "009d5c81",
+      "00dbd492",
+      "03560426",
+      "05a7bcf2",
+      "0607ce86",
+      "0692e18c",
+      "070dd51e",
+      "08573cc6",
+      "0934a4d8",
+      "09c534e7",
+      "0a1d4ef5",
+      "0a2355a6",
+      "0b17323b",
+      "0bb8deee",
+      "0becf7df",
+      "0c786b71",
+      "0c9aba6e",
+      "0d87d2a6",
+      "0e671a1a",
+      "0f63c0b9",
+      "103eff5b",
+      "11e1fe23",
+      "12422b43",
+      "12997ef3",
+      "12eac192",
+      "136b0064",
+      "13713586",
+      "137f0df0",
+      "140c817e",
+      "14754a24",
+      "15113be4",
+      "15663ba9",
+      "15696249",
+      "16b78196",
+      "17b80ad2",
+      "17cae0c1",
+      "18419cfa",
+      "184a9768",
+      "195ba7dc",
+      "1990f7a8",
+      "19bb5feb",
+      "1a2e2828",
+      "1a6449f1",
+      "1acc24af",
+      "1c02dbbe",
+      "1c0d0a4b",
+      "1c56ad9f",
+      "1d0a4b61",
+      "1d398264"
+    ]
+  },
+  "cost": {
+    "input_tokens": 183426,
+    "cached_input_tokens": 0,
+    "output_tokens": 589603,
+    "total_usd": 15.6572,
+    "per_task_usd": 0.3131,
+    "prices_as_of": "2026-07-01"
+  },
+  "per_task": [
+    {
+      "task": "00576224",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0165
+    },
+    {
+      "task": "009d5c81",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0474
+    },
+    {
+      "task": "00dbd492",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.1062
+    },
+    {
+      "task": "03560426",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.1198
+    },
+    {
+      "task": "05a7bcf2",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 1.0488
+    },
+    {
+      "task": "0607ce86",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.1712
+    },
+    {
+      "task": "0692e18c",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.054
+    },
+    {
+      "task": "070dd51e",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.1145
+    },
+    {
+      "task": "08573cc6",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.3386
+    },
+    {
+      "task": "0934a4d8",
+      "solved": false,
+      "solved_pass2": false,
+      "cost_usd": 1.6471
+    },
+    {
+      "task": "09c534e7",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.8471
+    },
+    {
+      "task": "0a1d4ef5",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.1181
+    },
+    {
+      "task": "0a2355a6",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.2261
+    },
+    {
+      "task": "0b17323b",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0319
+    },
+    {
+      "task": "0bb8deee",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.044
+    },
+    {
+      "task": "0becf7df",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.053
+    },
+    {
+      "task": "0c786b71",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0476
+    },
+    {
+      "task": "0c9aba6e",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0165
+    },
+    {
+      "task": "0d87d2a6",
+      "solved": false,
+      "solved_pass2": false,
+      "cost_usd": 0.2907
+    },
+    {
+      "task": "0e671a1a",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.2599
+    },
+    {
+      "task": "0f63c0b9",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.1103
+    },
+    {
+      "task": "103eff5b",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.3316
+    },
+    {
+      "task": "11e1fe23",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0685
+    },
+    {
+      "task": "12422b43",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0994
+    },
+    {
+      "task": "12997ef3",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0332
+    },
+    {
+      "task": "12eac192",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.2553
+    },
+    {
+      "task": "136b0064",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.6191
+    },
+    {
+      "task": "13713586",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.1399
+    },
+    {
+      "task": "137f0df0",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.1258
+    },
+    {
+      "task": "140c817e",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.1355
+    },
+    {
+      "task": "14754a24",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.8007
+    },
+    {
+      "task": "15113be4",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.4247
+    },
+    {
+      "task": "15663ba9",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.7875
+    },
+    {
+      "task": "15696249",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0387
+    },
+    {
+      "task": "16b78196",
+      "solved": false,
+      "solved_pass2": false,
+      "cost_usd": 1.6459
+    },
+    {
+      "task": "17b80ad2",
+      "solved": false,
+      "solved_pass2": false,
+      "cost_usd": 0.1961
+    },
+    {
+      "task": "17cae0c1",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.026
+    },
+    {
+      "task": "18419cfa",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.328
+    },
+    {
+      "task": "184a9768",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.7821
+    },
+    {
+      "task": "195ba7dc",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0201
+    },
+    {
+      "task": "1990f7a8",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0815
+    },
+    {
+      "task": "19bb5feb",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0122
+    },
+    {
+      "task": "1a2e2828",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.0337
+    },
+    {
+      "task": "1a6449f1",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.093
+    },
+    {
+      "task": "1acc24af",
+      "solved": false,
+      "solved_pass2": false,
+      "cost_usd": 1.607
+    },
+    {
+      "task": "1c02dbbe",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.13
+    },
+    {
+      "task": "1c0d0a4b",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.068
+    },
+    {
+      "task": "1c56ad9f",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.6764
+    },
+    {
+      "task": "1d0a4b61",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.1922
+    },
+    {
+      "task": "1d398264",
+      "solved": true,
+      "solved_pass2": true,
+      "cost_usd": 0.196
+    }
+  ],
+  "run_config": {
+    "backend": "anthropic",
+    "harness": null,
+    "evolve": false,
+    "protocol": "stateless"
+  },
+  "created": "2026-07-02T02:44:10.160388+00:00"
+}

@@ -1,0 +1,189 @@
+{
+  "data_dir": "/home/worker/ARC-AGI-2/data/evaluation",
+  "model": "gpt-5.5",
+  "harness": "/home/worker/exo/examples/simple-coding-agent/harness-arc-evolve.ts",
+  "evolve": true,
+  "n": 25,
+  "solved": 16,
+  "pass_at_1": 0.64,
+  "solved_pass2": 16,
+  "pass_at_2": 0.64,
+  "results": [
+    {
+      "task": "0934a4d8",
+      "solved": true,
+      "solved_pass2": true,
+      "n_test": 1,
+      "parsed": true
+    },
+    {
+      "task": "135a2760",
+      "solved": true,
+      "solved_pass2": true,
+      "n_test": 1,
+      "parsed": true
+    },
+    {
+      "task": "136b0064",
+      "solved": true,
+      "solved_pass2": true,
+      "n_test": 1,
+      "parsed": true
+    },
+    {
+      "task": "13e47133",
+      "solved": true,
+      "solved_pass2": true,
+      "n_test": 2,
+      "parsed": true
+    },
+    {
+      "task": "142ca369",
+      "solved": true,
+      "solved_pass2": true,
+      "n_test": 2,
+      "parsed": true
+    },
+    {
+      "task": "16b78196",
+      "solved": false,
+      "solved_pass2": false,
+      "n_test": 1,
+      "parsed": true
+    },
+    {
+      "task": "16de56c4",
+      "solved": true,
+      "solved_pass2": true,
+      "n_test": 2,
+      "parsed": true
+    },
+    {
+      "task": "1818057f",
+      "solved": true,
+      "solved_pass2": true,
+      "n_test": 1,
+      "parsed": true
+    },
+    {
+      "task": "195c6913",
+      "solved": false,
+      "solved_pass2": false,
+      "n_test": 2,
+      "parsed": true
+    },
+    {
+      "task": "1ae2feb7",
+      "solved": true,
+      "solved_pass2": true,
+      "n_test": 3,
+      "parsed": true
+    },
+    {
+      "task": "20270e3b",
+      "solved": true,
+      "solved_pass2": true,
+      "n_test": 2,
+      "parsed": true
+    },
+    {
+      "task": "20a9e565",
+      "solved": false,
+      "solved_pass2": false,
+      "n_test": 2,
+      "parsed": true
+    },
+    {
+      "task": "21897d95",
+      "solved": false,
+      "solved_pass2": false,
+      "n_test": 2,
+      "parsed": true
+    },
+    {
+      "task": "221dfab4",
+      "solved": false,
+      "solved_pass2": false,
+      "n_test": 2,
+      "parsed": true
+    },
+    {
+      "task": "247ef758",
+      "solved": true,
+      "solved_pass2": true,
+      "n_test": 2,
+      "parsed": true
+    },
+    {
+      "task": "269e22fb",
+      "solved": true,
+      "solved_pass2": true,
+      "n_test": 2,
+      "parsed": true
+    },
+    {
+      "task": "271d71e2",
+      "solved": false,
+      "solved_pass2": false,
+      "n_test": 1,
+      "parsed": true
+    },
+    {
+      "task": "28a6681f",
+      "solved": false,
+      "solved_pass2": false,
+      "n_test": 1,
+      "parsed": true
+    },
+    {
+      "task": "291dc1e1",
+      "solved": false,
+      "solved_pass2": false,
+      "n_test": 1,
+      "parsed": true
+    },
+    {
+      "task": "2b83f449",
+      "solved": false,
+      "solved_pass2": false,
+      "n_test": 1,
+      "parsed": true
+    },
+    {
+      "task": "2ba387bc",
+      "solved": true,
+      "solved_pass2": true,
+      "n_test": 1,
+      "parsed": true
+    },
+    {
+      "task": "2c181942",
+      "solved": true,
+      "solved_pass2": true,
+      "n_test": 1,
+      "parsed": true
+    },
+    {
+      "task": "2d0172a1",
+      "solved": true,
+      "solved_pass2": true,
+      "n_test": 2,
+      "parsed": true
+    },
+    {
+      "task": "31f7f899",
+      "solved": true,
+      "solved_pass2": true,
+      "n_test": 1,
+      "parsed": true
+    },
+    {
+      "task": "332f06d7",
+      "solved": true,
+      "solved_pass2": true,
+      "n_test": 1,
+      "parsed": true
+    }
+  ],
+  "evolve_root": "/home/worker/exo/evaluation/arc-agi/results/evolve-roots/evolve25"
+}

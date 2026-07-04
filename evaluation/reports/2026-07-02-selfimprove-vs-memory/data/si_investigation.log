@@ -1,0 +1,1445 @@
+=== ARM=memory TASK=database_exploration n=12 start 07:05:29 ===
+==> clbench run database_exploration --schedule default --system exo --task-params {"num_instances":12} --runs 1 --max-workers 1
+Running exo on database_exploration...
+System params: {'model': 'gpt-5.5', 'kwargs': None}
+Task params: {'schedule': 'default', 'db_path': '/home/worker/clbench/data/database_exploration/products.db', 'questions_path': '/home/worker/clbench/data/database_exploration/questions.json', 'num_questions': 30, 'num_instances': 12, 'max_queries_per_question': 15, 'seed': 42, 'response_timeout_seconds': 60.0}
+
+Live dashboard: http://127.0.0.1:45709/viewers/single_task_viewer.html?artifact=results/database_exploration/live/2026-07-02T07-05-30.199535Z/manifest.json
+
+Error: Benchmark execution failed.
+  Task: database_exploration
+  System: exo
+  Run group: 2026-07-02T07-05-30.199535Z
+  Config: (none)
+  Live dashboard: http://127.0.0.1:45709/viewers/single_task_viewer.html?artifact=results/database_exploration/live/2026-07-02T07-05-30.199535Z/manifest.json
+  ValueError: Variant 'schema_drift' defines fixed parameters and cannot be combined with num_questions=12 (expected 40).
+Hint: Add --debug for extra CLI setup logs.
+Traceback (most recent call last):
+  File "/home/worker/clbench/src/cli.py", line 2286, in _cmd_run_impl
+    baseline_info, task_results, run_trace_data_list = run_benchmark(
+                                                       ~~~~~~~~~~~~~^
+        task_class=task_class,
+        ^^^^^^^^^^^^^^^^^^^^^^
+    ...<14 lines>...
+        output_path=Path(args.output) if args.output else None,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/worker/clbench/src/runs/benchmark.py", line 300, in run_benchmark
+    num_baseline_instances = get_task_num_instances(task_class, merged_baseline_params)
+  File "/home/worker/clbench/src/runs/common.py", line 72, in get_task_num_instances
+    probe_task = task_class(**filter_init_params(task_class, task_params))
+  File "/home/worker/clbench/src/tasks/database_exploration/task.py", line 175, in __init__
+    validate_variant_defaults(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^
+        self.variant_spec,
+        ^^^^^^^^^^^^^^^^^^
+    ...<13 lines>...
+        },
+        ^^
+    )
+    ^
+  File "/home/worker/clbench/src/tasks/variants.py", line 106, in validate_variant_defaults
+    raise ValueError(
+    ...<3 lines>...
+    )
+ValueError: Variant 'schema_drift' defines fixed parameters and cannot be combined with num_questions=12 (expected 40).
+=== ARM=memory TASK=database_exploration exit 1 07:05:30 ===
+=== ARM=memory TASK=sales_prediction n=8 start 07:05:30 ===
+==> clbench run sales_prediction --schedule default --system exo --task-params {"num_instances":8} --runs 1 --max-workers 1
+Running exo on sales_prediction...
+System params: {'model': 'gpt-5.5', 'kwargs': None}
+Task params: {'num_instances': 12, 'max_steps_per_instance': 20, 'seed': 123, 'base_year': 2027, 'forecast_horizon': 5, 'schedule': 'default', 'docker_image': 'pgasawa2/continual-learning-bench:sales-prediction', 'clean_workspace_between_instances': False, 'repeat_instructions': True, 'expected_num_instances': 12}
+
+Live dashboard: http://127.0.0.1:43317/viewers/single_task_viewer.html?artifact=results/sales_prediction/live/2026-07-02T07-05-31.430416Z/manifest.json
+
+Starting 1 run(s) + 12-instance baseline with 1 parallel workers [group 2026-07-02T07-05-31.430416Z, mode=replicate]
+👋 This is mini-swe-agent version 2.2.4.
+Check the v2 migration guide at https://klieret.short.gy/mini-v2-migration
+Loading global config from '/home/worker/.config/mini-swe-agent/.env'
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-3597afc5 -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-3597afc5 with ID 
+5e54fb6c136da64ccfae76a5ad715b33bbbee080365102f032237500f0b5f34e                
+  Run 1/1 complete - score: 0.8255
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-0b6bce93 -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-0b6bce93 with ID 
+8f4bb16e17f6b654220cf41fee04188f1f865a29a6be141089fe62ef56e5a6b2                
+  Baseline 1/12 complete (instance #1) - mean so far: 0.6368
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-6c0fa4f4 -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-6c0fa4f4 with ID 
+56f57eb7913a6365db6dae33eb2c8941b876c76022e793b8a6adf7b5027e5112                
+  Baseline 2/12 complete (instance #2) - mean so far: 0.6240
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-a4e436f8 -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-a4e436f8 with ID 
+56edbc8f2312d027f4f112829a6756dd93c21cda8473239f8eab72ccc4acdf3b                
+  Baseline 3/12 complete (instance #3) - mean so far: 0.5915
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-cfcf4d5c -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-cfcf4d5c with ID 
+30f1cc65effba5dda6daa75fb7f4e3cd10e406bf959ba5d7f6ebda4ce6538176                
+  Baseline 4/12 complete (instance #4) - mean so far: 0.6081
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-a9b0ed48 -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-a9b0ed48 with ID 
+471837e040d1cc64402e8910c0601ca9364c773a3b9ec6da403c4f034e3992bd                
+  Baseline 5/12 complete (instance #5) - mean so far: 0.5818
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-6e979490 -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-6e979490 with ID 
+8f6ac9d98c7002509afb42854dcf0bc04f7c5872005273d363b8ecfacfcc1672                
+  Baseline 6/12 complete (instance #6) - mean so far: 0.5675
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-f60b6edf -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-f60b6edf with ID 
+dfa6eab069b0a80a21d250fc175f097e3316d1acf1207ff55eef9ae7465b31fd                
+  Baseline 7/12 complete (instance #7) - mean so far: 0.5755
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-53022f3d -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-53022f3d with ID 
+678bdf4f675380963c3dbc43cbb4ea35ec05414e75f67ba1bb84a177c249ecdd                
+  Baseline 8/12 complete (instance #8) - mean so far: 0.5643
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-5f89a633 -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-5f89a633 with ID 
+14732042fabfc4e9f5499d98933dc9fb30998d053a1103b487e36665cc5a8c45                
+  Baseline 9/12 complete (instance #9) - mean so far: 0.5481
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-03042129 -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-03042129 with ID 
+ab01d63926c5421d6596b07f369d5389ac914628e8704b208fff8fa1462ecec5                
+  Baseline 10/12 complete (instance #10) - mean so far: 0.5469
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-a55b2832 -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-a55b2832 with ID 
+9975bc079857258a5166dba6e76c15355ec131c70f6b7ddd082ea8fad8021cef                
+  Baseline 11/12 complete (instance #11) - mean so far: 0.5364
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-7511c7a3 -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-7511c7a3 with ID 
+22aefe625172e7ee8160a96e80eb631b8f9c24c45f4f40f4a33aad8dc6740e32                
+  Baseline 12/12 complete (instance #12) - mean so far: 0.5204
+
+================================================================================
+BENCHMARK
+================================================================================
+
+Final cumulative gain: +3.6609
+Final cumulative reward: +9.9059
+Baseline reward total: +6.2450
+Baseline coverage: 12/12
+Run total reward: +9.9059
+Run cumulative gain: +3.6609
+
+================================================================================
+RESULTS
+================================================================================
+
+Score: 0.8255
+System compute: $0.000000 | 0 call(s) | 0 tokens
+
+Load this in the viewer: results/sales_prediction/viewer_artifact_2026-07-02T07-05-31.430416Z_20260702_080006.json.gz
+Full trace JSON files: results/sales_prediction/traces/2026-07-02T07-05-31.430416Z
+Live viewer URL: http://127.0.0.1:43317/viewers/single_task_viewer.html?artifact=results/sales_prediction/live/2026-07-02T07-05-31.430416Z/manifest.json
+=== ARM=memory TASK=sales_prediction exit 0 08:00:11 ===
+=== ARM=memory TASK=codebase_adaptation n=10 start 08:00:11 ===
+==> clbench run codebase_adaptation --schedule default --system exo --task-params {"num_instances":10} --runs 1 --max-workers 1
+👋 This is mini-swe-agent version 2.2.4.
+Check the v2 migration guide at https://klieret.short.gy/mini-v2-migration
+Loading global config from '/home/worker/.config/mini-swe-agent/.env'
+Running exo on codebase_adaptation...
+System params: {'model': 'gpt-5.5', 'kwargs': None}
+Task params: {'dataset_path': 'data/codebase_adaptation/final-dataset.jsonl', 'num_instances': 19, 'max_steps_per_issue': 40, 'seed': 42, 'same_repo': True, 'schedule': 'default', 'expected_num_instances': 19}
+
+Live dashboard: http://127.0.0.1:43867/viewers/single_task_viewer.html?artifact=results/codebase_adaptation/live/2026-07-02T08-00-12.354499Z/manifest.json
+
+Starting 1 run(s) + 19-instance baseline with 1 parallel workers [group 2026-07-02T08-00-12.354499Z, mode=permute]
+👋 This is mini-swe-agent version 2.2.4.
+Check the v2 migration guide at https://klieret.short.gy/mini-v2-migration
+Loading global config from '/home/worker/.config/mini-swe-agent/.env'
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-a138dae1 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-a138dae1 with ID 
+4da3ff41c140a2a332e683f149f96d847e3956b54216a2a0e5e0a76893a1ff00                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-5030fcd6 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-5030fcd6 with ID 
+f2f348858a6d7746112a1953cce5e02f0d65e91a8290a9fcd39d6e6957859275                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-c49b58b3 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-c49b58b3 with ID 
+dd64854f9658774425f49a5fd6347609331c6a4117fb0408e2cef5682544e960                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-47e1d702 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-47e1d702 with ID 
+29ca6cdcfcd96f141c401ba14eec4eb49d51bfc1810a4386b4e02760763fdf11                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-81f537ae -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-81f537ae with ID 
+24f4d3aa0f474801bf257a9c7c4ca0de183021fd7d1265f1d5a9e582fe799922                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-f3ae9e47 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-f3ae9e47 with ID 
+92b5bc6153c13eab7c40a571d9950662926e6b3eaa712a1f372788689cd2c1a0                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-76c7af02 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-76c7af02 with ID 
+ff4626c853620acd2aa76953471a6995d47df5e40b02a70f9bf047669c744a9e                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-0a4bb45f -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-0a4bb45f with ID 
+be0623c887b49294e275eafbe183983277b21a83369e93be893af892f753657f                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-e68565e9 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-e68565e9 with ID 
+8f19546c4836bd181adb5d74efbc70605e634ec3b7b89871ee5d43f8cad538e7                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-9ca881ad -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-9ca881ad with ID 
+eb9bb18c3799193e0c694f538dca55ec688708de4c792a649621ce3faaadca8d                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-f2056aa8 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-f2056aa8 with ID 
+8c711820f25e93ecf85b72710bef581cc72f3a74b1b848d5a328259b3e66e5d8                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-a47e2e43 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-a47e2e43 with ID 
+cf0a1e90d389e1ff09f70d01f52312acf147485c79507fa3994bd09fd52928b3                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-64ac445c -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-64ac445c with ID 
+8670ef059d9abbc8b8c2562c1a3bbf100c6efa95af5a12e4c24881da2cdab16f                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-e94ea967 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-e94ea967 with ID 
+db1944b7dd0001d0a35c1f01e89c4e93c6149b1715a959c6e136749f4fdf9ff1                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-13b2ce25 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-13b2ce25 with ID 
+9e259328b27c1480347cd9a72d28515cd1a2bf82fa2d643f06a89ef916171245                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-00d8e6bf -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-00d8e6bf with ID 
+558375fd7edb2037d0e13e82123489f33b29c01b447188712b9fbfb8f7c7ffaf                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-9c768f95 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-9c768f95 with ID 
+06d51feda55cfc756bd20c1825c8a025904063a1d5ae2faa9b47c69818496ae4                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-626a33e3 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-626a33e3 with ID 
+70be7d25c15b24c6e7433a1b5c81c1ee762079cbc0583ec7cab506f4ce40b85f                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-da9fb48d -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-da9fb48d with ID 
+df0ec366a2127238c7875e565802f8640cd7c7cbf4b2502656ae0c59fa62777a                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-911ee3e6 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+  Run 1/1 complete - score: 0.6355
+minisweagent.environment: INFO: Started container minisweagent-911ee3e6 with ID 
+bd1971f316e93a4d1b85a4db23718edde46e39bf2d415b96e3947f91a39e24ae                
+  Baseline 1/19 complete (instance #1) - mean so far: 0.8250
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-971e29f9 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-971e29f9 with ID 
+ef57c8e04d556b348b7a0c71adaa0c5ed0d2c339418b00cee52ec3c44caf7bb4                
+  Baseline 2/19 complete (instance #2) - mean so far: 0.8250
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-e6e934c2 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-e6e934c2 with ID 
+33779c757ef8d51efbf13118c3685b2f499838fd9d417e03554ac0019cbea0a7                
+  Baseline 3/19 complete (instance #3) - mean so far: 0.8000
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-3443a6b3 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-3443a6b3 with ID 
+28b70d290e8f2181ddae799cd3ba4368f911e477f7ba2a36fbce34aee2b65eb3                
+  Baseline 4/19 complete (instance #4) - mean so far: 0.7688
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-f9a7bf92 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-f9a7bf92 with ID 
+e3f51cb2c18d53ae4369dac7bfaed81bf296d0458218387415693bb3244f9f76                
+  Baseline 5/19 complete (instance #5) - mean so far: 0.7600
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-2cbf8051 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-2cbf8051 with ID 
+8d282ab5b9ea2238f21143a075c19627e520a5d267cf41729f55607d3b8d9227                
+  Baseline 6/19 complete (instance #6) - mean so far: 0.7500
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-4e903a0e -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-4e903a0e with ID 
+431e32227a97b823c7524af38c06b38263854b23252f4bc0a814189e90d315ac                
+  Baseline 7/19 complete (instance #7) - mean so far: 0.7536
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-6ee6ff44 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-6ee6ff44 with ID 
+d27f6d8b825f01c14a34d4b243c8ea3afc34c936cd75c8a6d54aebee24e4fcbe                
+  Baseline 8/19 complete (instance #8) - mean so far: 0.7406
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-acfe4593 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-acfe4593 with ID 
+e7c736a6f1b1b43bf564ff73e089d3e0932b9f972ce7aa792cda19854adae052                
+  Baseline 9/19 complete (instance #9) - mean so far: 0.7306
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-16db80cb -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-16db80cb with ID 
+611e021b6e2a5b913c930c72272ad00d80f49bdc23bdef52ecd2a3a182fe098f                
+  Baseline 10/19 complete (instance #10) - mean so far: 0.7200
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-799f4a30 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-799f4a30 with ID 
+02ad437491c7185e7b562def80f36af313e64245b7350971980f0a8f7c6ac7ea                
+  Baseline 11/19 complete (instance #11) - mean so far: 0.7182
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-ce3f5080 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-ce3f5080 with ID 
+ed17b59be3d1c076e0a335076a9515d58dd0a0e71b2f2610191107afd9858c70                
+  Baseline 12/19 complete (instance #12) - mean so far: 0.6583
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-5653af6f -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-5653af6f with ID 
+b22bf33a5ae2e0487110ae66759e3b61b947b9f80c3d83812ad31ddeefcbff36                
+  Baseline 13/19 complete (instance #13) - mean so far: 0.6692
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-dc7b842c -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-dc7b842c with ID 
+5e3dd018cece018a85d78147574620125b4df60f693f1cb2fca699b47347b7b1                
+  Baseline 14/19 complete (instance #14) - mean so far: 0.6411
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-8799c235 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-8799c235 with ID 
+914a9d544445164036108a9c8710f32a4c6d2ea9d2152656935033c22f5d65b0                
+  Baseline 15/19 complete (instance #15) - mean so far: 0.6433
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-226ebdbf -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-226ebdbf with ID 
+d44ba78b9677bc28079858d5b21e834f0d9e01098e26eb77de93a33f156f3374                
+  Baseline 16/19 complete (instance #16) - mean so far: 0.6453
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-951b497a -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-951b497a with ID 
+6300a2c13715c84430654c3fc8041a3c0a3c010143ca7c43bb8c9c583b9e13ee                
+  Baseline 17/19 complete (instance #17) - mean so far: 0.6529
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-2221f6af -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-2221f6af with ID 
+4238b4efa23e4b6dcf1ed2a8b58dba972f86bf3cecb81437ce658d4c91aee7f7                
+  Baseline 18/19 complete (instance #18) - mean so far: 0.6431
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-d9a991c0 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-d9a991c0 with ID 
+b354ffc68ea0a2291628e89e28c856e9a35eb5415e38d218b3ff6a5996cc0ace                
+  Baseline 19/19 complete (instance #19) - mean so far: 0.6553
+
+================================================================================
+BENCHMARK
+================================================================================
+
+Final cumulative gain: -0.3750
+Final cumulative reward: +12.0750
+Baseline reward total: +12.4500
+Baseline coverage: 19/19
+Run total reward: +12.0750
+Run cumulative gain: -0.3750
+
+================================================================================
+RESULTS
+================================================================================
+
+Score: 0.6355
+System compute: $0.000000 | 0 call(s) | 0 tokens
+
+Load this in the viewer: results/codebase_adaptation/viewer_artifact_2026-07-02T08-00-12.354499Z_20260702_085844.json.gz
+Full trace JSON files: results/codebase_adaptation/traces/2026-07-02T08-00-12.354499Z
+Live viewer URL: http://127.0.0.1:43867/viewers/single_task_viewer.html?artifact=results/codebase_adaptation/live/2026-07-02T08-00-12.354499Z/manifest.json
+=== ARM=memory TASK=codebase_adaptation exit 0 08:58:50 ===
+=== ARM=selfimprove TASK=database_exploration n=12 start 08:58:50 ===
+==> clbench run database_exploration --schedule default --system exo --task-params {"num_instances":12} --runs 1 --max-workers 1
+Running exo on database_exploration...
+System params: {'model': 'gpt-5.5', 'kwargs': None}
+Task params: {'schedule': 'default', 'db_path': '/home/worker/clbench/data/database_exploration/products.db', 'questions_path': '/home/worker/clbench/data/database_exploration/questions.json', 'num_questions': 30, 'num_instances': 12, 'max_queries_per_question': 15, 'seed': 42, 'response_timeout_seconds': 60.0}
+
+Live dashboard: http://127.0.0.1:41621/viewers/single_task_viewer.html?artifact=results/database_exploration/live/2026-07-02T08-58-51.166475Z/manifest.json
+
+Error: Benchmark execution failed.
+  Task: database_exploration
+  System: exo
+  Run group: 2026-07-02T08-58-51.166475Z
+  Config: (none)
+  Live dashboard: http://127.0.0.1:41621/viewers/single_task_viewer.html?artifact=results/database_exploration/live/2026-07-02T08-58-51.166475Z/manifest.json
+  ValueError: Variant 'schema_drift' defines fixed parameters and cannot be combined with num_questions=12 (expected 40).
+Hint: Add --debug for extra CLI setup logs.
+Traceback (most recent call last):
+  File "/home/worker/clbench/src/cli.py", line 2286, in _cmd_run_impl
+    baseline_info, task_results, run_trace_data_list = run_benchmark(
+                                                       ~~~~~~~~~~~~~^
+        task_class=task_class,
+        ^^^^^^^^^^^^^^^^^^^^^^
+    ...<14 lines>...
+        output_path=Path(args.output) if args.output else None,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/worker/clbench/src/runs/benchmark.py", line 300, in run_benchmark
+    num_baseline_instances = get_task_num_instances(task_class, merged_baseline_params)
+  File "/home/worker/clbench/src/runs/common.py", line 72, in get_task_num_instances
+    probe_task = task_class(**filter_init_params(task_class, task_params))
+  File "/home/worker/clbench/src/tasks/database_exploration/task.py", line 175, in __init__
+    validate_variant_defaults(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^
+        self.variant_spec,
+        ^^^^^^^^^^^^^^^^^^
+    ...<13 lines>...
+        },
+        ^^
+    )
+    ^
+  File "/home/worker/clbench/src/tasks/variants.py", line 106, in validate_variant_defaults
+    raise ValueError(
+    ...<3 lines>...
+    )
+ValueError: Variant 'schema_drift' defines fixed parameters and cannot be combined with num_questions=12 (expected 40).
+=== ARM=selfimprove TASK=database_exploration exit 1 08:58:51 ===
+=== ARM=selfimprove TASK=sales_prediction n=8 start 08:58:51 ===
+==> clbench run sales_prediction --schedule default --system exo --task-params {"num_instances":8} --runs 1 --max-workers 1
+Running exo on sales_prediction...
+System params: {'model': 'gpt-5.5', 'kwargs': None}
+Task params: {'num_instances': 12, 'max_steps_per_instance': 20, 'seed': 123, 'base_year': 2027, 'forecast_horizon': 5, 'schedule': 'default', 'docker_image': 'pgasawa2/continual-learning-bench:sales-prediction', 'clean_workspace_between_instances': False, 'repeat_instructions': True, 'expected_num_instances': 12}
+
+Live dashboard: http://127.0.0.1:37245/viewers/single_task_viewer.html?artifact=results/sales_prediction/live/2026-07-02T08-58-52.435877Z/manifest.json
+
+Starting 1 run(s) + 12-instance baseline with 1 parallel workers [group 2026-07-02T08-58-52.435877Z, mode=replicate]
+👋 This is mini-swe-agent version 2.2.4.
+Check the v2 migration guide at https://klieret.short.gy/mini-v2-migration
+Loading global config from '/home/worker/.config/mini-swe-agent/.env'
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-1adab302 -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-1adab302 with ID 
+cc91d198a13462ebc43eed78231392667fce295cbab78addd112a8b285105746                
+  Run 1/1 complete - score: 0.8409
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-ae5245e6 -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-ae5245e6 with ID 
+706d7c3f1ec25b98e44f361b305d3390c842aba280e7c0c7f99d21af45f57c48                
+  Baseline 1/12 complete (instance #1) - mean so far: 0.6443
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-76c874f6 -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-76c874f6 with ID 
+04f1255c41c87157f689644ab079d36a811463301aa8147fd9a1091e256d10f2                
+  Baseline 2/12 complete (instance #2) - mean so far: 0.6102
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-95c1ae4a -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-95c1ae4a with ID 
+8ae19908a533fcdd164a8b3cb74f9fa60d743eb99b4c155d6c0eb0b58a70e658                
+  Baseline 3/12 complete (instance #3) - mean so far: 0.5900
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-7a85b4a9 -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-7a85b4a9 with ID 
+c04b0f74170f2870643ef1f385a065b60e61ed44d4331b1557d013cfb56ff137                
+  Baseline 4/12 complete (instance #4) - mean so far: 0.6033
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-ae4d68ba -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-ae4d68ba with ID 
+064f21a28c6e122260cbeccb57bb38015913493c2b9250078a5341141e5fe01e                
+  Baseline 5/12 complete (instance #5) - mean so far: 0.5906
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-53f1064d -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-53f1064d with ID 
+0bd0345cff04abd31da0bf25c586a35f21584ff8f9c48bbfc3c59708c240bcfb                
+  Baseline 6/12 complete (instance #6) - mean so far: 0.5775
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-b783a52e -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-b783a52e with ID 
+389f170f9be68cdfe9244eda3477308584517c38b9d79437fd2c12a60ba9efe6                
+  Baseline 7/12 complete (instance #7) - mean so far: 0.5821
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-43224ddb -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-43224ddb with ID 
+6a8abc379631c6210da16b9ccdde0139c93d3369353e843fcf5887459ddc05e5                
+  Baseline 8/12 complete (instance #8) - mean so far: 0.5707
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-0849e2b1 -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-0849e2b1 with ID 
+aec4d83bb1d4cb16b48442d80cd5e1b97ac6e6c768d0b646ec96b0ab10e097c1                
+  Baseline 9/12 complete (instance #9) - mean so far: 0.5565
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-8379b317 -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-8379b317 with ID 
+47a9335d9995480f93c796a96b77f27af726cbbed0763dbc6399c07bfd121ae1                
+  Baseline 10/12 complete (instance #10) - mean so far: 0.5566
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-c0401716 -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-c0401716 with ID 
+ea29d0abec0e0f069795d17bf1f423f95fd19e9f44cc0149bdd08a4e139756d2                
+  Baseline 11/12 complete (instance #11) - mean so far: 0.5454
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-b9b33158 -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-b9b33158 with ID 
+32d933393f52d64e9cceefd807eef48fb3ca2eee5e5ce953b50c2994cf11edbe                
+  Baseline 12/12 complete (instance #12) - mean so far: 0.5345
+
+================================================================================
+BENCHMARK
+================================================================================
+
+Final cumulative gain: +3.6767
+Final cumulative reward: +10.0908
+Baseline reward total: +6.4141
+Baseline coverage: 12/12
+Run total reward: +10.0908
+Run cumulative gain: +3.6767
+
+================================================================================
+RESULTS
+================================================================================
+
+Score: 0.8409
+System compute: $0.000000 | 0 call(s) | 0 tokens
+
+Load this in the viewer: results/sales_prediction/viewer_artifact_2026-07-02T08-58-52.435877Z_20260702_095843.json.gz
+Full trace JSON files: results/sales_prediction/traces/2026-07-02T08-58-52.435877Z
+Live viewer URL: http://127.0.0.1:37245/viewers/single_task_viewer.html?artifact=results/sales_prediction/live/2026-07-02T08-58-52.435877Z/manifest.json
+=== ARM=selfimprove TASK=sales_prediction exit 0 09:58:48 ===
+=== ARM=selfimprove TASK=codebase_adaptation n=10 start 09:58:48 ===
+==> clbench run codebase_adaptation --schedule default --system exo --task-params {"num_instances":10} --runs 1 --max-workers 1
+👋 This is mini-swe-agent version 2.2.4.
+Check the v2 migration guide at https://klieret.short.gy/mini-v2-migration
+Loading global config from '/home/worker/.config/mini-swe-agent/.env'
+Running exo on codebase_adaptation...
+System params: {'model': 'gpt-5.5', 'kwargs': None}
+Task params: {'dataset_path': 'data/codebase_adaptation/final-dataset.jsonl', 'num_instances': 19, 'max_steps_per_issue': 40, 'seed': 42, 'same_repo': True, 'schedule': 'default', 'expected_num_instances': 19}
+
+Live dashboard: http://127.0.0.1:44231/viewers/single_task_viewer.html?artifact=results/codebase_adaptation/live/2026-07-02T09-58-49.902762Z/manifest.json
+
+Starting 1 run(s) + 19-instance baseline with 1 parallel workers [group 2026-07-02T09-58-49.902762Z, mode=permute]
+👋 This is mini-swe-agent version 2.2.4.
+Check the v2 migration guide at https://klieret.short.gy/mini-v2-migration
+Loading global config from '/home/worker/.config/mini-swe-agent/.env'
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-4f17fa5c -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-4f17fa5c with ID 
+e09d423ed44635ce004c94866e79f1fbbcaab4cef3cfe9637f8d0dd93fcb9fc8                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-ab1b4f08 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-ab1b4f08 with ID 
+14528b3b2d67b1873497a7bd67f1b781603ee3f33dc09805e175276e84b4b4e6                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-b45f24dd -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-b45f24dd with ID 
+1321563d5e1282e7e67ab9cd9715f15b37603ef25987ffed0f37f687370365d7                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-5defc7a9 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-5defc7a9 with ID 
+5a64b339a8301890bd4802c2bf81cee8199797b424ec13ee1c14594f4a21d68e                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-f13a5fcb -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-f13a5fcb with ID 
+f176e6a09784df64cd34c4540c53f6c4fc88dbedc538ee27dd93133cbbd9a1ab                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-7a606a92 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-7a606a92 with ID 
+0c8c9fa696149edcf58ea23eb57e2ca1ed87afe69d0d66c7c7187b7fc6498240                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-fd693e5c -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-fd693e5c with ID 
+d1f6614deb4090c09d438825442107035adfe5fa522702daca6fd73e2627d367                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-1d2044ac -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-1d2044ac with ID 
+e5e4169b4658f78a766d53d3f5d3dce9a6579ec7e1fa43215a51b0ffe85b89f2                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-0fcb42af -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-0fcb42af with ID 
+0f8d9c5db09a88c1bd6189617e583259253535cbb3085d5ba3a7dbdd6b1d9958                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-7291f64a -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-7291f64a with ID 
+9f9390b4d52ebe92c2fbd39f34586a461e46c26226868a558c4c15d22af00fed                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-fffb58fb -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-fffb58fb with ID 
+966b0c14b19c2c4d75e6f3c98eba8e884566fe13d505a6866d414524969fa446                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-fde13fd0 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-fde13fd0 with ID 
+764d0461b064defd0c687c02eddf8b8a9690933205338384463d2d6af884a221                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-353bd8f4 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-353bd8f4 with ID 
+e1cb04db4065770a7af25e6449d121179a06f5b93c97cc5b077f1e3310fed316                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-1767ced6 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-1767ced6 with ID 
+811b44ed73d7df3f769f124acb696289cfe83875006b603fa41619347ddca12a                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-535bb6ce -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-535bb6ce with ID 
+02c9bd46e863a1b499b8f04c73c95d0251de13ce4ea4220b0c9cc50d24ff3e68                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-bc4efd5b -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-bc4efd5b with ID 
+ad86b1a31d97405f1387177230fa97163a31467bcfa8718b1d3f83a49eb9a266                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-f27a8a43 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-f27a8a43 with ID 
+42413f60acee9eeb43542ecf81dadce73bd21c4aa7dd15a813a7dd55212091eb                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-11cddd21 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-11cddd21 with ID 
+0e3fe7e2b61a28b5fba19e9923fd1462409f108ef1d144fa3e50224f7a581a82                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-5aba5c99 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-5aba5c99 with ID 
+b242a1122e855484fdc12b9e2ce8ec65eb56e97a95ef33d0977aac1cd536eda4                
+  Run 1/1 complete - score: 0.6855minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-49038e42 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+
+minisweagent.environment: INFO: Started container minisweagent-49038e42 with ID 
+bf626c51ac7faec6ad716246e0c19c918d72b95a85afec4c64ea50e2fda505d1                
+  Baseline 1/19 complete (instance #1) - mean so far: 0.7750
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-5a76e060 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-5a76e060 with ID 
+9e15cb5418c4af867664510d895c41216e349c688d89f0dd9a9061063c9b805a                
+  Baseline 2/19 complete (instance #2) - mean so far: 0.7000
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-209cf6f3 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-209cf6f3 with ID 
+b9f921861f6187fb2646095cd38b7b865772537e8bc096c4a14cf160628916b9                
+  Baseline 3/19 complete (instance #3) - mean so far: 0.6750
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-e6cc524d -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-e6cc524d with ID 
+aa3151ee1552d89aaae7a1d1d201c86cd2b1ca96af7861177d12fc401656de73                
+  Baseline 4/19 complete (instance #4) - mean so far: 0.6813
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-29437725 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-29437725 with ID 
+95b2e51a05748ccdcf8e1dd4635a9f85c62f32136206900b0b601707202372d2                
+  Baseline 5/19 complete (instance #5) - mean so far: 0.6900
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-ff126064 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-ff126064 with ID 
+6f2b24357acd631ced4428a32556d24e6e700981dd3a31ef41a6f767c3e7b925                
+  Baseline 6/19 complete (instance #6) - mean so far: 0.6917
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-513ff83f -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-513ff83f with ID 
+3b27b1f0587dbb05423d84fd1c0412c9d76980f5275c419ba34b4316cc1f770f                
+  Baseline 7/19 complete (instance #7) - mean so far: 0.6929
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-30462f94 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-30462f94 with ID 
+1226ba560fc49d6e361b00a779529e25d4d42724f25c7231866523fd10046eb6                
+  Baseline 8/19 complete (instance #8) - mean so far: 0.6719
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-fea24d14 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-fea24d14 with ID 
+3e1fb5ee092118765de883ed837c7b4ce8df4b3bf3529c93acfa7ad6cfa0ef77                
+  Baseline 9/19 complete (instance #9) - mean so far: 0.6722
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-a4b85543 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-a4b85543 with ID 
+f0be8a271f293422bbee0d9f7d99d3d2a8031d4e5b45f0b35df37267aad81a5f                
+  Baseline 10/19 complete (instance #10) - mean so far: 0.6750
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-429fe0c8 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-429fe0c8 with ID 
+1cfff01735b0f83d09be47ccef37373f4246268391b04c9d036998dfa035bc36                
+  Baseline 11/19 complete (instance #11) - mean so far: 0.6136
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-231ede3d -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-231ede3d with ID 
+840b39cd1064d46c67952ed49beaf6d86e3bf171fcd3a1413e91505e7ce4eb43                
+  Baseline 12/19 complete (instance #12) - mean so far: 0.5896
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-7a5e6aef -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-7a5e6aef with ID 
+905c51f67645f9d322a7482d69e886b25af7d90b5deebfe91b414e521d766610                
+  Baseline 13/19 complete (instance #13) - mean so far: 0.6019
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-abfe57c8 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-abfe57c8 with ID 
+c8ce601068ca34d3fca341a6a8c212f5e6100162b295324c1f6271159e69f04a                
+  Baseline 14/19 complete (instance #14) - mean so far: 0.6143
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-d28753ff -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-d28753ff with ID 
+8f91c728602f17fb5dd166c2888076e72ea3fe0e30def8874f423f3ad4ac8c6b                
+  Baseline 15/19 complete (instance #15) - mean so far: 0.6100
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-76b29794 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-76b29794 with ID 
+cc44e742ee795f07ed697378eea23ca4cc9b6d760c5148ecd578632e4092eb2e                
+  Baseline 16/19 complete (instance #16) - mean so far: 0.6141
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-0f63dcf5 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-0f63dcf5 with ID 
+8219c93f9229cb262abd4c87c757216ea0482b94ed30002585b2aef634b6390d                
+  Baseline 17/19 complete (instance #17) - mean so far: 0.6206
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-af43efa0 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-af43efa0 with ID 
+a8a02e052828c7b8292a03b08b9e05e85f2d70bbfdb03ea09d4e0935baaafd11                
+  Baseline 18/19 complete (instance #18) - mean so far: 0.6167
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-6de3e8cc -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-6de3e8cc with ID 
+cc94a71c26cf5e39bfacb090b2af37465e612a6a1e7aef027afea7506f1099e1                
+  Baseline 19/19 complete (instance #19) - mean so far: 0.6250
+
+================================================================================
+BENCHMARK
+================================================================================
+
+Final cumulative gain: +1.1500
+Final cumulative reward: +13.0250
+Baseline reward total: +11.8750
+Baseline coverage: 19/19
+Run total reward: +13.0250
+Run cumulative gain: +1.1500
+
+================================================================================
+RESULTS
+================================================================================
+
+Score: 0.6855
+System compute: $0.000000 | 0 call(s) | 0 tokens
+
+Load this in the viewer: results/codebase_adaptation/viewer_artifact_2026-07-02T09-58-49.902762Z_20260702_110009.json.gz
+Full trace JSON files: results/codebase_adaptation/traces/2026-07-02T09-58-49.902762Z
+Live viewer URL: http://127.0.0.1:44231/viewers/single_task_viewer.html?artifact=results/codebase_adaptation/live/2026-07-02T09-58-49.902762Z/manifest.json
+=== ARM=selfimprove TASK=codebase_adaptation exit 0 11:00:14 ===
+=== ARM=si-notools TASK=database_exploration n=12 start 11:00:15 ===
+==> clbench run database_exploration --schedule default --system exo --task-params {"num_instances":12} --runs 1 --max-workers 1
+Running exo on database_exploration...
+System params: {'model': 'gpt-5.5', 'kwargs': None}
+Task params: {'schedule': 'default', 'db_path': '/home/worker/clbench/data/database_exploration/products.db', 'questions_path': '/home/worker/clbench/data/database_exploration/questions.json', 'num_questions': 30, 'num_instances': 12, 'max_queries_per_question': 15, 'seed': 42, 'response_timeout_seconds': 60.0}
+
+Live dashboard: http://127.0.0.1:38561/viewers/single_task_viewer.html?artifact=results/database_exploration/live/2026-07-02T11-00-15.929886Z/manifest.json
+
+Error: Benchmark execution failed.
+  Task: database_exploration
+  System: exo
+  Run group: 2026-07-02T11-00-15.929886Z
+  Config: (none)
+  Live dashboard: http://127.0.0.1:38561/viewers/single_task_viewer.html?artifact=results/database_exploration/live/2026-07-02T11-00-15.929886Z/manifest.json
+  ValueError: Variant 'schema_drift' defines fixed parameters and cannot be combined with num_questions=12 (expected 40).
+Hint: Add --debug for extra CLI setup logs.
+Traceback (most recent call last):
+  File "/home/worker/clbench/src/cli.py", line 2286, in _cmd_run_impl
+    baseline_info, task_results, run_trace_data_list = run_benchmark(
+                                                       ~~~~~~~~~~~~~^
+        task_class=task_class,
+        ^^^^^^^^^^^^^^^^^^^^^^
+    ...<14 lines>...
+        output_path=Path(args.output) if args.output else None,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/worker/clbench/src/runs/benchmark.py", line 300, in run_benchmark
+    num_baseline_instances = get_task_num_instances(task_class, merged_baseline_params)
+  File "/home/worker/clbench/src/runs/common.py", line 72, in get_task_num_instances
+    probe_task = task_class(**filter_init_params(task_class, task_params))
+  File "/home/worker/clbench/src/tasks/database_exploration/task.py", line 175, in __init__
+    validate_variant_defaults(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^
+        self.variant_spec,
+        ^^^^^^^^^^^^^^^^^^
+    ...<13 lines>...
+        },
+        ^^
+    )
+    ^
+  File "/home/worker/clbench/src/tasks/variants.py", line 106, in validate_variant_defaults
+    raise ValueError(
+    ...<3 lines>...
+    )
+ValueError: Variant 'schema_drift' defines fixed parameters and cannot be combined with num_questions=12 (expected 40).
+=== ARM=si-notools TASK=database_exploration exit 1 11:00:16 ===
+=== ARM=si-notools TASK=sales_prediction n=8 start 11:00:16 ===
+==> clbench run sales_prediction --schedule default --system exo --task-params {"num_instances":8} --runs 1 --max-workers 1
+Running exo on sales_prediction...
+System params: {'model': 'gpt-5.5', 'kwargs': None}
+Task params: {'num_instances': 12, 'max_steps_per_instance': 20, 'seed': 123, 'base_year': 2027, 'forecast_horizon': 5, 'schedule': 'default', 'docker_image': 'pgasawa2/continual-learning-bench:sales-prediction', 'clean_workspace_between_instances': False, 'repeat_instructions': True, 'expected_num_instances': 12}
+
+Live dashboard: http://127.0.0.1:46867/viewers/single_task_viewer.html?artifact=results/sales_prediction/live/2026-07-02T11-00-17.124526Z/manifest.json
+
+Starting 1 run(s) + 12-instance baseline with 1 parallel workers [group 2026-07-02T11-00-17.124526Z, mode=replicate]
+👋 This is mini-swe-agent version 2.2.4.
+Check the v2 migration guide at https://klieret.short.gy/mini-v2-migration
+Loading global config from '/home/worker/.config/mini-swe-agent/.env'
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-07d43543 -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-07d43543 with ID 
+c7bb8f45469e2584e139af40a9ce68defa49fddcd082d18a7193405eb4549d44                
+  Run 1/1 complete - score: 0.8083
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-a82ef18f -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-a82ef18f with ID 
+a7b28cf5f0d9eaa3a01dc5509e201f0375161ec5dbb708b748082462c0e83d34                
+  Baseline 1/12 complete (instance #1) - mean so far: 0.6362
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-b9ec22eb -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-b9ec22eb with ID 
+4b38fc43905a099d470f8d01a49c5d5a92a8f0caefe0c9bae5863622286aee3a                
+  Baseline 2/12 complete (instance #2) - mean so far: 0.5824
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-4d210f1a -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-4d210f1a with ID 
+6a0eb0cbb482840f6f68c9c3ff807c53185bf3b4e412538267216f53e86dd83a                
+  Baseline 3/12 complete (instance #3) - mean so far: 0.5607
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-6042dace -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-6042dace with ID 
+f3310611ce8e478a2f058af5f38a1f472c0fd4ccc147391981cff0d2b4a28729                
+  Baseline 4/12 complete (instance #4) - mean so far: 0.5831
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-20452c1b -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-20452c1b with ID 
+5c20f7e2a49dc409fc90dd01d9550034a354f356d25e673226d96e77b345bea7                
+  Baseline 5/12 complete (instance #5) - mean so far: 0.5698
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-f878ef05 -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-f878ef05 with ID 
+89a0fce2a1dfa335db121fceb3b917232bc81ff48a06f52c0f8c16c279e9fb59                
+  Baseline 6/12 complete (instance #6) - mean so far: 0.5587
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-ad7a6055 -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-ad7a6055 with ID 
+0cea9b673549f32221a1d56f5259aea6e783100d5c20b649c040787d8acdf8ba                
+  Baseline 7/12 complete (instance #7) - mean so far: 0.5654
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-98eac3d9 -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-98eac3d9 with ID 
+1f514385fb92dcb8f780fc47f61844ee325d24222cdc8e29736f9594f18b68de                
+  Baseline 8/12 complete (instance #8) - mean so far: 0.5533
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-e2dc7ce2 -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-e2dc7ce2 with ID 
+dbe98ac2312210054723a825ee548c80bccdf62da4833d96d5a0621cd412bbad                
+  Baseline 9/12 complete (instance #9) - mean so far: 0.5389
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-380a5b0b -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-380a5b0b with ID 
+355beea618487f849f73a83220c2046b65bf04409244e8b50d8e222c63114eef                
+  Baseline 10/12 complete (instance #10) - mean so far: 0.5406
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-5558f5fe -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-5558f5fe with ID 
+b0c68ba3120ae127ce9097e2749ef259b8f32057756d0a3756203aa0c079160f                
+  Baseline 11/12 complete (instance #11) - mean so far: 0.5297
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-7f99e850 -w /app --rm --network=none                        
+pgasawa2/continual-learning-bench:sales-prediction sleep 2h                     
+minisweagent.environment: INFO: Started container minisweagent-7f99e850 with ID 
+05d0d41b073666a803a6e173562dc6cc9643dd5a5af3cf006eea105777156bfc                
+  Baseline 12/12 complete (instance #12) - mean so far: 0.5179
+
+================================================================================
+BENCHMARK
+================================================================================
+
+Final cumulative gain: +3.4842
+Final cumulative reward: +9.6991
+Baseline reward total: +6.2149
+Baseline coverage: 12/12
+Run total reward: +9.6991
+Run cumulative gain: +3.4842
+
+================================================================================
+RESULTS
+================================================================================
+
+Score: 0.8083
+System compute: $0.000000 | 0 call(s) | 0 tokens
+
+Load this in the viewer: results/sales_prediction/viewer_artifact_2026-07-02T11-00-17.124526Z_20260702_115546.json.gz
+Full trace JSON files: results/sales_prediction/traces/2026-07-02T11-00-17.124526Z
+Live viewer URL: http://127.0.0.1:46867/viewers/single_task_viewer.html?artifact=results/sales_prediction/live/2026-07-02T11-00-17.124526Z/manifest.json
+=== ARM=si-notools TASK=sales_prediction exit 0 11:55:51 ===
+=== ARM=si-notools TASK=codebase_adaptation n=10 start 11:55:51 ===
+==> clbench run codebase_adaptation --schedule default --system exo --task-params {"num_instances":10} --runs 1 --max-workers 1
+👋 This is mini-swe-agent version 2.2.4.
+Check the v2 migration guide at https://klieret.short.gy/mini-v2-migration
+Loading global config from '/home/worker/.config/mini-swe-agent/.env'
+Running exo on codebase_adaptation...
+System params: {'model': 'gpt-5.5', 'kwargs': None}
+Task params: {'dataset_path': 'data/codebase_adaptation/final-dataset.jsonl', 'num_instances': 19, 'max_steps_per_issue': 40, 'seed': 42, 'same_repo': True, 'schedule': 'default', 'expected_num_instances': 19}
+
+Live dashboard: http://127.0.0.1:36565/viewers/single_task_viewer.html?artifact=results/codebase_adaptation/live/2026-07-02T11-55-52.387002Z/manifest.json
+
+Starting 1 run(s) + 19-instance baseline with 1 parallel workers [group 2026-07-02T11-55-52.387002Z, mode=permute]
+👋 This is mini-swe-agent version 2.2.4.
+Check the v2 migration guide at https://klieret.short.gy/mini-v2-migration
+Loading global config from '/home/worker/.config/mini-swe-agent/.env'
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-549af79c -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-549af79c with ID 
+c286c1a68ba5cfaa9e3d2acc6094c3ed60e43a2e770ea5cc46cf07a78450cc45                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-7ecfaa72 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-7ecfaa72 with ID 
+4331e70a657f9c1f57e658bfb4b49ced09472a3c0d4cf945c47561062264a2e4                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-402b556c -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-402b556c with ID 
+4cb02941c208414118241d18a074303b9b537d934040714ff9bbd676bb3e1171                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-3f70c8d8 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-3f70c8d8 with ID 
+33169ca3ed39b21f35829420ae9f781f4253e28a7b66f5c67377b134550fd4ff                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-4fa1da61 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-4fa1da61 with ID 
+97c7928dc7e065d0a044c67ade552577b41eef097ffe286fe0230828e0736488                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-8b1c48d4 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-8b1c48d4 with ID 
+0b8aa9ea329d06a33666f8b1680e47bb58e6688ca2464c8d0e9783807b5783ef                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-381865a1 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-381865a1 with ID 
+e791199f63d45f1e02549b1784cb2441f8f345267c19918bc6afa34195ee9646                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-e9c4bbf3 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-e9c4bbf3 with ID 
+dbc09452a00f8bc3de0114a5093aea2838ad7089f841a63879ad4c40cffafc74                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-80855184 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-80855184 with ID 
+f48af709981a08abd4472b67ce30475eaa52a3e8e8e00fe209a7b8261ed90a41                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-843091bd -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-843091bd with ID 
+cf22dc3c3e8b7cbce459fa3bdd4e716ca325909a09f8a939bb758f282eb7d12d                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-38df9471 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-38df9471 with ID 
+46a3e9aa9852c18866e5587c754388c0dc0454cda175b06eefbfc172b4e6124a                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-2417532f -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-2417532f with ID 
+40e51afde5270745be1bea1d35a28689e7b9150820d73a4cfdd8d05439cce2ef                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-86438398 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-86438398 with ID 
+17137dd4d4c64d4a81e8eae6766380630b351b65f5eb34788b97e44bfc7b8fad                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-3c1b902c -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-3c1b902c with ID 
+3cefbd033a0e2e9b16aa90fa940862cbe35e8150f80125f2f03d2aad54daf79d                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-a27678d3 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-a27678d3 with ID 
+04bfa3dc2d022bf2e0f4d6395621af60df723c7afdb2d737bf3ea2b5355632f5                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-88b133fd -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-88b133fd with ID 
+b4d49968b9e4974530dc7b6988634189dbe8322e36c7d83284e582fcf3673d74                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-2f40854d -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-2f40854d with ID 
+3bb93785830df915838547ec5ee7abcd6aa0f202a90dcca7f067d16779ba7a07                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-b164a94e -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-b164a94e with ID 
+52e2f85b11ab9a141ea67a98af095656c2359b2138550555ea6e8d6c89319247                
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-da58ce8a -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-da58ce8a with ID 
+18ab2e4981d0344e9968b92e9841d6dabae86d91aa4a66f7a7c689051e724f8a                
+  Run 1/1 complete - score: 0.7329minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-08a309c3 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+
+minisweagent.environment: INFO: Started container minisweagent-08a309c3 with ID 
+9eb158015e1e51292bce57fadfe870393ebbd00feb8eb14d5c059ae2fe71e635                
+  Baseline 1/19 complete (instance #1) - mean so far: 0.6750
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-c1cf690e -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-c1cf690e with ID 
+bad995a613a8f3702e50f229e2412e55dfb13b418f3e033188552c4c9d38cb17                
+  Baseline 2/19 complete (instance #2) - mean so far: 0.7250
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-48c5af1e -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-48c5af1e with ID 
+a05411083d6fe2e450af71ba0afcca90b97aaab2663029d4e3ecaaf6093460eb                
+  Baseline 3/19 complete (instance #3) - mean so far: 0.7000
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-f1335ea3 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-f1335ea3 with ID 
+380ba4c316e6e568342c660ae56c15b27b6d5085237dec3e59fd90fe50982873                
+  Baseline 4/19 complete (instance #4) - mean so far: 0.7000
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-496fd292 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-496fd292 with ID 
+12309f2c7fda77e8bcdab636c449253aece0e2fde33f3498b226bdb73baa06d9                
+  Baseline 5/19 complete (instance #5) - mean so far: 0.7200
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-3229dec6 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-3229dec6 with ID 
+217e265f7cbd08e90ad5495345389991acf80efbecb724670e5deff8ded1402a                
+  Baseline 6/19 complete (instance #6) - mean so far: 0.7208
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-f8976765 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-f8976765 with ID 
+2bdb80cc1ffe70df3c51f0c3b10c2cc4189a372d1f85748debffe5b7a06d88f0                
+  Baseline 7/19 complete (instance #7) - mean so far: 0.7179
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-d64773c9 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-d64773c9 with ID 
+d6db6e5ff7f5e678a63d958d5cbfc1b953f83afa29d297c3e5f35162637b2eaf                
+  Baseline 8/19 complete (instance #8) - mean so far: 0.6281
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-f63070da -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tablib sleep 2h                               
+minisweagent.environment: INFO: Started container minisweagent-f63070da with ID 
+be1db7890da4d44bd1201f20cf4e2d3cb0ac8151af2f0a7ec819beaa0230f3f2                
+  Baseline 9/19 complete (instance #9) - mean so far: 0.6278
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-512af55e -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-512af55e with ID 
+975f09d9a14229071a51983e5200078abeeb46142eb67d55848f1784f81430bd                
+  Baseline 10/19 complete (instance #10) - mean so far: 0.6200
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-fb0372e0 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-fb0372e0 with ID 
+2b7a724084f708d31f070a61988b50820b4567288daa5db2314efd44b7cdfc98                
+  Baseline 11/19 complete (instance #11) - mean so far: 0.5636
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-a4dc016c -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-a4dc016c with ID 
+11b6da72c514acebfee86d3a3439ec55a4b685a356024d812d0a6eff055d269f                
+  Baseline 12/19 complete (instance #12) - mean so far: 0.5646
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-94af74bd -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-94af74bd with ID 
+cbb2d20e7bb573a3d39cc719923cd8cda7e8e065c2640803f8e98466cb6709f5                
+  Baseline 13/19 complete (instance #13) - mean so far: 0.5827
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-f0e2d0ea -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-f0e2d0ea with ID 
+005cd19e17a669d78a645f1d4d3edb5ff220c756452abf1f83348940006bb7ed                
+  Baseline 14/19 complete (instance #14) - mean so far: 0.5911
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-741882a1 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-741882a1 with ID 
+235a6bc61f2b5cdd590e9abfd9e77f136cb352c83941d8a1709f77e08d6912f5                
+  Baseline 15/19 complete (instance #15) - mean so far: 0.5900
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-0bec94c0 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-0bec94c0 with ID 
+5a192668884da6081a110ab7019e50176ca21fd9b9936f38581946dbe3832638                
+  Baseline 16/19 complete (instance #16) - mean so far: 0.5984
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-6296c74a -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-6296c74a with ID 
+5e916c97e91c4095ad8db6acd2eb42a353540c9c9339c7d2bda4b21bf9e22f7c                
+  Baseline 17/19 complete (instance #17) - mean so far: 0.6059
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-47e9f040 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-47e9f040 with ID 
+1af51d955ef2f6b702fe77cdd74d8448eca1814033b1a1100948460067d800a2                
+  Baseline 18/19 complete (instance #18) - mean so far: 0.5986
+minisweagent.environment: DEBUG: Starting container with command: docker run -d 
+--name minisweagent-abbd8008 -w /testbed --rm --network=none                    
+pgasawa2/continual-learning-bench:tenacity sleep 2h                             
+minisweagent.environment: INFO: Started container minisweagent-abbd8008 with ID 
+34f4d2d6a1a745900187f6f5edc7eb194cbc95f1f4d8c39a8c25bbfe8e9320f7                
+  Baseline 19/19 complete (instance #19) - mean so far: 0.6013
+
+================================================================================
+BENCHMARK
+================================================================================
+
+Final cumulative gain: +2.5000
+Final cumulative reward: +13.9250
+Baseline reward total: +11.4250
+Baseline coverage: 19/19
+Run total reward: +13.9250
+Run cumulative gain: +2.5000
+
+================================================================================
+RESULTS
+================================================================================
+
+Score: 0.7329
+System compute: $0.000000 | 0 call(s) | 0 tokens
+
+Load this in the viewer: results/codebase_adaptation/viewer_artifact_2026-07-02T11-55-52.387002Z_20260702_125508.json.gz
+Full trace JSON files: results/codebase_adaptation/traces/2026-07-02T11-55-52.387002Z
+Live viewer URL: http://127.0.0.1:36565/viewers/single_task_viewer.html?artifact=results/codebase_adaptation/live/2026-07-02T11-55-52.387002Z/manifest.json
+=== ARM=si-notools TASK=codebase_adaptation exit 0 12:55:14 ===
+=== investigation done 12:55:14 ===
+=== ARM=memory TASK=database_exploration n=40full start 12:56:52 ===
+==> clbench run database_exploration --schedule default --system exo --runs 1 --max-workers 1
+Running exo on database_exploration...
+System params: {'model': 'gpt-5.5', 'kwargs': None}
+Task params: {'schedule': 'default', 'db_path': '/home/worker/clbench/data/database_exploration/products.db', 'questions_path': '/home/worker/clbench/data/database_exploration/questions.json', 'num_questions': 30, 'max_queries_per_question': 15, 'seed': 42, 'response_timeout_seconds': 60.0, 'expected_num_instances': 40}
+
+Live dashboard: http://127.0.0.1:40859/viewers/single_task_viewer.html?artifact=results/database_exploration/live/2026-07-02T12-56-53.513602Z/manifest.json
+
+Starting 1 run(s) + 40-instance baseline with 1 parallel workers [group 2026-07-02T12-56-53.513602Z, mode=permute]
+  Run 1/1 complete - score: 0.5550
+  Baseline 1/40 complete (instance #1) - mean so far: 0.6000
+  Baseline 2/40 complete (instance #2) - mean so far: 0.3000
+  Baseline 3/40 complete (instance #3) - mean so far: 0.4000
+  Baseline 4/40 complete (instance #4) - mean so far: 0.4667
+  Baseline 5/40 complete (instance #5) - mean so far: 0.5067
+  Baseline 6/40 complete (instance #6) - mean so far: 0.5444
+  Baseline 7/40 complete (instance #7) - mean so far: 0.5619
+  Baseline 8/40 complete (instance #8) - mean so far: 0.4917
+  Baseline 9/40 complete (instance #9) - mean so far: 0.4889
+  Baseline 10/40 complete (instance #10) - mean so far: 0.5000
+  Baseline 11/40 complete (instance #11) - mean so far: 0.4970
+  Baseline 12/40 complete (instance #12) - mean so far: 0.5111
+  Baseline 13/40 complete (instance #13) - mean so far: 0.5128
+  Baseline 14/40 complete (instance #14) - mean so far: 0.5238
+  Baseline 15/40 complete (instance #15) - mean so far: 0.4889
+  Baseline 16/40 complete (instance #16) - mean so far: 0.5000
+  Baseline 17/40 complete (instance #17) - mean so far: 0.4706
+  Baseline 18/40 complete (instance #18) - mean so far: 0.4445
+  Baseline 19/40 complete (instance #19) - mean so far: 0.4597
+  Baseline 20/40 complete (instance #20) - mean so far: 0.4367
+  Baseline 21/40 complete (instance #21) - mean so far: 0.4159
+  Baseline 22/40 complete (instance #22) - mean so far: 0.3970
+  Baseline 23/40 complete (instance #23) - mean so far: 0.3797
+  Baseline 24/40 complete (instance #24) - mean so far: 0.3639
+  Baseline 25/40 complete (instance #25) - mean so far: 0.3493
+  Baseline 26/40 complete (instance #26) - mean so far: 0.3359
+  Baseline 27/40 complete (instance #27) - mean so far: 0.3235
+  Baseline 28/40 complete (instance #28) - mean so far: 0.3119
+  Baseline 29/40 complete (instance #29) - mean so far: 0.3012
+  Baseline 30/40 complete (instance #30) - mean so far: 0.2911
+  Baseline 31/40 complete (instance #31) - mean so far: 0.2817
+  Baseline 32/40 complete (instance #32) - mean so far: 0.2729
+  Baseline 33/40 complete (instance #33) - mean so far: 0.2647
+  Baseline 34/40 complete (instance #34) - mean so far: 0.2569
+  Baseline 35/40 complete (instance #35) - mean so far: 0.2495
+  Baseline 36/40 complete (instance #36) - mean so far: 0.2426
+  Baseline 37/40 complete (instance #37) - mean so far: 0.2559
+  Baseline 38/40 complete (instance #38) - mean so far: 0.2614
+  Baseline 39/40 complete (instance #39) - mean so far: 0.2718
+  Baseline 40/40 complete (instance #40) - mean so far: 0.2650
+
+================================================================================
+BENCHMARK
+================================================================================
+
+Final cumulative gain: +11.5998
+Final cumulative reward: +22.2000
+Baseline reward total: +10.6002
+Baseline coverage: 40/40
+Run total reward: +22.2000
+Run cumulative gain: +11.5998
+
+================================================================================
+RESULTS
+================================================================================
+
+Score: 0.5550
+System compute: $0.000000 | 0 call(s) | 0 tokens
+
+Load this in the viewer: results/database_exploration/viewer_artifact_2026-07-02T12-56-53.513602Z_20260702_133317.json.gz
+Full trace JSON files: results/database_exploration/traces/2026-07-02T12-56-53.513602Z
+Live viewer URL: http://127.0.0.1:40859/viewers/single_task_viewer.html?artifact=results/database_exploration/live/2026-07-02T12-56-53.513602Z/manifest.json
+=== ARM=memory TASK=database_exploration exit 0 13:33:22 ===
+=== ARM=selfimprove TASK=database_exploration n=40full start 13:33:22 ===
+==> clbench run database_exploration --schedule default --system exo --runs 1 --max-workers 1
+Running exo on database_exploration...
+System params: {'model': 'gpt-5.5', 'kwargs': None}
+Task params: {'schedule': 'default', 'db_path': '/home/worker/clbench/data/database_exploration/products.db', 'questions_path': '/home/worker/clbench/data/database_exploration/questions.json', 'num_questions': 30, 'max_queries_per_question': 15, 'seed': 42, 'response_timeout_seconds': 60.0, 'expected_num_instances': 40}
+
+Live dashboard: http://127.0.0.1:41995/viewers/single_task_viewer.html?artifact=results/database_exploration/live/2026-07-02T13-33-23.487031Z/manifest.json
+
+Starting 1 run(s) + 40-instance baseline with 1 parallel workers [group 2026-07-02T13-33-23.487031Z, mode=permute]
+  Run 1/1 complete - score: 0.4967
+  Baseline 1/40 complete (instance #1) - mean so far: 0.6000
+  Baseline 2/40 complete (instance #2) - mean so far: 0.3000
+  Baseline 3/40 complete (instance #3) - mean so far: 0.3778
+  Baseline 4/40 complete (instance #4) - mean so far: 0.4667
+  Baseline 5/40 complete (instance #5) - mean so far: 0.3733
+  Baseline 6/40 complete (instance #6) - mean so far: 0.4333
+  Baseline 7/40 complete (instance #7) - mean so far: 0.4667
+  Baseline 8/40 complete (instance #8) - mean so far: 0.4083
+  Baseline 9/40 complete (instance #9) - mean so far: 0.4222
+  Baseline 10/40 complete (instance #10) - mean so far: 0.4400
+  Baseline 11/40 complete (instance #11) - mean so far: 0.4424
+  Baseline 12/40 complete (instance #12) - mean so far: 0.4500
+  Baseline 13/40 complete (instance #13) - mean so far: 0.4154
+  Baseline 14/40 complete (instance #14) - mean so far: 0.4333
+  Baseline 15/40 complete (instance #15) - mean so far: 0.4044
+  Baseline 16/40 complete (instance #16) - mean so far: 0.4250
+  Baseline 17/40 complete (instance #17) - mean so far: 0.4000
+  Baseline 18/40 complete (instance #18) - mean so far: 0.3778
+  Baseline 19/40 complete (instance #19) - mean so far: 0.3965
+  Baseline 20/40 complete (instance #20) - mean so far: 0.4067
+  Baseline 21/40 complete (instance #21) - mean so far: 0.3873
+  Baseline 22/40 complete (instance #22) - mean so far: 0.3697
+  Baseline 23/40 complete (instance #23) - mean so far: 0.3536
+  Baseline 24/40 complete (instance #24) - mean so far: 0.3389
+  Baseline 25/40 complete (instance #25) - mean so far: 0.3253
+  Baseline 26/40 complete (instance #26) - mean so far: 0.3128
+  Baseline 27/40 complete (instance #27) - mean so far: 0.3012
+  Baseline 28/40 complete (instance #28) - mean so far: 0.2905
+  Baseline 29/40 complete (instance #29) - mean so far: 0.2805
+  Baseline 30/40 complete (instance #30) - mean so far: 0.2711
+  Baseline 31/40 complete (instance #31) - mean so far: 0.2624
+  Baseline 32/40 complete (instance #32) - mean so far: 0.2542
+  Baseline 33/40 complete (instance #33) - mean so far: 0.2465
+  Baseline 34/40 complete (instance #34) - mean so far: 0.2392
+  Baseline 35/40 complete (instance #35) - mean so far: 0.2438
+  Baseline 36/40 complete (instance #36) - mean so far: 0.2370
+  Baseline 37/40 complete (instance #37) - mean so far: 0.2504
+  Baseline 38/40 complete (instance #38) - mean so far: 0.2579
+  Baseline 39/40 complete (instance #39) - mean so far: 0.2667
+  Baseline 40/40 complete (instance #40) - mean so far: 0.2600
+
+================================================================================
+BENCHMARK
+================================================================================
+
+Final cumulative gain: +9.4670
+Final cumulative reward: +19.8668
+Baseline reward total: +10.3998
+Baseline coverage: 40/40
+Run total reward: +19.8668
+Run cumulative gain: +9.4670
+
+================================================================================
+RESULTS
+================================================================================
+
+Score: 0.4967
+System compute: $0.000000 | 0 call(s) | 0 tokens
+
+Load this in the viewer: results/database_exploration/viewer_artifact_2026-07-02T13-33-23.487031Z_20260702_140749.json.gz
+Full trace JSON files: results/database_exploration/traces/2026-07-02T13-33-23.487031Z
+Live viewer URL: http://127.0.0.1:41995/viewers/single_task_viewer.html?artifact=results/database_exploration/live/2026-07-02T13-33-23.487031Z/manifest.json
+=== ARM=selfimprove TASK=database_exploration exit 0 14:07:54 ===
+=== ARM=si-notools TASK=database_exploration n=40full start 14:07:54 ===
+==> clbench run database_exploration --schedule default --system exo --runs 1 --max-workers 1
+Running exo on database_exploration...
+System params: {'model': 'gpt-5.5', 'kwargs': None}
+Task params: {'schedule': 'default', 'db_path': '/home/worker/clbench/data/database_exploration/products.db', 'questions_path': '/home/worker/clbench/data/database_exploration/questions.json', 'num_questions': 30, 'max_queries_per_question': 15, 'seed': 42, 'response_timeout_seconds': 60.0, 'expected_num_instances': 40}
+
+Live dashboard: http://127.0.0.1:37071/viewers/single_task_viewer.html?artifact=results/database_exploration/live/2026-07-02T14-07-55.245525Z/manifest.json
+
+Starting 1 run(s) + 40-instance baseline with 1 parallel workers [group 2026-07-02T14-07-55.245525Z, mode=permute]
+  Run 1/1 complete - score: 0.5250
+  Baseline 1/40 complete (instance #1) - mean so far: 0.6000
+  Baseline 2/40 complete (instance #2) - mean so far: 0.3000
+  Baseline 3/40 complete (instance #3) - mean so far: 0.4000
+  Baseline 4/40 complete (instance #4) - mean so far: 0.4833
+  Baseline 5/40 complete (instance #5) - mean so far: 0.5200
+  Baseline 6/40 complete (instance #6) - mean so far: 0.5555
+  Baseline 7/40 complete (instance #7) - mean so far: 0.5714
+  Baseline 8/40 complete (instance #8) - mean so far: 0.5000
+  Baseline 9/40 complete (instance #9) - mean so far: 0.5037
+  Baseline 10/40 complete (instance #10) - mean so far: 0.5200
+  Baseline 11/40 complete (instance #11) - mean so far: 0.5152
+  Baseline 12/40 complete (instance #12) - mean so far: 0.5278
+  Baseline 13/40 complete (instance #13) - mean so far: 0.5231
+  Baseline 14/40 complete (instance #14) - mean so far: 0.5333
+  Baseline 15/40 complete (instance #15) - mean so far: 0.4978
+  Baseline 16/40 complete (instance #16) - mean so far: 0.5083
+  Baseline 17/40 complete (instance #17) - mean so far: 0.4784
+  Baseline 18/40 complete (instance #18) - mean so far: 0.4519
+  Baseline 19/40 complete (instance #19) - mean so far: 0.4667
+  Baseline 20/40 complete (instance #20) - mean so far: 0.4733
+  Baseline 21/40 complete (instance #21) - mean so far: 0.4508
+  Baseline 22/40 complete (instance #22) - mean so far: 0.4303
+  Baseline 23/40 complete (instance #23) - mean so far: 0.4116
+  Baseline 24/40 complete (instance #24) - mean so far: 0.3944
+  Baseline 25/40 complete (instance #25) - mean so far: 0.3787
+  Baseline 26/40 complete (instance #26) - mean so far: 0.3641
+  Baseline 27/40 complete (instance #27) - mean so far: 0.3506
+  Baseline 28/40 complete (instance #28) - mean so far: 0.3381
+  Baseline 29/40 complete (instance #29) - mean so far: 0.3264
+  Baseline 30/40 complete (instance #30) - mean so far: 0.3156
+  Baseline 31/40 complete (instance #31) - mean so far: 0.3054
+  Baseline 32/40 complete (instance #32) - mean so far: 0.2958
+  Baseline 33/40 complete (instance #33) - mean so far: 0.2869
+  Baseline 34/40 complete (instance #34) - mean so far: 0.2784
+  Baseline 35/40 complete (instance #35) - mean so far: 0.2705
+  Baseline 36/40 complete (instance #36) - mean so far: 0.2630
+  Baseline 37/40 complete (instance #37) - mean so far: 0.2757
+  Baseline 38/40 complete (instance #38) - mean so far: 0.2825
+  Baseline 39/40 complete (instance #39) - mean so far: 0.2923
+  Baseline 40/40 complete (instance #40) - mean so far: 0.2850
+
+================================================================================
+BENCHMARK
+================================================================================
+
+Final cumulative gain: +9.5998
+Final cumulative reward: +20.9999
+Baseline reward total: +11.4001
+Baseline coverage: 40/40
+Run total reward: +20.9999
+Run cumulative gain: +9.5998
+
+================================================================================
+RESULTS
+================================================================================
+
+Score: 0.5250
+System compute: $0.000000 | 0 call(s) | 0 tokens
+
+Load this in the viewer: results/database_exploration/viewer_artifact_2026-07-02T14-07-55.245525Z_20260702_144253.json.gz
+Full trace JSON files: results/database_exploration/traces/2026-07-02T14-07-55.245525Z
+Live viewer URL: http://127.0.0.1:37071/viewers/single_task_viewer.html?artifact=results/database_exploration/live/2026-07-02T14-07-55.245525Z/manifest.json
+=== ARM=si-notools TASK=database_exploration exit 0 14:42:58 ===
+=== db arms done 14:42:58 ===
