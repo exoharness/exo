@@ -1,0 +1,26 @@
+  5/5 Mean: 0.000 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 0:02:20 0:00:00
+terminal-bench • exo-codex • gpt-5.5
+┏━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━┓
+┃ Trials ┃ Exceptions ┃  Mean ┃
+┡━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━┩
+│      5 │          5 │ 0.000 │
+└────────┴────────────┴───────┘
+
+┏━━━━━━━━┳━━━━━━━┓
+┃ Reward ┃ Count ┃
+┡━━━━━━━━╇━━━━━━━┩
+│ 0.0    │     5 │
+└────────┴───────┘
+
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━┓
+┃ Exception                 ┃ Count ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━┩
+│ NonZeroAgentExitCodeError │     5 │
+└───────────────────────────┴───────┘
+
+Job Info
+Total runtime: 2m 20s
+Results written to jobs/2026-06-27__01-50-28/result.json
+Inspect results by running `harbor view jobs`
+Share results by running `harbor upload jobs/2026-06-27__01-50-28`
+

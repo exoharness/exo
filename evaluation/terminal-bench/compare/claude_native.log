@@ -1,0 +1,27 @@
+  5/5 Mean: 0.400 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 0:30:36 0:00:00
+terminal-bench • claude-code • claude-sonnet-4-6
+┏━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━┓
+┃ Trials ┃ Exceptions ┃  Mean ┃
+┡━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━┩
+│      5 │          3 │ 0.400 │
+└────────┴────────────┴───────┘
+
+┏━━━━━━━━┳━━━━━━━┓
+┃ Reward ┃ Count ┃
+┡━━━━━━━━╇━━━━━━━┩
+│ 0.0    │     3 │
+│ 1.0    │     2 │
+└────────┴───────┘
+
+┏━━━━━━━━━━━━━━━━━━━┳━━━━━━━┓
+┃ Exception         ┃ Count ┃
+┡━━━━━━━━━━━━━━━━━━━╇━━━━━━━┩
+│ AgentTimeoutError │     3 │
+└───────────────────┴───────┘
+
+Job Info
+Total runtime: 30m 36s
+Results written to jobs/2026-06-27__01-46-50/result.json
+Inspect results by running `harbor view jobs`
+Share results by running `harbor upload jobs/2026-06-27__01-46-50`
+

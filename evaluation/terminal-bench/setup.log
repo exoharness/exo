@@ -1,0 +1,12 @@
+==> exo repo: /home/worker/exo
+==> Installing harbor CLI (uv tool)
+    harbor 0.15.0
+==> Python deps for reporting (venv: /home/worker/exo/evaluation/terminal-bench/.venv)
+==> Building slim exo bundle from /home/worker/exo
+   Compiling exoharness v0.1.0 (/home/worker/exo/crates/exoharness)
+   Compiling executor v0.1.0 (/home/worker/exo/crates/executor)
+   Compiling exo v0.1.0 (/home/worker/exo/crates/cli)
+    Finished `release` profile [optimized] target(s) in 49.82s
+fetching node v22.14.0
+wrote /home/worker/exo/evaluation/terminal-bench/exo-bundle.tar.gz (105M)
+==> Done. Set OPENAI_API_KEY and run ./run.sh

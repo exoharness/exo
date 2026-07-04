@@ -1,0 +1,31 @@
+==> harbor run | model=openai/gpt-5.5 concurrency=4 timeout_mult=1.0 args=-i bn-fit-modify -i cancel-async-tasks -i circuit-fibsqrt -i configure-git-webserver -i dna-assembly -i extract-moves-from-video -i feal-differential-cryptanalysis -i feal-linear-cryptanalysis -i fix-code-vulnerability -i fix-ocaml-gc -i gpt2-codegolf -i install-windows-3.11 -i llm-inference-batching-scheduler -i make-doom-for-mips -i make-mips-interpreter -i mcmc-sampling-stan -i model-extraction-relu-logits -i password-recovery -i path-tracing -i path-tracing-reverse -i polyglot-rust-c -i protein-assembly -i regex-chess -i sam-cell-seg -i sparql-university -i torch-pipeline-parallelism -i torch-tensor-parallelism -i train-fasttext -i video-processing -i write-compressor
+  30/30 Mean: 0.633 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1:14:02 0:00:00
+terminal-bench • exo • gpt-5.5
+┏━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━┓
+┃ Trials ┃ Exceptions ┃  Mean ┃
+┡━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━┩
+│     30 │          2 │ 0.633 │
+└────────┴────────────┴───────┘
+
+┏━━━━━━━━┳━━━━━━━┓
+┃ Reward ┃ Count ┃
+┡━━━━━━━━╇━━━━━━━┩
+│ 1.0    │    19 │
+│ 0.0    │    11 │
+└────────┴───────┘
+
+┏━━━━━━━━━━━━━━━━━━━┳━━━━━━━┓
+┃ Exception         ┃ Count ┃
+┡━━━━━━━━━━━━━━━━━━━╇━━━━━━━┩
+│ AgentTimeoutError │     2 │
+└───────────────────┴───────┘
+
+Job Info
+Total runtime: 1h 14m 2s
+Results written to jobs/2026-06-27__00-01-54/result.json
+Inspect results by running `harbor view jobs`
+Share results by running `harbor upload jobs/2026-06-27__00-01-54`
+
+==> Generating report
+report written: /home/worker/exo/evaluation/terminal-bench/reports/2026-06-27__00-01-54/REPORT.md  (mean 0.633, 19/30 passed)
+==> Report written under reports/ (latest job)

@@ -1,0 +1,25 @@
+==> harbor run | model=openai/gpt-5.5 concurrency=4 timeout_mult=1.0 args=-l 5
+  5/5 Mean: 0.800 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 0:09:46 0:00:00
+terminal-bench • exo • gpt-5.5
+┏━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━┓
+┃ Trials ┃ Exceptions ┃  Mean ┃
+┡━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━┩
+│      5 │          0 │ 0.800 │
+└────────┴────────────┴───────┘
+
+┏━━━━━━━━┳━━━━━━━┓
+┃ Reward ┃ Count ┃
+┡━━━━━━━━╇━━━━━━━┩
+│ 0.0    │     1 │
+│ 1.0    │     4 │
+└────────┴───────┘
+
+Job Info
+Total runtime: 9m 46s
+Results written to jobs/2026-06-26__23-50-35/result.json
+Inspect results by running `harbor view jobs`
+Share results by running `harbor upload jobs/2026-06-26__23-50-35`
+
+==> Generating report
+report written: /home/worker/exo/evaluation/terminal-bench/reports/2026-06-26__23-50-35/REPORT.md  (mean 0.800, 4/5 passed)
+==> Report written under reports/ (latest job)
