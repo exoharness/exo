@@ -21,6 +21,9 @@ const SKILLS_INDEX_ARTIFACT_PATH = "skills/index.json";
 
 // agentskills.io spec: lowercase alphanumeric with single hyphens, 1-64 chars.
 const SKILL_NAME_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+// `index` would make skillArtifactPath collide with the catalog at
+// SKILLS_INDEX_ARTIFACT_PATH, shadowing the index and bricking the skill.
+const RESERVED_SKILL_NAMES = new Set(["index"]);
 const MAX_NAME_CHARS = 64;
 const MAX_DESCRIPTION_CHARS = 1024;
 // Soft caps so a single install cannot make the store unreasonably large.
@@ -149,6 +152,9 @@ function validateSkillName(name: string): string | null {
   }
   if (!SKILL_NAME_PATTERN.test(name)) {
     return "frontmatter name must be lowercase letters, digits, and single hyphens (e.g. pdf-processing)";
+  }
+  if (RESERVED_SKILL_NAMES.has(name)) {
+    return `${name} is a reserved skill name; choose a different name`;
   }
   return null;
 }
