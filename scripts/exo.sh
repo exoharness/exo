@@ -318,10 +318,6 @@ scheduler_pid_file() {
   echo "$ROOT_DIR/.exo/exoclaw-scheduler.pid"
 }
 
-scheduler_lock_file() {
-  echo "$ROOT_DIR/.exo/exoclaw-scheduler.lock"
-}
-
 scheduler_log_file() {
   echo "$ROOT_DIR/.exo/exoclaw-scheduler.log"
 }
@@ -414,7 +410,6 @@ ensure_scheduler() {
   pid_file="$(scheduler_pid_file)"
   log_file="$(scheduler_log_file)"
   echo "Starting scheduler loop..."
-  rm -f "$(scheduler_lock_file)"
   local scheduler_args=(--env-file-if-exists "$ENV_FILE")
   local backend
   backend="$(effective_sandbox_backend)"
@@ -641,7 +636,6 @@ stop_scheduler() {
     fi
   fi
   pkill -f "exoclaw-scheduler-runner .*run --watch" >/dev/null 2>&1 || true
-  rm -f "$(scheduler_lock_file)"
   rm -f "$pid_file"
 }
 

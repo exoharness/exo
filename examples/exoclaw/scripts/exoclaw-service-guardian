@@ -149,10 +149,6 @@ write_reboot_notice() {
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$reason" >"$(reboot_notice_file)"
 }
 
-scheduler_lock_file() {
-  echo "$STATE_DIR/exoclaw-scheduler.lock"
-}
-
 repl_restart_file() {
   echo "$STATE_DIR/exo-control.restart"
 }
@@ -235,7 +231,7 @@ start_scheduler() {
     echo "Scheduler already running: $(<"$pid_file")"
     return
   fi
-  rm -f "$(scheduler_lock_file)" "$(scheduler_restart_file)"
+  rm -f "$(scheduler_restart_file)"
   echo "Starting scheduler..."
   local scheduler_args=(--env-file-if-exists "$ENV_FILE")
   if [[ -n "$SANDBOX_BACKEND" ]]; then
@@ -333,7 +329,6 @@ drain_pid_file() {
 stop_scheduler() {
   drain_pid_file "Exoclaw scheduler" "$(scheduler_pid_file)" "$(scheduler_restart_file)"
   pkill -f "exoclaw-scheduler-runner .*run --watch" >/dev/null 2>&1 || true
-  rm -f "$(scheduler_lock_file)"
 }
 
 stop_adapters() {

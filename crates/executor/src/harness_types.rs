@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use exoharness::{
     AgentHandle, AgentRecord, ConversationHandle, ConversationRecord, ExoHarness, Result,
-    SandboxProvider, SessionId,
+    SandboxProvider, SessionId, TurnCoordinator,
 };
 use lingua::Message;
 
@@ -16,6 +16,12 @@ use crate::{
 #[async_trait]
 pub trait Harness: Send + Sync {
     fn exoharness_handle(&self) -> Arc<dyn ExoHarness>;
+
+    /// The coordinator every send on this harness serializes through.
+    /// External producers (schedulers, adapters) enqueue turns here — with
+    /// dedupe keys for idempotent firing — and drive them with
+    /// `HarnessConversation::run_next_pending_turn()`.
+    fn turn_coordinator(&self) -> Arc<dyn TurnCoordinator>;
 
     async fn list_agents(&self) -> Result<Vec<AgentRecord>>;
     async fn get_agent(&self, agent_ref: &str) -> Result<Option<Arc<dyn HarnessAgent>>>;
@@ -56,6 +62,13 @@ pub trait HarnessConversation: Send + Sync {
     async fn close_session(&self, session_id: SessionId) -> Result<()>;
     async fn send(&self, request: SendRequest) -> Result<SendResult>;
     async fn send_stream(&self, request: SendRequest) -> Result<ExecutionStreamHandle>;
+    /// Execute the conversation's head pending turn, if one is eligible and
+    /// the conversation is unleased: the worker primitive for turns enqueued
+    /// by external producers. Returns the executed turn's result, or `None`
+    /// when there was nothing to run (empty queue, delayed head, or the
+    /// lease is held elsewhere). Execution errors propagate after the turn
+    /// is completed, so a failing turn never wedges the queue.
+    async fn run_next_pending_turn(&self) -> Result<Option<SendResult>>;
 }
 
 #[derive(Debug, Clone)]

@@ -4,9 +4,9 @@ use std::time::Duration;
 use crate::{AgentConfig, ConversationConfig, ExecutionStreamHandle, SendRequest, SendResult};
 use async_trait::async_trait;
 use exoharness::{
-    AgentHandle, AgentRecord, BasicTurnCoordinator, ConversationHandle, ConversationId,
-    ConversationLease, ConversationRecord, EnqueueTurnRequest, ExoHarness, NewAgentRequest,
-    NewConversationRequest, PendingTurn, Result, SessionId, TurnCoordinator, TurnId,
+    AgentHandle, AgentRecord, BasicTurnCoordinator, ConversationHandle, ConversationLease,
+    ConversationRecord, EnqueueTurnRequest, ExoHarness, NewAgentRequest, NewConversationRequest,
+    PendingTurn, Result, SessionId, TurnCoordinator, TurnId,
 };
 use lingua::Message;
 
@@ -59,30 +59,32 @@ pub(crate) trait HarnessRuntime: Send + Sync + Clone + 'static {
     async fn flush_tracing(&self) -> Result<()>;
 }
 
-/// Wait until this sender's turn is at the head of the conversation queue
-/// and the conversation lease is ours. Turns execute in enqueue order, so a
-/// sender whose turn is behind others releases the lease and retries while
-/// the earlier senders drive their own turns.
-async fn wait_for_pending_turn(
-    coordinator: &Arc<dyn TurnCoordinator>,
-    conversation_id: ConversationId,
+/// The result of a turn that already finished, reconstructed from its
+/// durable `turn_ended` event. Lets a sender whose turn was executed by
+/// another driver (a worker draining the queue, a deduplicated producer)
+/// return the same ids the executing driver saw.
+pub(crate) async fn finished_turn_result(
+    conversation: &dyn ConversationHandle,
     turn_id: TurnId,
-) -> Result<ConversationLease> {
-    loop {
-        if let Some(lease) = coordinator.claim_conversation(conversation_id).await? {
-            match coordinator.peek_turn(&lease).await {
-                Ok(Some(head)) if head.id == turn_id => return Ok(lease),
-                Ok(_) => {
-                    coordinator.release_idle(&lease).await?;
-                }
-                Err(error) => {
-                    let _ = coordinator.release_idle(&lease).await;
-                    return Err(error);
-                }
-            }
-        }
-        tokio::time::sleep(CLAIM_RETRY_INTERVAL).await;
-    }
+) -> Result<Option<SendResult>> {
+    let events = conversation
+        .get_events(Some(exoharness::EventQuery {
+            turn_id: Some(turn_id),
+            types: Some(vec![exoharness::EventKind::TURN_ENDED]),
+            ..Default::default()
+        }))
+        .await?
+        .events;
+    let Some(ended) = events.last() else {
+        return Ok(None);
+    };
+    Ok(Some(SendResult {
+        session_id: ended
+            .session_id
+            .ok_or_else(|| anyhow::anyhow!("turn_ended event is missing a session id"))?,
+        turn_id,
+        latest_event_id: ended.id,
+    }))
 }
 
 pub(crate) trait SharedHarnessBacked: Send + Sync {
@@ -98,6 +100,10 @@ where
 {
     fn exoharness_handle(&self) -> Arc<dyn ExoHarness> {
         self.shared_harness().exoharness_handle()
+    }
+
+    fn turn_coordinator(&self) -> Arc<dyn TurnCoordinator> {
+        self.shared_harness().turn_coordinator()
     }
 
     async fn list_agents(&self) -> Result<Vec<AgentRecord>> {
@@ -151,6 +157,10 @@ where
 
     pub(crate) fn exoharness_handle(&self) -> Arc<dyn ExoHarness> {
         Arc::clone(&self.exoharness)
+    }
+
+    pub(crate) fn turn_coordinator(&self) -> Arc<dyn TurnCoordinator> {
+        Arc::clone(&self.coordinator)
     }
 
     pub(crate) async fn list_agents(&self) -> Result<Vec<AgentRecord>> {
@@ -337,6 +347,68 @@ struct SharedHarnessConversation<R> {
     coordinator: Arc<dyn TurnCoordinator>,
 }
 
+impl<R> SharedHarnessConversation<R>
+where
+    R: HarnessRuntime,
+{
+    /// Execute the head pending turn under a held lease and complete it,
+    /// even when execution fails, so an errored turn never wedges the queue.
+    /// Returns the head's result, or `None` when the queue is empty (or its
+    /// head is not yet eligible).
+    async fn execute_head_under_lease(
+        &self,
+        lease: &ConversationLease,
+    ) -> Result<Option<SendResult>> {
+        let Some(head) = self.coordinator.peek_turn(lease).await? else {
+            return Ok(None);
+        };
+        let head_id = head.id;
+        let result = self
+            .runtime
+            .execute_pending_turn(
+                Arc::clone(&self.agent),
+                Arc::clone(&self.conversation),
+                Arc::clone(&self.coordinator),
+                lease.clone(),
+                head,
+            )
+            .await;
+        if let Err(error) = self.coordinator.complete_turn(lease, head_id).await {
+            tracing::error!(%error, turn_id = %head_id, "failed to complete queued turn");
+        }
+        result.map(Some)
+    }
+
+    /// Drive head turns under the lease until `turn_id` executes. Foreign
+    /// heads (turns enqueued by producers that died, or by producers that
+    /// delegate driving) are executed and completed along the way; their
+    /// errors are logged, not attributed to this sender.
+    async fn drive_until(
+        &self,
+        lease: &ConversationLease,
+        turn_id: TurnId,
+    ) -> Result<Option<SendResult>> {
+        loop {
+            let Some(head) = self.coordinator.peek_turn(lease).await? else {
+                return Ok(None);
+            };
+            if head.id == turn_id {
+                return self.execute_head_under_lease(lease).await;
+            }
+            match self.execute_head_under_lease(lease).await {
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        turn_id = %head.id,
+                        "queued turn failed while draining the conversation queue"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl<R> HarnessConversation for SharedHarnessConversation<R>
 where
@@ -395,26 +467,27 @@ where
             )
             .await?;
         let turn_id = enqueued.turn.id;
-        let lease = wait_for_pending_turn(&self.coordinator, conversation_id, turn_id).await?;
-        let result = self
-            .runtime
-            .execute_pending_turn(
-                Arc::clone(&self.agent),
-                Arc::clone(&self.conversation),
-                Arc::clone(&self.coordinator),
-                lease.clone(),
-                enqueued.turn,
-            )
-            .await;
-        // Pop the turn and free the lease even when execution failed, so an
-        // errored turn cannot wedge the conversation queue.
-        if let Err(error) = self.coordinator.complete_turn(&lease, turn_id).await {
-            tracing::error!(%error, %turn_id, "failed to complete queued turn");
+        loop {
+            // Another driver (a worker draining the queue) may have executed
+            // this turn already.
+            if let Some(result) = finished_turn_result(self.conversation.as_ref(), turn_id).await? {
+                return Ok(result);
+            }
+            let Some(lease) = self.coordinator.claim_conversation(conversation_id).await? else {
+                tokio::time::sleep(CLAIM_RETRY_INTERVAL).await;
+                continue;
+            };
+            let outcome = self.drive_until(&lease, turn_id).await;
+            if let Err(error) = self.coordinator.release_idle(&lease).await {
+                tracing::error!(%error, %conversation_id, "failed to release conversation lease");
+            }
+            match outcome? {
+                Some(result) => return Ok(result),
+                // The queue drained without reaching this turn (it finished
+                // elsewhere, or the head is delayed): loop and re-check.
+                None => tokio::time::sleep(CLAIM_RETRY_INTERVAL).await,
+            }
         }
-        if let Err(error) = self.coordinator.release_idle(&lease).await {
-            tracing::error!(%error, %conversation_id, "failed to release conversation lease");
-        }
-        result
     }
 
     async fn send_stream(&self, request: SendRequest) -> Result<ExecutionStreamHandle> {
@@ -431,7 +504,48 @@ where
             )
             .await?;
         let turn_id = enqueued.turn.id;
-        let lease = wait_for_pending_turn(&self.coordinator, conversation_id, turn_id).await?;
+        let lease = loop {
+            if let Some(result) = finished_turn_result(self.conversation.as_ref(), turn_id).await? {
+                // A queue worker executed this turn before we could stream
+                // it; degrade to a completion-only stream.
+                return Ok(completed_only_stream(result));
+            }
+            let Some(lease) = self.coordinator.claim_conversation(conversation_id).await? else {
+                tokio::time::sleep(CLAIM_RETRY_INTERVAL).await;
+                continue;
+            };
+            // Drain foreign heads (non-streaming) until this turn is next.
+            let ready = loop {
+                match self.coordinator.peek_turn(&lease).await {
+                    Ok(Some(head)) if head.id == turn_id => break Ok(true),
+                    Ok(Some(_)) => {
+                        if let Err(error) = self.execute_head_under_lease(&lease).await {
+                            tracing::warn!(
+                                %error,
+                                "queued turn failed while draining the conversation queue"
+                            );
+                        }
+                    }
+                    Ok(None) => break Ok(false),
+                    Err(error) => break Err(error),
+                }
+            };
+            match ready {
+                Ok(true) => break lease,
+                Ok(false) => {
+                    // Turn finished elsewhere or the head is delayed; release
+                    // and re-check from the top.
+                    if let Err(error) = self.coordinator.release_idle(&lease).await {
+                        tracing::error!(%error, %conversation_id, "failed to release conversation lease");
+                    }
+                    tokio::time::sleep(CLAIM_RETRY_INTERVAL).await;
+                }
+                Err(error) => {
+                    let _ = self.coordinator.release_idle(&lease).await;
+                    return Err(error);
+                }
+            }
+        };
         let stream = self
             .runtime
             .execute_pending_turn_stream(
@@ -457,4 +571,26 @@ where
             }
         }
     }
+
+    async fn run_next_pending_turn(&self) -> Result<Option<SendResult>> {
+        let conversation_id = self.conversation.record().id;
+        let Some(lease) = self.coordinator.claim_conversation(conversation_id).await? else {
+            return Ok(None);
+        };
+        let result = self.execute_head_under_lease(&lease).await;
+        if let Err(error) = self.coordinator.release_idle(&lease).await {
+            tracing::error!(%error, %conversation_id, "failed to release conversation lease");
+        }
+        result
+    }
+}
+
+/// A stream that only reports completion, for the rare case where a queue
+/// worker executed a streaming sender's turn before it could attach.
+fn completed_only_stream(result: SendResult) -> ExecutionStreamHandle {
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let _ = event_tx.send(Ok(crate::ExecutionStreamEvent::Completed(result)));
+    ExecutionStreamHandle::new(tokio_stream::wrappers::UnboundedReceiverStream::new(
+        event_rx,
+    ))
 }

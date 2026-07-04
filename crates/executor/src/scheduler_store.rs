@@ -78,24 +78,6 @@ impl SchedulerStore {
             .collect())
     }
 
-    pub async fn claim_due_tasks(
-        &self,
-        now_ms: u64,
-        limit: usize,
-        lease_ms: u64,
-    ) -> Result<Vec<ScheduledTaskRecord>> {
-        let mut due = self.due_tasks(now_ms).await?;
-        due.sort_by_key(|task| task.next_run_at_ms);
-        due.truncate(limit);
-        let mut claimed = Vec::new();
-        for mut task in due {
-            task.claim(now_ms, lease_ms);
-            self.put_task(&task).await?;
-            claimed.push(task);
-        }
-        Ok(claimed)
-    }
-
     pub async fn get_task(&self, task_id: &str) -> Result<Option<ScheduledTaskRecord>> {
         let path = self.task_path(task_id);
         match fs::read(&path).await {
@@ -248,7 +230,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn claim_due_tasks_leases_until_expiry() {
+    async fn due_tasks_lists_only_enabled_due_tasks() {
         let tempdir = TempDir::new().unwrap();
         let store = SchedulerStore::new(tempdir.path());
         let mut task = store
@@ -268,9 +250,10 @@ mod tests {
         task.next_run_at_ms = 1;
         store.put_task(&task).await.unwrap();
 
-        let claimed = store.claim_due_tasks(2, 10, 100).await.unwrap();
-        assert_eq!(claimed.len(), 1);
-        assert!(store.claim_due_tasks(3, 10, 100).await.unwrap().is_empty());
-        assert_eq!(store.claim_due_tasks(103, 10, 100).await.unwrap().len(), 1);
+        assert_eq!(store.due_tasks(2).await.unwrap().len(), 1);
+        assert!(store.due_tasks(0).await.unwrap().is_empty());
+
+        store.disable_task(&task.id).await.unwrap();
+        assert!(store.due_tasks(2).await.unwrap().is_empty());
     }
 }
