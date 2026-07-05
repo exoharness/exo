@@ -186,4 +186,12 @@ describe("todo tools", () => {
     });
     expect(await todoInstruction(context)).toBeNull();
   });
+
+  it("treats a failing listArtifacts as empty instead of throwing", async () => {
+    const { context, conversation } = makeContext();
+    conversation.listArtifacts = async () => {
+      throw new Error("transient rpc failure");
+    };
+    expect(await todoInstruction(context)).toBeNull();
+  });
 });

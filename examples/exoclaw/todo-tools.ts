@@ -45,22 +45,23 @@ function todoHandle(context: TurnContext): TodoHandle {
 }
 
 async function readTodos(handle: TodoHandle): Promise<Todo[]> {
-  const latest = (await handle.listArtifacts())
-    .filter((artifact) => artifact.path === TODO_ARTIFACT_PATH)
-    .sort((a, b) => b.version - a.version)[0];
-  if (latest === undefined) {
-    return [];
-  }
   let raw: unknown;
   try {
+    const latest = (await handle.listArtifacts())
+      .filter((artifact) => artifact.path === TODO_ARTIFACT_PATH)
+      .sort((a, b) => b.version - a.version)[0];
+    if (latest === undefined) {
+      return [];
+    }
     raw = await handle.readArtifactJson({
       artifactId: latest.artifactId,
       version: latest.version,
     });
   } catch {
-    // A corrupt list is not worth bricking prompt assembly over; unlike
-    // memory it is fully regenerable, so treat it as empty and let the next
-    // todowrite overwrite it.
+    // A corrupt or unreadable list (including a transient listArtifacts
+    // failure) is not worth bricking prompt assembly over; unlike memory it
+    // is fully regenerable, so treat it as empty and let the next todowrite
+    // overwrite it.
     return [];
   }
   return isTodoList(raw) ? raw : [];
