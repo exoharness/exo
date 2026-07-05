@@ -41,7 +41,7 @@ To use Exo as an agent, you'll need an OpenAI or OpenRouter API key. If you
 have that, simply do the following:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/ankrgyl/exo/main/public/setup.sh -o setup.sh
+curl -fsSL https://raw.githubusercontent.com/ankrgyl/exo/main/setup.sh -o setup.sh
 bash setup.sh
 ```
 
@@ -68,6 +68,32 @@ Install python3 and curl in the sandbox. You don't need sudo, just use apt-get. 
 schedule a task to run every minute that grabs news headlines from the BBC RSS feed. Only print new headlines you've
 not printed before. Please print them here.
 ```
+
+## Operating Exo
+
+`setup.sh` is only for the first-time install. After that, `./exo.sh` in the
+repo root is the day-to-day control surface for your agent. Running it with no
+arguments starts (or reconnects to) the local agent so you can talk to it via
+the command line.
+
+```
+./exo.sh                # start the full stack (Docker sandbox, ExoChat) and open the CLI chat interface
+./exo.sh list           # list agents and conversations
+./exo.sh stop-all       # stop the scheduler and adapter runners; state is preserved
+./exo.sh fresh          # rebuild, delete all agents/conversations, start clean
+./exo.sh setup-profile  # update your local profile (name, preferences)
+./exo.sh --help         # all commands and options
+```
+
+The most common commands: use `stop-all` when you want to shut Exo down,
+plain `./exo.sh` to bring it back with all state intact, and `fresh` when you
+want to throw everything away and start over with a brand-new agent.
+
+By default `./exo.sh` uses the `canonical` template: a Docker sandbox, the repo
+mounted at `/workspace/exo`, and ExoChat for remote access. Pass
+`--template dev` for a developer variant that sets up IRC and Discord instead
+of ExoChat, or `--template minimal` for a bare REPL with no Docker defaults or
+adapter setup.
 
 ## Understanding Exo
 
@@ -120,7 +146,7 @@ There are a number of prompt files that Exo uses during runtime. You can edit th
   rules for the default Exo agent.
 - `.exo/exoclaw-profile.md`: local, git-ignored profile instructions such as
   your name and machine-specific preferences. Create or update it with
-  `scripts/exo.sh setup-profile`.
+  `./exo.sh setup-profile`.
 - `examples/exoclaw/harness.ts`: assembles the full prompt sent each turn,
   including dynamic instructions about tools, adapters, memory, sandbox behavior,
   and self-maintenance.

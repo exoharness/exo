@@ -6,10 +6,10 @@ so setup requires no phone number, bot token, or third-party workspace.
 
 ## Setup
 
-Use canonical setup:
+Use the default canonical setup:
 
 ```bash
-scripts/exo.sh fresh --canonical
+./exo.sh fresh
 ```
 
 The control script starts the adapter runner, watches `.exo/exoclaw-adapters.log`,
@@ -25,7 +25,7 @@ pnpm dlx wrangler dev --config website/wrangler.jsonc --port 8787
 Then start Exoclaw against it from the repo root:
 
 ```bash
-EXO_CHAT_BASE_URL=http://127.0.0.1:8787 scripts/exo.sh fresh --canonical
+EXO_CHAT_BASE_URL=http://127.0.0.1:8787 ./exo.sh fresh
 ```
 
 The setup prompt creates a library adapter similar to:

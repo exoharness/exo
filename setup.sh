@@ -204,7 +204,7 @@ missing_has() {
 
 is_exo_checkout() {
   local dir="$1"
-  [[ -d "$dir/.git" && -f "$dir/scripts/exo.sh" ]]
+  [[ -d "$dir/.git" && -f "$dir/exo.sh" ]]
 }
 
 prompt_yes_no() {
@@ -395,27 +395,6 @@ trust_mise_config() {
   mise trust "$config"
 }
 
-control_script_supports() {
-  local flag="$1"
-  scripts/exo.sh --help 2>/dev/null | grep -q -- "$flag"
-}
-
-write_local_profile() {
-  local file="$1"
-  local user_name="$2"
-  mkdir -p "$(dirname "$file")"
-  {
-    echo "# Local Exo Profile"
-    echo
-    echo "This file is local to this machine and should not be committed."
-    if [[ -n "$user_name" ]]; then
-      echo
-      echo "The user's name is $user_name."
-    fi
-  } >"$file"
-  chmod 600 "$file"
-}
-
 choose_install_dir() {
   if is_exo_checkout "$PWD"; then
     echo "Using current Exo checkout: $PWD" >&2
@@ -560,31 +539,20 @@ main() {
   info "Configure Exo"
   USER_NAME="$(prompt_text "Your name, or blank to skip" "$USER_NAME")"
   AGENT_NAME="$(prompt_text "Agent display name" "$AGENT_NAME")"
-  local profile_file="${EXOCLAW_LOCAL_PROMPT_FILE:-$install_dir/.exo/exoclaw-profile.md}"
-  write_local_profile "$profile_file" "$USER_NAME"
-  echo "Wrote local Exo profile: $profile_file"
+  ./exo.sh write-profile ${USER_NAME:+--user-name "$USER_NAME"}
 
-  info "Install dependencies"
-  pnpm install
-
-  info "Build exo"
-  CARGO_TARGET_DIR=target cargo build -p exo --ignore-rust-version
+  info "Build Exo"
+  ./exo.sh build
 
   info "Store secrets and register model"
-  ./target/debug/exo --env-file-if-exists "$env_file" \
-    secret set "$MODEL_PROVIDER" --env "$MODEL_API_KEY_ENV"
-  ./target/debug/exo --env-file-if-exists "$env_file" \
-    model register "$MODEL_NAME" --model "$UPSTREAM_MODEL" \
-    --secret "$MODEL_PROVIDER" ${MODEL_BASE_URL:+--base-url "$MODEL_BASE_URL"}
+  ./exo.sh register-model --model "$MODEL_NAME" \
+    --upstream-model "$UPSTREAM_MODEL" \
+    --secret-name "$MODEL_PROVIDER" --secret-env "$MODEL_API_KEY_ENV" \
+    ${MODEL_BASE_URL:+--base-url "$MODEL_BASE_URL"}
 
   info "Start canonical Exo"
-  local control_args=(fresh --canonical --agent-name "$AGENT_NAME")
-  if control_script_supports "--skip-build"; then
-    control_args=(fresh --canonical --skip-build --agent-name "$AGENT_NAME")
-  fi
   unset EXO_SETUP_ADAPTER
-  export EXO_CANONICAL_PROFILE=user
-  exec scripts/exo.sh "${control_args[@]}"
+  exec ./exo.sh fresh --skip-build --agent-name "$AGENT_NAME"
 }
 
 main "$@"
