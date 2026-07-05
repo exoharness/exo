@@ -161,6 +161,7 @@ async fn filesystem_snapshot_and_rewind_round_trip() {
             id: sandbox_id.clone(),
             snapshot_id,
             idle_seconds: None,
+            provider: None,
         })
         .await
         .expect("start_sandbox (rewind) should succeed");
