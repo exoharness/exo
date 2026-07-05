@@ -837,6 +837,58 @@ impl BasicExoHarness {
         PathBuf::from("agents")
     }
 
+    /// Slug-uniqueness index: one marker file per slug under
+    /// `agents/by-slug/`, plus a `.seeded` sentinel recording that markers
+    /// exist for every pre-index agent. Turns the per-create uniqueness check
+    /// from O(existing agents) full record scans into an O(1) existence
+    /// probe (measured: onboarding decayed 6.1 → 0.6 creates/s over the
+    /// first 5000 agents without this).
+    fn slug_index_dir(&self) -> PathBuf {
+        self.agents_dir().join("by-slug")
+    }
+
+    fn slug_marker_path(&self, slug: &str) -> PathBuf {
+        // Slugs are filesystem-safe by construction (CLI slugifies); encode
+        // defensively anyway so a hostile slug cannot escape the directory.
+        let encoded: String = slug
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c.to_string()
+                } else {
+                    format!("%{:02x}", c as u32)
+                }
+            })
+            .collect();
+        // ".slug" extension (never ".json") so a slug literally named
+        // "record" can't produce "agents/by-slug/record.json", which the
+        // list_agent_records key filter would misread as an agent record.
+        self.slug_index_dir().join(format!("{encoded}.slug"))
+    }
+
+    /// Must be called with the write lock held. Seeds markers for stores
+    /// created before the index existed (one full scan, once per store).
+    async fn ensure_slug_index_seeded(&self) -> Result<()> {
+        let sentinel = self.slug_index_dir().join(".seeded");
+        if self
+            .inner
+            .storage
+            .get_json_if_exists::<bool>(&sentinel)
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+        for record in self.list_agent_records().await? {
+            self.inner
+                .storage
+                .put_json(self.slug_marker_path(&record.slug), &record.id)
+                .await?;
+        }
+        self.inner.storage.put_json(sentinel, &true).await?;
+        Ok(())
+    }
+
     fn bindings_dir(&self) -> PathBuf {
         PathBuf::from("bindings")
     }
@@ -894,8 +946,15 @@ impl ExoHarness for BasicExoHarness {
 
     async fn new_agent(&self, request: NewAgentRequest) -> Result<Arc<dyn AgentHandle>> {
         let _guard = self.inner.write_lock.lock().await;
-        let existing = self.list_agent_records().await?;
-        if existing.iter().any(|agent| agent.slug == request.slug) {
+        self.ensure_slug_index_seeded().await?;
+        let marker = self.slug_marker_path(&request.slug);
+        if self
+            .inner
+            .storage
+            .get_json_if_exists::<Uuid7>(&marker)
+            .await?
+            .is_some()
+        {
             bail!("agent slug already exists: {}", request.slug);
         }
 
@@ -909,6 +968,7 @@ impl ExoHarness for BasicExoHarness {
             .storage
             .put_json(agent_dir.join("record.json"), &record)
             .await?;
+        self.inner.storage.put_json(marker, &record.id).await?;
         Ok(Arc::new(BasicAgentHandle {
             harness: self.clone(),
             record,
@@ -920,6 +980,19 @@ impl ExoHarness for BasicExoHarness {
         let agent_dir = self.agents_dir().join(id.to_string());
         if self.inner.storage.list_keys(&agent_dir).await?.is_empty() {
             return Ok(false);
+        }
+        // Release the slug before the record disappears (marker path derives
+        // from the record's slug).
+        if let Some(record) = self
+            .inner
+            .storage
+            .get_json_if_exists::<AgentRecord>(&agent_dir.join("record.json"))
+            .await?
+        {
+            self.inner
+                .storage
+                .delete_prefix(self.slug_marker_path(&record.slug))
+                .await?;
         }
         self.inner.storage.delete_prefix(agent_dir).await?;
         Ok(true)
