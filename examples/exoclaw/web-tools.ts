@@ -465,11 +465,12 @@ function webSearchTool(): ToolInstance {
             description: "Search query.",
           },
           count: {
-            type: "number",
-            description: "Number of results to return, 1-10. Defaults to 5.",
+            type: ["number", "null"],
+            description:
+              "Number of results to return, 1-10. Null for the default of 5.",
           },
         },
-        required: ["query"],
+        required: ["query", "count"],
       },
     },
     handler: {
@@ -540,12 +541,12 @@ function webFetchTool(): ToolInstance {
             description: "The http(s) URL to fetch.",
           },
           maxChars: {
-            type: "number",
+            type: ["number", "null"],
             description:
-              "Maximum characters of extracted text to return, 1000-100000. Defaults to 20000.",
+              "Maximum characters of extracted text to return, 1000-100000. Null for the default of 20000.",
           },
         },
-        required: ["url"],
+        required: ["url", "maxChars"],
       },
     },
     handler: {
