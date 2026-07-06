@@ -2647,11 +2647,22 @@ async fn start_sandbox_side_effect(
     //     handle after the new one exists would tear down the new container's
     //     warm-cache entry (both handles share the same SandboxKey).
     let sandbox_handle = if cross_provider {
+        // The payload may be a reference into the source provider's own
+        // infrastructure (e.g. a DaytonaSnapshot manifest); give that provider
+        // the chance to materialise it into a portable kind the target can
+        // restore. Pass-through for kinds that already travel.
+        let sandbox_request = sandbox_request(owner, &request.id, &sandbox, None);
+        let payload = harness
+            .inner
+            .sandbox_backend_for_provider(previous_provider)
+            .await?
+            .export_snapshot_portable(&sandbox_request, payload)
+            .await?;
         let sandbox_handle = harness
             .inner
             .sandbox_backend_for_provider(sandbox.provider)
             .await?
-            .acquire_from_snapshot(sandbox_request(owner, &request.id, &sandbox, None), payload)
+            .acquire_from_snapshot(sandbox_request, payload)
             .await?;
         let previous_handle = harness
             .inner

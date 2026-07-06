@@ -138,6 +138,13 @@ pub enum SnapshotKind {
     /// Reference to a Sprites checkpoint id on a named sprite. Payload bytes are
     /// a small JSON manifest; restoring is `POST .../checkpoints/{id}/restore`.
     SpritesSnapshot,
+    /// A gzipped tar of a sandbox's root filesystem (no image metadata),
+    /// loadable with `docker import`. The portable interchange format for
+    /// cross-provider restores: produced by
+    /// [`ManagedSandboxBackend::export_snapshot_portable`] when a snapshot
+    /// must leave the provider that captured it (e.g. teleporting a Daytona
+    /// sandbox back down to local Docker).
+    RootFsTar,
 }
 
 #[async_trait]
@@ -173,6 +180,21 @@ pub trait ManagedSandboxBackend: Send + Sync {
         request: SandboxRequest,
         payload: SnapshotPayload,
     ) -> Result<Arc<dyn ManagedSandboxHandle>>;
+
+    /// Convert a snapshot payload this backend produced into a portable kind
+    /// that other backends can restore (used for cross-provider restores when
+    /// the payload's kind is private to this backend, e.g. a `DaytonaSnapshot`
+    /// manifest headed for local Docker). The default passes the payload
+    /// through unchanged, which is correct for kinds that already travel
+    /// (`DockerImageTar`) — backends whose snapshots are references into their
+    /// own infrastructure override this to materialise the bytes.
+    async fn export_snapshot_portable(
+        &self,
+        _request: &SandboxRequest,
+        payload: SnapshotPayload,
+    ) -> Result<SnapshotPayload> {
+        Ok(payload)
+    }
 }
 
 pub const DEFAULT_SANDBOX_IMAGE: &str = crate::sandbox_provider::DEFAULT_DOCKER_IMAGE;
@@ -520,13 +542,15 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
             bail!("restore-from-snapshot requires a warm sandbox lifecycle (idle_ttl must be set)");
         }
         match (self.cli, payload.kind) {
-            (ContainerCliFlavor::Docker, SnapshotKind::DockerImageTar) => {}
+            (ContainerCliFlavor::Docker, SnapshotKind::DockerImageTar)
+            | (ContainerCliFlavor::Docker, SnapshotKind::RootFsTar) => {}
             (ContainerCliFlavor::AppleContainer, _) => bail!(
                 "restore-from-snapshot is not yet implemented for the apple-container backend"
             ),
-            (_, SnapshotKind::DaytonaSnapshot) => {
-                bail!("restoring a Daytona snapshot on a container backend is not implemented yet")
-            }
+            (_, SnapshotKind::DaytonaSnapshot) => bail!(
+                "restoring a Daytona snapshot on a container backend requires the Daytona \
+                 provider to export it first (cross-provider restores do this automatically)"
+            ),
             (_, SnapshotKind::E2bSnapshot) => bail!(
                 "E2bSnapshot payloads can only be restored by the E2B sandbox provider; \
                  select provider e2b to rewind this snapshot"
@@ -537,7 +561,12 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
             ),
         }
 
-        let image_tag = docker_load_image(&self.container_bin, &payload.bytes).await?;
+        let image_tag = match payload.kind {
+            SnapshotKind::RootFsTar => {
+                docker_import_rootfs(&self.container_bin, &payload.bytes).await?
+            }
+            _ => docker_load_image(&self.container_bin, &payload.bytes).await?,
+        };
 
         // Build a fresh request that points at the loaded image. Mounts,
         // network policy, lifecycle, and key are all preserved from the
@@ -1907,6 +1936,46 @@ async fn docker_load_image(container_bin: &Path, payload: &Bytes) -> Result<Stri
         }
     }
     bail!("docker load completed but no image reference found in output: {stdout}")
+}
+
+/// Import a gzipped rootfs tarball (`SnapshotKind::RootFsTar`) as a local
+/// image via `docker import`, returning the tag it was imported under.
+/// Unlike `docker load`, this consumes a bare filesystem tree — no layers, no
+/// image config — so env/entrypoint metadata doesn't carry over; warm
+/// sandboxes don't rely on it (they always run an explicit argv).
+async fn docker_import_rootfs(container_bin: &Path, payload: &Bytes) -> Result<String> {
+    use tokio::io::AsyncWriteExt;
+
+    let image_tag = format!("exo-import-{}:1", Uuid::new_v4().simple());
+    let mut child = Command::new(container_bin)
+        .args(["import", "-", &image_tag])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawning `docker import`")?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("docker import: failed to acquire stdin"))?;
+    stdin
+        .write_all(payload)
+        .await
+        .context("writing rootfs tar to `docker import` stdin")?;
+    stdin.shutdown().await.ok();
+    drop(stdin);
+
+    let output = child
+        .wait_with_output()
+        .await
+        .context("waiting on `docker import`")?;
+    if !output.status.success() {
+        bail!(
+            "docker import failed: {}",
+            render_command_error(&output.stderr)
+        );
+    }
+    Ok(image_tag)
 }
 
 #[cfg(test)]

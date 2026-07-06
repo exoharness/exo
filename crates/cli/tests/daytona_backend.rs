@@ -597,6 +597,106 @@ async fn acquire_from_snapshot_bridges_docker_tar_but_fails_on_garbage() {
     );
 }
 
+#[tokio::test]
+async fn export_snapshot_portable_tars_a_temp_sandbox_into_rootfs_payload() {
+    // Teleport-down export: a DaytonaSnapshot manifest is materialised as a
+    // portable RootFsTar by booting a temp sandbox from the named snapshot,
+    // tarring its rootfs, downloading the tarball, and deleting the temp
+    // sandbox.
+    let server = MockServer::start().await;
+    let backend = backend_for_mock(&server);
+
+    Mock::given(method("POST"))
+        .and(path("/sandbox"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(sandbox_json("sb-export", "started")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    mount_get_started(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/toolbox/sb-export/process/execute"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "exitCode": 0, "result": "EXO_TAR_OK\n" })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/toolbox/sb-export/files/download"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"fake-rootfs-tgz".to_vec()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/sandbox/sb-export"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let manifest = json!({ "snapshot_name": "exo-snap-export-fixture" });
+    let payload = SnapshotPayload {
+        kind: SnapshotKind::DaytonaSnapshot,
+        bytes: Bytes::from(serde_json::to_vec(&manifest).unwrap()),
+    };
+    let request = make_request("conv-12", "sandbox-12");
+    let exported = backend
+        .export_snapshot_portable(&request, payload)
+        .await
+        .expect("export should succeed against the mock");
+
+    assert!(
+        matches!(exported.kind, SnapshotKind::RootFsTar),
+        "exported kind should be RootFsTar, got {:?}",
+        exported.kind
+    );
+    assert_eq!(&exported.bytes[..], b"fake-rootfs-tgz");
+
+    let requests = server.received_requests().await.unwrap_or_default();
+    let create = requests
+        .iter()
+        .find(|r| r.url.path() == "/sandbox" && r.method.to_string().to_uppercase() == "POST")
+        .expect("temp sandbox create should have been called");
+    let body: Value = serde_json::from_slice(&create.body).unwrap();
+    assert_eq!(
+        body.get("snapshot").and_then(Value::as_str),
+        Some("exo-snap-export-fixture"),
+        "temp sandbox must boot from the manifest's snapshot: {body:?}"
+    );
+    let labels = body.get("labels").expect("labels in create body");
+    assert!(
+        labels
+            .get("exo.sandbox.key")
+            .and_then(Value::as_str)
+            .is_some_and(|k| k.contains("exo-snapshot-export")),
+        "temp sandbox must use a distinct export key, not the real sandbox's: {labels:?}"
+    );
+}
+
+#[tokio::test]
+async fn export_snapshot_portable_passes_docker_tar_through_untouched() {
+    let server = MockServer::start().await;
+    let backend = backend_for_mock(&server);
+
+    let payload = SnapshotPayload {
+        kind: SnapshotKind::DockerImageTar,
+        bytes: Bytes::from_static(b"tar-bytes"),
+    };
+    let request = make_request("conv-13", "sandbox-13");
+    let exported = backend
+        .export_snapshot_portable(&request, payload)
+        .await
+        .expect("pass-through export should succeed");
+    assert!(matches!(exported.kind, SnapshotKind::DockerImageTar));
+    assert_eq!(&exported.bytes[..], b"tar-bytes");
+
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(requests.len(), 0, "pass-through must not touch the API");
+}
+
 // ─────────────────────── exec (toolbox URL) ───────────────────────
 
 #[tokio::test]

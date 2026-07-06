@@ -32,7 +32,7 @@ use uuid::Uuid;
 
 use crate::sandbox::{
     ManagedSandboxBackend, ManagedSandboxHandle, SandboxCommand, SandboxCommandOutput,
-    SandboxNetworkPolicy, SandboxRequest, SandboxSpec, SnapshotKind, SnapshotPayload,
+    SandboxKey, SandboxNetworkPolicy, SandboxRequest, SandboxSpec, SnapshotKind, SnapshotPayload,
     WARM_SANDBOX_KEY_LABEL, WARM_SANDBOX_SPEC_HASH_LABEL, sandbox_spec_hash,
 };
 use crate::sandbox_provider::shell_quote;
@@ -289,7 +289,9 @@ impl ManagedSandboxBackend for DaytonaSandboxBackend {
             SnapshotKind::DockerImageTar => {
                 import_docker_image_tar(&self.handle_backend(), &payload.bytes).await?
             }
-            SnapshotKind::E2bSnapshot | SnapshotKind::SpritesSnapshot => bail!(
+            SnapshotKind::E2bSnapshot
+            | SnapshotKind::SpritesSnapshot
+            | SnapshotKind::RootFsTar => bail!(
                 "the Daytona backend cannot restore a {:?} payload; \
                  select the provider that produced the snapshot",
                 payload.kind
@@ -307,9 +309,73 @@ impl ManagedSandboxBackend for DaytonaSandboxBackend {
             backend: self.handle_backend(),
         }))
     }
+
+    async fn export_snapshot_portable(
+        &self,
+        request: &SandboxRequest,
+        payload: SnapshotPayload,
+    ) -> Result<SnapshotPayload> {
+        // Only DaytonaSnapshot manifests are private to this backend; anything
+        // else either already travels or belongs to another provider (and will
+        // be rejected by the consumer with a specific error).
+        if !matches!(payload.kind, SnapshotKind::DaytonaSnapshot) {
+            return Ok(payload);
+        }
+        let manifest: DaytonaSnapshotManifest = serde_json::from_slice(&payload.bytes)
+            .context("decoding DaytonaSnapshot manifest")?;
+        self.export_snapshot_as_rootfs_tar(request, &manifest.snapshot_name)
+            .await
+    }
 }
 
+/// Path the export tar is written to inside the temp sandbox.
+const EXPORT_ROOTFS_PATH: &str = "/tmp/exo-rootfs.tgz";
+/// Ceiling for tarring a full rootfs; large sandboxes take a while.
+const EXPORT_TAR_TIMEOUT_SECS: u64 = 600;
+
 impl DaytonaSandboxBackend {
+    /// Teleport-down export: materialise a named Daytona snapshot as a
+    /// portable [`SnapshotKind::RootFsTar`] payload by booting a throwaway
+    /// sandbox from it, tarring its root filesystem, and downloading the
+    /// tarball through the toolbox. The temp sandbox is deleted afterwards
+    /// regardless of outcome.
+    ///
+    /// Caveats:
+    ///   - The compressed rootfs must fit in the sandbox's own free disk;
+    ///     Daytona can't size disks on create-from-snapshot, so oversized
+    ///     images (e.g. the stock daytonaio/sandbox) fail with a clear error.
+    ///   - Runs `tar` as root via passwordless sudo when the image has it,
+    ///     falling back to the sandbox user with unreadable files skipped.
+    async fn export_snapshot_as_rootfs_tar(
+        &self,
+        request: &SandboxRequest,
+        snapshot_name: &str,
+    ) -> Result<SnapshotPayload> {
+        // A unique key keeps the temp sandbox's labels from colliding with the
+        // real sandbox's find-by-label lookups during the export window.
+        let mut export_request = request.clone();
+        export_request.key = SandboxKey::ConversationSandbox {
+            conversation_id: "exo-snapshot-export".to_string(),
+            sandbox_id: Uuid::new_v4().simple().to_string(),
+        };
+        let spec_hash = sandbox_spec_hash(&export_request.spec);
+        let sandbox = self
+            .create_sandbox(&export_request, &spec_hash, Some(snapshot_name))
+            .await
+            .context("creating temp Daytona sandbox for snapshot export")?;
+        let backend = self.handle_backend();
+
+        let result = export_rootfs_tar_from_sandbox(&backend, &sandbox.id, self).await;
+        if let Err(error) = backend.delete_sandbox(&sandbox.id).await {
+            tracing::warn!(
+                sandbox_id = %sandbox.id,
+                error = format!("{error:#}"),
+                "failed to delete temp Daytona sandbox after snapshot export"
+            );
+        }
+        result
+    }
+
     /// Clone the HTTP state into a value the handle owns, so handle operations
     /// don't re-borrow the backend.
     fn handle_backend(&self) -> DaytonaBackendHandle {
@@ -337,6 +403,43 @@ impl DaytonaBackendHandle {
 
     fn toolbox_endpoint(&self, path: &str) -> String {
         format!("{}{}", self.toolbox_url, path)
+    }
+
+    /// Download a file's raw bytes from a sandbox via the toolbox.
+    async fn download_file(&self, id: &str, path: &str) -> Result<Bytes> {
+        let response = self
+            .client
+            .get(self.toolbox_endpoint(&format!("/toolbox/{id}/files/download")))
+            .query(&[("path", path)])
+            .send()
+            .await
+            .with_context(|| format!("downloading {path} from Daytona sandbox {id}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            bail!("Daytona file download of {path} failed ({status}): {text}");
+        }
+        response
+            .bytes()
+            .await
+            .with_context(|| format!("reading {path} download body from Daytona sandbox {id}"))
+    }
+
+    /// Delete a sandbox outright (`DELETE /sandbox/{id}`) — used for temp
+    /// export sandboxes, where stop-and-keep would just leak.
+    async fn delete_sandbox(&self, id: &str) -> Result<()> {
+        let response = self
+            .client
+            .delete(self.api_endpoint(&format!("/sandbox/{id}")))
+            .send()
+            .await
+            .with_context(|| format!("deleting Daytona sandbox {id}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            bail!("Daytona delete-sandbox failed ({status}): {text}");
+        }
+        Ok(())
     }
 
     /// Short-lived push credentials for Daytona's transient registry, used by
@@ -1183,6 +1286,56 @@ async fn import_docker_image_tar(backend: &DaytonaBackendHandle, tar: &[u8]) -> 
 
     backend.wait_for_snapshot_active(&snapshot_name).await?;
     Ok(snapshot_name)
+}
+
+/// Download a tarball containing the root filesystem of a sandbox. Note: Pseudo-filesystems and /tmp (where the tarball itself lands) are excluded.
+async fn export_rootfs_tar_from_sandbox(
+    backend: &DaytonaBackendHandle,
+    id: &str,
+    creator: &DaytonaSandboxBackend,
+) -> Result<SnapshotPayload> {
+    creator.wait_until_started(id).await?;
+
+    // Tar as root via sudo when the image has it (skipped files would
+    // otherwise silently vanish from the export); `--ignore-failed-read`
+    // covers the non-sudo case and is harmless with it. tar exits 1 for
+    // "file changed as we read it" on a live filesystem — accepted.
+    let tar_command = format!(
+        "if sudo -n true 2>/dev/null; then SUDO='sudo -n'; else SUDO=''; fi; \
+         $SUDO tar czf {path} --one-file-system --warning=no-file-changed --ignore-failed-read \
+         --exclude=./tmp --exclude=./proc --exclude=./sys --exclude=./dev -C / . ; \
+         rc=$?; if [ \"$rc\" -le 1 ]; then echo EXO_TAR_OK; else echo EXO_TAR_FAILED rc=$rc; fi",
+        path = EXPORT_ROOTFS_PATH
+    );
+    let response = execute_daytona_process(
+        backend,
+        id,
+        DaytonaExecRequest {
+            command: tar_command,
+            cwd: Some("/".to_string()),
+            env: HashMap::new(),
+            timeout: Some(EXPORT_TAR_TIMEOUT_SECS),
+        },
+        "tarring sandbox rootfs for export",
+    )
+    .await?;
+    let output = response.result.unwrap_or_default();
+    if !output.contains("EXO_TAR_OK") {
+        if output.contains("No space left") {
+            bail!(
+                "exporting this Daytona snapshot needs more free disk than the sandbox has \
+                 (the compressed rootfs is written to the sandbox's own /tmp before download); \
+                 tar output: {output}"
+            );
+        }
+        bail!("tarring the sandbox rootfs for export failed: {output}");
+    }
+
+    let bytes = backend.download_file(id, EXPORT_ROOTFS_PATH).await?;
+    Ok(SnapshotPayload {
+        kind: SnapshotKind::RootFsTar,
+        bytes,
+    })
 }
 
 /// `docker login` + `docker push` against an isolated `--config` directory:

@@ -133,6 +133,44 @@ async fn teleport_docker_sandbox_to_daytona_keeps_files() {
         "file should survive the docker->daytona teleport: {stdout:?}"
     );
 
+    // 4.5 Round trip: mutate on Daytona, then teleport back DOWN to local
+    //     Docker and confirm both generations of state arrived. The down-leg
+    //     exercises the export path: native Daytona snapshot → temp sandbox →
+    //     rootfs tar → docker import.
+    let (rc, _, _) = exec_shell(
+        conv.as_ref(),
+        &sandbox_id,
+        "echo daytona-was-here > /exo-daytona.txt",
+    )
+    .await;
+    assert_eq!(rc, 0, "writing the daytona marker should succeed");
+
+    let snapshot_id = conv
+        .snapshot_sandbox(sandbox_id.clone())
+        .await
+        .expect("native daytona snapshot");
+    conv.start_sandbox(StartSandboxRequest {
+        id: sandbox_id.clone(),
+        snapshot_id,
+        idle_seconds: None,
+        provider: Some(SandboxProvider::Docker),
+    })
+    .await
+    .expect("start_sandbox back on docker from the daytona snapshot");
+
+    let (rc, stdout, _) = exec_shell(
+        conv.as_ref(),
+        &sandbox_id,
+        "cat /exo-teleport.txt /exo-daytona.txt && hostname",
+    )
+    .await;
+    eprintln!("after teleport back down, docker sees:\n{stdout}");
+    assert_eq!(rc, 0, "exec on the returned docker sandbox should succeed");
+    assert!(
+        stdout.contains("teleport-marker") && stdout.contains("daytona-was-here"),
+        "both markers should survive the daytona->docker teleport: {stdout:?}"
+    );
+
     let _ = conv.stop_sandbox(sandbox_id).await;
 
     // 5. Make-before-break: a teleport that fails must leave the source
