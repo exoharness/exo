@@ -184,7 +184,7 @@ matrix cell that supports docker. The test self-skips on cells that don't
 
 Two live Daytona analogs (both `#[ignore]`d; they need `DAYTONA_API_KEY`
 — snapshots are available in Daytona's shared `us` region — and, for the
-teleport, a local docker daemon plus the `daytona` CLI on PATH):
+teleport, a local docker daemon):
 
 ```
 # native Daytona snapshot + rewind

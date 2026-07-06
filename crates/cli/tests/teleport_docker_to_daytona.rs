@@ -11,9 +11,8 @@
 //!   4. exec on the same sandbox id — now running on Daytona — and read the
 //!      marker file back
 //!
-//! Ignored by default — requires a local Docker daemon, the `daytona` CLI on
-//! PATH, and `DAYTONA_API_KEY` (+ optional `DAYTONA_ORGANIZATION_ID` /
-//! `DAYTONA_TARGET`). Run with:
+//! Ignored by default — requires a local Docker daemon and `DAYTONA_API_KEY`
+//! (+ optional `DAYTONA_ORGANIZATION_ID` / `DAYTONA_TARGET`). Run with:
 //!
 //! ```bash
 //! cargo test -p exo --test teleport_docker_to_daytona -- --ignored --nocapture
@@ -31,7 +30,7 @@ use futures::io::AsyncReadExt;
 use tempfile::TempDir;
 
 #[tokio::test]
-#[ignore = "live: needs docker, the daytona CLI, and DAYTONA_API_KEY"]
+#[ignore = "live: needs docker and DAYTONA_API_KEY"]
 async fn teleport_docker_sandbox_to_daytona_keeps_files() {
     let Ok(api_key) = std::env::var("DAYTONA_API_KEY") else {
         eprintln!("skipping: DAYTONA_API_KEY not set");

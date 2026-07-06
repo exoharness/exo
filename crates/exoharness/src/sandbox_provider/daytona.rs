@@ -58,7 +58,7 @@ pub struct DaytonaConfig {
     pub api_key: String,
     pub api_url: String,
     pub toolbox_url: String,
-    /// Region target (e.g. `us`), passed through on create when set.
+    /// Region target (e.g. `eu`, `us`), passed through on create when set.
     pub target: Option<String>,
     /// Scopes requests via `X-Daytona-Organization-ID`; without it Daytona may
     /// default to a "personal" org that lacks credit.
@@ -70,9 +70,6 @@ pub struct DaytonaSandboxBackend {
     api_url: String,
     toolbox_url: String,
     target: Option<String>,
-    /// Kept (beyond the baked-in auth header) so the cross-backend bridge can
-    /// authenticate the `daytona` CLI for `snapshot push`.
-    api_key: String,
 }
 
 impl DaytonaSandboxBackend {
@@ -98,7 +95,6 @@ impl DaytonaSandboxBackend {
             api_url: config.api_url.trim_end_matches('/').to_string(),
             toolbox_url: config.toolbox_url.trim_end_matches('/').to_string(),
             target: config.target,
-            api_key: config.api_key,
         })
     }
 
@@ -290,9 +286,6 @@ impl ManagedSandboxBackend for DaytonaSandboxBackend {
                     .context("decoding DaytonaSnapshot manifest")?;
                 manifest.snapshot_name
             }
-            // PROTOTYPE cross-backend bridge: resume a sandbox snapshotted on the
-            // Docker backend (a `docker save` tarball) here on Daytona. This is
-            // the teleport path: local container -> snapshot -> remote Daytona.
             SnapshotKind::DockerImageTar => {
                 import_docker_image_tar(&self.handle_backend(), &payload.bytes).await?
             }
@@ -308,7 +301,7 @@ impl ManagedSandboxBackend for DaytonaSandboxBackend {
             .await?;
         self.wait_until_started(&sandbox.id).await?;
         Ok(Arc::new(DaytonaSandboxHandle {
-            id: format!("daytona-restored:{}", request.key),
+            id: format!("daytona:{}", request.key),
             sandbox_id: sandbox.id,
             request,
             backend: self.handle_backend(),
@@ -324,7 +317,6 @@ impl DaytonaSandboxBackend {
             client: self.client.clone(),
             api_url: self.api_url.clone(),
             toolbox_url: self.toolbox_url.clone(),
-            api_key: self.api_key.clone(),
             target: self.target.clone(),
         }
     }
@@ -335,8 +327,7 @@ struct DaytonaBackendHandle {
     client: reqwest::Client,
     api_url: String,
     toolbox_url: String,
-    api_key: String,
-    /// Region target; the bridge must push its snapshot into the same region
+    /// Region target; the bridge must register its snapshot in the same region
     /// sandboxes are created in, or create-from-snapshot 400s with
     /// "not available in region".
     target: Option<String>,
@@ -349,6 +340,45 @@ impl DaytonaBackendHandle {
 
     fn toolbox_endpoint(&self, path: &str) -> String {
         format!("{}{}", self.toolbox_url, path)
+    }
+
+    /// Short-lived push credentials for Daytona's transient registry, used by
+    /// the Docker bridge (`GET /docker-registry/registry-push-access`).
+    async fn get_registry_push_access(&self) -> Result<DaytonaRegistryPushAccess> {
+        self.client
+            .get(self.api_endpoint("/docker-registry/registry-push-access"))
+            .send()
+            .await
+            .context("fetching Daytona registry push access")?
+            .error_for_status()
+            .context("Daytona registry-push-access returned an error status")?
+            .json()
+            .await
+            .context("decoding Daytona registry push access")
+    }
+
+    /// Register a pushed transient-registry image as a Daytona snapshot in the
+    /// backend's region (`POST /snapshots`). The snapshot builds asynchronously
+    /// (pending -> active); see `wait_for_snapshot_active`.
+    async fn register_snapshot(&self, name: &str, image_name: &str) -> Result<()> {
+        let body = DaytonaCreateSnapshotRequest {
+            name: name.to_string(),
+            image_name: image_name.to_string(),
+            region_id: self.target.clone(),
+        };
+        let response = self
+            .client
+            .post(self.api_endpoint("/snapshots"))
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("registering Daytona snapshot {name}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            bail!("Daytona snapshot registration failed ({status}): {text}");
+        }
+        Ok(())
     }
 
     /// `None` until the snapshot is registered: a freshly-captured snapshot 404s
@@ -410,10 +440,6 @@ impl DaytonaBackendHandle {
             .with_context(|| format!("decoding Daytona sandbox {id}"))
     }
 
-    /// A native `POST /sandbox/{id}/snapshot` runs asynchronously: the sandbox
-    /// enters `snapshotting` and returns to its prior state once the source is
-    /// quiesced. This only tracks the *sandbox* side; the snapshot resource
-    /// becomes usable a little later (see `wait_for_snapshot_active`).
     async fn wait_until_snapshot_complete(&self, id: &str) -> Result<()> {
         let deadline = Instant::now() + SNAPSHOT_WAIT_TIMEOUT;
         loop {
@@ -1053,16 +1079,8 @@ async fn stop_via_backend(backend: &DaytonaBackendHandle, id: &str) -> Result<()
     Ok(())
 }
 
-// Snapshot the running sandbox (`POST /sandbox/{id}/snapshot`); restore later
-// via `create_sandbox(snapshot = <name>)`. Daytona's docs disagree on whether
-// this captures fs+memory ("checkpoint") or fs only — verify empirically.
-//
-// TODO(snapshot-modes): exoharness's snapshot API is mode-less, so it can't
-// distinguish a memory checkpoint from a disk snapshot; a follow-up should add
-// `SnapshotMode { Disk, Checkpoint }`.
-//
-// Available in the shared `us` region (verified live 2026-07). Orgs without
-// the feature get a 403 ("feature flags not enabled"), surfaced below.
+// Snapshot the running sandbox (`POST /sandbox/{id}/snapshot`); can later be restored
+// via `create_sandbox(snapshot = <name>)`. 
 async fn save_as_snapshot_via_backend(
     backend: &DaytonaBackendHandle,
     id: &str,
@@ -1090,11 +1108,7 @@ async fn save_as_snapshot_via_backend(
         }
         bail!("Daytona snapshot failed ({status}): {text}");
     }
-    // Capture is asynchronous on two fronts: the source sandbox sits in
-    // `snapshotting`, and the snapshot resource itself is built in the background
-    // (404 -> Pending -> Active). The sandbox leaves `snapshotting` *before* the
-    // snapshot is Active, and creating from a not-yet-Active snapshot fails with
-    // "Sandbox failed to start: internal error" — so wait for both.
+    // Capture is async for both the sandbox and the snapshot resource itself, wait for both.
     backend.wait_until_snapshot_complete(id).await?;
     backend.wait_for_snapshot_active(&snapshot_name).await?;
 
@@ -1106,17 +1120,18 @@ async fn save_as_snapshot_via_backend(
     })
 }
 
-// PROTOTYPE cross-backend bridge: import a `docker save` tarball (the Docker
-// backend's snapshot format) into Daytona as a snapshot and return its name, so
-// a sandbox snapshotted on local Docker can be teleported to Daytona with its
-// files intact.
+// Cross-backend bridge: import a `docker save` tarball (the Docker backend's
+// snapshot format) into Daytona as a snapshot and return its name, so a
+// sandbox snapshotted on local Docker can be teleported to Daytona with its
+// files intact. The registry push runs against Daytona's transient registry
+// with short-lived credentials from the API; no daytona CLI involved.
 //
-// Caveats (fine for a prototype, not production):
-//   - Requires `docker` and the `daytona` CLI on the harness host.
+// Caveats:
+//   - Requires a `docker` daemon on the harness host (used for load/tag/push;
+//     pushing the tarball's layers straight from memory with an OCI registry
+//     client would drop that too).
 //   - Disk/filesystem only -- a docker image carries no memory/process state.
 //   - The image must be linux/amd64 to run on Daytona.
-// A production version would push to Daytona's registry via the API rather than
-// shelling out, and wouldn't need a local docker daemon.
 async fn import_docker_image_tar(backend: &DaytonaBackendHandle, tar: &[u8]) -> Result<String> {
     let snapshot_name = format!("exo-bridge-{}", Uuid::new_v4().simple());
     let tar_path = std::env::temp_dir().join(format!("{snapshot_name}.tar"));
@@ -1144,11 +1159,16 @@ async fn import_docker_image_tar(backend: &DaytonaBackendHandle, tar: &[u8]) -> 
         .map(str::to_string)
         .context("could not parse an image ref from `docker load` output")?;
 
-    // Re-tag to a specific version: Daytona rejects the `latest` tag that the
-    // Docker backend's snapshots carry.
-    let versioned_ref = format!("{snapshot_name}:1");
+    // Fetch short-lived push credentials for Daytona's transient registry and
+    // re-tag the image into it. (Also sidesteps the `latest` tag that the
+    // Docker backend's snapshots carry, which Daytona rejects.)
+    let push_access = backend.get_registry_push_access().await?;
+    let remote_ref = format!(
+        "{}/{}/{snapshot_name}:1",
+        push_access.registry_url, push_access.project
+    );
     let tag = tokio::process::Command::new("docker")
-        .args(["tag", &image_ref, &versioned_ref])
+        .args(["tag", &image_ref, &remote_ref])
         .output()
         .await
         .context("running `docker tag`")?;
@@ -1159,46 +1179,93 @@ async fn import_docker_image_tar(backend: &DaytonaBackendHandle, tar: &[u8]) -> 
         );
     }
 
-    // Authenticate the CLI with the same API key, then push the image as a
-    // Daytona snapshot (the CLI handles the registry push + snapshot
-    // registration). Push into the backend's region — sandboxes are created
-    // there, and a snapshot in another region 400s on create.
-    run_daytona_cli(&["login", "--api-key", &backend.api_key]).await?;
-    let mut push_args = vec!["snapshot", "push", &versioned_ref, "--name", &snapshot_name];
-    if let Some(target) = backend.target.as_deref() {
-        push_args.extend(["--region", target]);
-    }
-    run_daytona_cli(&push_args).await?;
-    for image in [&image_ref, &versioned_ref] {
+    // Push with a throwaway docker config dir so the temp credentials never
+    // touch the host user's ~/.docker/config.json, then register the pushed
+    // image as a Daytona snapshot in the backend's region — sandboxes are
+    // created there, and a snapshot in another region 400s on create.
+    let push_result = docker_push_with_credentials(&push_access, &remote_ref).await;
+    for image in [&image_ref, &remote_ref] {
         let _ = tokio::process::Command::new("docker")
             .args(["image", "rm", image])
             .output()
             .await;
     }
+    push_result?;
+    backend
+        .register_snapshot(&snapshot_name, &remote_ref)
+        .await?;
 
     backend.wait_for_snapshot_active(&snapshot_name).await?;
     Ok(snapshot_name)
 }
 
-async fn run_daytona_cli(args: &[&str]) -> Result<()> {
-    let output = tokio::process::Command::new("daytona")
-        .args(args)
-        .output()
+/// `docker login` + `docker push` against an isolated `--config` directory:
+/// the temp registry credentials are fed over stdin and written only to the
+/// throwaway config, never to the host user's docker config or process argv.
+async fn docker_push_with_credentials(
+    push_access: &DaytonaRegistryPushAccess,
+    remote_ref: &str,
+) -> Result<()> {
+    use tokio::process::Command;
+
+    let config_dir = std::env::temp_dir().join(format!("exo-docker-config-{}", Uuid::new_v4()));
+    tokio::fs::create_dir_all(&config_dir)
         .await
-        .with_context(|| {
-            format!(
-                "running `daytona {}` (is the daytona CLI installed on the harness host?)",
-                args.first().copied().unwrap_or_default()
-            )
-        })?;
-    if !output.status.success() {
-        bail!(
-            "`daytona {}` failed: {}",
-            args.first().copied().unwrap_or_default(),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        .with_context(|| format!("creating temp docker config {}", config_dir.display()))?;
+
+    let result = async {
+        let mut login = Command::new("docker")
+            .arg("--config")
+            .arg(&config_dir)
+            .args([
+                "login",
+                &push_access.registry_url,
+                "--username",
+                &push_access.username,
+                "--password-stdin",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("running `docker login` for the Daytona transient registry")?;
+        let mut stdin = login
+            .stdin
+            .take()
+            .context("opening stdin for `docker login`")?;
+        stdin
+            .write_all(push_access.secret.as_bytes())
+            .await
+            .context("writing registry credentials to `docker login`")?;
+        drop(stdin);
+        let login = login.wait_with_output().await.context("`docker login`")?;
+        if !login.status.success() {
+            bail!(
+                "docker login to {} failed: {}",
+                push_access.registry_url,
+                String::from_utf8_lossy(&login.stderr)
+            );
+        }
+
+        let push = Command::new("docker")
+            .arg("--config")
+            .arg(&config_dir)
+            .args(["push", remote_ref])
+            .output()
+            .await
+            .context("running `docker push` to the Daytona transient registry")?;
+        if !push.status.success() {
+            bail!(
+                "docker push {remote_ref} failed: {}",
+                String::from_utf8_lossy(&push.stderr)
+            );
+        }
+        Ok(())
     }
-    Ok(())
+    .await;
+
+    let _ = tokio::fs::remove_dir_all(&config_dir).await;
+    result
 }
 
 fn reject_unsupported_mounts(request: &SandboxRequest) -> Result<()> {
@@ -1477,6 +1544,26 @@ struct DaytonaSnapshotRequest {
 struct DaytonaSnapshotInfo {
     #[serde(default)]
     state: String,
+}
+
+/// Temporary robot-account credentials for the transient registry; expire
+/// after about an hour, so they're fetched per-push and never persisted.
+#[derive(Deserialize)]
+struct DaytonaRegistryPushAccess {
+    username: String,
+    secret: String,
+    #[serde(rename = "registryUrl")]
+    registry_url: String,
+    project: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DaytonaCreateSnapshotRequest {
+    name: String,
+    #[serde(rename = "imageName")]
+    image_name: String,
+    #[serde(rename = "regionId", skip_serializing_if = "Option::is_none")]
+    region_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
