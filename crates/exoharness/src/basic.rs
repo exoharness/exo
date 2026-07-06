@@ -860,28 +860,6 @@ impl BasicExoHarness {
         self.slug_index_dir().join(format!("{encoded}.slug"))
     }
 
-    /// Seeds markers for pre-index stores; once per store, write lock held.
-    async fn ensure_slug_index_seeded(&self) -> Result<()> {
-        let sentinel = self.slug_index_dir().join(".seeded");
-        if self
-            .inner
-            .storage
-            .get_json_if_exists::<bool>(&sentinel)
-            .await?
-            .is_some()
-        {
-            return Ok(());
-        }
-        for record in self.list_agent_records().await? {
-            self.inner
-                .storage
-                .put_json(self.slug_marker_path(&record.slug), &record.id)
-                .await?;
-        }
-        self.inner.storage.put_json(sentinel, &true).await?;
-        Ok(())
-    }
-
     fn bindings_dir(&self) -> PathBuf {
         PathBuf::from("bindings")
     }
@@ -939,7 +917,6 @@ impl ExoHarness for BasicExoHarness {
 
     async fn new_agent(&self, request: NewAgentRequest) -> Result<Arc<dyn AgentHandle>> {
         let _guard = self.inner.write_lock.lock().await;
-        self.ensure_slug_index_seeded().await?;
         // TODO: claim the marker with a conditional put (put_json_if_absent,
         // arriving in PR #113) to close the cross-process create race.
         let marker = self.slug_marker_path(&request.slug);
@@ -987,6 +964,11 @@ impl ExoHarness for BasicExoHarness {
                 .storage
                 .delete_prefix(self.slug_marker_path(&record.slug))
                 .await?;
+        } else {
+            tracing::warn!(
+                %id,
+                "agent dir exists without record.json; cannot release slug marker, continuing with delete"
+            );
         }
         self.inner.storage.delete_prefix(agent_dir).await?;
         Ok(true)
