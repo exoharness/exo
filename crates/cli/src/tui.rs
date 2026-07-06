@@ -533,9 +533,15 @@ impl ChatRepl {
                                 println!("no snapshots yet for this conversation");
                             }
                             Ok(snapshots) => {
-                                println!("SNAPSHOT\tSANDBOX");
+                                println!("SNAPSHOT\tTAKEN\tSANDBOX");
                                 for (snapshot_id, sandbox_id) in snapshots {
-                                    println!("{snapshot_id}\t{sandbox_id}");
+                                    // Snapshot ids are uuid7, so creation time
+                                    // is embedded in the id itself.
+                                    let taken = snapshot_id
+                                        .timestamp()
+                                        .map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                                        .unwrap_or_else(|| "-".to_string());
+                                    println!("{snapshot_id}\t{taken}\t{sandbox_id}");
                                 }
                             }
                             Err(error) => println!("listing snapshots failed: {error:#}"),

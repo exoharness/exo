@@ -595,7 +595,7 @@ pub struct StartSandboxRequest {
     pub idle_seconds: Option<u64>,
     // If unspecified, starts sandbox where it was last run. If specified, will attempt to
     // start the sandbox on the specified provider, if supported. If successful, the
-    // sandbox will start there going forward. 
+    // sandbox will start there going forward.
     #[serde(default)]
     pub provider: Option<SandboxProvider>,
 }

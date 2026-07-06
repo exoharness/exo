@@ -327,9 +327,6 @@ struct DaytonaBackendHandle {
     client: reqwest::Client,
     api_url: String,
     toolbox_url: String,
-    /// Region target; the bridge must register its snapshot in the same region
-    /// sandboxes are created in, or create-from-snapshot 400s with
-    /// "not available in region".
     target: Option<String>,
 }
 
@@ -1080,7 +1077,7 @@ async fn stop_via_backend(backend: &DaytonaBackendHandle, id: &str) -> Result<()
 }
 
 // Snapshot the running sandbox (`POST /sandbox/{id}/snapshot`); can later be restored
-// via `create_sandbox(snapshot = <name>)`. 
+// via `create_sandbox(snapshot = <name>)`.
 async fn save_as_snapshot_via_backend(
     backend: &DaytonaBackendHandle,
     id: &str,
@@ -1123,15 +1120,11 @@ async fn save_as_snapshot_via_backend(
 // Cross-backend bridge: import a `docker save` tarball (the Docker backend's
 // snapshot format) into Daytona as a snapshot and return its name, so a
 // sandbox snapshotted on local Docker can be teleported to Daytona with its
-// files intact. The registry push runs against Daytona's transient registry
-// with short-lived credentials from the API; no daytona CLI involved.
+// files intact.
 //
-// Caveats:
-//   - Requires a `docker` daemon on the harness host (used for load/tag/push;
-//     pushing the tarball's layers straight from memory with an OCI registry
-//     client would drop that too).
-//   - Disk/filesystem only -- a docker image carries no memory/process state.
-//   - The image must be linux/amd64 to run on Daytona.
+// Note: requires a `docker` daemon on the harness host (used for load/tag/push).
+// The resulting snapshot is disk/filesystem-only, i.e. not CRIU (no memory/process
+// state). The image *must* be linux/amd64 to run on Daytona.
 async fn import_docker_image_tar(backend: &DaytonaBackendHandle, tar: &[u8]) -> Result<String> {
     let snapshot_name = format!("exo-bridge-{}", Uuid::new_v4().simple());
     let tar_path = std::env::temp_dir().join(format!("{snapshot_name}.tar"));
@@ -1159,9 +1152,6 @@ async fn import_docker_image_tar(backend: &DaytonaBackendHandle, tar: &[u8]) -> 
         .map(str::to_string)
         .context("could not parse an image ref from `docker load` output")?;
 
-    // Fetch short-lived push credentials for Daytona's transient registry and
-    // re-tag the image into it. (Also sidesteps the `latest` tag that the
-    // Docker backend's snapshots carry, which Daytona rejects.)
     let push_access = backend.get_registry_push_access().await?;
     let remote_ref = format!(
         "{}/{}/{snapshot_name}:1",
@@ -1179,10 +1169,6 @@ async fn import_docker_image_tar(backend: &DaytonaBackendHandle, tar: &[u8]) -> 
         );
     }
 
-    // Push with a throwaway docker config dir so the temp credentials never
-    // touch the host user's ~/.docker/config.json, then register the pushed
-    // image as a Daytona snapshot in the backend's region — sandboxes are
-    // created there, and a snapshot in another region 400s on create.
     let push_result = docker_push_with_credentials(&push_access, &remote_ref).await;
     for image in [&image_ref, &remote_ref] {
         let _ = tokio::process::Command::new("docker")
@@ -1208,6 +1194,9 @@ async fn docker_push_with_credentials(
 ) -> Result<()> {
     use tokio::process::Command;
 
+    // We create a temp docker config dir so that the credentials are not written to the host
+    // user's docker config. The temp dir is removed after the push. Note, these are the (1-hour
+    // temporary) credentials provided by the Daytona backend, not the host user's docker credentials.
     let config_dir = std::env::temp_dir().join(format!("exo-docker-config-{}", Uuid::new_v4()));
     tokio::fs::create_dir_all(&config_dir)
         .await
@@ -1353,13 +1342,6 @@ fn wrap_session_command_with_exit_status(
     } else {
         String::new()
     };
-    // Two zsh landmines here, hit live on daemon v0.193 (the session shell in
-    // the default sandbox image is zsh):
-    //   - `status` is a read-only zsh special variable; assigning it aborts the
-    //     whole command line with 126, so the variable is exo-prefixed.
-    //   - a trailing `exit` kills the persistent session shell and the daemon
-    //     never reports completion, so the exit code travels via the status
-    //     file only.
     format!(
         "set -e; {env_prelude}set +e; {command}; exo_exit_status=$?; printf '%s\\n' \"$exo_exit_status\" > {}",
         shell_quote(exit_status_path)
