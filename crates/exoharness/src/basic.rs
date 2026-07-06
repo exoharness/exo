@@ -837,6 +837,29 @@ impl BasicExoHarness {
         PathBuf::from("agents")
     }
 
+    /// Slug-uniqueness index: one marker file per slug, so the per-create
+    /// uniqueness check is O(1) instead of a full record scan.
+    fn slug_index_dir(&self) -> PathBuf {
+        self.agents_dir().join("by-slug")
+    }
+
+    fn slug_marker_path(&self, slug: &str) -> PathBuf {
+        // Encode defensively so a hostile slug cannot escape the directory.
+        let encoded: String = slug
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c.to_string()
+                } else {
+                    format!("%{:02x}", c as u32)
+                }
+            })
+            .collect();
+        // ".slug", never ".json": a slug named "record" must not match the
+        // list_agent_records key filter.
+        self.slug_index_dir().join(format!("{encoded}.slug"))
+    }
+
     fn bindings_dir(&self) -> PathBuf {
         PathBuf::from("bindings")
     }
@@ -894,8 +917,16 @@ impl ExoHarness for BasicExoHarness {
 
     async fn new_agent(&self, request: NewAgentRequest) -> Result<Arc<dyn AgentHandle>> {
         let _guard = self.inner.write_lock.lock().await;
-        let existing = self.list_agent_records().await?;
-        if existing.iter().any(|agent| agent.slug == request.slug) {
+        // TODO: claim the marker with a conditional put (put_json_if_absent,
+        // arriving in PR #113) to close the cross-process create race.
+        let marker = self.slug_marker_path(&request.slug);
+        if self
+            .inner
+            .storage
+            .get_json_if_exists::<Uuid7>(&marker)
+            .await?
+            .is_some()
+        {
             bail!("agent slug already exists: {}", request.slug);
         }
 
@@ -909,6 +940,7 @@ impl ExoHarness for BasicExoHarness {
             .storage
             .put_json(agent_dir.join("record.json"), &record)
             .await?;
+        self.inner.storage.put_json(marker, &record.id).await?;
         Ok(Arc::new(BasicAgentHandle {
             harness: self.clone(),
             record,
@@ -920,6 +952,23 @@ impl ExoHarness for BasicExoHarness {
         let agent_dir = self.agents_dir().join(id.to_string());
         if self.inner.storage.list_keys(&agent_dir).await?.is_empty() {
             return Ok(false);
+        }
+        // Release the slug before the record (its source) disappears.
+        if let Some(record) = self
+            .inner
+            .storage
+            .get_json_if_exists::<AgentRecord>(&agent_dir.join("record.json"))
+            .await?
+        {
+            self.inner
+                .storage
+                .delete_prefix(self.slug_marker_path(&record.slug))
+                .await?;
+        } else {
+            tracing::warn!(
+                %id,
+                "agent dir exists without record.json; cannot release slug marker, continuing with delete"
+            );
         }
         self.inner.storage.delete_prefix(agent_dir).await?;
         Ok(true)
