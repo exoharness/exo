@@ -1,7 +1,8 @@
 # Sandbox Snapshots
 
-Status: implemented for the Docker sandbox backend; stubs in place for the
-other backends.
+Status: implemented for the Docker, E2B, Sprites, and Daytona sandbox
+backends; stubs in place for the others. Daytona can additionally restore a
+Docker snapshot (the cross-provider "teleport" bridge).
 
 ## Summary
 
@@ -22,8 +23,13 @@ it, and the restore path that actually consumes it.
 - `ConversationHandle::start_sandbox(StartSandboxRequest { id, snapshot_id, .. })`
   starts a fresh container whose filesystem is sourced from the snapshot,
   preserving the original sandbox's mounts, network policy, and lifecycle.
-- A chat-REPL slash-command surface — `/snapshot`, `/snapshots`, `/rewind <id>`
-  — that drives the round-trip without leaving the conversation.
+- A chat-REPL slash-command surface — `/snapshot`, `/snapshots`, `/rewind <id>`,
+  `/teleport <provider>` — that drives the round-trip without leaving the
+  conversation.
+- **Teleportation**: `start_sandbox` accepts an optional `provider` override,
+  so a snapshot taken on one backend can be restored under another. The
+  flagship path is local Docker → Daytona: the same sandbox id, resumed
+  remotely with its filesystem intact.
 
 ## What this is not
 
@@ -150,6 +156,9 @@ Inside the chat REPL (`exo chat repl <agent> <conv>`):
 /snapshots          list snapshots taken in this conversation
 /rewind <id>        stop the current sandbox, start a fresh one from the
                     named snapshot
+/teleport <provider> snapshot the live sandbox and restore it under another
+                    provider (e.g. `/teleport daytona` moves a local Docker
+                    sandbox up to Daytona)
 /help               show command list
 ```
 
@@ -172,6 +181,18 @@ EXO_TEST_SANDBOX_BACKEND=docker cargo test --package exo \
 The CI integration workflow runs it on push to `main` against each Linux
 matrix cell that supports docker. The test self-skips on cells that don't
 (`local-process`) so they don't false-fail.
+
+Two live Daytona analogs (both `#[ignore]`d; they need `DAYTONA_API_KEY`
+— snapshots are available in Daytona's shared `us` region — and, for the
+teleport, a local docker daemon):
+
+```
+# native Daytona snapshot + rewind
+cargo test -p exo --test snapshot_round_trip_daytona -- --ignored --nocapture
+
+# teleport: local Docker sandbox snapshotted and resumed on Daytona
+cargo test -p exo --test teleport_docker_to_daytona -- --ignored --nocapture
+```
 
 ## Extending to another sandbox backend
 

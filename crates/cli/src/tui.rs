@@ -8,8 +8,8 @@ use std::time::Duration;
 use anyhow::Result;
 use executor::{
     ConversationHandle, EventData, EventId, EventKind, EventQuery, EventQueryDirection,
-    ExecutionStreamEvent, HarnessAgent, HarnessConversation, SandboxId, SendRequest, SessionId,
-    SnapshotId, StartSandboxRequest,
+    ExecutionStreamEvent, HarnessAgent, HarnessConversation, SandboxId, SandboxProvider,
+    SendRequest, SessionId, SnapshotId, StartSandboxRequest,
 };
 use lingua::universal::{UserContent, UserContentPart};
 use lingua::{Message, UniversalStreamChunk};
@@ -533,13 +533,38 @@ impl ChatRepl {
                                 println!("no snapshots yet for this conversation");
                             }
                             Ok(snapshots) => {
-                                println!("SNAPSHOT\tSANDBOX");
+                                println!("SNAPSHOT\tTAKEN\tSANDBOX");
                                 for (snapshot_id, sandbox_id) in snapshots {
-                                    println!("{snapshot_id}\t{sandbox_id}");
+                                    // Snapshot ids are uuid7, so creation time
+                                    // is embedded in the id itself.
+                                    let taken = snapshot_id
+                                        .timestamp()
+                                        .map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                                        .unwrap_or_else(|| "-".to_string());
+                                    println!("{snapshot_id}\t{taken}\t{sandbox_id}");
                                 }
                             }
                             Err(error) => println!("listing snapshots failed: {error:#}"),
                         },
+                        "/teleport" => {
+                            println!("usage: /teleport <provider> (e.g. /teleport daytona)");
+                        }
+                        other if other.starts_with("/teleport ") => {
+                            let arg = other
+                                .strip_prefix("/teleport ")
+                                .expect("prefix checked")
+                                .trim();
+                            if arg.is_empty() || arg.contains(char::is_whitespace) {
+                                println!("usage: /teleport <provider> (e.g. /teleport daytona)");
+                            } else {
+                                match self.teleport_sandbox(arg).await {
+                                    Ok((sandbox_id, provider)) => {
+                                        println!("sandbox {sandbox_id} teleported to {provider}");
+                                    }
+                                    Err(error) => println!("teleport failed: {error:#}"),
+                                }
+                            }
+                        }
                         other if other.starts_with("/rewind ") => {
                             let arg = other
                                 .strip_prefix("/rewind ")
@@ -602,6 +627,38 @@ impl ChatRepl {
         list_snapshots(self.conversation.as_ref()).await
     }
 
+    /// Teleport the conversation's live sandbox to another provider: snapshot
+    /// it where it runs now, then restore that snapshot under the target
+    /// provider. The sandbox id is stable across the move; only the backend
+    /// (and the machine actually running the container) changes.
+    async fn teleport_sandbox(&self, provider_str: &str) -> Result<(SandboxId, SandboxProvider)> {
+        let provider = provider_str
+            .parse::<SandboxProvider>()
+            .map_err(|error| anyhow::anyhow!("invalid provider `{provider_str}`: {error}"))?;
+        let sandbox_id = latest_sandbox_id(self.conversation.as_ref())
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("no sandbox has been created in this conversation yet")
+            })?;
+        println!("snapshotting sandbox {sandbox_id}...");
+        let snapshot_id = self
+            .conversation
+            .exoharness_handle()
+            .snapshot_sandbox(sandbox_id.clone())
+            .await?;
+        println!("snapshot {snapshot_id} captured; restoring on {provider}...");
+        self.conversation
+            .exoharness_handle()
+            .start_sandbox(StartSandboxRequest {
+                id: sandbox_id.clone(),
+                snapshot_id,
+                idle_seconds: None,
+                provider: Some(provider),
+            })
+            .await?;
+        Ok((sandbox_id, provider))
+    }
+
     /// Restore the conversation's sandbox to a previously-taken snapshot.
     /// Stops the current container, decodes the snapshot payload, and starts
     /// a fresh container from that state.
@@ -620,6 +677,7 @@ impl ChatRepl {
                 id: sandbox_id,
                 snapshot_id,
                 idle_seconds: None,
+                provider: None,
             })
             .await?;
         Ok(())
@@ -908,6 +966,8 @@ fn print_help() {
     println!("                       (defaults to the latest one if no id is given)");
     println!("  /snapshots           list snapshots taken in this conversation");
     println!("  /rewind <id>         restore the sandbox to a previous snapshot");
+    println!("  /teleport <provider> move the live sandbox to another provider");
+    println!("                       (e.g. /teleport daytona: snapshot + restore there)");
     println!("  /help                show this message");
 }
 

@@ -578,6 +578,7 @@ async fn execute_rewind_sandbox_tool(
                     id: handle.sandbox_id.clone(),
                     snapshot_id,
                     idle_seconds: Some(spec.idle_seconds),
+                    provider: None,
                 })
                 .await?;
             turn.add_events(vec![EventData::SandboxStarted {
@@ -609,6 +610,7 @@ async fn execute_rewind_sandbox_tool(
                 id: sandbox_id.clone(),
                 snapshot_id,
                 idle_seconds: Some(spec.idle_seconds),
+                provider: None,
             })
             .await?;
             record_current_sandbox_snapshot(
