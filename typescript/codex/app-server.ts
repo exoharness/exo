@@ -385,7 +385,7 @@ async function* readableStreamChunks(
   }
 }
 
-async function* linesFromChunks(
+export async function* linesFromChunks(
   chunks: AsyncIterable<string>,
 ): AsyncGenerator<string> {
   let buffered = "";
@@ -431,7 +431,7 @@ function parseProtocolMessage(line: string): ProtocolMessage {
   return parsed;
 }
 
-function tryParseProtocolMessage(line: string): ProtocolParseResult {
+export function tryParseProtocolMessage(line: string): ProtocolParseResult {
   try {
     return { type: "message", message: parseProtocolMessage(line) };
   } catch (error) {
@@ -462,7 +462,7 @@ function isServerRequest(
   return "id" in message && typeof message.method === "string";
 }
 
-function defaultServerRequestResult(method: string): JsonValue {
+export function defaultServerRequestResult(method: string): JsonValue {
   switch (method) {
     case "item/commandExecution/requestApproval":
     case "item/fileChange/requestApproval":
@@ -503,7 +503,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-class AsyncQueue<T> {
+export class AsyncQueue<T> {
   private readonly values: T[] = [];
   private readonly waiters: Array<{
     resolve: (result: IteratorResult<T>) => void;

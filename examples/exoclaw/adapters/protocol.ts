@@ -94,7 +94,7 @@ export function parseWorkerCommand(value: unknown): WorkerOutboundCommand {
   };
 }
 
-function parseAttachments(value: unknown): AdapterAttachment[] {
+export function parseAttachments(value: unknown): AdapterAttachment[] {
   if (value === undefined || value === null) {
     return [];
   }
@@ -140,7 +140,10 @@ function parseAttachments(value: unknown): AdapterAttachment[] {
   });
 }
 
-function nullableStringValue(value: unknown, name: string): string | null {
+export function nullableStringValue(
+  value: unknown,
+  name: string,
+): string | null {
   if (value === undefined || value === null) {
     return null;
   }

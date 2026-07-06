@@ -563,6 +563,289 @@ mod tests {
         assert_eq!(tool_call_id, "call_real");
         assert_eq!(tool_name, "shell");
     }
+
+    fn shell_tool_definition() -> ToolDefinition {
+        ToolDefinition {
+            name: "shell".to_string(),
+            description: "Run a shell command.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "command": { "type": "string" }
+                },
+                "required": ["command"]
+            }),
+        }
+    }
+
+    #[test]
+    fn tool_definitions_convert_to_universal_function_tools() {
+        let definition = shell_tool_definition();
+
+        let tools = build_universal_tools(std::slice::from_ref(&definition)).unwrap();
+
+        assert_eq!(tools.len(), 1);
+        let tool = &tools[0];
+        assert_eq!(tool.name, "shell");
+        assert_eq!(tool.description.as_deref(), Some("Run a shell command."));
+        assert_eq!(tool.strict, Some(true));
+        assert!(matches!(
+            tool.tool_type,
+            lingua::universal::UniversalToolType::Function
+        ));
+        // The JSON Schema must survive the serde_json -> lingua_json hop intact.
+        assert_eq!(
+            tool.parameters,
+            Some(to_lingua_value(definition.parameters.clone()))
+        );
+    }
+
+    #[test]
+    fn extract_tool_calls_pulls_valid_calls_and_skips_invalid_arguments() {
+        let messages = vec![Message::Assistant {
+            content: AssistantContent::Array(vec![
+                AssistantContentPart::Text(TextContentPart {
+                    text: "Running the command.".to_string(),
+                    encrypted_content: None,
+                    provider_options: None,
+                    cache_control: None,
+                }),
+                AssistantContentPart::ToolCall {
+                    tool_call_id: "call_ok".to_string(),
+                    tool_name: "shell".to_string(),
+                    arguments: ToolCallArguments::from(r#"{"command":"ls"}"#.to_string()),
+                    encrypted_content: None,
+                    provider_options: None,
+                    provider_executed: None,
+                },
+                // Truncated/malformed argument JSON parses to
+                // `ToolCallArguments::Invalid` and must not be surfaced as an
+                // executable tool call.
+                AssistantContentPart::ToolCall {
+                    tool_call_id: "call_bad".to_string(),
+                    tool_name: "shell".to_string(),
+                    arguments: ToolCallArguments::from(r#"{"command": "#.to_string()),
+                    encrypted_content: None,
+                    provider_options: None,
+                    provider_executed: None,
+                },
+            ]),
+            id: None,
+        }];
+
+        let tool_calls = extract_tool_calls(&messages).unwrap();
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].tool_call_id, "call_ok");
+        assert_eq!(tool_calls[0].request.function_name, "shell");
+        assert_eq!(
+            serde_json::Value::Object(tool_calls[0].request.arguments.clone()),
+            serde_json::json!({ "command": "ls" })
+        );
+    }
+
+    #[test]
+    fn to_exoharness_arguments_round_trips_nested_values() {
+        let ToolCallArguments::Valid(arguments) = ToolCallArguments::from(
+            r#"{"command":"ls","env":{"LANG":"C"},"args":["-l",2,true,null]}"#.to_string(),
+        ) else {
+            panic!("expected valid arguments");
+        };
+
+        let converted = to_exoharness_arguments(&arguments).unwrap();
+
+        assert_eq!(
+            serde_json::Value::Object(converted),
+            serde_json::json!({
+                "command": "ls",
+                "env": { "LANG": "C" },
+                "args": ["-l", 2, true, null]
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn anthropic_complete_round_trips_through_the_messages_api() {
+        use lingua::universal::UserContent;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "msg_01",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-4-6",
+                "content": [
+                    { "type": "text", "text": "Listing files now." },
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_01",
+                        "name": "shell",
+                        "input": { "command": "ls" }
+                    }
+                ],
+                "stop_reason": "tool_use",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cache_read_input_tokens": 3,
+                    "cache_creation_input_tokens": 2
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut request = model_request();
+        request.model = "claude-sonnet-4-6".to_string();
+        request.api_key = Some("sk-ant-test".to_string());
+        request.base_url = Some(server.uri());
+        request.max_output_tokens = Some(1024);
+        request.messages = vec![Message::User {
+            content: UserContent::String("list the files".to_string()),
+        }];
+        request.tools = vec![shell_tool_definition()];
+
+        let client = RouterModelClient::new(HashMap::new());
+        let response = client.complete(request).await.unwrap();
+
+        // The wire request went to the native Messages API with the expected
+        // body shape (this path previously had zero hermetic coverage).
+        let recorded = server.received_requests().await.unwrap();
+        assert_eq!(recorded.len(), 1);
+        let wire = &recorded[0];
+        assert_eq!(wire.url.path(), "/messages");
+        assert_eq!(
+            wire.headers.get("x-api-key").unwrap().to_str().unwrap(),
+            "sk-ant-test"
+        );
+        assert!(wire.headers.get("anthropic-version").is_some());
+        let body: serde_json::Value = serde_json::from_slice(&wire.body).unwrap();
+        assert_eq!(body["model"], "claude-sonnet-4-6");
+        assert_eq!(body["max_tokens"], 1024);
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert!(
+            body["messages"][0]["content"]
+                .to_string()
+                .contains("list the files"),
+            "user text should be on the wire; got: {}",
+            body["messages"][0]
+        );
+        assert_eq!(body["tools"][0]["name"], "shell");
+        assert_eq!(
+            body["tools"][0]["input_schema"]["required"],
+            serde_json::json!(["command"])
+        );
+
+        // The Messages response parses into the universal ModelResponse.
+        assert_eq!(response.model.as_deref(), Some("claude-sonnet-4-6"));
+        let usage = response.usage.expect("usage should be mapped");
+        assert_eq!(usage.prompt_tokens, Some(10));
+        assert_eq!(usage.completion_tokens, Some(5));
+        assert_eq!(usage.prompt_cached_tokens, Some(3));
+        assert_eq!(usage.prompt_cache_creation_tokens, Some(2));
+        assert_eq!(
+            response.provider_cost_usd, None,
+            "Anthropic does not report a dollar cost"
+        );
+
+        let Some(Message::Assistant {
+            content: AssistantContent::Array(parts),
+            ..
+        }) = response.messages.first()
+        else {
+            panic!(
+                "expected an assistant message with array content; got {:?}",
+                response.messages
+            );
+        };
+        assert!(parts.iter().any(|part| matches!(
+            part,
+            AssistantContentPart::Text(text) if text.text == "Listing files now."
+        )));
+
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].tool_call_id, "toolu_01");
+        assert_eq!(response.tool_calls[0].request.function_name, "shell");
+        assert_eq!(
+            serde_json::Value::Object(response.tool_calls[0].request.arguments.clone()),
+            serde_json::json!({ "command": "ls" })
+        );
+    }
+
+    #[tokio::test]
+    async fn openrouter_complete_uses_chat_completions_and_reports_provider_cost() {
+        use lingua::universal::UserContent;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/openrouter.ai/api/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "gen-1",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "openai/gpt-4o-mini",
+                "choices": [{
+                    "index": 0,
+                    "message": { "role": "assistant", "content": "hello from openrouter" },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 16,
+                    "completion_tokens": 6,
+                    "total_tokens": 22,
+                    "cost": 0.000042
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut request = model_request();
+        request.model = "openai/gpt-4o-mini".to_string();
+        request.api_key = Some("sk-or-test".to_string());
+        // OpenRouter is detected by its base URL; keep "openrouter.ai" in the
+        // path so the request still lands on the local mock server.
+        request.base_url = Some(format!("{}/openrouter.ai/api/v1", server.uri()));
+        request.messages = vec![Message::User {
+            content: UserContent::String("hi".to_string()),
+        }];
+
+        let client = RouterModelClient::new(HashMap::new());
+        let response = client.complete(request).await.unwrap();
+
+        let recorded = server.received_requests().await.unwrap();
+        assert_eq!(recorded.len(), 1);
+        let wire = &recorded[0];
+        assert_eq!(wire.url.path(), "/openrouter.ai/api/v1/chat/completions");
+        assert_eq!(
+            wire.headers.get("authorization").unwrap().to_str().unwrap(),
+            "Bearer sk-or-test"
+        );
+        let body: serde_json::Value = serde_json::from_slice(&wire.body).unwrap();
+        assert_eq!(body["model"], "openai/gpt-4o-mini");
+        assert_eq!(body["messages"][0]["role"], "user");
+
+        // The provider-reported dollar cost flows through untouched.
+        assert_eq!(response.provider_cost_usd, Some(0.000042));
+        let usage = response.usage.expect("usage should be mapped");
+        assert_eq!(usage.prompt_tokens, Some(16));
+        assert_eq!(usage.completion_tokens, Some(6));
+        assert!(matches!(
+            response.messages.first(),
+            Some(Message::Assistant {
+                content: AssistantContent::String(text),
+                ..
+            }) if text == "hello from openrouter"
+        ));
+        assert!(response.tool_calls.is_empty());
+    }
 }
 
 fn serialize_request(format: ProviderFormat, request: &UniversalRequest) -> Result<Bytes> {

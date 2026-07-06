@@ -277,3 +277,90 @@ pub(crate) fn default_master_key_path() -> Result<PathBuf> {
     }
     bail!("could not determine config directory: set XDG_CONFIG_HOME or HOME")
 }
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn static_cipher() -> SecretCipher {
+        SecretCipher::new(Arc::new(StaticSecretKeyProvider::new(
+            [9u8; MASTER_KEY_LEN],
+        )))
+    }
+
+    fn test_secret() -> Secret {
+        Secret::Key {
+            value: "hunter2".to_string(),
+        }
+    }
+
+    #[test]
+    fn encrypt_decrypt_round_trips_plaintext() {
+        let cipher = static_cipher();
+        let encrypted = cipher.encrypt_secret(&test_secret()).expect("encrypt");
+        let Secret::Key { value } = cipher.decrypt_secret(&encrypted).expect("decrypt") else {
+            panic!("decrypted secret should be the original Key variant");
+        };
+        assert_eq!(value, "hunter2");
+    }
+
+    #[test]
+    fn encrypting_same_plaintext_twice_uses_fresh_nonces() {
+        let cipher = static_cipher();
+        let first = cipher.encrypt_secret(&test_secret()).expect("encrypt");
+        let second = cipher.encrypt_secret(&test_secret()).expect("encrypt");
+        assert_ne!(first.nonce, second.nonce);
+        assert_ne!(first.ciphertext, second.ciphertext);
+    }
+
+    #[test]
+    fn decrypt_rejects_tampered_ciphertext() {
+        let cipher = static_cipher();
+        let mut encrypted = cipher.encrypt_secret(&test_secret()).expect("encrypt");
+        encrypted.ciphertext[0] ^= 0xff;
+        let error = cipher
+            .decrypt_secret(&encrypted)
+            .expect_err("tampered ciphertext must not decrypt");
+        assert!(
+            format!("{error:#}").contains("failed to decrypt secret payload"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn file_backed_provider_creates_then_reuses_master_key() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let path = tempdir.path().join("keys").join("master.key");
+        let first = FileBackedSecretKeyProvider::new(path.clone())
+            .get_or_create_key()
+            .expect("first call creates the key");
+        assert!(path.exists(), "master key file should be created");
+        // A fresh provider on the same path must load the persisted key, not
+        // mint a new one.
+        let second = FileBackedSecretKeyProvider::new(path)
+            .get_or_create_key()
+            .expect("second call reads the key back");
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn file_backed_provider_rejects_wrong_length_master_key_file() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let path = tempdir.path().join("master.key");
+        std::fs::write(&path, b"too-short").expect("write garbage key");
+        let error = FileBackedSecretKeyProvider::new(path.clone())
+            .get_or_create_key()
+            .expect_err("wrong-length key must be rejected");
+        assert!(
+            format!("{error:#}").contains("invalid master key length"),
+            "unexpected error: {error:#}"
+        );
+        // The bad file must survive untouched, not be silently regenerated.
+        assert_eq!(
+            std::fs::read(&path).expect("garbage file still present"),
+            b"too-short"
+        );
+    }
+}

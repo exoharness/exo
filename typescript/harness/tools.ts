@@ -162,7 +162,7 @@ interface ToolResultArtifactReference extends JsonObject {
   mimeType: string;
 }
 
-async function compactToolResult(
+export async function compactToolResult(
   context: TurnContext,
   args: CompactToolResultArgs,
 ): Promise<ToolResult> {
@@ -296,7 +296,7 @@ export async function initializeTool(
   };
 }
 
-function validateToolDefinition(definition: ToolDefinition): void {
+export function validateToolDefinition(definition: ToolDefinition): void {
   if (typeof definition.name !== "string" || definition.name.length === 0) {
     throw new Error("tool definition.name must be a non-empty string");
   }
@@ -344,7 +344,7 @@ function validateToolHandler(handler: ToolHandler): void {
   }
 }
 
-function validateJsonSchema(
+export function validateJsonSchema(
   schema: JsonValue,
   value: JsonValue,
   path: string,

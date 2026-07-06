@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  assertRoundBudget,
   buildShellToolDefinitions,
   createShellToolInstance,
   createToolRegistry,
@@ -15,6 +16,7 @@ import {
   registerLibraryToolModulePath,
   registerTools,
   materializeEventsToMessages,
+  messageText,
   toolResultMessage,
   toolResultEvent,
   type Event,
@@ -23,6 +25,7 @@ import {
   type ToolExecutionContext,
   type ToolInstance,
   type Tool,
+  type Message,
   type ToolResult,
   type TurnContext,
 } from "./index";
@@ -678,6 +681,86 @@ describe("agent tool loading", () => {
     await expect(
       initializeTool(generatedTool, "agent", {}, fakeTurnContext()),
     ).rejects.toThrow("tool definition must use parameters, not inputSchema");
+  });
+});
+
+describe("assertRoundBudget", () => {
+  function contextWithBudget(maxToolRoundTrips: number | null): TurnContext {
+    return {
+      agentConfig: { maxToolRoundTrips },
+    } as unknown as TurnContext;
+  }
+
+  it("passes rounds at or under the configured budget", () => {
+    const context = contextWithBudget(2);
+    expect(() => assertRoundBudget(context, 1, "executor")).not.toThrow();
+    expect(() => assertRoundBudget(context, 2, "executor")).not.toThrow();
+  });
+
+  it("throws once the round exceeds the budget", () => {
+    expect(() =>
+      assertRoundBudget(contextWithBudget(2), 3, "executor"),
+    ).toThrow("executor exceeded the configured round budget");
+  });
+
+  it("never throws when no budget is configured", () => {
+    expect(() =>
+      assertRoundBudget(contextWithBudget(null), 1_000, "executor"),
+    ).not.toThrow();
+    expect(() =>
+      assertRoundBudget(fakeTurnContext(), 1_000, "executor"),
+    ).not.toThrow();
+  });
+});
+
+describe("messageText content rendering", () => {
+  it("returns string content and empty text for missing messages", () => {
+    expect(messageText({ role: "user", content: "plain" })).toBe("plain");
+    expect(messageText(null)).toBe("");
+    expect(
+      messageText({ role: "user", content: { odd: true } } as Message),
+    ).toBe("");
+  });
+
+  it("renders reasoning, image, tool_call, and tool_result parts", () => {
+    expect(
+      messageText({
+        role: "assistant",
+        content: [
+          { type: "reasoning", text: "plan the command" },
+          { type: "text", text: "Running it. " },
+          { type: "image", source: { data: "..." } },
+          {
+            type: "tool_call",
+            tool_call_id: "call_1",
+            tool_name: "shell",
+            arguments: { command: "ls" },
+          },
+        ],
+      }),
+    ).toBe(
+      '[reasoning] plan the commandRunning it. [image][tool_call shell] {"command":"ls"}',
+    );
+
+    expect(
+      messageText(
+        toolResultMessage("call_1", "shell", { ok: true, stdout: "a\n" }),
+      ),
+    ).toBe('shell => {"ok":true,"stdout":"a\\n"}');
+  });
+
+  it("skips unknown and malformed parts", () => {
+    expect(
+      messageText({
+        role: "assistant",
+        content: [
+          { type: "unknown_block" },
+          { type: "reasoning" }, // no text field
+          "loose string",
+          { type: "text", text: "kept" },
+        ],
+      }),
+    ).toBe("kept");
   });
 });
 

@@ -229,4 +229,133 @@ mod tests {
         );
         assert!(result["cursor"].as_str().is_some());
     }
+
+    fn assistant_messages_event(text: &str, cost_usd: Option<f64>) -> EventData {
+        EventData::Messages {
+            messages: vec![lingua::Message::Assistant {
+                content: lingua::universal::AssistantContent::String(text.to_string()),
+                id: None,
+            }],
+            response_id: None,
+            usage: cost_usd.map(|cost| {
+                Box::new(exoharness::UsageRecord {
+                    model: "claude-sonnet-4-6".to_string(),
+                    prompt_tokens: Some(1_000),
+                    completion_tokens: Some(500),
+                    prompt_cached_tokens: Some(100),
+                    prompt_cache_creation_tokens: None,
+                    completion_reasoning_tokens: None,
+                    cost_usd: Some(cost),
+                    ttft_ms: None,
+                    duration_ms: Some(1_250),
+                })
+            }),
+        }
+    }
+
+    async fn append_message_events(conversation: &dyn ConversationHandle, events: Vec<EventData>) {
+        conversation
+            .add_events(AddEventsRequest {
+                session_id: None,
+                turn_id: None,
+                data: events,
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn messages_events_preserve_usage_and_cost_annotations_newest_first() {
+        let tempdir = TempDir::new().unwrap();
+        let conversation = test_conversation(&tempdir).await;
+        append_message_events(
+            conversation.as_ref(),
+            vec![
+                assistant_messages_event("first reply", None),
+                assistant_messages_event("second reply", Some(0.0123)),
+            ],
+        )
+        .await;
+
+        let result = execute_list_conversation_events_tool(
+            conversation.as_ref(),
+            &tool_request(serde_json::json!({
+                "kinds": ["messages"],
+                "limit": null,
+                "cursor": null,
+                "direction": null
+            })),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["ok"], true);
+        let events = result["events"].as_array().unwrap();
+        assert_eq!(events.len(), 2);
+
+        // Default direction is Desc: the most recent event comes first.
+        let newest = &events[0]["data"];
+        assert!(
+            newest.to_string().contains("second reply"),
+            "newest-first ordering should surface the second reply; got: {newest}"
+        );
+
+        // The UsageRecord annotation (documented in #100) survives the tool's
+        // JSON output verbatim, including the computed cost.
+        let usage = &newest["usage"];
+        assert_eq!(usage["model"], "claude-sonnet-4-6");
+        assert_eq!(usage["prompt_tokens"], 1_000);
+        assert_eq!(usage["completion_tokens"], 500);
+        assert_eq!(usage["prompt_cached_tokens"], 100);
+        assert_eq!(usage["duration_ms"], 1_250);
+        let cost = usage["cost_usd"].as_f64().expect("cost should be present");
+        assert!(
+            (cost - 0.0123).abs() < 1e-9,
+            "expected cost 0.0123, got {cost}"
+        );
+
+        // Events recorded without usage stay clean: no usage key at all.
+        assert!(events[1]["data"].get("usage").is_none());
+    }
+
+    #[tokio::test]
+    async fn limit_clamps_to_valid_range() {
+        let tempdir = TempDir::new().unwrap();
+        let conversation = test_conversation(&tempdir).await;
+        let batch = (0..(MAX_EVENT_LIMIT + 5))
+            .map(|index| assistant_messages_event(&format!("reply-{index}"), None))
+            .collect::<Vec<_>>();
+        append_message_events(conversation.as_ref(), batch).await;
+
+        // A zero limit clamps up to one event rather than erroring.
+        let result = execute_list_conversation_events_tool(
+            conversation.as_ref(),
+            &tool_request(serde_json::json!({
+                "kinds": ["messages"],
+                "limit": 0,
+                "cursor": null,
+                "direction": null
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["events"].as_array().unwrap().len(), 1);
+
+        // An oversized limit clamps down to MAX_EVENT_LIMIT.
+        let result = execute_list_conversation_events_tool(
+            conversation.as_ref(),
+            &tool_request(serde_json::json!({
+                "kinds": ["messages"],
+                "limit": 100_000,
+                "cursor": null,
+                "direction": null
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result["events"].as_array().unwrap().len(),
+            MAX_EVENT_LIMIT as usize
+        );
+    }
 }

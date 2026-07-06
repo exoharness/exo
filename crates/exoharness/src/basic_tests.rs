@@ -1,12 +1,13 @@
 use std::env;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use anyhow::bail;
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, Cursor};
 use lingua::Message;
@@ -18,16 +19,16 @@ use tokio::time::{sleep, timeout};
 
 use crate::test_support::{local_test_config, local_test_config_with_daytona};
 use crate::{
-    Artifact, ArtifactVersion, BasicExoHarness, BeginTurnRequest, Binding, BoxAsyncRead,
-    BoxAsyncWrite, CloseSandboxProcessInputRequest, CreateSandboxRequest, DurableFileSystem,
-    EventData, EventKind, EventQuery, EventQueryDirection, ExoHarness, FileSystemMountMode,
-    ForkConversationRequest, ManagedSandboxBackend, ManagedSandboxHandle, NewAgentRequest,
-    NewConversationRequest, PutSecretRequest, RunInSandboxRequest, SandboxCommand,
+    AddEventsRequest, Artifact, ArtifactVersion, BasicExoHarness, BeginTurnRequest, Binding,
+    BoxAsyncRead, BoxAsyncWrite, CloseSandboxProcessInputRequest, CreateSandboxRequest,
+    DurableFileSystem, EventData, EventKind, EventQuery, EventQueryDirection, ExoHarness,
+    FileSystemMountMode, ForkConversationRequest, ManagedSandboxBackend, ManagedSandboxHandle,
+    NewAgentRequest, NewConversationRequest, PutSecretRequest, RunInSandboxRequest, SandboxCommand,
     SandboxCommandOutput, SandboxKey, SandboxLifecycleConfig, SandboxNetworkPolicy,
     SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessParts, SandboxProcessStatus,
     SandboxProcessStdin, SandboxProvider, SandboxProviderConfig, SandboxRequest, SandboxSpec,
-    Secret, SnapshotPayload, StartSandboxProcessRequest, Uuid7, WaitSandboxProcessRequest,
-    WriteArtifactRequest, WriteSandboxProcessInputRequest,
+    Secret, SnapshotKind, SnapshotPayload, StartSandboxProcessRequest, StartSandboxRequest, Uuid7,
+    WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
 const DEFAULT_DURABLE_CONTRACT_MOUNT_PATH: &str = "/home/exo/workspace";
@@ -1867,4 +1868,312 @@ async fn daytona_sandbox_binding_drives_provider_config() {
     assert_eq!(config.target.as_deref(), Some("experimental"));
     assert_eq!(config.organization_id.as_deref(), Some("org-1"));
     assert_eq!(config.api_url, crate::DEFAULT_DAYTONA_API_URL);
+}
+
+fn messages_event(text: &str) -> EventData {
+    EventData::Messages {
+        messages: vec![user_message(text)],
+        response_id: None,
+        usage: None,
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn add_events_rejects_zero_events() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
+        .await
+        .expect("harness should initialize");
+    let conversation = test_conversation(&harness).await;
+
+    let error = conversation
+        .add_events(AddEventsRequest {
+            session_id: None,
+            turn_id: None,
+            data: Vec::new(),
+        })
+        .await
+        .expect_err("conversation append of zero events should fail");
+    assert!(error.to_string().contains("cannot append zero events"));
+
+    let turn = conversation
+        .begin_turn(BeginTurnRequest::default())
+        .await
+        .expect("turn");
+    let error = turn
+        .add_events(Vec::new())
+        .await
+        .expect_err("turn append of zero events should fail");
+    assert!(error.to_string().contains("cannot append zero events"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn turn_scoped_append_fails_when_head_advances_outside_turn() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let backend = Arc::new(SnapshotStubBackend::new());
+    let harness = BasicExoHarness::new_with_sandbox_backend(
+        local_test_config(tempdir.path()),
+        backend as Arc<dyn ManagedSandboxBackend>,
+    )
+    .await
+    .expect("harness should initialize");
+    let conversation = test_conversation(&harness).await;
+    let sandbox_id = test_sandbox(&conversation).await;
+    let turn = conversation
+        .begin_turn(BeginTurnRequest::default())
+        .await
+        .expect("turn");
+
+    // Advance the conversation head behind the turn's back; the turn's next
+    // head-guarded append must then observe a stale expected head.
+    conversation
+        .add_events(AddEventsRequest {
+            session_id: None,
+            turn_id: None,
+            data: vec![messages_event("outside the turn")],
+        })
+        .await
+        .expect("conversation append");
+
+    let error = turn
+        .snapshot_sandbox(sandbox_id)
+        .await
+        .expect_err("stale turn append should be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("turn is stale and cannot be resumed"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn get_events_desc_returns_newest_first_and_limit_truncates() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
+        .await
+        .expect("harness should initialize");
+    let conversation = test_conversation(&harness).await;
+    for text in ["one", "two", "three"] {
+        conversation
+            .add_events(AddEventsRequest {
+                session_id: None,
+                turn_id: None,
+                data: vec![messages_event(text)],
+            })
+            .await
+            .expect("append");
+    }
+
+    let asc_ids = conversation
+        .get_events(Some(EventQuery {
+            direction: Some(EventQueryDirection::Asc),
+            ..Default::default()
+        }))
+        .await
+        .expect("asc events")
+        .events
+        .iter()
+        .map(|event| event.id)
+        .collect::<Vec<_>>();
+    // conversation_created plus the three message events.
+    assert_eq!(asc_ids.len(), 4);
+    assert!(asc_ids.is_sorted());
+
+    let desc_ids = conversation
+        .get_events(Some(EventQuery {
+            direction: Some(EventQueryDirection::Desc),
+            ..Default::default()
+        }))
+        .await
+        .expect("desc events")
+        .events
+        .iter()
+        .map(|event| event.id)
+        .collect::<Vec<_>>();
+    assert_eq!(desc_ids, asc_ids.iter().rev().copied().collect::<Vec<_>>());
+
+    let asc_limited = conversation
+        .get_events(Some(EventQuery {
+            direction: Some(EventQueryDirection::Asc),
+            limit: Some(2),
+            ..Default::default()
+        }))
+        .await
+        .expect("asc limited")
+        .events
+        .iter()
+        .map(|event| event.id)
+        .collect::<Vec<_>>();
+    assert_eq!(asc_limited, asc_ids[..2]);
+
+    let desc_limited = conversation
+        .get_events(Some(EventQuery {
+            direction: Some(EventQueryDirection::Desc),
+            limit: Some(2),
+            ..Default::default()
+        }))
+        .await
+        .expect("desc limited")
+        .events
+        .iter()
+        .map(|event| event.id)
+        .collect::<Vec<_>>();
+    assert_eq!(desc_limited, desc_ids[..2]);
+}
+
+const SNAPSHOT_STUB_BYTES: &[u8] = b"stub-snapshot-payload";
+
+struct SnapshotStubBackend {
+    restored: Mutex<Option<Vec<u8>>>,
+}
+
+impl SnapshotStubBackend {
+    fn new() -> Self {
+        Self {
+            restored: Mutex::new(None),
+        }
+    }
+
+    fn restored_payload(&self) -> Option<Vec<u8>> {
+        self.restored.lock().expect("restored poisoned").clone()
+    }
+}
+
+#[async_trait]
+impl ManagedSandboxBackend for SnapshotStubBackend {
+    async fn acquire(
+        &self,
+        _request: SandboxRequest,
+    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+        Ok(Arc::new(SnapshotStubHandle))
+    }
+
+    async fn acquire_from_snapshot(
+        &self,
+        _request: SandboxRequest,
+        payload: SnapshotPayload,
+    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+        *self.restored.lock().expect("restored poisoned") = Some(payload.bytes.to_vec());
+        Ok(Arc::new(SnapshotStubHandle))
+    }
+}
+
+struct SnapshotStubHandle;
+
+#[async_trait]
+impl ManagedSandboxHandle for SnapshotStubHandle {
+    fn id(&self) -> &str {
+        "snapshot-stub-sandbox"
+    }
+
+    async fn exec(&self, _command: &SandboxCommand) -> crate::Result<SandboxCommandOutput> {
+        bail!("snapshot stub does not support exec")
+    }
+
+    async fn start_process(&self, _command: &SandboxCommand) -> crate::Result<SandboxProcessParts> {
+        bail!("snapshot stub does not support start_process")
+    }
+
+    async fn stop(&self) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn snapshot(&self) -> crate::Result<SnapshotPayload> {
+        Ok(SnapshotPayload {
+            kind: SnapshotKind::DockerImageTar,
+            bytes: Bytes::from_static(SNAPSHOT_STUB_BYTES),
+        })
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn snapshot_sandbox_persists_manifest_and_restores_recorded_bytes() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let backend = Arc::new(SnapshotStubBackend::new());
+    let harness = BasicExoHarness::new_with_sandbox_backend(
+        local_test_config(tempdir.path()),
+        Arc::clone(&backend) as Arc<dyn ManagedSandboxBackend>,
+    )
+    .await
+    .expect("harness should initialize");
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let conversation = agent
+        .new_conversation(NewConversationRequest::default())
+        .await
+        .expect("conversation");
+    let sandbox_id = test_sandbox(&conversation).await;
+
+    // Restoring before any snapshot exists must fail, not fabricate state.
+    let error = conversation
+        .start_sandbox(StartSandboxRequest {
+            id: sandbox_id.clone(),
+            snapshot_id: Uuid7::now(),
+            idle_seconds: None,
+        })
+        .await
+        .expect_err("restore without a snapshot should fail");
+    assert!(
+        error.to_string().contains("have you taken a snapshot"),
+        "unexpected error: {error:#}"
+    );
+
+    let snapshot_id = conversation
+        .snapshot_sandbox(sandbox_id.clone())
+        .await
+        .expect("snapshot");
+
+    let conversation_dir = tempdir
+        .path()
+        .join("agents")
+        .join(agent.record().id.to_string())
+        .join("conversations")
+        .join(conversation.record().id.to_string());
+    let snapshot_dir = conversation_dir
+        .join("snapshots")
+        .join(snapshot_id.to_string());
+    let payload = fs::read(snapshot_dir.join("payload.bin"))
+        .await
+        .expect("payload.bin written");
+    assert_eq!(payload, SNAPSHOT_STUB_BYTES);
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(snapshot_dir.join("manifest.json"))
+            .await
+            .expect("manifest.json written"),
+    )
+    .expect("manifest parses");
+    assert_eq!(manifest["snapshot_id"], snapshot_id.to_string());
+    assert_eq!(manifest["sandbox_id"], sandbox_id.as_str());
+    assert_eq!(manifest["payload_size_bytes"], SNAPSHOT_STUB_BYTES.len());
+
+    let stored: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            conversation_dir
+                .join("sandboxes")
+                .join(format!("{sandbox_id}.json")),
+        )
+        .await
+        .expect("sandbox record"),
+    )
+    .expect("sandbox record parses");
+    assert_eq!(stored["latest_snapshot_id"], snapshot_id.to_string());
+
+    conversation
+        .start_sandbox(StartSandboxRequest {
+            id: sandbox_id,
+            snapshot_id,
+            idle_seconds: Some(60),
+        })
+        .await
+        .expect("restore from snapshot");
+    assert_eq!(
+        backend.restored_payload().as_deref(),
+        Some(SNAPSHOT_STUB_BYTES)
+    );
 }

@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildIdeogramInput,
+  decodeDataUrl,
+  extensionForMimeType,
   extractFalImages,
   generateFalImage,
+  mimeTypeForUrl,
 } from "./fal-tools";
 
 describe("buildIdeogramInput", () => {
@@ -237,5 +240,141 @@ describe("generateFalImage", () => {
       ok: false,
       error: "FAL_KEY is not set in the host environment.",
     });
+  });
+
+  it("turns a callFal failure into an error result instead of throwing", async () => {
+    await expect(
+      generateFalImage(
+        { prompt: "x" },
+        {
+          apiKey: "fal-key",
+          callFal: async () => {
+            throw new Error("Fal request failed (503): overloaded");
+          },
+        },
+      ),
+    ).resolves.toEqual({
+      ok: false,
+      error: "Fal request failed (503): overloaded",
+    });
+  });
+
+  it("fails and echoes the response when Fal returns no images", async () => {
+    await expect(
+      generateFalImage(
+        { prompt: "x" },
+        {
+          apiKey: "fal-key",
+          callFal: async () => ({ images: [], detail: "safety filtered" }),
+        },
+      ),
+    ).resolves.toEqual({
+      ok: false,
+      error: "Fal response did not include any images.",
+      response: { images: [], detail: "safety filtered" },
+    });
+  });
+
+  it("keeps the image without cache paths when fetching it fails", async () => {
+    const result = (await generateFalImage(
+      {
+        prompt: "x",
+        attachToConversation: true,
+      },
+      {
+        apiKey: "fal-key",
+        callFal: async () => ({
+          images: [
+            {
+              url: "https://v3b.fal.media/files/a/image.jpg",
+              content_type: "image/jpeg",
+            },
+          ],
+        }),
+        fetchImage: async () => {
+          throw new Error("Fal image fetch failed (404)");
+        },
+      },
+    )) as { ok: boolean; images: Record<string, unknown>[]; media?: unknown };
+
+    expect(result.ok).toBe(true);
+    expect(result.images).toEqual([
+      {
+        url: "https://v3b.fal.media/files/a/image.jpg",
+        mimeType: "image/jpeg",
+        fileName: null,
+        fileSize: null,
+        width: null,
+        height: null,
+      },
+    ]);
+    expect(result.images[0]).not.toHaveProperty("path");
+    expect(result.images[0]).not.toHaveProperty("sandboxPath");
+    // With nothing cached there is nothing to attach either.
+    expect(result.media).toBeUndefined();
+  });
+});
+
+describe("mimeTypeForUrl", () => {
+  it("reads the mime type out of a data URL", () => {
+    expect(mimeTypeForUrl("data:image/webp;base64,AAAA")).toBe("image/webp");
+  });
+
+  it("falls back to image/png for non-image data URLs", () => {
+    expect(mimeTypeForUrl("data:text/plain;base64,AAAA")).toBe("image/png");
+  });
+
+  it("maps https URLs by file extension with a jpeg fallback", () => {
+    expect(mimeTypeForUrl("https://v3b.fal.media/files/a/image.PNG")).toBe(
+      "image/png",
+    );
+    expect(mimeTypeForUrl("https://v3b.fal.media/files/a/image.webp")).toBe(
+      "image/webp",
+    );
+    expect(mimeTypeForUrl("https://v3b.fal.media/files/a/image.jpg")).toBe(
+      "image/jpeg",
+    );
+    expect(mimeTypeForUrl("https://v3b.fal.media/files/a/image")).toBe(
+      "image/jpeg",
+    );
+  });
+});
+
+describe("extensionForMimeType", () => {
+  it("maps known image mime types and ignores parameters", () => {
+    expect(extensionForMimeType("image/png")).toBe(".png");
+    expect(extensionForMimeType("image/webp")).toBe(".webp");
+    expect(extensionForMimeType("image/gif")).toBe(".gif");
+    expect(extensionForMimeType("image/png;charset=binary")).toBe(".png");
+  });
+
+  it("defaults everything else to .jpg", () => {
+    expect(extensionForMimeType("image/jpeg")).toBe(".jpg");
+    expect(extensionForMimeType("application/octet-stream")).toBe(".jpg");
+  });
+});
+
+describe("decodeDataUrl", () => {
+  it("decodes base64 payloads and keeps the declared mime type", () => {
+    const decoded = decodeDataUrl(
+      `data:image/png;base64,${Buffer.from("exo").toString("base64")}`,
+      "image/jpeg",
+    );
+    expect(decoded.mimeType).toBe("image/png");
+    expect(Buffer.from(decoded.bytes).toString("utf8")).toBe("exo");
+  });
+
+  it("uses the fallback mime type when the header omits one", () => {
+    const decoded = decodeDataUrl(
+      `data:;base64,${Buffer.from("exo").toString("base64")}`,
+      "image/jpeg",
+    );
+    expect(decoded.mimeType).toBe("image/jpeg");
+  });
+
+  it("rejects a data URL without a payload separator", () => {
+    expect(() => decodeDataUrl("data:image/png;base64", "image/jpeg")).toThrow(
+      "Fal returned an invalid data URL",
+    );
   });
 });

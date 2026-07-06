@@ -323,6 +323,79 @@ mod tests {
         assert_eq!(task.task_sandbox_id, None);
     }
 
+    fn test_task(now_ms: u64) -> ScheduledTaskRecord {
+        ScheduledTaskRecord::new(
+            NewScheduledTask {
+                agent_id: "agent".to_string(),
+                conversation_id: "conversation".to_string(),
+                name: "check".to_string(),
+                schedule: "@every 5m".to_string(),
+                sandbox_mode: None,
+                setup_command: None,
+                command: vec!["true".to_string()],
+                report_prompt: "Report.".to_string(),
+                max_output_bytes: None,
+            },
+            now_ms,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn mark_completed_reschedules_and_clears_lease() {
+        let mut task = test_task(1_000);
+        assert_eq!(task.next_run_at_ms, 301_000);
+
+        task.claim(301_000, DEFAULT_TASK_LEASE_MS);
+        assert!(task.lease.is_some());
+
+        let run = ScheduledTaskRunRecord {
+            id: "run-1".to_string(),
+            task_id: task.id.clone(),
+            started_at_ms: 301_000,
+            finished_at_ms: 305_000,
+            exit_code: Some(0),
+            stdout_bytes: 12,
+            stderr_bytes: 0,
+            truncated: false,
+            result_artifact_id: Some("artifact-1".to_string()),
+            error: None,
+        };
+        task.mark_completed(&run, Some("artifact-1".to_string()), 305_000)
+            .unwrap();
+
+        // Next run is scheduled off the completion time, per the parsed schedule.
+        assert_eq!(task.next_run_at_ms, 305_000 + 300_000);
+        assert_eq!(task.lease, None);
+        assert_eq!(task.last_run_at_ms, Some(305_000));
+        assert_eq!(task.latest_run_id, Some("run-1".to_string()));
+        assert_eq!(
+            task.latest_result_artifact_id,
+            Some("artifact-1".to_string())
+        );
+        assert_eq!(task.updated_at_ms, 305_000);
+    }
+
+    #[test]
+    fn is_due_respects_lease_expiry() {
+        let mut task = test_task(1_000);
+
+        // Not due before the scheduled time; due once it arrives.
+        assert!(!task.is_due(300_999));
+        assert!(task.is_due(301_000));
+
+        // An unexpired lease suppresses re-claiming...
+        task.claim(301_000, 60_000);
+        assert!(!task.is_due(301_001));
+        assert!(!task.is_due(360_999));
+        // ...until the lease expires (a crashed runner's lease is reclaimable).
+        assert!(task.is_due(361_000));
+
+        // Disabled tasks are never due, lease or not.
+        task.enabled = false;
+        assert!(!task.is_due(361_000));
+    }
+
     #[test]
     fn scheduled_task_rejects_excessive_output_cap() {
         assert!(

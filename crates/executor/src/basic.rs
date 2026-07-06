@@ -638,3 +638,104 @@ struct HistoryCacheEntry {
     messages: Vec<Message>,
     tool_call_names: HashMap<ToolCallId, String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use exoharness::Uuid7;
+    use lingua::UniversalUsage;
+
+    // Inline LiteLLM-schema fixture so the assertions are hermetic and don't
+    // depend on whatever rates the upstream JSON happens to ship today.
+    const PRICING_FIXTURE: &str = r#"{
+        "claude-sonnet-4-6": {
+            "litellm_provider": "anthropic",
+            "mode": "chat",
+            "input_cost_per_token": 3e-06,
+            "output_cost_per_token": 1.5e-05
+        }
+    }"#;
+
+    fn pricing_fixture() -> PricingTable {
+        PricingTable::from_json_str(PRICING_FIXTURE).expect("fixture should parse")
+    }
+
+    fn model_response() -> ModelResponse {
+        ModelResponse {
+            provider_cost_usd: None,
+            response_id: Some(Uuid7::now()),
+            messages: Vec::new(),
+            tool_calls: Vec::new(),
+            usage: Some(UniversalUsage {
+                prompt_tokens: Some(1_000),
+                completion_tokens: Some(500),
+                ..Default::default()
+            }),
+            model: Some("claude-sonnet-4-6".to_string()),
+            ttft: None,
+            duration: None,
+        }
+    }
+
+    #[test]
+    fn provider_reported_cost_wins_over_pricing_table_estimate() {
+        let pricing = pricing_fixture();
+
+        // Without a provider-reported cost the table estimate applies:
+        // 1000 prompt @ $3/M + 500 completion @ $15/M = $0.0105.
+        let estimated = build_usage_record(&model_response(), &pricing)
+            .expect("usage should produce a record")
+            .cost_usd
+            .expect("cost should be estimated from the table");
+        assert!((estimated - 0.0105).abs() < 1e-9);
+
+        // With one, the authoritative provider figure is preserved verbatim.
+        let mut response = model_response();
+        response.provider_cost_usd = Some(0.5);
+        let record =
+            build_usage_record(&response, &pricing).expect("usage should produce a record");
+        assert_eq!(record.cost_usd, Some(0.5));
+    }
+
+    #[test]
+    fn no_usage_and_no_timing_produces_no_record() {
+        let response = ModelResponse {
+            provider_cost_usd: None,
+            response_id: Some(Uuid7::now()),
+            messages: Vec::new(),
+            tool_calls: Vec::new(),
+            usage: None,
+            model: Some("claude-sonnet-4-6".to_string()),
+            ttft: None,
+            duration: None,
+        };
+
+        assert!(build_usage_record(&response, &pricing_fixture()).is_none());
+
+        // Timing alone is enough to warrant a record, even without token usage.
+        let mut timed = response;
+        timed.duration = Some(Duration::from_millis(1_250));
+        let record =
+            build_usage_record(&timed, &pricing_fixture()).expect("timing should produce a record");
+        assert_eq!(record.duration_ms, Some(1_250));
+        assert_eq!(record.cost_usd, None, "no usage means no cost estimate");
+    }
+
+    #[test]
+    fn pricing_lookup_is_skipped_when_model_is_unknown() {
+        let mut response = model_response();
+        response.model = None;
+
+        let record = build_usage_record(&response, &pricing_fixture())
+            .expect("usage should produce a record");
+        assert_eq!(record.model, "");
+        assert_eq!(
+            record.cost_usd, None,
+            "an empty model must not be priced against the table"
+        );
+        assert_eq!(record.prompt_tokens, Some(1_000));
+        assert_eq!(record.completion_tokens, Some(500));
+    }
+}

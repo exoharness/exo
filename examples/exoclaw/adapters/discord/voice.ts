@@ -337,7 +337,7 @@ export class DiscordVoice {
 }
 
 /** Wrap raw s16le PCM in a minimal 44-byte WAV header for the STT API. */
-function pcmToWav(pcm: Buffer): Buffer {
+export function pcmToWav(pcm: Buffer): Buffer {
   const header = Buffer.alloc(44);
   const byteRate = SAMPLE_RATE * CHANNELS * BYTES_PER_SAMPLE;
   const blockAlign = CHANNELS * BYTES_PER_SAMPLE;

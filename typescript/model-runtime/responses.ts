@@ -605,7 +605,7 @@ export class AnthropicRuntime implements ResponsesRuntimeLike {
   }
 }
 
-function buildAnthropicBody(
+export function buildAnthropicBody(
   request: NativeResponsesRequest,
 ): Anthropic.MessageCreateParamsNonStreaming {
   const { system, messages } = splitAnthropicMessages(request.messages ?? []);
@@ -622,7 +622,7 @@ function buildAnthropicBody(
 // Anthropic takes the system prompt as a top-level field, not a message role.
 // Pull system/developer turns out, then let lingua convert the rest — the same
 // `linguaTo<Provider>Messages` path the Responses runtime uses for its input.
-function splitAnthropicMessages(messages: Message[]): {
+export function splitAnthropicMessages(messages: Message[]): {
   system: string;
   messages: Anthropic.MessageParam[];
 } {
@@ -653,7 +653,9 @@ function toolDefinitionsToAnthropicTools(
   }));
 }
 
-function anthropicMessageToResponse(message: Anthropic.Message): Response {
+export function anthropicMessageToResponse(
+  message: Anthropic.Message,
+): Response {
   const output: unknown[] = [];
   const text = message.content
     .filter((block): block is Anthropic.TextBlock => block.type === "text")
@@ -687,7 +689,7 @@ function anthropicMessageToResponse(message: Anthropic.Message): Response {
   } as unknown as Response;
 }
 
-function anthropicUsageToResponseUsage(
+export function anthropicUsageToResponseUsage(
   usage: Anthropic.Usage | null | undefined,
 ): unknown {
   if (!usage) {
@@ -859,7 +861,9 @@ function messagesToChatMessages(
   return messages.map(messageToChatMessage);
 }
 
-function messageToChatMessage(message: Message): ChatCompletionMessageParam {
+export function messageToChatMessage(
+  message: Message,
+): ChatCompletionMessageParam {
   if (message.role === "system" || message.role === "developer") {
     return { role: "system", content: messageContentText(message.content) };
   }
@@ -896,7 +900,7 @@ function toolDefinitionsToChatTools(
   }));
 }
 
-function chatCompletionToResponse(completion: ChatCompletion): Response {
+export function chatCompletionToResponse(completion: ChatCompletion): Response {
   const choice = completion.choices[0];
   const output: unknown[] = [];
   if (choice?.message.content) {
@@ -920,7 +924,7 @@ function chatCompletionToResponse(completion: ChatCompletion): Response {
   } as unknown as Response;
 }
 
-class ChatCompletionAccumulator {
+export class ChatCompletionAccumulator {
   private id = `chatcmpl_${Date.now()}`;
   private created = Math.floor(Date.now() / 1000);
   private model = "";
@@ -1022,7 +1026,7 @@ function responseFunctionCallOutput(toolCall: ChatFunctionToolCall): unknown {
   };
 }
 
-function chatUsageToResponseUsage(
+export function chatUsageToResponseUsage(
   usage:
     | ChatCompletion["usage"]
     | ChatCompletionChunk["usage"]
@@ -1045,7 +1049,9 @@ function chatUsageToResponseUsage(
   };
 }
 
-function assistantToolCalls(content: unknown): ChatCompletionMessageToolCall[] {
+export function assistantToolCalls(
+  content: unknown,
+): ChatCompletionMessageToolCall[] {
   if (!Array.isArray(content)) {
     return [];
   }
@@ -1085,7 +1091,7 @@ function assistantTextContent(content: unknown): string | null {
   return messageContentText(content);
 }
 
-function toolResultContent(content: unknown): {
+export function toolResultContent(content: unknown): {
   toolCallId: string;
   output: unknown;
 } {

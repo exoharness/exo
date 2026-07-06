@@ -98,13 +98,13 @@ function guardianParameters(): ToolDefinition["parameters"] {
   };
 }
 
-type GuardianArguments = {
+export type GuardianArguments = {
   action: GuardianAction;
   build: boolean;
   logTarget: GuardianLogTarget;
 };
 
-function parseGuardianArguments(args: JsonObject): GuardianArguments {
+export function parseGuardianArguments(args: JsonObject): GuardianArguments {
   const action = args.action;
   if (typeof action !== "string" || !(action in ACTION_TO_COMMAND)) {
     throw new Error(
@@ -134,17 +134,23 @@ function parseGuardianArguments(args: JsonObject): GuardianArguments {
   };
 }
 
-async function executeGuardianAction(
-  args: GuardianArguments,
-): Promise<ToolResult> {
-  const command = ACTION_TO_COMMAND[args.action];
-  const commandArgs = [command];
+// Pure argv composition for the guardian script, kept separate from the spawn
+// so the mapping from tool arguments to CLI flags is directly testable.
+export function guardianCommandArgs(args: GuardianArguments): string[] {
+  const commandArgs = [ACTION_TO_COMMAND[args.action]];
   if (args.action === "restart_all" && args.build) {
     commandArgs.push("--build");
   }
   if (args.action === "logs" && args.logTarget !== "all") {
     commandArgs.push(args.logTarget);
   }
+  return commandArgs;
+}
+
+async function executeGuardianAction(
+  args: GuardianArguments,
+): Promise<ToolResult> {
+  const commandArgs = guardianCommandArgs(args);
 
   if (shouldDeferAction(args.action)) {
     const result = runGuardianDeferred(commandArgs);
@@ -174,7 +180,7 @@ async function executeGuardianAction(
   };
 }
 
-function shouldDeferAction(action: GuardianAction): boolean {
+export function shouldDeferAction(action: GuardianAction): boolean {
   return (
     action === "restart_all" ||
     action === "restart_services" ||
@@ -262,7 +268,7 @@ function runGuardianDeferred(args: string[]): {
   };
 }
 
-function clampOutput(output: string): string {
+export function clampOutput(output: string): string {
   if (output.length <= MAX_OUTPUT_CHARS) {
     return output;
   }

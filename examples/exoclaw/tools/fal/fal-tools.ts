@@ -419,7 +419,7 @@ async function fetchImageBytes(
   };
 }
 
-function decodeDataUrl(
+export function decodeDataUrl(
   dataUrl: string,
   fallbackMimeType: string,
 ): { bytes: Uint8Array; mimeType: string } {
@@ -450,7 +450,7 @@ function setOptionalString(
   }
 }
 
-function mimeTypeForUrl(url: string): string {
+export function mimeTypeForUrl(url: string): string {
   if (url.startsWith("data:")) {
     const comma = url.indexOf(",");
     const header = comma === -1 ? url.slice(5) : url.slice(5, comma);
@@ -467,7 +467,7 @@ function mimeTypeForUrl(url: string): string {
   return "image/jpeg";
 }
 
-function extensionForMimeType(mimeType: string): string {
+export function extensionForMimeType(mimeType: string): string {
   switch (mimeType.split(";")[0]) {
     case "image/png":
       return ".png";

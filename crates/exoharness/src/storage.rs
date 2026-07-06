@@ -168,3 +168,151 @@ fn normalize_path(path: &Path) -> String {
         .collect::<Vec<_>>()
         .join("/")
 }
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    async fn test_store() -> (TempDir, BasicObjectStore) {
+        let tempdir = TempDir::new().expect("tempdir");
+        let store = BasicObjectStore::local_filesystem(tempdir.path())
+            .await
+            .expect("store");
+        (tempdir, store)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bytes_round_trip_and_missing_key_semantics() {
+        let (_tempdir, store) = test_store().await;
+        store
+            .put_bytes("dir/blob.bin", b"payload".to_vec())
+            .await
+            .expect("put");
+        assert_eq!(
+            store.get_bytes("dir/blob.bin").await.expect("get"),
+            b"payload"
+        );
+        assert_eq!(
+            store
+                .get_bytes_if_exists("dir/missing.bin")
+                .await
+                .expect("miss is not an error"),
+            None
+        );
+        store
+            .get_bytes("dir/missing.bin")
+            .await
+            .expect_err("hard get on a missing key errors");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn json_round_trip_and_missing_key_returns_none() {
+        let (_tempdir, store) = test_store().await;
+        let value = serde_json::json!({"name": "exo", "count": 3});
+        store
+            .put_json("dir/record.json", &value)
+            .await
+            .expect("put");
+        assert_eq!(
+            store
+                .get_json::<serde_json::Value>("dir/record.json")
+                .await
+                .expect("get"),
+            value
+        );
+        assert_eq!(
+            store
+                .get_json_if_exists::<serde_json::Value>("dir/missing.json")
+                .await
+                .expect("miss is not an error"),
+            None
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_keys_isolates_prefixes() {
+        let (_tempdir, store) = test_store().await;
+        store
+            .put_bytes("alpha/one.bin", vec![1])
+            .await
+            .expect("put");
+        store
+            .put_bytes("alpha/nested/two.bin", vec![2])
+            .await
+            .expect("put");
+        store
+            .put_bytes("alphabet/three.bin", vec![3])
+            .await
+            .expect("put");
+        store
+            .put_bytes("beta/four.bin", vec![4])
+            .await
+            .expect("put");
+        // Prefixes are path segments: "alphabet" must not leak into "alpha".
+        assert_eq!(
+            store.list_keys("alpha").await.expect("list"),
+            vec!["alpha/nested/two.bin", "alpha/one.bin"]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn copy_prefix_copies_objects_and_keeps_source_intact() {
+        let (_tempdir, store) = test_store().await;
+        store
+            .put_bytes("src/a.bin", b"a".to_vec())
+            .await
+            .expect("put");
+        store
+            .put_bytes("src/nested/b.bin", b"b".to_vec())
+            .await
+            .expect("put");
+        store.copy_prefix("src", "dst").await.expect("copy");
+        assert_eq!(store.get_bytes("dst/a.bin").await.expect("copied"), b"a");
+        assert_eq!(
+            store
+                .get_bytes("dst/nested/b.bin")
+                .await
+                .expect("copied nested"),
+            b"b"
+        );
+        assert_eq!(
+            store.list_keys("src").await.expect("source intact"),
+            vec!["src/a.bin", "src/nested/b.bin"]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delete_prefix_removes_only_matching_objects() {
+        let (_tempdir, store) = test_store().await;
+        store.put_bytes("drop/a.bin", vec![1]).await.expect("put");
+        store
+            .put_bytes("drop/nested/b.bin", vec![2])
+            .await
+            .expect("put");
+        store.put_bytes("keep/c.bin", vec![3]).await.expect("put");
+        store.delete_prefix("drop").await.expect("delete");
+        assert_eq!(store.list_keys("").await.expect("list"), vec!["keep/c.bin"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn redundant_path_components_normalize_to_the_same_key() {
+        let (_tempdir, store) = test_store().await;
+        store
+            .put_bytes("dir//sub/./file.bin", b"x".to_vec())
+            .await
+            .expect("put");
+        assert_eq!(
+            store
+                .get_bytes("dir/sub/file.bin")
+                .await
+                .expect("get via canonical key"),
+            b"x"
+        );
+        assert_eq!(
+            store.list_keys("dir").await.expect("list"),
+            vec!["dir/sub/file.bin"]
+        );
+    }
+}

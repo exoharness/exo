@@ -142,6 +142,56 @@ describe("memory tools", () => {
     expect(huge.ok).toBe(false);
   });
 
+  it("returns removed:0 when forgetting an id that does not exist", async () => {
+    const { context } = makeContext();
+    await call("remember", { text: "kept fact" }, context);
+
+    const result = (await call("forget", { id: "mem_missing1" }, context)) as {
+      ok: boolean;
+      removed: number;
+    };
+    expect(result.ok).toBe(false);
+    expect(result.removed).toBe(0);
+
+    // The store is untouched.
+    const content = String((await memoryInstruction(context))?.content);
+    expect(content).toContain("kept fact");
+  });
+
+  it("evicts the oldest entries past the cap and reports them as dropped", async () => {
+    const { context, agent } = makeContext();
+    // Pre-seed a store already at the MAX_ENTRIES=200 cap.
+    await agent.writeArtifactJson({
+      path: "memory/exoclaw-memory.json",
+      value: {
+        entries: Array.from({ length: 200 }, (_, index) => ({
+          id: `mem_seed${index}`,
+          text: `seeded fact ${index}`,
+          createdAt: "1970-01-01T00:00:00Z",
+        })),
+      },
+    });
+
+    const result = (await call(
+      "remember",
+      { text: "one over the cap" },
+      context,
+    )) as {
+      ok: boolean;
+      total: number;
+      dropped: number;
+    };
+    expect(result.ok).toBe(true);
+    expect(result.total).toBe(200);
+    expect(result.dropped).toBe(1);
+
+    // The oldest entry was evicted; the newest survives.
+    const content = String((await memoryInstruction(context))?.content);
+    expect(content).not.toContain("mem_seed0");
+    expect(content).toContain("mem_seed1");
+    expect(content).toContain("one over the cap");
+  });
+
   it("returns null when nothing is remembered", async () => {
     const { context } = makeContext();
     expect(await memoryInstruction(context)).toBeNull();

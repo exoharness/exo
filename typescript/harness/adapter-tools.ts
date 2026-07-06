@@ -446,7 +446,7 @@ function transformCreateAdapterArguments(args: JsonObject): JsonObject {
   return args;
 }
 
-function validateAdapterSource(source: string, type: string): void {
+export function validateAdapterSource(source: string, type: string): void {
   if ((type === "irc" || type === "agent-cli") && source !== "built_in") {
     throw new Error(`${type} adapters must use source 'built_in'`);
   }
