@@ -2630,27 +2630,65 @@ async fn start_sandbox_side_effect(
     // teleport a Docker snapshot up to Daytona). Set before routing so the
     // restore targets the new backend and the new provider is persisted;
     // unsupported providers / snapshot kinds error in the calls below.
+    let previous_provider = sandbox.provider;
     if let Some(provider) = request.provider {
         sandbox.provider = provider;
     }
+    let cross_provider = sandbox.provider != previous_provider;
 
-    // Remote work before the write lock: stop any previous handle, then boot
-    // the restored sandbox.
-    let previous_handle = harness
-        .inner
-        .running_sandboxes
-        .lock()
-        .await
-        .remove(&request.id);
-    if let Some(previous_handle) = previous_handle {
-        previous_handle.stop().await?;
-    }
-    let sandbox_handle = harness
-        .inner
-        .sandbox_backend_for_provider(sandbox.provider)
-        .await?
-        .acquire_from_snapshot(sandbox_request(owner, &request.id, &sandbox, None), payload)
-        .await?;
+    // Remote work before the write lock. Two orders, chosen by whether the
+    // restore changes providers:
+    //   - Cross-provider (teleport): make-before-break. Boot the new sandbox
+    //     first and stop the old one only once it's up, so a failed restore
+    //     leaves the source sandbox running and serving. Safe because the two
+    //     handles live on different backends and can't collide.
+    //   - Same provider: stop-then-boot. The backend replaces the warm
+    //     container for this key itself during restore, and stopping the old
+    //     handle after the new one exists would tear down the new container's
+    //     warm-cache entry (both handles share the same SandboxKey).
+    let sandbox_handle = if cross_provider {
+        let sandbox_handle = harness
+            .inner
+            .sandbox_backend_for_provider(sandbox.provider)
+            .await?
+            .acquire_from_snapshot(sandbox_request(owner, &request.id, &sandbox, None), payload)
+            .await?;
+        let previous_handle = harness
+            .inner
+            .running_sandboxes
+            .lock()
+            .await
+            .remove(&request.id);
+        if let Some(previous_handle) = previous_handle
+            && let Err(error) = previous_handle.stop().await
+        {
+            // The new sandbox is authoritative at this point; a failure to
+            // reap the source shouldn't fail the restore.
+            tracing::warn!(
+                sandbox_id = %request.id,
+                previous_provider = %previous_provider,
+                error = format!("{error:#}"),
+                "failed to stop the source sandbox after a cross-provider restore"
+            );
+        }
+        sandbox_handle
+    } else {
+        let previous_handle = harness
+            .inner
+            .running_sandboxes
+            .lock()
+            .await
+            .remove(&request.id);
+        if let Some(previous_handle) = previous_handle {
+            previous_handle.stop().await?;
+        }
+        harness
+            .inner
+            .sandbox_backend_for_provider(sandbox.provider)
+            .await?
+            .acquire_from_snapshot(sandbox_request(owner, &request.id, &sandbox, None), payload)
+            .await?
+    };
 
     let _guard = harness.inner.write_lock.lock().await;
     harness

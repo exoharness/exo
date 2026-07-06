@@ -23,9 +23,9 @@ use std::process::Command;
 
 use exoharness::{
     BasicExoHarness, BasicExoHarnessConfig, ConversationHandle, CreateSandboxRequest,
-    DaytonaBackendSpec, ExoHarness, NewAgentRequest, NewConversationRequest, PutSecretRequest,
-    RunInSandboxRequest, SandboxBackendRegistration, SandboxId, SandboxProvider, Secret,
-    SecretBackendChoice, StartSandboxRequest,
+    DaytonaBackendSpec, ExoHarness, FileSystemMount, FileSystemMountMode, NewAgentRequest,
+    NewConversationRequest, PutSecretRequest, RunInSandboxRequest, SandboxBackendRegistration,
+    SandboxId, SandboxProvider, Secret, SecretBackendChoice, StartSandboxRequest,
 };
 use futures::io::AsyncReadExt;
 use tempfile::TempDir;
@@ -135,6 +135,56 @@ async fn teleport_docker_sandbox_to_daytona_keeps_files() {
     );
 
     let _ = conv.stop_sandbox(sandbox_id).await;
+
+    // 5. Make-before-break: a teleport that fails must leave the source
+    //    sandbox running. Host mounts are rejected by the Daytona backend
+    //    inside acquire_from_snapshot, which makes the failure deterministic
+    //    (and local — nothing reaches the Daytona API).
+    let mount_dir = TempDir::new().expect("mount dir");
+    let mounted_id = conv
+        .create_sandbox(CreateSandboxRequest {
+            name: None,
+            provider: SandboxProvider::Docker,
+            image: "docker.io/library/ubuntu:24.04".into(),
+            default_workdir: Some("/".into()),
+            file_system_mounts: Some(vec![FileSystemMount {
+                host_path: mount_dir.path().display().to_string(),
+                mount_path: "/mnt/host".into(),
+                mode: FileSystemMountMode::ReadOnly,
+                internal: None,
+            }]),
+            durable_file_systems: None,
+            enable_networking: Some(false),
+            idle_seconds: Some(300),
+        })
+        .await
+        .expect("create mounted docker sandbox");
+    let (rc, _, _) = exec_shell(conv.as_ref(), &mounted_id, "echo alive > /still-here.txt").await;
+    assert_eq!(rc, 0);
+
+    let snapshot_id = conv
+        .snapshot_sandbox(mounted_id.clone())
+        .await
+        .expect("snapshot mounted docker sandbox");
+    let error = conv
+        .start_sandbox(StartSandboxRequest {
+            id: mounted_id.clone(),
+            snapshot_id,
+            idle_seconds: None,
+            provider: Some(SandboxProvider::Daytona),
+        })
+        .await
+        .expect_err("teleporting a mounted sandbox to daytona must fail");
+    eprintln!("failed teleport (expected): {error:#}");
+
+    let (rc, stdout, _) = exec_shell(conv.as_ref(), &mounted_id, "cat /still-here.txt").await;
+    assert_eq!(
+        rc, 0,
+        "the source sandbox must still be running after a failed teleport"
+    );
+    assert_eq!(stdout.trim(), "alive");
+
+    let _ = conv.stop_sandbox(mounted_id).await;
 }
 
 async fn seed_secret(harness: &BasicExoHarness, name: &str, value: &str) {

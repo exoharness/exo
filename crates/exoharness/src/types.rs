@@ -593,10 +593,9 @@ pub struct StartSandboxRequest {
     pub id: SandboxId,
     pub snapshot_id: SnapshotId,
     pub idle_seconds: Option<u64>,
-    /// Restore under a different provider than the sandbox was created with
-    /// (e.g. teleport a Docker snapshot up to Daytona). `None` keeps the
-    /// sandbox's current provider. The target provider must be supported by the
-    /// harness and able to restore the snapshot's kind.
+    // If unspecified, starts sandbox where it was last run. If specified, will attempt to
+    // start the sandbox on the specified provider, if supported. If successful, the
+    // sandbox will start there going forward. 
     #[serde(default)]
     pub provider: Option<SandboxProvider>,
 }
@@ -836,8 +835,7 @@ pub enum SandboxProviderConfig {
     Daytona {
         /// Secret-store id of the API key.
         api_key_secret_id: SecretId,
-        /// Daytona `target` region (e.g. `us` / `eu`). Sandbox snapshots are
-        /// available in the shared `us` region (verified 2026-07).
+        /// Daytona `target` region (e.g. `us` / `eu`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         region: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
