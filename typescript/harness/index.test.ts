@@ -17,6 +17,7 @@ import {
   materializeEventsToMessages,
   toolResultMessage,
   toolResultEvent,
+  unfinishedToolCalls,
   type Event,
   type EventData,
   type JsonObject,
@@ -295,6 +296,77 @@ describe("materializeEventsToMessages", () => {
         error: "tool execution did not complete before the previous turn ended",
       }),
       { role: "user", content: "try again" },
+    ]);
+  });
+});
+
+describe("unfinishedToolCalls", () => {
+  function toolRequested(id: string, at: string): Event {
+    return {
+      id: at,
+      conversationId: "conversation",
+      createdAt: `2026-01-01T00:00:0${at}Z`,
+      data: {
+        type: "tool_requested",
+        tool_call_id: id,
+        request: { function_name: "shell", arguments: { command: id } },
+      },
+    };
+  }
+
+  function toolResult(id: string, at: string): Event {
+    return {
+      id: at,
+      conversationId: "conversation",
+      createdAt: `2026-01-01T00:00:0${at}Z`,
+      data: {
+        type: "tool_result",
+        tool_call_id: id,
+        result: { ok: true },
+      },
+    };
+  }
+
+  it("returns tool calls without matching results, in order", () => {
+    const events = [
+      toolRequested("call_1", "1"),
+      toolResult("call_1", "2"),
+      toolRequested("call_2", "3"),
+      toolRequested("call_3", "4"),
+      toolResult("call_3", "5"),
+      toolRequested("call_4", "6"),
+    ];
+    const unfinished = unfinishedToolCalls(events);
+    expect(unfinished.map((call) => call.toolCallId)).toEqual([
+      "call_2",
+      "call_4",
+    ]);
+    expect(unfinished[0].request).toEqual({
+      functionName: "shell",
+      arguments: { command: "call_2" },
+    });
+  });
+
+  it("is empty when every call has a result", () => {
+    const events = [
+      toolRequested("call_1", "1"),
+      toolResult("call_1", "2"),
+      toolRequested("call_2", "3"),
+      toolResult("call_2", "4"),
+    ];
+    expect(unfinishedToolCalls(events)).toEqual([]);
+  });
+
+  it("is empty for a fresh turn with no tool events", () => {
+    expect(unfinishedToolCalls([])).toEqual([]);
+  });
+
+  it("ignores results that arrive before their request pairs them", () => {
+    // A result with no recorded request (e.g. partial history) never yields
+    // a call to re-execute.
+    const events = [toolResult("call_9", "1"), toolRequested("call_1", "2")];
+    expect(unfinishedToolCalls(events).map((call) => call.toolCallId)).toEqual([
+      "call_1",
     ]);
   });
 });

@@ -28,6 +28,14 @@ impl BasicObjectStore {
         })
     }
 
+    /// Process-local store with the same conditional-put semantics as the
+    /// filesystem store.
+    pub(crate) fn memory() -> Self {
+        Self {
+            store: Arc::new(object_store::memory::InMemory::new()),
+        }
+    }
+
     pub(crate) async fn put_json<T: Serialize>(
         &self,
         key: impl AsRef<Path>,
@@ -37,6 +45,40 @@ impl BasicObjectStore {
         let bytes = serde_json::to_vec_pretty(value)?;
         self.store.put(&path, Bytes::from(bytes).into()).await?;
         Ok(())
+    }
+
+    /// Atomically create the object, failing if it already exists. Returns
+    /// false when another writer created it first.
+    pub(crate) async fn put_json_if_absent<T: Serialize>(
+        &self,
+        key: impl AsRef<Path>,
+        value: &T,
+    ) -> Result<bool> {
+        let path = object_path(key.as_ref())?;
+        let bytes = serde_json::to_vec_pretty(value)?;
+        let options = object_store::PutOptions {
+            mode: object_store::PutMode::Create,
+            ..Default::default()
+        };
+        match self
+            .store
+            .put_opts(&path, Bytes::from(bytes).into(), options)
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(object_store::Error::AlreadyExists { .. }) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Delete the object, tolerating a concurrent delete.
+    pub(crate) async fn delete_key(&self, key: impl AsRef<Path>) -> Result<()> {
+        let path = object_path(key.as_ref())?;
+        match self.store.delete(&path).await {
+            Ok(()) => Ok(()),
+            Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     pub(crate) async fn put_bytes(&self, key: impl AsRef<Path>, value: Vec<u8>) -> Result<()> {

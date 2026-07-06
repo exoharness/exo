@@ -5,6 +5,7 @@ import {
   registerBuiltInTools,
   registerLibraryToolModulePath,
   turnMetadata,
+  turnUnfinishedToolCalls,
   type BuiltInToolName,
   type EventData,
   type HarnessToolRegistry,
@@ -99,6 +100,35 @@ async function runResponsesTurnLoop(
   const { conversation } = context.exoharness.current;
   const maxToolRoundTrips = context.agentConfig.maxToolRoundTrips;
   let latestEventId: string | null = null;
+
+  // Resume frontier: if a prior attempt of this turn crashed between
+  // recording tool calls and recording their results, execute those calls
+  // now — with their original tool_call_ids — so real results land in
+  // history instead of synthesized failures. Recorded rounds are never
+  // redone: they are already part of the materialized history below.
+  const unfinished = await turnUnfinishedToolCalls(
+    context.exoharness.current.turn,
+  );
+  if (unfinished.length > 0) {
+    const tools = options.registerTools
+      ? createToolRegistry(context)
+      : await createDefaultToolRegistry(context);
+    if (options.registerTools) {
+      await options.registerTools(tools, context);
+    }
+    for (const toolCall of unfinished) {
+      const toolResultEvents = await runtime.traceToolCall(
+        turnParent,
+        context,
+        toolCall,
+        0,
+        (toolCall) => tools.executePending([toolCall]),
+      );
+      if (toolResultEvents.length > 0) {
+        latestEventId = await appendTurnEvents(context, toolResultEvents);
+      }
+    }
+  }
 
   for (let round = 0; ; round += 1) {
     if (

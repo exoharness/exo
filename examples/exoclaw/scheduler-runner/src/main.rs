@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -65,7 +64,9 @@ async fn main() -> Result<()> {
             interval_seconds,
             limit,
         } => {
-            let _lock = SchedulerRunnerLock::acquire(&cli.root)?;
+            // No singleton lock: concurrent runners coordinate through the
+            // conversation leases and occurrence dedupe of the harness's
+            // turn coordinator, so extra runners are harmless.
             let store = SchedulerStore::new(cli.root.join("scheduled-tasks"));
             loop {
                 let runs =
@@ -98,10 +99,6 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-struct SchedulerRunnerLock {
-    path: PathBuf,
-}
-
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum SandboxBackendArg {
     #[value(name = "apple-container")]
@@ -121,65 +118,11 @@ impl From<SandboxBackendArg> for SandboxBackendRegistration {
     }
 }
 
-impl SchedulerRunnerLock {
-    fn acquire(root: &Path) -> Result<Self> {
-        fs::create_dir_all(root)?;
-        let path = root.join("exoclaw-scheduler.lock");
-        let pid = std::process::id().to_string();
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                use std::io::Write;
-                writeln!(file, "{pid}")?;
-                Ok(Self { path })
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let existing_pid = fs::read_to_string(&path).unwrap_or_default();
-                if process_is_running(existing_pid.trim()) {
-                    return Err(anyhow!(
-                        "scheduler runner already appears to be running with pid {}",
-                        existing_pid.trim()
-                    ));
-                }
-                fs::remove_file(&path)?;
-                Self::acquire(root)
-            }
-            Err(error) => Err(error.into()),
-        }
-    }
-}
-
-impl Drop for SchedulerRunnerLock {
-    fn drop(&mut self) {
-        if let Err(error) = fs::remove_file(&self.path) {
-            tracing::error!(
-                path = %self.path.display(),
-                %error,
-                "failed to remove scheduler lock"
-            );
-        }
-    }
-}
-
 /// The guardian writes this marker to request a graceful restart: finish the
 /// current scheduler pass, claim the marker (remove it), and exit so the
 /// guardian can start a fresh build.
 fn claim_restart_marker(root: &Path) -> bool {
     fs::remove_file(root.join("exoclaw-scheduler.restart")).is_ok()
-}
-
-fn process_is_running(pid: &str) -> bool {
-    !pid.is_empty()
-        && Command::new("kill")
-            .arg("-0")
-            .arg(pid)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
 }
 
 async fn exoclaw_harness(

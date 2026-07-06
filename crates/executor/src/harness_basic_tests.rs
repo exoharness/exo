@@ -1301,6 +1301,267 @@ async fn conversation_model_override_changes_effective_model() {
     assert_eq!(requests[2].max_output_tokens, Some(512));
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn concurrent_sends_serialize_through_the_turn_queue() {
+    let tempdir = TempDir::new().expect("tempdir should exist");
+    let exoharness = Arc::new(
+        BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
+            .await
+            .expect("basic exoharness should initialize"),
+    ) as Arc<dyn ExoHarness>;
+    let model_response = |text: &str| ModelResponse {
+        provider_cost_usd: None,
+        response_id: Some(Uuid7::now()),
+        messages: vec![assistant_message(text)],
+        tool_calls: Vec::new(),
+        usage: None,
+        model: None,
+        ttft: None,
+        duration: None,
+    };
+    let harness = BasicHarness::new(
+        exoharness,
+        Arc::new(FakeModelClient::new(vec![
+            model_response("pong one"),
+            model_response("pong two"),
+        ])),
+        Arc::new(BasicToolRuntime),
+    );
+    register_test_models(harness.exoharness_handle().as_ref()).await;
+
+    let agent = harness
+        .create_agent(CreateAgentRequest {
+            slug: "demo".to_string(),
+            name: None,
+            harness: crate::AgentHarnessKind::Basic,
+            typescript: None,
+            enable_agent_tool_creation: true,
+            sandbox_image: None,
+            sandbox_provider: SandboxProvider::LocalProcess,
+            enable_networking: false,
+            model: "gpt-5.4".to_string(),
+            max_output_tokens: None,
+            max_tool_round_trips: Some(2),
+            braintrust: None,
+        })
+        .await
+        .expect("agent should be created");
+    let conversation = agent
+        .create_conversation(CreateConversationRequest::default())
+        .await
+        .expect("conversation should be created");
+
+    let (first, second) = tokio::join!(
+        conversation.send(SendRequest {
+            input: vec![user_message("ping one")],
+            session_id: None,
+        }),
+        conversation.send(SendRequest {
+            input: vec![user_message("ping two")],
+            session_id: None,
+        }),
+    );
+    let first = first.expect("first send should succeed");
+    let second = second.expect("second send should succeed");
+    assert_ne!(first.turn_id, second.turn_id);
+
+    // Turns must not interleave: each turn_started is followed by its own
+    // turn_ended before the next turn begins, and turns start in the order
+    // they were enqueued.
+    let events = conversation
+        .exoharness_handle()
+        .get_events(Some(EventQuery {
+            cursor: None,
+            direction: Some(EventQueryDirection::Asc),
+            limit: None,
+            session_id: None,
+            turn_id: None,
+            types: Some(vec![
+                EventKind::TURN_ENQUEUED,
+                EventKind::TURN_STARTED,
+                EventKind::TURN_ENDED,
+            ]),
+        }))
+        .await
+        .expect("turn events should load")
+        .events;
+    let mut enqueued = Vec::new();
+    let mut boundary_order = Vec::new();
+    for event in &events {
+        match &event.data {
+            EventData::TurnEnqueued { turn_id, .. } => enqueued.push(*turn_id),
+            EventData::TurnStarted { .. } => {
+                boundary_order.push(("started", event.turn_id.expect("turn id")));
+            }
+            EventData::TurnEnded => {
+                boundary_order.push(("ended", event.turn_id.expect("turn id")));
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(enqueued.len(), 2);
+    // Queue order is turn-id order (UUIDv7 = generation order); the
+    // turn_enqueued *events* of two racing producers may log in either order.
+    enqueued.sort();
+    let (first_turn, second_turn) = (enqueued[0], enqueued[1]);
+    assert_eq!(
+        boundary_order,
+        vec![
+            ("started", first_turn),
+            ("ended", first_turn),
+            ("started", second_turn),
+            ("ended", second_turn),
+        ]
+    );
+
+    // User/assistant messages alternate rather than interleaving as
+    // user/user/assistant/assistant.
+    let messages = conversation.messages().await.expect("messages should load");
+    assert_eq!(messages.len(), 4);
+    assert!(matches!(messages[0], Message::User { .. }));
+    assert!(matches!(messages[1], Message::Assistant { .. }));
+    assert!(matches!(messages[2], Message::User { .. }));
+    assert!(matches!(messages[3], Message::Assistant { .. }));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn scheduler_runs_due_tasks_through_the_turn_queue() {
+    use crate::scheduler_store::SchedulerStore;
+    use crate::scheduler_types::NewScheduledTask;
+    use crate::{SchedulerRunOptions, run_due_tasks};
+
+    let tempdir = TempDir::new().expect("tempdir should exist");
+    let exoharness = Arc::new(
+        BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness")))
+            .await
+            .expect("basic exoharness should initialize"),
+    ) as Arc<dyn ExoHarness>;
+    let harness: Arc<dyn Harness> = Arc::new(BasicHarness::new(
+        exoharness,
+        Arc::new(FakeModelClient::new(vec![ModelResponse {
+            provider_cost_usd: None,
+            response_id: Some(Uuid7::now()),
+            messages: vec![assistant_message("noted")],
+            tool_calls: Vec::new(),
+            usage: None,
+            model: None,
+            ttft: None,
+            duration: None,
+        }])),
+        Arc::new(BasicToolRuntime),
+    ));
+    register_test_models(harness.exoharness_handle().as_ref()).await;
+
+    let agent = harness
+        .create_agent(CreateAgentRequest {
+            slug: "demo".to_string(),
+            name: None,
+            harness: crate::AgentHarnessKind::Basic,
+            typescript: None,
+            enable_agent_tool_creation: false,
+            sandbox_image: None,
+            sandbox_provider: SandboxProvider::LocalProcess,
+            enable_networking: false,
+            model: "gpt-5.4".to_string(),
+            max_output_tokens: None,
+            max_tool_round_trips: Some(2),
+            braintrust: None,
+        })
+        .await
+        .expect("agent should be created");
+    let conversation = agent
+        .create_conversation(CreateConversationRequest::default())
+        .await
+        .expect("conversation should be created");
+
+    let store = SchedulerStore::new(tempdir.path().join("scheduled-tasks"));
+    let mut task = store
+        .create_task(NewScheduledTask {
+            agent_id: agent.record().id.to_string(),
+            conversation_id: conversation.record().id.to_string(),
+            name: "echo-check".to_string(),
+            schedule: "@every 1m".to_string(),
+            sandbox_mode: None,
+            setup_command: None,
+            command: vec!["echo".to_string(), "scheduled-output".to_string()],
+            report_prompt: "Summarize the output.".to_string(),
+            max_output_bytes: None,
+        })
+        .await
+        .expect("task should be created");
+    task.next_run_at_ms = 1;
+    store.put_task(&task).await.expect("task should be due");
+
+    // While the conversation lease is held (e.g. an interactive turn), the
+    // task is skipped and stays due — no scheduler-specific locks involved.
+    let coordinator = harness.turn_coordinator();
+    let conversation_id = conversation.record().id;
+    let held = coordinator
+        .claim_conversation(conversation_id)
+        .await
+        .expect("claim")
+        .expect("lease");
+    let runs = run_due_tasks(Arc::clone(&harness), &store, SchedulerRunOptions::default())
+        .await
+        .expect("run_due_tasks should succeed");
+    assert!(runs.is_empty(), "leased conversation should skip the task");
+    assert!(coordinator.release_idle(&held).await.expect("release"));
+
+    // Unleased: the task runs, and the report is a queued turn driven to
+    // completion through the coordinator.
+    let runs = run_due_tasks(Arc::clone(&harness), &store, SchedulerRunOptions::default())
+        .await
+        .expect("run_due_tasks should succeed");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].exit_code, Some(0));
+    assert_eq!(runs[0].error, None);
+
+    let messages = conversation.messages().await.expect("messages");
+    assert_eq!(messages.len(), 2);
+    let report = match &messages[0] {
+        Message::User {
+            content: UserContent::String(text),
+        } => text.clone(),
+        other => panic!("expected user report prompt, got {other:?}"),
+    };
+    assert!(report.contains("scheduled-output"));
+    assert!(report.contains("Summarize the output."));
+    assert!(matches!(messages[1], Message::Assistant { .. }));
+
+    // The report is durable coordinated intent: exactly one enqueued turn,
+    // and the lease is free afterwards.
+    let enqueued_events = conversation
+        .exoharness_handle()
+        .get_events(Some(EventQuery {
+            cursor: None,
+            direction: Some(EventQueryDirection::Asc),
+            limit: None,
+            session_id: None,
+            turn_id: None,
+            types: Some(vec![EventKind::TURN_ENQUEUED]),
+        }))
+        .await
+        .expect("events")
+        .events;
+    assert_eq!(enqueued_events.len(), 1);
+    assert!(
+        coordinator
+            .claim_conversation(conversation_id)
+            .await
+            .expect("claim")
+            .is_some(),
+        "scheduler should release the conversation lease"
+    );
+
+    // The occurrence advanced: nothing further is due.
+    let task = store.get_task(&task.id).await.expect("get").expect("task");
+    assert!(task.next_run_at_ms > 1);
+    let runs = run_due_tasks(Arc::clone(&harness), &store, SchedulerRunOptions::default())
+        .await
+        .expect("run_due_tasks should succeed");
+    assert!(runs.is_empty());
+}
+
 #[derive(Default)]
 struct FakeModelClient {
     responses: Mutex<VecDeque<ModelResponse>>,

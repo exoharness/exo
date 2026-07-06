@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_MAX_OUTPUT_BYTES: u64 = 200_000;
 pub const MAX_OUTPUT_BYTES: u64 = 2_000_000;
-pub const DEFAULT_TASK_LEASE_MS: u64 = 10 * 60 * 1_000;
 pub const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 10 * 60 * 1_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -32,7 +31,6 @@ pub struct ScheduledTaskRecord {
     pub last_run_at_ms: Option<u64>,
     pub latest_run_id: Option<String>,
     pub latest_result_artifact_id: Option<String>,
-    pub lease: Option<ScheduledTaskLease>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,13 +67,6 @@ pub struct ScheduledTaskRunRecord {
     pub truncated: bool,
     pub result_artifact_id: Option<String>,
     pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ScheduledTaskLease {
-    pub id: String,
-    pub leased_at_ms: u64,
-    pub expires_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,26 +111,14 @@ impl ScheduledTaskRecord {
             last_run_at_ms: None,
             latest_run_id: None,
             latest_result_artifact_id: None,
-            lease: None,
         })
     }
 
+    /// Whether the task should run. Concurrency is not this record's
+    /// concern: runners serialize through the conversation's turn
+    /// coordinator lease, and occurrence dedupe collapses racing reports.
     pub fn is_due(&self, now_ms: u64) -> bool {
-        self.enabled
-            && self.next_run_at_ms <= now_ms
-            && self
-                .lease
-                .as_ref()
-                .is_none_or(|lease| lease.expires_at_ms <= now_ms)
-    }
-
-    pub fn claim(&mut self, now_ms: u64, lease_ms: u64) {
-        self.lease = Some(ScheduledTaskLease {
-            id: Uuid7::now().to_string(),
-            leased_at_ms: now_ms,
-            expires_at_ms: now_ms.saturating_add(lease_ms),
-        });
-        self.updated_at_ms = now_ms;
+        self.enabled && self.next_run_at_ms <= now_ms
     }
 
     pub fn mark_completed(
@@ -154,7 +133,6 @@ impl ScheduledTaskRecord {
         self.latest_run_id = Some(run.id.clone());
         self.latest_result_artifact_id = result_artifact_id;
         self.next_run_at_ms = schedule.next_after_ms(now_ms);
-        self.lease = None;
         Ok(())
     }
 }

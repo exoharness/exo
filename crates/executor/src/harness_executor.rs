@@ -2,7 +2,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use exoharness::{AgentHandle, BeginTurnRequest, ConversationHandle, Result, TurnHandle};
+use exoharness::{
+    AgentHandle, ConversationHandle, ConversationLease, PendingTurn, Result, TurnCoordinator,
+    TurnHandle,
+};
 use tokio::sync::mpsc;
 
 use crate::braintrust::{BraintrustRuntimeConfig, BraintrustTracer};
@@ -13,8 +16,8 @@ use crate::harness_config::{
 use crate::harness_facade::HarnessRuntime;
 use crate::harness_helpers::get_conversation_model_override;
 use crate::shared::{
-    AGENT_CONFIG_CACHE_NAME, CONVERSATION_CONFIG_CACHE_NAME, cache_agent_config,
-    cache_conversation_config, execute_prepared_turn, get_or_load_cached,
+    AGENT_CONFIG_CACHE_NAME, CONVERSATION_CONFIG_CACHE_NAME, TurnCompletion, cache_agent_config,
+    cache_conversation_config, execute_prepared_turn, get_or_load_cached, spawn_lease_renewal,
     spawn_prepared_turn_stream,
 };
 use crate::{
@@ -148,11 +151,13 @@ where
         Ok(())
     }
 
-    async fn send(
+    async fn execute_pending_turn(
         &self,
         agent: Arc<dyn AgentHandle>,
         conversation: Arc<dyn ConversationHandle>,
-        request: SendRequest,
+        coordinator: Arc<dyn TurnCoordinator>,
+        lease: ConversationLease,
+        pending: PendingTurn,
     ) -> Result<SendResult> {
         let (mut agent_config, conversation_config, model_override) = tokio::try_join!(
             self.get_agent_config(agent.as_ref()),
@@ -168,20 +173,21 @@ where
                 &conversation_config,
             )
             .await?;
+        let request = SendRequest {
+            input: pending.input.clone(),
+            session_id: pending.session_id,
+        };
         let prepared = self.executor.prepare_request(&request)?;
-        let turn = conversation
-            .begin_turn(BeginTurnRequest {
-                session_id: request.session_id,
-                input: request.input,
-            })
-            .await?;
+        let record = coordinator.begin_pending_turn(&lease, pending.id).await?;
+        let turn = conversation.turn_handle(record).await?;
+        let renewal = spawn_lease_renewal(Arc::clone(&coordinator), lease.clone());
         let trace_agent_config = agent_config.clone();
         let executor = self.executor.clone();
         let run_turn = Arc::clone(&turn);
         let run_conversation = Arc::clone(&conversation);
         let run_agent = Arc::clone(&agent);
 
-        execute_prepared_turn(
+        let result = execute_prepared_turn(
             self.tracer.as_ref(),
             agent.as_ref(),
             conversation.as_ref(),
@@ -204,14 +210,18 @@ where
                 })
             },
         )
-        .await
+        .await;
+        renewal.abort();
+        result
     }
 
-    async fn send_stream(
+    async fn execute_pending_turn_stream(
         &self,
         agent: Arc<dyn AgentHandle>,
         conversation: Arc<dyn ConversationHandle>,
-        request: SendRequest,
+        coordinator: Arc<dyn TurnCoordinator>,
+        lease: ConversationLease,
+        pending: PendingTurn,
     ) -> Result<ExecutionStreamHandle> {
         let (mut agent_config, conversation_config, model_override) = tokio::try_join!(
             self.get_agent_config(agent.as_ref()),
@@ -227,13 +237,20 @@ where
                 &conversation_config,
             )
             .await?;
+        let request = SendRequest {
+            input: pending.input.clone(),
+            session_id: pending.session_id,
+        };
         let prepared = self.executor.prepare_request(&request)?;
-        let turn = conversation
-            .begin_turn(BeginTurnRequest {
-                session_id: request.session_id,
-                input: request.input,
-            })
-            .await?;
+        let record = coordinator.begin_pending_turn(&lease, pending.id).await?;
+        let turn = conversation.turn_handle(record).await?;
+        let renewal = spawn_lease_renewal(Arc::clone(&coordinator), lease.clone());
+        let completion = TurnCompletion {
+            coordinator,
+            lease,
+            turn_id: pending.id,
+            renewal,
+        };
         let trace_agent_config = agent_config.clone();
         let executor = self.executor.clone();
         let run_turn = Arc::clone(&turn);
@@ -246,6 +263,7 @@ where
             conversation,
             turn,
             trace_agent_config,
+            Some(completion),
             move |turn_trace, event_tx| {
                 Box::pin(async move {
                     executor

@@ -1,19 +1,26 @@
 use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::{Result, anyhow};
-use exoharness::{RunInSandboxRequest, SandboxProcess, WriteArtifactRequest};
+use anyhow::{Context, Result, anyhow};
+use exoharness::{EnqueueTurnRequest, RunInSandboxRequest, SandboxProcess, WriteArtifactRequest};
 use futures::io::{AsyncRead, AsyncReadExt};
+use lingua::Message;
+use lingua::universal::UserContent;
 use serde::Serialize;
 
 use crate::agent_sandbox::ensure_agent_sandbox;
 use crate::conversation_sandbox::{create_conversation_sandbox, ensure_conversation_sandbox};
-use crate::conversation_wakeup::send_conversation_wakeup;
 use crate::scheduler_store::SchedulerStore;
 use crate::scheduler_types::{
-    DEFAULT_COMMAND_TIMEOUT_MS, DEFAULT_TASK_LEASE_MS, ScheduledTaskRecord, ScheduledTaskRunRecord,
+    DEFAULT_COMMAND_TIMEOUT_MS, ScheduledTaskRecord, ScheduledTaskRunRecord,
     ScheduledTaskSandboxMode, now_ms,
 };
+use crate::shared::spawn_lease_renewal;
 use crate::{Harness, Uuid7};
+
+/// How often a scheduler waits between checks while its report turn is being
+/// driven by another runner or is queued behind other turns.
+const REPORT_DRIVE_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy)]
 pub struct SchedulerRunOptions {
@@ -48,27 +55,66 @@ pub async fn run_due_tasks(
     store: &SchedulerStore,
     options: SchedulerRunOptions,
 ) -> Result<Vec<ScheduledTaskRunRecord>> {
-    let due = store
-        .claim_due_tasks(now_ms(), options.limit, DEFAULT_TASK_LEASE_MS)
-        .await?;
-    futures::future::try_join_all(
+    let mut due = store.due_tasks(now_ms()).await?;
+    due.sort_by_key(|task| task.next_run_at_ms);
+    due.truncate(options.limit);
+    let runs = futures::future::try_join_all(
         due.into_iter()
             .map(|task| run_task(Arc::clone(&harness), store, task)),
     )
-    .await
+    .await?;
+    Ok(runs.into_iter().flatten().collect())
 }
 
+/// Run one due task. All coordination goes through the harness's turn
+/// coordinator:
+///
+/// - The conversation lease is the run mutex. If the conversation is leased
+///   (an interactive turn, or another scheduler runner), the task is skipped
+///   this tick and stays due — no scheduler-specific locks.
+/// - The report is a queued turn with an occurrence-scoped dedupe key, so a
+///   racing runner that re-fires the same occurrence attaches to the same
+///   pending turn instead of duplicating the report.
+/// - Occurrence bookkeeping advances only after the report turn completes:
+///   a crash anywhere re-fires the occurrence (at-least-once), and the
+///   dedupe key collapses the report while the earlier one is still pending.
+///
+/// Returns `None` when the task was skipped.
 pub async fn run_task(
     harness: Arc<dyn Harness>,
     store: &SchedulerStore,
-    mut task: ScheduledTaskRecord,
-) -> Result<ScheduledTaskRunRecord> {
+    task: ScheduledTaskRecord,
+) -> Result<Option<ScheduledTaskRunRecord>> {
+    let coordinator = harness.turn_coordinator();
+    let conversation_id = task
+        .conversation_id
+        .parse::<exoharness::ConversationId>()
+        .with_context(|| {
+            format!(
+                "scheduled task conversation id is not valid: {}",
+                task.conversation_id
+            )
+        })?;
+    let Some(lease) = coordinator.claim_conversation(conversation_id).await? else {
+        return Ok(None);
+    };
+    // Re-read under the lease: another runner may have completed this
+    // occurrence between the due scan and our claim.
+    let current = store.get_task(&task.id).await?;
+    let Some(mut task) = current.filter(|task| task.is_due(now_ms())) else {
+        release_lease(coordinator.as_ref(), &lease).await;
+        return Ok(None);
+    };
+    let occurrence_ms = task.next_run_at_ms;
+
     let started_at_ms = now_ms();
     let run_id = Uuid7::now().to_string();
+    let renewal = spawn_lease_renewal(Arc::clone(&coordinator), lease.clone());
     let run_result = run_task_inner(Arc::clone(&harness), &mut task, &run_id).await;
+    renewal.abort();
     let finished_at_ms = now_ms();
 
-    let (mut run, result_artifact_id) = match run_result {
+    let (mut run, result_artifact_id, report_prompt) = match run_result {
         Ok(output) => {
             let stdout_bytes = output.stdout.len() as u64;
             let stderr_bytes = output.stderr.len() as u64;
@@ -86,6 +132,7 @@ pub async fn run_task(
                     error: output.error.clone(),
                 },
                 output.result_artifact_id,
+                Some(output.report_prompt),
             )
         }
         Err(error) => (
@@ -102,8 +149,25 @@ pub async fn run_task(
                 error: Some(error.to_string()),
             },
             None,
+            None,
         ),
     };
+
+    // The command is done: the lease's remaining job (serializing the report)
+    // belongs to the drive loop below, which claims it per head turn.
+    release_lease(coordinator.as_ref(), &lease).await;
+
+    if let Some(prompt) = report_prompt {
+        drive_report_turn(
+            harness.as_ref(),
+            coordinator.as_ref(),
+            &task,
+            conversation_id,
+            occurrence_ms,
+            prompt,
+        )
+        .await?;
+    }
 
     task.mark_completed(&run, result_artifact_id, finished_at_ms)?;
     if run
@@ -117,7 +181,85 @@ pub async fn run_task(
     run.task_id = task.id.clone();
     store.put_run(&run).await?;
     store.put_task(&task).await?;
-    Ok(run)
+    Ok(Some(run))
+}
+
+async fn release_lease(
+    coordinator: &dyn exoharness::TurnCoordinator,
+    lease: &exoharness::ConversationLease,
+) {
+    if let Err(error) = coordinator.release_idle(lease).await {
+        tracing::error!(
+            %error,
+            conversation_id = %lease.conversation_id,
+            "failed to release conversation lease"
+        );
+    }
+}
+
+/// Enqueue the report as a durable turn — deduplicated per occurrence, so a
+/// racing runner attaches to the same pending turn — and drive the queue
+/// until it completes. Foreign turns drained along the way fail softly.
+async fn drive_report_turn(
+    harness: &dyn Harness,
+    coordinator: &dyn exoharness::TurnCoordinator,
+    task: &ScheduledTaskRecord,
+    conversation_id: exoharness::ConversationId,
+    occurrence_ms: u64,
+    prompt: String,
+) -> Result<()> {
+    let enqueued = coordinator
+        .enqueue_turn(
+            conversation_id,
+            EnqueueTurnRequest {
+                input: vec![Message::User {
+                    content: UserContent::String(prompt),
+                }],
+                session_id: None,
+                not_before: None,
+                dedupe_key: Some(format!("scheduled-task:{}:{occurrence_ms}", task.id)),
+            },
+        )
+        .await?;
+    let conversation = harness
+        .get_agent(&task.agent_id)
+        .await?
+        .ok_or_else(|| anyhow!("scheduled task agent does not exist: {}", task.agent_id))?
+        .get_conversation(&task.conversation_id)
+        .await?
+        .ok_or_else(|| {
+            anyhow!(
+                "scheduled task conversation does not exist: {}",
+                task.conversation_id
+            )
+        })?;
+    let result = loop {
+        match conversation.run_next_pending_turn().await {
+            Ok(Some(result)) if result.turn_id == enqueued.turn.id => break result,
+            // A foreign turn was drained; keep going.
+            Ok(Some(_)) => continue,
+            // Nothing ran: the lease is held elsewhere, the queue drained
+            // without our turn, or another driver already executed it.
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "queued turn failed while driving a scheduled task report"
+                );
+            }
+        }
+        if let Some(result) = crate::harness_facade::finished_turn_result(
+            conversation.exoharness_handle().as_ref(),
+            enqueued.turn.id,
+        )
+        .await?
+        {
+            break result;
+        }
+        tokio::time::sleep(REPORT_DRIVE_INTERVAL).await;
+    };
+    conversation.close_session(result.session_id).await?;
+    Ok(())
 }
 
 fn is_missing_task_owner_error(error: &str) -> bool {
@@ -132,6 +274,7 @@ struct TaskOutput {
     truncated: bool,
     result_artifact_id: Option<String>,
     error: Option<String>,
+    report_prompt: String,
 }
 
 async fn run_task_inner(
@@ -256,7 +399,7 @@ async fn run_task_inner(
         })
         .await?;
     let artifact_id = artifact_version.artifact_id.to_string();
-    let prompt = if let Some(error) = &error {
+    let report_prompt = if let Some(error) = &error {
         error_wakeup_prompt(task, run_id, error, &artifact_version)
     } else {
         wakeup_prompt(
@@ -269,7 +412,6 @@ async fn run_task_inner(
             &stderr,
         )
     };
-    send_conversation_wakeup(conversation.as_ref(), prompt).await?;
 
     Ok(TaskOutput {
         exit_code,
@@ -278,6 +420,7 @@ async fn run_task_inner(
         truncated,
         result_artifact_id: Some(artifact_id),
         error,
+        report_prompt,
     })
 }
 

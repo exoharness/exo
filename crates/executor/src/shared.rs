@@ -6,7 +6,8 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::Error;
 use exoharness::{
-    AgentHandle, AgentId, ConversationHandle, ConversationId, EventId, Result, TurnHandle,
+    AgentHandle, AgentId, ConversationHandle, ConversationId, ConversationLease, EventId, Result,
+    TurnCoordinator, TurnHandle, TurnId,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -15,6 +16,63 @@ use crate::execution_tracing::{ExecutionTracer, TurnExecutionTrace};
 use crate::{AgentConfig, ExecutionStreamEvent, ExecutionStreamHandle, SendResult};
 
 pub(crate) type TurnFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+
+/// Coordinator bookkeeping for a queued turn executed by a spawned stream
+/// task: stop renewing, pop the head, and free the lease once the turn
+/// finishes.
+pub(crate) struct TurnCompletion {
+    pub(crate) coordinator: Arc<dyn TurnCoordinator>,
+    pub(crate) lease: ConversationLease,
+    pub(crate) turn_id: TurnId,
+    pub(crate) renewal: tokio::task::JoinHandle<()>,
+}
+
+impl TurnCompletion {
+    pub(crate) async fn finish(self) {
+        self.renewal.abort();
+        if let Err(error) = self
+            .coordinator
+            .complete_turn(&self.lease, self.turn_id)
+            .await
+        {
+            tracing::error!(%error, turn_id = %self.turn_id, "failed to complete queued turn");
+        }
+        if let Err(error) = self.coordinator.release_idle(&self.lease).await {
+            tracing::error!(
+                %error,
+                conversation_id = %self.lease.conversation_id,
+                "failed to release conversation lease"
+            );
+        }
+    }
+}
+
+/// Keeps the conversation lease alive while a turn executes. Aborted by
+/// `TurnCompletion::finish()` (or the caller) once the turn is done.
+pub(crate) fn spawn_lease_renewal(
+    coordinator: Arc<dyn TurnCoordinator>,
+    lease: ConversationLease,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let interval = coordinator.lease_ttl() / 3;
+        loop {
+            tokio::time::sleep(interval).await;
+            match coordinator.renew(&lease, true).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::error!(
+                        conversation_id = %lease.conversation_id,
+                        "lost conversation lease while executing turn"
+                    );
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to renew conversation lease");
+                }
+            }
+        }
+    })
+}
 
 pub(crate) fn cache_insert<K, V>(cache: &RwLock<HashMap<K, V>>, key: K, value: V, name: &str)
 where
@@ -88,6 +146,7 @@ pub(crate) fn spawn_prepared_turn_stream<Run>(
     conversation: Arc<dyn ConversationHandle>,
     turn: Arc<dyn TurnHandle>,
     agent_config: AgentConfig,
+    completion: Option<TurnCompletion>,
     run: Run,
 ) -> ExecutionStreamHandle
 where
@@ -131,6 +190,10 @@ where
                 }
                 Err(error) => turn_trace.finish_error(error).await,
             }
+        }
+
+        if let Some(completion) = completion {
+            completion.finish().await;
         }
 
         if let Err(error) = &send_result {
