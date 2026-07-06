@@ -1,5 +1,8 @@
+import { lookup as lookupWithCallback } from "node:dns";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
+
+import { Agent, fetch as undiciFetch } from "undici";
 
 import type {
   HarnessToolRegistry,
@@ -16,7 +19,8 @@ import type {
 // web_search picks a provider per call: Brave Search API when a key is
 // configured, otherwise the key-free DuckDuckGo HTML endpoint. The Brave key
 // is read from the exo secret store (`exo secret set brave-api-key ...`),
-// which takes effect on the next call without a restart, with the
+// which takes effect within a minute without a restart (the resolved key is
+// cached for 60s to avoid secret-store round trips per search), with the
 // BRAVE_API_KEY env var (.env) as a startup-time fallback. Set
 // EXO_WEB_SEARCH_PROVIDER=brave|duckduckgo to force a provider.
 
@@ -73,20 +77,49 @@ function cacheSet(key: string, value: JsonObject): void {
   });
 }
 
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  nbsp: " ",
+  ndash: "–",
+  mdash: "—",
+  lsquo: "‘",
+  rsquo: "’",
+  ldquo: "“",
+  rdquo: "”",
+  hellip: "…",
+  middot: "·",
+  bull: "•",
+  laquo: "«",
+  raquo: "»",
+  copy: "©",
+  reg: "®",
+  trade: "™",
+  deg: "°",
+  times: "×",
+};
+
+function codePointToString(codePoint: number, fallback: string): string {
+  return codePoint > 0 && codePoint <= 0x10ffff
+    ? String.fromCodePoint(codePoint)
+    : fallback;
+}
+
 export function decodeEntities(text: string): string {
   return text
-    .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) =>
-      String.fromCodePoint(Number.parseInt(hex, 16)),
+    .replace(/&#x([0-9a-f]+);/gi, (match, hex: string) =>
+      codePointToString(Number.parseInt(hex, 16), match),
     )
-    .replace(/&#(\d+);/g, (_, dec: string) =>
-      String.fromCodePoint(Number.parseInt(dec, 10)),
+    .replace(/&#(\d+);/g, (match, dec: string) =>
+      codePointToString(Number.parseInt(dec, 10), match),
     )
-    .replace(/&nbsp;/g, " ")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&amp;/g, "&");
+    .replace(
+      /&([a-z]+);/gi,
+      (match, name: string) => NAMED_ENTITIES[name.toLowerCase()] ?? match,
+    );
 }
 
 function stripTags(html: string): string {
@@ -158,6 +191,42 @@ export function isPrivateIp(ip: string): boolean {
   return true; // not an IP: fail closed
 }
 
+// Re-validates every resolved address at socket-connect time, so a DNS
+// rebinding flip between the pre-flight lookup and the actual connection
+// still gets blocked. Used as the dispatcher for guest-controlled fetches.
+const guardedDispatcher = new Agent({
+  connect: {
+    lookup(hostname, options, callback) {
+      lookupWithCallback(
+        hostname,
+        { ...options, all: true },
+        (error, addresses) => {
+          if (error !== null) {
+            callback(error, "", 0);
+            return;
+          }
+          const blocked = addresses.find(({ address }) =>
+            isPrivateIp(address),
+          );
+          if (blocked !== undefined || addresses.length === 0) {
+            callback(
+              new Error(`blocked host resolving to private address: ${hostname}`),
+              "",
+              0,
+            );
+            return;
+          }
+          if (options.all === true) {
+            callback(null, addresses);
+          } else {
+            callback(null, addresses[0].address, addresses[0].family);
+          }
+        },
+      );
+    },
+  },
+});
+
 async function assertPublicHttpUrl(url: URL): Promise<void> {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error(`only http(s) URLs are allowed: ${url.protocol}`);
@@ -191,7 +260,20 @@ async function assertPublicHttpUrl(url: URL): Promise<void> {
 
 // --- web_search providers ----------------------------------------------------
 
+const BRAVE_KEY_CACHE_TTL_MS = 60 * 1000;
+
+let braveKeyCache: { expiresAtMs: number; key: string | null } | null = null;
+
 async function resolveBraveKey(context: TurnContext): Promise<string | null> {
+  if (braveKeyCache !== null && braveKeyCache.expiresAtMs > Date.now()) {
+    return braveKeyCache.key;
+  }
+  const key = await lookUpBraveKey(context);
+  braveKeyCache = { expiresAtMs: Date.now() + BRAVE_KEY_CACHE_TTL_MS, key };
+  return key;
+}
+
+async function lookUpBraveKey(context: TurnContext): Promise<string | null> {
   try {
     // getSecret takes the secret's UUID, so resolve the name via listSecrets.
     const secrets = await context.exoharness.listSecrets();
@@ -254,8 +336,10 @@ export function parseDuckDuckGoHtml(
   limit: number,
 ): WebSearchResult[] {
   const anchors = html.matchAll(/<a\s+([^>]*)>([\s\S]*?)<\/a>/gi);
-  const titles: { url: string; title: string }[] = [];
-  const snippets: string[] = [];
+  // Snippet anchors follow their title anchor in DuckDuckGo's markup, so
+  // attach each snippet to the most recent title instead of pairing the two
+  // lists by index (which skews when a result has no snippet).
+  const entries: WebSearchResult[] = [];
   for (const match of anchors) {
     const attrs = match[1];
     const cls = /class="([^"]*)"/.exec(attrs)?.[1] ?? "";
@@ -263,20 +347,27 @@ export function parseDuckDuckGoHtml(
       const href = /href="([^"]*)"/.exec(attrs)?.[1] ?? "";
       const url = normalizeDuckDuckGoUrl(decodeEntities(href));
       if (url !== null) {
-        titles.push({ url, title: decodeEntities(stripTags(match[2])) });
+        entries.push({
+          url,
+          title: decodeEntities(stripTags(match[2])),
+          snippet: "",
+        });
       }
     } else if (cls.includes("result__snippet")) {
-      snippets.push(decodeEntities(stripTags(match[2])));
+      const last = entries.at(-1);
+      if (last !== undefined && last.snippet === "") {
+        last.snippet = decodeEntities(stripTags(match[2]));
+      }
     }
   }
   const seen = new Set<string>();
   const results: WebSearchResult[] = [];
-  for (const [index, { url, title }] of titles.entries()) {
-    if (seen.has(url)) {
+  for (const entry of entries) {
+    if (seen.has(entry.url)) {
       continue;
     }
-    seen.add(url);
-    results.push({ title, url, snippet: snippets[index] ?? "" });
+    seen.add(entry.url);
+    results.push(entry);
     if (results.length >= limit) {
       break;
     }
@@ -393,8 +484,10 @@ export function extractReadableText(html: string): {
   return { title, text };
 }
 
+type GuardedResponse = Awaited<ReturnType<typeof undiciFetch>>;
+
 async function readBodyWithLimit(
-  response: Response,
+  response: GuardedResponse,
   maxBytes: number,
 ): Promise<string> {
   if (response.body === null) {
@@ -413,19 +506,20 @@ async function readBodyWithLimit(
   }
   await reader.cancel().catch(() => {});
   const decoder = new TextDecoder("utf-8", { fatal: false });
-  return chunks
-    .map((chunk) => decoder.decode(chunk, { stream: true }))
-    .join("");
+  const parts = chunks.map((chunk) => decoder.decode(chunk, { stream: true }));
+  parts.push(decoder.decode());
+  return parts.join("");
 }
 
 async function fetchWithGuard(rawUrl: string): Promise<{
   finalUrl: string;
-  response: Response;
+  response: GuardedResponse;
 }> {
   let current = new URL(rawUrl);
   for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
     await assertPublicHttpUrl(current);
-    const response = await fetch(current, {
+    const response = await undiciFetch(current, {
+      dispatcher: guardedDispatcher,
       redirect: "manual",
       headers: {
         "User-Agent": BROWSER_USER_AGENT,
@@ -571,7 +665,7 @@ function webFetchTool(): ToolInstance {
           ),
         );
         let finalUrl: string;
-        let response: Response;
+        let response: GuardedResponse;
         try {
           ({ finalUrl, response } = await fetchWithGuard(parsed.toString()));
         } catch (error) {

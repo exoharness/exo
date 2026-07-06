@@ -117,6 +117,22 @@ describe("parseDuckDuckGoHtml", () => {
       [],
     );
   });
+
+  it("does not skew pairing when a result has no snippet", () => {
+    const html = `
+      <a class="result__a" href="https://example.com/no-snippet">No Snippet</a>
+      <a class="result__a" href="https://example.org/with">With Snippet</a>
+      <a class="result__snippet" href="https://example.org/with">Only snippet</a>
+    `;
+    expect(parseDuckDuckGoHtml(html, 10)).toEqual([
+      { title: "No Snippet", url: "https://example.com/no-snippet", snippet: "" },
+      {
+        title: "With Snippet",
+        url: "https://example.org/with",
+        snippet: "Only snippet",
+      },
+    ]);
+  });
 });
 
 describe("extractReadableText", () => {
@@ -149,6 +165,18 @@ describe("decodeEntities", () => {
   it("decodes named and numeric entities", () => {
     expect(decodeEntities("a &amp; b &lt;c&gt; &#39;d&#39; &#x41;")).toBe(
       "a & b <c> 'd' A",
+    );
+  });
+
+  it("decodes common typographic named entities", () => {
+    expect(
+      decodeEntities("June 30 &middot; a&mdash;b &rsquo;x&rsquo; &hellip;"),
+    ).toBe("June 30 · a—b ’x’ …");
+  });
+
+  it("leaves unknown entities and invalid code points intact", () => {
+    expect(decodeEntities("&bogus; &#x110000; &#0;")).toBe(
+      "&bogus; &#x110000; &#0;",
     );
   });
 });
