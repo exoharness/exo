@@ -38,3 +38,4 @@ libc = "0.2"
 [dev-dependencies]
 futures.workspace = true
 tempfile = "3.23.0"
+tokio = { workspace = true, features = ["test-util"] }

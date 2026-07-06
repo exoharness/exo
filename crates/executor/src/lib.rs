@@ -26,6 +26,7 @@ mod local_sandbox;
 mod rlm;
 #[cfg(test)]
 mod rlm_tests;
+mod runner_pool;
 mod scheduler_runtime;
 mod scheduler_store;
 mod scheduler_types;
@@ -33,6 +34,8 @@ mod shared;
 #[cfg(test)]
 mod test_support;
 mod typescript;
+#[cfg(test)]
+mod typescript_e2e_tests;
 
 pub use adapter::AdapterStore;
 pub use adapter::{
