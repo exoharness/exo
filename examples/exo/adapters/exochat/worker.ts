@@ -37,6 +37,9 @@ const userUrl = sessionUrl("user", session.channelId, session.secret);
 const agentUrl = sessionUrl("agent", session.channelId, session.secret);
 let seq = 0;
 let socket: WebSocket | null = null;
+// Declared before the top-level connect() call below runs.
+let reconnectDelayMs = 1000;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
 process.stderr.write(
   `\n[exochat-adapter] Open this ExoChat URL on your phone or browser:\n${userUrl}\n\n`,
@@ -104,9 +107,6 @@ for await (const line of input) {
     }
   }
 }
-
-let reconnectDelayMs = 1000;
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
 function scheduleReconnect(): void {
   if (reconnectTimer) {
