@@ -16,10 +16,7 @@ const GUARDIAN_SCRIPT = new URL(
 ).pathname;
 const ROOT_DIR = new URL("../..", import.meta.url).pathname;
 const STATE_DIR = join(ROOT_DIR, ".exo");
-const DEFERRED_LOG_PATH = join(
-  STATE_DIR,
-  "exo-service-guardian-actions.log",
-);
+const DEFERRED_LOG_PATH = join(STATE_DIR, "exo-service-guardian-actions.log");
 const MAX_OUTPUT_CHARS = 20_000;
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFERRED_RESTART_DELAY_SECONDS = 2;

@@ -1208,9 +1208,7 @@ async fn main() -> Result<()> {
                     AgentHarnessKind::TypeScript | AgentHarnessKind::Exo
                 ) && config.typescript.is_none()
                 {
-                    bail!(
-                        "TypeScript and Exo agents require a module path; pass --module <path>"
-                    );
+                    bail!("TypeScript and Exo agents require a module path; pass --module <path>");
                 }
                 agent.put_config(config).await?;
                 println!("updated agent {}", agent.record().slug);

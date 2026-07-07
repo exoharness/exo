@@ -60,7 +60,7 @@ Exo's identity is its durable state. Rollback, cloning, and migration all depend
 | Agent artifacts (sandbox registry, configs) | `.exo/exoharness`         | yes                        | yes                            | no         |
 | Adapter + scheduler records                 | `.exo`                    | yes                        | yes                            | no         |
 | Secrets                                     | Keychain / secret backend | yes                        | yes                            | no         |
-| Local profile memory                        | `.exo/exo-profile.md` | yes                        | yes                            | no         |
+| Local profile memory                        | `.exo/exo-profile.md`     | yes                        | yes                            | no         |
 | Sandbox filesystem                          | sandbox backend           | **no** (that is the point) | yes (warm sandbox)             | no         |
 | Worker connections                          | adapter worker processes  | yes                        | **no** (reconnect after drain) | no         |
 

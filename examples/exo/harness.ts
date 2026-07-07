@@ -20,6 +20,7 @@ import { registerGuardianTools } from "./guardian-tools";
 import { registerIntrospectionTools } from "./introspection-tools";
 import { memoryInstruction, registerMemoryTools } from "./memory-tools";
 import { registerTodoTools, todoInstruction } from "./todo-tools";
+import { registerWebTools } from "./web-tools";
 import {
   basicHarnessInstructions,
   defaultBuiltInToolNames,
@@ -60,6 +61,7 @@ async function registerExoTools(
   registerMemoryTools(tools);
   registerTodoTools(tools);
   registerSkillTools(tools);
+  registerWebTools(tools);
   for (const modulePath of context.agentConfig.typescript?.toolModulePaths ??
     []) {
     await registerLibraryToolModulePath(tools, context, modulePath);
@@ -120,7 +122,10 @@ When the user shares a durable preference or fact about themselves ("remember th
 For multi-step work, track your plan with the todowrite tool: rewrite the full list each call, keep one item in_progress, and mark items completed only after verifying them. The current list is shown back to you each turn.
 
 ## Skills
-You also support durable skills in the standard agent-skills format (SKILL.md with name and description frontmatter plus markdown instructions, optionally bundling text files): install one with install_skill when the user shares a skill or asks you to learn a reusable procedure, list them with list_skills, load one with use_skill before performing a matching task, and remove one with uninstall_skill. Installed skill names and descriptions are shown to you each turn. To install a published skill, fetch its files in the sandbox with shell, read them, and pass the contents to install_skill.`,
+You also support durable skills in the standard agent-skills format (SKILL.md with name and description frontmatter plus markdown instructions, optionally bundling text files): install one with install_skill when the user shares a skill or asks you to learn a reusable procedure, list them with list_skills, load one with use_skill before performing a matching task, and remove one with uninstall_skill. Installed skill names and descriptions are shown to you each turn. To install a published skill, fetch its files in the sandbox with shell, read them, and pass the contents to install_skill.
+
+## Web access
+Use web_search to find current information on the web and web_fetch to read a specific page as text; these run on the host, so prefer them over sandbox curl for quick lookups.`,
     },
     {
       role: "developer",
@@ -154,8 +159,7 @@ You also support durable skills in the standard agent-skills format (SKILL.md wi
 }
 
 function readLocalPrompt(): string | null {
-  const path =
-    process.env.EXO_LOCAL_PROMPT_FILE ?? DEFAULT_LOCAL_PROMPT_PATH;
+  const path = process.env.EXO_LOCAL_PROMPT_FILE ?? DEFAULT_LOCAL_PROMPT_PATH;
   if (!existsSync(path)) {
     return null;
   }

@@ -198,13 +198,8 @@ async fn exo_harness(
         sandbox_backends: vec![sandbox_backend],
     };
     Ok(Arc::new(
-        TypeScriptHarness::<ExoToolRuntime>::exo_from_root(
-            root,
-            exo_config,
-            runtime_config,
-            env,
-        )
-        .await?,
+        TypeScriptHarness::<ExoToolRuntime>::exo_from_root(root, exo_config, runtime_config, env)
+            .await?,
     ))
 }
 

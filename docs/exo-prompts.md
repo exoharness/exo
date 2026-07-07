@@ -27,18 +27,18 @@ prompt materialization.
 
 ## Quick Change Guide
 
-| Goal                                           | Best place to change                                                                                |
-| ---------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Goal                                       | Best place to change                                                                            |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------- |
 | Change your local Exo name/persona         | `.exo/exo-profile.md`                                                                           |
 | Change committed Exo identity for everyone | `examples/exo/prompts/me.md`                                                                    |
 | Change Exo operating policy                | `examples/exo/harness.ts`                                                                       |
-| Change what adapter setup creates              | `examples/exo/adapters/<adapter>/setup-prompt.md`                                               |
-| Change adapter-originated wakeup wording       | `crates/executor/src/adapter/runtime.rs`                                                            |
-| Change scheduled-task report wording           | `crates/executor/src/scheduler_runtime.rs`                                                          |
-| Change TypeScript prompt assembly              | `examples/typescript/turn-loop.ts` and `typescript/harness/index.ts`                                |
-| Change Rust basic harness prompt assembly      | `crates/executor/src/basic.rs`                                                                      |
-| Change RLM system/root prompts                 | `crates/executor/src/rlm.rs`                                                                        |
-| Change tool-use guidance                       | tool definitions in `typescript/harness/*`, `examples/exo/*-tools.ts`, or Rust tool definitions |
+| Change what adapter setup creates          | `examples/exo/adapters/<adapter>/setup-prompt.md`                                               |
+| Change adapter-originated wakeup wording   | `crates/executor/src/adapter/runtime.rs`                                                        |
+| Change scheduled-task report wording       | `crates/executor/src/scheduler_runtime.rs`                                                      |
+| Change TypeScript prompt assembly          | `examples/typescript/turn-loop.ts` and `typescript/harness/index.ts`                            |
+| Change Rust basic harness prompt assembly  | `crates/executor/src/basic.rs`                                                                  |
+| Change RLM system/root prompts             | `crates/executor/src/rlm.rs`                                                                    |
+| Change tool-use guidance                   | tool definitions in `typescript/harness/*`, `examples/exo/*-tools.ts`, or Rust tool definitions |
 
 ## Exoharness
 
