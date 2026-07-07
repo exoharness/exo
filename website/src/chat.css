@@ -363,18 +363,22 @@ h1 {
 
 .composer-surface {
   display: grid;
-  gap: 14px;
+  gap: 8px;
   width: min(100%, 920px);
   margin: 0 auto;
   border: 1px solid var(--border);
-  border-radius: 28px;
+  border-radius: 22px;
   background: var(--muted);
   box-shadow: none;
-  padding: 18px;
+  padding: 10px 14px;
 }
 
 .composer-input {
-  min-height: 54px;
+  /* One line by default; grows with content (field-sizing) up to a cap,
+     then scrolls. */
+  min-height: 24px;
+  max-height: 180px;
+  overflow-y: auto;
   border-color: transparent !important;
   border-radius: 0 !important;
   background: transparent !important;
@@ -409,8 +413,8 @@ h1 {
 }
 
 .composer-tool-button {
-  width: 40px;
-  height: 40px;
+  width: 34px;
+  height: 34px;
   border-color: color-mix(in oklab, var(--foreground) 14%, transparent);
   border-radius: 999px;
   background: transparent;
@@ -423,9 +427,56 @@ h1 {
 }
 
 .composer-send-button {
-  width: 40px;
-  height: 40px;
+  width: 34px;
+  height: 34px;
   border-radius: 999px;
+}
+
+.typing-indicator {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: max-content;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--muted);
+}
+
+.typing-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted-foreground);
+  animation: typing-bounce 1.2s ease-in-out infinite;
+}
+
+.typing-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.typing-dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes typing-bounce {
+  0%,
+  60%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .typing-dot {
+    animation: none;
+    opacity: 0.6;
+  }
 }
 
 @media (max-width: 720px) {

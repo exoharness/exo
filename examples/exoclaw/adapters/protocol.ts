@@ -1,10 +1,16 @@
-export type WorkerOutboundCommand = {
-  type: "send_message";
-  id: string;
-  target?: string | null;
-  text: string;
-  attachments: AdapterAttachment[];
-};
+export type WorkerOutboundCommand =
+  | {
+      type: "send_message";
+      id: string;
+      target?: string | null;
+      text: string;
+      attachments: AdapterAttachment[];
+    }
+  | {
+      type: "typing";
+      target?: string | null;
+      state: "started" | "stopped";
+    };
 
 export type AdapterAttachment = {
   kind: "image" | "video" | "audio" | "document";
@@ -69,7 +75,20 @@ export function adapterConfig(): JsonObject {
 }
 
 export function parseWorkerCommand(value: unknown): WorkerOutboundCommand {
-  if (!isRecord(value) || value.type !== "send_message") {
+  if (!isRecord(value)) {
+    throw new Error("worker command must be an object");
+  }
+  if (value.type === "typing") {
+    if (value.state !== "started" && value.state !== "stopped") {
+      throw new Error("typing state must be 'started' or 'stopped'");
+    }
+    return {
+      type: "typing",
+      target: typeof value.target === "string" ? value.target : null,
+      state: value.state,
+    };
+  }
+  if (value.type !== "send_message") {
     throw new Error("worker command must be a send_message object");
   }
   if (typeof value.id !== "string" || value.id.length === 0) {

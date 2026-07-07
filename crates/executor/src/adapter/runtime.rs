@@ -420,6 +420,37 @@ pub async fn send_adapter_message_with_handles(
     Ok(())
 }
 
+/// In-memory side channel for typing signals: not durable on purpose — a
+/// stale "typing" after a restart would be a lie, and the outbox must stay
+/// reserved for real messages.
+#[derive(Clone)]
+struct TypingSignal {
+    queue: Arc<std::sync::Mutex<Vec<WorkerCommand>>>,
+    notify: Arc<Notify>,
+}
+
+impl TypingSignal {
+    fn push(&self, target: &str, state: &str) {
+        self.queue
+            .lock()
+            .expect("typing signal queue poisoned")
+            .push(WorkerCommand::Typing {
+                target: Some(target.to_string()),
+                state: state.to_string(),
+            });
+        self.notify.notify_one();
+    }
+
+    fn drain(&self) -> Vec<WorkerCommand> {
+        std::mem::take(&mut *self.queue.lock().expect("typing signal queue poisoned"))
+    }
+}
+
+// Adapters whose workers understand the typing command.
+fn adapter_supports_typing(config: &AdapterConfig) -> bool {
+    config.adapter_type == "exochat"
+}
+
 async fn run_adapter_loop(
     harness: Arc<dyn Harness>,
     store: &AdapterStore,
@@ -432,6 +463,12 @@ async fn run_adapter_loop(
     let config = adapter.config.clone();
     let secret_env = worker_secret_env(agent.exoharness_handle().as_ref(), &config).await?;
     let outbound_notifier = register_adapter_outbound_notifier(&adapter.id);
+    let typing = adapter_supports_typing(&config).then(|| TypingSignal {
+        queue: Arc::new(std::sync::Mutex::new(Vec::new())),
+        notify: Arc::clone(&outbound_notifier.notify),
+    });
+    let event_typing = typing.clone();
+    let outbound_typing = typing.clone();
     let event_store = store.clone();
     let event_adapter = adapter.clone();
     let event_agent = std::sync::Arc::clone(&agent);
@@ -452,6 +489,7 @@ async fn run_adapter_loop(
             let agent = std::sync::Arc::clone(&event_agent);
             let conversation = std::sync::Arc::clone(&event_conversation);
             let config = event_config.clone();
+            let typing = event_typing.clone();
             async move {
                 handle_worker_event(
                     &store,
@@ -460,6 +498,7 @@ async fn run_adapter_loop(
                     &adapter,
                     &config,
                     event,
+                    typing,
                 )
                 .await
             }
@@ -467,18 +506,23 @@ async fn run_adapter_loop(
         move || {
             let store = outbound_store.clone();
             let adapter_id = outbound_adapter_id.clone();
+            let typing = outbound_typing.clone();
             async move {
-                Ok(store
-                    .claim_outbound_messages(&adapter_id)
-                    .await?
-                    .into_iter()
-                    .map(|message| WorkerCommand::SendMessage {
-                        id: message.id,
-                        target: message.target,
-                        text: message.text,
-                        attachments: message.attachments,
-                    })
-                    .collect())
+                let mut commands: Vec<WorkerCommand> =
+                    typing.as_ref().map(TypingSignal::drain).unwrap_or_default();
+                commands.extend(
+                    store
+                        .claim_outbound_messages(&adapter_id)
+                        .await?
+                        .into_iter()
+                        .map(|message| WorkerCommand::SendMessage {
+                            id: message.id,
+                            target: message.target,
+                            text: message.text,
+                            attachments: message.attachments,
+                        }),
+                );
+                Ok(commands)
             }
         },
         move || {
@@ -552,6 +596,7 @@ async fn handle_worker_event(
     adapter: &AdapterRecord,
     config: &AdapterConfig,
     event: WorkerEvent,
+    typing: Option<TypingSignal>,
 ) -> Result<()> {
     match event {
         WorkerEvent::Connected { subject, metadata } => {
@@ -595,6 +640,7 @@ async fn handle_worker_event(
                 message_id,
                 metadata,
                 attachments,
+                typing,
             )
             .await
         }
@@ -748,6 +794,7 @@ async fn handle_worker_message(
     message_id: Option<String>,
     metadata: serde_json::Value,
     attachments: Vec<AdapterAttachment>,
+    typing: Option<TypingSignal>,
 ) -> Result<()> {
     if let Some(message_id) = &message_id
         && !store
@@ -800,7 +847,13 @@ async fn handle_worker_message(
         parts.extend(image_parts);
         UserContent::Array(parts)
     };
+    if let Some(typing) = &typing {
+        typing.push(&target, "started");
+    }
     let wakeup_result = send_conversation_wakeup_content(conversation, content).await;
+    if let Some(typing) = &typing {
+        typing.push(&target, "stopped");
+    }
     // A failed model turn must not tear down the worker: the external
     // connection is healthy and dropping it loses every queued message.
     // Record the failure and keep processing events.

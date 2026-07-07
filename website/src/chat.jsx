@@ -50,6 +50,19 @@ function ChatApp() {
     enabled: session.demo,
     label: session.demo ? "Preview" : "Waiting",
   });
+  const [peerTyping, setPeerTyping] = React.useState(false);
+  const typingTimerRef = React.useRef(null);
+  const setTyping = React.useCallback((active) => {
+    if (typingTimerRef.current) {
+      clearTimeout(typingTimerRef.current);
+      typingTimerRef.current = null;
+    }
+    setPeerTyping(active);
+    if (active) {
+      // Safety valve: a missed "stopped" signal must not spin forever.
+      typingTimerRef.current = setTimeout(() => setPeerTyping(false), 120_000);
+    }
+  }, []);
   const [status, setStatus] = React.useState({
     data: {
       label: "Crypto",
@@ -241,13 +254,24 @@ function ChatApp() {
 
       setStatusPart("peer", { tone: "warning", value: "waiting" });
       setComposer({ enabled: false, label: "Waiting" });
+      setTyping(false);
       if (remoteSeenRef.current) {
         addNotice("Peer left. Messages are not queued by the relay.");
       }
     }
 
     function renderFrame(frame, self) {
+      if (frame.type === "typing") {
+        if (!self) {
+          setTyping(frame.state === "started");
+        }
+        return;
+      }
+
       if (frame.type === "chat") {
+        if (!self) {
+          setTyping(false);
+        }
         addEvent({
           frame,
           kind: "message",
@@ -272,7 +296,7 @@ function ChatApp() {
         self,
       });
     }
-  }, [addEvent, addNotice, session, setStatusPart]);
+  }, [addEvent, addNotice, session, setStatusPart, setTyping]);
 
   const sendChat = React.useCallback(async () => {
     const text = input.trim();
@@ -398,6 +422,15 @@ function ChatApp() {
                   <ConversationEvent event={event} />
                 </MessageScrollerItem>
               ))}
+              {peerTyping ? (
+                <MessageScrollerItem
+                  key="typing-indicator"
+                  messageId="typing-indicator"
+                  scrollAnchor
+                >
+                  <TypingIndicator />
+                </MessageScrollerItem>
+              ) : null}
             </MessageScrollerContent>
           </MessageScrollerViewport>
           <MessageScrollerButton
@@ -465,6 +498,20 @@ function StatusBadge({ icon: Icon, status }) {
       <span>{status.label}</span>
       <strong>{status.value}</strong>
     </Badge>
+  );
+}
+
+function TypingIndicator() {
+  return (
+    <div
+      aria-label="exo is responding"
+      className="typing-indicator"
+      role="status"
+    >
+      <span className="typing-dot" />
+      <span className="typing-dot" />
+      <span className="typing-dot" />
+    </div>
   );
 }
 

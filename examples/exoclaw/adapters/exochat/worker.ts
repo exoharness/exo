@@ -63,6 +63,19 @@ for await (const line of input) {
   let commandId: string | null = null;
   try {
     const command = parseWorkerCommand(JSON.parse(line));
+    if (command.type === "typing") {
+      // Best-effort presence signal; never worth an error or a nack.
+      try {
+        await sendFrame({
+          type: "typing",
+          state: command.state,
+          createdAt: Date.now(),
+        });
+      } catch {
+        // Disconnected; the signal is stale by the time we reconnect.
+      }
+      continue;
+    }
     commandId = command.id;
     const target = command.target ?? session.channelId;
     if (target !== session.channelId) {

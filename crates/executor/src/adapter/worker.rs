@@ -23,6 +23,13 @@ pub enum WorkerCommand {
         #[serde(default)]
         attachments: Vec<AdapterAttachment>,
     },
+    /// Best-effort presence signal (no ack): the agent started or finished a
+    /// wakeup turn for an inbound message from this adapter.
+    Typing {
+        #[serde(default)]
+        target: Option<String>,
+        state: String,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
