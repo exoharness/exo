@@ -1,9 +1,11 @@
 import {
   createToolRegistry,
+  messagesEvent,
   registerAgentToolsFromDirectoryIfExists,
   registerBuiltInTools,
   registerLibraryToolModulePath,
   turnMetadata,
+  userTextMessage,
   type BuiltInToolName,
   type EventData,
   type HarnessToolRegistry,
@@ -22,6 +24,13 @@ import { ensureTable } from "@exo/model-runtime/cost";
 
 import { materializeWorkerclawPromptMessages } from "./message-materialize.js";
 import { resolveLlmBinding } from "../typescript/shared.js";
+import {
+  buildAutonomousContinueUserMessage,
+  buildRoundBudgetContinueMessage,
+  DEFAULT_ROUND_BUDGET_EXTENSIONS,
+  isTaskTreeFinished,
+  readTaskTreeSnapshot,
+} from "./task-tree-snapshot.js";
 
 export interface WorkerclawTurnLoopOptions {
   instructions?: (context: TurnContext) => Message[] | Promise<Message[]>;
@@ -83,6 +92,7 @@ async function runWorkerclawTurnLoop(
   const { conversation } = context.exoharness.current;
   const maxToolRoundTrips = context.agentConfig.maxToolRoundTrips;
   let latestEventId: string | null = null;
+  let budgetExtensions = 0;
 
   for (let round = 0; ; round += 1) {
     if (
@@ -90,7 +100,26 @@ async function runWorkerclawTurnLoop(
       maxToolRoundTrips !== undefined &&
       round > maxToolRoundTrips
     ) {
-      return latestEventId;
+      const snapshot = await readTaskTreeSnapshot(context);
+      if (isTaskTreeFinished(snapshot)) {
+        return latestEventId;
+      }
+      if (budgetExtensions >= DEFAULT_ROUND_BUDGET_EXTENSIONS) {
+        return latestEventId;
+      }
+      budgetExtensions += 1;
+      round = 0;
+      latestEventId = await appendTurnEvents(context, [
+        messagesEvent([
+          userTextMessage(
+            buildRoundBudgetContinueMessage(
+              budgetExtensions,
+              DEFAULT_ROUND_BUDGET_EXTENSIONS,
+            ),
+          ),
+        ]),
+      ]);
+      continue;
     }
 
     const tools = createToolRegistry(context);
@@ -151,7 +180,17 @@ async function runWorkerclawTurnLoop(
       if (hasSyntheticToolResult) {
         continue;
       }
-      return latestEventId;
+      const snapshot = await readTaskTreeSnapshot(context);
+      if (isTaskTreeFinished(snapshot)) {
+        return latestEventId;
+      }
+      const assistantText = extractAssistantTextFromEvents(events);
+      latestEventId = await appendTurnEvents(context, [
+        messagesEvent([
+          userTextMessage(buildAutonomousContinueUserMessage(assistantText)),
+        ]),
+      ]);
+      continue;
     }
 
     for (const toolCall of toolCalls) {
@@ -166,7 +205,46 @@ async function runWorkerclawTurnLoop(
         latestEventId = await appendTurnEvents(context, toolResultEvents);
       }
     }
+
+    if (isTaskTreeFinished(await readTaskTreeSnapshot(context))) {
+      return latestEventId;
+    }
   }
+}
+
+function extractAssistantTextFromEvents(events: EventData[]): string {
+  const parts: string[] = [];
+  for (const event of events) {
+    if (event.type !== "messages" || !Array.isArray(event.messages)) {
+      continue;
+    }
+    for (const message of event.messages) {
+      if (message.role !== "assistant") {
+        continue;
+      }
+      if (typeof message.content === "string" && message.content.trim()) {
+        parts.push(message.content.trim());
+        continue;
+      }
+      if (!Array.isArray(message.content)) {
+        continue;
+      }
+      for (const block of message.content) {
+        if (!block || typeof block !== "object") {
+          continue;
+        }
+        const typed = block as { type?: string; text?: string };
+        if (
+          typed.type === "text" &&
+          typeof typed.text === "string" &&
+          typed.text.trim()
+        ) {
+          parts.push(typed.text.trim());
+        }
+      }
+    }
+  }
+  return parts.join("\n").trim();
 }
 
 async function appendTurnEvents(
