@@ -126,7 +126,11 @@ describe("parseDuckDuckGoHtml", () => {
       <a class="result__snippet" href="https://example.org/with">Only snippet</a>
     `;
     expect(parseDuckDuckGoHtml(html, 10)).toEqual([
-      { title: "No Snippet", url: "https://example.com/no-snippet", snippet: "" },
+      {
+        title: "No Snippet",
+        url: "https://example.com/no-snippet",
+        snippet: "",
+      },
       {
         title: "With Snippet",
         url: "https://example.org/with",

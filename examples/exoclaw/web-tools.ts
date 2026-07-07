@@ -17,11 +17,11 @@ import type {
 
 // Host-side web access tools: web_search and web_fetch. Note these run in
 // the harness runner process on the host, so work even when the sandbox
-// was created with networking disabled. 
+// was created with networking disabled.
 //
-// Backend provider for search is Brave Search API (requires a key) or 
-// DuckDuckGo HTML (no key), and is selected per-call based on the presence 
-// of a Brave key in the exo secret store (`exo secret set brave-api-key ...`) 
+// Backend provider for search is Brave Search API (requires a key) or
+// DuckDuckGo HTML (no key), and is selected per-call based on the presence
+// of a Brave key in the exo secret store (`exo secret set brave-api-key ...`)
 // or BRAVE_API_KEY env var.
 //
 // EXO_WEB_SEARCH_PROVIDER=brave|duckduckgo to force a provider.
@@ -209,12 +209,12 @@ const guardedDispatcher = new Agent({
             callback(error, "", 0);
             return;
           }
-          const blocked = addresses.find(({ address }) =>
-            isPrivateIp(address),
-          );
+          const blocked = addresses.find(({ address }) => isPrivateIp(address));
           if (blocked !== undefined || addresses.length === 0) {
             callback(
-              new Error(`blocked host resolving to private address: ${hostname}`),
+              new Error(
+                `blocked host resolving to private address: ${hostname}`,
+              ),
               "",
               0,
             );
