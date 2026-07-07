@@ -760,7 +760,7 @@ main() {
   check_dependencies
   ensure_docker_running
 
-  local install_dir
+  local install_dir launch_dir="$PWD"
   install_dir="$(choose_install_dir)"
   clone_or_reuse_repo "$install_dir"
   cd "$install_dir"
@@ -817,20 +817,21 @@ main() {
   info "Create your agent"
   ./exo.sh setup-agent --agent-name "$AGENT_NAME"
 
-  print_success_banner "$install_dir"
+  print_success_banner "$install_dir" "$launch_dir"
 }
 
 print_success_banner() {
   local dir="$1"
+  local launch_dir="$2"
   cat <<'EOF'
 
-      \ \     / /
-       \ \   / /
-        \ \ / /
-         > X <
-        / / \ \
-       / /   \ \
-      /_/     \_\
+        \ \     / /
+         \ \   / /
+          \ \ / /
+           > X <
+          / / \ \
+         / /   \ \
+        /_/     \_\
 
      ___  __  __  ___
     / _ \ \ \/ / / _ \
@@ -841,7 +842,7 @@ EOF
   echo "Exo is installed and your agent is ready."
   echo
   echo "Start chatting:"
-  if [[ "$PWD" != "$dir" ]]; then
+  if [[ "$launch_dir" != "$dir" ]]; then
     echo "  cd $dir"
   fi
   echo "  ./exo.sh"
