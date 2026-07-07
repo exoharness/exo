@@ -131,7 +131,7 @@ files). `install_skill`, `list_skills`, `use_skill`, `read_skill_file`, and
 plus `skills/<name>.json`), so skills persist across conversations and survive
 sandbox rewinds, and every install is a versioned, auditable artifact write.
 Only names and descriptions are injected each turn; bodies load on demand. See
-`skills-arch.md` at the repo root.
+`docs/design/skills-arch.md`.
 
 **Adapters.** Adapters connect conversations to external systems:
 

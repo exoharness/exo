@@ -229,7 +229,7 @@ And adapter tools:
 record and event history. `delete_adapter` removes the adapter record and stored
 events.
 
-And skill tools (see `skills-arch.md` at the repo root for the design):
+And skill tools (see `docs/design/skills-arch.md` for the design):
 
 - `install_skill`
 - `list_skills`

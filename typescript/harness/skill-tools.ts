@@ -13,7 +13,7 @@ import type { HarnessToolRegistry, ToolInstance } from "./tools";
 // is a SKILL.md (YAML frontmatter with name + description, markdown body of
 // instructions) plus optional supporting text files. Stored as agent
 // artifacts so skills persist across conversations and survive sandbox
-// rewinds. See skills-arch.md for the design.
+// rewinds. See docs/design/skills-arch.md for the design.
 //
 // Progressive disclosure: skillsInstruction injects only name + description
 // each turn; use_skill loads the body; read_skill_file loads bundled files.
