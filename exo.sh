@@ -84,6 +84,8 @@ Subcommands:
                    --user-name and --local-prompt-file
   setup-profile    Prompt interactively and write the local profile prompt
   setup-sandbox    Pull the sandbox image
+  setup-agent      Create the agent and conversation (and pull the sandbox
+                   image) without starting anything
 
 Options:
   --model <model>              Model binding name (default: gpt-5.4)
@@ -567,6 +569,15 @@ ensure_sandbox_image() {
 setup_sandbox() {
   ensure_exo_bin
   container_pull_image
+}
+
+setup_agent() {
+  ensure_exo_bin
+  if [[ "$USE_SANDBOX" == true ]]; then
+    ensure_sandbox_image
+  fi
+  ensure_agent
+  ensure_conversation
 }
 
 agent_exists() {
@@ -1264,6 +1275,10 @@ while [[ $# -gt 0 ]]; do
       shift
       COMMAND="setup-sandbox"
       ;;
+    setup-agent)
+      shift
+      COMMAND="setup-agent"
+      ;;
     build)
       shift
       [[ $# -eq 0 ]] || die "build does not accept additional arguments"
@@ -1521,6 +1536,9 @@ case "$COMMAND" in
     ;;
   setup-sandbox)
     setup_sandbox
+    ;;
+  setup-agent)
+    setup_agent
     ;;
   build)
     build_all

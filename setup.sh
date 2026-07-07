@@ -814,9 +814,42 @@ main() {
     --secret-name "$MODEL_PROVIDER" --secret-env "$MODEL_API_KEY_ENV" \
     ${MODEL_BASE_URL:+--base-url "$MODEL_BASE_URL"}
 
-  info "Start canonical Exo"
-  unset EXO_SETUP_ADAPTER
-  exec ./exo.sh fresh --skip-build --agent-name "$AGENT_NAME"
+  info "Create your agent"
+  ./exo.sh setup-agent --agent-name "$AGENT_NAME"
+
+  print_success_banner "$install_dir"
+}
+
+print_success_banner() {
+  local dir="$1"
+  cat <<'EOF'
+
+      \ \     / /
+       \ \   / /
+        \ \ / /
+         > X <
+        / / \ \
+       / /   \ \
+      /_/     \_\
+
+     ___  __  __  ___
+    / _ \ \ \/ / / _ \
+   |  __/  >  < | (_) |
+    \___| /_/\_\ \___/
+
+EOF
+  echo "Exo is installed and your agent is ready."
+  echo
+  echo "Start chatting:"
+  if [[ "$PWD" != "$dir" ]]; then
+    echo "  cd $dir"
+  fi
+  echo "  ./exo.sh"
+  echo
+  echo "That same command starts or reconnects to your agent any time. Also useful:"
+  echo "  ./exo.sh stop-all   stop everything; state is preserved"
+  echo "  ./exo.sh fresh      wipe agents and start over"
+  echo "  ./exo.sh --help     all commands"
 }
 
 main "$@"
