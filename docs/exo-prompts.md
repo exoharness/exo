@@ -218,13 +218,13 @@ Prefer concise operational answers.
 You can create it interactively with:
 
 ```bash
-scripts/exo.sh setup-profile
+./exo.sh setup-profile
 ```
 
 You can use a different local profile path with:
 
 - `EXO_LOCAL_PROMPT_FILE`
-- `scripts/exo.sh --local-prompt-file <path>`
+- `./exo.sh --local-prompt-file <path>`
 
 For committed Exo behavior, use:
 
@@ -257,7 +257,7 @@ maintenance, Fal images, or sandbox scope.
 The Exo launcher can send prompt files into the conversation before the REPL
 starts:
 
-- `scripts/exo.sh`
+- `./exo.sh`
 
 Important flags:
 
@@ -351,7 +351,7 @@ The model learns about sandbox behavior from harness instructions and tool
 descriptions. Exo's developer prompt says that conversations default to the
 agent sandbox and explains when to use conversation or task sandboxes.
 
-`scripts/exo.sh` configures the important filesystem mounts:
+`./exo.sh` configures the important filesystem mounts:
 
 - this repository at `/workspace/exo`
 - the Fal image cache at `/fal`
@@ -360,7 +360,7 @@ agent sandbox and explains when to use conversation or task sandboxes.
 Relevant files:
 
 - `examples/exo/harness.ts`
-- `scripts/exo.sh`
+- `./exo.sh`
 - `crates/executor/src/conversation_sandbox.rs`
 - `crates/executor/src/agent_sandbox.rs`
 

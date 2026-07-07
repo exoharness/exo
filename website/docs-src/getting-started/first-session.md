@@ -46,7 +46,7 @@ agent to:
   operating rules of the default agent.
 - `.exo/exo-profile.md` — your local, git-ignored profile (name,
   machine-specific preferences). Recreate it anytime with
-  `scripts/exo.sh setup-profile`.
+  `./exo.sh setup-profile`.
 - `examples/exo/harness.ts` — assembles the full prompt each turn,
   including dynamic instructions about tools, adapters, memory, and
   self-maintenance.
@@ -56,14 +56,14 @@ them to take effect.
 
 ## Managing the agent
 
-`scripts/exo.sh` is the control surface for the canonical agent:
+`./exo.sh` is the control surface for the canonical agent:
 
 ```bash
-scripts/exo.sh              # create or reuse the agent, start services + REPL
-scripts/exo.sh list         # list agents and conversations
-scripts/exo.sh stop-all     # stop scheduler and adapter loops
-scripts/exo.sh fresh        # start over with a fresh agent
-scripts/exo.sh setup-profile
+./exo.sh              # create or reuse the agent, start services + REPL
+./exo.sh list         # list agents and conversations
+./exo.sh stop-all     # stop scheduler and adapter loops
+./exo.sh fresh        # start over with a fresh agent
+./exo.sh setup-profile
 ```
 
 Where to go from here: there's little else you *need* to learn — talk to the

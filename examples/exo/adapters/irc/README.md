@@ -24,7 +24,7 @@ For IRC plus Discord developer testing, run the developer canonical profile from
 the repo after setup:
 
 ```bash
-scripts/exo.sh fresh --canonical-dev
+./exo.sh fresh --template dev
 ```
 
 ## Adapter Setup
@@ -32,7 +32,7 @@ scripts/exo.sh fresh --canonical-dev
 Use the Exo setup flow:
 
 ```bash
-scripts/exo.sh fresh --pull-sandbox --setup irc
+./exo.sh fresh --pull-sandbox --setup irc
 ```
 
 The setup prompt at `setup-prompt.md` asks Exo to create a built-in adapter similar to:

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 EXO_BIN="${EXO_BIN:-$ROOT_DIR/target/debug/exo}"
 SCHEDULER_BIN="${EXO_SCHEDULER_BIN:-$ROOT_DIR/target/debug/exo-scheduler-runner}"
@@ -34,8 +34,7 @@ ADAPTER_LIMIT="${EXO_ADAPTER_LIMIT:-50}"
 CONTROL=false
 SETUP_PROFILE=false
 SKIP_BUILD="${EXO_SKIP_BUILD:-false}"
-CANONICAL_SETUP=false
-CANONICAL_PROFILE="${EXO_CANONICAL_PROFILE:-user}"
+TEMPLATE="${EXO_TEMPLATE:-canonical}"
 SANDBOX_PROVIDER_EXPLICIT=false
 SANDBOX_BACKEND_EXPLICIT=false
 declare -a CONTROL_PIDS=()
@@ -45,37 +44,67 @@ if [[ -n "$SETUP_ADAPTER" ]]; then
   SETUP_ADAPTERS+=("$SETUP_ADAPTER")
 fi
 INITIAL_PROMPT_FILE="${EXO_INITIAL_PROMPT_FILE:-}"
+UPSTREAM_MODEL="${EXO_UPSTREAM_MODEL:-}"
+SECRET_NAME=""
+SECRET_ENV=""
+MODEL_BASE_URL=""
+USER_NAME="${EXO_USER_NAME:-}"
 export EXO_LOCAL_PROMPT_FILE="$LOCAL_PROMPT_FILE"
 
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/exo.sh [options]
-  scripts/exo.sh list
-  scripts/exo.sh delall all
-  scripts/exo.sh fresh
-  scripts/exo.sh canonical
-  scripts/exo.sh canonical-dev
-  scripts/exo.sh stop-all
-  scripts/exo.sh setup-profile
-  scripts/exo.sh setup-sandbox
+  ./exo.sh [options]
+  ./exo.sh list
+  ./exo.sh delall all
+  ./exo.sh fresh
+  ./exo.sh stop-all
+  ./exo.sh build
+  ./exo.sh register-model
+  ./exo.sh write-profile
+  ./exo.sh setup-profile
+  ./exo.sh setup-sandbox
 
-Default behavior creates or reuses an Exo agent and conversation, starts the
-local scheduler and adapter loops, then starts a REPL. It reads .env by default
-if present.
+Default behavior starts the canonical stack: it creates or reuses an Exo
+agent and conversation with a Docker sandbox, repo self-map mount, ExoChat
+setup, guardian config, and control logs, starts the local scheduler and
+adapter loops, then starts a REPL. It reads .env by default if present.
+Choose a different template with --template.
+
+Subcommands:
+  list             List agents and conversations
+  delall all       Delete all agents and conversations
+  fresh            Rebuild, delete all state, and start a clean REPL
+  stop-all         Stop the scheduler and adapter runners, preserving .exo state
+  build            Install JS dependencies and build the exo CLI and scheduler
+  register-model   Store an API-key secret and register a model binding; uses
+                   --model, --upstream-model, --secret-name, --secret-env, and
+                   optionally --base-url
+  write-profile    Write the local profile prompt non-interactively; uses
+                   --user-name and --local-prompt-file
+  setup-profile    Prompt interactively and write the local profile prompt
+  setup-sandbox    Pull the sandbox image
 
 Options:
   --model <model>              Model binding name (default: gpt-5.4)
+  --upstream-model <model>     Upstream model id for register-model (default: --model)
+  --secret-name <name>         Secret name for register-model (e.g. openai)
+  --secret-env <env-var>       Environment variable holding the API key for register-model
+  --base-url <url>             Optional API base URL for register-model
+  --user-name <name>           User name for write-profile (default: none)
   --agent <slug>               Agent slug (default: exo-agent)
   --conversation <slug>        Conversation slug (default: dev)
   --convo <slug>               Alias for --conversation
   --agent-name <name>          Agent display name (default: Exo Agent)
   --conversation-name <name>   Conversation display name (default: Dev)
   --module <path>              Exo TypeScript harness module
-  --canonical                  Docker sandbox, repo self-map mount, ExoChat setup,
-                               control logs, and guardian config
-  --canonical-dev              Docker sandbox, repo self-map mount, IRC+Discord setup,
-                               control logs, and guardian config
+  --template <name>            Launch template (default: canonical):
+                                 canonical  Docker sandbox, repo self-map mount, ExoChat
+                                            setup, control logs, and guardian config
+                                 dev        Same as canonical but with IRC+Discord
+                                            instead of ExoChat
+                                 minimal    No Docker defaults, adapter setup prompts,
+                                            control console, or guardian config
   --sandbox-image <image>      Sandbox image (default: ubuntu:24.04)
   --sandbox-provider <provider>
                                 Sandbox provider: daytona, apple-container, docker, or local-process
@@ -121,8 +150,8 @@ Environment overrides:
   EXO_BIN, EXO_START_SCHEDULER, EXO_START_ADAPTERS, EXO_REPO,
   EXO_AGENT_CLI_ROOT, EXO_AGENT_CLI_MOUNT,
   EXO_SCHEDULER_BIN, EXO_SCHEDULER_INTERVAL_SECONDS, EXO_ADAPTER_LIMIT,
-  EXO_SETUP_ADAPTER, EXO_INITIAL_PROMPT_FILE, EXO_CANONICAL_PROFILE,
-  EXO_SKIP_BUILD
+  EXO_SETUP_ADAPTER, EXO_INITIAL_PROMPT_FILE, EXO_TEMPLATE,
+  EXO_SKIP_BUILD, EXO_UPSTREAM_MODEL, EXO_USER_NAME
 EOF
 }
 
@@ -217,8 +246,8 @@ add_setup_adapter() {
   SETUP_ADAPTERS+=("$adapter")
 }
 
-apply_canonical_setup_defaults() {
-  if [[ "$CANONICAL_SETUP" != true ]]; then
+apply_template_defaults() {
+  if [[ "$TEMPLATE" == "minimal" ]]; then
     return
   fi
 
@@ -233,8 +262,8 @@ apply_canonical_setup_defaults() {
   if [[ "$SANDBOX_BACKEND_EXPLICIT" != true ]]; then
     SANDBOX_BACKEND="docker"
   fi
-  case "$CANONICAL_PROFILE" in
-    user)
+  case "$TEMPLATE" in
+    canonical)
       add_setup_adapter "exochat"
       ;;
     dev)
@@ -242,13 +271,13 @@ apply_canonical_setup_defaults() {
       add_setup_adapter "discord"
       ;;
     *)
-      die "EXO_CANONICAL_PROFILE must be user or dev"
+      die "--template must be canonical, dev, or minimal"
       ;;
   esac
 }
 
 configure_guardian_for_current_launch() {
-  if [[ "$CANONICAL_SETUP" != true ]]; then
+  if [[ "$TEMPLATE" == "minimal" ]]; then
     return
   fi
 
@@ -272,6 +301,43 @@ build_exo_scheduler() {
   (cd "$ROOT_DIR" && CARGO_TARGET_DIR=target cargo build \
     --manifest-path examples/exo/scheduler-runner/Cargo.toml \
     --ignore-rust-version)
+}
+
+build_all() {
+  echo "Installing JS dependencies..."
+  (cd "$ROOT_DIR" && pnpm install)
+  build_exo
+  build_exo_scheduler
+}
+
+register_model() {
+  [[ -n "$SECRET_NAME" ]] || die "register-model requires --secret-name"
+  [[ -n "$SECRET_ENV" ]] || die "register-model requires --secret-env"
+  ensure_exo_bin
+  local upstream="${UPSTREAM_MODEL:-$MODEL}"
+  echo "Storing secret $SECRET_NAME from \$$SECRET_ENV..."
+  exo secret set "$SECRET_NAME" --env "$SECRET_ENV"
+  echo "Registering model $MODEL -> $upstream..."
+  local args=(model register "$MODEL" --model "$upstream" --secret "$SECRET_NAME")
+  if [[ -n "$MODEL_BASE_URL" ]]; then
+    args+=(--base-url "$MODEL_BASE_URL")
+  fi
+  exo "${args[@]}"
+}
+
+write_local_profile() {
+  mkdir -p "$(dirname "$LOCAL_PROMPT_FILE")"
+  {
+    echo "# Local Exo Profile"
+    echo
+    echo "This file is local to this machine and should not be committed."
+    if [[ -n "$USER_NAME" ]]; then
+      echo
+      echo "The user's name is $USER_NAME."
+    fi
+  } >"$LOCAL_PROMPT_FILE"
+  chmod 600 "$LOCAL_PROMPT_FILE"
+  echo "Wrote local Exo profile: $LOCAL_PROMPT_FILE"
 }
 
 scheduler_source_newer_than() {
@@ -1185,18 +1251,6 @@ while [[ $# -gt 0 ]]; do
       shift
       COMMAND="fresh"
       ;;
-    canonical)
-      shift
-      COMMAND="repl"
-      CANONICAL_SETUP=true
-      CANONICAL_PROFILE="user"
-      ;;
-    canonical-dev|dev|docker-dev)
-      shift
-      COMMAND="repl"
-      CANONICAL_SETUP=true
-      CANONICAL_PROFILE="dev"
-      ;;
     stop-all|stop)
       shift
       [[ $# -eq 0 ]] || die "stop-all does not accept additional arguments"
@@ -1210,9 +1264,46 @@ while [[ $# -gt 0 ]]; do
       shift
       COMMAND="setup-sandbox"
       ;;
+    build)
+      shift
+      [[ $# -eq 0 ]] || die "build does not accept additional arguments"
+      COMMAND="build"
+      ;;
+    register-model)
+      shift
+      COMMAND="register-model"
+      ;;
+    write-profile)
+      shift
+      COMMAND="write-profile"
+      ;;
     --model)
       MODEL="${2:-}"
       [[ -n "$MODEL" ]] || die "--model requires a value"
+      shift 2
+      ;;
+    --upstream-model)
+      UPSTREAM_MODEL="${2:-}"
+      [[ -n "$UPSTREAM_MODEL" ]] || die "--upstream-model requires a value"
+      shift 2
+      ;;
+    --secret-name)
+      SECRET_NAME="${2:-}"
+      [[ -n "$SECRET_NAME" ]] || die "--secret-name requires a value"
+      shift 2
+      ;;
+    --secret-env)
+      SECRET_ENV="${2:-}"
+      [[ -n "$SECRET_ENV" ]] || die "--secret-env requires a value"
+      shift 2
+      ;;
+    --base-url)
+      MODEL_BASE_URL="${2:-}"
+      [[ -n "$MODEL_BASE_URL" ]] || die "--base-url requires a value"
+      shift 2
+      ;;
+    --user-name)
+      USER_NAME="${2:-}"
       shift 2
       ;;
     --agent)
@@ -1263,14 +1354,20 @@ while [[ $# -gt 0 ]]; do
       SANDBOX_BACKEND_EXPLICIT=true
       shift 2
       ;;
-    --canonical)
-      CANONICAL_SETUP=true
-      CANONICAL_PROFILE="user"
-      shift
+    --template)
+      TEMPLATE="${2:-}"
+      case "$TEMPLATE" in
+        canonical|dev|minimal) ;;
+        *) die "--template must be canonical, dev, or minimal" ;;
+      esac
+      shift 2
       ;;
-    --canonical-dev)
-      CANONICAL_SETUP=true
-      CANONICAL_PROFILE="dev"
+    --template=*)
+      TEMPLATE="${1#--template=}"
+      case "$TEMPLATE" in
+        canonical|dev|minimal) ;;
+        *) die "--template must be canonical, dev, or minimal" ;;
+      esac
       shift
       ;;
     --self-repo-mount)
@@ -1397,7 +1494,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-apply_canonical_setup_defaults
+apply_template_defaults
 
 export EXO_LOCAL_PROMPT_FILE="$LOCAL_PROMPT_FILE"
 export EXO_REPO="$SELF_REPO_MOUNT_PATH"
@@ -1424,5 +1521,14 @@ case "$COMMAND" in
     ;;
   setup-sandbox)
     setup_sandbox
+    ;;
+  build)
+    build_all
+    ;;
+  register-model)
+    register_model
+    ;;
+  write-profile)
+    write_local_profile
     ;;
 esac

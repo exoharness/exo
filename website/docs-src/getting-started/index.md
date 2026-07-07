@@ -11,7 +11,7 @@ script, then learn what to do with it.
 1. [Installation](./installation) — run `setup.sh`; it handles keys,
    build, and launch.
 2. [Your First Session](./first-session) — test prompts, prompt
-   customization, and the `scripts/exo.sh` control surface.
+   customization, and the `./exo.sh` control surface.
 
 Building from primitives instead of using the canonical agent:
 

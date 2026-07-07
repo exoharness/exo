@@ -32,14 +32,14 @@ This document defines the self-introspection and self-control capability areas w
 
 Exo should always be able to inspect the code that defines its own behavior, change it, and restart itself on the new build.
 
-**Seeing its own code.** Local startup with `scripts/exo.sh` mounts the repository into the sandbox at `/workspace/exo` (configurable with `--self-repo-mount` or `EXO_REPO`). The shell tool therefore starts with a stable view of the source tree. `examples/exo/SELF.md` is the checked-in self map — a compact navigation guide to prompts, harness assembly, adapters, scheduler, supervisors, and local state — and the harness tells Exo its path each turn through `EXO_SELF_MAP`. The self map is intentionally navigational, not a full architecture document.
+**Seeing its own code.** Local startup with `./exo.sh` mounts the repository into the sandbox at `/workspace/exo` (configurable with `--self-repo-mount` or `EXO_REPO`). The shell tool therefore starts with a stable view of the source tree. `examples/exo/SELF.md` is the checked-in self map — a compact navigation guide to prompts, harness assembly, adapters, scheduler, supervisors, and local state — and the harness tells Exo its path each turn through `EXO_SELF_MAP`. The self map is intentionally navigational, not a full architecture document.
 
 **Editing its own code.** Edits happen through the shell tool against the repo mount. Git is the change history and the rollback mechanism for code: Exo can diff, commit, and revert its own modifications (see area 8).
 
 **Building and rerunning itself.** Host-side actions happen outside the sandbox through two cooperating supervisors:
 
 - `examples/exo/scripts/exo-service-guardian` is the host service supervisor: it builds Exo, shows service status, prints scheduler and adapter logs, and restarts the scheduler or adapter runners while preserving `.exo` state.
-- `scripts/exo.sh --control` is the terminal supervisor: it keeps the user's terminal open, streams service logs, runs the interactive `exo repl` as a child, and can restart only that child after a rebuild.
+- `./exo.sh --control` is the terminal supervisor: it keeps the user's terminal open, streams service logs, runs the interactive `exo repl` as a child, and can restart only that child after a rebuild.
 
 The model-visible `guardian_action` tool wraps the guardian script with a strict allowlist: `status`, `build`, `start_services`, `stop_services`, `restart_services`, `restart_adapters`, `restart_scheduler`, `restart_all`, and `logs`. It does not accept arbitrary shell commands. The `restart_*` actions are deferred briefly and handed to a detached guardian process so the current model turn can finish and report that the restart was scheduled. `restart_all` is the normal self-reboot path; `start_services`, `stop_services`, and `restart_services` are lower-level controls for the guardian-managed scheduler and adapter runner.
 
@@ -47,7 +47,7 @@ Service restarts drain instead of killing blindly: the guardian writes a restart
 
 Reboots are announced through the adapters: because restarts are deferred, the agent can post a "going down" message with `send_adapter_message` in the same turn that requests the restart. The guardian writes `.exo/exo-reboot-notice.json`; the fresh adapter runner claims it and sends one wakeup per adapter conversation so the agent can announce its return. Announcements queue in the durable adapter outbox and deliver when the worker reconnects. Stale notices (older than 15 minutes) are discarded.
 
-The canonical local startup is `scripts/exo.sh canonical` (Docker provider/backend, repo self-map mount, guardian config, adapter setup prompts, control REPL). `fresh --canonical` gives the same shape from a clean agent/conversation state.
+The canonical local startup is plain `./exo.sh` (Docker provider/backend, repo self-map mount, guardian config, adapter setup prompts, control REPL — the default `--template canonical`). `./exo.sh fresh` gives the same shape from a clean agent/conversation state.
 
 ## 2. Durable Memory and Identity
 
@@ -173,7 +173,7 @@ What constitutes "Exo" for cloning purposes (the area 2 inventory):
 
 Building blocks that already exist: conversation `fork` in the exoharness API, sandbox snapshots, the adapter records being plain JSON under `.exo`, and the canonical event log for the clone to know its own provenance (a `cloned_from` custom event would make lineage explicit).
 
-The likely path is an export/import pair: a guardian-level `export` action that produces a portable bundle (git ref + `.exo` state + secret manifest listing what must be re-provisioned + snapshot references), and a bootstrap path on the target (`scripts/exo.sh` already encapsulates most platform differences: Docker vs. apple-container, launch mechanics). Migration is then export, transfer, import, re-provision secrets, and re-bind adapter identities — with the old instance drained (area 1's markers) before the new one takes over the external identities.
+The likely path is an export/import pair: a guardian-level `export` action that produces a portable bundle (git ref + `.exo` state + secret manifest listing what must be re-provisioned + snapshot references), and a bootstrap path on the target (`./exo.sh` already encapsulates most platform differences: Docker vs. apple-container, launch mechanics). Migration is then export, transfer, import, re-provision secrets, and re-bind adapter identities — with the old instance drained (area 1's markers) before the new one takes over the external identities.
 
 ## 8. Self-Verification and Rollback
 

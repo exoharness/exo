@@ -38,7 +38,7 @@ The implementation is split across a few small executor and CLI modules:
   used by Exo.
 - `typescript/harness/adapter-tools.ts` exposes the model-facing Exo tools.
 - `crates/cli/src/adapters.rs` provides `exo --harness exo adapters ...`.
-- `scripts/exo.sh` starts the adapter runner next to the scheduler.
+- `./exo.sh` starts the adapter runner next to the scheduler.
 
 At a high level:
 
@@ -266,7 +266,7 @@ The adapter runner is started by:
 ./target/debug/exo --harness exo adapters run --limit 50
 ```
 
-`scripts/exo.sh` starts this automatically unless `--no-adapters` is
+`./exo.sh` starts this automatically unless `--no-adapters` is
 provided. It also records a pid file at `.exo/exo-adapters.pid`.
 
 The runtime periodically lists enabled adapters and starts one supervision task

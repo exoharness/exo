@@ -11,7 +11,7 @@ The MVP is text-only. The recommended setup wakes on `app_mention` events and Sl
 Start Exo normally:
 
 ```bash
-scripts/exo.sh
+./exo.sh
 ```
 
 Then ask the agent:
@@ -25,7 +25,7 @@ The agent will walk you through creating the Slack app, storing secrets, creatin
 This startup shortcut is still available, but optional:
 
 ```bash
-scripts/exo.sh --setup slack
+./exo.sh --setup slack
 ```
 
 You do not need to run `pnpm slack:setup` for the chat-driven flow.
@@ -83,7 +83,7 @@ exo secret set slack-bot-token --value 'xoxb-...'
 During interactive setup, the agent creates the adapter after you confirm the Slack secrets are stored. You can also send the setup prompt while starting a fresh local Exo agent:
 
 ```bash
-scripts/exo.sh \
+./exo.sh \
   --agent exospooky \
   --conversation dev \
   --setup slack

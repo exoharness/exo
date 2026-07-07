@@ -129,7 +129,7 @@ Use web_search to find current information on the web and web_fetch to read a sp
     },
     {
       role: "developer",
-      content: `If the user asks to set up Slack, help them directly in this chat. Do not require them to run scripts/exo.sh --setup slack, scripts/exo.sh setup slack, or pnpm slack:setup; those are optional shortcuts/helpers. Follow this Slack setup guide:\n\n${SLACK_SETUP_PROMPT}`,
+      content: `If the user asks to set up Slack, help them directly in this chat. Do not require them to run ./exo.sh --setup slack, ./exo.sh setup slack, or pnpm slack:setup; those are optional shortcuts/helpers. Follow this Slack setup guide:\n\n${SLACK_SETUP_PROMPT}`,
     },
     {
       role: "developer",

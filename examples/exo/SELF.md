@@ -15,7 +15,7 @@ Use this map before changing Exo itself.
 - `examples/exo/prompts/me.md`: durable identity and operating rules.
 - `examples/exo/guardian-tools.ts`: model-visible host maintenance tool.
 - `examples/exo/scripts/exo-service-guardian`: host-side build and service control.
-- `scripts/exo.sh`: local startup script for REPL, scheduler, adapters, sandbox, and repo mount.
+- `./exo.sh`: local startup script for REPL, scheduler, adapters, sandbox, and repo mount.
 - `examples/exo/sandbox-tools.ts`: sandbox snapshot and rewind tool definitions.
 - `examples/exo/introspection-tools.ts`: `list_adapter_events` and `list_conversation_events` introspection tools.
 - `examples/exo/host-tools.ts`: `registerHostTool` helper that bridges TypeScript tool definitions to Rust execution.
@@ -44,11 +44,11 @@ Use this map before changing Exo itself.
 From the repository root on the host:
 
 ```bash
-scripts/exo.sh canonical
+./exo.sh
 examples/exo/scripts/exo-service-guardian status
 examples/exo/scripts/exo-service-guardian build
 examples/exo/scripts/exo-service-guardian restart-all --build
-scripts/exo.sh --control
+./exo.sh --control
 ```
 
 Inside the Exo sandbox, inspect the mounted code with:
@@ -122,7 +122,7 @@ inside the conversation before touching host services:
   to pick up a new build. Restart actions are deferred briefly so the current
   turn can finish before services stop; check status/logs after they come back.
 - In control mode, service guardian builds write `.exo/exo-control.restart`;
-  the `scripts/exo.sh --control` wrapper restarts only the child `exo repl` and
+  the `./exo.sh --control` wrapper restarts only the child `exo repl` and
   keeps the user's terminal open.
 - Service restarts drain gracefully: the guardian writes
   `.exo/exo-adapters.restart` / `.exo/exo-scheduler.restart`, the

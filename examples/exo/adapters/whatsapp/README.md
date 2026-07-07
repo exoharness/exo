@@ -13,7 +13,7 @@ When WhatsApp asks for pairing, the worker logs an ASCII QR code and emits a lif
 Use the Exo setup flow:
 
 ```bash
-scripts/exo.sh fresh --pull-sandbox --setup whatsapp
+./exo.sh fresh --pull-sandbox --setup whatsapp
 ```
 
 The script watches `.exo/exo-adapters.log`, prints the QR code if it appears, and pauses while you scan it. Scan from WhatsApp using the linked-device flow.
