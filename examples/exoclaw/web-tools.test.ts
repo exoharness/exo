@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   decodeEntities,
+  extractArticleMarkdown,
   extractReadableText,
   isPrivateIp,
   normalizeDuckDuckGoUrl,
@@ -158,6 +159,64 @@ describe("extractReadableText", () => {
     expect(text).not.toContain("tracked");
     expect(text).not.toContain("color: red");
     expect(text).not.toContain("Nav link");
+  });
+});
+
+describe("extractArticleMarkdown", () => {
+  const articleHtml = `
+    <html>
+      <head><title>Promises Explained | Example Blog</title></head>
+      <body>
+        <nav><a href="/">Home</a> <a href="/about">About</a></nav>
+        <aside>Subscribe to our newsletter! Ads ads ads.</aside>
+        <article>
+          <h1>Promises Explained</h1>
+          <p>A Promise represents the eventual completion or failure of an
+          asynchronous operation and its resulting value. Unlike callbacks,
+          promises can be chained, which makes asynchronous code far more
+          readable and maintainable in complex applications.</p>
+          <p>Promises have three states: pending, fulfilled, and rejected.
+          Once a promise settles it stays settled, which makes promises a
+          reliable primitive for coordinating work across large codebases.
+          See <a href="/docs/promises">the docs</a> for details.</p>
+          <ul><li>pending</li><li>fulfilled</li><li>rejected</li></ul>
+        </article>
+        <footer>© 2026 Example Corp</footer>
+      </body>
+    </html>
+  `;
+
+  it("extracts main content as markdown and drops boilerplate", () => {
+    const result = extractArticleMarkdown(
+      articleHtml,
+      "https://example.com/articles/promises",
+    );
+    expect(result).not.toBeNull();
+    expect(result?.title).toContain("Promises Explained");
+    expect(result?.text).toContain("eventual completion or failure");
+    expect(result?.text).toMatch(/-\s+pending/);
+    expect(result?.text).not.toContain("newsletter");
+    expect(result?.text).not.toContain("Ads ads ads");
+  });
+
+  it("resolves relative links against the page url", () => {
+    const result = extractArticleMarkdown(
+      articleHtml,
+      "https://example.com/articles/promises",
+    );
+    expect(result?.text).toContain(
+      "[the docs](https://example.com/docs/promises)",
+    );
+  });
+
+  it("returns null when there is no content to extract", () => {
+    expect(extractArticleMarkdown("", "https://example.com/")).toBe(null);
+    expect(
+      extractArticleMarkdown(
+        "<html><body><script>x()</script></body></html>",
+        "https://example.com/",
+      ),
+    ).toBe(null);
   });
 });
 

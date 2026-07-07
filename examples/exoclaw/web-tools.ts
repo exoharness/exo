@@ -2,6 +2,9 @@ import { lookup as lookupWithCallback } from "node:dns";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
+import { Readability } from "@mozilla/readability";
+import { parseHTML } from "linkedom";
+import TurndownService from "turndown";
 import { Agent, fetch as undiciFetch } from "undici";
 
 import type {
@@ -12,16 +15,15 @@ import type {
   TurnContext,
 } from "@exo/harness";
 
-// Host-side web access tools: web_search and web_fetch. Handlers run in the
-// harness runner process on the host, so they work even when the sandbox was
-// created with networking disabled.
+// Host-side web access tools: web_search and web_fetch. Note these run in
+// the harness runner process on the host, so work even when the sandbox
+// was created with networking disabled. 
 //
-// web_search picks a provider per call: Brave Search API when a key is
-// configured, otherwise the key-free DuckDuckGo HTML endpoint. The Brave key
-// is read from the exo secret store (`exo secret set brave-api-key ...`),
-// which takes effect within a minute without a restart (the resolved key is
-// cached for 60s to avoid secret-store round trips per search), with the
-// BRAVE_API_KEY env var (.env) as a startup-time fallback. Set
+// Backend provider for search is Brave Search API (requires a key) or 
+// DuckDuckGo HTML (no key), and is selected per-call based on the presence 
+// of a Brave key in the exo secret store (`exo secret set brave-api-key ...`) 
+// or BRAVE_API_KEY env var.
+//
 // EXO_WEB_SEARCH_PROVIDER=brave|duckduckgo to force a provider.
 
 const BRAVE_SECRET_ID = "brave-api-key";
@@ -130,6 +132,8 @@ function stripTags(html: string): string {
 }
 
 // --- SSRF guard -------------------------------------------------------------
+// Added safeguards to prevent the host from fetching private/internal addresses, including
+// localhost, link-local, and reserved ranges. This is to prevent SSRF attacks from the sandboxed environment.
 
 function isPrivateIpv4(ip: string): boolean {
   const octets = ip.split(".").map((part) => Number.parseInt(part, 10));
@@ -442,6 +446,49 @@ async function searchBrave(
 
 // --- web_fetch extraction ----------------------------------------------------
 
+const turndown = new TurndownService({
+  headingStyle: "atx",
+  bulletListMarker: "-",
+  codeBlockStyle: "fenced",
+});
+
+// Reader-mode extraction: Readability (the Firefox Reader View engine) scores
+// the DOM and isolates the main content, dropping nav/ads/sidebars; turndown
+// converts the cleaned HTML to markdown. Returns null when Readability does
+// not recognize the page as article-like (dashboards, index pages, search
+// results); callers fall back to extractReadableText.
+export function extractArticleMarkdown(
+  html: string,
+  url: string,
+): { title: string | null; text: string } | null {
+  try {
+    const { document } = parseHTML(html);
+    // Readability resolves relative links against the document base.
+    const head = document.head;
+    if (head != null) {
+      const base = document.createElement("base");
+      base.setAttribute("href", url);
+      head.prepend(base);
+    }
+    const article = new Readability(document as unknown as Document, {
+      charThreshold: 250,
+    }).parse();
+    if (article === null || typeof article.content !== "string") {
+      return null;
+    }
+    const text = turndown.turndown(article.content).trim();
+    if (text === "") {
+      return null;
+    }
+    const title = typeof article.title === "string" ? article.title.trim() : "";
+    return { title: title === "" ? null : title, text };
+  } catch {
+    return null;
+  }
+}
+
+// Regex-based fallback for pages Readability rejects. Coarser than the
+// reader-mode path but always produces something.
 export function extractReadableText(html: string): {
   title: string | null;
   text: string;
@@ -625,7 +672,7 @@ function webFetchTool(): ToolInstance {
     definition: {
       name: "web_fetch",
       description:
-        "Fetch an http(s) URL from the host and return the page as readable markdown-ish text (title, headings, links, body). Follows up to 5 redirects, blocks private/internal addresses, and truncates to maxChars. No JavaScript rendering; for JSON APIs the raw body is returned.",
+        "Fetch an http(s) URL from the host and return the page's main content as markdown (reader mode, like Firefox Reader View), falling back to a basic full-page text extraction for non-article pages. Follows up to 5 redirects, blocks private/internal addresses, and truncates to maxChars. No JavaScript rendering; for JSON APIs the raw body is returned.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -713,9 +760,17 @@ function webFetchTool(): ToolInstance {
             text: body.slice(0, 2_000),
           };
         }
-        const { title, text } = isHtml
-          ? extractReadableText(body)
-          : { title: null, text: body.trim() };
+        let extracted: { title: string | null; text: string };
+        let extractor: "readability" | "basic" | "raw";
+        if (isHtml) {
+          const article = extractArticleMarkdown(body, finalUrl);
+          extractor = article !== null ? "readability" : "basic";
+          extracted = article ?? extractReadableText(body);
+        } else {
+          extractor = "raw";
+          extracted = { title: null, text: body.trim() };
+        }
+        const { title, text } = extracted;
         const truncated = text.length > maxChars;
         return {
           ok: true,
@@ -723,6 +778,7 @@ function webFetchTool(): ToolInstance {
           finalUrl,
           status: response.status,
           contentType,
+          extractor,
           title,
           text: truncated ? text.slice(0, maxChars) : text,
           truncated,
