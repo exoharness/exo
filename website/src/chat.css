@@ -147,7 +147,10 @@ svg {
 .chat-shell {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  min-height: 100svh;
+  /* Fixed height (not min-height): the middle row must be the scroll
+     container, so the shell itself can never outgrow the viewport. */
+  height: 100svh;
+  overflow: hidden;
   background: var(--background);
 }
 
