@@ -1,6 +1,5 @@
 .DS_Store
 .env
-.exo-setup-build.log
 .env.local
 .bt
 .next

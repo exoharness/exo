@@ -627,29 +627,6 @@ trust_mise_config() {
   mise trust "$config"
 }
 
-wait_for_build() {
-  local pid="$1"
-  local log="$2"
-  if kill -0 "$pid" 2>/dev/null; then
-    info "Waiting for the Exo build to finish (first build takes a few minutes)"
-    if tail --help 2>/dev/null | grep -q -- --pid; then
-      tail --pid="$pid" -n 0 -f "$log" 2>/dev/null || true
-    else
-      while kill -0 "$pid" 2>/dev/null; do
-        sleep 5
-        echo "  ...still building (log: $log)"
-      done
-    fi
-  fi
-  local build_status=0
-  wait "$pid" || build_status=$?
-  if ((build_status != 0)); then
-    tail -n 40 "$log" >&2
-    die "Exo build failed (exit $build_status). Full log: $log"
-  fi
-  echo "Build complete."
-}
-
 choose_install_dir() {
   if is_exo_checkout "$PWD"; then
     echo "Using current Exo checkout: $PWD" >&2
@@ -790,15 +767,10 @@ main() {
   trust_mise_config "$install_dir/mise.toml"
   ensure_toolchains
 
-  # Start the long build now so it compiles while the user answers the
-  # configuration prompts below.
-  local build_log="$install_dir/.exo-setup-build.log"
-  local build_pid
-  info "Build Exo (runs in the background while you configure)"
-  echo "Build log: $build_log"
-  ./exo.sh build >"$build_log" 2>&1 &
-  build_pid=$!
-  trap 'kill "$build_pid" 2>/dev/null || true' INT TERM
+  # Build before the interactive prompts so answering them is the last step
+  # before launch.
+  info "Build Exo (takes a few minutes on first install)"
+  ./exo.sh build
 
   local env_file="$install_dir/.env"
   if [[ ! -f "$env_file" && -f "$install_dir/.env.example" ]]; then
@@ -835,9 +807,6 @@ main() {
   USER_NAME="$(prompt_text "Your name, or blank to skip" "$USER_NAME")"
   AGENT_NAME="$(prompt_text "Agent display name" "$AGENT_NAME")"
   ./exo.sh write-profile ${USER_NAME:+--user-name "$USER_NAME"}
-
-  wait_for_build "$build_pid" "$build_log"
-  trap - INT TERM
 
   info "Store secrets and register model"
   ./exo.sh register-model --model "$MODEL_NAME" \
