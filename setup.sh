@@ -40,7 +40,7 @@ Options:
 Environment overrides:
   EXO_REPO_URL, EXO_REPO_REF, EXO_INSTALL_DIR, EXO_MODEL_PROVIDER, EXO_MODEL,
   EXO_UPSTREAM_MODEL, EXO_AGENT_NAME, EXO_USER_NAME, EXO_CHAT_BASE_URL,
-  EXOCLAW_LOCAL_PROMPT_FILE, EXO_SETUP_FORCE, OPENAI_API_KEY,
+  EXO_LOCAL_PROMPT_FILE, EXO_SETUP_FORCE, OPENAI_API_KEY,
   OPENROUTER_API_KEY
 EOF
 }
@@ -560,7 +560,7 @@ main() {
   info "Configure Exo"
   USER_NAME="$(prompt_text "Your name, or blank to skip" "$USER_NAME")"
   AGENT_NAME="$(prompt_text "Agent display name" "$AGENT_NAME")"
-  local profile_file="${EXOCLAW_LOCAL_PROMPT_FILE:-$install_dir/.exo/exoclaw-profile.md}"
+  local profile_file="${EXO_LOCAL_PROMPT_FILE:-$install_dir/.exo/exo-profile.md}"
   write_local_profile "$profile_file" "$USER_NAME"
   echo "Wrote local Exo profile: $profile_file"
 

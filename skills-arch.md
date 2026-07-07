@@ -34,12 +34,12 @@ install here unchanged: read the `SKILL.md` and files, pass them to
 ## Storage: artifact-backed
 
 Skills are stored as **agent artifacts**, not sandbox files. Rationale, from
-the exoclaw state inventory (`examples/exoclaw/docs/SELF-CONTROL.md`, area 2):
+the exo state inventory (`examples/exo/docs/SELF-CONTROL.md`, area 2):
 the sandbox filesystem is the one non-durable layer — it does not survive
 rewinds or warm-container death — while agent artifacts survive sandbox
 rewinds and service restarts, persist across every conversation for the agent,
 and are versioned, so every install/update is auditable and recoverable. This
-mirrors how exoclaw memory (`memory/exoclaw-memory.json`) and the sandbox
+mirrors how exo memory (`memory/exo-memory.json`) and the sandbox
 snapshot registry are persisted.
 
 Layout:
@@ -58,7 +58,7 @@ the same name writes a new version and updates the index entry.
 Known limitation (shared with the memory store): index updates are
 read-modify-write without compare-and-swap, so two conversations installing
 skills concurrently can lose one index update. Fix alongside the artifact
-versioning rework (see the TODO in `examples/exoclaw/memory-tools.ts`).
+versioning rework (see the TODO in `examples/exo/memory-tools.ts`).
 
 Supporting files are stored as UTF-8 text in v1. Binary assets are out of
 scope; skills needing binaries should fetch them at use time (the body can
@@ -67,8 +67,8 @@ instruct the agent to download into the sandbox).
 ## Tool surface
 
 Implemented in `typescript/harness/skill-tools.ts` and exported from
-`@exo/harness`, so any harness — not just exoclaw — can register the tools and
-inject the listing. Nothing in the module depends on exoclaw; it only uses the
+`@exo/harness`, so any harness — not just exo — can register the tools and
+inject the listing. Nothing in the module depends on exo; it only uses the
 generic `Agent` artifact API.
 
 - `install_skill(skillMd, files?)` — validates frontmatter per the spec (the
@@ -87,7 +87,7 @@ Prompt injection: `skillsInstruction(context)` returns a developer message
 listing `name — description` for every installed skill, with the standing
 instruction to call `use_skill` before performing a matching task. It returns
 `null` when no skills are installed, and degrades (loudly, without throwing)
-if the index artifact is corrupt — same failure policy as exoclaw memory:
+if the index artifact is corrupt — same failure policy as exo memory:
 prompt assembly must never brick the agent, and the write path still refuses
 to bury a corrupt store.
 

@@ -93,7 +93,7 @@ async function readIndex(handle: SkillsHandle): Promise<SkillsIndex> {
 }
 
 // TODO(storage-rework): install/uninstall are read-modify-write on the index
-// with no compare-and-swap, same as the exoclaw memory store. Two
+// with no compare-and-swap, same as the exo memory store. Two
 // conversations mutating skills concurrently can lose one index update. Fix
 // alongside the artifact versioning rework.
 async function writeIndex(

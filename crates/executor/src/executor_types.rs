@@ -45,7 +45,7 @@ pub enum AgentHarnessKind {
     Rlm,
     #[serde(rename = "typescript")]
     TypeScript,
-    Exoclaw,
+    Exo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,7 +120,7 @@ pub fn effective_sandbox_scope(
     conversation_config
         .sandbox_scope
         .unwrap_or(match agent_config.harness {
-            AgentHarnessKind::Exoclaw => SandboxScope::Agent,
+            AgentHarnessKind::Exo => SandboxScope::Agent,
             _ => SandboxScope::Conversation,
         })
 }

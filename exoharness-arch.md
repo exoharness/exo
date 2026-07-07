@@ -4,7 +4,7 @@ This document describes the full Exoharness API from the perspective of the
 subcomponents that use it. It covers the core Rust object model, the JSONL
 protocol used to expose that model across process boundaries, the TypeScript
 harness API, and the way higher-level systems such as the executor, scheduler,
-adapters, CLI, and Exoclaw compose those pieces.
+adapters, CLI, and Exo compose those pieces.
 
 ## Mental Model
 
@@ -12,13 +12,13 @@ Exoharness is the durable runtime substrate for agents. It owns agents,
 conversations, sessions, turns, events, artifacts, sandboxes, bindings, and
 secrets. The executor layer sits on top and decides how a turn is run: a basic
 LLM loop, an RLM loop, or a TypeScript harness. Product-specific systems such as
-Exoclaw then add tools, prompts, schedulers, and adapters on top of that
+Exo then add tools, prompts, schedulers, and adapters on top of that
 executor layer.
 
 The main boundary looks like this:
 
 ```text
-CLI / Exoclaw scripts / scheduler / adapter runner
+CLI / Exo scripts / scheduler / adapter runner
   -> executor Harness facade
     -> exoharness object model
     -> executor turn runtime
@@ -59,7 +59,7 @@ and artifacts so the event log preserves turn ownership.
   authors.
 - `typescript/harness/runner.ts`: TypeScript guest process that converts the
   public TypeScript API into host protocol messages.
-- `examples/exoclaw/harness.ts`: Exoclaw's TypeScript harness module.
+- `examples/exo/harness.ts`: Exo's TypeScript harness module.
 
 ## Core Rust API
 
@@ -261,7 +261,7 @@ and wait handles.
 The executor adds policy on top:
 
 - `ensure_conversation_sandbox()` creates or reuses the conversation sandbox.
-- `ensure_agent_sandbox()` lets Exoclaw share one persistent sandbox across an
+- `ensure_agent_sandbox()` lets Exo share one persistent sandbox across an
   agent by using agent-level sandbox metadata.
 - The scheduler supports `agent`, `conversation`, and `task_fresh` modes.
 
@@ -500,7 +500,7 @@ result contains preview text, truncation metadata, and artifact references.
 
 ## Model Loop Integration
 
-The TypeScript harness API does not directly prescribe a model loop. Exoclaw and
+The TypeScript harness API does not directly prescribe a model loop. Exo and
 the basic TypeScript harness use shared turn-loop helpers to:
 
 1. Materialize prompt messages from configured instructions and conversation
@@ -514,25 +514,25 @@ the basic TypeScript harness use shared turn-loop helpers to:
 The Rust model runtime uses Lingua's universal message and tool abstractions and
 routes requests through `braintrust_llm_router`.
 
-## Exoclaw Integration
+## Exo Integration
 
-`examples/exoclaw/harness.ts` is a TypeScript harness module. It composes the
-generic TypeScript harness API with Exoclaw-specific instructions and tools.
+`examples/exo/harness.ts` is a TypeScript harness module. It composes the
+generic TypeScript harness API with Exo-specific instructions and tools.
 
 On each turn it:
 
 1. Calls `runResponsesHarnessTurn()`.
 2. Adds generic basic harness instructions.
-3. Adds `examples/exoclaw/prompts/me.md`.
-4. Adds an optional local profile prompt from `.exo/exoclaw-profile.md` or
-   `EXOCLAW_LOCAL_PROMPT_FILE`.
+3. Adds `examples/exo/prompts/me.md`.
+4. Adds an optional local profile prompt from `.exo/exo-profile.md` or
+   `EXO_LOCAL_PROMPT_FILE`.
 5. Registers built-in tools.
 6. Registers scheduler tools.
 7. Registers adapter tools.
 8. Registers configured library tool modules.
 9. Registers agent-created tools if enabled.
 
-Exoclaw-specific tools are still executed by the Rust tool runtime. The
+Exo-specific tools are still executed by the Rust tool runtime. The
 TypeScript side mostly provides model-visible schemas and forwards scoped
 arguments such as current agent id and conversation id.
 
@@ -549,7 +549,7 @@ The scheduler tool API is model-facing TypeScript:
 - `delete_scheduled_task`
 
 Those tool handlers call `context.executeTool()` with current agent and
-conversation ids. The Rust `ExoclawToolRuntime` persists scheduled task records
+conversation ids. The Rust `ExoToolRuntime` persists scheduled task records
 outside the core conversation event log.
 
 When a task is due, the scheduler runtime:
@@ -600,9 +600,9 @@ stream turns, inspect events/messages, and manage bindings/secrets. It should
 not need to know whether the underlying storage is `BasicExoHarness` or another
 future implementation.
 
-Exoclaw-specific startup logic lives under `examples/exoclaw`. The root CLI
-still provides generic agent and conversation operations; Exoclaw scripts and
-runner binaries compose those generic operations with Exoclaw scheduler and
+Exo-specific startup logic lives under `examples/exo`. The root CLI
+still provides generic agent and conversation operations; Exo scripts and
+runner binaries compose those generic operations with Exo scheduler and
 adapter services.
 
 ## Storage Implementation
@@ -649,9 +649,9 @@ or expose consistently, such as conversations, events, artifacts, and sandboxes.
 Prefer executor- or product-level extensions when the feature is specific to a
 runtime or application:
 
-- Scheduler tasks live in executor/Exoclaw code because they are a particular
+- Scheduler tasks live in executor/Exo code because they are a particular
   use of sandboxes and wakeups.
-- Adapters live in executor/Exoclaw code because IRC, WhatsApp, and Signal are
+- Adapters live in executor/Exo code because IRC, WhatsApp, and Signal are
   external integration services.
 - Tool definitions live in TypeScript and executor tool runtimes because they
   are model-facing behavior, not storage primitives.

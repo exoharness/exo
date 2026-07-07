@@ -42,12 +42,12 @@ the task scheduler, and conversation wakeups are all live.
 Exo reads several prompt files at runtime. Edit them directly, or ask the
 agent to:
 
-- `examples/exoclaw/prompts/me.md` — the committed core identity and
+- `examples/exo/prompts/me.md` — the committed core identity and
   operating rules of the default agent.
-- `.exo/exoclaw-profile.md` — your local, git-ignored profile (name,
+- `.exo/exo-profile.md` — your local, git-ignored profile (name,
   machine-specific preferences). Recreate it anytime with
   `scripts/exo.sh setup-profile`.
-- `examples/exoclaw/harness.ts` — assembles the full prompt each turn,
+- `examples/exo/harness.ts` — assembles the full prompt each turn,
   including dynamic instructions about tools, adapters, memory, and
   self-maintenance.
 

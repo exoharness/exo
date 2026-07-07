@@ -27,7 +27,7 @@ use executor::{
     Binding, BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig,
     ConversationModelConfig, CreateAgentRequest, CreateConversationRequest, DaytonaBackendSpec,
     E2bBackendSpec, EventKind, EventQuery, EventQueryDirection, ExoHarness,
-    ExoHarnessHttpServeOptions, ExoclawToolRuntime, FileSystemMount, FileSystemMountMode,
+    ExoHarnessHttpServeOptions, ExoToolRuntime, FileSystemMount, FileSystemMountMode,
     ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET, Harness, HarnessAgent,
     HarnessConversation, HttpExoHarness, LocalSandboxExoHarness, PutSecretRequest, RlmHarness,
     SANDBOX_MAIN_MOUNT_DIR, SandboxBackendRegistration, SandboxProvider, SandboxProviderConfig,
@@ -107,7 +107,7 @@ enum HarnessKind {
     Rlm,
     #[value(name = "typescript")]
     TypeScript,
-    Exoclaw,
+    Exo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,7 +164,7 @@ impl FromStr for HarnessSelection {
             "basic" => Ok(Self::Kind(HarnessKind::Basic)),
             "rlm" => Ok(Self::Kind(HarnessKind::Rlm)),
             "typescript" => Ok(Self::Kind(HarnessKind::TypeScript)),
-            "exoclaw" => Ok(Self::Kind(HarnessKind::Exoclaw)),
+            "exo" => Ok(Self::Kind(HarnessKind::Exo)),
             "codex" => Ok(Self::TypeScriptPreset(TypeScriptHarnessPreset::Codex)),
             "claude-code" => Ok(Self::TypeScriptPreset(TypeScriptHarnessPreset::ClaudeCode)),
             "cursor" | "cursor-sdk" => Ok(Self::TypeScriptPreset(TypeScriptHarnessPreset::Cursor)),
@@ -172,7 +172,7 @@ impl FromStr for HarnessSelection {
                 Ok(Self::TypeScriptModule(PathBuf::from(value)))
             }
             _ => Err(format!(
-                "unknown harness `{raw}`; expected basic, rlm, typescript, exoclaw, codex, claude-code, cursor, or a TypeScript module path"
+                "unknown harness `{raw}`; expected basic, rlm, typescript, exo, codex, claude-code, cursor, or a TypeScript module path"
             )),
         }
     }
@@ -1070,9 +1070,9 @@ async fn main() -> Result<()> {
                 } else if let Some(module) = module.as_deref() {
                     if !matches!(
                         config.harness,
-                        AgentHarnessKind::TypeScript | AgentHarnessKind::Exoclaw
+                        AgentHarnessKind::TypeScript | AgentHarnessKind::Exo
                     ) {
-                        bail!("--module is only valid with TypeScript or Exoclaw agents");
+                        bail!("--module is only valid with TypeScript or Exo agents");
                     }
                     let existing_tool_modules = config
                         .typescript
@@ -1102,9 +1102,9 @@ async fn main() -> Result<()> {
                 } else if !tool_modules.is_empty() {
                     if !matches!(
                         config.harness,
-                        AgentHarnessKind::TypeScript | AgentHarnessKind::Exoclaw
+                        AgentHarnessKind::TypeScript | AgentHarnessKind::Exo
                     ) {
-                        bail!("--tool-module is only valid with TypeScript or Exoclaw agents");
+                        bail!("--tool-module is only valid with TypeScript or Exo agents");
                     }
                     let Some(typescript) = config.typescript.as_mut() else {
                         bail!("typescript agents require a module path; pass --module <path>");
@@ -1205,11 +1205,11 @@ async fn main() -> Result<()> {
                 }
                 if matches!(
                     config.harness,
-                    AgentHarnessKind::TypeScript | AgentHarnessKind::Exoclaw
+                    AgentHarnessKind::TypeScript | AgentHarnessKind::Exo
                 ) && config.typescript.is_none()
                 {
                     bail!(
-                        "TypeScript and Exoclaw agents require a module path; pass --module <path>"
+                        "TypeScript and Exo agents require a module path; pass --module <path>"
                     );
                 }
                 agent.put_config(config).await?;
@@ -2118,8 +2118,8 @@ async fn instantiate_harness(
             runtime_config,
             env_vars,
         )),
-        HarnessKind::Exoclaw => Arc::new(
-            TypeScriptHarness::<ExoclawToolRuntime>::exoclaw_from_root(
+        HarnessKind::Exo => Arc::new(
+            TypeScriptHarness::<ExoToolRuntime>::exo_from_root(
                 root,
                 exo_config.clone(),
                 runtime_config,
@@ -2141,7 +2141,7 @@ fn to_agent_harness_kind(kind: HarnessKind) -> AgentHarnessKind {
         HarnessKind::Basic => AgentHarnessKind::Basic,
         HarnessKind::Rlm => AgentHarnessKind::Rlm,
         HarnessKind::TypeScript => AgentHarnessKind::TypeScript,
-        HarnessKind::Exoclaw => AgentHarnessKind::Exoclaw,
+        HarnessKind::Exo => AgentHarnessKind::Exo,
     }
 }
 
@@ -2150,7 +2150,7 @@ fn from_agent_harness_kind(kind: AgentHarnessKind) -> HarnessKind {
         AgentHarnessKind::Basic => HarnessKind::Basic,
         AgentHarnessKind::Rlm => HarnessKind::Rlm,
         AgentHarnessKind::TypeScript => HarnessKind::TypeScript,
-        AgentHarnessKind::Exoclaw => HarnessKind::Exoclaw,
+        AgentHarnessKind::Exo => HarnessKind::Exo,
     }
 }
 
@@ -2159,7 +2159,7 @@ fn format_harness_kind(kind: AgentHarnessKind) -> &'static str {
         AgentHarnessKind::Basic => "basic",
         AgentHarnessKind::Rlm => "rlm",
         AgentHarnessKind::TypeScript => "typescript",
-        AgentHarnessKind::Exoclaw => "exoclaw",
+        AgentHarnessKind::Exo => "exo",
     }
 }
 
@@ -2175,10 +2175,10 @@ fn build_typescript_harness_config(
     let harness_kind = selection
         .map(HarnessSelection::harness_kind)
         .unwrap_or(HarnessKind::Basic);
-    if !matches!(harness_kind, HarnessKind::TypeScript | HarnessKind::Exoclaw)
+    if !matches!(harness_kind, HarnessKind::TypeScript | HarnessKind::Exo)
         && !tool_modules.is_empty()
     {
-        bail!("--tool-module is only valid with --harness typescript or exoclaw");
+        bail!("--tool-module is only valid with --harness typescript or exo");
     }
     match (selection, harness_kind, module) {
         (Some(HarnessSelection::TypeScriptPreset(_)), _, Some(_))
@@ -2197,7 +2197,7 @@ fn build_typescript_harness_config(
                 resolve_typescript_tool_module_paths(tool_modules)?,
             )?))
         }
-        (_, HarnessKind::TypeScript | HarnessKind::Exoclaw, Some(module)) => {
+        (_, HarnessKind::TypeScript | HarnessKind::Exo, Some(module)) => {
             Ok(Some(resolve_typescript_harness_config(
                 module,
                 resolve_typescript_tool_module_paths(tool_modules)?,
@@ -2206,9 +2206,9 @@ fn build_typescript_harness_config(
         (_, HarnessKind::TypeScript, None) => Err(anyhow!(
             "typescript agents require --module <path>, or use --harness codex, --harness claude-code, --harness cursor, or --harness <module.ts>"
         )),
-        (_, HarnessKind::Exoclaw, None) => Err(anyhow!("exoclaw agents require --module <path>")),
+        (_, HarnessKind::Exo, None) => Err(anyhow!("exo agents require --module <path>")),
         (_, _, Some(_)) => Err(anyhow!(
-            "--module is only valid with --harness typescript or exoclaw"
+            "--module is only valid with --harness typescript or exo"
         )),
         (_, _, None) => Ok(None),
     }
@@ -2238,7 +2238,7 @@ async fn ensure_agent_matches_harness_selection(
 
     if matches!(
         selection.harness_kind(),
-        HarnessKind::TypeScript | HarnessKind::Exoclaw
+        HarnessKind::TypeScript | HarnessKind::Exo
     ) && config.typescript.is_none()
     {
         bail!(
@@ -2302,7 +2302,7 @@ fn format_harness_selection(selection: &HarnessSelection) -> String {
             HarnessKind::Basic => "basic".to_string(),
             HarnessKind::Rlm => "rlm".to_string(),
             HarnessKind::TypeScript => "typescript".to_string(),
-            HarnessKind::Exoclaw => "exoclaw".to_string(),
+            HarnessKind::Exo => "exo".to_string(),
         },
         HarnessSelection::TypeScriptPreset(preset) => match preset {
             TypeScriptHarnessPreset::Codex => "codex".to_string(),

@@ -31,7 +31,7 @@ everything:
 2. Asks for your OpenAI API key (stored in a `.env` file with `600`
    permissions, then registered in exo's secret store).
 3. Asks for your name and your agent's name, and writes a local profile at
-   `.exo/exoclaw-profile.md` (git-ignored — machine-specific instructions
+   `.exo/exo-profile.md` (git-ignored — machine-specific instructions
    live here).
 4. Starts the canonical agent: a sandbox (Ubuntu 24.04 in Docker), the task
    scheduler, and the ExoChat adapter.

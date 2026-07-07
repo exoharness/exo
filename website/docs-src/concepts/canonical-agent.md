@@ -7,7 +7,7 @@ description: What setup.sh actually runs — the canonical exo agent, its tools,
 
 The [setup script](../getting-started/installation) launches exo's
 **canonical agent** — a long-running personal agent (its implementation
-lives at `examples/exoclaw/`) that demonstrates the full
+lives at `examples/exo/`) that demonstrates the full
 recursive-self-improvement loop. You can use it without knowing these
 internals, but a basic map helps when you want to guide its evolution.
 

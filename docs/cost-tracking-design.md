@@ -19,7 +19,7 @@ reasoning behind that split.
   including an optional `cost_usd` field, but contains no pricing code and never
   computes, validates, or owns cost. It round-trips bytes.
 - **Usage is agent-reported telemetry, not an attested ledger.** The token counts
-  come from the provider response, which for the TypeScript/exoclaw path is read
+  come from the provider response, which for the TypeScript/exo path is read
   _inside the agent-side harness process_ (the model call is not made by the
   trusted Rust core — there is no model-completion runtime request). So usage is
   self-reported wherever cost is later computed. The implication is that it cannot
@@ -63,7 +63,7 @@ TRUSTED SUBSTRATE                    USERSPACE (agent-side)
 ─────────────────                    ──────────────────────
 exoharness store                     Rust executors (Basic/RLM) ─┐
   • persists UsageRecord verbatim                                 ├─ cost library
-  • raw tokens + model + timing      TS harness / exoclaw ───────┘   (policy)
+  • raw tokens + model + timing      TS harness / exo ───────┘   (policy)
   • cost_usd is just a field;                  │
     NOTHING here computes it                   └─ fills cost_usd when building the
   • no pricing dependency                         messages event (or leaves it null
@@ -89,7 +89,7 @@ its own data loading, and neither depends on the other having run:
   / `--pricing-url`, `EXO_LITELLM_PRICES_*` as env) and injects it. `exoharness`
   does not depend on it.
 - **TypeScript:** a self-contained port (`@exo/model-runtime/cost`) used by the
-  exoclaw harness. It loads its own data through the harness's normal config flow
+  exo harness. It loads its own data through the harness's normal config flow
   — reading `EXO_LITELLM_PRICES_PATH` from its inherited env, then its own cache,
   then its own fetch — and computes cost when building the messages event. It does
   **not** depend on the Rust loader having populated anything.
@@ -149,7 +149,7 @@ rate.
   stay in agreement.
 - Executors: assert the persisted `Messages` event carries the expected cost for
   the Anthropic and inclusive paths, through a Rust executor and through the
-  exoclaw/TS path, so coverage is pinned on both userspaces.
+  exo/TS path, so coverage is pinned on both userspaces.
 - `server_duration_ms` removed; the legacy-no-`usage` backward-compat test stays.
 
 ## Not in Scope (Intentional)

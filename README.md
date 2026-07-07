@@ -127,12 +127,12 @@ While there are many, the most obvious is that right now there isn't a simple wa
 
 There are a number of prompt files that Exo uses during runtime. You can edit these directly or ask Exo to.
 
-- `examples/exoclaw/prompts/me.md`: the committed core identity and operating
+- `examples/exo/prompts/me.md`: the committed core identity and operating
   rules for the default Exo agent.
-- `.exo/exoclaw-profile.md`: local, git-ignored profile instructions such as
+- `.exo/exo-profile.md`: local, git-ignored profile instructions such as
   your name and machine-specific preferences. Create or update it with
   `scripts/exo.sh setup-profile`.
-- `examples/exoclaw/harness.ts`: assembles the full prompt sent each turn,
+- `examples/exo/harness.ts`: assembles the full prompt sent each turn,
   including dynamic instructions about tools, adapters, memory, sandbox behavior,
   and self-maintenance.
 

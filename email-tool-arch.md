@@ -1,6 +1,6 @@
-# Exoclaw Email Adapter Architecture
+# Exo Email Adapter Architecture
 
-This document proposes email as an Exoclaw adapter backed by Resend. Email is
+This document proposes email as an Exo adapter backed by Resend. Email is
 bidirectional and event-driven: inbound messages arrive while the agent is idle,
 and outbound messages should be queued and delivered through a durable external
 integration. That matches the existing adapter model better than a pure
@@ -12,7 +12,7 @@ The main design is:
 Resend inbound webhook
   -> email adapter worker
   -> AdapterStore inbound event
-  -> Exoclaw conversation wakeup
+  -> Exo conversation wakeup
   -> agent decides what to do
   -> send_adapter_message
   -> AdapterStore outbound queue
@@ -20,14 +20,14 @@ Resend inbound webhook
 ```
 
 Optional library tools can still exist later for inbox inspection, but the
-primary integration should be `examples/exoclaw/adapters/email/`.
+primary integration should be `examples/exo/adapters/email/`.
 
 ## Goals
 
-- Add first-party email support using the existing Exoclaw adapter subsystem.
+- Add first-party email support using the existing Exo adapter subsystem.
 - Support inbound email, outbound email, replies, and attachments.
 - Use Resend for outbound delivery and inbound routing/webhooks.
-- Keep email-specific code under `examples/exoclaw/`.
+- Keep email-specific code under `examples/exo/`.
 - Keep secrets and deploy-specific defaults out of Git.
 - Reuse `create_adapter`, `list_adapters`, `disable_adapter`, `delete_adapter`,
   and `send_adapter_message` where possible.
@@ -45,7 +45,7 @@ primary integration should be `examples/exoclaw/adapters/email/`.
 ## Proposed Location
 
 ```text
-examples/exoclaw/adapters/email/
+examples/exo/adapters/email/
   README.md
   setup-prompt.md
   worker.ts
@@ -57,7 +57,7 @@ examples/exoclaw/adapters/email/
 Shared adapter protocol changes, if any, should stay in:
 
 ```text
-examples/exoclaw/adapters/protocol.ts
+examples/exo/adapters/protocol.ts
 crates/executor/src/adapter/
 typescript/harness/adapter-tools.ts
 ```
@@ -99,7 +99,7 @@ Suggested settings:
   "adapterType": "email",
   "settings": {
     "provider": "resend",
-    "from": "Exoclaw <agent@example.com>",
+    "from": "Exo <agent@example.com>",
     "replyTo": "agent@example.com",
     "inbound": {
       "bind": "127.0.0.1:8765",
@@ -217,7 +217,7 @@ For a new email:
 {
   "adapterId": "<email-adapter-id>",
   "target": "person@example.com",
-  "text": "Hello from Exoclaw.",
+  "text": "Hello from Exo.",
   "attachments": []
 }
 ```
@@ -363,7 +363,7 @@ Even with an adapter-first design, a small library tool module may still be
 useful for inspecting stored email:
 
 ```text
-examples/exoclaw/tools/library/email/
+examples/exo/tools/library/email/
   index.ts
   store.ts
 ```
@@ -442,7 +442,7 @@ Email is external and often sensitive. The adapter should be conservative:
 - Require explicit `send_adapter_message` calls for all replies.
 - Record sent email metadata for audit.
 
-The Exoclaw prompt should tell the agent:
+The Exo prompt should tell the agent:
 
 - email messages can wake the conversation
 - it should not auto-reply unless the user or standing instructions make that
@@ -480,18 +480,18 @@ create_adapter({
 })
 ```
 
-The Exoclaw startup script can later add `email` to `--adapters` alongside
+The Exo startup script can later add `email` to `--adapters` alongside
 `irc`, `whatsapp`, and `signal`.
 
 ## File-Level Plan
 
 Phase 1: adapter skeleton.
 
-- Add `examples/exoclaw/adapters/email/README.md`.
-- Add `examples/exoclaw/adapters/email/setup-prompt.md`.
-- Add `examples/exoclaw/adapters/email/worker.ts`.
-- Add `examples/exoclaw/adapters/email/resend.ts`.
-- Add `examples/exoclaw/adapters/email/email-store.ts`.
+- Add `examples/exo/adapters/email/README.md`.
+- Add `examples/exo/adapters/email/setup-prompt.md`.
+- Add `examples/exo/adapters/email/worker.ts`.
+- Add `examples/exo/adapters/email/resend.ts`.
+- Add `examples/exo/adapters/email/email-store.ts`.
 - Update docs to mention `email` as a supported adapter.
 
 Phase 2: inbound receive.
@@ -527,7 +527,7 @@ Phase 5: attachments.
 
 Phase 6: optional helper tools.
 
-- Add `examples/exoclaw/tools/library/email/index.ts` only if needed.
+- Add `examples/exo/tools/library/email/index.ts` only if needed.
 - Implement `list_received_emails` and `read_received_email`.
 - Keep sending through `send_adapter_message`.
 
@@ -537,9 +537,9 @@ Phase 7: verification and docs.
 - Unit test inbound webhook normalization.
 - Unit test email store dedupe.
 - Add worker-level smoke tests where practical.
-- Update `examples/exoclaw/adapter-architecture.md`.
-- Update `examples/exoclaw/README.md`.
-- Update `examples/exoclaw/prompts/me.md`.
+- Update `examples/exo/adapter-architecture.md`.
+- Update `examples/exo/README.md`.
+- Update `examples/exo/prompts/me.md`.
 
 ## Open Questions
 
@@ -557,9 +557,9 @@ Phase 7: verification and docs.
 
 ## Recommendation
 
-Implement email as `examples/exoclaw/adapters/email/`. Treat receiving as the
+Implement email as `examples/exo/adapters/email/`. Treat receiving as the
 primary reason for choosing the adapter abstraction: a Resend webhook worker
-stores inbound email, deduplicates events, and wakes the configured Exoclaw
+stores inbound email, deduplicates events, and wakes the configured Exo
 conversation. Treat sending as the adapter's outbound path through
 `send_adapter_message`, not as a standalone `send_email` tool.
 

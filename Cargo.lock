@@ -2418,7 +2418,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "exoclaw-scheduler-runner"
+name = "exo-scheduler-runner"
 version = "0.1.0"
 dependencies = [
  "anyhow",

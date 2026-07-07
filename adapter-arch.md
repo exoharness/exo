@@ -1,16 +1,16 @@
 # Adapter Architecture
 
-This document is a review map for the Exoclaw adapter changes. It focuses on the minimal architecture: what owns adapter state, what starts workers, how messages move, and which files to inspect.
+This document is a review map for the Exo adapter changes. It focuses on the minimal architecture: what owns adapter state, what starts workers, how messages move, and which files to inspect.
 
 ## What Adapters Are
 
-Adapters are long-running host-managed connections to external services. They let Exoclaw receive messages from outside the REPL and send explicit replies back out.
+Adapters are long-running host-managed connections to external services. They let Exo receive messages from outside the REPL and send explicit replies back out.
 
 The adapter subsystem is intentionally separate from normal tools:
 
 - Tools run during a model turn.
 - Adapters run continuously in a background host process.
-- Adapter events wake a conversation by creating a normal Exoclaw turn.
+- Adapter events wake a conversation by creating a normal Exo turn.
 - Outbound adapter sends are explicit tool calls, not implicit model output.
 
 ## Sources
@@ -19,10 +19,10 @@ Adapter records have a `source` describing where the adapter comes from:
 
 Current sources:
 
-- `built_in`: core Exoclaw adapter. IRC is the only built-in adapter.
-- `library`: reusable adapter shipped with Exoclaw. Signal and WhatsApp are library adapters backed by shipped workers.
+- `built_in`: core Exo adapter. IRC is the only built-in adapter.
+- `library`: reusable adapter shipped with Exo. Signal and WhatsApp are library adapters backed by shipped workers.
 
-All adapters in this PR are worker adapters: supervised processes using JSONL over stdin/stdout. Protocol-specific code should live under `examples/exoclaw/adapters/<adapter>/`, not in the shared Rust runtime.
+All adapters in this PR are worker adapters: supervised processes using JSONL over stdin/stdout. Protocol-specific code should live under `examples/exo/adapters/<adapter>/`, not in the shared Rust runtime.
 
 ## Data Model
 
@@ -60,16 +60,16 @@ Adapter records and event records stay in the store. Larger, conversation-visibl
 
 ## Runtime Ownership
 
-The adapter runner is a host process started by the Exoclaw script:
+The adapter runner is a host process started by the Exo script:
 
 ```text
-examples/exoclaw/scripts/exoclaw-repl
+examples/exo/scripts/exo-repl
 ```
 
 It starts:
 
 ```bash
-exo --harness exoclaw adapters run --watch --limit <N>
+exo --harness exo adapters run --watch --limit <N>
 ```
 
 The CLI entry point is:
@@ -105,7 +105,7 @@ The shared worker protocol is implemented in Rust and mirrored in TypeScript:
 
 ```text
 crates/executor/src/adapter/worker.rs
-examples/exoclaw/adapters/protocol.ts
+examples/exo/adapters/protocol.ts
 ```
 
 Host to worker:
@@ -140,7 +140,7 @@ Workers receive configuration via environment:
 4. `runtime.rs` writes an inbound artifact into the owning conversation.
 5. `runtime.rs` records a store event.
 6. `runtime.rs` calls `send_conversation_wakeup`.
-7. Exoclaw receives a normal user message containing:
+7. Exo receives a normal user message containing:
    - adapter name
    - adapter id
    - target
@@ -182,10 +182,10 @@ Tools:
 - `delete_adapter`
 - `send_adapter_message`
 
-These tools are registered by the Exoclaw harness:
+These tools are registered by the Exo harness:
 
 ```text
-examples/exoclaw/harness.ts
+examples/exo/harness.ts
 ```
 
 Host-side execution is in:
@@ -198,7 +198,7 @@ crates/executor/src/adapter/tools.rs
 The TypeScript layer currently transforms typed user-facing adapter configs into generic worker configs. For example, a Signal config becomes a worker config pointing at:
 
 ```text
-examples/exoclaw/adapters/signal/worker.ts
+examples/exo/adapters/signal/worker.ts
 ```
 
 ## Protocol Workers
@@ -206,7 +206,7 @@ examples/exoclaw/adapters/signal/worker.ts
 Protocol-specific code lives under:
 
 ```text
-examples/exoclaw/adapters/
+examples/exo/adapters/
 ```
 
 Current workers:
@@ -218,12 +218,12 @@ Current workers:
 Each adapter directory also has a local README and setup prompt:
 
 ```text
-examples/exoclaw/adapters/irc/README.md
-examples/exoclaw/adapters/irc/setup-prompt.md
-examples/exoclaw/adapters/whatsapp/README.md
-examples/exoclaw/adapters/whatsapp/setup-prompt.md
-examples/exoclaw/adapters/signal/README.md
-examples/exoclaw/adapters/signal/setup-prompt.md
+examples/exo/adapters/irc/README.md
+examples/exo/adapters/irc/setup-prompt.md
+examples/exo/adapters/whatsapp/README.md
+examples/exo/adapters/whatsapp/setup-prompt.md
+examples/exo/adapters/signal/README.md
+examples/exo/adapters/signal/setup-prompt.md
 ```
 
 ## Lifecycle
@@ -232,8 +232,8 @@ Adapter lifecycle is owned by the host runner, not by the REPL.
 
 Startup:
 
-- `examples/exoclaw/scripts/exoclaw-repl` starts `exo adapters run --watch` unless `--no-adapters` is set.
-- The runner writes `.exo/exoclaw-adapters.pid` and logs to `.exo/exoclaw-adapters.log`.
+- `examples/exo/scripts/exo-repl` starts `exo adapters run --watch` unless `--no-adapters` is set.
+- The runner writes `.exo/exo-adapters.pid` and logs to `.exo/exo-adapters.log`.
 - The runner starts worker processes for enabled, ready adapters.
 
 Restart:
@@ -243,7 +243,7 @@ Restart:
 
 Stopping:
 
-- `stop_adapters` in `examples/exoclaw/scripts/exoclaw-repl` kills the runner and worker processes.
+- `stop_adapters` in `examples/exo/scripts/exo-repl` kills the runner and worker processes.
 - Disabling/deleting adapter records prevents future restarts.
 
 ## Files To Inspect For PR Review
@@ -261,22 +261,22 @@ TypeScript tool surface:
 
 - `typescript/harness/adapter-tools.ts`
 - `typescript/harness/index.test.ts`
-- `examples/exoclaw/harness.ts`
+- `examples/exo/harness.ts`
 
 Protocol-specific workers:
 
-- `examples/exoclaw/adapters/protocol.ts`
-- `examples/exoclaw/adapters/irc/worker.ts`
-- `examples/exoclaw/adapters/whatsapp/worker.ts`
-- `examples/exoclaw/adapters/signal/worker.ts`
+- `examples/exo/adapters/protocol.ts`
+- `examples/exo/adapters/irc/worker.ts`
+- `examples/exo/adapters/whatsapp/worker.ts`
+- `examples/exo/adapters/signal/worker.ts`
 
 Script and docs:
 
-- `examples/exoclaw/scripts/exoclaw-repl`
-- `examples/exoclaw/README.md`
-- `examples/exoclaw/adapter-architecture.md`
-- `examples/exoclaw/adapters/*/README.md`
-- `examples/exoclaw/adapters/*/setup-prompt.md`
+- `examples/exo/scripts/exo-repl`
+- `examples/exo/README.md`
+- `examples/exo/adapter-architecture.md`
+- `examples/exo/adapters/*/README.md`
+- `examples/exo/adapters/*/setup-prompt.md`
 
 ## Minimality Notes
 

@@ -27,7 +27,7 @@ export interface Message {
 
 export interface AgentConfig {
   instructions: Message[];
-  harness: "basic" | "rlm" | "typescript" | "exoclaw";
+  harness: "basic" | "rlm" | "typescript" | "exo";
   typescript?: {
     modulePath: string;
     toolModulePaths: string[];

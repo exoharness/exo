@@ -187,7 +187,7 @@ conversation history — see [Data Model](../concepts/data-model) if you
 want the details on why.)
 
 The same pattern scales to anything derivable: the canonical agent's harness
-([`examples/exoclaw/harness.ts`](https://github.com/ankrgyl/exo/blob/main/examples/exoclaw/harness.ts))
+([`examples/exo/harness.ts`](https://github.com/ankrgyl/exo/blob/main/examples/exo/harness.ts))
 uses it to splice in an identity prompt, a git-ignored local profile file,
 and the agent's persistent memory block each round.
 

@@ -4,7 +4,7 @@
 
 ### Exo source code
 
-In the canonical Exoclaw setup, the running source tree is mounted into the
+In the canonical Exo setup, the running source tree is mounted into the
 agent sandbox at `/workspace/exo`. This lets the agent inspect its own harness,
 prompts, tools, adapters, scheduler, and startup scripts, and propose or make
 changes to them.
@@ -18,7 +18,7 @@ reconstruct what happened across restarts, rebuilds, and experiments.
 
 ### Sandbox
 
-Canonical Exoclaw conversations use a shared agent-scoped sandbox by default.
+Canonical Exo conversations use a shared agent-scoped sandbox by default.
 The agent can run shell commands there, install tools, inspect snapshots, create
 new snapshots, and rewind the sandbox when it needs to back out risky changes.
 
@@ -32,7 +32,7 @@ runners while preserving `.exo` state.
 ### Tools
 
 Tools are functions the model can call during a turn. Core tools expose shell
-access and agent-created tool installation; Exoclaw adds tools for adapters,
+access and agent-created tool installation; Exo adds tools for adapters,
 scheduling, sandbox snapshots, memory, introspection, and guardian maintenance.
 Tool definitions are registered each model round, so the agent sees the current
 tool list as part of the model request.
@@ -54,7 +54,7 @@ result.
 
 ### Memory
 
-Exoclaw includes `remember` and `forget` tools for durable agent memory. Saved
+Exo includes `remember` and `forget` tools for durable agent memory. Saved
 memory is stored outside the sandbox and injected back into future turns across
 conversations.
 
