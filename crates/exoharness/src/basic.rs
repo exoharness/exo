@@ -962,7 +962,7 @@ impl ExoHarness for BasicExoHarness {
         {
             self.inner
                 .storage
-                .delete_prefix(self.slug_marker_path(&record.slug))
+                .delete_key_if_exists(self.slug_marker_path(&record.slug))
                 .await?;
         } else {
             tracing::warn!(

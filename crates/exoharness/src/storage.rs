@@ -107,6 +107,17 @@ impl BasicObjectStore {
         Ok(keys)
     }
 
+    /// Delete the object at exactly `key`, tolerating absence. Unlike
+    /// `delete_prefix`, this works for a single object: `list`-based prefix
+    /// deletion never matches an object at exactly the prefix path.
+    pub(crate) async fn delete_key_if_exists(&self, key: impl AsRef<Path>) -> Result<()> {
+        match self.store.delete(&object_path(key.as_ref())?).await {
+            Ok(()) => Ok(()),
+            Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     pub(crate) async fn delete_prefix(&self, prefix: impl AsRef<Path>) -> Result<()> {
         for key in self.list_keys(prefix).await? {
             self.store.delete(&object_path(Path::new(&key))?).await?;
