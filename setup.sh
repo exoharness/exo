@@ -84,57 +84,98 @@ require_command() {
   fi
 }
 
+source_cargo_env() {
+  if [[ -f "$HOME/.cargo/env" ]]; then
+    # Pick up a rustup-managed toolchain that is not on PATH yet.
+    # shellcheck disable=SC1091
+    . "$HOME/.cargo/env"
+  fi
+}
+
+# git, docker, and (on Linux) a C toolchain must be installed by the system
+# package manager. node, pnpm, and rust are installed by mise after clone,
+# pinned to the versions in mise.toml, when not already present.
 collect_missing_dependencies() {
   MISSING_DEPS=()
+  SYSTEM_MISSING=()
 
-  command -v git >/dev/null 2>&1 ||
+  if ! command -v git >/dev/null 2>&1; then
     MISSING_DEPS+=("git")
+    SYSTEM_MISSING+=("git")
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    MISSING_DEPS+=("docker")
+    SYSTEM_MISSING+=("docker")
+  fi
+  if [[ "$(uname -s)" == "Linux" ]] && ! command -v cc >/dev/null 2>&1; then
+    MISSING_DEPS+=("build-tools")
+    SYSTEM_MISSING+=("build-tools")
+  fi
   command -v node >/dev/null 2>&1 ||
     MISSING_DEPS+=("node")
   command -v pnpm >/dev/null 2>&1 ||
     MISSING_DEPS+=("pnpm")
-  command -v cargo >/dev/null 2>&1 ||
-    MISSING_DEPS+=("cargo")
-  command -v rustc >/dev/null 2>&1 ||
-    MISSING_DEPS+=("rustc")
-  command -v docker >/dev/null 2>&1 ||
-    MISSING_DEPS+=("docker")
+  if ! command -v cargo >/dev/null 2>&1 || ! command -v rustc >/dev/null 2>&1; then
+    MISSING_DEPS+=("rust")
+  fi
+}
+
+print_dependency_status() {
+  local dep
+  echo "Exo uses these dependencies:"
+  for dep in git node pnpm rust docker; do
+    if missing_has "$dep" "${MISSING_DEPS[@]}"; then
+      echo "  - $dep (missing)"
+    else
+      echo "  - $dep (installed)"
+    fi
+  done
+  if missing_has build-tools "${MISSING_DEPS[@]}"; then
+    echo "  - C build tools (missing)"
+  fi
+}
+
+mise_available() {
+  command -v mise >/dev/null 2>&1 || [[ -x "$HOME/.local/bin/mise" ]]
 }
 
 check_dependencies() {
-  if [[ -f "$HOME/.cargo/env" ]]; then
-    # A previous run (or manual rustup install) may not be on PATH yet.
-    # shellcheck disable=SC1091
-    . "$HOME/.cargo/env"
-  fi
+  source_cargo_env
   collect_missing_dependencies
   if ((${#MISSING_DEPS[@]} == 0)); then
     return
   fi
-
-  echo "Missing required dependencies:" >&2
-  local item
-  for item in "${MISSING_DEPS[@]}"; do
-    echo "  - $item" >&2
-  done
-
-  if can_auto_install_dependencies && should_auto_install_dependencies; then
-    install_missing_dependencies "${MISSING_DEPS[@]}"
-    hash -r
-    collect_missing_dependencies
-    if ((${#MISSING_DEPS[@]} == 0)); then
-      echo "All dependencies are installed."
-      maybe_reexec_for_docker_group
-      return
-    fi
-    echo "Still missing after the install flow:" >&2
-    for item in "${MISSING_DEPS[@]}"; do
-      echo "  - $item" >&2
-    done
+  if ((${#SYSTEM_MISSING[@]} == 0)) && mise_available; then
+    # Only the mise-managed toolchains are missing; no prompt needed.
+    echo "node, pnpm, and rust will be installed with mise once the repository is in place."
+    return
   fi
 
-  print_dependency_install_help "${MISSING_DEPS[@]}"
-  exit 1
+  echo
+  print_dependency_status
+
+  local mode
+  mode="$(choose_dependency_install_mode)"
+  if [[ "$mode" == "manual" ]]; then
+    print_dependency_install_help "${MISSING_DEPS[@]}"
+    exit 1
+  fi
+
+  if ((${#SYSTEM_MISSING[@]} > 0)); then
+    install_missing_dependencies "${SYSTEM_MISSING[@]}"
+    hash -r
+  fi
+  collect_missing_dependencies
+  if ((${#SYSTEM_MISSING[@]} > 0)); then
+    echo "Still missing after the install flow: ${SYSTEM_MISSING[*]}" >&2
+    print_dependency_install_help "${MISSING_DEPS[@]}"
+    exit 1
+  fi
+  if missing_has node "${MISSING_DEPS[@]}" || missing_has pnpm "${MISSING_DEPS[@]}" ||
+    missing_has rust "${MISSING_DEPS[@]}"; then
+    echo "node, pnpm, and rust will be installed with mise once the repository is in place."
+  fi
+  maybe_reexec_for_docker_group
 }
 
 can_auto_install_dependencies() {
@@ -145,14 +186,27 @@ can_auto_install_dependencies() {
   esac
 }
 
-should_auto_install_dependencies() {
-  if [[ "$INSTALL_DEPS" == true ]]; then
-    return 0
+choose_dependency_install_mode() {
+  if [[ "$INSTALL_DEPS" == true ]] && can_auto_install_dependencies; then
+    printf '%s' auto
+    return
   fi
-  if [[ ! -t 0 ]]; then
-    return 1
+  if [[ ! -t 0 ]] || ! can_auto_install_dependencies; then
+    printf '%s' manual
+    return
   fi
-  prompt_yes_no "Install the missing dependencies now?" y
+  echo "How should the missing dependencies be installed?" >&2
+  echo "1) Automatically (recommended): the system package manager installs git and Docker; mise (https://mise.jdx.dev) installs pinned node, pnpm, and rust" >&2
+  echo "2) Manually: print the install commands for each and exit" >&2
+  local choice
+  while true; do
+    read -r -p "Install mode [1-2, default 1]: " choice
+    case "${choice:-1}" in
+      1) printf '%s' auto; return ;;
+      2) printf '%s' manual; return ;;
+      *) echo "Please choose 1 or 2." >&2 ;;
+    esac
+  done
 }
 
 sudo_run() {
@@ -180,26 +234,10 @@ install_missing_dependencies_linux() {
   if missing_has git "$@"; then
     apt_packages+=("git")
   fi
-  if missing_has cargo "$@" || missing_has rustc "$@"; then
+  if missing_has build-tools "$@"; then
     apt_packages+=("build-essential" "pkg-config" "libssl-dev")
   fi
   sudo_run apt-get install -y "${apt_packages[@]}"
-  if missing_has node "$@"; then
-    info "Installing Node.js 22 (NodeSource)"
-    curl -fsSL https://deb.nodesource.com/setup_22.x | sudo_run bash -
-    sudo_run apt-get install -y nodejs
-  fi
-  if missing_has pnpm "$@"; then
-    info "Enabling pnpm"
-    if command -v corepack >/dev/null 2>&1; then
-      sudo_run env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack enable pnpm
-    else
-      sudo_run npm install -g pnpm
-    fi
-  fi
-  if missing_has cargo "$@" || missing_has rustc "$@"; then
-    install_rustup
-  fi
   if missing_has docker "$@"; then
     info "Installing Docker Engine (get.docker.com)"
     curl -fsSL https://get.docker.com | sudo_run sh
@@ -223,22 +261,9 @@ install_missing_dependencies_macos() {
     command -v brew >/dev/null 2>&1 ||
       die "Homebrew install did not complete; install it manually and rerun."
   fi
-  local brew_packages=()
   if missing_has git "$@"; then
-    brew_packages+=("git")
-  fi
-  if missing_has node "$@"; then
-    brew_packages+=("node")
-  fi
-  if missing_has pnpm "$@"; then
-    brew_packages+=("pnpm")
-  fi
-  if ((${#brew_packages[@]} > 0)); then
-    info "Installing ${brew_packages[*]} with Homebrew"
-    brew install "${brew_packages[@]}"
-  fi
-  if missing_has cargo "$@" || missing_has rustc "$@"; then
-    install_rustup
+    info "Installing git with Homebrew"
+    brew install git
   fi
   if missing_has docker "$@"; then
     info "Installing Docker Desktop"
@@ -247,14 +272,31 @@ install_missing_dependencies_macos() {
   fi
 }
 
-install_rustup() {
-  info "Installing Rust (rustup)"
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-  if [[ -f "$HOME/.cargo/env" ]]; then
-    # shellcheck disable=SC1091
-    . "$HOME/.cargo/env"
+ensure_toolchains() {
+  source_cargo_env
+  if ! command -v mise >/dev/null 2>&1 && [[ -x "$HOME/.local/bin/mise" ]]; then
+    # mise was installed manually but is not on PATH yet.
+    export PATH="$HOME/.local/bin:$PATH"
   fi
-  echo "Ignore rustup's restart-your-shell note: cargo is already available to this setup, and new shells pick it up automatically."
+  if command -v node >/dev/null 2>&1 && command -v pnpm >/dev/null 2>&1 &&
+    command -v cargo >/dev/null 2>&1 && command -v rustc >/dev/null 2>&1; then
+    return
+  fi
+  info "Installing node, pnpm, and rust with mise (versions pinned in mise.toml)"
+  if ! command -v mise >/dev/null 2>&1; then
+    curl -fsSL https://mise.run | sh
+    export PATH="$HOME/.local/bin:$PATH"
+    command -v mise >/dev/null 2>&1 ||
+      die "mise install failed; see https://mise.jdx.dev/getting-started.html"
+  fi
+  mise trust mise.toml
+  mise install
+  eval "$(mise activate bash --shims)"
+  local tool
+  for tool in node pnpm cargo rustc; do
+    command -v "$tool" >/dev/null 2>&1 ||
+      die "$tool is still unavailable after mise install"
+  done
 }
 
 maybe_reexec_for_docker_group() {
@@ -276,7 +318,7 @@ maybe_reexec_for_docker_group() {
 
 print_dependency_install_help() {
   echo >&2
-  echo "Install the missing dependencies, then rerun this setup script." >&2
+  echo "Manual install steps for the missing dependencies:" >&2
   case "$(uname -s)" in
     Darwin)
       print_macos_dependency_install_help "$@"
@@ -288,6 +330,20 @@ print_dependency_install_help() {
       print_generic_dependency_install_help "$@"
       ;;
   esac
+  print_toolchain_install_help "$@"
+  echo >&2
+  echo "Final step: rerun this script (bash setup.sh) and it will pick up from here." >&2
+}
+
+print_toolchain_install_help() {
+  if ! missing_has node "$@" && ! missing_has pnpm "$@" && ! missing_has rust "$@"; then
+    return
+  fi
+  echo >&2
+  echo "node, pnpm, rust — install mise, and setup will install the pinned versions on rerun:" >&2
+  echo "  curl -fsSL https://mise.run | sh" >&2
+  echo '  export PATH="$HOME/.local/bin:$PATH"' >&2
+  echo "  # or install node 22+, pnpm, and rustup yourself if you prefer" >&2
 }
 
 print_macos_dependency_install_help() {
@@ -299,19 +355,6 @@ print_macos_dependency_install_help() {
   fi
   if missing_has git "$@"; then
     echo "  xcode-select --install  # includes Git, if Apple developer tools are missing" >&2
-  fi
-  local brew_packages=()
-  if missing_has node "$@"; then
-    brew_packages+=("node")
-  fi
-  if missing_has pnpm "$@"; then
-    brew_packages+=("pnpm")
-  fi
-  if missing_has cargo "$@" || missing_has rustc "$@"; then
-    echo '  curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y' >&2
-  fi
-  if ((${#brew_packages[@]} > 0)); then
-    echo "  brew install ${brew_packages[*]}" >&2
   fi
   if missing_has docker "$@"; then
     echo "  brew install --cask docker" >&2
@@ -328,22 +371,11 @@ print_linux_dependency_install_help() {
   if missing_has git "$@"; then
     apt_packages+=("git")
   fi
-  if missing_has node "$@"; then
-    echo "  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -" >&2
-    apt_packages+=("nodejs")
-  fi
-  if missing_has cargo "$@" || missing_has rustc "$@"; then
-    apt_packages+=("curl" "build-essential" "pkg-config" "libssl-dev")
+  if missing_has build-tools "$@"; then
+    apt_packages+=("build-essential" "pkg-config" "libssl-dev")
   fi
   if ((${#apt_packages[@]} > 0)); then
     echo "  sudo apt-get install -y ${apt_packages[*]}" >&2
-  fi
-  if missing_has pnpm "$@"; then
-    echo "  corepack enable pnpm" >&2
-  fi
-  if missing_has cargo "$@" || missing_has rustc "$@"; then
-    echo '  curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y' >&2
-    echo '  source "$HOME/.cargo/env"' >&2
   fi
   if missing_has docker "$@"; then
     echo "  # Install Docker Engine for your distro, then start it:" >&2
@@ -353,11 +385,8 @@ print_linux_dependency_install_help() {
 
 print_generic_dependency_install_help() {
   echo >&2
-  echo "Install Git, Node.js 22+, pnpm, Rust via rustup, and Docker Desktop/Engine." >&2
+  echo "Install Git and Docker Desktop/Engine (node, pnpm, and rust are handled by mise during setup)." >&2
   echo "  Git: https://git-scm.com/downloads" >&2
-  echo "  Node.js: https://nodejs.org/" >&2
-  echo "  pnpm: https://pnpm.io/installation" >&2
-  echo "  Rust: https://rustup.rs/" >&2
   echo "  Docker: https://www.docker.com/products/docker-desktop/" >&2
 }
 
@@ -724,6 +753,7 @@ main() {
   clone_or_reuse_repo "$install_dir"
   cd "$install_dir"
   trust_mise_config "$install_dir/mise.toml"
+  ensure_toolchains
 
   local env_file="$install_dir/.env"
   if [[ ! -f "$env_file" && -f "$install_dir/.env.example" ]]; then

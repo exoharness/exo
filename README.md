@@ -56,7 +56,9 @@ curl -fsSL https://raw.githubusercontent.com/ankrgyl/exo/main/setup.sh -o setup.
 bash setup.sh
 ```
 
-_Note that Exo requires git, cargo, pnpm, and Docker_
+_Note that Exo requires git and Docker. The setup script offers to install
+them if missing, and installs pinned node, pnpm, and rust toolchains
+automatically via [mise](https://mise.jdx.dev)._
 
 It'll ask for the API key and your name and your agent's name. Once you enter
 these, the setup will start the agent. It will also print an URL of the form.
