@@ -105,6 +105,21 @@ for await (const line of input) {
   }
 }
 
+let reconnectDelayMs = 1000;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleReconnect(): void {
+  if (reconnectTimer) {
+    return;
+  }
+  const delay = reconnectDelayMs;
+  reconnectDelayMs = Math.min(reconnectDelayMs * 2, 30_000);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    void connect().catch(() => scheduleReconnect());
+  }, delay);
+}
+
 async function connect(): Promise<void> {
   const wsUrl = new URL(`/chat/ws/${session.channelId}`, baseUrl);
   wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
@@ -122,13 +137,16 @@ async function connect(): Promise<void> {
       type: "disconnected",
       reason: event.reason || String(event.code),
     });
-    process.exit(1);
+    // The relay drops idle connections; reconnect in-process instead of
+    // exiting so the runner does not restart us (and reprint the chat URL).
+    scheduleReconnect();
   });
   socket.addEventListener("error", () => {
     writeWorkerEvent({ type: "error", message: "ExoChat WebSocket error" });
   });
 
   await waitForOpen(socket);
+  reconnectDelayMs = 1000;
   writeWorkerEvent({
     type: "connected",
     subject: session.channelId,
