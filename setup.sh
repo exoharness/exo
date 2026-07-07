@@ -102,6 +102,11 @@ collect_missing_dependencies() {
 }
 
 check_dependencies() {
+  if [[ -f "$HOME/.cargo/env" ]]; then
+    # A previous run (or manual rustup install) may not be on PATH yet.
+    # shellcheck disable=SC1091
+    . "$HOME/.cargo/env"
+  fi
   collect_missing_dependencies
   if ((${#MISSING_DEPS[@]} == 0)); then
     return
@@ -249,6 +254,7 @@ install_rustup() {
     # shellcheck disable=SC1091
     . "$HOME/.cargo/env"
   fi
+  echo "Ignore rustup's restart-your-shell note: cargo is already available to this setup, and new shells pick it up automatically."
 }
 
 maybe_reexec_for_docker_group() {
@@ -587,7 +593,34 @@ choose_install_dir() {
     printf '%s' "$PWD"
     return
   fi
-  printf '%s' "$INSTALL_DIR"
+  if [[ -n "${EXO_INSTALL_DIR:-}" ]]; then
+    printf '%s' "$INSTALL_DIR"
+    return
+  fi
+  if [[ "$FORCE_INSTALL" == true ]] || directory_can_receive_checkout "$PWD"; then
+    printf '%s' "$PWD"
+    return
+  fi
+  if [[ ! -t 0 ]]; then
+    printf '%s' "$PWD"
+    return
+  fi
+  echo "The current directory ($PWD) is not empty, so Exo needs its own directory." >&2
+  local dir
+  while true; do
+    dir="$(prompt_text "Where should Exo be installed?" "$PWD/exo")"
+    dir="${dir/#\~\//$HOME/}"
+    if is_exo_checkout "$dir"; then
+      echo "Using existing Exo checkout: $dir" >&2
+      printf '%s' "$dir"
+      return
+    fi
+    if [[ ! -e "$dir" ]] || directory_can_receive_checkout "$dir"; then
+      printf '%s' "$dir"
+      return
+    fi
+    echo "$dir already exists and is not empty; choose another directory." >&2
+  done
 }
 
 directory_can_receive_checkout() {
