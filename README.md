@@ -1,4 +1,15 @@
+<div align="center">
+  <img src="docs/images/exo_logo.png" alt="exo logo" width="160" />
+
 # exo
+
+[![CI](https://github.com/ankrgyl/exo/actions/workflows/ci.yml/badge.svg)](https://github.com/ankrgyl/exo/actions/workflows/ci.yml)
+[![Integration tests](https://github.com/ankrgyl/exo/actions/workflows/integration.yml/badge.svg)](https://github.com/ankrgyl/exo/actions/workflows/integration.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg?logo=rust)](Cargo.toml)
+[![TypeScript](https://img.shields.io/badge/typescript-5.x-3178c6.svg?logo=typescript&logoColor=white)](tsconfig.json)
+
+</div>
 
 Exo is a systems approach to recursive self improvement. In short, it's a
 complete agent harnes that has support for tools, tasks, integrations (e.g.
