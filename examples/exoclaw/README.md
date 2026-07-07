@@ -22,7 +22,7 @@ cp .env.example .env   # then fill in OPENAI_API_KEY
 2. Tell Exoclaw who you are (optional but recommended):
 
 ```bash
-scripts/exo.sh setup-profile
+./exo.sh setup-profile
 ```
 
 This interactively asks for your name and any local instructions, and writes
@@ -33,7 +33,7 @@ reply. You can rerun this or edit the file directly at any time.
 3. Build and start everything with one command (run from the repo root):
 
 ```bash
-scripts/exo.sh fresh --canonical
+./exo.sh fresh
 ```
 
 This builds the `exo` binary, creates the agent and a `dev` conversation, pulls
@@ -42,10 +42,10 @@ scheduler and adapter runner, sets up the ExoChat adapter, prints a browser
 chat URL using the hosted control plane at `https://exoharness.ai`, and drops
 you into a REPL.
 
-For developer testing with IRC and Discord instead, use `canonical-dev`:
+For developer testing with IRC and Discord instead, use the `dev` template:
 
 ```bash
-scripts/exo.sh fresh --canonical-dev
+./exo.sh fresh --template dev
 ```
 
 4. Chat with Exoclaw in the REPL:
@@ -74,9 +74,9 @@ Notes:
 
 - `fresh` deletes existing agents, conversations, and adapters first. For
   day-to-day restarts that keep state, drop `fresh`:
-  `scripts/exo.sh canonical`
-- For a minimal start without adapter setup:
-  `scripts/exo.sh --pull-sandbox`
+  `./exo.sh`
+- For a minimal start without Docker defaults or adapter setup:
+  `./exo.sh --template minimal --pull-sandbox`
 
 ## Setting up Discord
 
@@ -99,14 +99,14 @@ path is:
 5. Create or confirm the adapter:
 
    ```bash
-   scripts/exo.sh --setup discord
+   ./exo.sh --setup discord
    ```
 
    If you are starting from scratch for adapter development, you can include
    Discord in the developer canonical setup:
 
    ```bash
-   scripts/exo.sh fresh --canonical-dev
+   ./exo.sh fresh --template dev
    ```
 
 6. Copy a Discord channel id for testing. In Discord, enable **User Settings** >
@@ -167,7 +167,7 @@ examples/exoclaw/scripts/exoclaw-service-guardian configure --sandbox-backend do
 ```
 
 The service guardian manages only the scheduler and adapter runners. Start or
-reconnect an interactive REPL with `scripts/exo.sh`.
+reconnect an interactive REPL with `./exo.sh`.
 
 Exoclaw can call the same host-side surface through the `guardian_action` tool.
 That tool exposes only allowlisted actions such as `status`, `build`,
@@ -176,7 +176,7 @@ Restart actions are handed off to a detached guardian process after a short
 delay so the current agent turn can finish before services stop. Detached
 restart output is written to `.exo/exoclaw-service-guardian-actions.log`.
 
-When `scripts/exo.sh --control` is running, it also acts
+When `./exo.sh --control` is running, it also acts
 as the foreground REPL supervisor. Guardian builds write
 `.exo/exo-control.restart`; the control wrapper sees that marker, restarts only
 the child `exo repl`, and keeps your terminal open.
@@ -192,7 +192,7 @@ it as an additional developer prompt when it exists, and `.exo` is ignored by
 git. To create it interactively:
 
 ```bash
-scripts/exo.sh setup-profile
+./exo.sh setup-profile
 ```
 
 The script asks for the user's name and any extra local instructions. To use a
@@ -251,33 +251,33 @@ Adapters are host-owned long-running runtimes for external applications. They
 are intentionally separate from scheduled sandbox commands: adapters own sockets,
 reconnect behavior, inbound message parsing, event history, and conversation
 wake-ups. Agents configure adapters with tools, and the local adapter runner
-started by `scripts/exo.sh` keeps them connected.
+started by `./exo.sh` keeps them connected.
 
 Exoclaw ships with ExoChat, IRC, WhatsApp, Signal, Discord, and agent-cli adapters
-(see `adapters/agent-cli/README.md` for the shell CLI). The canonical local
+(see `adapters/agent-cli/README.md` for the shell CLI). The default canonical
 setup turns on ExoChat:
 
 ```bash
-scripts/exo.sh canonical
+./exo.sh
 ```
 
 For developer testing with IRC and Discord, use:
 
 ```bash
-scripts/exo.sh canonical-dev
+./exo.sh --template dev
 ```
 
 To send every setup prompt before opening the REPL:
 
 ```bash
-scripts/exo.sh --setup-all
+./exo.sh --setup-all
 ```
 
 For a fresh control agent with a local profile prompt and all adapters:
 
 ```bash
 PATH="/opt/homebrew/opt/openjdk/bin:$PATH" \
-  scripts/exo.sh fresh \
+  ./exo.sh fresh \
   --agent exoclaw-agent \
   --agent-name "Exoclaw" \
   --conversation dev \
@@ -343,13 +343,13 @@ the cli. The following command will create a REPL with the agent and a
 persistent sandbox that will be durable across conversations
 
 ```bash
-scripts/exo.sh --pull-sandbox
+./exo.sh --pull-sandbox
 ```
 
 If you want a conversation to have its own sandbox, use `sandboxScope: "conversation"`:
 
 ```bash
-scripts/exo.sh --conversation isolated-dev --sandbox-scope conversation
+./exo.sh --conversation isolated-dev --sandbox-scope conversation
 exo --harness exoclaw conversation update exoclaw-agent isolated-dev --sandbox-scope conversation
 ```
 
