@@ -52,7 +52,7 @@ To use Exo as an agent, you'll need an OpenAI or OpenRouter API key. If you
 have that, simply do the following:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/ankrgyl/exo/main/public/setup.sh -o setup.sh
+curl -fsSL https://raw.githubusercontent.com/ankrgyl/exo/main/setup.sh -o setup.sh
 bash setup.sh
 ```
 

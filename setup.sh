@@ -10,6 +10,9 @@ MODEL_PROVIDER="${EXO_MODEL_PROVIDER:-}"
 AGENT_NAME="${EXO_AGENT_NAME:-Exo}"
 USER_NAME="${EXO_USER_NAME:-}"
 FORCE_INSTALL="${EXO_SETUP_FORCE:-false}"
+INSTALL_DEPS="${EXO_SETUP_INSTALL_DEPS:-false}"
+DOCKER_GROUP_ADDED=false
+SETUP_ARGS=()
 DEFAULT_EXO_CHAT_BASE_URL="https://exoharness.ai"
 DEFAULT_OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
 DEFAULT_OPENROUTER_MODEL="z-ai/glm-5.2"
@@ -35,13 +38,14 @@ Options:
   --repo-ref <ref>      Git ref to clone; alias for --branch
   --force               Back up existing files and install into a non-empty
                         directory; refuses to run directly in $HOME or /
+  --install-deps        Install missing dependencies without prompting
   --help                Show this help
 
 Environment overrides:
   EXO_REPO_URL, EXO_REPO_REF, EXO_INSTALL_DIR, EXO_MODEL_PROVIDER, EXO_MODEL,
   EXO_UPSTREAM_MODEL, EXO_AGENT_NAME, EXO_USER_NAME, EXO_CHAT_BASE_URL,
-  EXO_LOCAL_PROMPT_FILE, EXO_SETUP_FORCE, OPENAI_API_KEY,
-  OPENROUTER_API_KEY
+  EXO_LOCAL_PROMPT_FILE, EXO_SETUP_FORCE, EXO_SETUP_INSTALL_DEPS,
+  OPENAI_API_KEY, OPENROUTER_API_KEY
 EOF
 }
 
@@ -55,6 +59,10 @@ parse_args() {
         ;;
       --force)
         FORCE_INSTALL=true
+        shift
+        ;;
+      --install-deps)
+        INSTALL_DEPS=true
         shift
         ;;
       --help|-h)
@@ -76,31 +84,188 @@ require_command() {
   fi
 }
 
-check_dependencies() {
-  local missing=()
+collect_missing_dependencies() {
+  MISSING_DEPS=()
 
   command -v git >/dev/null 2>&1 ||
-    missing+=("git")
+    MISSING_DEPS+=("git")
   command -v node >/dev/null 2>&1 ||
-    missing+=("node")
+    MISSING_DEPS+=("node")
   command -v pnpm >/dev/null 2>&1 ||
-    missing+=("pnpm")
+    MISSING_DEPS+=("pnpm")
   command -v cargo >/dev/null 2>&1 ||
-    missing+=("cargo")
+    MISSING_DEPS+=("cargo")
   command -v rustc >/dev/null 2>&1 ||
-    missing+=("rustc")
+    MISSING_DEPS+=("rustc")
   command -v docker >/dev/null 2>&1 ||
-    missing+=("docker")
+    MISSING_DEPS+=("docker")
+}
 
-  if ((${#missing[@]} > 0)); then
-    echo "Missing required dependencies:" >&2
-    local item
-    for item in "${missing[@]}"; do
+check_dependencies() {
+  collect_missing_dependencies
+  if ((${#MISSING_DEPS[@]} == 0)); then
+    return
+  fi
+
+  echo "Missing required dependencies:" >&2
+  local item
+  for item in "${MISSING_DEPS[@]}"; do
+    echo "  - $item" >&2
+  done
+
+  if can_auto_install_dependencies && should_auto_install_dependencies; then
+    install_missing_dependencies "${MISSING_DEPS[@]}"
+    hash -r
+    collect_missing_dependencies
+    if ((${#MISSING_DEPS[@]} == 0)); then
+      echo "All dependencies are installed."
+      maybe_reexec_for_docker_group
+      return
+    fi
+    echo "Still missing after the install flow:" >&2
+    for item in "${MISSING_DEPS[@]}"; do
       echo "  - $item" >&2
     done
-    print_dependency_install_help "${missing[@]}"
-    exit 1
   fi
+
+  print_dependency_install_help "${MISSING_DEPS[@]}"
+  exit 1
+}
+
+can_auto_install_dependencies() {
+  case "$(uname -s)" in
+    Darwin) return 0 ;;
+    Linux) command -v apt-get >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+
+should_auto_install_dependencies() {
+  if [[ "$INSTALL_DEPS" == true ]]; then
+    return 0
+  fi
+  if [[ ! -t 0 ]]; then
+    return 1
+  fi
+  prompt_yes_no "Install the missing dependencies now?" y
+}
+
+sudo_run() {
+  if [[ "$(id -u)" == "0" ]]; then
+    "$@"
+  else
+    command -v sudo >/dev/null 2>&1 ||
+      die "sudo is required to install dependencies automatically. Install them manually and rerun."
+    sudo "$@"
+  fi
+}
+
+install_missing_dependencies() {
+  case "$(uname -s)" in
+    Darwin) install_missing_dependencies_macos "$@" ;;
+    Linux) install_missing_dependencies_linux "$@" ;;
+    *) die "automatic dependency install is not supported on this platform" ;;
+  esac
+}
+
+install_missing_dependencies_linux() {
+  info "Installing dependencies with apt-get"
+  sudo_run apt-get update
+  local apt_packages=("curl" "ca-certificates")
+  if missing_has git "$@"; then
+    apt_packages+=("git")
+  fi
+  if missing_has cargo "$@" || missing_has rustc "$@"; then
+    apt_packages+=("build-essential" "pkg-config" "libssl-dev")
+  fi
+  sudo_run apt-get install -y "${apt_packages[@]}"
+  if missing_has node "$@"; then
+    info "Installing Node.js 22 (NodeSource)"
+    curl -fsSL https://deb.nodesource.com/setup_22.x | sudo_run bash -
+    sudo_run apt-get install -y nodejs
+  fi
+  if missing_has pnpm "$@"; then
+    info "Enabling pnpm"
+    if command -v corepack >/dev/null 2>&1; then
+      sudo_run env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack enable pnpm
+    else
+      sudo_run npm install -g pnpm
+    fi
+  fi
+  if missing_has cargo "$@" || missing_has rustc "$@"; then
+    install_rustup
+  fi
+  if missing_has docker "$@"; then
+    info "Installing Docker Engine (get.docker.com)"
+    curl -fsSL https://get.docker.com | sudo_run sh
+    sudo_run systemctl enable --now docker 2>/dev/null || true
+    if [[ "$(id -u)" != "0" ]]; then
+      sudo_run usermod -aG docker "$USER"
+      DOCKER_GROUP_ADDED=true
+    fi
+  fi
+}
+
+install_missing_dependencies_macos() {
+  if ! command -v brew >/dev/null 2>&1; then
+    info "Installing Homebrew"
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    if [[ -x /opt/homebrew/bin/brew ]]; then
+      eval "$(/opt/homebrew/bin/brew shellenv)"
+    elif [[ -x /usr/local/bin/brew ]]; then
+      eval "$(/usr/local/bin/brew shellenv)"
+    fi
+    command -v brew >/dev/null 2>&1 ||
+      die "Homebrew install did not complete; install it manually and rerun."
+  fi
+  local brew_packages=()
+  if missing_has git "$@"; then
+    brew_packages+=("git")
+  fi
+  if missing_has node "$@"; then
+    brew_packages+=("node")
+  fi
+  if missing_has pnpm "$@"; then
+    brew_packages+=("pnpm")
+  fi
+  if ((${#brew_packages[@]} > 0)); then
+    info "Installing ${brew_packages[*]} with Homebrew"
+    brew install "${brew_packages[@]}"
+  fi
+  if missing_has cargo "$@" || missing_has rustc "$@"; then
+    install_rustup
+  fi
+  if missing_has docker "$@"; then
+    info "Installing Docker Desktop"
+    brew install --cask docker
+    open -a Docker || true
+  fi
+}
+
+install_rustup() {
+  info "Installing Rust (rustup)"
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+  if [[ -f "$HOME/.cargo/env" ]]; then
+    # shellcheck disable=SC1091
+    . "$HOME/.cargo/env"
+  fi
+}
+
+maybe_reexec_for_docker_group() {
+  if [[ "$DOCKER_GROUP_ADDED" != true ]]; then
+    return
+  fi
+  if docker info >/dev/null 2>&1; then
+    return
+  fi
+  # Group membership from usermod does not apply to the current shell.
+  if command -v sg >/dev/null 2>&1; then
+    echo "Re-running setup with the docker group applied..."
+    exec sg docker -c "EXO_SETUP_INSTALL_DEPS=true bash '$0' ${SETUP_ARGS[*]:-}"
+  fi
+  echo "You were added to the docker group, but it requires a new login session." >&2
+  echo "Log out and back in (or run: newgrp docker), then rerun this script." >&2
+  exit 1
 }
 
 print_dependency_install_help() {
@@ -510,6 +675,7 @@ clone_or_reuse_repo() {
 }
 
 main() {
+  SETUP_ARGS=("$@")
   parse_args "$@"
 
   echo "Exo canonical setup"
