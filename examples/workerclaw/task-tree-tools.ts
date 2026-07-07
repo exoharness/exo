@@ -1,28 +1,19 @@
 import { randomUUID } from "node:crypto";
 
 import type {
-  ArtifactVersion,
   HarnessToolRegistry,
   JsonObject,
   JsonValue,
   ToolDefinition,
   ToolInstance,
   ToolResult,
-  TurnContext,
 } from "@exo/harness";
 
-const TASK_TREE_ARTIFACT_PATH = "task-tree.json";
-
-type TreeSnapshot = {
-  rootRef: string;
-  expectedDeliverables?: Array<{
-    type: string;
-    description: string;
-    quantity: number;
-  }>;
-  nodes: Record<string, JsonObject>;
-  updatedAt: string;
-};
+import {
+  loadOrCreateTaskTreeSnapshot,
+  type TaskTreeSnapshot,
+  writeTaskTreeSnapshot,
+} from "./task-tree-snapshot.js";
 
 type BridgeEventPayload = {
   ok: true;
@@ -93,7 +84,7 @@ function taskTreeInitTool(): ToolInstance {
     mutateSnapshot(args, snapshot) {
       snapshot.rootRef = stringField(args, "rootRef");
       snapshot.expectedDeliverables =
-        (args.expectedDeliverables as TreeSnapshot["expectedDeliverables"]) ??
+        (args.expectedDeliverables as TaskTreeSnapshot["expectedDeliverables"]) ??
         undefined;
       for (const raw of args.nodes as JsonObject[]) {
         const nodeRef = stringField(raw, "nodeRef");
@@ -239,33 +230,87 @@ function reportDeliverableTool(): ToolInstance {
 }
 
 function completeTaskTool(): ToolInstance {
-  return localTool({
-    name: "complete_task",
-    description:
-      "Signal that the entire task is finished. Call once all work and verification are done.",
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        summary: {
-          type: "string",
-          description: "Brief summary of what was accomplished.",
+  return {
+    source: "built_in",
+    definition: {
+      name: "complete_task",
+      description:
+        "Signal that the entire task is finished. Call only after every TODO leaf is completed and client deliverables are reported via report_deliverable. " +
+        "Do NOT call with status failed for recoverable errors (bad tool args, missing npm packages, compile retries) — fix them with e2b_run_command or executeCommand first.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          summary: {
+            type: "string",
+            description: "Brief summary of what was accomplished.",
+          },
+          status: {
+            type: "string",
+            enum: ["completed", "failed"],
+          },
         },
-        status: {
-          type: "string",
-          enum: ["completed", "failed"],
-        },
+        required: ["summary", "status"],
       },
-      required: ["summary", "status"],
     },
-    buildEvent(args) {
-      return {
-        type: "task.complete",
-        summary: stringField(args, "summary"),
-        status: stringField(args, "status") as "completed" | "failed",
-      };
+    handler: {
+      async execute(args, execution): Promise<ToolResult> {
+        try {
+          const status = stringField(args, "status") as "completed" | "failed";
+          if (status === "completed") {
+            const snapshot = await loadOrCreateTaskTreeSnapshot(
+              execution.context,
+            );
+            const incomplete = incompleteLeafRefs(snapshot);
+            if (incomplete.length > 0) {
+              return {
+                ok: false,
+                error:
+                  `Cannot complete_task: ${incomplete.length} TODO leaf node(s) are not completed: ` +
+                  `${incomplete.join(", ")}. Mark each with task_tree_update_status before finishing.`,
+              };
+            }
+          }
+
+          const summary = stringField(args, "summary");
+          const snapshot = await loadOrCreateTaskTreeSnapshot(
+            execution.context,
+          );
+          snapshot.taskComplete = {
+            summary,
+            status,
+            completedAt: new Date().toISOString(),
+          };
+          await writeTaskTreeSnapshot(execution.context, snapshot);
+
+          const bridgeEvent = {
+            type: "task.complete",
+            summary,
+            status,
+          };
+          const payload: BridgeEventPayload = { ok: true, bridgeEvent };
+          return payload as unknown as ToolResult;
+        } catch (err) {
+          return {
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          };
+        }
+      },
     },
-  });
+  };
+}
+
+function incompleteLeafRefs(snapshot: TaskTreeSnapshot): string[] {
+  const incomplete: string[] = [];
+  for (const [nodeRef, raw] of Object.entries(snapshot.nodes)) {
+    if (raw.isLeaf !== true) continue;
+    const status = typeof raw.status === "string" ? raw.status : "pending";
+    if (status !== "completed") {
+      incomplete.push(nodeRef);
+    }
+  }
+  return incomplete;
 }
 
 function localTool(options: {
@@ -273,7 +318,7 @@ function localTool(options: {
   description: string;
   parameters: ToolDefinition["parameters"];
   buildEvent: (args: JsonObject) => JsonObject;
-  mutateSnapshot?: (args: JsonObject, snapshot: TreeSnapshot) => void;
+  mutateSnapshot?: (args: JsonObject, snapshot: TaskTreeSnapshot) => void;
 }): ToolInstance {
   return {
     source: "built_in",
@@ -287,15 +332,11 @@ function localTool(options: {
         try {
           const bridgeEvent = options.buildEvent(args);
           if (options.mutateSnapshot) {
-            const snapshot = await loadOrCreateSnapshot(execution);
-            options.mutateSnapshot(args, snapshot);
-            snapshot.updatedAt = new Date().toISOString();
-            await execution.context.exoharness.current.conversation.writeArtifactJson(
-              {
-                path: TASK_TREE_ARTIFACT_PATH,
-                value: snapshot as unknown as JsonValue,
-              },
+            const snapshot = await loadOrCreateTaskTreeSnapshot(
+              execution.context,
             );
+            options.mutateSnapshot(args, snapshot);
+            await writeTaskTreeSnapshot(execution.context, snapshot);
           }
           const payload: BridgeEventPayload = { ok: true, bridgeEvent };
           return payload as unknown as ToolResult;
@@ -310,45 +351,6 @@ function localTool(options: {
   };
 }
 
-async function loadOrCreateSnapshot(execution: {
-  context: TurnContext;
-}): Promise<TreeSnapshot> {
-  const conversation = execution.context.exoharness.current.conversation;
-  const latest = latestArtifactVersion(
-    await conversation.listArtifacts(),
-    TASK_TREE_ARTIFACT_PATH,
-  );
-  if (!latest) {
-    return {
-      rootRef: "root",
-      nodes: {},
-      updatedAt: new Date().toISOString(),
-    };
-  }
-  const existing = await conversation.readArtifactJson<TreeSnapshot>({
-    artifactId: latest.artifactId,
-    version: latest.version,
-  });
-  if (existing) return existing;
-  return {
-    rootRef: "root",
-    nodes: {},
-    updatedAt: new Date().toISOString(),
-  };
-}
-
-function latestArtifactVersion(
-  artifacts: ArtifactVersion[],
-  path: string,
-): ArtifactVersion | null {
-  return (
-    artifacts
-      .filter((artifact) => artifact.path === path)
-      .sort((a, b) => b.version - a.version)[0] ?? null
-  );
-}
-
-/** Build a bridge event object without undefined values (JsonObject-safe). */
 function bridgeEvent(
   fields: Record<string, JsonValue | undefined>,
 ): JsonObject {
