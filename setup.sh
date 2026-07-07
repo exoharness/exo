@@ -243,7 +243,7 @@ install_missing_dependencies_linux() {
     curl -fsSL https://get.docker.com | sudo_run sh
     sudo_run systemctl enable --now docker 2>/dev/null || true
     if [[ "$(id -u)" != "0" ]]; then
-      sudo_run usermod -aG docker "$USER"
+      sudo_run usermod -aG docker "$(id -un)"
       DOCKER_GROUP_ADDED=true
     fi
   fi
@@ -597,8 +597,25 @@ ensure_docker_running() {
       fi
       sleep 2
     done
+    die "Docker is not running. Start Docker Desktop, then rerun this script."
   fi
-  die "Docker is not running. Start Docker Desktop, then rerun this script."
+  # Linux: docker is installed but not reachable. If the daemon runs and the
+  # user is just missing docker group membership, offer to fix that.
+  if [[ "$(id -u)" != "0" ]] && getent group docker >/dev/null 2>&1 &&
+    ! id -nG | grep -qw docker; then
+    echo "Docker is installed, but your user cannot reach the Docker daemon (not in the docker group)."
+    if [[ "$INSTALL_DEPS" == true ]] || { [[ -t 0 ]] && prompt_yes_no "Add $(id -un) to the docker group now?" y; }; then
+      sudo_run usermod -aG docker "$(id -un)"
+      DOCKER_GROUP_ADDED=true
+      maybe_reexec_for_docker_group
+      docker info >/dev/null 2>&1 && return
+    fi
+  fi
+  sudo_run systemctl start docker 2>/dev/null || true
+  if docker info >/dev/null 2>&1; then
+    return
+  fi
+  die "Docker is installed but the daemon is not reachable. Start it (e.g. sudo systemctl start docker), then rerun this script."
 }
 
 trust_mise_config() {
