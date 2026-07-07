@@ -1,5 +1,8 @@
 <div align="center">
-  <img src="docs/images/exo_logo.png" alt="exo logo" width="160" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/exo_badge_dark.svg">
+    <img src="docs/images/exo_badge_light.svg" alt="exo logo" width="160" />
+  </picture>
 
 # exo
 
