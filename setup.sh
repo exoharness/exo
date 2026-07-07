@@ -430,8 +430,23 @@ prompt_yes_no() {
 
 read_secret() {
   local prompt="$1"
-  local value
-  read -r -s -p "$prompt: " value
+  local value=""
+  local char
+  printf '%s: ' "$prompt" >&2
+  while IFS= read -r -s -n1 char; do
+    if [[ -z "$char" ]]; then # Enter
+      break
+    fi
+    if [[ "$char" == $'\x7f' || "$char" == $'\x08' ]]; then # Backspace
+      if [[ -n "$value" ]]; then
+        value="${value%?}"
+        printf '\b \b' >&2
+      fi
+      continue
+    fi
+    value+="$char"
+    printf '*' >&2
+  done
   echo >&2
   printf '%s' "$value"
 }
@@ -725,6 +740,7 @@ clone_or_reuse_repo() {
   prepare_non_empty_install_dir "$install_dir"
   tmp_parent="$(mktemp -d)"
   tmp_checkout="$tmp_parent/exo"
+  echo "Fetching Exo into $install_dir (staged via a temporary clone)..."
   git clone --branch "$REPO_REF" "$REPO_URL" "$tmp_checkout"
   shopt -s nullglob dotglob
   for entry in "$tmp_checkout"/*; do
