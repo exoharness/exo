@@ -3,6 +3,16 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# setup.sh installs node/pnpm/rust through mise; make its shims available even
+# in shells where mise was never activated (the harness runner spawns node).
+if [[ -x "$HOME/.local/bin/mise" ]] || command -v mise >/dev/null 2>&1; then
+  export PATH="$HOME/.local/share/mise/shims:$HOME/.local/bin:$PATH"
+fi
+if [[ -f "$HOME/.cargo/env" ]]; then
+  # shellcheck disable=SC1091
+  . "$HOME/.cargo/env"
+fi
+
 EXO_BIN="${EXO_BIN:-$ROOT_DIR/target/debug/exo}"
 SCHEDULER_BIN="${EXO_SCHEDULER_BIN:-$ROOT_DIR/target/debug/exo-scheduler-runner}"
 ENV_FILE="${EXO_ENV_FILE:-$ROOT_DIR/.env}"
