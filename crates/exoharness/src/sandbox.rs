@@ -148,6 +148,14 @@ pub trait ManagedSandboxHandle: Send + Sync {
         None
     }
 
+    /// The image the sandbox is actually running when the backend substituted
+    /// the requested one (e.g. a snapshot restore boots from a freshly loaded
+    /// tag). Callers persist this so every process resolves the same warm
+    /// sandbox after a restore.
+    fn effective_image(&self) -> Option<String> {
+        None
+    }
+
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput>;
 
     async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts>;
@@ -635,6 +643,10 @@ struct WarmSandboxHandle {
 impl ManagedSandboxHandle for WarmSandboxHandle {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    fn effective_image(&self) -> Option<String> {
+        Some(self.request.spec.image.clone())
     }
 
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {
