@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use anyhow::{Context as AnyhowContext, anyhow, bail};
@@ -24,25 +24,44 @@ use lingua::UniversalStreamChunk;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter, Lines};
 use tokio::process::{Child, ChildStdout, Command};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::execution_tracing::TurnExecutionTrace;
 use crate::harness_executor::{ExecutorHarnessRuntime, ExecutorStreamMode, HarnessExecutor};
 use crate::harness_facade::{SharedHarness, SharedHarnessBacked};
 use crate::harness_tool::{BasicToolRuntime, ExoclawToolRuntime, ensure_shell_sandbox};
+use crate::runner_pool::RunnerPool;
 use crate::shared::try_send_stream_event;
 use crate::{
     AgentConfig, BraintrustRuntimeConfig, ConversationConfig, ExecutionStreamEvent, SendRequest,
     ToolRuntime,
 };
 
+/// Max runner processes per harness module. Overridable via `EXO_TS_RUNNER_POOL`.
+const DEFAULT_RUNNER_POOL_SIZE: usize = 4;
+/// Upper bound on the env override — a guard against a typo spawning thousands
+/// of Node processes, not a tuned limit.
+const MAX_RUNNER_POOL_SIZE: usize = 256;
+/// Idle runners are reaped after this long; a quiescent pool drains to zero.
+const RUNNER_IDLE_TTL: Duration = Duration::from_secs(300);
+
+fn runner_pool_size_from_env() -> usize {
+    std::env::var("EXO_TS_RUNNER_POOL")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|&size| size > 0)
+        .map(|size: usize| size.min(MAX_RUNNER_POOL_SIZE))
+        .unwrap_or(DEFAULT_RUNNER_POOL_SIZE)
+}
+
 pub struct TypeScriptExecutor<T> {
     root: Arc<dyn ExoHarness>,
     workspace_root: PathBuf,
     env: Arc<HashMap<String, String>>,
     tools: Arc<T>,
-    runners: Arc<Mutex<HashMap<String, Arc<Mutex<TypeScriptRunnerProcess>>>>>,
+    pool_size: usize,
+    runners: Arc<StdMutex<HashMap<String, Arc<RunnerPool<TypeScriptRunnerProcess>>>>>,
 }
 
 impl<T> TypeScriptExecutor<T> {
@@ -51,13 +70,15 @@ impl<T> TypeScriptExecutor<T> {
         workspace_root: PathBuf,
         env: HashMap<String, String>,
         tools: Arc<T>,
+        pool_size: usize,
     ) -> Self {
         Self {
             root,
             workspace_root,
             env: Arc::new(env),
             tools,
-            runners: Arc::new(Mutex::new(HashMap::new())),
+            pool_size,
+            runners: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 }
@@ -69,6 +90,7 @@ impl<T> Clone for TypeScriptExecutor<T> {
             workspace_root: self.workspace_root.clone(),
             env: Arc::clone(&self.env),
             tools: Arc::clone(&self.tools),
+            pool_size: self.pool_size,
             runners: Arc::clone(&self.runners),
         }
     }
@@ -117,28 +139,36 @@ where
             bail!("typescript harness module does not exist: {module_path}");
         }
 
-        let runner = self.runner(&module_path).await?;
-        let result = {
-            let mut runner = runner.lock().await;
-            runner
-                .execute_turn(
-                    self,
-                    TypeScriptTurn {
-                        agent,
-                        conversation,
-                        turn,
-                        agent_config,
-                        conversation_config,
-                        prepared,
-                        stream_mode,
-                        turn_trace,
-                    },
+        let pool = self.pool(&module_path);
+        let mut runner = pool
+            .acquire(|| {
+                TypeScriptRunnerProcess::start(
+                    &self.workspace_root,
+                    self.env.as_ref(),
+                    &module_path,
                 )
-                .await
-        };
+            })
+            .await?;
+        let result = runner
+            .execute_turn(
+                self,
+                TypeScriptTurn {
+                    agent,
+                    conversation,
+                    turn,
+                    agent_config,
+                    conversation_config,
+                    prepared,
+                    stream_mode,
+                    turn_trace,
+                },
+            )
+            .await;
 
-        if result.is_err() {
-            self.remove_runner(&module_path, &runner).await;
+        // A failed turn implies a dead runner (the guest exits on error), so
+        // only a clean turn returns its process to the pool.
+        if result.is_ok() {
+            runner.checkin();
         }
 
         result
@@ -149,28 +179,13 @@ impl<T> TypeScriptExecutor<T>
 where
     T: ToolRuntime + 'static,
 {
-    async fn runner(&self, module_path: &str) -> Result<Arc<Mutex<TypeScriptRunnerProcess>>> {
-        let mut runners = self.runners.lock().await;
-        if let Some(runner) = runners.get(module_path) {
-            return Ok(Arc::clone(runner));
-        }
-
-        let runner = Arc::new(Mutex::new(TypeScriptRunnerProcess::start(
-            &self.workspace_root,
-            self.env.as_ref(),
-            module_path,
-        )?));
-        runners.insert(module_path.to_string(), Arc::clone(&runner));
-        Ok(runner)
-    }
-
-    async fn remove_runner(&self, module_path: &str, runner: &Arc<Mutex<TypeScriptRunnerProcess>>) {
-        let mut runners = self.runners.lock().await;
-        if let Some(current) = runners.get(module_path)
-            && Arc::ptr_eq(current, runner)
-        {
-            runners.remove(module_path);
-        }
+    fn pool(&self, module_path: &str) -> Arc<RunnerPool<TypeScriptRunnerProcess>> {
+        let mut runners = self.runners.lock().expect("runner pool map lock");
+        Arc::clone(
+            runners
+                .entry(module_path.to_string())
+                .or_insert_with(|| RunnerPool::new(self.pool_size, RUNNER_IDLE_TTL)),
+        )
     }
 
     async fn execute_runtime_request(
@@ -803,6 +818,7 @@ impl<T> TypeScriptHarness<T> {
                 workspace_root,
                 HashMap::new(),
                 tools,
+                runner_pool_size_from_env(),
             ),
             None,
         );
@@ -822,7 +838,13 @@ impl TypeScriptHarness<BasicToolRuntime> {
             .context("failed to resolve current directory for TypeScript harness")?;
         let tools = Arc::new(BasicToolRuntime);
         let runtime = ExecutorHarnessRuntime::new(
-            TypeScriptExecutor::new(Arc::clone(&exoharness), workspace_root, env, tools),
+            TypeScriptExecutor::new(
+                Arc::clone(&exoharness),
+                workspace_root,
+                env,
+                tools,
+                runner_pool_size_from_env(),
+            ),
             runtime_config,
         );
         Ok(Self {
@@ -861,7 +883,13 @@ impl TypeScriptHarness<ExoclawToolRuntime> {
             adapter_worker_root,
         ));
         let runtime = ExecutorHarnessRuntime::new(
-            TypeScriptExecutor::new(Arc::clone(&exoharness), workspace_root, env, tools),
+            TypeScriptExecutor::new(
+                Arc::clone(&exoharness),
+                workspace_root,
+                env,
+                tools,
+                runner_pool_size_from_env(),
+            ),
             runtime_config,
         );
         Ok(Self {
@@ -1223,7 +1251,6 @@ fn format_error_chain(error: &anyhow::Error, context: std::fmt::Arguments<'_>) -
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
-    use std::sync::Mutex as StdMutex;
 
     use super::*;
 
