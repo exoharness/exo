@@ -5,7 +5,7 @@
 # Fast path: the agent-cli adapter is already listening, so the prompt goes
 # straight to the agent. First run: this script bootstraps the adapter by
 # adding the workspace mount and asking the running agent to create it. The
-# only prerequisite is that the Exoclaw stack (exoclaw-control) is running.
+# only prerequisite is that the Exoclaw stack (./exo.sh) is running.
 set -euo pipefail
 
 SOURCE="${BASH_SOURCE[0]}"
@@ -47,8 +47,8 @@ adapter_runner_running() {
 bootstrap() {
   echo "exo-cli: agent-cli adapter not running; bootstrapping it now..." >&2
 
-  [[ -x "$EXO_BIN" ]] || die "exo binary not found at $EXO_BIN. Build it or start the stack: examples/exoclaw/scripts/exoclaw-control canonical"
-  adapter_runner_running || die "the Exoclaw adapter runner is not running. Start the stack first: examples/exoclaw/scripts/exoclaw-control canonical"
+  [[ -x "$EXO_BIN" ]] || die "exo binary not found at $EXO_BIN. Build it or start the stack: ./exo.sh"
+  adapter_runner_running || die "the Exoclaw adapter runner is not running. Start the stack first: ./exo.sh"
   [[ -d "$MOUNT_ROOT" ]] || die "workspace root does not exist: $MOUNT_ROOT (override with EXOCLAW_AGENT_CLI_ROOT)"
 
   echo "exo-cli: mounting $MOUNT_ROOT at $MOUNT_PATH in the agent sandbox..." >&2

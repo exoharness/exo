@@ -26,7 +26,7 @@ Put the client on your PATH:
 ln -s "$PWD/examples/exoclaw/scripts/exo-cli" ~/bin/exo-cli
 ```
 
-That is the only manual step. As long as the Exoclaw stack is running (`exoclaw-control canonical`), the first `exo-cli` invocation bootstraps everything else automatically: it adds the workspace mount (default `$HOME/projects` → `/agent-cli`, override with `EXOCLAW_AGENT_CLI_ROOT` / `EXOCLAW_AGENT_CLI_MOUNT`), sends the agent a message asking it to create the adapter, waits for the worker socket to appear, then delivers your prompt. Subsequent invocations skip straight to the socket.
+That is the only manual step. As long as the Exoclaw stack is running (`./exo.sh`), the first `exo-cli` invocation bootstraps everything else automatically: it adds the workspace mount (default `$HOME/projects` → `/agent-cli`, override with `EXOCLAW_AGENT_CLI_ROOT` / `EXOCLAW_AGENT_CLI_MOUNT`), sends the agent a message asking it to create the adapter, waits for the worker socket to appear, then delivers your prompt. Subsequent invocations skip straight to the socket.
 
 The adapter config the agent creates looks like:
 
@@ -46,7 +46,7 @@ The adapter config the agent creates looks like:
 You can also configure things explicitly at stack startup instead of relying on the bootstrap:
 
 ```bash
-examples/exoclaw/scripts/exoclaw-control canonical \
+./exo.sh \
   --agent-cli-mount "$HOME/projects" \
   --setup agent-cli
 ```
@@ -59,7 +59,7 @@ examples/exoclaw/scripts/exoclaw-control canonical \
 
 ## Quirks And Gotchas
 
-- The bootstrap requires the adapter runner to already be running; `exo-cli` cannot start the Exoclaw stack itself and will tell you to run `exoclaw-control canonical` if it is down.
+- The bootstrap requires the adapter runner to already be running; `exo-cli` cannot start the Exoclaw stack itself and will tell you to run `./exo.sh` if it is down.
 - The mount is part of the sandbox spec, not the adapter. The bootstrap adds it for you, but an already-running sandbox only picks it up when the sandbox is recreated.
 - `exo-cli` exits after the first reply. The conversation keeps its history, so a follow-up `exo-cli` invocation continues the same conversation context.
 - Replies can take as long as an agent turn. The client waits up to `EXO_AGENT_CLI_TIMEOUT_MS` (default 15 minutes).

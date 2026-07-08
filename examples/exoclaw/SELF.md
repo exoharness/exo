@@ -15,7 +15,7 @@ Use this map before changing Exoclaw itself.
 - `examples/exoclaw/prompts/me.md`: durable identity and operating rules.
 - `examples/exoclaw/guardian-tools.ts`: model-visible host maintenance tool.
 - `examples/exoclaw/scripts/exoclaw-service-guardian`: host-side build and service control.
-- `examples/exoclaw/scripts/exoclaw-control`: local startup script for REPL, scheduler, adapters, sandbox, and repo mount.
+- `./exo.sh`: local startup script for REPL, scheduler, adapters, sandbox, and repo mount.
 - `examples/exoclaw/sandbox-tools.ts`: sandbox snapshot and rewind tool definitions.
 - `examples/exoclaw/introspection-tools.ts`: `list_adapter_events` and `list_conversation_events` introspection tools.
 - `examples/exoclaw/host-tools.ts`: `registerHostTool` helper that bridges TypeScript tool definitions to Rust execution.
@@ -44,11 +44,11 @@ Use this map before changing Exoclaw itself.
 From the repository root on the host:
 
 ```bash
-examples/exoclaw/scripts/exoclaw-control canonical
+./exo.sh
 examples/exoclaw/scripts/exoclaw-service-guardian status
 examples/exoclaw/scripts/exoclaw-service-guardian build
 examples/exoclaw/scripts/exoclaw-service-guardian restart-all --build
-examples/exoclaw/scripts/exoclaw-control --control
+./exo.sh --control
 ```
 
 Inside the Exoclaw sandbox, inspect the mounted code with:
@@ -121,8 +121,8 @@ inside the conversation before touching host services:
 - Use `guardian_action restart_all` after code changes that require host services
   to pick up a new build. Restart actions are deferred briefly so the current
   turn can finish before services stop; check status/logs after they come back.
-- In control mode, service guardian builds write `.exo/exoclaw-control.restart`;
-  the `exoclaw-control --control` wrapper restarts only the child `exo repl` and
+- In control mode, service guardian builds write `.exo/exo-control.restart`;
+  the `./exo.sh --control` wrapper restarts only the child `exo repl` and
   keeps the user's terminal open.
 - Service restarts drain gracefully: the guardian writes
   `.exo/exoclaw-adapters.restart` / `.exo/exoclaw-scheduler.restart`, the

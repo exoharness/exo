@@ -22,8 +22,8 @@ use std::process::Command;
 
 use exoharness::{
     BasicExoHarness, BasicExoHarnessConfig, ConversationHandle, CreateSandboxRequest, ExoHarness,
-    NewAgentRequest, NewConversationRequest, RunInSandboxRequest, SandboxBackendChoice, SandboxId,
-    SandboxProvider, SecretBackendChoice, StartSandboxRequest,
+    NewAgentRequest, NewConversationRequest, RunInSandboxRequest, SandboxBackendRegistration,
+    SandboxId, SandboxProvider, SecretBackendChoice, StartSandboxRequest,
 };
 use futures::io::AsyncReadExt;
 use tempfile::TempDir;
@@ -47,7 +47,7 @@ async fn filesystem_snapshot_and_rewind_round_trip() {
         // it's orthogonal to what we're testing (sandbox snapshots).
         secret_backend: SecretBackendChoice::Static([7u8; 32]),
         sandbox_default: SandboxProvider::Docker,
-        sandbox_backends: vec![SandboxBackendChoice::Docker],
+        sandbox_backends: vec![SandboxBackendRegistration::docker()],
     })
     .await
     .expect("BasicExoHarness::new should succeed");
@@ -161,6 +161,7 @@ async fn filesystem_snapshot_and_rewind_round_trip() {
             id: sandbox_id.clone(),
             snapshot_id,
             idle_seconds: None,
+            provider: None,
         })
         .await
         .expect("start_sandbox (rewind) should succeed");

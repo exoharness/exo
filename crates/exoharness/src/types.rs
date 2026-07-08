@@ -575,6 +575,7 @@ pub enum SandboxProvider {
     AwsAgentCore,
     AppleContainer,
     Docker,
+    External,
     #[serde(alias = "local")]
     LocalProcess,
 }
@@ -596,6 +597,7 @@ impl SandboxProvider {
             Self::AwsAgentCore => "aws-agentcore",
             Self::AppleContainer => "apple-container",
             Self::Docker => "docker",
+            Self::External => "external",
             Self::LocalProcess => "local-process",
         }
     }
@@ -619,6 +621,7 @@ impl FromStr for SandboxProvider {
             "aws-agentcore" | "aws_agentcore" => Ok(Self::AwsAgentCore),
             "apple-container" | "apple_container" => Ok(Self::AppleContainer),
             "docker" => Ok(Self::Docker),
+            "external" => Ok(Self::External),
             "local" | "local-process" | "local_process" => Ok(Self::LocalProcess),
             provider => Err(anyhow::anyhow!("unsupported sandbox provider: {provider}")),
         }
@@ -630,6 +633,11 @@ pub struct StartSandboxRequest {
     pub id: SandboxId,
     pub snapshot_id: SnapshotId,
     pub idle_seconds: Option<u64>,
+    // If unspecified, starts sandbox where it was last run. If specified, will attempt to
+    // start the sandbox on the specified provider, if supported. If successful, the
+    // sandbox will start there going forward.
+    #[serde(default)]
+    pub provider: Option<SandboxProvider>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -867,7 +875,7 @@ pub enum SandboxProviderConfig {
     Daytona {
         /// Secret-store id of the API key.
         api_key_secret_id: SecretId,
-        /// Daytona `target` (`us` / `eu` / `experimental`; Note: CRIU snapshot support requires `experimental` as of 6/5/2026).
+        /// Daytona `target` region (e.g. `us` / `eu`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         region: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

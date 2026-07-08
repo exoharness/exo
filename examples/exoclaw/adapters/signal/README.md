@@ -15,7 +15,7 @@ Incoming Signal messages become Exoclaw adapter message events. Outbound `send_a
 Install the JVM `signal-cli` distribution and Java, then make sure the `signal-cli` script and Java are available to the adapter worker. Run setup with:
 
 ```bash
-examples/exoclaw/scripts/exoclaw-control fresh --pull-sandbox --setup signal
+./exo.sh fresh --pull-sandbox --setup signal
 ```
 
 The script watches `.exo/exoclaw-adapters.log`, prints the linked-device QR code if it appears, and pauses while you scan it from Signal: Settings > Linked devices > Link new device.
@@ -61,7 +61,7 @@ Java must be visible on `PATH` for the JVM script. On Homebrew macOS, prefix Exo
 
 ```bash
 PATH="/opt/homebrew/opt/openjdk/bin:$PATH" \
-examples/exoclaw/scripts/exoclaw-control fresh --pull-sandbox --setup signal
+./exo.sh fresh --pull-sandbox --setup signal
 ```
 
 You can also add `/opt/homebrew/opt/openjdk/bin` to your shell profile.
