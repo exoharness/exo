@@ -128,6 +128,10 @@ for await (const line of input) {
   let commandId: string | null = null;
   try {
     const command = parseWorkerCommand(JSON.parse(line));
+    if (command.type !== "send_message") {
+      // Typing signals are exochat-only; ignore other command types.
+      continue;
+    }
     commandId = command.id;
     if (command.attachments.length > 0) {
       throw new Error("agent-cli does not support attachments");
