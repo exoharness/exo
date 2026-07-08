@@ -5,6 +5,18 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 STATE_DIR="$ROOT_DIR/.exo"
 CONFIG_FILE="${EXO_SERVICE_GUARDIAN_CONFIG:-$STATE_DIR/exo-service-guardian.env}"
 
+# Match exo.sh: services restarted by the guardian spawn node (harness runner,
+# adapter workers), so put the mise-pinned toolchain on PATH. Without this, a
+# guardian restart inherits whatever ambient node is around (e.g. an old nvm
+# node) and harness turns can crash on missing Web API globals.
+if [[ -x "$HOME/.local/bin/mise" ]] || command -v mise >/dev/null 2>&1; then
+  export PATH="$HOME/.local/share/mise/shims:$HOME/.local/bin:$PATH"
+fi
+if [[ -f "$HOME/.cargo/env" ]]; then
+  # shellcheck disable=SC1091
+  . "$HOME/.cargo/env"
+fi
+
 HARNESS="exo"
 EXO_BIN="${EXO_BIN:-$ROOT_DIR/target/debug/exo}"
 SCHEDULER_BIN="${EXO_SCHEDULER_BIN:-$ROOT_DIR/target/debug/exo-scheduler-runner}"
