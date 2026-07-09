@@ -198,16 +198,18 @@ async fn conversation_send_round_trips_through_real_sandbox_and_mocked_openai() 
             .collect::<Vec<_>>()
     );
 
+    // `agents/` holds the `by-slug/` index next to the agent-id dirs, and
+    // readdir order is not deterministic — pick the entry that actually has a
+    // `conversations` subdir instead of whatever comes back first.
     let conv_root = root_dir
         .path()
         .join("exoharness/agents")
         .read_dir()
         .expect("agents dir exists")
-        .next()
-        .expect("at least one agent")
-        .unwrap()
-        .path()
-        .join("conversations");
+        .flatten()
+        .map(|entry| entry.path().join("conversations"))
+        .find(|path| path.is_dir())
+        .expect("at least one agent with a conversations dir");
     let conv_dir = conv_root
         .read_dir()
         .expect("conversations dir exists")
