@@ -20,7 +20,7 @@ You'll also need an **OpenAI API key**.
 ## Run the setup script
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ankrgyl/exo/main/setup.sh -o setup.sh
+curl -fsSL https://raw.githubusercontent.com/exoharness/exo/main/setup.sh -o setup.sh
 bash setup.sh
 ```
 
@@ -52,7 +52,7 @@ harness from scratch or script against the exoharness — install it from a
 checkout with cargo:
 
 ```bash
-git clone https://github.com/ankrgyl/exo
+git clone https://github.com/exoharness/exo
 cd exo
 cargo install --path crates/cli --locked
 exo --help

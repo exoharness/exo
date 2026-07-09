@@ -17,7 +17,7 @@ need:
    the current number without calling a tool.
 
 The finished file lives at
-[`examples/typescript/sysmon-harness.ts`](https://github.com/ankrgyl/exo/blob/main/examples/typescript/sysmon-harness.ts).
+[`examples/typescript/sysmon-harness.ts`](https://github.com/exoharness/exo/blob/main/examples/typescript/sysmon-harness.ts).
 
 ## The harness contract
 
@@ -40,7 +40,7 @@ export default defineHarness({
 });
 ```
 
-That's [`examples/typescript/basic-harness.ts`](https://github.com/ankrgyl/exo/blob/main/examples/typescript/basic-harness.ts)
+That's [`examples/typescript/basic-harness.ts`](https://github.com/exoharness/exo/blob/main/examples/typescript/basic-harness.ts)
 verbatim. `runResponsesHarnessTurn` accepts two hooks, and they are the whole
 customization surface for this tutorial:
 
@@ -133,7 +133,7 @@ Notes:
 - `initializationParameters` / `initialize(args)` exist so a tool can be
   configured per-agent (an API prefix, a base URL) separately from per-call
   arguments — see
-  [`examples/typescript/tools/uppercase.ts`](https://github.com/ankrgyl/exo/blob/main/examples/typescript/tools/uppercase.ts)
+  [`examples/typescript/tools/uppercase.ts`](https://github.com/exoharness/exo/blob/main/examples/typescript/tools/uppercase.ts)
   for a configured example. Ours needs no configuration.
 - Harness code runs on the **host**, so `node:os` reports the host machine.
   For work that belongs in isolation, call the `shell` tool or
@@ -187,7 +187,7 @@ conversation history — see [Data Model](../concepts/data-model) if you
 want the details on why.)
 
 The same pattern scales to anything derivable: the canonical agent's harness
-([`examples/exo/harness.ts`](https://github.com/ankrgyl/exo/blob/main/examples/exo/harness.ts))
+([`examples/exo/harness.ts`](https://github.com/exoharness/exo/blob/main/examples/exo/harness.ts))
 uses it to splice in an identity prompt, a git-ignored local profile file,
 and the agent's persistent memory block each round.
 

@@ -12,7 +12,7 @@ hooks from the [Custom Agent Quickstart](./write-your-own-agent):
 `registerTools` and `instructions`.
 
 The finished file is
-[`examples/typescript/coding-agent-harness.ts`](https://github.com/ankrgyl/exo/blob/main/examples/typescript/coding-agent-harness.ts).
+[`examples/typescript/coding-agent-harness.ts`](https://github.com/exoharness/exo/blob/main/examples/typescript/coding-agent-harness.ts).
 
 ## The loop is already there
 
