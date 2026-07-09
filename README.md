@@ -33,7 +33,7 @@ The goal of Exo is to be the minimal framework possible to give an agent full
 ability for recursive self improvement. Why would you want such a thing?
 
 - It's a great agent framework to build exactly the agent you like that's
-  maximally better lesson-aligned. Future smarter models can evolve every aspect
+  maximally Bitter Lesson aligned. Future smarter models can evolve every aspect
   of the system at runtime. And do it safely with full history.
 - It's a great framework to allow AI models to solve complex problems by
   iterating on system level properties. We've had agents learn to play games,
