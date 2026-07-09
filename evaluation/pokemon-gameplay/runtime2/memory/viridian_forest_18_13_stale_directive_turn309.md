@@ -1,0 +1,1 @@
+Viridian Forest turn 309: live state at `(18,13)` facing right is officially stale after many retries. Do not spend more turns micro-probing here; rewind to a genuinely different checkpoint instead of rewalking the upper-west/mid-west connectors.

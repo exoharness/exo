@@ -1,0 +1,1 @@
+Viridian Forest turn 405: at `(17,43)` facing left, talking to the lower Bug Catcher shows ordinary flavor text, but advancing too quickly can appear to bounce between partial pages (`I came here with...`, `They're out for POKeMON`, `I am...`). Treat this as slow textbox progression, not a softlock; use single `A` presses with moderate waits rather than batch mashing.

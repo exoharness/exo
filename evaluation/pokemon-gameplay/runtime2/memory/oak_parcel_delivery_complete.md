@@ -1,0 +1,1 @@
+Oak's Parcel delivery complete: after talking to Oak at `(4,2)` facing right and advancing the dialog, free movement resumed in Oak's Lab with Oak and rival still standing at the top of the room. This indicates the parcel scene fully resolved; treat parcel delivery as done and move on to healing / next progression rather than re-talking the aide or bookshelves.

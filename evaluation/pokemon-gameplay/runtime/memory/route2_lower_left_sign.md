@@ -1,0 +1,1 @@
+Route 2 lower-left sign: standing at `(5,66)` facing up and pressing `A` reads `ROUTE 2` / `VIRIDIAN CITY - PEWTER CITY`. This confirms the lower-left open area by the sign is just the route marker, not a hidden entrance or progress trigger.

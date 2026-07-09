@@ -1,0 +1,1 @@
+Route 22 upper-right discovery: from the far-east upper area, climbing to about `(39,9)` and pressing `right` warps to map `0x01` (Viridian City) at about `(0,17)`. This is a hidden/overlooked reconnect from Route 22 back into Viridian's upper-left side, not forward progression.

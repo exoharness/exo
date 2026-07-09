@@ -1,0 +1,1 @@
+Turn 317 stale-state note: live state at Viridian Forest `(30,11)` facing left matches the solved east-edge / mid-east family and should not be explored outward. Best action was to save `turn317_forest_30_11_live` and rewind to `turn287_forest_18_6_postbattle` for a genuinely different probe angle.

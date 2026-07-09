@@ -1,0 +1,1 @@
+Oak's Lab lower-right NPC probe: the NPC near the lower-right side of the lab, reached around `(8,11)` facing up, says `I study POKéMON as PROF.OAK's AIDE.` This is not Professor Oak and does not progress the parcel story. Clear his dialog with controlled `A/B`, then move toward Oak instead of re-talking here.

@@ -1,0 +1,1 @@
+Viridian Forest turn 445: from lower-lane checkpoint `(25,34)`, approaching the visible Bug Catcher/advice NPC again via `right,right,right,up,right,right,A` reaches `(29,33)` and reopens the same flavor text `Ssh!` / bug-scaring advice. This reconfirms that the visible NPC in this pocket is not progression and that the `(25,34) -> (29,33)` approach is a stale local check.

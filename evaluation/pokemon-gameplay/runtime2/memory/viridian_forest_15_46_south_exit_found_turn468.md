@@ -1,0 +1,1 @@
+Viridian Forest turn 468 breakthrough: from the fresh lower-west clearing family, moving east and south reached the sign area around `(15,45)` / `(15,46)`. From `(15,46)` facing down, `down` goes to `(15,47)` and a second `down` changes map to `Viridian Forest South Gate` `(5,0)`. This is the actual forest exit route.

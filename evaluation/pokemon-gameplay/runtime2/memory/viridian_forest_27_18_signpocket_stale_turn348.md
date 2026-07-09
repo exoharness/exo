@@ -1,0 +1,1 @@
+Viridian Forest turn 348: live state at `(27,18)` facing up with the sign directly ahead is part of the already-solved trainer/sign pocket. Do not keep exploring outward from `(27,18)` as if it were new progress; either trigger a genuinely different interaction (trainer battle) or rewind.

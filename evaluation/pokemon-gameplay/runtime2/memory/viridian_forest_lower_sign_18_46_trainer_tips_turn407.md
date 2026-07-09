@@ -1,0 +1,1 @@
+Viridian Forest turn 407: the sign in the new lower clearing at `(18,46)` facing up is a standard `TRAINER TIPS` sign about weakening a target before attempting capture, and that healthy Pokémon may escape. It is flavor text only, not progression.

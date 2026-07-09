@@ -1,0 +1,22 @@
+[
+  {
+    "text": "Safely clear the current wild Weedle intro battle on map 0x33, then resume forest exploration from the upper lane around (20,8)",
+    "status": "in_progress"
+  },
+  {
+    "text": "Probe the upper-west Viridian Forest continuation from roughly (24..20,8..9), since recent right-edge and lower-grass branches mostly loop back",
+    "status": "pending"
+  },
+  {
+    "text": "Keep a fresh checkpoint before deeper forest probing or trainer-heavy branches",
+    "status": "pending"
+  },
+  {
+    "text": "Use stable wild-battle escape cadence: clear intro with A+waits, then RUN explicitly",
+    "status": "pending"
+  },
+  {
+    "text": "If forest progress stalls again, systematically map remaining upper-lane west branches before revisiting proven mid-east/lower loops",
+    "status": "pending"
+  }
+]

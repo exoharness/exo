@@ -1,0 +1,1 @@
+Boot/title behavior: initial turn may show blank white screen while game is still in boot sequence. Waiting ~180 frames revealed Nintendo/Creatures/Game Freak copyright screen, then button presses reached the Pokemon Red title screen. During boot/title, RAM location still claimed Pallet Town, so screenshot is the reliable source.

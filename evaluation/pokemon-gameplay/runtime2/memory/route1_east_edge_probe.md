@@ -1,0 +1,1 @@
+Route 1 south entrance east-edge probe: from around (14,28), moving right reaches at least x=17 along the bottom path, but northward movement from x=14..17 at y=28 remained blocked. Repeated attempts there can trigger wild encounters from adjacent grass without advancing north, so this strip is not the correct way through.

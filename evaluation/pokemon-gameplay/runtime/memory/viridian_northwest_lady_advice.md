@@ -1,0 +1,1 @@
+Viridian City northwest woman by the tree wall around (17,10): talking to her gives non-progression advice about shopping in Pewter City and taking the winding trail in Viridian Forest. Not a blocker or route trigger.

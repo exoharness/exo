@@ -1,0 +1,8 @@
+# Regenerable runtime state
+**/venv/
+**/__pycache__/
+**/checkpoints/
+**/backups/
+
+# Copyrighted game ROMs — never commit. Supply locally under pokemon-gameplay/roms/.
+**/roms/

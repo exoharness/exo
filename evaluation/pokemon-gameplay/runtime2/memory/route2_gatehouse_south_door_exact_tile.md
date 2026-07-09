@@ -1,0 +1,1 @@
+Route 2 upper-row gatehouse south entrance exact tile: from the upper Route 2 row, the building entrance is at about `(3,44)` on map `0x0d`. From outside in front of the door, pressing `up` there enters the gatehouse interior (map `0x32`). This is a safer/more direct forest approach than retesting blocked `up` tiles at `(4..6,44)`.

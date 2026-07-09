@@ -1,0 +1,1 @@
+Viridian Pokecenter heal completion: from Nurse Joy text `OK. We'll need your...`, advancing with A reaches `Thank you! Your POKEMON are fighting fit!` then `We hope to see you again!`. A reliable clean close from this late phase is `B, down` repeated as needed; HP was fully restored to 32/32 before the final goodbye text fully closed.

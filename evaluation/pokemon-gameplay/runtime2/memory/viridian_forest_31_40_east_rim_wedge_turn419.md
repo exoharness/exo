@@ -1,0 +1,1 @@
+Viridian Forest turn 419: live state at `(31,40)` facing right on the far east rim is a stale wedge. Screen shows grass with a Bug Catcher visible to the left and stump line on the right, but recent tiny probes already proved `up` is blocked here and nearby routes rejoin the known lower sign/NPC and east-rim families. Rewind out instead of continuing from `(31,40)`.

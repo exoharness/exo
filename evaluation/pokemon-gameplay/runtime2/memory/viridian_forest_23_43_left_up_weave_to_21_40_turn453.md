@@ -1,0 +1,1 @@
+Viridian Forest turn 453: from lower-hub checkpoint `turn453_forest_23_43_microtest_start` at `(23,43)`, the dry-road micro-route `left, up, left, up, right, up, left` reaches `(21,40)`. From there, `up` is blocked. This confirms another narrow approach into the already-known `(21,40)` offshoot rather than a fresh exit.

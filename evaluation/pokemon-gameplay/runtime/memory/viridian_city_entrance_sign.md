@@ -1,0 +1,1 @@
+Viridian City entrance sign: from the south entrance path, going west then north reaches the town sign around (16,17). Reading it gives the standard town text beginning `VIRIDIAN CITY / The Eternally ...`.

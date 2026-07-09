@@ -1,0 +1,1 @@
+Viridian Forest turn 305: after escaping the wild Kakuna from `(30,17)`, the overworld view confirms this is the familiar mid-east trainer/sign pocket beside the Bug Catcher, not fresh progress. Treat `(30,17)` the same as the solved `(31,19)` / `(30,18)` rejoin area and rewind instead of probing further.

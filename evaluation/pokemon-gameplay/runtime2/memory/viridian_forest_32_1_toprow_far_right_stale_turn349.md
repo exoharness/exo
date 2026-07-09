@@ -1,0 +1,1 @@
+Viridian Forest turn 349: live state at `(32,1)` facing up on the far-right top row is stale solved geometry. The screenshot shows the top fence and right-side tree line; this is the already-classified far-right top-row family. Do not continue normal exploration from here. Rewind instead.

@@ -1,0 +1,1 @@
+Viridian Forest turn 365: at the sign-row choke around `(17,32)`, lateral movement is almost fully blocked. From `(17,32)`, `left` is blocked immediately; `right` reaches only `(18,32)` and further right is blocked. `up` from `(18,32)` is also blocked. This is the same local sign-row choke family, not a fresh branch.

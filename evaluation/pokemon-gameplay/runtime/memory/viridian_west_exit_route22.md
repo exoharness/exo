@@ -1,0 +1,1 @@
+Viridian City west exit found: from the northwest/upper-left side of Viridian, reaching about `(0,14)` and then pressing `left` warps to map `0x21` (decimal 33), which is Route 22. This confirms the actual west progression branch exists and the earlier northwest lady/tree-wall choke was just the wrong lane.

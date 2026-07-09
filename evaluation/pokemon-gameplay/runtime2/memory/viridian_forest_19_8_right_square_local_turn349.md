@@ -1,0 +1,1 @@
+Viridian Forest turn 349: from fresh `(19,8)` facing up, the immediate right-side square is only a tiny local loop. Probe `right, right, down, down, left, left, up, up` gives `(19,8) -> (20,8) -> (21,8) -> (21,9)` with second `down` blocked, then back left to `(19,9)` and `up` returns to `(19,8)` with second `up` blocked. No fresh continuation there.

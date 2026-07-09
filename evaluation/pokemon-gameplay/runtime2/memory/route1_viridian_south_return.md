@@ -1,0 +1,1 @@
+Route 1 / Viridian south return path: south exit from Viridian City uses the fence opening around x≈20, y≈30. Going south there warps to Route 1 near `(11,0)`. On lower Route 1, the apparent block at about `(12,31)` is misleading; the real path to Pallet Town is slightly left. Moving into the lower-left lane and then going down reaches Pallet Town safely.

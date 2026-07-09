@@ -1,0 +1,1 @@
+Viridian Forest turn 314: from checkpoint `turn312_forest_32_10_eastedge` at `(32,10)`, probing `up,up,left,left` reaches `(30,8)` but left is blocked from `(30,10)`. Continuing `down x6, right, down, left` returns to the familiar trainer/sign rejoin around `(30,17)`. This apparent east-edge state is not fresh progress; classify it with the solved mid-east pocket.

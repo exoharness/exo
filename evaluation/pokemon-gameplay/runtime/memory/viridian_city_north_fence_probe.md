@@ -1,0 +1,1 @@
+Viridian City north-fence probe: at y=14, the upper fence line is blocked across a wide span. Verified blocked `up` interactions from about x=24 through x=35; pressing `A` there did nothing useful. The east edge at x=35 is also blocked by rock wall, so the north route opening is not on the far-right side.

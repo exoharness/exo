@@ -1,0 +1,1 @@
+Early battle low-HP notes: repeated `A` usually handles simple wild fights, but visible battle text often lags behind RAM/tool battle-clear signals. Trust the screenshot until the overworld is visibly back. If Squirtle is at dangerous HP, prefer fleeing with `down, right, A` from the main battle menu rather than auto-fighting.

@@ -1,0 +1,1 @@
+Viridian Pokecenter healing position: stand at (3,3) facing up and press A to talk to Nurse Joy. This opens the HEAL / CANCEL menu and healing works normally. Earlier right-side counter positions were Cable Club / other NPCs, causing the long confusion.

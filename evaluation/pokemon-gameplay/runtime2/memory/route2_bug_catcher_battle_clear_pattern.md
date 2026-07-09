@@ -1,0 +1,1 @@
+Route 2 Bug Catcher trainer battle clear pattern: when Bubble seems stuck on `used BUBBLE!`, wait a long time (~90 then ~120 frames) for animation to finish before pressing A. After KO, deliberate single/short A presses with long settles cleanly advanced `Enemy CATERPIE fainted!`, `gained 67 EXP. Points!`, then trainer defeat/money text.

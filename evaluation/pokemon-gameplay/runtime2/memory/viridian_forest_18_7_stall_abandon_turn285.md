@@ -1,0 +1,1 @@
+Viridian Forest stall at (18,7): repeated probing from the upper-west / top-row approach has only produced loops back into known upper-west lanes or the mid-east rejoin hub around (30,18). After 30+ turns without map progress, the correct response is to abandon this local state and rewind out rather than keep testing nearby drops.

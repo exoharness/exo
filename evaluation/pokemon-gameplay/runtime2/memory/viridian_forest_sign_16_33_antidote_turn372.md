@@ -1,0 +1,1 @@
+Viridian Forest turn 372: the sign around `(16,33)` facing up reads the standard poison hint: `For poison, use ANTIDOTE! Get it at POKeMON MARTs!` This confirms the west sign-row branch at `(18,35)` reconnects to the already-known antidote/sign choke, not a new exit route.

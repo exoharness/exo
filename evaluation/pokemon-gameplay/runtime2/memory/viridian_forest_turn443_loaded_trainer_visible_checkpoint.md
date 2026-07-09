@@ -1,0 +1,1 @@
+Viridian Forest turn 443: rewound to `turn375_forest_27_34_trainers_visible` specifically to try a more radical plan — interact with visible trainer/road geometry from a clean non-east-rim checkpoint instead of continuing any lower sign or east-rim wedge.

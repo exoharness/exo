@@ -1,0 +1,1 @@
+Viridian Forest turn 436: live state at `(18,32)` facing up with the sign visible to the left is part of the already-mapped upper-left sign-row choke family. Do not keep probing from here; rewind to a cleaner lower-area checkpoint.

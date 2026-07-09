@@ -1,0 +1,1973 @@
+[
+  {
+    "turn": 1,
+    "summary": "Got through the boot/title weirdness and into Oak’s intro. Learned that the initial white screen was just pre-title boot; waiting ~180 frames revealed the copyright screen, then button presses reached the title. Mashed through most of Oak’s speech safely with A and moderate waits. On the player naming screen, pressing START accepted the default name immediately; in this ROM/state the default player name appears to be “AAAA”. We are now at the rival naming screen, so intro is almost finished.\n\nState reached during intro: RAM now shows Player’s House 2F at (3,6), money $3000, no Pokémon yet. I u",
+    "milestones": [
+      "Entered Pallet Town for the first time",
+      "Entered Player's House 2F for the first time"
+    ],
+    "improvements": [
+      "TODOS updated",
+      "PLAYBOOK updated",
+      "MEMORY: boot_behavior",
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 2,
+    "summary": "Finished the intro and confirmed rival default naming works with START too. Oak’s opening sequence is over; we’re now controllable in Player’s House 2F.\n\nWhat I learned:\n- I’m standing directly in front of the bedroom TV/SNES, and pressing A/B while facing it cycles between two inspect messages:\n  - “...Okay! It’s time to go!”\n  - “AAAA is playing the SNES!”\n- Movement inputs did nothing because I kept being stuck in these textboxes; I need to clear the text and then walk away without re-pressing A.\n- `save_checkpoint` currently failed with a filesystem 500 error, so checkpoints may be unrelia",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 3,
+    "summary": "I cleared the TV textbox and confirmed movement works normally on the bedroom floor. I spent the rest of the turn probing the room bounds and obstacles, but I did not find the stair tile yet.\n\nWhat I learned:\n- The accessible bedroom area seems to span roughly x=1..5 and y=6..7 from current RAM coordinates.\n- The bed on the left and plant on the right are solid obstacles.\n- Repeated downward movement at y=7 did nothing, so the visible bottom edge of the room is not where the stairs are.\n- I was able to move to (1,6) near the bed and to (5,6) near the plant, so the upper row is traversable acro",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 4,
+    "summary": "I probed the bedroom much more systematically instead of repeating the same failed action.\n\nWhat I did:\n- Moved across the entire visible lower half of Player’s House 2F and confirmed I can stand at least on:\n  - left side near bed: around (1,7) and (1,6)\n  - center: (2,7), (3,7)\n  - right side near plant: (4,7), (5,7)\n- Tried multiple `down` attempts, including long holds, from bottom-row tiles x=2, x=3, and x=4.\n- None of those triggered a staircase/downstairs warp.\n\nWhat I learned:\n- The room is not frozen; movement works normally.\n- Bed, plant, and TV/desk are solid obstacles as expected.\n",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: players_house_2f_failed_stairs_probe",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 5,
+    "summary": "Turn 5 summary:\n\n- I did a genuinely different, broader movement probe across the whole visible room instead of only pushing down from center.\n- Confirmed I can move freely across the bottom row from about x=1 to x=5 and up/down between y=6 and y=7.\n- Tested `down` from multiple bottom-row positions including (1,7), (4,7), and (5,7); none triggered a staircase/warp.\n- Tried serpentine movement and long-hold movement too; still could not reach any y > 7 or find a hidden exit.\n- So the expected downstairs tile is not behaving like a normal visible bottom-edge stair in this state.\n\nWhat I learned",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: players_house_2f_bottom_edge_probe",
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 6,
+    "summary": "Turn 6 summary:\n\n- I finally did a genuinely different sanity check: opened the START menu, confirmed it works normally, then closed it with B.\n- Re-probed movement afterward from right side to left side and back; movement is normal within the accessible room.\n- Confirmed again that:\n  - accessible area is still only about x=1..5, y=6..7\n  - left side/bed blocks movement\n  - bottom edge still does not warp\n  - long-hold movement also does nothing special\n- Checked `list_checkpoints`; there are currently no checkpoints at all, so rewind is not available.\n\nWhat I learned:\n- This is not a frozen-",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: players_house_2f_menu_sanity",
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 7,
+    "summary": "Turn 7 summary:\n\n- The run had reset back to boot/title despite stale RAM showing Pallet Town at (0,0), so I trusted the screen and replayed the startup sequence.\n- Waited through:\n  - copyright screen\n  - GAME FREAK logo\n  - opening monster animation\n  - title screen\n- Pressed START at the title and selected NEW GAME.\n- Mashed through a large chunk of Oak’s intro with A.\n- Reached deep into the intro again:\n  - player is now already set to default name/state, since RAM jumped to Player’s House 2F with $3000 while intro text continued\n  - current screen is still mid-intro on the rival explanat",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 8,
+    "summary": "Turn 8 summary:\n\n- I finished the remaining intro flow again after the reset:\n  - mashed through Oak’s rival explanation\n  - reached the rival naming screen\n  - confirmed `start` still accepts the default rival name, which again became `AAAAAA`\n  - waited through the white transition and resumed the final Oak text\n- After returning to the bedroom, I again ended up facing the TV/SNES and confirmed the same two inspect messages:\n  - “AAAA is playing the SNES!”\n  - “…Okay! It’s time to go!”\n- I attempted several sequences intended to clear the textbox and walk away, but movement still did not occ",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 9,
+    "summary": "Turn 9 summary:\n\n- I finally cleared the SNES textbox cleanly and confirmed movement is possible again.\n- From the textbox state at (3,6) facing up, pressing `A, A, down, down...` got me to a clean free-movement state at **(3,7)** facing down.\n- I then tested the apparent downstairs exit tile directly:\n  - moved around slightly on the bottom row\n  - waited 180 frames with no change\n  - held `down` for 60 frames with extra settle time\n- Result: **still no movement and no warp** from **(3,7)**, which visually looks like the bottom-center exit position.\n\nWhat I learned:\n- This is not just “stuck ",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: players_house_2f_current_visual",
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 10,
+    "summary": "Updated self-improvement assets only, per directive.\n\nChanged:\n- Playbook: consolidated the recurring lessons about boot/title desync, default-name acceptance with START, textbox clearing, and the exact Player’s House 2F wedge evidence so I stop rediscovering the same failed hypotheses.\n- Memory: saved `players_house_2f_consolidated` with the verified room facts, implications, and best next experiments.\n- Todos: refined the active goal to focus on new interaction hypotheses and added a reminder to verify checkpoint reliability.\n- Tooling: installed `probe_path`, a step-by-step input logger tha",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: players_house_2f_consolidated",
+      "NEW TOOL: probe_path",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 11,
+    "summary": "Turn 11 summary:\n\n- I stopped repeating only `down` and did genuinely different probes.\n- Used `probe_path` to test interactions from multiple positions/facings:\n  - At **(2,6)** facing up, `A` did nothing.\n  - At **(4,6)** facing up, `A` did nothing.\n  - At **(3,7)** facing left, `A` did nothing.\n  - At **(4,7)** facing right, `A` did nothing.\n- Confirmed again that only the **TV/SNES** at **(3,6)** facing up is interactable; pressing `A` there opens the usual text:\n  - “AAAA is playing the SNES!”\n- Re-approaching the center tile from left/right/up still did not reveal any hidden warp.\n- Ende",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: players_house_2f_interaction_probe",
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 12,
+    "summary": "Turn 12 summary:\n\n- Cleared the SNES textbox again and confirmed a second clean dismissal method:\n  - `b, b, down, down` from the TV textbox gets back to free movement at **(3,7)** facing down.\n- Re-probed the bottom-center area with step logging:\n  - From **(3,7)**, `down` still does nothing.\n  - From **(1,7)**, `down` also does nothing.\n  - Moving left/right across the bottom row still works normally.\n- Tried genuinely different floor interactions:\n  - `A` at **(3,7)** facing down: no interaction\n  - `A` at **(2,7)** facing left: no interaction\n  - `A` at **(4,7)** facing right: no interacti",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: players_house_2f_b_clear_and_reprobe",
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 13,
+    "summary": "Turn 13 summary:\n\n- I did one more genuinely different verification pass instead of more blind `down` presses.\n- `probe_path` reconfirmed the room is only a 2-row reachable area:\n  - reachable: around x=1..5, y=6..7\n  - `up` from (3,7) to (3,6) works\n  - `down` from (3,7) still does nothing\n- I then tested the TV/SNES state again carefully:\n  - `up` to face the TV, `A` opens the usual text\n  - `B` dismisses it cleanly\n  - trying unusual buttons (`A/B/START/SELECT`) from that state only cycled/dismissed SNES text; no hidden event, warp, or escape occurred\n\nWhat I learned:\n- This is now best tre",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: players_house_2f_dead_end_turn13",
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 14,
+    "summary": "Turn 14 summary:\n\n- I followed the directive to do something genuinely different and to re-read the screen carefully instead of repeating center-tile `down`.\n- Checked `list_checkpoints` again: there are still **no checkpoints**, so rewind is unavailable.\n- Used `probe_path` from the SNES textbox state and confirmed an important nuance:\n  - `B` dismissed one page, but not enough by itself to free movement.\n  - `A, A, down, down` successfully cleared the textbox and moved to **(3,7)** facing down.\n- Opened the START menu from the clean state and re-read the room carefully.\n- Moved to the **bott",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: players_house_2f_void_visual",
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 15,
+    "summary": "Turn 15 summary:\n\n- Did a genuinely different test instead of more stair-tile probing: I used the START menu and successfully completed an in-game SAVE from the wedge.\n- Sequence used from the menu shown on screen:\n  - `down, down, A` to select SAVE\n  - confirmed through the save flow\n  - waited for `Now saving...` to finish\n- Result: save completed normally, then the game returned to the exact same bad Player’s House 2F state at `(1,7)`.\n\nWhat I learned:\n- The wedge is not a total game freeze:\n  - START menu works\n  - save flow works\n  - SRAM/in-game saving appears functional\n- But saving doe",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: players_house_2f_save_test",
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 16,
+    "summary": "Turn 16 summary:\n\n- I finally broke out of the false “2F corruption” theory by trying genuinely different timing.\n- Used `probe_path` with **long-hold movement** (`hold_frames: 60`) from the apparent dead-end on Player’s House 2F:\n  - long `right` from `(1,7)` jumped to about `(5,7)`\n  - long `up` from there reached about `(5,3)`\n- Then with normal probes I found the **actual top-right staircase area**:\n  - moved to about `(6,1)` on 2F\n  - pressing `right` there caused a map change from **Player’s House 2F (0x26)** to **Player’s House 1F (0x25)**\n- Confirmed by screenshot/state that I am now i",
+    "milestones": [
+      "Entered Player's House 1F for the first time"
+    ],
+    "improvements": [
+      "MEMORY: players_house_escape_fix",
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 17,
+    "summary": "Turn 17 summary:\n\n- I systematically mapped **Player’s House 1F** with `probe_path` instead of guessing.\n- Key findings on **1F (map 0x25)**:\n  - Starting area at bottom-left is walkable across the lower room.\n  - I could move up the left side to about **(1,3)**, then across the top to about **(5,3)**.\n  - The furniture blocks some center/right movement, but the room is much larger than the initial screen crop suggested.\n  - The **staircase at the top-right is real and usable**: from around **(7,2)** pressing **up** warped to **Player’s House 2F (map 0x26)**.\n- After warping, I explored **2F**",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 18,
+    "summary": "Turn 18 summary:\n\n- I stopped re-testing the upstairs wedge and used the known stair warp correctly:\n  - From **Player’s House 2F at (6,1)**, pressing **right** warped back to **Player’s House 1F**.\n- On 1F, I systematically mapped the floor with `probe_path` instead of guessing from the cropped screen.\n- I discovered the actual route out of the house:\n  - from the upper area, move left/down around the table into the lower corridor\n  - the lower corridor is walkable across to about **x=0..5, y=7**\n  - from about **(2,7)** on **map 0x25**, pressing **down** triggers the house exit warp\n- The wa",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: players_house_1f_exit"
+    ]
+  },
+  {
+    "turn": 19,
+    "summary": "Turn 19 summary:\n\n- I finally progressed the Pallet Town opening by probing the **north exit** instead of wandering locally.\n- Systematic probing showed:\n  - the north path is blocked across much of the fence line/grass edge,\n  - but the **east side** is the correct opening.\n- Verified trigger:\n  - at about **Pallet Town (map 0x00), x=10, y=1**, stepping into the north exit triggered **Oak’s cutscene**.\n  - Screen showed: **“OAK: It’s unsafe! Wild POKeMON live...”**\n- Mashed through Oak escort dialog.\n- Oak led me into **Oak’s Lab (map 0x28)**.\n- I am now standing in front of Oak and the rival",
+    "milestones": [
+      "Entered Oak's Lab for the first time"
+    ],
+    "improvements": [
+      "MEMORY: pallet_town_oak_trigger",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 20,
+    "summary": "Updated self-improvement assets only.\n\nChanged:\n- **Playbook:** added the current Oak’s Lab state, the verified Pallet Town north-exit/Oak trigger, and next-step expectations for the starter scene so I don’t have to rediscover the opening flow.\n- **Memory:** saved `oak_lab_opening` with the lab-entry/starter-scene summary and expected sequence.\n- **Todos:** aligned goals with reality: now focused on finishing Oak’s Lab dialog, getting the starter, then handling the first rival battle.\n- **Tooling:** installed **`advance_dialog`**, a reusable dialog-mashing tool for multi-box story conversation",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: oak_lab_opening",
+      "TODOS updated",
+      "TODOS updated",
+      "NEW TOOL: advance_dialog"
+    ]
+  },
+  {
+    "turn": 21,
+    "summary": "- Progressed Oak’s Lab intro successfully after the apparent dialog stall. The issue was just text paging; a single slower `A` after waiting advanced from “Which POKeMON do you want?” to free movement.\n- Moved to the **rightmost Poké Ball** and confirmed it is **Squirtle**:\n  - path used from in-front-of-Oak: `down, right, right, right` to get beside the table, then `left, up, A` to inspect the ball\n  - Pokédex/info screen showed **SQUIRTLE / TINYTURTLE**\n- Backed out of the Pokédex info and reached the actual selection prompt.\n- Current screen is the confirmation menu:\n  - text: **“water POKé",
+    "milestones": [
+      "Pokedex grew to 4 owned"
+    ],
+    "improvements": []
+  },
+  {
+    "turn": 22,
+    "summary": "Turn 22 summary:\n\n- Successfully chose **Squirtle** as the starter.\n- Confirmed a useful shortcut on the nickname screen:\n  - pressing **START** immediately declines renaming and keeps the default name **SQUIRTLE**.\n- After starter acquisition, RAM updated correctly:\n  - party now contains **Squirtle Lv5, 19/19 HP**\n  - Pokédex owned is now **1**\n- I saved this as memory in **`oak_lab_squirtle_choice`** and updated todos:\n  - “finish dialog and obtain a starter” is now done\n  - “first rival battle” is now in progress\n\nWhat I did after that:\n- Advanced through the rival/Oak post-pick dialog.\n- ",
+    "milestones": [
+      "Party grew to 1: Squirtle L0"
+    ],
+    "improvements": [
+      "TODOS updated",
+      "MEMORY: oak_lab_squirtle_choice"
+    ]
+  },
+  {
+    "turn": 23,
+    "summary": "Turn 23 summary:\n\n- I re-read the lab screen and tried a genuinely different action instead of assuming we were stuck in overworld movement.\n- Pressing `A` while facing the rival at **Oak’s Lab (5,6) facing up** triggered the expected first rival battle.\n- The earlier “no movement” behavior was just the pre-battle interaction state, not a wedge.\n\nBattle progress this turn:\n- Rival **AAAAAA** sent out **Bulbasaur Lv5**.\n- Squirtle entered battle at **19/19 HP**.\n- I advanced through the opening text and reached the battle menu multiple times.\n- At least one **Tackle** resolved successfully:\n  -",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 24,
+    "summary": "Turn 24 summary:\n\n- I finished the first rival battle sequence, but **lost** the battle.\n- Battle outcome details:\n  - Squirtle started this turn at **13/19 HP** against **Bulbasaur Lv5**.\n  - I kept advancing the combat text and attack flow with `A`.\n  - Squirtle’s HP dropped **13 → 10 → 6 → 5 → 3 → 0**.\n  - Final visible text before the loss included repeated **“used TACKLE!”** lines and one **“Critical…”** line.\n- After fainting, I advanced through the post-battle dialog:\n  - Rival said **“Yeah! Am I great or what?”**\n  - Oak gave follow-up advice including **“POKéMON fight to toughen it up",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 25,
+    "summary": "Turn 25 summary:\n\n- I made real progress instead of staying stuck at Oak’s Lab.\n- From Oak’s Lab, I probed downward and confirmed the exit:\n  - moving down from `(5,6)` to `(5,11)` reached the doorway area\n  - one more `down` warped out to **Pallet Town** at about `(12,11)`\n- I briefly re-entered Oak’s Lab by pressing `up` from the door, confirming the warp is reliable, then exited again.\n\nWhat I learned in Pallet Town:\n- Standing directly in front of Oak’s Lab door can be awkward for moving north; probing showed I needed to move away from the doorway alignment first.\n- From outside Oak’s Lab,",
+    "milestones": [
+      "Entered Route 1 for the first time"
+    ],
+    "improvements": []
+  },
+  {
+    "turn": 26,
+    "summary": "Turn 26 summary:\n\n- I stopped treating the Route 1 south entrance as a wedge and probed it systematically.\n- From **Route 1 (map 0x0c) at (10,28)**:\n  - repeated `up` did nothing, confirming the **north tile by the sign/fence is blocked**\n  - moving **right** along the bottom path worked up to about **x=14**\n  - trying to go north there led into **grass** and triggered a **wild Rattata Lv3**\n- In the wild battle, I used repeated `A` presses to progress through the menus/text and beat the Rattata.\n  - Squirtle ended at **16/19 HP**\n  - visible result: **“AAAA gained 24 EXP. Points!”**\n- I saved",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route1_south_sign_and_grass_probe",
+      "TODOS updated",
+      "PLAYBOOK updated"
+    ]
+  },
+  {
+    "turn": 27,
+    "summary": "Turn 27 summary:\n\n- Cleared the lingering wild-battle/result text from the Route 1 Rattata encounters and returned to the overworld.\n- During the battle cleanup, Squirtle beat a **Wild Rattata Lv2** and ended at **14/19 HP**.\n- I systematically probed the **east side of Route 1’s south entrance** instead of just mashing `up`:\n  - from about **(14,28)**, moving right worked to **x=15, 16, 17**\n  - but **`up` from x=14..17 at y=28 never advanced north**\n  - repeated attempts there only produced grass-edge/wild-encounter behavior\n- I also observed some odd temporary screen corruption while probin",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route1_east_edge_probe",
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 28,
+    "summary": "Turn 28 summary:\n\n- I finally stopped re-testing the blocked east edge and tried a genuinely different route: moving **left** from the south entrance before probing north.\n- That worked:\n  - from the old stuck area around **(16,28)**, moving left reached the main vertical lane\n  - at **x=11** and **x=9**, `up` was still blocked\n  - moving farther left eventually reached **(6,28)**, where a wild encounter triggered\n\nBattle/result progress:\n- Fought and beat a **Wild Rattata Lv4**.\n- Squirtle took damage during the fight:\n  - **14/19 HP → 9/19 → 6/19**\n- Squirtle then **leveled up to Lv6** and n",
+    "milestones": [
+      "Highest party level is now 6"
+    ],
+    "improvements": [
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 29,
+    "summary": "Turn 29 summary:\n\n- I finally re-read the screen instead of treating Route 1 as a pure movement puzzle.\n- From the “stuck” spot at **Route 1 (6,24)**, I probed around the NPC and discovered:\n  - `up` at **x=5..7, y=24** is blocked by the rock/fence line.\n  - The sprite below me was an **NPC**, not a geometry obstacle.\n- I pressed **A** facing the NPC and triggered the standard Route 1 clerk dialog.\n- The dialog was long and included the key early-game gift:\n  - he gives the player a **sample item** and talks about the **Poké Mart** carrying **POKé BALLS**.\n- After clearing the full conversatio",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 30,
+    "summary": "Updated self-improvement assets only; no buttons pressed.\n\nChanged:\n- Playbook updated with:\n  - Route 1 clerk insight: nearby sprite was an NPC, not geometry; check `A` on sprites before assuming blockage.\n  - Current Route 1 status: Squirtle is low HP, avoid grass, and continue north from the clerk area.\n  - Battle heuristic reminder: clear lingering result text fully before movement.\n- Saved durable memory:\n  - `route1_clerk_potion_and_lane` — clerk conversation, free sample item/Poké Mart hint, and the nearby lane/collision notes.\n- Todos updated to match reality:\n  - current top priority ",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route1_clerk_potion_and_lane",
+      "PLAYBOOK updated",
+      "TODOS updated",
+      "NEW TOOL: early_battle_mash"
+    ]
+  },
+  {
+    "turn": 31,
+    "summary": "- Cleared the lingering wild Pidgey battle text and returned to the overworld safely.\n- Re-probed Route 1 from the clerk area with systematic movement:\n  - From `(12,24)` I could go north to `(12,20)`, but the fence/ledge line blocked further progress there.\n  - Going left along that line revealed the true opening: from `(9,20)`, `up` worked to `(9,19)`.\n  - Continuing north and then east advanced up the route to about `(13,15)`.\n- Important Route 1 geometry learned:\n  - The mid-route fence line is blocked at `x=12..13, y=20`.\n  - The passable northbound gap is farther west, around `x=9, y=20 ",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 32,
+    "summary": "- Cleared the first Route 1 wild Pidgey encounter safely by choosing **RUN**:\n  - From the fight menu, `down, right, A` selected **RUN**.\n  - After advancing text, RAM confirmed **battle: none** and returned to the overworld at **(15,14)**.\n\n- I then used **systematic probing** instead of guessing:\n  - From **(15,14)**, `up` to **(15,13)** worked.\n  - `left` from there was blocked.\n  - Moving right along the east side worked to **(17,14)**.\n  - Going down from there worked to **(17,16)** and left/back down to **(15,17)** / **(16,17)**, revealing more of the lower-right route edge.\n  - Critical",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 33,
+    "summary": "- Ran from the wild **Pidgey Lv3** successfully despite low HP:\n  - confirmed the battle-menu path again: **`down, right, A` = RUN**\n  - had to clear two text states: first “Got away safe!” then one more `A` to fully return to overworld\n  - RAM then correctly showed **battle: none**\n\n- Re-read the Route 1 screen and did genuinely different probing instead of reusing the same east-side pushes.\n- Systematic `probe_path` mapping from the east-side area found:\n  - **(17,15)** itself is grass / encounter-prone\n  - **up from x=15,y=14 is blocked**\n  - the horizontal rock line around **y=14** is bloc",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 34,
+    "summary": "Made real progress: we broke the Route 1 “wedge” and reached **Viridian City**.\n\nWhat I did:\n- Probed north from **(5,18)** and confirmed the west lane is open up to **y=14**.\n- Followed the horizontal rock barrier east to the opening near the trainer/grass area.\n- Moved north through that opening, continued up the upper route, then looped west near the top fence line.\n- Final warp:\n  - from about **Route 1 (map 0x0c), (11,0)**, pressing **up** entered **Viridian City (map 0x01)** at about **(21,35)**.\n\nWhat I learned:\n- The Route 1 blockage was not a hard dead end.\n- The correct path is:\n  1.",
+    "milestones": [
+      "Entered Viridian City for the first time"
+    ],
+    "improvements": [
+      "MEMORY: route1_to_viridian_path",
+      "TODOS updated",
+      "PLAYBOOK updated"
+    ]
+  },
+  {
+    "turn": 35,
+    "summary": "- Re-probed Viridian City from the south entrance and made real positional progress:\n  - moved north from `(21,35)` to around `(21,30)`\n  - then west to `(13,30)`\n  - then found a usable northbound route on the east side by going right to `(19,28)`, up to `(19,26)`, left to `(15,26)`, and up to `(15,25)`\n  - continued north to `(15,18)`, then west to the town sign at about `(16,17)` facing right\n\n- I verified the sign interaction:\n  - pressing `A` on the sign opens the Viridian City sign text\n  - visible text is the standard:\n    - `VIRIDIAN CITY`\n    - `The Eternally Green Paradise`\n  - I sav",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: viridian_city_entrance_sign",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 36,
+    "summary": "- Cleared the Viridian City sign text first; the apparent “stuck” state was just an open textbox.\n- Then I did genuinely different probing across Viridian City instead of hovering by the entrance sign:\n  - Confirmed movement from the sign area to `(16,16)`, then east across the upper town to about `(24,16)`.\n  - Found the **Poké Mart** building on the east side; its sign visibly reads **MART**. I reached the area around it at about `(27,21)`.\n  - Explored the middle/southwest parts of town, including a pond/water area and fence lines, ending at **Viridian City `(8,29)` facing up**.\n- Important",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 37,
+    "summary": "- I spent this turn mapping the **east/central Viridian City area** to find the **Pokémon Center entrance** while keeping low-HP Squirtle out of grass and battles.\n- Key findings:\n  - From the southwest area near **(8,29)**, moving east led back to the **Poké Mart side**.\n  - I confirmed the building labeled **POKé** on the east side is the **Poké Mart**, not the Pokémon Center.\n  - There is a long **rock/fence barrier** running horizontally around **y=28** in this area; many attempted `up` moves from below it are blocked.\n  - I found a **gap/crossing** in that barrier around **x=22**, allowin",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 38,
+    "summary": "- Reached the **Viridian Pokémon Center** despite the awkward fence/ledge layout south of it:\n  - From `(22,28)` I found the actual gap by moving **left to x=19**, then **up** to `(19,25)`, then **right** toward the building.\n  - The Center entrance is entered from just below/left of the door; from outside at about `(22,26)`, pressing **right, up** warped into **Viridian Pokecenter (map 0x29)** at `(3,7)`.\n\n- Inside the Center:\n  - Waited through the fade-in/black transition.\n  - Walked toward the counter area, but I **talked to the standing NPC in the middle of the room**, not Nurse Joy.\n  - ",
+    "milestones": [
+      "Entered Viridian Pokecenter for the first time"
+    ],
+    "improvements": []
+  },
+  {
+    "turn": 39,
+    "summary": "- I tried to clear the Pokecenter NPC dialog, but this NPC has a **long looping/multi-page speech** and I did **not finish it** before the tool budget ran low.\n- Current state is still:\n  - **Viridian Pokecenter (map 0x29)**\n  - at **(4,4)** facing up\n  - **not in battle**\n  - **Squirtle Lv6 at 5/21 HP**, so healing remains urgent.\n- What I learned:\n  - The NPC directly north of the player in the Viridian Pokecenter is **not Nurse Joy**.\n  - Talking to him gives the standard advice text about Pokémon Centers, including lines like:\n    - “They don’t charge any money either!”\n    - “There’s a PO",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 40,
+    "summary": "Updated self-improvement only; no buttons pressed.\n\nChanged:\n- **Playbook**: added Viridian City / Pokecenter notes:\n  - exact Pokecenter approach through the awkward fence gap\n  - warning that the middle-aisle man is **not** Nurse Joy\n  - reminder to clear text, then go straight to the **top counter** for healing\n  - current route priority: **heal first, Mart second**\n- **Memory saved**: `viridian_pokecenter_notes`\n  - durable notes on the entrance path, misleading NPC dialog, and current low-HP healing priority\n- **Todos updated**:\n  - `Heal Squirtle in Viridian City's Pokemon Center` stays ",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: viridian_pokecenter_notes",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 41,
+    "summary": "- Cleared the long stuck Pokecenter dialog by finally using **B** instead of endless A-mashing; that was the genuinely different input needed.\n- Re-probed the room with `probe_path` and mapped the top aisle:\n  - From the original stuck spot, moving **right, up** reached **(5,3)**.\n  - At **(5,3)**, facing **left** and pressing **A** talks to the nearby male NPC, confirming that tile is beside him.\n  - Moving to **(3,3)** and facing **right** also talks to the same/adjacent top-aisle NPC.\n  - Multiple attempts to go **up** from the top aisle did nothing, so the counter blocks direct north movem",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 42,
+    "summary": "- Still stuck in the Viridian Pokecenter advice NPC dialog; I did finally confirm it is a normal multi-page text conversation, not a softlock or movement bug.\n- Important observation: the textbox is definitely advancing, but my repeated A/B mashing cycled through pages and landed back on earlier lines like:\n  - “There’s a POKéMON CENTER in every town ahead.”\n- I also confirmed from movement probes that:\n  - at `(2,3)` facing left, no new interaction triggered\n  - returning to `(3,3)` facing right and pressing `A` re-talks to the same right-side NPC\n  - movement inputs while the textbox is open",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 43,
+    "summary": "- Cleared the “stuck forever” Pokecenter dialog by using **B**; that finally returned to free movement. So the issue was not a softlock.\n- From there I probed the top aisle and confirmed:\n  - moving from `(3,3)` to `(5,3)` is possible\n  - **up from `(5,3)` is blocked by the counter**\n  - the tile/player immediately to the **left** at `(5,3)` is still the same advice NPC; pressing `A` there reopens his text\n- I made a mistake by interacting left again and got pulled back into the same repeating advice text:\n  - “There’s a POKéMON CENTER in every town ahead.”\n  - “They don’t charge any money eit",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 44,
+    "summary": "- Broke out of the 7-turn Pokecenter wedge.\n- Key cause found: bulk `A`/dialog-mash while facing the advice NPC can finish his text and immediately re-talk to him, making it look like the dialog never ends.\n- I saved this as memory: `viridian_pokecenter_advice_npc_not_working`.\n\nWhat worked:\n- Advanced the advice text with smaller/manual presses until it fully cleared.\n- Once free, I moved away from the NPC and re-probed the top aisle.\n- Confirmed:\n  - from `(5,3)`, `left` is blocked\n  - `up` from the aisle is blocked by the counter\n  - moving right is open: I reached `(9,3)` on the top aisle\n",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: viridian_pokecenter_advice_npc_not_working"
+    ]
+  },
+  {
+    "turn": 45,
+    "summary": "- I made real diagnostic progress in the Viridian Pokecenter top aisle.\n- Starting from `(9,3)`, I systematically tested interactions:\n  - `(8,3)` facing left and `A` did nothing special.\n  - `(7,3)` facing left and `A` opened dialog from the **left-side top NPC**.\n  - At `(9,3)`, facing right and pressing `A` also opens dialog — this means there is a **right-side interaction target/NPC** immediately to the right of the player’s aisle position.\n- Important nuance confirmed again: bulk dialog mashing can loop because after text closes, another `A` can immediately re-talk to the adjacent NPC.\n- ",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 46,
+    "summary": "- Broke out of the repeated Pokecenter dialog again and finally made positional progress.\n- Key discovery: from the top aisle, **(9,3) facing up** appears to be the correct tile to talk to Nurse Joy across the counter. When I pressed `A` there, the screen stayed on the overworld with no textbox, suggesting I may have under-pressed / wrong facing timing, but importantly I was **not** forced back into the receptionist advice loop.\n- Also verified:\n  - At **(9,3) facing right**, `A` talks to the **right-side advice NPC/receptionist text** (“The receptionist told me...” / “You can use that PC in t",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 47,
+    "summary": "- I finally made a genuinely different probe in the Viridian Pokecenter top aisle instead of re-talking to the same NPC endlessly.\n- Key findings:\n  - From `(9,3)`, pressing `A` while facing **right** definitely talks to the right-side male NPC, whose text includes: **“You can use that PC in the corner.”** / **“The receptionist told me...”**\n  - Using **B** can advance/clear his text, and combining a final **down** after clearing let me step away safely to `(9,4)`.\n  - I mapped the nearby top aisle more carefully:\n    - `(7,3)` facing left talks to the left-side NPC.\n    - `(8,3)` facing up an",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 48,
+    "summary": "- Found the correct healing interaction in the Viridian Pokecenter at last.\n- Key discovery:\n  - Standing at **(11,3) facing up** is the correct tile to talk to **Nurse Joy**.\n  - Pressing `A` there produced the healing dialog: **“preparations. Please wait.”**\n- What did **not** work:\n  - `A` from **(9,3) facing up** did nothing.\n  - `A` from **(9,3) facing right** talks to the **right-side male NPC** (“The receptionist...” / PC advice).\n  - `A` from **(10,4) facing up** also talks to that right-side NPC, not Nurse Joy.\n  - The advice-dialog “softlock” was caused by re-talking adjacent NPCs wi",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 49,
+    "summary": "- I finally proved the current counter tile was the **wrong receptionist**:\n  - At **Viridian Pokecenter (11,3) facing up**, pressing through the text revealed:\n    - **“Welcome to the Cable Club!”**\n    - **“We’re making preparations. Please wait.”**\n  - So this tile does **not** heal; it is the **Cable Club receptionist**, not Nurse Joy.\n\n- I also confirmed:\n  - The “Please wait.” screen is **not** an automatic timed pause; waiting 240 and then 600 frames did nothing.\n  - The textbox can be cleared with repeated **B** presses.\n  - After clearing, the player remained at **(11,3)** with **Squi",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: viridian_pokecenter_cable_club_mistake",
+      "PLAYBOOK updated"
+    ]
+  },
+  {
+    "turn": 50,
+    "summary": "Updated self-improvement only, no inputs pressed.\n\nChanged:\n- **Playbook updated** with the Pokecenter lessons I kept re-learning:\n  - repeated `A` near NPCs can instantly re-talk and fake an “infinite dialog”\n  - use controlled single `A` and small `B` clears around counters\n  - confirmed **(11,3) facing up = Cable Club receptionist, not healing**\n  - added a compact top-aisle interaction map and the best next inference: probe left of the Cable Club desk for Nurse Joy\n- **Memory saved:** `viridian_pokecenter_top_aisle_map`\n  - durable map of the Pokecenter counter interactions and the anti-lo",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: viridian_pokecenter_top_aisle_map",
+      "TODOS updated",
+      "NEW TOOL: service_desk_probe"
+    ]
+  },
+  {
+    "turn": 51,
+    "summary": "- Cleared the Cable Club text and finally made a genuinely different probe: moved left along the entire top counter instead of re-testing the same right-side desk.\n- Important discovery from the screen layout:\n  - The woman at `(11,3)` is indeed the **Cable Club receptionist**.\n  - The **actual healing desk/Nurse Joy area is farther left**, separated by a vertical divider.\n  - By walking left to about **(6,3)**, I brought a **second counter section** into view on the far left with a staff sprite behind it.\n- Interaction results:\n  - `(10,3)` facing up: no healing / no useful interaction.\n  - `",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 52,
+    "summary": "- Success: I found the real Nurse Joy tile and healed Squirtle. RAM now shows **Squirtle L6 at 21/21 HP**.\n- Critical map result:\n  - **Viridian Pokecenter healer = (3,3) facing up**\n  - `(11,3)` is Cable Club, not healing.\n  - `(6,3)` facing up does nothing useful.\n- I saved this as memory and updated the playbook/todos.\n\nCurrent state:\n- Still in **Viridian Pokecenter**\n- At **(3,3)** facing up\n- A healing textbox is still on screen (`OK. We'll need your POKéMON.`), but healing already completed in RAM.\n\nNext turn:\n1. Clear the remaining healing text cleanly.\n2. Exit the Pokecenter.\n3. Go to",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: viridian_pokecenter_nurse_joy_position",
+      "TODOS updated",
+      "PLAYBOOK updated"
+    ]
+  },
+  {
+    "turn": 53,
+    "summary": "Cleared Nurse Joy’s remaining text and got back to free movement; healing is complete and confirmed in RAM.\n\nWhat I did:\n- Advanced the healer dialog from `OK. We'll need your POKéMON.` through `Thank you!` to `We hope to see you again!`\n- Used `A/B` plus movement to fully exit the textbox safely.\n- Waited through the screen transition at the Pokecenter exit.\n- Left the Pokecenter to Viridian City.\n- Navigated east/northeast across town and reached the Viridian Mart door area.\n\nWhat I learned:\n- The lingering healer textbox was normal, not a wedge; it just needed a few more confirms.\n- After c",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 54,
+    "summary": "- Entered the **Viridian Mart** successfully by pressing `up` from outside.\n- Important new observation: the Mart interior appeared first with an empty textbox, and the **clerk’s auto parcel dialog only appeared after waiting**. So this event can be delayed a bit; don’t assume the map is idle.\n- Advanced the clerk text and completed the parcel event:\n  - confirmed text including `Hey! You came from PALLET TOWN?`\n  - received **`OAK's PARCEL`**\n  - cleared the final line `Okay! Say hi to PROF.OAK for me!`\n- Exited the Mart back to **Viridian City**, current state:\n  - **Viridian City (map 0x1)*",
+    "milestones": [
+      "Entered Viridian Mart for the first time"
+    ],
+    "improvements": [
+      "MEMORY: viridian_mart_parcel_event",
+      "TODOS updated",
+      "PLAYBOOK updated"
+    ]
+  },
+  {
+    "turn": 55,
+    "summary": "Moved from the Mart area and systematically probed south Viridian with RAM-guided paths instead of guessing from the screen. Key result: the blocked fence line at y=30 has an opening around x=20. Following that gap south warped from **Viridian City (21,35)** to **Route 1 (11,0)**, then continued into grass and triggered a **wild battle** at **Route 1 (16,6)**.\n\nWhat I learned:\n- South exit from Viridian is confirmed reachable; the true pass-through is not at the obvious center/right posts but via the gap near **x≈20, y=30→31**.\n- My long probe overshot after entering Route 1 and walked into gr",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 56,
+    "summary": "Cleared the wild Pidgey battle manually and returned to the Route 1 overworld.\n\nWhat happened:\n- `early_battle_mash` was misleading here: its log said battle cleared, but the screen was still in battle text/animation. I trusted the screenshot and kept advancing.\n- Squirtle beat the wild Pidgey.\n- Current state is back on Route 1 at `(16,6)`, no battle, Squirtle at `17/21 HP`.\n\nWhat I learned:\n- In battle, RAM/tool battle-clear detection can be ahead of the visible text/animation. For battles, trust the screen until the overworld is visibly back.\n- Long A batches can eventually clear a simple w",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 57,
+    "summary": "- Probed a genuinely different Route 1 path instead of repeating old movement:\n  - From `(16,6)` I moved left and then far south through the western lane.\n  - Verified this route reaches at least `(5,22)`.\n  - Going farther south there is blocked.\n  - Moving east along the lower lane reaches at least `(15,23)`.\n  - Pressing down at `(15,23)` triggered a wild encounter, so that lower edge is grass, not the exit.\n\n- Current state:\n  - In a **wild Pidgey Lv3 battle**\n  - Squirtle is **Lv6 at 10/21 HP**\n  - Screen currently shows: **“Enemy PIDGEY used GUST!”**\n  - So the battle is still ongoing an",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 58,
+    "summary": "Won the wild Pidgey fight safely enough, though it got close: Squirtle dropped to 5 HP, then leveled to 7 and is now at 7/23 HP. The battle flow issue was visual timing, not a wedge: multiple A presses were needed to get through “used TACKLE,” “fainted,” level-up, and back to overworld.\n\nAfter the battle, I made genuinely different progress on Route 1:\n- Started at `(15,23)` in/near grass.\n- Probed `left,left,left,down...` and found a clear southbound path.\n- Reached `(12,29)` and then `(12,31)`.\n- Further `down` from `(12,31)` is blocked; repeated presses just alternate facing/screen state wi",
+    "milestones": [
+      "Highest party level is now 7"
+    ],
+    "improvements": []
+  },
+  {
+    "turn": 59,
+    "summary": "I broke the Route 1 “wedge” by trying a genuinely different path and timing.\n\nWhat I did:\n- Probed the lower-left edge from `(12,31)` instead of repeating blocked downward presses.\n- That probe stepped into grass and triggered a wild Pidgey Lv3.\n- In battle, I first tried fighting, but with Squirtle at low HP the exchange was bad:\n  - Squirtle dropped from `7/23` to `4/23`, then to `1/23`.\n- I then used the known run input `down, right, A` and successfully escaped.\n- After clearing the “Got away safely!” text, I tested moving straight down from the new position.\n- That worked: from `(10,33)` I",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 60,
+    "summary": "Updated self-improvement only, no game inputs.\n\nChanged:\n- Updated the playbook with the things I kept re-learning:\n  - lower Route 1 south exit is slightly left of the fake dead-end near `(12,31)`\n  - Viridian south gate opening is around `x≈20, y≈30`\n  - after Oak’s first escort, standing at Pallet north path `(10,1)` will not repeat that trigger\n  - low-HP rule: prioritize parcel delivery over extra encounters, and flee wild battles when needed\n  - battle-clear timing can lag visually, so trust the screenshot until the overworld is visibly back\n- Saved durable memories:\n  - `route1_viridian",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: route1_viridian_south_return",
+      "MEMORY: early_battle_low_hp_notes",
+      "TODOS updated",
+      "NEW TOOL: flee_wild_battle"
+    ]
+  },
+  {
+    "turn": 61,
+    "summary": "- Probed Pallet Town from the north path marker `(10,1)` instead of assuming the old Oak trigger mattered. Confirmed that after the first escort, this tile is just normal ground.\n- Mapped enough of town by RAM-guided movement to relocate the major buildings:\n  - West house around `(8,4)` blocks westward further.\n  - East/southeast large building is Oak’s Lab area; I reached its front at about `(13,6)` and later along its left/front side around `(10,12)`.\n  - Several apparent “blocked downs” were just building/fence collisions, not a wedge.\n- Important outcome: I ended the turn immediately left",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 62,
+    "summary": "- Reached the correct building and entered **Oak’s Lab** from Pallet Town. Important timing lesson: after the warp, the screen still showed the exterior until a short **wait**; then the lab interior appeared. So building-entry visuals can lag and a brief wait is sometimes required.\n- Inside the lab, I probed the room and confirmed:\n  - From the entrance area, moving **up/up/left/left/up** reaches the **top-left bookshelf zone**.\n  - Pressing **A** there gives the standard bookshelf text: **“Crammed full of POKéMON books!”**\n  - Pressing **B** is good for clearing that text; repeated **A** just",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 63,
+    "summary": "Cleared a genuinely different Oak's Lab interaction and learned the lower-right NPC is just **Prof. Oak’s aide**, not Oak.\n\nWhat I did:\n- Probed from the entrance area to the lower-right side of the lab.\n- Faced the NPC at about `(8,11)` and talked to him.\n- Cleared the full dialog safely.\n\nWhat I learned:\n- This NPC says: **“I study POKéMON as PROF.OAK’s AIDE.”**\n- So talking here does **not** deliver Oak’s Parcel or advance the story.\n- I saved this as memory: `oak_lab_aide_position`.\n\nCurrent state:\n- Still in **Oak’s Lab**\n- At about **(8,11)** facing **up**\n- **Squirtle is dangerously low",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: oak_lab_aide_position"
+    ]
+  },
+  {
+    "turn": 64,
+    "summary": "- I stopped repeating the lower-right aide and made a genuinely different Oak’s Lab probe.\n- Using RAM-guided movement, I found the actual path to **Professor Oak**:\n  - from around `(8,11)`, moving left to the center-left aisle, then up, then across/right to the top lab area reaches Oak near the desk.\n- I re-confirmed multiple top bookshelf interactions are just **“Crammed full of POKéMON books!”** and not story progress.\n- Important success: at **(4,2)** facing right, pressing `A` talked to **Oak**, and advancing dialog reached:\n  - **“AAAA delivered OAK’s PARCEL.”**\n- Current state is **mid",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 65,
+    "summary": "Delivered Oak’s Parcel scene fully and got unstuck.\n\nWhat I did:\n- Advanced Oak’s parcel dialog all the way through.\n- Accidentally re-talked to the rival when probing movement too early; cleared that long rival/Oak conversation too.\n- Confirmed free movement resumed in Oak’s Lab afterward.\n- Walked down through the lab and found the exit.\n- Successfully left Oak’s Lab to Pallet Town.\n\nWhat I learned:\n- Parcel delivery is definitely complete; free movement returns in the lab after a long Oak/rival dialog chain.\n- Important timing/interaction lesson: immediately after story text, movement probe",
+    "milestones": [],
+    "improvements": [
+      "TODOS updated",
+      "MEMORY: oak_parcel_delivery_complete"
+    ]
+  },
+  {
+    "turn": 66,
+    "summary": "I made genuinely different progress by using the house at Pallet `(12,12)` as a likely healing target instead of wandering.\n\nWhat I did:\n- Probed around Pallet and found a warp into the right-side house.\n- Inside, I tested the NPCs instead of assuming it was irrelevant.\n- The lower/left woman is not useful for healing.\n- Talking to the man in the middle/top triggered a healing-style effect.\n- I then used the menu item sequence `START, down, down, A...` and confirmed the result in RAM: **Squirtle went from 1/23 HP to 21/23 HP**.\n\nWhat I learned:\n- This Pallet house is the place where an NPC can",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 67,
+    "summary": "Cleared an accidental menu/item state and got back to real navigation.\n\nWhat I did:\n- Escaped the stuck-looking `CANCEL / EXIT` item submenu with `B/B/START`.\n- Confirmed the overworld in Oak’s Lab was normal.\n- Used `probe_path` to leave Oak’s Lab; after the warp the screen went black briefly, and a short `wait` brought up Pallet Town normally.\n- Re-entered/exited the same right-side Pallet house/lab doorway once while checking pathing.\n- Then made genuinely different overworld progress in Pallet Town:\n  - From the right-side house area `(12,12)`, moved left and then north via the central-wes",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 68,
+    "summary": "- Made genuinely different progress instead of wandering in Pallet: I walked north out of Pallet Town and re-entered **Route 1**, confirming the north gate path from Pallet is straightforward from `(8,7)` via the center lane to `(10,1)` and then onto Route 1.\n- On Route 1, I probed the lower entrance area around `(10,32)` down to the familiar sign/fence choke near `(9-14,28)`.\n- Reconfirmed the key geometry:\n  - the horizontal rock/fence line at **y=28** blocks going north from the lower path,\n  - the **left sign area** around `x=5,y=28` also blocks `up`,\n  - the **right side** up to about `x=",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 69,
+    "summary": "Summary:\n- I stopped repeating the exact same tile and did broader horizontal probing across the lower Route 1 choke.\n- Confirmed these lower-edge facts by RAM:\n  - From the starting area near `(10,29)`, moving left works down to at least `(4,29)`.\n  - The entire fence/rock line just north at `y=28` is blocked at multiple tested x positions: `x=4,5,6,9,10,15`.\n  - Probing from grass caused multiple wild encounters; I successfully fled both without damage.\n- Current state:\n  - Route 1 at about `(4,28)`, facing up\n  - no battle\n  - Squirtle `21/23 HP`\n\nWhat I learned:\n- There is no hidden north ",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 70,
+    "summary": "Updated self-improvement only, no game inputs.\n\nChanged:\n- Playbook updated with:\n  - consolidated Route 1 lower-choke lesson: stop brute-forcing the bottom strip at y≈28\n  - reminder that post-dialog stray `A` can immediately re-talk to Oak/lab NPCs\n  - verified Oak parcel talk position and aide/bookshelf non-objectives\n  - Pallet right-side house as a practical backup heal point\n  - current route focus: get back to Viridian and test next story gate\n- Saved memories:\n  - `route1_lower_choke_consolidated`\n  - `pallet_town_right_house_heal`\n- Todos updated to match reality:\n  - now focused on r",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: route1_lower_choke_consolidated",
+      "MEMORY: pallet_town_right_house_heal",
+      "TODOS updated",
+      "NEW TOOL: walk_path_until_event"
+    ]
+  },
+  {
+    "turn": 71,
+    "summary": "- I finally confirmed the old Route 1 knowledge is still correct: from `(4,28)` I moved `right,right` and then could go north up the west/middle lane to `(6,24)`. So the lower-left area was not a wedge; I had just been one lane too far left.\n- From there, I verified:\n  - `(5,24)` is the clerk lane and `up` is blocked there.\n  - Going east along `y=24` works cleanly to `(14,24)`.\n  - From `(14,24)`, `up` to `(14,23)` is possible, but further `up` is blocked.\n- I then made a bad exploratory choice: I kept probing around the grass/opening area without enough caution, causing multiple wild Rattata",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 72,
+    "summary": "- Cleared the wild **Rattata Lv4** battle safely. Squirtle is now **Lv7, 18/23 HP** and back on the overworld.\n- Important battle lesson from this screen sequence: the earlier mash tool kept desyncing because the battle was sitting on intermediate text/menu states. Manual `A` presses confirmed the flow:\n  - enemy move text\n  - move selection\n  - our Tackle text\n  - enemy Tail Whip / stat-drop text\n  - another Tackle\n  - faint text\n  - post-battle clear back to overworld\n- After the battle, I resumed Route 1 navigation from `(14,24)` and made real progress probing the upper lane:\n  - `right, up",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 73,
+    "summary": "Summary:\n- I made real progress on Route 1 and re-found the upper route geometry from a different starting point.\n- Key successful probe:\n  - From `(7,20)`, going east along the blocked fence line and then working back left/up found the open lane.\n  - I reached `(9,18)`, then walked north to `(9,14)`, and east to `(14,14)`.\n  - This re-confirms the remembered route segment: the west/middle lane leads up to `y=14`, then east to about `x=14`.\n- Important new geometry refinement:\n  - From `(14,14)`, repeated `up` is blocked.\n  - From `(14,13)`, moving further up is also blocked in the tested appr",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 74,
+    "summary": "- Cleared the wild Rattata fight from the lingering text state; Squirtle leveled up to **Lv8** and is now **18/26 HP**.\n- Then used a genuinely different probe from **Route 1 (14,14)** and found the correct upper path:\n  - `up` works from 14,14 up to **14,11**\n  - then `right` to **15,11**\n  - then `up` to **15,9**\n  - then `left,left,left` to **12,9**\n  - then `up,up` to **12,7**\n- From **(12,7)**, trying to keep going straight up failed at **(12,6)**, but shifting **left to (11,6)** identified the narrow top passage area.\n- A wild **Pidgey Lv5** triggered there. The flee tool mis-navigated i",
+    "milestones": [
+      "Highest party level is now 8"
+    ],
+    "improvements": []
+  },
+  {
+    "turn": 75,
+    "summary": "- I made genuinely different Route 1 probes around the upper grass/narrow passage instead of repeating the same `up`.\n- Findings from RAM-guided probing:\n  - From `(11,6)`, `left` to `(10,6)` and `down` to `(10,7)` are possible.\n  - From `(10,7)`, `left/up/right/down` in the tested arrangement were blocked; this area is tightly constrained by ledges/rocks.\n  - From `(11,8)`, a different route `right, down, down, right, up, right, up, up, left` reached `(13,7)`, showing there is walkable space on the east side of the upper grass pocket.\n- I triggered and fled two wild encounters safely (Pidgey,",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route1_upper_grass_bad_tiles"
+    ]
+  },
+  {
+    "turn": 76,
+    "summary": "- Fled two wild **Rattata Lv3** encounters safely from the Route 1 upper-grass choke; Squirtle remains **Lv8, 18/26 HP**.\n- Important timing lesson reaffirmed: the battle can sit on blank intro/send-out screens. A good flee sequence here was:\n  - advance intro with a couple `A`s until the actual battle menu appears,\n  - then `down, right, A`,\n  - then a few `A`s to clear the result.\n- I made genuinely different path probes around the suspected top passage instead of repeating straight `up`.\n- Verified upper Route 1 geometry from this state:\n  - From `(13,7)`, `up -> (13,6)`, `left -> (12,6)`, ",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 77,
+    "summary": "- I first handled the blank-white screen correctly by waiting 180 frames; the screen then rendered normally. Important: on this Route 1 upper area, a blank screen can just be a rendering/transition lag, not a true softlock.\n- From the visible upper-grass choke, I probed movement and got a more accurate local map:\n  - Start was around `(11,6)`.\n  - `right` to `(12,6)` works.\n  - `down` from there to `(12,7)` works.\n  - `left,left,down,right,right,up,up` confirmed walkable grass tiles around `(10..12, 6..8)`.\n  - Moving farther east reached `(13,6)`, but from `(13,6)` basically every tested move",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 78,
+    "summary": "- Broke out of the Route 1 upper-grass stall and found the correct finish: from `(13,4)` on Route 1, `left,left,up,up,up,up,left,up` reached the north exit and warped into **Viridian City** at about `(20,35)`.\n- Then I tested Viridian’s north-side geometry rather than wandering blindly:\n  - Moved up the known left-side crossing to around `(19,20)`.\n  - Probed the house/fence area and then the full northern fence line.\n  - Verified the **north fence at y≈14 is blocked** across a broad span, including roughly **x=24 through x=35**.\n  - The far-right edge is also closed by the rock wall; `A` on t",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: viridian_city_north_fence_probe"
+    ]
+  },
+  {
+    "turn": 79,
+    "summary": "- I stopped brute-forcing the same blocked north-fence tiles and made a genuinely different Viridian City probe.\n- Key progress:\n  - Confirmed the fence at `(24,14)` is blocked leftward, but moving **down then east** opens the far-right side.\n  - Reached the **rock-wall east edge** around `(35,16)`.\n  - From there, going **left to about `(20,16)` and then up** found the **upper city** instead of the dead fence line.\n  - Discovered and entered a **small house** at about `(21,15)` (map `0x2b`), then exited cleanly.\n  - Continued north/west and then east across the upper lane to reach the **Gym f",
+    "milestones": [
+      "Entered Viridian School for the first time"
+    ],
+    "improvements": [
+      "MEMORY: viridian_upper_city_probe",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 80,
+    "summary": "Updated self-improvement only; no inputs sent.\n\nChanged:\n- **Playbook updated** with:\n  - consolidated Viridian upper-city geometry and the “don’t brute-force the north fence” lesson\n  - Route 1 upper-grass choke lessons and the confirmed final northbound finish\n  - reminder that blank white screens can be harmless render/transition lag\n  - current objective clarified: test Viridian’s true next progression, with Route 22 as fallback\n  - low-HP caution re-added now that Squirtle is at risk again\n- **Saved memory:** `viridian_city_upper_layout_consolidated`\n- **Todos updated** to reflect reality",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: viridian_city_upper_layout_consolidated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 81,
+    "summary": "- I made genuinely different progress instead of re-testing the Gym front: I walked all the way left across Viridian’s upper city from `(29,10)` to `(17,10)` and found an NPC by the tree wall.\n- Interacting while facing left did nothing; facing **up** from directly below her starts dialog.\n- Her text is **non-progression advice**, not a gate trigger. It mentions:\n  - taking the **winding trail in Viridian Forest** to get to **Pewter City**\n  - shopping in **Pewter City**\n- I saved this as memory `viridian_northwest_lady_advice`.\n- Important local geometry learned:\n  - At `(17,10)`, the tile le",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: viridian_northwest_lady_advice",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 82,
+    "summary": "Summary:\n- I escaped the non-progress northwest-lady area by switching to genuinely different pathing instead of re-testing the same blocked left tiles.\n- Key Viridian City discoveries by RAM-guided probing:\n  - Around `(17,10)`, the immediate left side is blocked by the tree wall; that spot is not the west exit.\n  - Moving southeast/southwest through other lanes opened the city’s western half.\n  - From roughly `(9,18)`, going left to `x=4`, then up to `y=14`, then left to `x=1`, then down to `y=17`, then left to `x=0`, and finally pressing `left` from about `(0,14)` warped to **map 0x21 / Rou",
+    "milestones": [
+      "Entered Route 22 for the first time"
+    ],
+    "improvements": [
+      "MEMORY: viridian_nw_lady_left_blocked",
+      "TODOS updated",
+      "MEMORY: viridian_west_exit_route22",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 83,
+    "summary": "Summary:\n- I made genuinely different Route 22 progress instead of repeating the same blocked tiles.\n- Mapped the route enough to learn an important negative result:\n  - Entry from Viridian west exit is around `(39,6)`.\n  - West from there reaches about `(36,6)`, but farther left is blocked on that upper-right shelf.\n  - Going down from that area reaches a long lower road around `y≈14-15`.\n  - That lower road is open horizontally across a very large span, tested from roughly `x=4` to `x=36`.\n  - But `up` is blocked all along the tested lower road at many positions (`x=4,6,7,8,12,15,18,20,21,22",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route22_lower_road_probe",
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 84,
+    "summary": "- I did a genuinely different Route 22 probe and learned something useful instead of repeating the same blocked `up`.\n- New confirmed Route 22 facts:\n  - The lower road is traversable almost end-to-end: roughly `x=2..37` at `y=14`, plus much of `y=15`.\n  - `up` is blocked all across many tested points on that road, including the current center area and both far ends.\n  - Far west around `(2,14)` is a dead end; only `down` to `(2,15)` works, then no continuation.\n  - Far east around `(37,14..15)` is also a dead end against the cliff.\n- Conclusion: the visible lower Route 22 road is a trap for p",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route22_lower_road_full_span_and_edges",
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 85,
+    "summary": "I made genuinely different Route 22 progress instead of re-testing the same dead lower road:\n\n- Confirmed the lower road’s far east end at `(37,14)` is a dead end, but from there I found an **upper-right climb**.\n- Verified climb path:\n  - from `(37,14)` go left to about `(33,14)`\n  - then `up` to `(33,13)` and `(33,12)`\n  - `left` to `(32,12)`\n  - `up` to `(32,11)`\n  - `left` to `(31,11)`\n  - `up` to `(31,10)`\n  - `left` to `(30,10)`\n  - `up` to `(30,9)` and `(30,8)`\n- This reaches a **different upper grassy corridor** along the cliff, proving Route 22 is not just the useless lower road.\n\nWha",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route22_upper_approach_found",
+      "MEMORY: route22_upper_grass_corridor_probe",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 86,
+    "summary": "Summary:\n- I made genuinely different Route 22 probes instead of repeating the same stuck inputs.\n- I safely fled a wild **Spearow** and confirmed Squirtle is now still **Lv8, 12/26 HP**.\n- I re-tested the **far east lower road** and confirmed again it dead-ends at about **(37,15)**.\n- I then re-climbed into the **upper-right Route 22 grass area** and mapped it more carefully:\n  - It’s a **small enclosed grass box**.\n  - You can move around inside it and drop back to the lower road.\n  - But the apparent top/right continuations are blocked.\n  - Reaching about **(33,8)-(33,9)** still does **not*",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route22_upper_grass_box_probe",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 87,
+    "summary": "- I systematically resolved the current **Route 22 upper-right grass area** instead of re-testing the same tile.\n- Key confirmed geometry:\n  - Starting from `(33,9)`, moving **right is blocked**.\n  - The vertical strip is open down to about `(33,14)`.\n  - From there, moving left and down returns to the **lower road**; I verified a clean exit path back to about `(31,15)`.\n  - I then re-ran the known east-side climb and confirmed again it leads only to the same **small enclosed grass box** around roughly `(30..33, 8..12)`.\n  - From `(31,8)`, repeated **right is blocked**, reinforcing that there ",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route22_enclosed_grass_box_and_lower_return",
+      "TODOS updated",
+      "PLAYBOOK updated"
+    ]
+  },
+  {
+    "turn": 88,
+    "summary": "- I refined Route 22 knowledge and confirmed the east-side upper approach still isn’t yielding progression.\n- New durable note saved: `route22_upper_strip_and_grass_entry`\n  - There’s a narrow upper strip near `(33,10..12)` by the stump line.\n  - It still leads into encounter-prone grass / blocked edges, not an exit.\n  - A wild Nidoran♂ appeared there; I fled successfully.\n- Current post-flee state from the tool log:\n  - Route 22 at about `(34,12)`\n  - Squirtle Lv8 at `12/26 HP`\n  - not in battle\n- I updated the playbook and todos to reflect the stronger conclusion:\n  - Route 22 is deprioritiz",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route22_upper_strip_and_grass_entry",
+      "TODOS updated",
+      "PLAYBOOK updated"
+    ]
+  },
+  {
+    "turn": 89,
+    "summary": "- On Route 22, I reconfirmed the **entire lower road** from the far east dead end to the far west dead end is traversable but non-progressing:\n  - walked from about **(37,14)** all the way left to **(2,14)** with no map change or battle\n  - then back right to **(35,14)** safely\n- I also re-ran the known **east-side climb**:\n  - `left,left,left,left, up,up, left,up, left,up, left`\n  - this again reached the upper-right grass/corridor area around **(30,10)** and confirmed the next `up` was blocked\n- Important re-confirmation: the **blank black screen** after entering that area was just a battle ",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 90,
+    "summary": "Updated only self-improvement, no inputs sent.\n\nChanged:\n- **Playbook updated** to consolidate:\n  - Route 22 is effectively non-progressing so far\n  - Viridian north / Route 2 should be the main path\n  - blank black/white screens can be transition/battle lag\n  - if `used TACKLE!` text is visible, next input should usually be `A`, not RUN/movement\n  - current live danger state: Route 22 battle, Squirtle at 9/26 HP\n- **Saved memory:** `route22_consolidated_nonprogression`\n- **Saved memory:** `turn90_battle_resume_note`\n- **Todos updated** to reflect reality:\n  1. clear current Route 22 battle sa",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: route22_consolidated_nonprogression",
+      "MEMORY: turn90_battle_resume_note",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 91,
+    "summary": "Cleared the live Route 22 wild battle safely: one more `A` advanced from `used TACKLE!`, then more `A`s confirmed **Enemy RATTATA fainted!** and returned to the overworld. Squirtle survived at **9/26 HP**.\n\nWhat I learned:\n- The battle-state/text lag lesson was confirmed again: RAM can still say battle while the useful action is just to keep pressing `A` through result text.\n- From the upper-right grass box at **(30,10)**, I found a clean escape back to the lower road:\n  - `right, down, right, down, right, down, down` reached **(33,14)**.\n- Reconfirmed the far-east lower road dead end:\n  - fro",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 92,
+    "summary": "- I stopped wasting turns on Route 22’s dead lower road and tried a genuinely different upper-right probe.\n- New useful discovery: from the far-east upper Route 22 area, reaching about `(39,9)` and pressing `right` warps back into **Viridian City** upper-left around `(0,17)`. This is a reconnect, not forward progression.\n- I saved that as memory `route22_upper_right_to_viridian_upper_left_warp`, updated the playbook, and updated todos to prioritize healing immediately.\n- From the Viridian upper-left reconnect, I navigated across town to the Pokecenter:\n  - moved to the Pokecenter frontage at a",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route22_upper_right_to_viridian_upper_left_warp",
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 93,
+    "summary": "Healed at Nurse Joy and confirmed Squirtle is back to 26/26 HP, but the Pokecenter dialog flow is behaving unusually.\n\nWhat I did:\n- Advanced Nurse Joy’s text from “OK. We’ll need your POKéMON.”\n- Waited through the healing machine sequence instead of only mashing A.\n- Reached post-heal text like “Thank you! Your POKéMON are …”\n- Pressing A too much appears to loop/restart her greeting text; B also stepped text but did not cleanly exit.\n- Additional waiting showed the textbox slowly revealing “We heal your POKéMON back to …” with no automatic close.\n\nWhat I learned:\n- The state is safe: not in",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 94,
+    "summary": "I broke out of the Pokecenter dialog wedge.\n\nWhat worked:\n- `A` advanced the lingering heal text to `POKEMON back to perfect health!`\n- A stray `HEAL / CANCEL` menu reopened over that line\n- `B` cleared the stray menu\n- Another `B`/movement advanced the remaining farewell text\n- From `We hope to see you again!`, `B + down` closed the dialog and moved us away\n\nCurrent state:\n- Viridian Pokecenter\n- Position `(3,4)`, facing down\n- Squirtle Lv8 at full HP `26/26`\n- Free movement restored\n\nI also saved this behavior as memory `viridian_pokecenter_heal_dialog_resolution`, updated the playbook, and ",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: viridian_pokecenter_heal_dialog_resolution",
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 95,
+    "summary": "Made real progress: I got out of the Pokecenter, found the actual north path in Viridian, and reached Route 2.\n\nWhat I did\n- Exited Viridian Pokecenter by walking straight down from `(3,4)` to the door.\n- Tried a new approach instead of re-testing the same north fence from the Pokecenter side:\n  - moved through the upper city\n  - accidentally entered Viridian School while probing the opening near `(21,16)`\n  - exited School to Viridian upper area at `(21,15)`\n- Continued probing west/north lanes and found the real north corridor:\n  - from around `(19,10)`, went up to `(19,8)`\n  - then west/nor",
+    "milestones": [
+      "Entered Route 2 for the first time"
+    ],
+    "improvements": []
+  },
+  {
+    "turn": 96,
+    "summary": "- Reached and confirmed real progress on **Route 2**. From the entry at `(7,71)`, I walked north up the main path, found a fence gate/opening area, and kept probing upward.\n- Useful Route 2 geometry learned this turn:\n  - The central path from `x=7` is open north at least up to about `y=57`.\n  - From `(7,57)`, going left reaches a west-side lane; at `(2,56)` the path continues.\n  - Taking the west lane north works cleanly up to about `(3,48)`.\n  - At the top-west area, there is a horizontal barrier/cliff/fence line: from `(3,48)`, moving right works to `(7,48)`, but further right is blocked, a",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 97,
+    "summary": "- Cleared two Route 2 wild battles that were causing confusing screen/state desync:\n  - First Pidgey battle at `(7,48)` ended, but battle transition/artifacts made the overworld look corrupted while RAM still showed `battle: wild`.\n  - A new Rattata battle had started during/after movement in grass at `(7,50)`; I eventually finished that too.\n- Important lesson confirmed again: when the screen shows battle result text like `A used TACKLE!` or `Enemy RATTATA ...`, the right action is usually just more `A` to clear text. RAM/screen can lag through transitions.\n- I also learned a negative Route 2",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 98,
+    "summary": "- I broke the Route 2 stall by doing something genuinely different: I stopped re-testing the same top edge and instead mapped a wider loop around this grass patch.\n- I hit two wild Pidgey battles while probing:\n  - first one was successfully escaped/cleared\n  - second one got stuck because the flee tool overshot timing, but I manually selected **RUN** with `down, right, A` and cleared the text with `A`\n- I saved a durable negative result as memory:\n  - `route2_top_grass_right_dead_end`\n  - At the top-west grass edge around `(2..5,48)`, north is blocked and east only reaches about `(5,48)` befo",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_top_grass_right_dead_end"
+    ]
+  },
+  {
+    "turn": 99,
+    "summary": "- I finally made different progress on the stalled Route 2 situation instead of re-testing the same movement only.\n- I used `probe_path` from `(8,50)` and learned:\n  - `right,right,up,up,left,left` reaches `(8,48)`\n  - from `(8,48)`, both `down` attempts were blocked\n- A wild battle triggered with the familiar misleading partial-overworld/black-screen transition. I verified again that this is not a softlock: RAM said `battle: wild`, then waiting and pressing `A` advanced into the battle screen.\n- The flee tool didn’t resolve this one cleanly, so I switched to persistent manual `A` advancement ",
+    "milestones": [
+      "Highest party level is now 9"
+    ],
+    "improvements": [
+      "MEMORY: route2_grass_patch_block_and_battle_transition",
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 100,
+    "summary": "Updated self-improvement only, no inputs sent.\n\nChanged:\n- **Playbook updated** with:\n  - explicit Route 2 consolidation\n  - repeated battle-text lessons (`used TACKLE`, `fainted`, `gained EXP`, `grew to level ...` all mean keep pressing `A`)\n  - reminder not to waste inputs on RUN/movement during EXP/level-up text\n  - current priority: clear the live Route 2 level-up text, then stop re-looping the same top grass patch\n- **Saved memory:** `route2_consolidated_early_probe`\n  - consolidates the early Route 2 layout and why the top-west grass area is a trap\n- **Installed tool:** `clear_battle_tex",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: route2_consolidated_early_probe",
+      "NEW TOOL: clear_battle_text",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 101,
+    "summary": "- Cleared the stuck Route 2 level-up/post-battle text successfully with manual `A` presses; overworld is restored at **Route 2 (8,48)**.\n- I verified again that this top grass patch is a trap:\n  - a loop `down,down,right,right,up,up,left,left` returns to the same tile `(8,48)`\n  - from `(8,48)`, many attempted moves are blocked\n- I then tried a genuinely different long path, but it immediately triggered a **wild Weedle** instead of escaping the area.\n- Battle outcome:\n  - Squirtle was hit by **Poison Sting**\n  - Squirtle is now **poisoned (PSN)** and at **11/28 HP**\n  - I beat the Weedle and r",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 102,
+    "summary": "- Escaped the Route 2 trap area by going west to the map edge and then south to a safer lower path.\n- Saved durable note: `route2_midwest_tree_maze_trap` — the mid-west tree/grass pocket around `(5..11, 51..52)` is encounter-prone and bad for probing.\n- Critical event: Squirtle fainted on the overworld, almost certainly from poison tick while walking. Current state is **Route 2 `(7,59)`, battle none, Squirtle 0/28 HP**.\n- Useful map info learned:\n  - West edge from the trap is reachable down to about **`(1,59)`**.\n  - Bottom path runs east at least to **`(7,59)`**.\n  - The gate/fence line is j",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_midwest_tree_maze_trap",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 103,
+    "summary": "I found the recovery path and confirmed what happened:\n\n- Squirtle had blacked out from poison on Route 2.\n- Going south from Route 2 returned us to Viridian City.\n- Re-entering the Pokecenter resulted in Squirtle being fully restored.\n- This was a true blackout/whiteout:\n  - HP restored to 28/28\n  - money dropped from $3000 to $1500\n\nCurrent state:\n- Viridian Pokecenter\n- at (3,7), facing up\n- Squirtle Lv9, 28/28 HP\n- $1500\n\nI also:\n- saved memory: `route2_poison_whiteout_to_pokecenter`\n- updated todos to replace the outdated “heal immediately” task with confirming/documenting this whiteout b",
+    "milestones": [],
+    "improvements": [
+      "TODOS updated",
+      "MEMORY: route2_poison_whiteout_to_pokecenter"
+    ]
+  },
+  {
+    "turn": 104,
+    "summary": "- Left the Viridian Pokecenter and reached **Route 2** again cleanly via Viridian’s north exit:\n  - From Viridian upper path, **(18,1) -> up to (18,0) -> up** warped to Route 2 at about **(8,71)**.\n- Reconfirmed the known **main north path**:\n  - going straight north from **(7,70)** works up to **(7,57)**, then north is blocked there.\n- I deliberately tried **genuinely different lower/safe probes** instead of re-entering the top-west grass trap:\n  - East from **(7,57)** reaches only about **(11,57)** and is blocked; north there is also blocked.\n  - I backed down to the lower-middle area and ex",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 105,
+    "summary": "I did a genuinely different Route 2 probe focused on the lower/southern area instead of re-looping the top grass trap.\n\nWhat I did:\n- Systematically probed the visible fence/tree choke around `(6..11,62)`.\n- Confirmed the apparent fence “gaps” near the central vertical tree line are fake from below: multiple `up` attempts from both sides were blocked.\n- Saved this as memory: `route2_south_fence_gaps_blocked`.\n- Backtracked and explored farther south-west instead of retrying the same choke.\n- Found a broader lower-left area with:\n  - a sign around the `(4..6,66)` area\n  - a bottom rock boundary",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_south_fence_gaps_blocked"
+    ]
+  },
+  {
+    "turn": 106,
+    "summary": "I broke the Route 2 stagnation by probing a genuinely different area: the lower-left open section instead of the repeated upper grass trap.\n\nWhat I did:\n- Mapped the lower corridor and chokepoints around `(2..11,62..69)`.\n- Confirmed:\n  - east side is blocked at about `x=11`\n  - north is blocked along the upper fence line from both west and east approaches\n  - west edge reaches about `x=2`\n  - south edge reaches about `y=69`\n- Returned to the lower-left sign area and tested interaction.\n\nWhat I learned:\n- The sign at about `(5,66)` is just the Route sign, not progression.\n- Verified text: `ROU",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_lower_left_sign"
+    ]
+  },
+  {
+    "turn": 107,
+    "summary": "I finally made genuinely different Route 2 probes instead of re-testing the sign textbox.\n\nWhat I did:\n- Cleared the Route 2 sign with `B`; movement had been blocked only because the textbox was still open.\n- Probed the lower-right/southern area around the sign and confirmed free movement there:\n  - moved from `(5,66)` to at least `(11,67)`\n  - north along the right side works up to about `(11,63)`\n  - from there, going right is blocked\n- Returned to the known choke at `(7,57)` and then took a genuinely different west-edge route:\n  - `left x5, up x5, left, up x2, right x3, up, left x2, up`\n  -",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 108,
+    "summary": "- Cleared the stuck **Pidgey Lv3** battle manually after the auto-mash tool kept desyncing on move selection.\n- Important battle detail learned: Squirtle now knows **Tail Whip** and **Bubble**; in the move menu the cursor was on **Tail Whip**, so blind A-mashing can waste turns. I moved **up** to **Tackle** to attack.\n- After finishing Pidgey, I resumed probing from **Route 2 (6,48)**. A new path test moved to **(4,49)** before triggering a **wild Rattata Lv4**.\n- Tried `flee_wild_battle`, but it failed again in this state and left the battle ongoing.\n- I then manually fought the Rattata with ",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 109,
+    "summary": "Cleared two wild Rattata fights and got back to overworld safely.\n\nWhat I did\n- Manually advanced battle text; `clear_battle_text` tool is broken (`ctx.frame is not a function`).\n- In the second wild battle, accidental input opened the Pokémon menu; `B` cleanly backed out to the main battle menu.\n- Confirmed safe flee sequence still works manually from battle menu: `down, A` selected **RUN** and escaped.\n- Then used genuinely different movement from the trap area:\n  - from `(5,51)` moved to a safer open lane at `(2,57)`\n  - reprobed north from there and reconnected to the known top row `(2,48)",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 110,
+    "summary": "Updated self-improvement only, no inputs sent.\n\nChanged:\n- **Playbook updated** with:\n  - Route 2 focus shifted to the **upper east-side lane** from the current `(10,48)` state\n  - confirmed lower fake fence gaps and west/midwest trap areas as low-value probes\n  - battle reminder that **blind A-mash is no longer safe** because Squirtle now has Tail Whip/Bubble and can land on non-damaging moves\n  - note that the old `clear_battle_text` tool is broken and should be replaced\n\n- **Saved memory:** `route2_upper_trap_and_east_lane_status`\n  - consolidates the upper Route 2 trap behavior, reconnect ",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: route2_upper_trap_and_east_lane_status",
+      "TODOS updated",
+      "NEW TOOL: clear_battle_text_safe"
+    ]
+  },
+  {
+    "turn": 111,
+    "summary": "- Broke the 24-turn Route 2 stall by trying a genuinely different path from the “upper east lane” instead of re-looping grass traps.\n- Key discovery: from Route 2 around `(7,44)`, walking `left,left,left,left,up` enters a building (`MAP_0x32`) — the gatehouse I had been missing.\n- Inside that building, going up to the north exit and pressing `up` transitions to **Route 2 Gate (Viridian Forest south)**, confirming real progression toward Viridian Forest.\n- After waiting through the black transition, I reached the outdoor north-side gate area safely at **map 0x33**, then probed a bit:\n  - straig",
+    "milestones": [
+      "Entered MAP_0x32 for the first time",
+      "Entered Route 2 Gate (Viridian Forest south) for the first time"
+    ],
+    "improvements": [
+      "MEMORY: route2_gatehouse_and_forest_gate_path",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 112,
+    "summary": "- I made genuinely different probes in the Route 2 / Viridian Forest south-side outdoor area instead of repeating the same blocked sign position.\n- First I confirmed the sign at about `(16,33)` is just advice text:\n  - `For poison, use ANTIDOTE! Get it at POKEMON MARTs!`\n  - I saved this as memory `route2_forest_sign_antidote`.\n- Important immediate lesson: after reading that sign, movement stayed blocked until I cleared the textbox with `B`. I added that reminder to the playbook.\n- Mapping results from this north-side outdoor area:\n  - From the sign area, moving north is blocked around `y=32`",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_forest_sign_antidote",
+      "PLAYBOOK updated"
+    ]
+  },
+  {
+    "turn": 113,
+    "summary": "- Mapped the **north-side Route 2 outdoor pocket** much more effectively instead of re-testing the blocked top grass:\n  - Start area `(6,30)` is hemmed in above.\n  - West reaches `(2,30)` but only down to `(2,31)`.\n  - East lane reaches `(8,30)` and can go down.\n  - A real lower route exists: from around `(6,34)` I got down to `(6,40)`, then east to at least `(14,40)`, and south to `(14,43)`.\n\n- Found an **NPC + sign area** near `(14,43)`:\n  - Talking to the NPC from `(15,43)` facing right gives:\n    - **“They’re out for POKEMON fights!”**\n  - This confirms that lower-right area is not the ent",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_gate_north_outdoor_layout_partial",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 114,
+    "summary": "- I finally made real progress out of the apparent “stuck” gatehouse state by re-reading the room instead of insisting the top-right door was the only exit.\n- In `MAP_0x32` (the building), I mapped the top row:\n  - left from `(9,1)` all the way to `(1,1)` is open\n  - trying `up` from x=1..4 stayed blocked until **x=5**\n  - from **`(5,1)` pressing `up` exits north** to **map 0x33 Route 2 Gate (Viridian Forest south)** at about `(17,47)`\n- This means the correct gatehouse exit alignment is **not** the visible top-right doorway I was re-testing; the usable warp is along the upper row nearer the m",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 115,
+    "summary": "Cleared an accidental battle-menu misstate: we were in the “Choose a POKéMON” submenu during a wild Weedle fight, so `B` backed out cleanly, then `down, A` successfully selected RUN. That confirms again that manual flee from the main battle menu is reliable.\n\nAfter escaping, I made genuinely different Route 2 / forest-approach probes instead of re-testing the same blocked tile:\n- From `(4,40)` I moved through the lower-right open lane to about `(8,43)`.\n- Probe mapping showed:\n  - open corridor from `(4,43)` east through `(12,43)`\n  - south blocked at `x=8` and also blocked at `x=10`\n  - conti",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 116,
+    "summary": "- Cleared the visually stuck Pikachu battle flow by manually advancing text; the safe-text tool falsely thought battle was over because RAM/state was desynced from the screen.\n- Important new timing lesson: after `used TACKLE!`, the screen can sit on the text for a while; a short `wait` revealed the actual battle menu cleanly.\n- From that menu, I selected `RUN` with `down, right, A`. The resulting screen now says `Go...`, which is likely the run-success text or the next battle text line; I had to stop due to tool budget before confirming the battle fully cleared.\n\nWhat I learned\n- In this stat",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 117,
+    "summary": "- Escaped the stuck **Pikachu** battle cleanly:\n  - `A` showed **Got away safely!**\n  - one more `A` cleared the battle\n  - then a short `wait` was required to get past the white transition back to overworld\n- Re-read and resumed mapping the **Route 2 Gate / Viridian Forest south outdoor area** from our current region rather than repeating old assumptions.\n- Useful mapping from current live state:\n  - Starting from around **(12,41)**, moving `right,right,down,down` reaches **(14,43)**\n  - From there, **down is blocked** at `(14,43)`\n  - Moving left across the row works to at least **(10,43)**\n",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 118,
+    "summary": "- Escaped the live **wild Kakuna** cleanly:\n  - `B` backed out of the bad submenu (`CANCEL` in move/Pokémon substate).\n  - `right, A` selected **RUN**.\n  - Then `A, A` cleared `Got away safely!`\n  - A short `wait` was required for the white battle transition to finish.\n- Then I made **genuinely different Route 2 / Viridian Forest south-side probes** instead of re-testing the same lower row:\n  - From `(14,40)`, moving **up is blocked** at `x=10` when coming from the left lane.\n  - New lane found: from `(15,39)` I could go **right to `(17,39)`**, then **straight north** to at least **`(17,34)`**",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 119,
+    "summary": "- Escaped another wild **Weedle** safely. Important reconfirmed battle detail: if I land in the move submenu or even the one-item `CANCEL` box, I can recover with **B/A** back to the main battle menu, then **down/right/A** selected **RUN** successfully here. After `Got away safely!`, one more `A` plus a short `wait` was needed for the white transition back to overworld.\n\n- I then made genuinely different Route 2 / Viridian Forest south-side probes and finally mapped more of the area instead of re-testing the same blocked north edge:\n  - From the prior stuck area, the lane at **x=18** is open *",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 120,
+    "summary": "Updated self-improvement only, no inputs sent.\n\nWhat I changed:\n- Updated the playbook with the latest Route 2 / Viridian Forest south-area findings:\n  - the lower-right NPC/sign pocket is a dead lead\n  - the best current lead is the right-side lane around `x≈17..18`\n  - the gatehouse north exit alignment near `(5,1)` is important\n  - added clearer wild-battle flee recovery notes from messy submenu states\n- Saved new memory:\n  - `route2_gate_north_outdoor_progress`\n- Updated todos to match reality:\n  - primary goal is now finding the actual Viridian Forest entrance from the right-side lane\n  -",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: route2_gate_north_outdoor_progress",
+      "TODOS updated",
+      "NEW TOOL: wild_run_recover"
+    ]
+  },
+  {
+    "turn": 121,
+    "summary": "Turn 121 summary:\n\nWhat I did\n- Probed a genuinely different path in the Route 2 north-side outdoor pocket instead of repeating the old `x≈17` lane:\n  - From `(15,44)` I moved right to `(17,44)`, then up to `(17,43)`.\n  - Confirmed the big tree/NPC line blocks further north there.\n  - Shifted farther east and found new reachable tiles:\n    - `(19,42)`, `(18,41)`, `(19,41)`, `(19,40)`\n    - then farther right to `(20,40)`, `(21,40)`, `(22,40)`, `(22,41)`, `(23,41)`, `(23,40)`\n- This is real new mapping: the east side opens beyond the previously emphasized `x=17..18` lane.\n- While probing grass ",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 122,
+    "summary": "Turn 122 summary:\n\nWhat I did\n- Recovered from a bad wild-battle submenu state:\n  - `B` from the Pokémon submenu first showed `Choose a POKéMON.`\n  - another `B` returned to the main battle menu\n  - `down, A` selected **RUN**\n  - `A, A`, then a short `wait`, cleanly finished the escape/white transition\n- Resumed overworld probing in the Route 2 north-side outdoor pocket from around `(22,40)`.\n- Mapped several genuinely new east-side tiles:\n  - `up` is blocked at `(22,40)`\n  - `right` reaches `(23,40)`, but north is still blocked there\n  - moving down from the east side is open to `(23,43)`\n  -",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 123,
+    "summary": "Turn 123 summary:\n\nWhat I did\n- Escaped the live wild Weedle battle manually after the recover tool left us in a half-cleared state:\n  - waited to reach the real battle menu\n  - used `down, right, A` to select RUN\n  - advanced `Got away safely!` with extra `A`\n  - waited through the white transition back to overworld\n- From Route 2 north-side outdoor area, I tried genuinely different exploration on the far east side instead of reusing the old x≈17–18 lane.\n- New movement findings from the east side:\n  - Starting at `(25,41)`, `right,right` reached `(27,41)`.\n  - North is blocked at `(27,41)`.\n",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 124,
+    "summary": "Turn 124 summary:\n\nWhat I did\n- Advanced the Route 2 north-side NPC text instead of continuing the 37-turn overworld stall.\n- Confirmed the NPC at `(26,33)` is a trainer: after `Hey! You have POKEMON! Come on!`, a battle transition started.\n- Waited through the black trainer-battle transition rather than mashing blindly.\n- Advanced the trainer intro until the opponent was identified as a **BUG CATCHER**.\n- Continued through send-out text and confirmed the first enemy is **Weedle Lv6**.\n- Waited through the delayed player send-out animation; this was another case where the screen stayed on `Go!",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 125,
+    "summary": "Turn 125 summary:\n\nWhat I did\n- Entered the first trainer battle in the Route 2 north-side outdoor pocket and handled the first combat turn manually instead of continuing to stall.\n- From the move menu:\n  - Selected **TACKLE** first.\n  - Learned an important battle-state fact immediately: after `used TACKLE!`, the next text became **`Enemy WEEDLE's attack missed! But, it failed!`**\n  - This means the enemy move text can chain across multiple boxes and look odd; it still just needs deliberate `A` advances.\n- On the next command menu, I selected **BUBBLE** (via `down, down, a` from the main batt",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 126,
+    "summary": "Turn 126 summary:\n\nWhat I did\n- Continued the live Bug Catcher battle instead of stalling on the repeated text state.\n- Confirmed an important timing issue: `Enemy WEEDLE used STRING SHOT!` can appear to ignore repeated normal A presses for a while because the animation hasn’t finished yet.\n- A genuinely different timing worked:\n  - a very short `A` press with a long settle advanced the animation\n  - then the text resolved to **`SPEED fell!`**\n- After that, one more `A` advanced to Squirtle’s move text:\n  - **`used BUBBLE!`**\n- I let the Bubble animation play and then waited long enough to rea",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 127,
+    "summary": "Turn 127 summary:\n\nWhat I did\n- Continued the live Bug Catcher trainer battle instead of stalling.\n- Cleared the end of the first KO sequence:\n  - advanced `Enemy WEEDLE fainted!`\n  - Squirtle leveled up to **Lv10**\n  - observed new stats on the level-up screen:\n    - Attack 17\n    - Defense 19\n    - Speed 15\n    - Special 18\n  - HP is now **15/30**\n- Advanced to the trainer’s next Pokémon:\n  - **BUG CATCHER sent out CATERPIE Lv6**\n- Waited for the real command menu to appear instead of inputting into animation lag.\n- Chose a move from the fight menu, but made an important mistake:\n  - input `",
+    "milestones": [
+      "Highest party level is now 10"
+    ],
+    "improvements": []
+  },
+  {
+    "turn": 128,
+    "summary": "Turn 128 summary:\n\nWhat I did\n- Broke the apparent 41-turn stall by treating the battle as a timing/text problem instead of repeating the same kind of input.\n- Carefully advanced the live trainer battle text:\n  - `A used TAIL WHIP!` → `Enemy CATERPIE's DEFENSE fell!`\n  - command menu returned\n- From the main menu, I intentionally re-entered the move list to read the current cursor/move layout:\n  - cursor was on **TAIL WHIP**\n  - visible move order confirms **TACKLE / TAIL WHIP / BUBBLE**\n- I then selected **BUBBLE** with `down, A`.\n- Battle flow after that:\n  - enemy acted first with **TACKLE*",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: trainer_battle_turn128_tail_whip_mistime"
+    ]
+  },
+  {
+    "turn": 129,
+    "summary": "- Continued the live Bug Catcher battle with genuinely different timing instead of repeating the old stuck inputs.\n- Resolved the delayed Bubble sequence correctly:\n  - waited through the animation\n  - `A` advanced to **Enemy CATERPIE’s SPEED...**\n  - more `A`/wait revealed **Enemy CATERPIE used TACKLE!**\n  - Squirtle took damage from **11/30 to 9/30**\n- Important battle timing lesson: after **used BUBBLE!**, the game can sit on that line for a long time; the right pattern was **wait first, then single A presses with long settle**, not mashing.\n- End-of-turn state is good and actionable: battl",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 130,
+    "summary": "Updated self-improvement only; no buttons pressed.\n\nWhat I changed\n- Updated the playbook with the repeated lessons I keep relearning:\n  - current live battle state\n  - the Route 2 north-side Bug Catcher at `(26,33)`\n  - the east-side pocket layout found so far\n  - Squirtle’s confirmed move order: **TACKLE / TAIL WHIP / BUBBLE**\n  - important battle timing: after **Bubble**, wait first, then use single `A` presses with long settle instead of mashing\n  - trainer battles here should be handled manually, not with wild flee/mash habits\n- Saved durable memory:\n  - `route2_bug_catcher_trainer_and_ba",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: route2_bug_catcher_trainer_and_battle_notes",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 131,
+    "summary": "Cleared the Bug Catcher battle successfully and returned to overworld.\n\nWhat I did\n- From the fight menu, selected **BUBBLE** correctly from the move list.\n- Used genuinely different timing to get unstuck:\n  - waited through the long Bubble animation\n  - advanced text one box at a time with short `A` presses and long settles\n- Cleared:\n  - `Enemy CATERPIE fainted!`\n  - `AAA gained 67 EXP. Points!`\n  - trainer defeat / payout text\n- Final state:\n  - **battle: none**\n  - **money: $1560**\n  - **Squirtle Lv10, 9/30 HP**\n  - back in the Route 2 north-side outdoor pocket next to the Bug Catcher\n\nWha",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_bug_catcher_battle_clear_pattern",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 132,
+    "summary": "Turn 132 summary:\n\n- Tried genuinely different exploration from the Bug Catcher instead of re-testing the same blocked tiles.\n- New verified mapping:\n  - From `(26,33)`, `up` reaches `(26,32)`.\n  - West/south path around the trainer is open enough to get to `(25,34)`.\n  - The far-right side is a dead end here:\n    - `(27,34)` is reachable\n    - further `right` is blocked\n    - `up` from `(27,34)` is also blocked\n  - A genuinely new northbound lane exists at about `x=25`:\n    - from `(25,34)`, going `up` repeatedly reached at least `(25,28)`.\n- That northward lane triggered a wild **Pikachu Lv3",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_north_side_upper_lane_and_pikachu_run",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 133,
+    "summary": "- Cleared the apparent white-screen “wedge” by waiting; it was just a delayed render/transition, not a softlock.\n- From the newly found northbound lane at `x=25`, I pushed straight north from `(25,28)` to `(25,20)` with no battle, confirming that lane continues much farther than previously mapped.\n- Reached a new top-area screen with:\n  - a sign near the upper center\n  - an NPC/trainer on the right\n  - more grass to the northeast\n- Probing there showed:\n  - `up` from `(25,20)` reaches `(25,19)`\n  - `right` reaches `(26,19)`\n  - farther `right`, `up`, and attempts back left from there did not m",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 134,
+    "summary": "Turn 134 summary:\n\nWhat I did\n- Resumed the newly triggered trainer battle in the upper Route 2 / Viridian Forest approach area.\n- Waited through the delayed send-out state until the actual battle menu appeared.\n- Chose **BUBBLE** deliberately from the move list using:\n  - `A` to open FIGHT\n  - `down, down, A` from the move list\n- Then handled the battle with slow timing instead of mashing:\n  - waited through the long Bubble text/animation\n  - advanced to **Enemy WEEDLE’s SPEED fell!**\n  - advanced again to **Enemy WEEDLE used STRING SHOT!**\n  - waited through the animation until the full `STR",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 135,
+    "summary": "Turn 135 summary:\n\nWhat I did\n- Continued the upper Route 2 trainer battle manually against **Weedle Lv7**.\n- Cleared the delayed enemy **STRING SHOT** sequence with careful timing:\n  - waited through the animation\n  - advanced to **`AAA's SPEED fell!`**\n- Reached the command menu again.\n- I then made a bad input:\n  - from the main battle menu I used `A, down, down, A`\n  - that selected **TAIL WHIP**, not **BUBBLE**\n- Cleared the resulting text:\n  - **`AAA used TAIL WHIP!`**\n  - **`Enemy WEEDLE's DEFENSE fell!`**\n- Cleared another delayed **Enemy WEEDLE used STRING SHOT!** sequence with a genu",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 136,
+    "summary": "What I did\n- Continued the live upper Route 2 trainer battle against **Weedle Lv7** with deliberate timing.\n- Opened the move menu from the main battle menu and confirmed the cursor was on **TAIL WHIP** again.\n- Correctly selected **BUBBLE** with `down, A` from that move-menu position.\n- Waited through the long animation instead of mashing.\n- Bubble landed successfully:\n  - Squirtle used **BUBBLE**\n  - Weedle’s HP dropped to roughly the low-yellow/orange range\n- Then selected **BUBBLE** again from the main menu using `A, down, down, A`.\n- On that turn, the enemy moved first:\n  - **Enemy WEEDLE",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 137,
+    "summary": "Turn 137 summary:\n\nWhat I did\n- Carefully advanced the delayed **Enemy WEEDLE used STRING SHOT!** sequence instead of mashing.\n- Cleared:\n  - `AAA's SPEED fell!`\n  - the accidental previous move text:\n    - `AAA used TAIL WHIP!`\n    - `Enemy WEEDLE's DEFENSE fell!`\n- Reached the command menu safely.\n- Opened the move list and confirmed the cursor was on **TAIL WHIP**.\n- Correctly selected **BUBBLE** from that cursor position using **`down, A`**.\n- After that, battle text advanced to the enemy’s action again:\n  - current visible state is **`Enemy WEEDLE used STRING S...`**\n  - battle is still a",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 138,
+    "summary": "Turn 138 summary:\n\nWhat I did\n- Continued the live upper Route 2 trainer battle very carefully, using waits instead of mashing through animation lag.\n- Cleared the stuck enemy action:\n  - waited through **Enemy WEEDLE used STRING SHOT!**\n  - advanced to **AAA’s SPEED fell!**\n- Reached Squirtle’s move text and resolved a full **BUBBLE** correctly:\n  - waited through the long Bubble animation twice\n  - advanced to the KO text\n  - **Weedle fainted**\n- Cleared the post-KO trainer text enough to reveal the trainer’s next Pokémon:\n  - **KAKUNA Lv7**\n- Waited through Kakuna’s first action and confirm",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 139,
+    "summary": "Turn 139 summary:\n\nWhat I did\n- Continued the live upper Route 2 trainer battle against **Kakuna Lv7**.\n- Cleared the first **HARDEN** sequence step by step:\n  - `Enemy KAKUNA used HARDEN!`\n  - `Enemy KAKUNA's DEFENSE rose!`\n- When the command menu returned, I opened the move list and verified the cursor was on **BUBBLE**.\n- Selected **BUBBLE** directly with a single `A`.\n- Waited through the long Bubble animation instead of mashing.\n- That Bubble resolved cleanly back to the command menu without showing damage text beyond the move line, suggesting Kakuna survived.\n- Selected **BUBBLE** again ",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 140,
+    "summary": "Self-improvement only; no buttons pressed.\n\nChanged:\n- Updated the playbook with the repeated Route 2 trainer-battle lessons:\n  - current live Kakuna battle state\n  - the newly confirmed northbound `x≈25` lane into the upper pocket\n  - the presence of a second Bug Catcher in that upper area\n  - the key timing rule: wait first on Bubble/String Shot/Harden sequences, then use single `A` presses\n  - Kakuna-specific note: main risk is wasted turns from Tail Whip / animation lag, not sudden damage\n- Saved durable memory:\n  - `route2_upper_bug_catcher_and_kakuna_notes`\n- Updated todos to reflect rea",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: route2_upper_bug_catcher_and_kakuna_notes",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 141,
+    "summary": "Turn 141 summary:\n\nWhat I did\n- Broke the 4-turn stall by using genuinely different timing instead of repeating the same action pattern.\n- Cleared Kakuna’s delayed text in the correct sequence:\n  - waited to fully reveal `Enemy KAKUNA's DEFENSE rose!`\n  - pressed `A` once to advance\n  - waited through Squirtle’s long **Bubble** animation\n- Reached the command menu with Kakuna still alive and the move cursor already on **BUBBLE**.\n- Selected **BUBBLE** directly with a single `A`.\n- Waited through the long Bubble animation again.\n- Advanced once to:\n  - `Enemy KAKUNA fainted!`\n- Used `clear_batt",
+    "milestones": [
+      "Highest party level is now 11"
+    ],
+    "improvements": []
+  },
+  {
+    "turn": 142,
+    "summary": "Turn 142 summary:\n\nWhat I did\n- Successfully cleared the stuck post-level-up state by using a genuinely different action pattern instead of trusting the battle-clear tool:\n  - `clear_battle_text_safe` falsely thought the battle was cleared, but the screen still showed `A grew to level 11!`\n  - manual `A` presses advanced the hidden trainer flow correctly\n- Confirmed the trainer still had another Pokémon:\n  - `BUG CATCHER sent out WEEDLE!`\n  - after a wait, the real battle menu appeared\n- Read the move menu carefully:\n  - cursor was already on **BUBBLE**\n  - selected **BUBBLE** with a single `A",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 143,
+    "summary": "Turn 143 summary:\n\nWhat I did\n- Continued the live upper Route 2 trainer battle against the Bug Catcher’s final-looking Weedle Lv7.\n- Cleared the delayed text after the visible `Critical hit!`:\n  - `Enemy WEEDLE's SPEED fell!`\n- Learned that the HP update can lag relative to the text:\n  - after advancing the Speed-fell line, Squirtle dropped from `7/32` to `5/32`, confirming Weedle’s earlier Poison Sting damage had not fully displayed yet.\n- Reached the main battle menu safely.\n- Opened the move list and confirmed the cursor was already on **BUBBLE**.\n- Selected **BUBBLE** with a single `A`.\n-",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 144,
+    "summary": "- Finished the stalled upper Route 2 Bug Catcher battle by using different timing and reading the text carefully instead of repeating the same pattern.\n- Resolved the visible sequence:\n  - after waiting, the stuck line became **`But, it failed!`**\n  - one `A` advanced to **`A used BUBBLE!`**\n  - a long wait plus one more `A` produced the KO transition\n  - after another wait, **`Enemy WEEDLE fainted!`** appeared\n- Cleared the rest of the trainer flow:\n  - **`A gained 78 EXP.`**\n  - **`AAA defeated BUG CATCHER!`**\n  - trainer after-battle dialog\n- Important outcome:\n  - battle is now **none**\n  ",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 145,
+    "summary": "Mapped the upper Route 2 pocket much further without entering grass.\n\nWhat I did\n- Started from `(26,19)` after the trainer battle and probed northward/new lanes instead of repeating old checks.\n- Confirmed a clean route up the upper-center/right side:\n  - `(26,19) -> (26,18)` works\n  - left to `(25,18)` works\n  - north through `(25,17)`, `(25,16)`, then right to `(26,16)`, north to `(26,15)`, left to `(25,15)`\n  - continuing north reaches `(25,14)`, `(25,13)`, `(26,13)`, `(26,12)`, `(26,11)`\n  - then straight up to `(26,10)`, `(26,9)`, `(26,8)`\n- Probed horizontal extent at `y=8`:\n  - west is",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 146,
+    "summary": "Turn 146 summary:\n\n- I stopped repeating the same top-edge test and did genuinely different probing across the whole upper Route 2 outdoor pocket.\n- Key new finding: the apparent forest entrance is **not** on the top row.\n  - I traversed the top row outside on map `0x33` from about `x=16` all the way to `x=32` at `y=1`.\n  - `up` was blocked at every tested top-row spot.\n  - Right edge caps at `x=32`.\n- New partial map learned:\n  - Far-right side has a vertical lane down to at least `(32,6)`.\n  - From the lower-right area, west becomes blocked by the tree/stump barrier until lower rows.\n  - A l",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_upper_pocket_top_row_probe",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 147,
+    "summary": "Turn 147 summary:\n\nWhat I did\n- Responded to the “10 turns stuck” warning by trying genuinely different probing in the upper-right portion of the Route 2 north-side outdoor pocket instead of retesting the top row.\n- Mapped several new walkable tiles and chokepoints:\n  - From `(21,8)`, rightward movement works through `(22,8)`, `(23,8)`, and farther to `(25,8)`.\n  - A southward lane exists around the middle-right area:\n    - `(25,8) -> (25,9) -> (25,10)` works.\n  - From there, moving east/up reaches a broader open area around `(26,9)`, `(26,10)`, `(26,11)`, and farther right/up to `(31,6)` and ",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 148,
+    "summary": "Turn 148 summary:\n\nWhat I did\n- Recovered from a bad wild-battle submenu state at very low HP.\n  - The live state was a Weedle encounter with the screen on `Choose a POKéMON.`\n  - Used `wild_run_recover`, which effectively did `B, down, A` to get back toward RUN.\n  - Confirmed the flow manually:\n    - first `A` finished `Got away`\n    - second `A` cleared `Got away safely!`\n  - Returned to overworld safely with Squirtle still at `5/32 HP`.\n- Immediately retreated from the dangerous upper Route 2 north-side outdoor pocket instead of continuing to probe in grass.\n- Verified a safe return route a",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 149,
+    "summary": "Turn 149 summary:\n\nWhat I did\n- Focused on the urgent goal: get low-HP Squirtle back to the Viridian Pokecenter.\n- Re-probed the Pokecenter frontage instead of repeating the same blocked `up` from `(22,26)`.\n- Found the actual entrance alignment:\n  - from outside near the storefront, moving farther right to about `(24,26)` was key\n  - then `left, up` transitioned into **Viridian Pokecenter**\n- Inside, walked back to the known healing tile:\n  - from `(3,6)` used `up, up, up` to reach `(3,3)` facing up at Nurse Joy\n- Started the healing conversation successfully.\n  - `A` brought up Nurse Joy’s g",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 150,
+    "summary": "Updated self-knowledge only; no buttons pressed.\n\nChanged:\n- Playbook:\n  - added the Viridian Pokecenter frontage alignment lesson (`~(24,26)`, then `left, up` if the usual approach fails)\n  - recorded that the current next live action is simply finishing the standard Nurse Joy heal flow\n  - consolidated that the Route 2 north-side top row is dead and future probing should focus on side/downward chokes, not re-testing `up` along `y=1`\n  - noted the safe-retreat lesson from the upper pocket when HP is low\n- Saved memory:\n  - `viridian_pokecenter_frontage_alignment`\n  - `route2_upper_pocket_retr",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: viridian_pokecenter_frontage_alignment",
+      "MEMORY: route2_upper_pocket_retreat_and_next_probe",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 151,
+    "summary": "Healed successfully and closed Nurse Joy’s dialog.\n\nWhat I did\n- Advanced the heal text from `OK. We'll need your...`\n- Confirmed Squirtle was fully healed to `32/32 HP`\n- Used the known clean-close pattern `B, down` through:\n  - `Thank you!`\n  - `Your POKEMON are fighting fit!`\n  - `We hope to see you again!`\n- Stepped off the counter\n\nCurrent state\n- Location: Viridian Pokecenter `(3,4)` facing down\n- Battle: none\n- Squirtle: Lv11, `32/32 HP`\n\nWhat I learned\n- The late Nurse Joy close really does work with repeated `B, down`\n- HP is restored before the final goodbye text fully ends\n\nNext tur",
+    "milestones": [],
+    "improvements": [
+      "TODOS updated",
+      "MEMORY: viridian_pokecenter_heal_completed_turn151"
+    ]
+  },
+  {
+    "turn": 152,
+    "summary": "Turn 152 summary:\n\nWhat I did\n- Left the Viridian Pokecenter successfully.\n- Learned that Pokecenter door transitions can show a fully black screen briefly even after RAM already says the map changed; waiting resolves it cleanly.\n- Accidentally re-entered the Pokecenter once by pressing `up` too soon from directly in front of the door, then exited again correctly.\n- Crossed from the Pokecenter side of Viridian into the upper city using the known route:\n  - from `(23,26)` went left to about `(19,26)`\n  - then north to about `(19,15)`\n- Probed the northwest and northeast upper-city fence lines i",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: viridian_pokecenter_door_transition_timing",
+      "PLAYBOOK updated"
+    ]
+  },
+  {
+    "turn": 153,
+    "summary": "Turn 153 summary:\n\nWhat I did\n- Responded to the “stuck” warning by trying genuinely different exploration instead of repeating the Route 2 probes.\n- Mapped the upper-left Viridian area around the Gym and found a new enterable building:\n  - from Gym frontage, moving left to about `(20,10)` showed north was blocked there\n  - moving farther left/down/up reached a doorway around Viridian `(21,9)`\n  - pressing `up` there entered **Viridian House** (`map 0x2c`)\n- Probed the house interior and confirmed it is a normal NPC house, not progression:\n  - interior walkable area includes roughly `(2..4, 5.",
+    "milestones": [
+      "Entered Viridian House for the first time"
+    ],
+    "improvements": [
+      "MEMORY: viridian_house_north_of_gym_nonprogression"
+    ]
+  },
+  {
+    "turn": 154,
+    "summary": "Turn 154 summary:\n\nWhat I did\n- Exited the non-progress house in Viridian after a couple messy re-entry/transition tests.\n- Re-probed the upper-left/north side of Viridian City instead of staying stuck around the house frontage.\n- Found a clean route from the house area back to the real north exit:\n  - from the house frontage around `(21,9)`, moving left to about `x=18`\n  - then north through `(18,8) -> (19,6) -> (18,5) -> (18,4) -> (18,2) -> (17,1) -> (18,0)`\n  - pressing `up` from **Viridian `(18,0)`** successfully warps to **Route 2** at about `(8,71)`\n\nWhat I learned\n- The Viridian House n",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 155,
+    "summary": "I confirmed a genuinely useful negative result on lower Route 2:\n\n- Walked/probed the fence row at `y=62`\n- Verified `up` is blocked from below across the tested span `x=3..11`\n- This includes the visible “gaps” near the center/right; they are not the real north route\n\nI saved this as memory:\n- `route2_row62_full_block_probe`\n\nI also updated todos so we stop wasting turns on these fake openings.\n\nCurrent practical takeaway:\n- Do not keep testing `up` along the `y=62` fence line\n- Next turn should use a different route entirely: continue lower/safer Route 2 mapping or move back to the known rou",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_row62_full_block_probe",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 156,
+    "summary": "Turn 156 summary:\n\nWhat I did\n- Responded to the “stuck” warning by trying a genuinely different Route 2 route instead of re-testing the blocked fence row at `y=62`.\n- Verified a safe lower-to-upper route on the west side:\n  - from `(3,62)`, `right x4` to `(7,62)`\n  - then `up` repeatedly to `(7,57)`\n  - then `left x4` to `(3,57)`\n  - then `up` repeatedly to `(3,48)`\n- Re-confirmed the old upper-row behavior:\n  - `up` from `(2,48)` and `(3,48)` is blocked\n  - east along the upper row is open through `(7,48)`\n- While probing that upper row, triggered a wild battle at `(5,48)`.\n- Recovered clean",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_west_lane_to_upper_row",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 157,
+    "summary": "Turn 157 summary:\n\nWhat I did\n- Tried genuinely different probing from the stuck upper Route 2 row instead of re-testing blocked `up` tiles.\n- Found the exact south gatehouse entrance tile on lower Route 2:\n  - from the upper row near the building, moving to about `(3,44)` on Route 2 map `0x0d` and pressing `up` enters the gatehouse.\n- Crossed the gatehouse interior cleanly using the already-known north-exit alignment:\n  - inside `MAP_0x32`, moving to about `(5,1)` and pressing `up` exits to the north-side outdoor pocket (`map 0x33`) at about `(17,47)`.\n- Reached the previously known upper lan",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_gatehouse_south_door_exact_tile",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 158,
+    "summary": "Turn 158 summary:\n\nWhat I did\n- Tried genuinely different probing in the Route 2 north-side outdoor pocket instead of re-testing the dead top row.\n- Verified the current start area was free movement, not a stuck textbox:\n  - from `(18,43)` I could move right/up to `(19,41)`.\n- Probed the sign/tree cluster around the middle-right:\n  - movement around `(19..23,40..42)` is possible\n  - `A` on the nearby sign/tree-facing spots did not trigger useful text from the tested facings\n- Pushed farther east than this turn’s start:\n  - reached at least `(29,41)`\n- Found more important blocked tiles on the ",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_north_side_east_edge_blocks_turn158",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 159,
+    "summary": "- Triggered a wild Kakuna while probing around `(29,40)` in the Route 2 north-side outdoor pocket.\n- Escaped manually after the flee tool failed cleanly:\n  - advanced past `Enemy KAKUNA's DEFENSE rose!`\n  - then `A, down, right, A` reached RUN\n  - `A, A` cleared the escape and returned to overworld\n- Important transition note re-confirmed: after battle ended, the screen went full white briefly; `wait 60` restored the overworld correctly.\n- I then tested `A` facing left from `(28,40)` beside the nearby NPC/sign-looking object.\n  - This did open text, so it is an interactable NPC, not scenery.\n ",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 160,
+    "summary": "Self-improvement only; no buttons pressed.\n\nChanged:\n- Updated the playbook to capture the repeated lessons from recent turns:\n  - Route 2 progress is in the forest-approach outdoor pocket, not the dead top row\n  - `(28,40)` facing left is an interactable east-side NPC, not scenery\n  - outdoor NPCs can masquerade as signs/trees, so suspicious sprites should get a deliberate `A` check\n  - recent Route 2 pathing/battle-transition reminders were consolidated\n- Saved new memory:\n  - `route2_north_side_east_npc_antidote_hint`\n- Updated todos to match reality:\n  - next priority is to finish the `(28",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: route2_north_side_east_npc_antidote_hint",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 161,
+    "summary": "Turn 161 summary:\n\nWhat I did\n- Finished the east-side NPC interaction at `(28,40)`:\n  - confirmed the prior hint text `You should carry extras!`\n- Switched to genuinely different probing instead of retesting the same tile:\n  - mapped a new lower/east lane from the NPC area:\n    - `(28,40)` left is blocked by the NPC\n    - moving `down` works to `(28,42)`\n    - moving right works through `(29,42)` to `(30,42)`\n    - from there, `up` works to `(30,40)`\n  - then explored west/center:\n    - from `(31,40)`, south works to `(31,43)` but further south is blocked\n    - west along that lower row works",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 162,
+    "summary": "Turn 162 summary:\n\nWhat I did\n- Cleared the open sign textbox with `B`. The full warning was:\n  - `TRAINER TIPS`\n  - `No stealing of POKEMON from other trainers!`\n  - `Catch only wild POKEMON!`\n  - `stay away from grassy areas!`\n- Then I deliberately tried genuinely different exploration instead of retesting the same east-side NPC area.\n- Mapped a long new northbound route in the Route 2 north-side outdoor pocket:\n  - from `(23,40)` I moved through the lower-right lane to `(26,43)`\n  - then up and around to `(27,36)`\n  - then continued north via the upper lane all the way to about `(25,21)`\n  ",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_north_side_upper_clearing_probe_turn162",
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 163,
+    "summary": "What I did\n- Probed a genuinely different area from the current upper clearing instead of re-testing the dead north edge.\n- Confirmed more upper-right boundary behavior in the Route 2 north-side outdoor pocket:\n  - from around `(22,8)`, moving to `(24,9)` works, but `down` there is blocked\n  - from `(26,8)`, `up` is still blocked\n  - moving farther right works through `(27,8) -> (29,8)`\n  - then a right-edge lane exists: `(31,8)`, `(31,7)`, and `(32,7)` are reachable\n- Explored that far-right edge downward:\n  - can descend cleanly from `(32,7)` to at least `(32,13)`\n  - from there, west opens ",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 164,
+    "summary": "Turn 164 summary:\n\nWhat I did\n- Resolved an initial white-screen transition by waiting; the screen returned to the Route 2 north-side outdoor grass lane at about `(30,13)`.\n- Tried a genuinely different probe from the far-right upper area instead of re-testing the dead north edge:\n  - `left` from `(30,13)` was blocked repeatedly\n  - `down` worked to `(30,15)`\n  - `left` was still blocked there\n  - `up` returned to `(30,14)` and then a wild encounter started\n- In the wild Weedle battle, the flee tools misread the substate:\n  - `flee_wild_battle` failed\n  - `wild_run_recover` claimed success eve",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 165,
+    "summary": "Turn 165 summary:\n\nWhat I did\n- Resolved the awkward wild-battle intro instead of assuming a wedge:\n  - waited through the delayed encounter text/animation until the battle UI fully appeared\n  - manually selected **RUN** with `A, down, right, A`\n  - cleared `Got away safely!` with one more `A`\n  - waited through the full-white transition back to overworld\n- Confirmed the battle/transition lesson again:\n  - RAM can say `battle: none` while the screen is still white; a short wait restores the overworld cleanly\n- Used two genuine probe sequences from the current far-right Route 2 north-side pocke",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 166,
+    "summary": "Turn 166 summary:\n\nWhat I did\n- Took the directive seriously and tried genuinely different probing from the far-right area instead of re-testing the dead north edge.\n- Used `probe_path` from `(32,13)` to discover a new reachable south/left corridor:\n  - moved down along the far-right edge to about `(32,17)`\n  - then worked left/down/left/down/left/left to reach a new open sign/NPC clearing around `(26,18)`\n- Interacted with the sign at `(26,18)` facing up and advanced the text. It is another `TRAINER TIPS` sign; the visible ending line was:\n  - `...your POKEDEX evaluated!`\n- Probed the nearby ",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 167,
+    "summary": "What I did\n- Probed a genuinely different area around the new sign/NPC clearing near `(28,19)` on Route 2 north-side pocket.\n- Confirmed a useful new corridor structure:\n  - from `(28,19)`, `up` to `(28,18)` works but a second `up` is blocked\n  - left works through `(27,18) -> (26,18) -> (25,18)`\n  - from there, north works through `(25,17) -> (25,16)`\n  - east from `(26,16)` is blocked at least at `(27,16)` and farther\n  - north from that column works up to `(25,12)`, then later to `(25,11) -> (25,10) -> (25,9)`\n  - from `(24,9)`, `up` is blocked at `(24,8)`\n- Reached the previously suspected",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 168,
+    "summary": "Turn 168 summary:\n\nWhat I did\n- Resolved the initial full-white screen by waiting 90 frames; it was just the usual post-transition blank screen, not a wedge.\n- Probed a genuinely different area from the current upper-left Route 2 north-side pocket instead of retesting the blocked north edge.\n- Mapped several new tiles/corridors around the upper-left/center:\n  - From `(16,8)`, `left` was blocked immediately.\n  - A vertical lane exists downward on `x=16`, reaching at least `(16,13)`.\n  - At `(16,13)`, moving right works to `(18,13)`, then down to `(18,14)`.\n  - At `(18,14)`, left/up/right/down a",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 169,
+    "summary": "Turn 169 summary:\n\nWhat I did\n- Took the warning seriously and switched to genuinely different probing in the Route 2 north-side outdoor pocket instead of re-testing the same eastern lanes.\n- Started from `(12,18)` and mapped a new central/upper route:\n  - found left blockage at `(11,16)`\n  - climbed via the central path through `(13,14)`, `(13,11)`, `(13,10)`, `(11,9)`\n  - then continued north to `(11,7)`, `(11,5)`, `(11,3)`\n- Reached a new upper clearing and confirmed a whole additional top-row segment:\n  - traversed across the top row through about `x=6..13` at `y=1`\n- Deliberately tested t",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_north_side_upper_left_culdesac_turn169",
+      "PLAYBOOK updated"
+    ]
+  },
+  {
+    "turn": 170,
+    "summary": "Self-improvement only; no buttons pressed.\n\nChanged:\n- Updated the playbook with the main repeated lesson from recent Route 2 turns:\n  - the outdoor pocket’s entire top row (`y=1`, roughly `x=6..32`) is a dead boundary\n  - turn 170 starts at about `(8,1)`, so the next real probe should go **down into center/left lanes**, not `up`\n  - consolidated the pattern that progress is now about descending from upper clearings into unexplored center-left routes\n- Saved a new consolidated memory:\n  - `route2_north_side_outdoor_consolidated_turn170`\n  - This summarizes the verified layout, NPC/sign info, t",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: route2_north_side_outdoor_consolidated_turn170",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 171,
+    "summary": "Turn 171 summary:\n\nWhat I did\n- Followed the directive and made a genuinely different probe from the known-dead top row start at `(8,1)` on map `0x33` by descending into center-left lanes instead of pressing `up`.\n- First probe established a valid descent path:\n  - straight down from `(8,1)` to `(8,5)`\n  - then left to `(6,5)`\n  - left at `(6,6)` is blocked\n  - left at `(6,7)` is also blocked\n  - continuing down/right/down reached `(8,9)`\n- Second probe continued that descent and found more center-left structure:\n  - down the same corridor to `(8,14)`\n  - left/down/left/down reached `(6,16)`\n ",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 172,
+    "summary": "Turn 172 summary\n\nWhat I did\n- Started from Route 2 north-side outdoor pocket (`map 0x33`) at `(6,17)` facing left and probed a genuinely different center-left path instead of re-testing the dead top row.\n- `probe_path` results:\n  - Up is open from `(6,17)` to `(6,13)`.\n  - Left is blocked at `(6,13)`.\n  - Back down to `(6,16)`, left is also blocked there.\n  - From `(6,15)`, right works to `(7,15)` and `(8,15)`.\n  - At `(8,15)`, right appears blocked, and trying to continue led into a wild encounter.\n- The encounter transition again began with a white/blank battle textbox screen; waiting was c",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 173,
+    "summary": "Turn 173 summary:\n\nWhat I did\n- Resolved the apparent white-screen “wedge” first by waiting 90 frames. It was just another delayed overworld redraw; RAM position stayed valid.\n- Switched to genuinely different probing in the Route 2 north-side outdoor pocket instead of retesting the dead top row:\n  - From `(8,15)`, `right` is blocked.\n  - A usable descent exists: straight down from `(8,15)` to at least `(8,21)`.\n  - At `y=21`, left works to `(6,21)` but further left is blocked there.\n  - Continuing south from that west lane works to `(6,23)`, then right to `(8,23)`, where right is blocked agai",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 174,
+    "summary": "Turn 174 summary:\n\nWhat I did\n- Stopped retesting the dead top row and probed a genuinely different center-left area of the Route 2 north-side outdoor pocket from `(2,20)`.\n- New movement findings:\n  - `(2,20) -> up` reaches `(2,19)`, but a second `up` is blocked.\n  - `(2,19) -> left` reaches `(1,19)`.\n  - From `(2,19)`, `right` is blocked.\n  - A lower-left route exists: `(2,20) -> (2,22) -> (1,22) -> (1,23) -> (3,23)`.\n  - From `(3,23)`, `up` reaches `(3,22)`, but another `up` is blocked.\n- Tried `A` facing up at `(2,19)` and discovered the nearby sprite is a trainer, not scenery or a sign.\n-",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 175,
+    "summary": "Turn 175 summary:\n\nWhat I did\n- Continued the newly triggered trainer battle from the center-left Route 2 north-side pocket.\n- Confirmed the battle text/animation is again laggy:\n  - `A used TACKLE!`\n  - after a long wait, `Critical hit!`\n  - then `Enemy WEEDLE used POISON STING!`\n  - after another delay, Squirtle’s HP dropped from 30/32 to 28/32\n  - then `...was poisoned!`\n- Returned cleanly to the battle command menu and selected **TACKLE** again with `A, A`.\n- End-of-turn state on screen: `A used TACKLE!` against Weedle Lv9; Squirtle is now **poisoned** at **28/32 HP**.\n\nWhat I learned\n- Th",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 176,
+    "summary": "Turn 176 summary:\n\nWhat I did\n- Continued the center-left Route 2 trainer battle against **Weedle Lv9**.\n- Worked through the previously “stuck” text by using **long waits plus single A presses** instead of mashing:\n  - after a long delay, the text advanced from `A used TACKLE!` to `...hurt by poison!`\n  - Squirtle’s HP then visibly dropped from **28/32 to 26/32**\n  - enemy action resolved as **`Enemy WEEDLE used STRING SHOT!`**\n  - after clearing the speed-drop text, I returned to the command menu\n- At the command menu, I selected **FIGHT -> TACKLE** again with `A, A`.\n- End-of-turn screen/st",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 177,
+    "summary": "Turn 177 summary:\n\nWhat I did\n- Continued the trainer battle carefully with the “wait long, then single A” approach instead of mashing.\n- Cleared the delayed text sequence:\n  - `Enemy WEEDLE used STRING SHOT!`\n  - `A's SPEED fell!`\n  - `A used TACKLE!`\n  - `A's hurt by poison!`\n- Confirmed again that battle text here can stay visually unchanged for a long time even after inputs.\n- After a long wait, the RAM HP finally updated from **26/32 to 24/32**, and the battle command menu returned.\n- Selected **FIGHT -> TACKLE** with `A, A`.\n- End-of-turn screen is now:\n  - `Enemy WEEDLE used POISON...`\n",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 178,
+    "summary": "Turn 178 summary:\n\nWhat I did\n- Continued the Route 2 center-left trainer battle against Weedle Lv9 using a different cadence from prior turns: longer waits and single `A` presses only when the textbox visibly needed advancing.\n- Cleared the stuck enemy-action sequence:\n  - `Enemy WEEDLE used POISON STING!`\n  - Squirtle’s HP dropped from 24/32 to 22/32\n  - `A's attack missed!`\n  - `A's hurt by poison!`\n  - after the delayed poison tick animation/state catch-up, HP dropped further to 20/32\n- Reached the battle command menu cleanly again.\n- Selected `FIGHT -> TACKLE` with `A, A`.\n- End-of-turn s",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 179,
+    "summary": "Turn 179 summary\n\nWhat I did\n- Broke the long-stalled trainer battle by changing cadence instead of mashing:\n  - waited through `Enemy WEEDLE used POISON STING!`\n  - advanced with single `A` presses\n  - let `A used TACKLE!` fully resolve\n  - cleared `Enemy WEEDLE fainted!`\n- Advanced through the post-battle sequence:\n  - Squirtle leveled up from **11 to 12**\n  - new stats shown included HP now **34 max**\n  - battle ended cleanly\n- Recorded the battle/dialog result in memory and updated todos.\n- Cleared a bit more of the trainer’s overworld dialog; current visible text is:\n  - `I'm looking for ",
+    "milestones": [
+      "Highest party level is now 12"
+    ],
+    "improvements": [
+      "MEMORY: route2_center_left_trainer_battle_and_dialog",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 180,
+    "summary": "Updated self-improvement artifacts only; no buttons pressed.\n\nChanged:\n- **Playbook updated** with:\n  - current live state at turn 180: still in the defeated trainer’s post-battle textbox at `(2,19)` on map `0x33`\n  - reminder to clear post-battle overworld text before movement\n  - consolidated **center-left Route 2 corridor** findings from turns 171–179\n  - stronger battle lesson: slow **wait + single A** cadence works better than mashing in these laggy early trainer fights\n- **Saved memory**: `route2_center_left_corridor_and_trainer_state_turn180`\n  - records the new center-left layout and t",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: route2_center_left_corridor_and_trainer_state_turn180",
+      "TODOS updated",
+      "NEW TOOL: paced_battle_progress"
+    ]
+  },
+  {
+    "turn": 181,
+    "summary": "Turn 181 summary:\n\nWhat I did\n- Cleared the defeated Bug Catcher’s lingering post-battle textbox with `B`; it was not a wedge.\n- Probed a genuinely different route from the center-left trainer area instead of retesting the dead top edge.\n- Confirmed the center-left trainer pocket connects back into the previously mapped upper-left corridor system:\n  - from `(2,19)`, left/down/down led into the lower-left clearing around `(1,23)`\n  - from there, eastward and then northward movement opened a real connection through the middle lanes\n  - climbed back up via roughly `(7,23) -> (7,13) -> (6,11) -> (",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_center_left_to_upper_left_connection_turn181",
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 182,
+    "summary": "Turn 182 summary:\n\n- I made a genuinely different probe from the Route 2 north-side pocket start at `(6,10)` and confirmed more structure in the upper-left lanes:\n  - `(6,10) -> up -> (6,9)` works\n  - `(6,11) -> left` is blocked\n  - `(8,10) -> right` is blocked\n  - climbed through `(8,7)`, then farther up/left to reach a clearing around `(6,3)`\n  - this upper-left area includes a sign on the far left, but it is still not the forest entrance\n- I then made a bad but informative mistake: while trying to interact/probe near the sign/top edge, Squirtle’s overworld poison finished it off.\n- Whiteout",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_whiteout_money_loss_and_pokecenter_return_turn182",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 183,
+    "summary": "Turn 183 summary:\n\nWhat I did\n- Saved a working checkpoint successfully: `turn183_pokecenter_reset`.\n- Took the “state not changing” warning seriously and made a genuinely different move: I abandoned the stale Route 2 loop and reset from Viridian Pokecenter back into Viridian City.\n- Reached the upper-left/northwest part of Viridian and systematically probed movement around the sign/tree corridor instead of assuming the path.\n- Confirmed several exact Viridian City movement facts by RAM coords:\n  - From Pokecenter exit, `left x4` then straight `up` reaches `(19,14)`.\n  - Continuing north on th",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 184,
+    "summary": "Turn 184 summary:\n\nWhat I did\n- Resolved the apparent “stuck” state at Viridian City `(19,2)`: it was just the **TRAINER TIPS** sign with multiple pages still open.\n- Verified that pressing **B** advances/closes the sign text cleanly.\n- After clearing the text, movement resumed normally:\n  - `(19,2) -> down` to `(19,6)` works\n  - `(19,6) -> left` to `(17,6)` works\n  - further `left` at `(17,6)` is blocked\n  - repeated `right` from `(19,6)` is also blocked on that row\n  - moving back `up` returns to `(19,2)` cleanly\n\nWhat I learned\n- This was **not** a navigation wedge; it was a lingering sign ",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: viridian_trainer_tips_sign_and_upper_corridor_turn184",
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 185,
+    "summary": "Turn 185 summary:\n\nWhat I did\n- Took the anti-stall directive seriously and made a genuinely different probe from the Viridian upper-left sign area instead of re-testing the same blocked corridor.\n- Confirmed the upper-left lane is open straight down:\n  - from `(19,2)` down to `(19,14)` is valid.\n- Re-tested the known upper-city crossing from a fresh angle:\n  - from `(19,16)`, moving right reaches at least `(25,16)`.\n  - from `(25,14)`, `up` is blocked by the long north fence line.\n  - from `(20,16)`, `up` is also blocked, reaffirming that this fence row is not the Route 2 path.\n- Then tried a",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: viridian_school_entry_and_layout_probe_turn185",
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 186,
+    "summary": "Turn 186 summary:\n\nWhat I did\n- Took the anti-stall warning seriously and made a genuinely different overworld probe in **Viridian City** instead of repeating the upper-left sign corridor.\n- Started at the small upper-city house/school frontage `(21,16)` and probed east:\n  - Right movement is open through `(27,16)`.\n  - Further right from `(27,16)` is blocked on that row.\n  - From `(27,16)`, moving up reaches `(27,14)`, but further `up` is blocked by the same long north fence line.\n- Then probed the **east-side Mart / rock-wall lane**:\n  - Continued east/lower to at least `(34,15)`.\n  - South ",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: viridian_east_mart_rockwall_probe_turn186",
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 187,
+    "summary": "Turn 187 summary:\n\nWhat I did\n- Returned to the Viridian upper-left sign corridor and verified that the apparent “stuck” behavior there was again just the sign lane, not the actual Route 2 exit.\n- Used `B` + movement to get off the sign cleanly.\n- Probed the upper-left corridor systematically and found the real northbound progression tile:\n  - from `(19,3)`, left reaches `(17,3)` but not farther\n  - from there, up is open through `(17,2)`, `(17,1)`, to `(17,0)`\n  - **pressing `up` from `(17,0)` warps to Route 2 (`map 0x0d`) at about `(7,71)`**\n- This confirms the exact Viridian City north exit",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: viridian_north_exit_to_route2_exact_tile_turn187",
+      "TODOS updated",
+      "PLAYBOOK updated"
+    ]
+  },
+  {
+    "turn": 188,
+    "summary": "Turn 188 summary:\n\nWhat I did\n- Used the newly verified Viridian north exit exactly as planned:\n  - from Viridian `(19,0)`, `left,left,up` reached Route 2 `(7,71)`.\n- Successfully created a working checkpoint:\n  - `turn188_route2_start`\n- Followed the known Route 2 return path north/west toward the upper area:\n  - climbed to `(7,57)`, moved west to `(3,57)`, then north to `(3,48)`, then east to `(7,48)`.\n- Confirmed again that the top-row `up` pushes around `(7,48)` are dead/blocked.\n- Triggered a wild battle during this transit.\n- Tried the flee tool, but it failed to escape cleanly and inste",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 189,
+    "summary": "Turn 189 summary:\n\nWhat I did\n- Saved a good harness checkpoint successfully at **`turn189_route2_3_48`** while standing on Route 2 at `(3,48)`.\n- Re-tested the apparent north opening from `(3,48)` and confirmed it is still blocked: repeated `up` from `(3,48)` does nothing.\n- Did a short control probe around the spot and confirmed movement is normal, not wedged:\n  - `(3,48) -> left -> (2,48) -> left -> (1,48)`\n  - `(1,48) -> down -> (1,49) -> right -> (3,49) -> up -> (3,48)`\n- Re-read the gatehouse memories and tested the nearby upper row again from a different angle:\n  - east along the row to",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_upper_row_block_extends_west_turn189",
+      "PLAYBOOK updated"
+    ]
+  },
+  {
+    "turn": 190,
+    "summary": "Updated self-improvement artifacts only; no buttons pressed.\n\nWhat I changed\n- **Playbook updated**\n  - Consolidated the big repeated lesson from turns 187–189:\n    - the real Viridian north exit is `(17,0) -> up`\n    - the reliable Route 2 return path is from `(7,71)` north to `y≈57`, west to `x≈3`, north to `y≈44`, then `left,left,left,left,up` into the gatehouse\n    - the visible top row around `y=48` is a **confirmed trap**, not a hidden entrance\n  - Added a practical anti-stall rule: stop retesting `up` along `(0..7,48)` and use the known lower/right gatehouse alignment instead.\n  - Recor",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: route2_upper_row_trap_and_gatehouse_return_turn190",
+      "NEW TOOL: route2_to_forest_approach",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 191,
+    "summary": "Turn 191 summary:\n\nWhat I did\n- Took the anti-stall directive seriously and did a genuinely different action: **loaded checkpoint `turn188_route2_start`** to rewind out of the repeated top-row trap state.\n- Re-read the saved gatehouse memory to recover the intended Route 2 forest-approach route.\n- Tried the custom `route2_to_forest_approach` tool, but it **failed** due to an internal bug (it attempted an invalid oversized/raw button batch).\n- Manually executed the known return route from Route 2 start:\n  - `(7,71)` north to `(7,57)`\n  - west to `(3,57)`\n  - north to `(3,48)`\n- Reconfirmed agai",
+    "milestones": [],
+    "improvements": [
+      "REWIND: turn188_route2_start"
+    ]
+  },
+  {
+    "turn": 192,
+    "summary": "Turn 192 summary:\n\nWhat I did\n- Took the anti-stall warning seriously and made genuinely different Route 2 probes instead of hammering `up` at `(3,48)`.\n- From `(3,48)`, tested a lower-left detour:\n  - `down x4, left x3` reached the far-left edge at `(0,52)`\n  - then `up` worked to `(0,51)`\n- Probed the far-left upper edge:\n  - climbed to `(0,48)`\n  - repeated `up` there is also blocked\n  - moving right to `(4,48)` and pressing `up` is still blocked\n- Re-read the gatehouse memories and confirmed the important mismatch:\n  - the remembered entrance is at about `(3,44)`, but the current whole vis",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 193,
+    "summary": "Turn 193 summary\n\nWhat I did\n- Cleared the live wild battle sequence safely instead of mashing:\n  - finished the previous **Rattata** fight with slow `wait + A` timing\n  - immediately got pulled into another wild encounter due to standing in grass\n  - waited through the delayed battle intro until it fully resolved to **wild Weedle Lv3**\n  - attempted the flee tool once, but it again failed to escape cleanly\n  - switched back to the safer slow-text approach and let Squirtle use **Tackle**\n  - cleared the Weedle fight successfully\n- After battle end, waited through the white transition back to o",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 194,
+    "summary": "Turn 194 summary\n\nWhat I did\n- Took the anti-stall directive seriously and used a genuinely different recovery: **loaded checkpoint `turn188_route2_start`** instead of continuing from the bad top-row trap/battle state.\n- Re-read the saved Route 2 gatehouse memories to recover the intended path.\n- Executed the known return route from Route 2 start:\n  - `(7,71)` north to `(7,57)`\n  - west to `(3,57)`\n  - north to `(3,48)`\n- This again reconfirmed the trap:\n  - repeated `up` from `(3,48)` does nothing\n  - moving farther west to `(0,48)` also leaves `up` blocked\n- Probed a different loop from the ",
+    "milestones": [],
+    "improvements": [
+      "REWIND: turn188_route2_start"
+    ]
+  },
+  {
+    "turn": 195,
+    "summary": "Turn 195 summary\n\nWhat I did\n- Resolved the live wild Rattata battle safely using slow timing instead of mashing:\n  - advanced `RATTATA` attack text with `A`\n  - waited through the delayed damage/update\n  - returned to the battle command menu at 31/34 HP\n  - selected **RUN** with `down, right, a`\n  - confirmed escape with `A`, then waited through the white transition back to overworld\n- After returning, I was back on Route 2 around `(6,48)` in the same upper-row grass trap area.\n- Because the anti-stall warning was still in effect and the state had been unproductive for many turns, I used a ge",
+    "milestones": [],
+    "improvements": [
+      "REWIND: turn188_route2_start"
+    ]
+  },
+  {
+    "turn": 196,
+    "summary": "- Saved a new good checkpoint at the clean Route 2 start: `turn196_route2_start_fullhp`.\n- Re-executed the known Route 2 return path from `(7,71)`:\n  - north to `(7,57)`\n  - west to `(3,57)`\n  - north to `(3,48)`\n- Reconfirmed again that the visible top row is a trap:\n  - `up` from `(3,48)` is blocked\n  - `up` from `(0,48)` is blocked\n  - `up` from `(5,48)` is blocked too\n- Did genuinely different local probes around the trap area:\n  - from `(0,48)`, `down` to `(0,49)` and right to `(5,49)` works\n  - from `(5,49)`, `up` reaches `(5,48)` but further `up` is blocked\n  - from `(5,48)`, right to `",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 197,
+    "summary": "Turn 197 summary\n\nWhat I did\n- Took the anti-stall warning seriously and used a genuinely different recovery: loaded `turn196_route2_start_fullhp` instead of staying in the repeated top-row trap.\n- Re-ran the known Route 2 return path cleanly from `(7,71)`:\n  - up to `(7,57)`\n  - left to `(3,57)`\n  - up to `(3,48)`\n- This again confirmed the same hard fact:\n  - `up` from `(3,48)` is blocked.\n- Re-read the gatehouse memory and noticed the key mismatch:\n  - the remembered south gatehouse entrance is around **`(3,44)`**, not the blocked visible top row at `y=48`.\n- Did a fresh local probe from `(",
+    "milestones": [],
+    "improvements": [
+      "REWIND: turn196_route2_start_fullhp",
+      "MEMORY: route2_upper_row_y48_vs_gatehouse_y44_mismatch_turn197"
+    ]
+  },
+  {
+    "turn": 198,
+    "summary": "Turn 198 summary\n\nWhat I did\n- Handled a wild **Pidgey Lv3** encounter safely after the probe triggered grass:\n  - flee tool failed again\n  - used slow `wait + A` battle timing\n  - Squirtle won with **Tackle**\n  - returned to overworld at **30/34 HP**\n- Then made a genuinely different Route 2 probe instead of retrying the same top-row `up` presses:\n  - from around `(5,48)`, moved back to `(3,48)`\n  - took the lower-left detour: `down x4, left x3, up` to reach **`(0,51)`**\n  - climbed to the extreme far-left upper edge at **`(0,48)`**\n- Verified a new negative fact:\n  - **repeated `up` from `(0",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_far_left_upper_edge_block_turn198",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 199,
+    "summary": "Turn 199 summary:\n\nWhat I did\n- Took the anti-stall directive seriously and rewound to the clean checkpoint `turn196_route2_start_fullhp` instead of continuing from the dead top-row trap.\n- Re-ran the standard Route 2 approach from `(7,71)` to the upper area.\n- Made a genuinely different probe on the right side and found the key missing connection:\n  - from the blocked top row, moving right reached `(8,48)`\n  - then `up` worked to `(8,47)` and `(8,46)`\n  - from there, moving around the building frontage let me reach the remembered gatehouse row at `y=44`\n- Verified the exact south gatehouse en",
+    "milestones": [],
+    "improvements": [
+      "REWIND: turn196_route2_start_fullhp",
+      "MEMORY: route2_gatehouse_south_entrance_verified_turn199",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 200,
+    "summary": "No buttons pressed, per directive.\n\nWhat I changed\n- Updated the playbook with the key turn-199 resolution:\n  - the repeated Route 2 `y=48` “top row” is a west-side trap\n  - the real gatehouse approach is to go east first to about `(8,48)`, then up to `(8,46)`, then around the frontage back to the true entrance row near `(3,44)`\n  - noted again that the old flee helpers have been unreliable and manual `B` recovery to RUN is safer\n- Saved durable memory files:\n  - `route2_gatehouse_south_approach_exact_turn199`\n  - `route2_upper_row_trap_resolution_summary`\n- Updated todos to match reality:\n  -",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: route2_gatehouse_south_approach_exact_turn199",
+      "MEMORY: route2_upper_row_trap_resolution_summary",
+      "TODOS updated",
+      "NEW TOOL: route2_start_to_gatehouse_south"
+    ]
+  },
+  {
+    "turn": 201,
+    "summary": "Turn 201 summary\n\nWhat I did\n- Saved a fresh good checkpoint at the current forest-approach start:\n  - `turn201_gate_north_start`\n- Made a genuinely different probe from the north-side outdoor pocket start `(17,47)` instead of retesting the blocked top row.\n- First probe:\n  - walked straight north from `(17,47)` to `(17,43)`\n  - confirmed the left side there is blocked\n  - shifted right and found open progress:\n    - `(20,43) -> up -> (20,41)`\n- A wild Weedle appeared during a follow-up probe.\n- Escaped the battle manually and cleanly:\n  - waited for the command menu\n  - selected RUN with `dow",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 202,
+    "summary": "Turn 202 summary\n\nWhat I did\n- Started from Route 2 north-side outdoor pocket at `(17,35)` facing up.\n- Probed straight north and found a real lane:\n  - `(17,35) -> (17,34) -> (17,33) -> (17,32)`\n  - further `up` from `(17,32)` is blocked.\n- Probed around that top point and confirmed a local choke:\n  - `(17,32) -> left` does not move\n  - `(18,32)` is reachable from the right, but `up` from `(18,32)` is also blocked.\n- Backed down/right, then made a genuinely different westward probe through the grass lanes:\n  - reached `(15,34)`, then `(15,32)`, then `(14,32)`, then `(14,33)`\n  - continued lef",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 203,
+    "summary": "Turn 203 summary\n\nWhat I did\n- Saved a fresh checkpoint at the current north-side Route 2 outdoor state:\n  - `turn203_route2_12_32`\n- Made a genuinely different local probe from `(12,32)` instead of retesting old blocked top rows.\n- Probe results:\n  - `up` from `(12,32)` is blocked.\n  - Moving right is open through `(13,32) -> (14,32) -> (15,32)`.\n  - From `(15,32)`, going `down` reaches `(15,34)`.\n  - From `(16,33)`, `up` is blocked.\n  - Returned to `(15,32)`, then shifted left to `(14,32)`.\n- Pressed `A` while facing the nearby sign area from `(15,32)` and got no text, so that position/facin",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 204,
+    "summary": "Turn 204 summary\n\nWhat I did\n- Escaped the opening wild **Kakuna Lv6** cleanly:\n  - `A` to reach the battle menu\n  - `down, right, A` to select **RUN**\n  - `A` to clear `Got away safely!`\n  - waited through the white transition back to overworld\n- Re-read the local area by interacting with the nearby sign from the current search zone.\n  - From `(15,32)` facing right, pressing `A` opened the sign text.\n  - Confirmed it is the familiar poison warning sign: `For poison, use ANTIDOTE! Get it at POKE...`\n- Did genuinely different probing around the current center-left area instead of retrying block",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 205,
+    "summary": "Turn 205 summary\n\nWhat I did\n- Resolved the live wild **Weedle Lv4** battle safely from the delayed intro state.\n- Used cautious timing instead of mashing:\n  - advanced through the appearance/send-out sequence with `A` and waits\n  - once the 4-option battle menu appeared, selected **RUN** with `down, right, A`\n  - cleared the slow `Got away safely!` text with extra `A` plus a wait\n- Returned successfully to the overworld in the Route 2 north-side outdoor pocket.\n\nWhat I learned\n- This battle followed the same slow early-battle pattern as before:\n  - after `Wild WEEDLE appeared!`, one or two `A",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 206,
+    "summary": "Turn 206 summary\n\nWhat I did\n- Started at Route 2 north-side outdoor pocket (`map 0x33`) at `(8,31)` facing left with Squirtle full HP.\n- Probed a genuinely different local area around the current center-left search zone instead of retesting the known blocked top rows.\n- First probe findings from `(8,31)`:\n  - `left` works to `(7,31)`\n  - `up` works once to `(7,30)`, but a second `up` is blocked\n  - `left` from `(6,31)` was blocked\n  - after some interaction attempts in grass, I triggered a wild Kakuna\n- Escaped the Kakuna safely:\n  - advanced text slowly\n  - waited through send-out animation\n",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 207,
+    "summary": "Turn 207 summary\n\nWhat I did\n- Cleanly escaped the opening wild **Weedle Lv3**:\n  - advanced intro text with `A`\n  - waited through send-out timing\n  - selected **RUN** with `down, right, A`\n  - cleared `Got away safely!` and waited through the white transition\n- Then obeyed the anti-stall directive by making **genuinely different overworld probes** from the far-left side of the Route 2 north-side outdoor pocket, starting around `(2,30)`.\n- Probe results:\n  - From `(2,30)`, `left` reaches `(1,30)` but **down is blocked** there.\n  - Along the same upper lane, right is open through at least `(7,",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 208,
+    "summary": "Turn 208 summary\n\nWhat I did\n- Followed the anti-stall directive by recording the current stall context in memory:\n  - `route2_north_side_center_left_stall_context_turn208`\n- Made a genuinely different local probe from the current center-left area around `(12,32)` instead of retesting the old blocked top rows.\n- Probe findings before the encounter:\n  - `(12,32) -> right -> (13,32)` works.\n  - Pressing `A` at `(13,32)` facing right did **not** trigger the nearby sign from that tile/facing.\n  - `up` from there did not move.\n  - `right` to `(14,32)` works.\n  - `down` to `(14,33)` works.\n  - `righ",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_north_side_center_left_stall_context_turn208"
+    ]
+  },
+  {
+    "turn": 209,
+    "summary": "Turn 209 summary\n\nWhat I did\n- Escaped the opening wild Weedle cleanly:\n  - `A` to finish `Got away safely!`\n  - waited through the white transition back to overworld\n- From the overworld around `(14,33)` facing left, I made genuinely different local probes near the sign / tree-stump choke instead of retesting the old top-row area.\n- Verified local movement around the current center-right patch:\n  - `(14,33) -> right -> (15,33)` works\n  - `(15,33) -> up -> (15,32)` works\n  - `up` from `(15,32)` is blocked\n  - `(15,32) -> left -> (14,32)` works\n  - `up` from `(14,32)` is blocked\n  - from the ne",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 210,
+    "summary": "Updated self-improvement materials without pressing buttons.\n\nChanged:\n- **Playbook updated** with:\n  - the repeated Route 2 north-side lesson that the `y=32` sign row is a **local choke**, not the forest entrance\n  - exact sign interaction note: read the antidote sign from about **`(15,32)` facing right**\n  - blocked `up` confirmations across `(14..18,32)`\n  - next search bias: probe **east/southeast from `(14..18,33..34)`** instead of retesting the sign row\n  - a clearer early-wild-battle escape cadence: advance intro with `A` + waits, then select **RUN** explicitly\n\n- **Memory saved**:\n  - ",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: route2_north_side_mid_pocket_refinement_turns201_209",
+      "TODOS updated",
+      "NEW TOOL: early_wild_run_opening"
+    ]
+  },
+  {
+    "turn": 211,
+    "summary": "Turn 211 summary\n\nWhat I did\n- Escaped the opening wild Weedle cleanly from the delayed battle state:\n  - once the 4-option menu was visible, `down, right, A` selected RUN\n  - then `A` cleared `Got away safely!`\n  - waited through the white transition back to overworld\n- Followed the anti-stall directive and made genuinely different Route 2 north-side probes from the current zone instead of retesting the blocked sign row.\n- Key movement probes:\n  - At the starting pocket around `(18,34)`, `right` was blocked, but `down` opened a southbound lane.\n  - Traced that lane south to about `(18,38)`, t",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 212,
+    "summary": "Turn 212 summary\n\nWhat I did\n- Resolved the live wild battle cleanly:\n  - the first flee helper misfired during the intro state\n  - used slow waits to advance the battle until the move screen appeared\n  - backed out with `B`, then selected **RUN** and confirmed `Got away safely!`\n  - waited through the white transition back to overworld\n- Saved a fresh checkpoint successfully:\n  - `turn212_kakuna_escaped_28_40`\n- Re-read the nearby NPC at the current tile instead of blindly probing movement.\n  - At `(28,40)` facing left, pressing `A` talks to the adjacent NPC.\n  - Confirmed this is the already",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 213,
+    "summary": "What I did\n- Cleared the stuck NPC textbox at `(28,40)` by using `B` repeatedly until overworld control returned.\n- Saved a fresh checkpoint: `turn213_npc_cleared_28_40`.\n- Made a genuinely different probe on the far-right side instead of rechecking the sign choke:\n  - found open tiles through `(29..32,40..43)`\n  - confirmed hard east boundary at `x=32`\n  - confirmed `down` from `(32,43)` is blocked\n  - confirmed the lower-right area loops back left/up into the same connected outer lane\n- Saved this as memory:\n  - `route2_north_side_far_right_probe_turn213`\n- Updated todos to emphasize stoppin",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_north_side_far_right_probe_turn213",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 214,
+    "summary": "Turn 214 summary\n\nWhat I did\n- Obeyed the anti-stall directive and stopped grinding the far-right dead-end.\n- Saved a durable note that the far-right lane around `(29..32,40..43)` is a dead end for entrance search.\n- Rewound to the clean checkpoint `turn201_gate_north_start`, back to the north-side outdoor start at `(17,47)`.\n- Re-probed from there with genuinely different movement:\n  - confirmed straight north works to `(17,43)` and then blocks\n  - shifted right to `(20,43)` and up to `(20,41)`\n  - then explored left/upward lanes and reached a new position around `(16,35)`\n- Pressing `A` near",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_north_side_far_right_dead_end_turn214",
+      "REWIND: turn201_gate_north_start"
+    ]
+  },
+  {
+    "turn": 215,
+    "summary": "Turn 215 summary\n\nWhat I did\n- Resolved the live wild Kakuna battle safely from a slow text state.\n- Confirmed the text was just lagged battle narration:\n  - waited through `A used TACKLE!`\n  - advanced `Enemy KAKUNA's DEFENSE rose!`\n  - returned to the 4-option battle menu\n- Escaped cleanly with explicit manual RUN:\n  - `down, right, A`\n  - then extra `A` to clear `Got away safely!`\n  - one more `A` was needed after a wait to finish the transition\n- Ended back in the overworld on map `0x33` at about `(18,35)`, facing up, full HP.\n\nWhat I learned\n- This was another example of the early-battle ",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 216,
+    "summary": "Turn 216 summary\n\nWhat I did\n- Saved a fresh checkpoint at the current search state:\n  - `turn216_start_18_35`\n- Followed the directive to try genuinely different probing around the current Route 2 north-side stall area instead of repeating the far-right dead ends.\n- Initial local probe from `(18,35)` found:\n  - `up -> (18,34)`\n  - `left -> (17,34) -> (16,34)`\n  - `up -> (16,33)`\n  - second `up` there is blocked\n  - `right -> (17,33) -> (18,33)`\n- A wild Weedle interrupted the next probe.\n- The `early_wild_run_opening` helper falsely reported success while the battle was still live, so I manua",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_sign_row_breach_turn216"
+    ]
+  },
+  {
+    "turn": 217,
+    "summary": "Turn 217 summary\n\nWhat I did\n- Escaped the opening wild Caterpie safely from the delayed intro state:\n  - `A` to advance from `Go! A!`\n  - waited for the 4-option menu\n  - `down, right, A` to select **RUN**\n  - `A` to clear `Got away safely!`\n  - waited through the white transition back to overworld\n- Saved a fresh checkpoint at the restored overworld state:\n  - `turn217_post_caterpie_12_32`\n- Made genuinely different Route 2 north-side probes around the stalled sign-row area instead of retesting only `up`:\n  1. From `(12,32)`:\n     - right to `(14,32)`\n     - down/right/down/down to `(16,35)`",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 218,
+    "summary": "Turn 218 summary\n\nWhat I did\n- Cleanly resolved the live wild battle:\n  - advanced the slow intro text in stages until `Wild KAKUNA appeared!`\n  - waited through the send-out animation\n  - once the 4-option menu appeared, selected **RUN** with `down, right, A`\n  - cleared `Got away safely!` with `A`\n  - waited through the white transition back to the overworld\n- Returned safely to the Route 2 north-side outdoor pocket:\n  - map `0x33`\n  - standing at about `(18,34)`, now facing left\n  - Squirtle is full HP `34/34`\n\nWhat I learned\n- This was another confirmed example of the stable early wild-bat",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 219,
+    "summary": "Turn 219 summary\n\nWhat I did\n- Heeded the “do something genuinely different” directive and used the remembered turn-216 route instead of rechecking the same choke:\n  - from `(18,34)` I moved to `(13,32)` successfully\n  - this re-confirmed the previously discovered breach into the area above the sign-row stall zone\n- Probed that upper-left side systematically with RAM-tracked movement.\n- Found a meaningful new lane on the left side:\n  - from around `(8,30)`, moving farther left/down/up led into a broader western clearing\n  - from there I reached about `(5,31)`, then `(2,31)`\n- At `(2,31)` facin",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 220,
+    "summary": "Updated self-improvement materials only; no buttons pressed.\n\nChanged:\n- **Playbook updated** to emphasize:\n  - the stable early-wild escape cadence from `Go! A!`\n  - that the `y=32` sign row is a local choke, not the entrance\n  - the new best lead: the **western clearing** reached via the left-side continuation, now known to extend to about `(2,31)`\n- **Memory saved**:\n  - `route2_western_clearing_breakthrough_turn219`\n- **Todos updated** to match reality:\n  - first priority is escaping the current live Kakuna battle safely next turn\n  - then continue probing from the **west-side clearing** i",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: route2_western_clearing_breakthrough_turn219",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 221,
+    "summary": "Turn 221 summary\n\nWhat I did\n- Escaped the live wild Kakuna safely from the `Go! A!` intro state:\n  - waited for the command menu\n  - selected **RUN** with `down, right, A`\n  - cleared `Got away safely!`\n  - returned to overworld at `map 0x33`, `(2,31)`, full HP\n- Saved a checkpoint:\n  - `turn221_west_clear_2_31`\n- Probed the western-clearing area step by step from `(2,31)`:\n  - `down` is blocked at `(2,31)`\n  - `right` works to `(3,31)` and `(4,31)`\n  - `down` remains blocked from `(4,31)`\n  - back at `(2,31)`, `up` works once to `(2,30)` but second `up` is blocked\n  - from `(3,30)`, `up` is ",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_western_clearing_sign_turn221"
+    ]
+  },
+  {
+    "turn": 222,
+    "summary": "Turn 222 summary\n\nWhat I did\n- Followed the directive to stop grinding the west-clearing dead end.\n- Re-read and saved the west-clearing result as durable memory:\n  - `route2_west_clearing_dead_end_turn222`\n- Rewound to the clean checkpoint `turn201_gate_north_start`, returning to the north-side outdoor pocket at `(17,47)`.\n- Made fresh stepwise probes from the start instead of continuing from the stale `(2,31)` branch.\n- Reconfirmed the known path:\n  - north to `(17,43)`\n  - right to `(20,43)`\n  - up to `(20,41)`\n  - then left/up through the mid pocket to `(17,35)`\n  - straight north to `(17,",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_west_clearing_dead_end_turn222",
+      "REWIND: turn201_gate_north_start"
+    ]
+  },
+  {
+    "turn": 223,
+    "summary": "Turn 223 summary\n\nWhat I did\n- Saved a fresh checkpoint at the stalled sign-row state:\n  - `turn223_start_17_32`\n- Re-read the local screen carefully instead of repeating the same blocked movement:\n  - confirmed the nearby sign is the antidote sign again\n  - the initial probe got stuck in sign text because `A` was pressed while facing left\n- Cleared the textbox with `B`.\n- Tried a genuinely different local movement path from `(17,32)`:\n  - all attempted `up/left` movement from the sign-row area was blocked\n  - only `right` to `(18,32)` succeeded in that test\n- A wild Pikachu Lv3 triggered from",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 224,
+    "summary": "Turn 224 summary\n\nWhat I did\n- Escaped the live wild Pikachu safely:\n  - pressed `A` on `Got away safely!`\n  - waited through the white transition back to overworld\n- Saved a fresh checkpoint:\n  - `turn224_post_pikachu_escape_18_32`\n- Did one more careful probe around the stalled Route 2 north-side outdoor pocket:\n  - reconfirmed the sign-row choke around `(17..18,32)` / `(15,32)` is blocked north\n  - reconfirmed the west-side sign area is another dead end, not a warp\n- Crucially, I stopped assuming map `0x33` was the forest entrance area.\n- Wrote this correction into durable memory/playbook/t",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_north_side_pocket_not_forest_entrance_turn224",
+      "PLAYBOOK updated",
+      "TODOS updated",
+      "REWIND: turn196_route2_start_fullhp"
+    ]
+  },
+  {
+    "turn": 225,
+    "summary": "I found the key correction.\n\nWhat I did\n- Saved a checkpoint: `turn225_gatehouse_interior_4_7`\n- Probed the gatehouse interior instead of re-searching the dead outdoor pocket.\n- From inside `MAP_0x32`, I found a valid path along the left/top interior:\n  - moved to `(2,4)`\n  - then `up, up, right, right, right` to `(5,2)`\n  - one more `right` was blocked\n  - then `up` to `(5,1)`\n  - then `up` again triggered a map change\n- Waited through the black transition.\n\nWhat I learned\n- The gatehouse interior does have the real north progression.\n- The correct exit is the **top-center doorway** inside th",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_gatehouse_interior_side_exit_discovery_turn225",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 226,
+    "summary": "What I did\n- Heeded the stall warning and immediately rewound out of the wrong outdoor pocket state:\n  - loaded `turn225_gatehouse_interior_4_7`\n- Saved a fresh retry checkpoint:\n  - `turn226_gatehouse_retry_4_7`\n- Re-probed the gatehouse interior stepwise instead of trusting the earlier mistaken route.\n- Learned the earlier “top-center doorway” interpretation was wrong:\n  - from `(6,4)`, moving up was blocked\n  - the correct interior path is via the upper-left aisle to `(5,1)`, then `up`\n- Confirmed that this interior `up` exit does **not** enter Viridian Forest directly:\n  - it map-changes b",
+    "milestones": [],
+    "improvements": [
+      "REWIND: turn225_gatehouse_interior_4_7"
+    ]
+  },
+  {
+    "turn": 227,
+    "summary": "Turn 227 summary\n\nWhat I did\n- Cleanly escaped the live wild Kakuna battle from the intro state using the stable cadence:\n  - advanced `Wild KAKUNA appeared!`\n  - waited through `Go! A!`\n  - waited for the 4-option command menu\n  - selected **RUN** with `down, right, A`\n  - cleared `Got away safely!`\n  - waited through the white transition back to overworld\n- Confirmed the post-battle overworld state was again the same wrong outdoor pocket on map `0x33` around `(20,41)`.\n- Following the stall-warning directive, I did something genuinely different instead of continuing to grind that area:\n  - l",
+    "milestones": [],
+    "improvements": [
+      "REWIND: turn226_gatehouse_retry_4_7"
+    ]
+  },
+  {
+    "turn": 228,
+    "summary": "Turn 228 summary\n\nWhat I did\n- Re-probed the Route 2 gatehouse interior from `MAP_0x32` instead of trusting prior assumptions.\n- Verified the exact top-door behavior:\n  - from inside at about `(5,1)`, pressing `up` changes to map `0x33`\n  - after the transition settles, that is the familiar north-side Route 2 outdoor pocket around `(17,47)`\n  - pressing `down` from that outdoor south edge returns to the gatehouse\n- Saved this as durable memory:\n  - `route2_gatehouse_top_door_loop_turn228`\n- Saved checkpoints:\n  - `turn228_gatehouse_interior_5_3`\n  - `turn228_north_pocket_start_17_47`\n- Re-ran ",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_gatehouse_top_door_loop_turn228",
+      "MEMORY: route2_north_pocket_reconfirmed_turn228",
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 229,
+    "summary": "Turn 229 summary\n\nWhat I did\n- Saved a fresh checkpoint at the current stalled north-pocket state:\n  - `turn229_start_18_33`\n- Followed the directive to try genuinely different local movement instead of redoing the sign-row:\n  - probed a loop around the right-side tree corridor from `(18,33)` down to `(18,36)`, then left/up/left/down/right back to `(18,36)`\n  - this confirmed that the nearby right edge is just a narrow lane, not a hidden warp\n- Tried a longer southward route from `(18,36)`:\n  - successfully moved down to `(18,39)`\n  - from `(18,39)`, further `down`, all tested `left`, and even",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 230,
+    "summary": "Updated self-improvement materials only; no buttons pressed.\n\nChanged:\n- **Playbook updated** with the key strategic correction:\n  - `MAP_0x32` top door is only a connector to `map 0x33`\n  - `map 0x33` should now be treated as an **optional/north-side dead-end pocket**, not the Viridian Forest entrance\n  - next real search should return to **south Route 2 (`map 0x0d`)** and look for a different overworld doorway/warp\n- **Memory saved**:\n  - `route2_north_pocket_south_lane_dead_end_turn229`\n  - records that the `(18,33) -> (18,36) -> (18,39)` south corridor on `0x33` is another dead end\n- **Tod",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: route2_north_pocket_south_lane_dead_end_turn229",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 231,
+    "summary": "Turn 231 summary\n\nWhat I did\n- Followed the stall directive and immediately rewound out of the dead `map 0x33` pocket.\n- Reconfirmed with direct movement that:\n  - `map 0x33` south edge `down` returns to `MAP_0x32`\n  - the gatehouse interior top door is just the connector, not the forest entrance\n- Rewound farther to the clean south Route 2 checkpoint:\n  - `turn196_route2_start_fullhp`\n- Saved a fresh working checkpoint for the real search:\n  - `turn231_route2_south_start`\n- Did a genuinely different systematic probe on south Route 2 (`map 0x0d`) instead of returning north-pocket.\n- Important ",
+    "milestones": [],
+    "improvements": [
+      "REWIND: turn228_north_pocket_start_17_47",
+      "REWIND: turn196_route2_start_fullhp",
+      "MEMORY: route2_row62_crossing_refined_turn231"
+    ]
+  },
+  {
+    "turn": 232,
+    "summary": "Turn 232 summary\n\nWhat I did\n- Saved a fresh checkpoint at the new south Route 2 search state:\n  - `turn232_route2_1_56_start`\n- Made a genuinely different systematic probe on south Route 2 (`map 0x0d`) from `(1,56)` instead of returning to the dead north pocket.\n- Confirmed a long west-lane climb:\n  - from `(1,56)` straight up to `(1,48)` is open.\n- Confirmed the top-row traverse:\n  - from `(1,48)` right to `(10,48)` works, but farther right is blocked.\n- Confirmed the known interior approach still exists:\n  - from that area, moving around to about `(3,44)` and pressing `up` re-enters `MAP_0x",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_south_gatehouse_reentry_turn232"
+    ]
+  },
+  {
+    "turn": 233,
+    "summary": "Turn 233 summary\n\nWhat I did\n- Saved a safety checkpoint in the gatehouse top row: `turn233_gatehouse_toprow_6_1`.\n- Re-probed the gatehouse top exit step-by-step and reconfirmed:\n  - from `MAP_0x32` at `(5,1)`, pressing `up` goes to map `0x33` at about `(17,47)`\n  - pressing `down` there returns to the gatehouse\n- Heeded the stall warning and rewound out of that dead branch to the south Route 2 checkpoint:\n  - loaded `turn232_route2_1_56_start`\n- Saved a fresh south-search checkpoint:\n  - `turn233_route2_south_start_1_56`\n- Did genuinely different probing on south Route 2 (`map 0x0d`) rather ",
+    "milestones": [],
+    "improvements": [
+      "REWIND: turn232_route2_1_56_start",
+      "MEMORY: route2_gatehouse_top_exit_not_forest_turn233"
+    ]
+  },
+  {
+    "turn": 234,
+    "summary": "Turn 234 summary\n\nWhat I did\n- Followed the stall warning and tried a genuinely different south-Route-2 search from the sign area at `(5,64)` instead of going back to the gatehouse or north pocket.\n- Saved checkpoint: `turn234_route2_sign_5_64`.\n- Systematically probed the previously suspicious row-62/right-side openings:\n  - confirmed you can reach `(10,62)` and also stand at `(9,62)` / `(11,62)`\n  - but `up` is blocked across that tested span\n  - and the apparent right-side/tree-column opening is also blocked from below\n- Wrote that failure down:\n  - memory `route2_row62_openings_probe_turn2",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_row62_openings_probe_turn234",
+      "REWIND: turn234_route2_sign_5_64",
+      "MEMORY: route2_left_opening_north_breach_turn234"
+    ]
+  },
+  {
+    "turn": 235,
+    "summary": "What I did\n- Saved a fresh checkpoint: `turn235_route2_8_57_start`.\n- Re-read the key memory from turn 234 and tested from the current state instead of repeating the old dead-end assumptions.\n- Verified the lower-left south Route 2 breach connects back to the upper Route 2/gatehouse approach:\n  - from `(8,57)`, left-side probing found the climb to `(3,54)`, then to `(1,49)`, then across to `(3,48)`\n  - from `(3,48)`, the known path `right x5, up x2, left x5, up x2` returned cleanly to the gatehouse door at `(3,44)`\n- Most important: I recognized the strategic mistake. The so-called “Route 2 no",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: route2_map33_is_viridian_forest_correction_turn235",
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 236,
+    "summary": "What I did\n- Cleared the black screen with a wait and confirmed we were in the south gatehouse interior `MAP_0x32` at `(4,7)`.\n- Saved a safety checkpoint:\n  - `turn236_gatehouse_4_7`\n- Re-probed the gatehouse interior step by step from this exact state and reconfirmed the verified route to the top exit:\n  - `left, left, up, right, right, right, up, up, up, up, left, left, left, up, right, up`\n  - more simply from the probed state: reach `(5,1)`, then `up`\n- Confirmed again that pressing `up` from `(5,1)` changes to map `0x33` at `(17,47)`.\n- Waited through the transition and saved a fresh for",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 237,
+    "summary": "Turn 237 summary\n\nWhat I did\n- Finished the live wild Metapod battle safely:\n  - used **Tackle**\n  - waited through the long early-battle text/animation lag\n  - confirmed **Critical hit!**\n  - cleared `Enemy METAPOD fainted!`\n  - returned to overworld with Squirtle still at **34/34 HP**\n- Saved a fresh checkpoint:\n  - `turn237_post_metapod_22_41`\n- Started a new forest probe from `(22,41)`:\n  - `right x4` reached `(26,41)`\n  - `up x5` reached `(26,36)`\n- From `(26,36)`, continued probing north:\n  - straight `up` to `(26,32)` was open\n  - `left` from `(26,32)` was blocked\n  - `up` to `(25,30)` ",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 238,
+    "summary": "Turn 238 summary\n\nWhat I did\n- Cleanly escaped a wild Weedle from the new forest position at `(25,30)`:\n  - battle started on `Wild WEEDLE appeared!`\n  - advanced through `Go! A!`\n  - briefly ended up using a move once during the slow intro/text transition\n  - then selected **RUN** with `down, right, A`\n  - cleared `Got away safely!`\n  - waited through the white transition back to overworld\n- Confirmed Squirtle stayed at **34/34 HP**.\n- Saved a fresh checkpoint:\n  - `turn238_post_weedle_25_30`\n- Continued the forest probe from `(25,30)` by walking straight north 8 tiles.\n- Verified a fully ope",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: viridian_forest_east_vertical_corridor_turn238"
+    ]
+  },
+  {
+    "turn": 239,
+    "summary": "Turn 239 summary\n\nWhat I did\n- Saved a fresh safety checkpoint:\n  - `turn239_forest_25_22`\n- Continued the northbound forest probe from `(25,22)` on map `0x33`.\n- Verified a long open vertical corridor:\n  - straight `up x12` took me cleanly from `(25,22)` to `(25,10)`\n- Probed the upper area:\n  - `right` from `(25,10)` is mostly blocked except for one step to `(26,10)`\n  - from `(26,10)`, `up` works only to `(26,8)` and then blocks\n- Shifted west and found a better route:\n  - went left across the top lane to `(20,8)`\n  - then left/up routing reached `(18,7)`\n  - then `left` to `(16,7)` and `up",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 240,
+    "summary": "Updated self-improvement materials only, no buttons pressed.\n\nChanged:\n- **Playbook updated** to capture the main recent lesson:\n  - `map 0x33` is definitely the real **Viridian Forest**\n  - the best progress is coming from the **east-side vertical corridor**, not the old west/sign-row dead ends\n  - current meaningful live state is the **upper-east forest** around `(32,11)` with full HP\n- **Memory saved**: `viridian_forest_upper_east_progress_turn239`\n  - records the verified route pieces from `(22,41)` up through `(25,10)` and the interpretation that the east-side corridor is the main promisi",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: viridian_forest_upper_east_progress_turn239",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 241,
+    "summary": "What I did\n- Saved a fresh checkpoint: `turn241_forest_32_11`.\n- Followed the directive to try genuinely different probing from the stuck upper-east forest state instead of repeating the same pushes into the top edge.\n- Mapped the upper-right branch stepwise and learned:\n  - from `(32,11)`, I can climb and swing left to a higher lane around `(28,8)`,\n  - then route farther through `(25,8)`, `(31,7)`, `(31,5)`, `(32,2)`, `(27,1)`, and across the top row to `(31,1)`,\n  - but **north is blocked** at all tested top-edge spots, including `(28,8)`, `(25,8)`, `(24,8)`, `(27,1)`, and `(31,1)`.\n- Wrote",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: viridian_forest_upper_east_top_row_turn241",
+      "REWIND: turn241_forest_32_11"
+    ]
+  },
+  {
+    "turn": 242,
+    "summary": "Turn 242 summary\n\nWhat I did\n- Saved a fresh checkpoint at the live forest state:\n  - `turn242_forest_30_14`\n- Tried a genuinely different route from the current upper-east forest lane instead of repeating the same top-edge pushes.\n- Probed downward from `(30,14)` and found a new mid-east clearing:\n  - `down x4` to `(30,18)`\n  - `left x3` to `(27,18)`\n  - `up` from `(27,18)` is blocked\n  - `left` to `(26,18)`, then `down` to `(26,20)`, `left` to `(25,20)`, then back `up` to `(25,18)`\n- Continued from there and confirmed this clearing links back to the already-known upper blocked lane:\n  - from",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: viridian_forest_mid_east_sign_trainer_lane_turn242"
+    ]
+  },
+  {
+    "turn": 243,
+    "summary": "Turn 243 summary\n\nWhat I did\n- Saved a fresh checkpoint at the stuck upper forest state:\n  - `turn243_forest_25_8`\n- Followed the “do something genuinely different” directive by probing the upper-east forest lanes instead of repeating blocked top-edge pushes.\n- Verified a new local loop/opening structure:\n  - From `(25,8)`, moving left to `(20,8)` works.\n  - From `(20,8)`, only one step down to `(20,9)` is open; further down there is blocked.\n  - From that row, rightward movement returns across to `(25,9)`.\n- Probed the east side more aggressively:\n  - From `(28,8)`, moving right reaches `(32,",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 244,
+    "summary": "Turn 244 summary\n\nWhat I did\n- Cleared a lingering sign textbox at `(26,18)` that said `...via PC to get your POKéDEX evaluated!`\n- Moved east to `(29,18)` and saved a fresh checkpoint:\n  - `turn244_forest_29_18`\n- Probed the nearby NPC/sign area systematically and found an interactable NPC at `(30,18)` facing down.\n- Read that NPC’s advice:\n  - starts with `Darn!`\n  - ends with `...to catch some stronger ones!`\n  - so this is just flavor/advice, not progression.\n- After clearing the dialog, probed movement around the NPC and found a new opening:\n  - from `(30,18)`, `up` works to `(30,17)` the",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 245,
+    "summary": "Turn 245 summary\n\nWhat I did\n- Used the live wild battle as a low-risk way to advance the stalled state at `(30,13)` in Viridian Forest (`map 0x33`).\n- Chose **TACKLE** twice against a wild **Kakuna Lv4**.\n- Carefully used the proven slow-battle cadence:\n  - `A` to act\n  - long waits (~90 frames) for slow text/animation\n  - single `A` presses to advance text\n- Confirmed Kakuna used **HARDEN**, then saw:\n  - `Enemy KAKUNA's DEFENSE rose!`\n- Returned cleanly to the move menu once, with PP dropping from **30/35 to 29/35**, confirming the first Tackle fully resolved.\n- Began the second Tackle; by ",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 246,
+    "summary": "Turn 246 summary\n\nWhat I did\n- Finished the slow wild Kakuna battle safely from the stuck `used TACKLE!` state:\n  - waited with the proven slow cadence\n  - advanced text with single `A` presses\n  - returned to overworld at `(30,13)` with Squirtle still **33/34 HP**\n- Saved a fresh checkpoint:\n  - `turn246_post_kakuna_30_13`\n- Did genuinely different forest probing instead of repeating the stalled top-edge pushes.\n- Mapped the nearby right-edge branch:\n  - from `(30,13)`, `up, up` reaches `(30,11)` but left is blocked there\n  - moving right returns to the known upper-east state `(32,11)`\n  - fr",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: viridian_forest_right_edge_south_branch_turn246",
+      "PLAYBOOK updated",
+      "TODOS updated"
+    ]
+  },
+  {
+    "turn": 247,
+    "summary": "What I did\n- Saved a fresh checkpoint at the live right-edge forest state:\n  - `turn247_forest_32_16`\n- Followed the directive to do something genuinely different: I approached the visible southwest branch instead of repeating top-edge pushes.\n- Moved from the right-edge lane down into a new lower clearing:\n  - from `(32,16)` down to `(32,20)`\n  - left is blocked at `(31,20)` beyond one step\n  - then down to `(31,22)` where the screen revealed two NPCs and a broader opening\n- Probed back up/left around that opening and reached the known mid-east NPC area:\n  - stepwise path ended at `(30,18)`\n-",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 248,
+    "summary": "What I did\n- Saved a fresh checkpoint: `turn248_forest_25_18`.\n- Tried a genuinely different local probe from the sign/NPC area instead of repeating top-edge pushes.\n- Verified this local structure:\n  - from `(25,18)`, `right,right` reaches `(27,18)`\n  - from there `down` opens to `(27,22)`\n  - **right is blocked across the whole tested row at `(27,20..22)`**\n- Probed the lower grass corridor and hit a wild Kakuna at `(25,21)`.\n- Escaped safely despite a menu misstate:\n  - the automated run helper got stuck and opened the **ITEM** pocket (`ANTIDOTE x1 / CANCEL`) instead of fully escaping\n  - b",
+    "milestones": [],
+    "improvements": []
+  },
+  {
+    "turn": 249,
+    "summary": "What I did\n- Saved a fresh checkpoint: `turn249_forest_25_23`.\n- Tested the “new” lower-grass state at `(25,23)` instead of assuming it was progress.\n- Verified it loops back into already-known territory:\n  - `up x5, right x2` returns to the sign/NPC area at `(27,18)`, where `up` is blocked.\n  - Continuing through the upper lanes led back to the previously mapped upper-east clearing around `(27,8)`.\n- Saved this as memory:\n  - `viridian_forest_rejoin_from_25_23_turn249`\n- Probed farther west from the upper-east area and found genuinely different walkable tiles:\n  - reached `(24,8)`, `(23,9)`, ",
+    "milestones": [],
+    "improvements": [
+      "MEMORY: viridian_forest_rejoin_from_25_23_turn249"
+    ]
+  },
+  {
+    "turn": 250,
+    "summary": "Updated self-improvement materials only, as directed.\n\nChanged:\n- **Playbook updated** with the main lessons from turns 247–250:\n  - right-edge/lower-grass forest branches mostly **loop back** into known mid-east territory\n  - the best remaining lead is the **upper-west lane** from around `(24..20,8..9)`\n  - `flee_wild_battle` can mis-navigate if used before the battle menu is really ready\n  - current live state is a **Weedle intro battle** at `Go! A!`, so next turn should use the cautious intro-clear-then-RUN pattern\n- **Memory saved**: `viridian_forest_mid_east_loops_and_upper_west_hint_turn",
+    "milestones": [],
+    "improvements": [
+      "PLAYBOOK updated",
+      "MEMORY: viridian_forest_mid_east_loops_and_upper_west_hint_turn250",
+      "TODOS updated"
+    ]
+  }
+]

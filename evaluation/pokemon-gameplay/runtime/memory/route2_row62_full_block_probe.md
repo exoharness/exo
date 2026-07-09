@@ -1,0 +1,1 @@
+Route 2 lower fence-row probe at y=62: from the Viridian north entrance area, the entire tested span from x=3 through x=11 at y=62 is blocked from below. Probes at x=3,4,5,8,9,10,11 all failed to move north. The visible small openings in the fence/ledge line here are decorative / unreachable from this side, not the real route north.

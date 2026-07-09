@@ -1,0 +1,1 @@
+Viridian Forest turn 435: live state at `(31,43)` facing right on the lower southeast/east-rim edge is not productive progress. Recent probes from this family already showed `(32,43)` with `down` blocked and quick returns into the known `(30,41)` / `(32,41)` east-rim geometry. Do not spend fresh action turns from live `(31,43)`; rewind to a genuinely different checkpoint first.

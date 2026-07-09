@@ -1,0 +1,1 @@
+Viridian Forest turn 321: from checkpoint `turn321_forest_18_6_fresh` at `(18,6)`, the probe `left,left,(left blocked), down x7, right,right,(right blocked), down x3` reaches `(18,16)`. This reconfirms the south/left descent from the `(18,6)` upper connector only feeds back into the already-solved `(18,16)` / mid-west pocket family, not a fresh branch.

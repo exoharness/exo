@@ -1,0 +1,1 @@
+Viridian City north exit to Route 2 exact tile (turn 187): from Viridian City upper-left corridor, moving to `(17,0)` and pressing `up` warps to Route 2 (`map 0x0d`) at about `(7,71)`. This is the real city-to-Route-2 progression tile. By contrast, the nearby sign lane around `(19,2)` is a dead/sign area and repeated `up` there does not progress.

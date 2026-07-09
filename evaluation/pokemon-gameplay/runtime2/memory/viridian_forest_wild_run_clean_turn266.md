@@ -1,0 +1,1 @@
+Viridian Forest wild Weedle run at `(25,20)`: clean 3-phase escape again worked. Sequence was `A` on `Wild WEEDLE appeared!`, wait through `Go! A!` until Squirtle fully appears, `A` to bring up the 4-option menu, then `down, right, A` for RUN, then `A` on `Got away safely!`, then wait through the white transition.

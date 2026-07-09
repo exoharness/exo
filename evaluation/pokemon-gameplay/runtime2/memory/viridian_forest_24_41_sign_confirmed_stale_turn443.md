@@ -1,0 +1,1 @@
+Viridian Forest turn 443: live state at `(24,41)` facing up with a sign is just the already-known `TRAINER TIPS` sign pocket. Pressing `B` from the partial textbox reveals `TRAINER TIPS`; this is not progression. Rewind out rather than continue from this sign state.

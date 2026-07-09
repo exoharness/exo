@@ -1,0 +1,30 @@
+[
+  {
+    "text": "Find the true north/Pewter-side exit of Viridian Forest from a checkpoint family not already proven to rejoin top-center, signlane, south gatehouse, lower sign-pocket, or the `(26,24..26)` vertical corridor",
+    "status": "in_progress"
+  },
+  {
+    "text": "Start the next action turn by rewinding away from the live stale `(17,11)` state; do not explore from `turn499_forest_17_11_newlane_start`",
+    "status": "in_progress"
+  },
+  {
+    "text": "Use viridian-forest-loop-triage / checkpoint-family audit before spending more probes in Viridian Forest",
+    "status": "in_progress"
+  },
+  {
+    "text": "Keep a fresh checkpoint before any genuinely new forest probe or before trainer interaction",
+    "status": "pending"
+  },
+  {
+    "text": "Use the installed viridian-forest-wild-run-recipe whenever a common wild battle starts during forest mapping",
+    "status": "in_progress"
+  },
+  {
+    "text": "Demote and avoid the confirmed south-gate backtrack family (inside gatehouse and outside Route 2 south frontage)",
+    "status": "done"
+  },
+  {
+    "text": "Do not continue from Viridian Forest South Gate; it is confirmed to be a backtrack to south Route 2",
+    "status": "done"
+  }
+]

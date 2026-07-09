@@ -1,0 +1,1 @@
+Route 2 mid-west tree maze trap: from the earlier top-grass area, probing south eventually reached around `(5..11, 51..52)` beside a dense tree block. At about `(5,51)`, repeated `up/right/down` attempts can trigger wild battles without yielding progression. This area is encounter-prone and not a good place to keep probing when HP is low.

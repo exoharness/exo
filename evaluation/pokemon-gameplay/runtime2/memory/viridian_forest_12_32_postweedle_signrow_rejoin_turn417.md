@@ -1,0 +1,1 @@
+Viridian Forest turn 417: after clearing the wild Weedle battle from live state at `(12,32)` facing right, the game returns to the known sign-row choke family around `(12,32)`. This is stale/non-progressing; do not spend turns continuing from this live post-battle state. Rewind out to a fresher checkpoint instead.

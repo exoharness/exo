@@ -1,0 +1,1 @@
+Viridian Forest turn 373: live state at `(16,33)` facing up with the textbox `ANTIDOTE! Get it at POKEMON MARTs!` is just the already-known sign-row choke, not fresh progress. This screen indicates a textbox is still open from the poison-hint sign near `(16,33)`; close/rewind instead of probing from here.

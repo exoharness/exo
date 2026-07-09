@@ -1,0 +1,1 @@
+Viridian Forest turn 462: from the fresh lower-west clearing live state `(11,43)` facing right, the probe `left,left,up,up,left,up,left,down` reached a new dry-road corridor at `(7,41)`. Pressing `A` facing down there did nothing. This appears to open a west/north continuation distinct from the previously mapped east-side Bug Catcher/sign side of the clearing.

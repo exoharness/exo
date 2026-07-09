@@ -1,0 +1,1 @@
+Viridian Pokecenter door transition timing: leaving/entering can show a fully black screen for a short while even though RAM already reports the map change. Waiting about 60-90 frames resolves it cleanly; do not panic or immediately press counter-inputs during the black screen.

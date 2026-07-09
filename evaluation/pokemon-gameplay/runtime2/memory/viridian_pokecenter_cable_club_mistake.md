@@ -1,0 +1,1 @@
+Viridian Pokecenter counter mistake: standing at (11,3) facing up does NOT heal. It talks to the Cable Club receptionist, with text like 'Welcome to the Cable Club! We're making preparations. Please wait.' Healing must be at a different counter position, likely farther left.

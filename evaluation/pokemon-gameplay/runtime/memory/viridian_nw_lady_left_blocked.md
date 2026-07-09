@@ -1,0 +1,1 @@
+Viridian City northwest lady/tree-wall probe: at about `(17,10)` the tile(s) immediately left are blocked by the tree wall. Standing below her and trying to go left from `(17,10)` or `(17,12..14)` did not progress west; this spot is not the Route 22 exit. To continue exploring west, first move away from the tree-wall choke and approach from farther south or another lane.

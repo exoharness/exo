@@ -1,0 +1,1 @@
+Viridian Forest turn 385: the Bug Catcher at about `(26,40)` in the lower trainer area is non-battle advice, not a blocker/trainer trigger. Facing right and pressing `A` gives ordinary catching advice (`You can carry only six POKEMON at a time.` / `You should carry extras!`). This lane is safe NPC flavor, not progression by interaction.

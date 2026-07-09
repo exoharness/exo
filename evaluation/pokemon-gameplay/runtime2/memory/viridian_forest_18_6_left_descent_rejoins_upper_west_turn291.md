@@ -1,0 +1,1 @@
+Viridian Forest turn 291: from checkpoint `turn287_forest_18_6_postbattle` at `(18,6)`, probing `left,left,down,down,left(blocked),down,down,left(blocked),left(blocked),down` reaches `(16,11)`. This is just the already-known upper-west lane / grass corridor, not a fresh branch. So the left/down descent off the `(18,6)` connector reconnects to solved geometry.

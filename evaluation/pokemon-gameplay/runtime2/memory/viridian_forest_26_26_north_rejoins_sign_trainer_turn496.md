@@ -1,0 +1,1 @@
+Viridian Forest turn 496: from live state `(26,26)` facing up, a straight climb `up x8` reaches `(26,18)`, and a short east check reaches `(28,18)`. Screen there shows the familiar sign + Bug Catcher pocket again, so the northward continuation from `(26,26)` is not a new exit by itself; it reconnects into known upper/trainer geometry.

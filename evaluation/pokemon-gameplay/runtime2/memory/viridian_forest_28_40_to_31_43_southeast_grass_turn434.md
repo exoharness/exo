@@ -1,0 +1,1 @@
+Viridian Forest turn 434: from checkpoint `turn403_forest_28_40_npcside` at `(28,40)`, the dry/grass route `right, right, down, down, left, down, right, right` reaches a genuinely farther southeast grass-edge state at `(31,43)`. This is lower than the previously emphasized `(30..32,41)` east-rim wedge and may represent a new southeast extension worth tiny follow-up probes.

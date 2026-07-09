@@ -1,0 +1,1 @@
+Oak's Lab starter choice: chose Squirtle. On the nickname screen, pressing START immediately declined naming and accepted the default species name. After rival/Oak dialogue, movement resumed with player at about (7,5) in Oak's Lab and party contained Squirtle Lv5 with 19/19 HP.

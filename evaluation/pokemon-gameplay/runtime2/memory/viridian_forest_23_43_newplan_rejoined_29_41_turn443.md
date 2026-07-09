@@ -1,0 +1,1 @@
+Viridian Forest turn 443: the attempted strategy shift from `turn387_forest_23_43_openlane_start` using the broad route `right,right,right,right,up,up,up(blocked),right,right` simply rejoined the already-known east-rim wedge at `(29,41)`. This confirms that even a less-tiny northeast push from the lower open lane still collapses into stale east-rim geometry.

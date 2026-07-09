@@ -1,0 +1,1 @@
+Viridian Forest turn 443: after 40+ stagnant turns of micro-probing stale lower anchors, shift strategy. From `turn387_forest_23_43_openlane_start`, prefer genuinely different forward-progress attempts such as engaging visible trainers / following the broad dry road north-east, instead of more sign-pocket or east-rim micro-tests.

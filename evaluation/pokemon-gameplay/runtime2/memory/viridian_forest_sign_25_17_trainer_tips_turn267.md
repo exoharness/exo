@@ -1,0 +1,1 @@
+Viridian Forest sign near `(25,17)` facing right is just `TRAINER TIPS` text (includes the usual Pokédex/PC guidance), not progression. The sign stands immediately east of the lane around `(25,17)` by the visible Bug Catcher pocket.

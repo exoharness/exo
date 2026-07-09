@@ -1,0 +1,1 @@
+Route 1 south entrance probe: at map 0x0c around (10,28), the sign/fence line directly north blocks upward movement. Moving east along the bottom path to about x=14 is open, and stepping into the grass there can trigger wild battles (encountered Wild Rattata Lv3). Pressing A while facing the blocked north tile/sign from (10,28) did not produce visible text.

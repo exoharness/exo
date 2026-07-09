@@ -1,0 +1,1 @@
+Pallet Town north exit / Oak trigger: at map 0x00, walking to x=10,y=1 from the east side of the north path triggered Oak's cutscene. Screen showed Oak below the player in front of the grass with dialog: "OAK: It's unsafe! Wild POKeMON live..." This confirms normal opening progression is intact.

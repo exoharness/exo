@@ -1,0 +1,1 @@
+Viridian Forest turn 432: the Bug Catcher on the lower lane around `(27,39)` / just south of the sign says the standard advice about carrying extra Poké Balls because he ran out trying to catch Pokémon. This is flavor text only, not progression; talking to him can leave a multi-page textbox that is annoying to clear.

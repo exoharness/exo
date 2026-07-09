@@ -1,0 +1,1 @@
+Viridian Forest turn 289 rejoin note: after rewinding to `turn271_forest_27_30_newlane`, the very next live visible overworld state after escaping the Weedle was `(26,30)` on map `0x33`, with the familiar Bug Catcher visible in the lower-right clearing. Treat `(26,30)` as part of the already-known mid-east sign/trainer pocket, not fresh progress.

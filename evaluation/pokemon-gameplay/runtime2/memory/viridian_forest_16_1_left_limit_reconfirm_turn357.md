@@ -1,0 +1,1 @@
+Viridian Forest turn 357: from live top-row state `(18,1)`, probing `left,left,up` reaches `(16,1)` and `up` is blocked. This reconfirms the top-row left limit: `(16,1)` is the furthest west reachable tile on the top row and does not open fresh progress. Treat live `(18,1)` / `(16,1)` as stale top-row geometry and rewind instead of continuing.

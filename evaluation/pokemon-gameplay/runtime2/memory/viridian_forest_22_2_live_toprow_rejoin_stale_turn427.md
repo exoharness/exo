@@ -1,0 +1,1 @@
+Viridian Forest turn 427: live state at `(22,2)` facing down is part of the already-solved top-row strip rejoined from the `(31,15)->(31,7)` upper branch. The screen shows the open top-row corridor with southern tree line; do not continue probing from here. Rewind to `turn426_forest_31_7_upper` or another fresher checkpoint instead.

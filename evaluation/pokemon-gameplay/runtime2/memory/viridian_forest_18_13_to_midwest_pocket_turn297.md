@@ -1,0 +1,1 @@
+Viridian Forest turn 297: from checkpoint `turn277_forest_18_13_visible` at `(18,13)`, walking `down x3, left x3` reaches `(15,16)`, and continuing around the clearing leads through `(14,17) -> (14,19) -> (12,16..19)` — this is the already-known self-contained mid-west pocket (`x≈11..14, y≈15..19`), not fresh progress.

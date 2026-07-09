@@ -1,0 +1,1 @@
+Route 2 top grass dead-end note: at about `(2..5,48)` there is a top boundary/ledge line blocking further north. From `(2,48)`, moving right only reaches about `(5,48)` before blocking again; this upper grass strip is encounter-prone and does not obviously progress east. Avoid re-probing the top grass edge; back out and search a different lane.
