@@ -6,8 +6,8 @@
 
 # exo
 
-[![CI](https://github.com/ankrgyl/exo/actions/workflows/ci.yml/badge.svg)](https://github.com/ankrgyl/exo/actions/workflows/ci.yml)
-[![Integration tests](https://github.com/ankrgyl/exo/actions/workflows/integration.yml/badge.svg)](https://github.com/ankrgyl/exo/actions/workflows/integration.yml)
+[![CI](https://github.com/exoharness/exo/actions/workflows/ci.yml/badge.svg)](https://github.com/exoharness/exo/actions/workflows/ci.yml)
+[![Integration tests](https://github.com/exoharness/exo/actions/workflows/integration.yml/badge.svg)](https://github.com/exoharness/exo/actions/workflows/integration.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg?logo=rust)](Cargo.toml)
 [![TypeScript](https://img.shields.io/badge/typescript-5.x-3178c6.svg?logo=typescript&logoColor=white)](tsconfig.json)
@@ -55,7 +55,7 @@ To use Exo as an agent, you'll need an OpenAI or OpenRouter API key. If you
 have that, simply do the following:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/ankrgyl/exo/main/setup.sh -o setup.sh
+curl -fsSL https://raw.githubusercontent.com/exoharness/exo/main/setup.sh -o setup.sh
 bash setup.sh
 ```
 
