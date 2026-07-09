@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="${EXO_REPO_URL:-https://github.com/ankrgyl/exo.git}"
+REPO_URL="${EXO_REPO_URL:-https://github.com/exoharness/exo.git}"
 REPO_REF="${EXO_REPO_REF:-main}"
 INSTALL_DIR="${EXO_INSTALL_DIR:-$PWD}"
 MODEL_NAME="${EXO_MODEL:-gpt-5.4}"

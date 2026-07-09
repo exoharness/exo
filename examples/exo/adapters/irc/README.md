@@ -16,7 +16,7 @@ default ExoChat control adapter:
 
 ```bash
 mkdir exo && cd exo
-curl -fsSL https://raw.githubusercontent.com/ankrgyl/exo/main/setup.sh -o setup.sh
+curl -fsSL https://raw.githubusercontent.com/exoharness/exo/main/setup.sh -o setup.sh
 bash setup.sh
 ```
 

@@ -131,7 +131,7 @@ mount root for agent-cli.
 ::: info
   Each adapter has a full setup walkthrough (bot creation, permissions,
   linking, troubleshooting) in its README under
-  [`examples/exo/adapters/`](https://github.com/ankrgyl/exo/tree/main/examples/exo/adapters)
+  [`examples/exo/adapters/`](https://github.com/exoharness/exo/tree/main/examples/exo/adapters)
   — start there when setting one up for real.
 :::
 

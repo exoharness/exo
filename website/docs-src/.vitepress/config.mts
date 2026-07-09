@@ -23,10 +23,10 @@ export default defineConfig({
     siteTitle: "exo",
     nav: [
       { text: "Home", link: "/" },
-      { text: "GitHub", link: "https://github.com/ankrgyl/exo" },
+      { text: "GitHub", link: "https://github.com/exoharness/exo" },
     ],
     search: { provider: "local" },
-    socialLinks: [{ icon: "github", link: "https://github.com/ankrgyl/exo" }],
+    socialLinks: [{ icon: "github", link: "https://github.com/exoharness/exo" }],
     sidebar: [
       { text: "Overview", link: "/" },
       {
