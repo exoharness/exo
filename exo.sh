@@ -3,24 +3,34 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# setup.sh installs node/pnpm/rust through mise; make its shims available even
+# in shells where mise was never activated (the harness runner spawns node).
+if [[ -x "$HOME/.local/bin/mise" ]] || command -v mise >/dev/null 2>&1; then
+  export PATH="$HOME/.local/share/mise/shims:$HOME/.local/bin:$PATH"
+fi
+if [[ -f "$HOME/.cargo/env" ]]; then
+  # shellcheck disable=SC1091
+  . "$HOME/.cargo/env"
+fi
+
 EXO_BIN="${EXO_BIN:-$ROOT_DIR/target/debug/exo}"
-SCHEDULER_BIN="${EXOCLAW_SCHEDULER_BIN:-$ROOT_DIR/target/debug/exoclaw-scheduler-runner}"
+SCHEDULER_BIN="${EXO_SCHEDULER_BIN:-$ROOT_DIR/target/debug/exo-scheduler-runner}"
 ENV_FILE="${EXO_ENV_FILE:-$ROOT_DIR/.env}"
 MODEL="${EXO_MODEL:-gpt-5.4}"
-AGENT="${EXO_AGENT:-exoclaw-agent}"
-AGENT_NAME="${EXO_AGENT_NAME:-Exoclaw Agent}"
+AGENT="${EXO_AGENT:-exo-agent}"
+AGENT_NAME="${EXO_AGENT_NAME:-Exo Agent}"
 CONVERSATION="${EXO_CONVERSATION:-dev}"
 CONVERSATION_NAME="${EXO_CONVERSATION_NAME:-Dev}"
-MODULE="${EXO_MODULE:-examples/exoclaw/harness.ts}"
-HARNESS="exoclaw"
-LOCAL_PROMPT_FILE="${EXOCLAW_LOCAL_PROMPT_FILE:-$ROOT_DIR/.exo/exoclaw-profile.md}"
+MODULE="${EXO_MODULE:-examples/exo/harness.ts}"
+HARNESS="exo"
+LOCAL_PROMPT_FILE="${EXO_LOCAL_PROMPT_FILE:-$ROOT_DIR/.exo/exo-profile.md}"
 SANDBOX_IMAGE="${EXO_SANDBOX_IMAGE:-ubuntu:24.04}"
 SANDBOX_PROVIDER="${EXO_SANDBOX_PROVIDER:-}"
 SANDBOX_BACKEND="${EXO_SANDBOX_BACKEND:-}"
-SELF_REPO_MOUNT_PATH="${EXOCLAW_REPO:-/workspace/exo}"
-SELF_MAP_PATH="$SELF_REPO_MOUNT_PATH/examples/exoclaw/SELF.md"
-AGENT_CLI_MOUNT_ROOT="${EXOCLAW_AGENT_CLI_ROOT:-}"
-AGENT_CLI_MOUNT_PATH="${EXOCLAW_AGENT_CLI_MOUNT:-/agent-cli}"
+SELF_REPO_MOUNT_PATH="${EXO_REPO:-/workspace/exo}"
+SELF_MAP_PATH="$SELF_REPO_MOUNT_PATH/examples/exo/SELF.md"
+AGENT_CLI_MOUNT_ROOT="${EXO_AGENT_CLI_ROOT:-}"
+AGENT_CLI_MOUNT_PATH="${EXO_AGENT_CLI_MOUNT:-/agent-cli}"
 NETWORKING="${EXO_NETWORKING:-enabled}"
 SHELL_PROGRAM="${EXO_SHELL_PROGRAM:-/bin/bash}"
 SANDBOX_SCOPE="${EXO_SANDBOX_SCOPE:-}"
@@ -49,7 +59,7 @@ SECRET_NAME=""
 SECRET_ENV=""
 MODEL_BASE_URL=""
 USER_NAME="${EXO_USER_NAME:-}"
-export EXOCLAW_LOCAL_PROMPT_FILE="$LOCAL_PROMPT_FILE"
+export EXO_LOCAL_PROMPT_FILE="$LOCAL_PROMPT_FILE"
 
 usage() {
   cat <<'EOF'
@@ -65,7 +75,7 @@ Usage:
   ./exo.sh setup-profile
   ./exo.sh setup-sandbox
 
-Default behavior starts the canonical stack: it creates or reuses an Exoclaw
+Default behavior starts the canonical stack: it creates or reuses an Exo
 agent and conversation with a Docker sandbox, repo self-map mount, ExoChat
 setup, guardian config, and control logs, starts the local scheduler and
 adapter loops, then starts a REPL. It reads .env by default if present.
@@ -84,6 +94,8 @@ Subcommands:
                    --user-name and --local-prompt-file
   setup-profile    Prompt interactively and write the local profile prompt
   setup-sandbox    Pull the sandbox image
+  setup-agent      Create the agent and conversation (and pull the sandbox
+                   image) without starting anything
 
 Options:
   --model <model>              Model binding name (default: gpt-5.4)
@@ -92,12 +104,12 @@ Options:
   --secret-env <env-var>       Environment variable holding the API key for register-model
   --base-url <url>             Optional API base URL for register-model
   --user-name <name>           User name for write-profile (default: none)
-  --agent <slug>               Agent slug (default: exoclaw-agent)
+  --agent <slug>               Agent slug (default: exo-agent)
   --conversation <slug>        Conversation slug (default: dev)
   --convo <slug>               Alias for --conversation
-  --agent-name <name>          Agent display name (default: Exoclaw Agent)
+  --agent-name <name>          Agent display name (default: Exo Agent)
   --conversation-name <name>   Conversation display name (default: Dev)
-  --module <path>              Exoclaw TypeScript harness module
+  --module <path>              Exo TypeScript harness module
   --template <name>            Launch template (default: canonical):
                                  canonical  Docker sandbox, repo self-map mount, ExoChat
                                             setup, control logs, and guardian config
@@ -116,7 +128,7 @@ Options:
   --agent-cli-mount-path <path> Sandbox path for the agent-cli mount (default: /agent-cli)
   --networking <mode>          enabled or disabled (default: enabled)
   --shell-program <path>       Shell in the sandbox (default: /bin/bash)
-  --sandbox-scope <scope>      agent or conversation (default: Exoclaw agent)
+  --sandbox-scope <scope>      agent or conversation (default: Exo agent)
   --scheduler-interval <secs>  Scheduler polling interval (default: 10)
   --no-scheduler               Do not start the local scheduled task runner
   --scheduler                  Start the local scheduled task runner
@@ -125,7 +137,7 @@ Options:
   --adapter-limit <n>          Max adapters supervised by the runner (default: 50)
   --control                    Show live scheduler and adapter logs beside the REPL
   --setup-profile              Prompt once and write the ignored local profile prompt
-  --local-prompt-file <path>    Local profile prompt path (default: .exo/exoclaw-profile.md)
+  --local-prompt-file <path>    Local profile prompt path (default: .exo/exo-profile.md)
   --setup <adapter>            Send adapters/<adapter>/setup-prompt.md.
                                 May be passed more than once.
   --setup-all                  Equivalent to --setup exochat --setup signal
@@ -139,17 +151,17 @@ Options:
   --no-sandbox                 Do not require or configure sandbox shell support
   --env-file <path>            Env file to read if present (default: .env)
   --exo-bin <path>             exo binary path (default: ./target/debug/exo)
-  --scheduler-bin <path>       Scheduler runner path (default: ./target/debug/exoclaw-scheduler-runner)
+  --scheduler-bin <path>       Scheduler runner path (default: ./target/debug/exo-scheduler-runner)
   --help                       Show this help
 
 Environment overrides:
   EXO_MODEL, EXO_AGENT, EXO_CONVERSATION, EXO_AGENT_NAME,
   EXO_CONVERSATION_NAME, EXO_MODULE, EXO_SANDBOX_IMAGE,
   EXO_SANDBOX_PROVIDER, EXO_SANDBOX_BACKEND, EXO_NETWORKING,
-  EXO_SHELL_PROGRAM, EXO_SANDBOX_SCOPE, EXO_ENV_FILE, EXOCLAW_LOCAL_PROMPT_FILE,
-  EXO_BIN, EXO_START_SCHEDULER, EXO_START_ADAPTERS, EXOCLAW_REPO,
-  EXOCLAW_AGENT_CLI_ROOT, EXOCLAW_AGENT_CLI_MOUNT,
-  EXOCLAW_SCHEDULER_BIN, EXO_SCHEDULER_INTERVAL_SECONDS, EXO_ADAPTER_LIMIT,
+  EXO_SHELL_PROGRAM, EXO_SANDBOX_SCOPE, EXO_ENV_FILE, EXO_LOCAL_PROMPT_FILE,
+  EXO_BIN, EXO_START_SCHEDULER, EXO_START_ADAPTERS, EXO_REPO,
+  EXO_AGENT_CLI_ROOT, EXO_AGENT_CLI_MOUNT,
+  EXO_SCHEDULER_BIN, EXO_SCHEDULER_INTERVAL_SECONDS, EXO_ADAPTER_LIMIT,
   EXO_SETUP_ADAPTER, EXO_INITIAL_PROMPT_FILE, EXO_TEMPLATE,
   EXO_SKIP_BUILD, EXO_UPSTREAM_MODEL, EXO_USER_NAME
 EOF
@@ -198,10 +210,10 @@ ensure_scheduler_bin() {
   if [[ -x "$SCHEDULER_BIN" ]] && ! scheduler_source_newer_than "$SCHEDULER_BIN"; then
     return
   fi
-  if [[ "$SCHEDULER_BIN" != "$ROOT_DIR/target/debug/exoclaw-scheduler-runner" ]]; then
+  if [[ "$SCHEDULER_BIN" != "$ROOT_DIR/target/debug/exo-scheduler-runner" ]]; then
     die "scheduler runner is not executable: $SCHEDULER_BIN"
   fi
-  build_exoclaw_scheduler
+  build_exo_scheduler
 }
 
 ensure_signal_cli() {
@@ -281,14 +293,14 @@ configure_guardian_for_current_launch() {
     return
   fi
 
-  "$ROOT_DIR/examples/exoclaw/scripts/exoclaw-service-guardian" configure \
+  "$ROOT_DIR/examples/exo/scripts/exo-service-guardian" configure \
     --env-file "$ENV_FILE" \
     --exo-bin "$EXO_BIN" \
     --scheduler-bin "$SCHEDULER_BIN" \
     --sandbox-backend "$SANDBOX_BACKEND" \
     --scheduler-interval "$SCHEDULER_INTERVAL_SECONDS" \
     --adapter-limit "$ADAPTER_LIMIT" >/dev/null
-  echo "Configured guardian for Docker-backed Exoclaw services."
+  echo "Configured guardian for Docker-backed Exo services."
 }
 
 build_exo() {
@@ -296,10 +308,10 @@ build_exo() {
   (cd "$ROOT_DIR" && CARGO_TARGET_DIR=target cargo build -p exo --ignore-rust-version)
 }
 
-build_exoclaw_scheduler() {
-  echo "Building Exoclaw scheduler runner..."
+build_exo_scheduler() {
+  echo "Building Exo scheduler runner..."
   (cd "$ROOT_DIR" && CARGO_TARGET_DIR=target cargo build \
-    --manifest-path examples/exoclaw/scheduler-runner/Cargo.toml \
+    --manifest-path examples/exo/scheduler-runner/Cargo.toml \
     --ignore-rust-version)
 }
 
@@ -307,7 +319,7 @@ build_all() {
   echo "Installing JS dependencies..."
   (cd "$ROOT_DIR" && pnpm install)
   build_exo
-  build_exoclaw_scheduler
+  build_exo_scheduler
 }
 
 register_model() {
@@ -344,8 +356,8 @@ scheduler_source_newer_than() {
   local target="$1"
   local path
   for path in \
-    "$ROOT_DIR/examples/exoclaw/scheduler-runner/Cargo.toml" \
-    "$ROOT_DIR/examples/exoclaw/scheduler-runner/src"/*.rs; do
+    "$ROOT_DIR/examples/exo/scheduler-runner/Cargo.toml" \
+    "$ROOT_DIR/examples/exo/scheduler-runner/src"/*.rs; do
     if [[ -e "$path" && "$path" -nt "$target" ]]; then
       return 0
     fi
@@ -381,15 +393,15 @@ exo() {
 }
 
 scheduler_pid_file() {
-  echo "$ROOT_DIR/.exo/exoclaw-scheduler.pid"
+  echo "$ROOT_DIR/.exo/exo-scheduler.pid"
 }
 
 scheduler_lock_file() {
-  echo "$ROOT_DIR/.exo/exoclaw-scheduler.lock"
+  echo "$ROOT_DIR/.exo/exo-scheduler.lock"
 }
 
 scheduler_log_file() {
-  echo "$ROOT_DIR/.exo/exoclaw-scheduler.log"
+  echo "$ROOT_DIR/.exo/exo-scheduler.log"
 }
 
 repl_restart_file() {
@@ -397,23 +409,23 @@ repl_restart_file() {
 }
 
 adapters_pid_file() {
-  echo "$ROOT_DIR/.exo/exoclaw-adapters.pid"
+  echo "$ROOT_DIR/.exo/exo-adapters.pid"
 }
 
 adapters_lock_file() {
-  echo "$ROOT_DIR/.exo/exoclaw-adapters.lock"
+  echo "$ROOT_DIR/.exo/exo-adapters.lock"
 }
 
 adapters_restart_file() {
-  echo "$ROOT_DIR/.exo/exoclaw-adapters.restart"
+  echo "$ROOT_DIR/.exo/exo-adapters.restart"
 }
 
 reboot_notice_file() {
-  echo "$ROOT_DIR/.exo/exoclaw-reboot-notice.json"
+  echo "$ROOT_DIR/.exo/exo-reboot-notice.json"
 }
 
 adapters_log_file() {
-  echo "$ROOT_DIR/.exo/exoclaw-adapters.log"
+  echo "$ROOT_DIR/.exo/exo-adapters.log"
 }
 
 scheduler_process_running() {
@@ -429,7 +441,7 @@ scheduler_process_running() {
     return 1
   fi
   command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-  [[ "$command_line" == *"exoclaw-scheduler-runner"*"run --watch"* ]]
+  [[ "$command_line" == *"exo-scheduler-runner"*"run --watch"* ]]
 }
 
 adapters_process_running() {
@@ -457,8 +469,8 @@ adapter_source_newer_than() {
   local target="$1"
   local path
   for path in \
-    "$ROOT_DIR/examples/exoclaw/adapters/protocol.ts" \
-    "$ROOT_DIR/examples/exoclaw/adapters"/*/worker.ts; do
+    "$ROOT_DIR/examples/exo/adapters/protocol.ts" \
+    "$ROOT_DIR/examples/exo/adapters"/*/worker.ts; do
     if [[ -e "$path" && "$path" -nt "$target" ]]; then
       return 0
     fi
@@ -569,6 +581,15 @@ setup_sandbox() {
   container_pull_image
 }
 
+setup_agent() {
+  ensure_exo_bin
+  if [[ "$USE_SANDBOX" == true ]]; then
+    ensure_sandbox_image
+  fi
+  ensure_agent
+  ensure_conversation
+}
+
 agent_exists() {
   exo agent show "$AGENT" >/dev/null 2>&1
 }
@@ -642,8 +663,8 @@ ensure_self_repo_mount() {
   if [[ ! "$SELF_REPO_MOUNT_PATH" = /* ]]; then
     die "self repo mount path must be absolute: $SELF_REPO_MOUNT_PATH"
   fi
-  if [[ ! -f "$ROOT_DIR/examples/exoclaw/SELF.md" ]]; then
-    die "Exoclaw self map is missing: examples/exoclaw/SELF.md"
+  if [[ ! -f "$ROOT_DIR/examples/exo/SELF.md" ]]; then
+    die "Exo self map is missing: examples/exo/SELF.md"
   fi
 
   exo conversation mount add "$AGENT" "$CONVERSATION" "$ROOT_DIR" "$SELF_REPO_MOUNT_PATH" --rw >/dev/null
@@ -702,11 +723,11 @@ stop_scheduler() {
   if [[ -f "$pid_file" ]]; then
     pid="$(<"$pid_file")"
     if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" >/dev/null 2>&1; then
-      echo "Stopping Exoclaw scheduler..."
+      echo "Stopping Exo scheduler..."
       terminate_process_tree "$pid"
     fi
   fi
-  pkill -f "exoclaw-scheduler-runner .*run --watch" >/dev/null 2>&1 || true
+  pkill -f "exo-scheduler-runner .*run --watch" >/dev/null 2>&1 || true
   rm -f "$(scheduler_lock_file)"
   rm -f "$pid_file"
 }
@@ -717,28 +738,28 @@ stop_adapters() {
   if [[ -f "$pid_file" ]]; then
     pid="$(<"$pid_file")"
     if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" >/dev/null 2>&1; then
-      echo "Stopping Exoclaw adapter runner..."
+      echo "Stopping Exo adapter runner..."
       terminate_process_tree "$pid"
     fi
   fi
   pkill -f "exo .*adapters run" >/dev/null 2>&1 || true
-  pkill -f "tsx examples/exoclaw/adapters/.*/worker.ts" >/dev/null 2>&1 || true
+  pkill -f "tsx examples/exo/adapters/.*/worker.ts" >/dev/null 2>&1 || true
   rm -f "$pid_file"
 }
 
 stop_all_processes() {
   stop_scheduler
   stop_adapters
-  echo "Stopped Exoclaw scheduler and adapter runners. State in .exo was preserved."
+  echo "Stopped Exo scheduler and adapter runners. State in .exo was preserved."
 }
 
 delete_adapter_state() {
   stop_adapters
   rm -rf "$ROOT_DIR/.exo/adapters"
   rm -f \
-    "$ROOT_DIR/.exo/exoclaw-adapters.pid" \
-    "$ROOT_DIR/.exo/exoclaw-adapters.log" \
-    "$ROOT_DIR/.exo/exoclaw-adapters.lock"
+    "$ROOT_DIR/.exo/exo-adapters.pid" \
+    "$ROOT_DIR/.exo/exo-adapters.log" \
+    "$ROOT_DIR/.exo/exo-adapters.lock"
 }
 
 delete_all_agents_and_conversations() {
@@ -775,7 +796,7 @@ setup_local_profile() {
   mkdir -p "$(dirname "$LOCAL_PROMPT_FILE")"
 
   if [[ -f "$LOCAL_PROMPT_FILE" ]]; then
-    echo "Local Exoclaw profile already exists: $LOCAL_PROMPT_FILE"
+    echo "Local Exo profile already exists: $LOCAL_PROMPT_FILE"
     read -r -p "Overwrite it? [y/N] " overwrite
     case "$overwrite" in
       y|Y|yes|YES) ;;
@@ -787,12 +808,12 @@ setup_local_profile() {
   fi
 
   local user_name extra_instructions
-  echo "Creating local Exoclaw profile: $LOCAL_PROMPT_FILE"
+  echo "Creating local Exo profile: $LOCAL_PROMPT_FILE"
   read -r -p "Your name, or blank to skip: " user_name
   read -r -p "Additional local instructions, or blank to skip: " extra_instructions
 
   {
-    echo "# Local Exoclaw Profile"
+    echo "# Local Exo Profile"
     echo
     echo "This file is local to this machine and should not be committed."
     if [[ -n "$user_name" ]]; then
@@ -805,7 +826,7 @@ setup_local_profile() {
     fi
   } >"$LOCAL_PROMPT_FILE"
 
-  echo "Wrote local profile prompt. The harness will load it from EXOCLAW_LOCAL_PROMPT_FILE."
+  echo "Wrote local profile prompt. The harness will load it from EXO_LOCAL_PROMPT_FILE."
 }
 
 # During fresh, all agents and conversations from this checkout are deleted, so
@@ -967,7 +988,7 @@ run_control_repl() {
 
     if [[ -f "$(repl_restart_file)" ]]; then
       rm -f "$(repl_restart_file)"
-      echo "Restarting Exoclaw REPL child after guardian rebuild request..."
+      echo "Restarting Exo REPL child after guardian rebuild request..."
       continue
     fi
     return "$repl_exit"
@@ -1035,7 +1056,7 @@ adapter_setup_prompt_file() {
   if [[ ! "$adapter" =~ ^[a-zA-Z0-9_-]+$ ]]; then
     die "--setup must be an adapter name, not a path: $adapter"
   fi
-  startup_prompt_file "$ROOT_DIR/examples/exoclaw/adapters/$adapter/setup-prompt.md"
+  startup_prompt_file "$ROOT_DIR/examples/exo/adapters/$adapter/setup-prompt.md"
 }
 
 send_startup_prompt() {
@@ -1264,6 +1285,10 @@ while [[ $# -gt 0 ]]; do
       shift
       COMMAND="setup-sandbox"
       ;;
+    setup-agent)
+      shift
+      COMMAND="setup-agent"
+      ;;
     build)
       shift
       [[ $# -eq 0 ]] || die "build does not accept additional arguments"
@@ -1373,7 +1398,7 @@ while [[ $# -gt 0 ]]; do
     --self-repo-mount)
       SELF_REPO_MOUNT_PATH="${2:-}"
       [[ -n "$SELF_REPO_MOUNT_PATH" ]] || die "--self-repo-mount requires a value"
-      SELF_MAP_PATH="$SELF_REPO_MOUNT_PATH/examples/exoclaw/SELF.md"
+      SELF_MAP_PATH="$SELF_REPO_MOUNT_PATH/examples/exo/SELF.md"
       shift 2
       ;;
     --agent-cli-mount)
@@ -1496,9 +1521,9 @@ done
 
 apply_template_defaults
 
-export EXOCLAW_LOCAL_PROMPT_FILE="$LOCAL_PROMPT_FILE"
-export EXOCLAW_REPO="$SELF_REPO_MOUNT_PATH"
-export EXOCLAW_SELF_MAP="$SELF_MAP_PATH"
+export EXO_LOCAL_PROMPT_FILE="$LOCAL_PROMPT_FILE"
+export EXO_REPO="$SELF_REPO_MOUNT_PATH"
+export EXO_SELF_MAP="$SELF_MAP_PATH"
 
 case "$COMMAND" in
   repl)
@@ -1521,6 +1546,9 @@ case "$COMMAND" in
     ;;
   setup-sandbox)
     setup_sandbox
+    ;;
+  setup-agent)
+    setup_agent
     ;;
   build)
     build_all

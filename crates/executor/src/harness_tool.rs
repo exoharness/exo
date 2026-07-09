@@ -34,13 +34,13 @@ const SANDBOX_SNAPSHOT_REGISTRY_ARTIFACT_PATH: &str = "config/sandbox-snapshots.
 pub struct BasicToolRuntime;
 
 #[derive(Debug, Clone)]
-pub struct ExoclawToolRuntime {
+pub struct ExoToolRuntime {
     scheduler_store: SchedulerStore,
     adapter_store: AdapterStore,
     adapter_creation_options: AdapterCreationOptions,
 }
 
-impl ExoclawToolRuntime {
+impl ExoToolRuntime {
     pub fn with_roots(
         scheduler_root: impl Into<PathBuf>,
         adapter_root: impl Into<PathBuf>,
@@ -85,7 +85,7 @@ impl ToolRuntime for BasicToolRuntime {
 }
 
 #[async_trait]
-impl ToolRuntime for ExoclawToolRuntime {
+impl ToolRuntime for ExoToolRuntime {
     async fn prepare_conversation(
         &self,
         agent: &dyn AgentHandle,
@@ -115,7 +115,7 @@ impl ToolRuntime for ExoclawToolRuntime {
     ) -> Result<ToolResult> {
         match request.function_name.as_str() {
             "shell" => {
-                execute_exoclaw_shell_tool(agent, conversation, agent_config, config, request).await
+                execute_exo_shell_tool(agent, conversation, agent_config, config, request).await
             }
             "schedule_sandbox_task" => {
                 execute_schedule_task_tool(agent, conversation, &self.scheduler_store, request)
@@ -854,7 +854,7 @@ async fn read_shell_process(process: Box<dyn SandboxProcess>) -> Result<ToolResu
     })?)
 }
 
-async fn execute_exoclaw_shell_tool(
+async fn execute_exo_shell_tool(
     agent: &dyn AgentHandle,
     conversation: &dyn ConversationHandle,
     agent_config: &AgentConfig,

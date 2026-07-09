@@ -5,13 +5,13 @@ infrastructure needed for state, resources, and security from agent-specific
 logic.
 
 This repo contains both **exoharness**, the durable substrate for agents, and
-**Exoclaw**, a full long-running personal agent built on top of it. Exoclaw is
+**Exo**, a full long-running personal agent built on top of it. Exo is
 the best place to start if you want to try Exo as a user: it can inspect and
 modify its own code, restart its services, manage adapters, run scheduled work,
-create tools, and snapshot or rewind its sandbox. Exoclaw supports a number of
+create tools, and snapshot or rewind its sandbox. Exo supports a number of
 tools and adapters including IRC, WhatsApp, Signal, and Discord.
 
-For setup and usage, see [Exoclaw](examples/exoclaw/README.md).
+For setup and usage, see [Exo](examples/exo/README.md).
 
 ![Exo architecture overview](docs/images/architecture-overview.svg)
 
@@ -116,11 +116,11 @@ and recursive-language-model harness experiments.
 For the coding-agent setup commands, see
 [docs/coding-agent-harnesses.md](./docs/coding-agent-harnesses.md).
 
-## Exoclaw Long-Running Harness
+## Exo Long-Running Harness
 
-Exoclaw is a long-running claw-type agent built on exoharness. It supports
+Exo is a long-running claw-type agent built on exoharness. It supports
 scheduled tasks, and a full adapter system including support for WhatsApp,
-Signal, and IRC. See [examples/exoclaw/README.md](./examples/exoclaw/README.md)
+Signal, and IRC. See [examples/exo/README.md](./examples/exo/README.md)
 for setup, operation, and debugging commands.
 
 ## Repository Layout
@@ -129,7 +129,7 @@ for setup, operation, and debugging commands.
 - `typescript`: TypeScript harness runtime, model-runtime helpers, and
   adapter-specific support code.
 - `examples/typescript`: runnable TypeScript harness examples.
-- `examples/exoclaw`: long-running TypeScript harness example with scheduled
+- `examples/exo`: long-running TypeScript harness example with scheduled
   task and adapter support.
 - `containers`: sandbox images used by the coding-agent harness examples.
 - `spec`: core architecture and terminology.

@@ -20,7 +20,7 @@ pub async fn supports_agent_and_conversation_crud(harness: Arc<dyn ExoHarness>) 
     let conversation_slug = unique_slug("conversation");
     let agent = harness
         .new_agent(NewAgentRequest {
-            slug: agent_slug,
+            slug: agent_slug.clone(),
             name: "Agent".to_string(),
         })
         .await
@@ -72,6 +72,21 @@ pub async fn supports_agent_and_conversation_crud(harness: Arc<dyn ExoHarness>) 
             .delete_agent(&agent.record().id)
             .await
             .expect("delete agent")
+    );
+
+    // Deleting an agent must release its slug marker for reuse.
+    let reused = harness
+        .new_agent(NewAgentRequest {
+            slug: agent_slug,
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("slug should be reusable after agent deletion");
+    assert!(
+        harness
+            .delete_agent(&reused.record().id)
+            .await
+            .expect("delete reused agent")
     );
 }
 

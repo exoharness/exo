@@ -13,7 +13,7 @@ import type { HarnessToolRegistry, ToolInstance } from "./tools";
 // is a SKILL.md (YAML frontmatter with name + description, markdown body of
 // instructions) plus optional supporting text files. Stored as agent
 // artifacts so skills persist across conversations and survive sandbox
-// rewinds. See skills-arch.md for the design.
+// rewinds. See docs/design/skills-arch.md for the design.
 //
 // Progressive disclosure: skillsInstruction injects only name + description
 // each turn; use_skill loads the body; read_skill_file loads bundled files.
@@ -93,7 +93,7 @@ async function readIndex(handle: SkillsHandle): Promise<SkillsIndex> {
 }
 
 // TODO(storage-rework): install/uninstall are read-modify-write on the index
-// with no compare-and-swap, same as the exoclaw memory store. Two
+// with no compare-and-swap, same as the exo memory store. Two
 // conversations mutating skills concurrently can lose one index update. Fix
 // alongside the artifact versioning rework.
 async function writeIndex(

@@ -62,7 +62,7 @@ pub use exoharness::{
 };
 pub use harness_basic::BasicHarness;
 pub use harness_config::load_agent_config;
-pub use harness_tool::{BasicToolRuntime, ExoclawToolRuntime};
+pub use harness_tool::{BasicToolRuntime, ExoToolRuntime};
 pub use harness_types::{
     CreateAgentRequest, CreateConversationRequest, Harness, HarnessAgent, HarnessConversation,
 };

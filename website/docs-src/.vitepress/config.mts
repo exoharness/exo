@@ -13,17 +13,13 @@ export default defineConfig({
   description: "Documentation for exo — a minimal system for building agents.",
   appearance: "dark",
   head: [
-    [
-      "link",
-      {
-        rel: "icon",
-        href:
-          "data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22%3E%3Crect width=%2264%22 height=%2264%22 rx=%2212%22 fill=%22%23111116%22/%3E%3Cpath d=%22M18 22l12 10-12 10M35 42h12%22 fill=%22none%22 stroke=%22%23ffb088%22 stroke-width=%225%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/%3E%3C/svg%3E",
-      },
-    ],
+    ["link", { rel: "icon", type: "image/svg+xml", href: "/favicon.svg" }],
   ],
   themeConfig: {
-    logo: undefined,
+    logo: {
+      light: "/images/exo-badge-light.svg",
+      dark: "/images/exo-badge-dark.svg",
+    },
     siteTitle: "exo",
     nav: [
       { text: "Home", link: "/" },

@@ -4,10 +4,10 @@ This guide maps the main places where Exo creates, stores, transforms, or
 injects model-visible prompt material. In Exo, a "prompt" is usually a
 `Message` assembled with durable conversation history before a model call. Some
 prompt-like text also lives in tool definitions, setup files, scheduler reports,
-adapter wakeups, and local Exoclaw profile files.
+adapter wakeups, and local Exo profile files.
 
-If you only want to change how your local Exoclaw instance introduces itself or
-behaves, start with [Changing Exoclaw Behavior](#changing-exoclaw-behavior).
+If you only want to change how your local Exo instance introduces itself or
+behaves, start with [Changing Exo Behavior](#changing-exo-behavior).
 
 ## Mental Model
 
@@ -21,24 +21,24 @@ several sources:
 5. Tool definitions, including tool and parameter descriptions.
 
 Most prompt changes should happen at the highest layer that matches the desired
-scope. Local identity belongs in local Exoclaw profile text. Adapter routing
+scope. Local identity belongs in local Exo profile text. Adapter routing
 belongs in adapter wakeup prompts. Generic history behavior belongs in executor
 prompt materialization.
 
 ## Quick Change Guide
 
-| Goal                                           | Best place to change                                                                                |
-| ---------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| Change your local Exoclaw name/persona         | `.exo/exoclaw-profile.md`                                                                           |
-| Change committed Exoclaw identity for everyone | `examples/exoclaw/prompts/me.md`                                                                    |
-| Change Exoclaw operating policy                | `examples/exoclaw/harness.ts`                                                                       |
-| Change what adapter setup creates              | `examples/exoclaw/adapters/<adapter>/setup-prompt.md`                                               |
-| Change adapter-originated wakeup wording       | `crates/executor/src/adapter/runtime.rs`                                                            |
-| Change scheduled-task report wording           | `crates/executor/src/scheduler_runtime.rs`                                                          |
-| Change TypeScript prompt assembly              | `examples/typescript/turn-loop.ts` and `typescript/harness/index.ts`                                |
-| Change Rust basic harness prompt assembly      | `crates/executor/src/basic.rs`                                                                      |
-| Change RLM system/root prompts                 | `crates/executor/src/rlm.rs`                                                                        |
-| Change tool-use guidance                       | tool definitions in `typescript/harness/*`, `examples/exoclaw/*-tools.ts`, or Rust tool definitions |
+| Goal                                       | Best place to change                                                                            |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| Change your local Exo name/persona         | `.exo/exo-profile.md`                                                                           |
+| Change committed Exo identity for everyone | `examples/exo/prompts/me.md`                                                                    |
+| Change Exo operating policy                | `examples/exo/harness.ts`                                                                       |
+| Change what adapter setup creates          | `examples/exo/adapters/<adapter>/setup-prompt.md`                                               |
+| Change adapter-originated wakeup wording   | `crates/executor/src/adapter/runtime.rs`                                                        |
+| Change scheduled-task report wording       | `crates/executor/src/scheduler_runtime.rs`                                                      |
+| Change TypeScript prompt assembly          | `examples/typescript/turn-loop.ts` and `typescript/harness/index.ts`                            |
+| Change Rust basic harness prompt assembly  | `crates/executor/src/basic.rs`                                                                  |
+| Change RLM system/root prompts             | `crates/executor/src/rlm.rs`                                                                    |
+| Change tool-use guidance                   | tool definitions in `typescript/harness/*`, `examples/exo/*-tools.ts`, or Rust tool definitions |
 
 ## Exoharness
 
@@ -87,7 +87,7 @@ For TypeScript harnesses, the same pattern is exposed through:
 - `examples/typescript/turn-loop.ts`
 
 Change these paths when you want to alter general prompt assembly behavior for
-a harness, not just a particular Exoclaw deployment.
+a harness, not just a particular Exo deployment.
 
 ### Wakeup Prompts
 
@@ -150,11 +150,11 @@ Important tool prompt surfaces:
 
 - `typescript/harness/built-in-tools.ts`
 - `typescript/harness/adapter-tools.ts`
-- `examples/exoclaw/scheduler-tools.ts`
-- `examples/exoclaw/sandbox-tools.ts`
-- `examples/exoclaw/guardian-tools.ts`
-- `examples/exoclaw/introspection-tools.ts`
-- `examples/exoclaw/tools/fal/fal-tools.ts`
+- `examples/exo/scheduler-tools.ts`
+- `examples/exo/sandbox-tools.ts`
+- `examples/exo/guardian-tools.ts`
+- `examples/exo/introspection-tools.ts`
+- `examples/exo/tools/fal/fal-tools.ts`
 - `crates/executor/src/basic.rs`
 - `crates/executor/src/rlm.rs`
 
@@ -194,23 +194,23 @@ Example TypeScript implementation:
 Change these only when you want to change the recursive language model workflow
 itself: how it uses the REPL, subqueries, context, or final-answer protocol.
 
-## Exoclaw
+## Exo
 
-Exoclaw is the long-running local control agent under `examples/exoclaw`. It is
+Exo is the long-running local control agent under `examples/exo`. It is
 the layer most users should customize.
 
-### Changing Exoclaw Behavior
+### Changing Exo Behavior
 
 For local behavior, use:
 
-- `.exo/exoclaw-profile.md`
+- `.exo/exo-profile.md`
 
 This file is ignored by Git and loaded as an additional developer prompt when it
 exists. It is the best place for local identity and preference changes, for
 example:
 
 ```text
-Call yourself Exospooky, not Exoclaw.
+Call yourself Exospooky, not Exo.
 The user's name is Martin.
 Prefer concise operational answers.
 ```
@@ -223,69 +223,69 @@ You can create it interactively with:
 
 You can use a different local profile path with:
 
-- `EXOCLAW_LOCAL_PROMPT_FILE`
+- `EXO_LOCAL_PROMPT_FILE`
 - `./exo.sh --local-prompt-file <path>`
 
-For committed Exoclaw behavior, use:
+For committed Exo behavior, use:
 
-- `examples/exoclaw/prompts/me.md`
+- `examples/exo/prompts/me.md`
 
 That file should stay generic. Do not put machine-specific details, secrets, or
 personal preferences there.
 
-### Exoclaw Harness Prompt
+### Exo Harness Prompt
 
-The Exoclaw harness builds its instruction list in:
+The Exo harness builds its instruction list in:
 
-- `examples/exoclaw/harness.ts`
+- `examples/exo/harness.ts`
 
 It currently loads:
 
 1. base TypeScript harness instructions
-2. `examples/exoclaw/prompts/me.md`
-3. an Exoclaw-specific developer message describing scheduler, sandbox,
+2. `examples/exo/prompts/me.md`
+3. an Exo-specific developer message describing scheduler, sandbox,
    guardian, adapter, and self-maintenance behavior
 4. a Fal image-generation developer message
-5. optional local profile text from `.exo/exoclaw-profile.md`
+5. optional local profile text from `.exo/exo-profile.md`
 
-Change `examples/exoclaw/harness.ts` when you want to change global Exoclaw
+Change `examples/exo/harness.ts` when you want to change global Exo
 operating policy, such as how it should treat adapters, scheduled work, self
 maintenance, Fal images, or sandbox scope.
 
-### Exoclaw Startup And Setup Prompts
+### Exo Startup And Setup Prompts
 
-The Exoclaw launcher can send prompt files into the conversation before the REPL
+The Exo launcher can send prompt files into the conversation before the REPL
 starts:
 
 - `./exo.sh`
 
 Important flags:
 
-- `--setup <adapter>` sends `examples/exoclaw/adapters/<adapter>/setup-prompt.md`
+- `--setup <adapter>` sends `examples/exo/adapters/<adapter>/setup-prompt.md`
 - `--setup-all` sends all configured adapter setup prompts
 - `--initial-prompt-file <path>` sends an arbitrary startup prompt file
 
 Adapter setup prompts are plain markdown instructions for the agent to create or
 confirm adapter configuration. Examples:
 
-- `examples/exoclaw/adapters/irc/setup-prompt.md`
-- `examples/exoclaw/adapters/agent-cli/setup-prompt.md`
-- `examples/exoclaw/adapters/whatsapp/setup-prompt.md`
-- `examples/exoclaw/adapters/signal/setup-prompt.md`
-- `examples/exoclaw/adapters/discord/setup-prompt.md`
+- `examples/exo/adapters/irc/setup-prompt.md`
+- `examples/exo/adapters/agent-cli/setup-prompt.md`
+- `examples/exo/adapters/whatsapp/setup-prompt.md`
+- `examples/exo/adapters/signal/setup-prompt.md`
+- `examples/exo/adapters/discord/setup-prompt.md`
 
 These prompts are not persistent instructions. They are one-time user messages
 that ask the running agent to configure adapters.
 
 ### Self Map And Self-Control Docs
 
-Exoclaw is told where to inspect its own source tree through:
+Exo is told where to inspect its own source tree through:
 
-- `examples/exoclaw/SELF.md`
-- `examples/exoclaw/docs/SELF-CONTROL.md`
+- `examples/exo/SELF.md`
+- `examples/exo/docs/SELF-CONTROL.md`
 
 The startup script mounts the repository at `/workspace/exo` by default and the
-harness tells the model to start with the self map when modifying Exoclaw.
+harness tells the model to start with the self map when modifying Exo.
 
 ## History
 
@@ -329,15 +329,15 @@ Exo exposes itself to the model through prompts, tool definitions, and runtime
 metadata. The model does not automatically know every local detail; it sees what
 the harness chooses to include.
 
-### Exoclaw Capabilities
+### Exo Capabilities
 
-Exoclaw tells the model about high-level capabilities in:
+Exo tells the model about high-level capabilities in:
 
-- `examples/exoclaw/harness.ts`
-- `examples/exoclaw/prompts/me.md`
-- `examples/exoclaw/SELF.md`
+- `examples/exo/harness.ts`
+- `examples/exo/prompts/me.md`
+- `examples/exo/SELF.md`
 - tool descriptions in `typescript/harness/*`
-- Exoclaw tool descriptions in `examples/exoclaw/*-tools.ts`
+- Exo tool descriptions in `examples/exo/*-tools.ts`
 - adapter descriptions in `typescript/harness/adapter-tools.ts`
 
 This is where the model learns that it can schedule tasks, inspect events, take
@@ -348,7 +348,7 @@ tools, and use shell commands.
 ### Sandbox And Filesystem
 
 The model learns about sandbox behavior from harness instructions and tool
-descriptions. Exoclaw's developer prompt says that conversations default to the
+descriptions. Exo's developer prompt says that conversations default to the
 agent sandbox and explains when to use conversation or task sandboxes.
 
 `./exo.sh` configures the important filesystem mounts:
@@ -359,15 +359,15 @@ agent sandbox and explains when to use conversation or task sandboxes.
 
 Relevant files:
 
-- `examples/exoclaw/harness.ts`
+- `examples/exo/harness.ts`
 - `./exo.sh`
 - `crates/executor/src/conversation_sandbox.rs`
 - `crates/executor/src/agent_sandbox.rs`
 
 ### Local Profile
 
-`.exo/exoclaw-profile.md` is the intended place to expose local user and machine
-preferences to Exoclaw. It can include local persona, naming, operating
+`.exo/exo-profile.md` is the intended place to expose local user and machine
+preferences to Exo. It can include local persona, naming, operating
 preferences, or project-specific habits. Keep secrets out of it.
 
 ### Environment Variables And Secrets
@@ -393,9 +393,9 @@ Examples:
   for machine-specific identity or deployment details.
 - Wakeup prompts should include enough routing context for the agent to take the
   right action without relying on hidden state.
-- Put local identity and preferences in `.exo/exoclaw-profile.md`.
-- Put general Exoclaw behavior in `examples/exoclaw/prompts/me.md` or
-  `examples/exoclaw/harness.ts`.
+- Put local identity and preferences in `.exo/exo-profile.md`.
+- Put general Exo behavior in `examples/exo/prompts/me.md` or
+  `examples/exo/harness.ts`.
 - Put wakeup-specific routing rules in the wakeup prompt that creates the user
   message.
 - After changing setup prompts, recreate or update existing adapters/tasks; the

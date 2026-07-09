@@ -4,7 +4,7 @@ members = [
   "crates/cost",
   "crates/exoharness",
   "crates/executor",
-  "examples/exoclaw/scheduler-runner",
+  "examples/exo/scheduler-runner",
 ]
 resolver = "2"
 

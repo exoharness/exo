@@ -28,7 +28,7 @@ They are deliberately separate from tools:
 
 Adapters run as supervised worker processes speaking JSONL over
 stdin/stdout. Protocol-specific code lives with the adapter (e.g.
-`examples/exoclaw/adapters/<adapter>/`), not in the shared Rust runtime.
+`examples/exo/adapters/<adapter>/`), not in the shared Rust runtime.
 Adapter records, event history, and the outbound queue are stored under
 `.exo/adapters/`.
 
@@ -65,7 +65,7 @@ The general recipe:
    per-adapter setup prompts:
 
    ```bash
-   examples/exoclaw/scripts/exoclaw-control --setup discord
+   examples/exo/scripts/exo-control --setup discord
    ```
 
    For adapters that link as a device (WhatsApp, Signal), the setup script
@@ -88,7 +88,7 @@ The general recipe:
 
 `source` tells `create_adapter` where the worker code comes from: `built_in`
 adapters ship with the harness runtime; `library` adapters are shipped
-worker modules (`examples/exoclaw/adapters/<type>/worker.ts`).
+worker modules (`examples/exo/adapters/<type>/worker.ts`).
 
 ### A worked example: Discord
 
@@ -131,7 +131,7 @@ mount root for agent-cli.
 ::: info
   Each adapter has a full setup walkthrough (bot creation, permissions,
   linking, troubleshooting) in its README under
-  [`examples/exoclaw/adapters/`](https://github.com/ankrgyl/exo/tree/main/examples/exoclaw/adapters)
+  [`examples/exo/adapters/`](https://github.com/ankrgyl/exo/tree/main/examples/exo/adapters)
   — start there when setting one up for real.
 :::
 

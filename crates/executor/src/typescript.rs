@@ -30,7 +30,7 @@ use tokio::task::JoinHandle;
 use crate::execution_tracing::TurnExecutionTrace;
 use crate::harness_executor::{ExecutorHarnessRuntime, ExecutorStreamMode, HarnessExecutor};
 use crate::harness_facade::{SharedHarness, SharedHarnessBacked};
-use crate::harness_tool::{BasicToolRuntime, ExoclawToolRuntime, ensure_shell_sandbox};
+use crate::harness_tool::{BasicToolRuntime, ExoToolRuntime, ensure_shell_sandbox};
 use crate::shared::try_send_stream_event;
 use crate::{
     AgentConfig, BraintrustRuntimeConfig, ConversationConfig, ExecutionStreamEvent, SendRequest,
@@ -843,19 +843,19 @@ impl TypeScriptHarness<BasicToolRuntime> {
     }
 }
 
-impl TypeScriptHarness<ExoclawToolRuntime> {
-    pub async fn exoclaw_from_root(
+impl TypeScriptHarness<ExoToolRuntime> {
+    pub async fn exo_from_root(
         root: impl AsRef<Path>,
         exo_config: BasicExoHarnessConfig,
         runtime_config: Option<BraintrustRuntimeConfig>,
         env: HashMap<String, String>,
     ) -> Result<Self> {
         let workspace_root = std::env::current_dir()
-            .context("failed to resolve current directory for Exoclaw harness")?;
+            .context("failed to resolve current directory for Exo harness")?;
         let root = root.as_ref();
         let exoharness: Arc<dyn ExoHarness> = Arc::new(BasicExoHarness::new(exo_config).await?);
-        let adapter_worker_root = workspace_root.join("examples/exoclaw/adapters");
-        let tools = Arc::new(ExoclawToolRuntime::with_roots(
+        let adapter_worker_root = workspace_root.join("examples/exo/adapters");
+        let tools = Arc::new(ExoToolRuntime::with_roots(
             root.join("scheduled-tasks"),
             root.join("adapters"),
             adapter_worker_root,

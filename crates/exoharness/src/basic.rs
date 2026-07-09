@@ -962,7 +962,7 @@ impl ExoHarness for BasicExoHarness {
         {
             self.inner
                 .storage
-                .delete_prefix(self.slug_marker_path(&record.slug))
+                .delete_key_if_exists(self.slug_marker_path(&record.slug))
                 .await?;
         } else {
             tracing::warn!(
@@ -2739,6 +2739,21 @@ async fn start_sandbox_side_effect(
             .await?
     };
 
+    // A restore can boot the sandbox from a different image than the one the
+    // sandbox was created with (e.g. the docker backend loads the snapshot as
+    // a new tag). Persist the effective image so every process — including
+    // scheduler and adapter runners in other processes — derives the same
+    // warm-sandbox spec and reattaches to this container instead of creating
+    // a second one. Keep the originally requested image for named matching.
+    if let Some(effective_image) = sandbox_handle.effective_image()
+        && effective_image != sandbox.image
+    {
+        sandbox
+            .requested_image
+            .get_or_insert_with(|| sandbox.image.clone());
+        sandbox.image = effective_image;
+    }
+
     let _guard = harness.inner.write_lock.lock().await;
     harness
         .inner
@@ -2821,8 +2836,12 @@ async fn find_matching_stored_sandbox(
         if !sandbox.running {
             continue;
         }
+        // After a snapshot restore, `image` holds the restored tag; the
+        // caller still asks for the image it originally configured, so match
+        // against that.
+        let comparable_image = sandbox.requested_image.as_ref().unwrap_or(&sandbox.image);
         if sandbox.provider != request.provider
-            || sandbox.image != request.image
+            || comparable_image != &request.image
             || sandbox.default_workdir != request.default_workdir
             || sandbox.file_system_mounts != request.file_system_mounts
             || sandbox.durable_file_systems != request.durable_file_systems
@@ -3167,6 +3186,12 @@ struct StoredSandbox {
     name: Option<String>,
     provider: SandboxProvider,
     image: String,
+    /// The image originally requested at creation, kept when a snapshot
+    /// restore rewrites `image` to the restored tag. Named-sandbox matching
+    /// compares against this so config-derived requests still resolve to the
+    /// restored sandbox instead of erroring or spawning a duplicate.
+    #[serde(default)]
+    requested_image: Option<String>,
     default_workdir: Option<String>,
     file_system_mounts: Vec<FileSystemMount>,
     #[serde(default)]
@@ -3196,6 +3221,7 @@ impl PreparedSandboxRequest {
             name: self.name.clone(),
             provider: self.provider,
             image: self.image.clone(),
+            requested_image: None,
             default_workdir: self.default_workdir.clone(),
             file_system_mounts: self.file_system_mounts.clone(),
             durable_file_systems: self.durable_file_systems.clone(),

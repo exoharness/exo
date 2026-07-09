@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <circle cx="256" cy="256" r="256" fill="#242424"></circle>
+  <g transform="translate(256,256)" fill="#f2f2f2">
+    <g transform="translate(-100,-133)">
+      <path d="M0,0 L87,45 L87,135 L0,75 Z"></path>
+      <path d="M0,266 L87,221 L87,131 L0,191 Z"></path>
+      <path d="M200,0 L113,45 L113,135 L200,75 Z"></path>
+      <path d="M200,266 L113,221 L113,131 L200,191 Z"></path>
+    </g>
+  </g>
+</svg>

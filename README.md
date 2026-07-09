@@ -1,4 +1,18 @@
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/exo_badge_dark.svg">
+    <img src="docs/images/exo_badge_light.svg" alt="exo logo" width="160" />
+  </picture>
+
 # exo
+
+[![CI](https://github.com/ankrgyl/exo/actions/workflows/ci.yml/badge.svg)](https://github.com/ankrgyl/exo/actions/workflows/ci.yml)
+[![Integration tests](https://github.com/ankrgyl/exo/actions/workflows/integration.yml/badge.svg)](https://github.com/ankrgyl/exo/actions/workflows/integration.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg?logo=rust)](Cargo.toml)
+[![TypeScript](https://img.shields.io/badge/typescript-5.x-3178c6.svg?logo=typescript&logoColor=white)](tsconfig.json)
+
+</div>
 
 Exo is a systems approach to recursive self improvement. In short, it's a
 complete agent harnes that has support for tools, tasks, integrations (e.g.
@@ -45,7 +59,9 @@ curl -fsSL https://raw.githubusercontent.com/ankrgyl/exo/main/setup.sh -o setup.
 bash setup.sh
 ```
 
-_Note that Exo requires git, cargo, pnpm, and Docker_
+_Note that Exo requires git and Docker. The setup script offers to install
+them if missing, and installs pinned node, pnpm, and rust toolchains
+automatically via [mise](https://mise.jdx.dev)._
 
 It'll ask for the API key and your name and your agent's name. Once you enter
 these, the setup will start the agent. It will also print an URL of the form.
@@ -142,12 +158,12 @@ While there are many, the most obvious is that right now there isn't a simple wa
 
 There are a number of prompt files that Exo uses during runtime. You can edit these directly or ask Exo to.
 
-- `examples/exoclaw/prompts/me.md`: the committed core identity and operating
+- `examples/exo/prompts/me.md`: the committed core identity and operating
   rules for the default Exo agent.
-- `.exo/exoclaw-profile.md`: local, git-ignored profile instructions such as
+- `.exo/exo-profile.md`: local, git-ignored profile instructions such as
   your name and machine-specific preferences. Create or update it with
   `./exo.sh setup-profile`.
-- `examples/exoclaw/harness.ts`: assembles the full prompt sent each turn,
+- `examples/exo/harness.ts`: assembles the full prompt sent each turn,
   including dynamic instructions about tools, adapters, memory, sandbox behavior,
   and self-maintenance.
 

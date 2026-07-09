@@ -1711,7 +1711,7 @@ mod tests {
     fn test_agent_config() -> AgentConfig {
         AgentConfig {
             instructions: Vec::new(),
-            harness: AgentHarnessKind::Exoclaw,
+            harness: AgentHarnessKind::Exo,
             typescript: None,
             enable_agent_tool_creation: true,
             sandbox_image: None,

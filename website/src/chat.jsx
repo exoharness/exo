@@ -17,7 +17,7 @@ import {
   AttachmentDescription,
   AttachmentTitle,
 } from "@/components/ui/attachment";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button } from "@/components/ui/button";
@@ -368,6 +368,7 @@ function ChatApp() {
       <header className="topbar">
         <div className="identity">
           <Avatar className="brand-avatar">
+            <AvatarImage src="/exo-badge-dark.svg" alt="exo" />
             <AvatarFallback>ex</AvatarFallback>
           </Avatar>
           <div className="identity-copy">

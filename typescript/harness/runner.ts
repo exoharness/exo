@@ -43,7 +43,7 @@ import {
 
 interface RawAgentConfig {
   instructions: Message[];
-  harness: "basic" | "rlm" | "typescript" | "type_script" | "exoclaw";
+  harness: "basic" | "rlm" | "typescript" | "type_script" | "exo";
   typescript?: {
     module_path: string;
     tool_module_paths?: string[];
