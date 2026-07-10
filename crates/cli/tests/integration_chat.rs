@@ -1,11 +1,12 @@
 //! Integration test exercising the real `exo` binary against:
-//!   - a real sandbox provider (docker / apple-container), and
+//!   - a real sandbox provider (local-process / docker / apple-container), and
 //!   - a wiremock-backed fake OpenAI Responses endpoint.
 //!
 //! `#[ignore]`'d so `cargo test` skips it by default; the integration workflow
 //! runs `cargo test --workspace -- --ignored` and selects the provider via the
-//! `EXO_TEST_SANDBOX_PROVIDER` env var (defaults to `docker`). The secret
-//! backend is always `file`, with the master key materialised inside a
+//! `EXO_TEST_SANDBOX_BACKEND` env var (defaults to `docker`), the same
+//! variable the workflow matrix sets and `snapshot_round_trip.rs` reads. The
+//! secret backend is always `file`, with the master key materialised inside a
 //! per-test tempdir via `XDG_CONFIG_HOME`.
 
 use std::path::PathBuf;
@@ -18,22 +19,25 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SandboxProvider {
+    LocalProcess,
     Docker,
     AppleContainer,
 }
 
 impl SandboxProvider {
     fn from_env() -> Self {
-        let raw = std::env::var("EXO_TEST_SANDBOX_PROVIDER").unwrap_or_else(|_| "docker".into());
+        let raw = std::env::var("EXO_TEST_SANDBOX_BACKEND").unwrap_or_else(|_| "docker".into());
         match raw.as_str() {
+            "local-process" => Self::LocalProcess,
             "docker" => Self::Docker,
             "apple-container" => Self::AppleContainer,
-            other => panic!("unknown EXO_TEST_SANDBOX_PROVIDER={other}"),
+            other => panic!("unknown EXO_TEST_SANDBOX_BACKEND={other}"),
         }
     }
 
     fn cli_arg(self) -> &'static str {
         match self {
+            Self::LocalProcess => "local-process",
             Self::Docker => "docker",
             Self::AppleContainer => "apple-container",
         }
@@ -41,6 +45,7 @@ impl SandboxProvider {
 
     fn runtime_available(self) -> bool {
         match self {
+            Self::LocalProcess => true,
             Self::Docker => Command::new("docker")
                 .arg("info")
                 .output()
@@ -198,16 +203,18 @@ async fn conversation_send_round_trips_through_real_sandbox_and_mocked_openai() 
             .collect::<Vec<_>>()
     );
 
+    // `agents/` holds the `by-slug/` index next to the agent-id dirs, and
+    // readdir order is not deterministic — pick the entry that actually has a
+    // `conversations` subdir instead of whatever comes back first.
     let conv_root = root_dir
         .path()
         .join("exoharness/agents")
         .read_dir()
         .expect("agents dir exists")
-        .next()
-        .expect("at least one agent")
-        .unwrap()
-        .path()
-        .join("conversations");
+        .flatten()
+        .map(|entry| entry.path().join("conversations"))
+        .find(|path| path.is_dir())
+        .expect("at least one agent with a conversations dir");
     let conv_dir = conv_root
         .read_dir()
         .expect("conversations dir exists")
