@@ -87,20 +87,20 @@ not printed before. Please print them here.
 
 ## Basic Agent Interaction
 
-For the basic setup of Exo, there are two methods of interacting, on the command
-line where you ran the setup script (or exo.sh). And through a browser using
+For the basic setup of Exo, there are two methods of interacting: on the command
+line where you ran the setup script (or `exo.sh`), and through a browser using
 exo-chat.
 
-Exo agents are intended to be long running. For example, if you `/exit` from the
-command line you can still interace with it via exo-chat. And if you do exit,
-you can always connect back to the cli chat using `./exo.sh`.
+Exo agents are intended to be long-running. For example, if you `/exit` from the
+command line you can still interact with it via exo-chat. And if you do exit,
+you can always connect back to the CLI chat using `./exo.sh`.
 
 Exo-chat is a minimal, web-based chat where you can talk to your agent from
 anywhere on the internet. However, Exo also supports standard chat applications
 like IRC, Discord, WhatsApp, Signal, or Slack. To configure them, just ask your
 agent to do so.
 
-If you ever forget or loose you exo-chat URL, you can just ask Exo for it from
+If you ever forget or lose your exo-chat URL, you can just ask Exo for it from
 the command line.
 
 ## Operating Exo
