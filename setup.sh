@@ -841,6 +841,10 @@ print_success_banner() {
 EOF
   echo "Exo is installed and your agent is ready."
   echo
+  echo "Your agent is long-running: once started, it stays up after you /exit the"
+  echo "chat, and it serves an ExoChat URL you can open from any browser, anywhere."
+  echo "If you ever lose that URL, ask your agent for it from the CLI chat."
+  echo
   echo "Start chatting:"
   if [[ "$launch_dir" != "$dir" ]]; then
     echo "  cd $dir"
