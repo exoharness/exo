@@ -255,18 +255,21 @@ fn preflight() -> bool {
     true
 }
 
-/// Read a directory expected to contain exactly one entry and return that
-/// entry's path. Used to walk into the per-agent / per-conversation directories
-/// without hardcoding the test-generated UUIDs.
+/// Read a directory expected to contain exactly one record entry and return
+/// that entry's path. Used to walk into the per-agent / per-conversation
+/// directories without hardcoding the test-generated UUIDs. Skips `by-slug`,
+/// the slug-uniqueness index the harness keeps next to the agent record
+/// directories.
 fn find_single_subdir(parent: &std::path::Path) -> std::path::PathBuf {
     let mut entries: Vec<_> = std::fs::read_dir(parent)
         .unwrap_or_else(|error| panic!("read_dir({}) failed: {error:#}", parent.display()))
         .filter_map(Result::ok)
+        .filter(|entry| entry.file_name() != "by-slug")
         .collect();
     assert_eq!(
         entries.len(),
         1,
-        "expected exactly one entry under {}, found {}",
+        "expected exactly one record entry under {}, found {}",
         parent.display(),
         entries.len()
     );
