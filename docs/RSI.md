@@ -15,7 +15,7 @@ thing to create another complete version of that thing (similar to function
 recursion in programming languages). Using a language's compiler to build the
 next version of that compiler is arguably recursive. The distinction matters
 because recursion, unlike autocatalysis, requires the system to carry its own
-state forward and to do so safely. It's the strong form a system being able to
+state forward and to do so safely. It's the strong form of a system being able to
 build versions of itself with minimal outside involvement.
 
 The bitter lesson argues that general methods ultimately beat hand-engineered
