@@ -22,7 +22,7 @@ improve every aspect of itself, clone itself, and even manage a lineage of
 clones.
 
 While most agents can do some form of self improvement, such as evolve their
-prompts or add tools, Exo is fully recursive in that can clone or operate on any
+prompts or add tools, Exo is fully recursive in that it can clone or operate on any
 aspect of itself, from prompts, to memory, to tooling, to the basic harness
 itself. And it's architected so that this evolution can be done incrementally
 and (mostly) safely. The only thing it can't muck with is an event log which
@@ -42,6 +42,9 @@ ability for recursive self improvmenet. Why would you want such a thing?
 
 In short, we think this is the best way to take advantage of the growing power
 of AI models when building long lived agents.
+
+For a more complete description of the architectural philosophy read
+[A Systems View of Recursive Self Improvement](docs/RSI.md)
 
 <!-- ![Exo playinb pokemon go](docs/images/exo_playing.gif) -->
 
