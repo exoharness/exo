@@ -27,7 +27,7 @@ while providing minimal scaffolding to do it safely?
 
 Exo is an attempt to answer that question. It has direct access to its running
 code, so it can modify nearly every aspect of itself. Further, it has basic
-support to clone, rewind, rebuild, and re-run itself.
+support to clone, rewind, rebuild, and re-run itself.[^1]
 
 However, just having full access to read and modify code isn't quite sufficient
 for a long running, working system. Even with recursion in languages there is
@@ -43,7 +43,7 @@ sandbox is rewound, the log is preserved. An agent that breaks itself, rewinds,
 and tries again can see what it already tried, instead of repeating the same
 mistake in a loop. The exo-harness provides the minimal infrastructure to
 protect secrets and the core mechanism for managing this state. It is the only
-part of Exo which cannot be modified by the agent.[^1]
+part of Exo which cannot be modified by the agent.[^2]
 
 That's the whole design. Exo supports recursive improvement by allowing the
 model to modify any aspect of itself, clone itself, rebuild and restart itself,
@@ -51,6 +51,12 @@ and rewind itself, and to do all this incrementally and somewhat safely, with
 minimal scaffolding.
 
 [^1]:
+    To be clear, we're focused on recursive improvement of the agent and not
+    the agent and the underlying model. Arguably a fully RSI solution would also
+    improve the model, the compute underneath it, and the power feeding it all.
+    Perhaps an RSI harness is a step on that path.
+
+[^2]:
     Whether or not the agent can modify the exo-harness is actually a policy
     consideration. The system technically allows it, but to provide safer standard
-    usage, it's dissallowed on the default configuration.
+    usage, it's disallowed on the default configuration.
