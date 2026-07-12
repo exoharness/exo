@@ -22,7 +22,7 @@ improve every aspect of itself, clone itself, and even manage a lineage of
 clones.
 
 While most agents can do some form of self improvement, such as evolve their
-prompts or add tools, Exo is fully recursive in that can clone or operate on any
+prompts or add tools, Exo is fully recursive in that it can clone or operate on any
 aspect of itself, from prompts, to memory, to tooling, to the basic harness
 itself. And it's architected so that this evolution can be done incrementally
 and (mostly) safely. The only thing it can't muck with is an event log which

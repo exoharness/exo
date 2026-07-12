@@ -37,18 +37,18 @@ arbitrary compute, and it would be tremendously difficult to do safely.
 
 Within Exo we similarly provide runtime support for the agent to recursively
 improve itself. The canonical state provides an immutable, append-only log of
-all events, not exactly a call stack (which pops) but more a complete execution
-history that nothing can erase. It maintains full lineage across clones. And
-even when the sandbox is rewound, the log is preserved. An agent that breaks
-itself, rewinds, and tries again can see what it already tried, instead of
-repeating the same mistake in a loop. The exo-harness provides the minimal
-infrastructure to protect secrets and the core mechanism for managing this
-state. It is the only part of Exo which cannot be modified by the agent.[^1]
+all events, not exactly a call stack but more a complete execution history that
+nothing can erase. It maintains full lineage across clones. And even when the
+sandbox is rewound, the log is preserved. An agent that breaks itself, rewinds,
+and tries again can see what it already tried, instead of repeating the same
+mistake in a loop. The exo-harness provides the minimal infrastructure to
+protect secrets and the core mechanism for managing this state. It is the only
+part of Exo which cannot be modified by the agent.[^1]
 
 That's the whole design. Exo supports recursive improvement by allowing the
 model to modify any aspect of itself, clone itself, rebuild and restart itself,
-and rewind itself — and to do all this incrementally and somewhat safely, with
-minimal scaffolding: canonical state plus protection for the core functions.
+and rewind itself, and to do all this incrementally and somewhat safely, with
+minimal scaffolding.
 
 [^1]:
     Whether or not the agent can modify the exo-harness is actually a policy
