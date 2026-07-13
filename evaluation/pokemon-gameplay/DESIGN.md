@@ -18,25 +18,27 @@ turn 1 — and objective progress (milestones from game RAM) should show it.
 
 ## Architecture
 
-Two processes, both local, no sandbox required:
+The agent is an exo TypeScript harness (the exo CLI runs the turn loop);
+the emulator is a local sidecar process:
 
 ```
 evaluation/pokemon-gameplay/
   DESIGN.md              <- this file
   README.md              <- run instructions
-  run.sh                 <- venv bootstrap + starts both processes
+  run.sh                 <- venv bootstrap + starts the emulator sidecar
+  drive.sh               <- long-run driver: chains exo turns, snapshots, gif/report
   emulator/
     server.py            <- PyBoy sidecar: HTTP JSON API on localhost
     memory_map.py        <- Pokemon Red/Blue RAM addresses -> structured state
     requirements.txt     <- pyboy, pillow
   agent/
-    run.ts               <- entry point: the turn loop
-    model.ts             <- OpenAI Responses API client (plain fetch, vision + tools)
+    harness.ts           <- exo TypeScript harness: instructions + tool registry hooks
     emulator-client.ts   <- HTTP client for the sidecar
     game-tools.ts        <- press_buttons, wait, checkpoints
     self-tools.ts        <- playbook / memory / todos / install_tool
-    context.ts           <- prompt assembly, history compaction, stuck detection
-    events.ts            <- append-only JSONL event log + progress tracking
+    skills.ts            <- install_skill / use_skill (agent-skills standard)
+    context.ts           <- per-round prompt assembly (playbook, memory, progress, screen)
+    events.ts            <- side JSONL event log + progress tracking (feeds viewer.py)
   prompts/
     system.md            <- fixed harness rules (committed, agent cannot edit)
     playbook.seed.md     <- initial strategy playbook, copied to runtime/ on first run
@@ -78,24 +80,27 @@ the sidecar holds the game paused (no ticking) while the agent thinks, so
 the game world never moves without an explicit agent action. Determinism +
 turn-based control = clean demo narrative.
 
-### Agent loop (`agent/run.ts`)
+### The exo harness (`agent/harness.ts`)
 
-One **turn** = one model conversation round with tool use:
+The agent runs over exo: one **turn** = one `exo conversation send`, and exo
+owns the model loop, tool round trips, and conversation history. The harness
+supplies two hooks:
 
-1. Compose context: `system.md` + current `playbook.md` + todos + memory
-   index (+ requested memory files) + progress summary + compact summaries of
-   the last N turns + the current annotated screenshot.
-2. Model calls tools in a loop (up to a round-trip cap per turn). Game tools
-   return a fresh screenshot + RAM state after every action, so the model
-   sees consequences immediately.
-3. Turn ends when the model produces a final text summary ("what I did, what
-   I learned, what's next"). That summary — not the screenshots — is what
-   survives into future turns' history, keeping token cost bounded.
-4. Harness appends events, saves the screenshot, updates progress, loops.
+1. `instructions` — re-runs before **every model round**: re-reads
+   `playbook.md` + todos + memory index + skills index (the agent may have
+   just edited them), observes RAM for objective milestones
+   (auto-checkpointing each one), runs stuck detection, and injects the
+   current screenshot + state. Screens are never accumulated: the model
+   always sees the frame as it is now.
+2. `registerTools` — rebuilds the tool registry every round from game tools,
+   self tools, skill tools, and the agent-authored `.mjs` tools on disk, so a
+   tool installed with `install_tool` is callable on the very next round
+   trip. The evaluation's `AgentTool` shape is bridged onto exo's registry by
+   a small adapter in `harness.ts`.
 
-Model: OpenAI Responses API, default `gpt-5.4` (what this exo checkout is
-registered with), overridable via `POKEMON_MODEL`. Vision input for
-screenshots, function tools for actions. Plain `fetch`; no SDK dependency.
+Turn summaries and tool results persist in exo's event log — nothing
+summary-related is hand-rolled here anymore. Model choice is exo agent
+config (`--model` at `agent create`).
 
 ## Self-improvement mechanisms (the point of the demo)
 
@@ -120,17 +125,18 @@ All mirrors of exo's own architecture, scoped to this evaluation:
 5. **Checkpoint / rewind** (`save_checkpoint` / `load_checkpoint`): the
    exo snapshot-rewind story. Harness auto-checkpoints on every milestone;
    the agent can rewind when it wedges itself (blacked out, stuck in a menu).
-6. **Forced reflection**: every 10th turn the harness replaces the normal
-   objective with: "Review recent turn summaries and outcomes. Update the
+6. **Forced reflection**: every 10th turn, `drive.sh` sends a reflection
+   prompt instead of a play prompt: "Review recent turns. Update the
    playbook, memories, todos, and tools before playing on." Self-improvement
    happens even if the model wouldn't volunteer it.
-7. **Stuck detection**: harness hashes (map, x, y, in_battle, dialog) across
-   turns; unchanged for 3 turns → inject an escalating nudge that names the
-   options: try different buttons, write a note about what doesn't work,
-   rewind.
+7. **Stuck detection**: the instructions hook hashes (map, x, y, in_battle,
+   screen) across model rounds; unchanged for several rounds → inject an
+   escalating nudge that names the options: try different buttons, write a
+   note about what doesn't work, rewind.
 
-The event log (`events.jsonl`) is append-only and not exposed through any
-agent tool — canonical history stays trustworthy, same rule as exo proper.
+Canonical history is exo's own event log (inspect with `exo conversation
+events`); `runtime/events.jsonl` is a side log that feeds the live viewer.
+Neither is exposed through any agent tool — history stays trustworthy.
 
 ## Progress display
 
@@ -159,8 +165,10 @@ Stretch: Viridian City, first Pokemon Center heal, Route 1 battles won.
   3x upscale, RAM-state annotation alongside every frame (position/party/
   battle flag don't depend on vision). Stretch: decode on-screen dialog text
   from the tilemap + charmap and attach it as text.
-- **Token burn**: screenshots only in the live turn, summaries afterward;
-  round-trip cap per turn; history compaction after ~30 turns.
+- **Token burn**: only the current round's screenshot is ever in context;
+  `maxToolRoundTrips` on the agent config caps rounds per turn. Long runs
+  accumulate exo conversation history — fork the conversation (or start a
+  fresh one; playbook/memory/tools carry the learning) when it gets heavy.
 - **ROM**: not committed (copyright); `roms/` is gitignored and the user
   supplies the `.gb`. Save states in `runtime/` are derived from it, also
   gitignored.

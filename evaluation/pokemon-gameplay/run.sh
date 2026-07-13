@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Boots the PyBoy sidecar + the self-improving Pokemon agent.
+# Boots the PyBoy emulator sidecar (foreground). The agent side runs through
+# the exo CLI — see README.md, or drive.sh for long unattended runs.
 #
-#   ./run.sh                 # uses first ROM in roms/*.gb, runs until ^C
-#   POKEMON_TURNS=25 ./run.sh
+#   ./run.sh                 # uses first ROM in roms/*.gb
 #   ./run.sh --rom roms/pokemon-red.gb
 #
-# Requires: python3 (venv), node >= 24, OPENAI_API_KEY.
+# Requires: python3 (venv).
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -24,10 +24,6 @@ if [[ -z "$ROM" || ! -f "$ROM" ]]; then
   echo "No ROM found. Put a Pokemon Red/Blue .gb file in roms/ (gitignored)." >&2
   exit 1
 fi
-if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-  echo "OPENAI_API_KEY is not set." >&2
-  exit 1
-fi
 
 VENV=runtime/venv
 if [[ ! -x "$VENV/bin/python" ]]; then
@@ -38,19 +34,4 @@ if [[ ! -x "$VENV/bin/python" ]]; then
 fi
 
 PORT="${POKEMON_EMULATOR_PORT:-8777}"
-"$VENV/bin/python" emulator/server.py --rom "$ROM" --port "$PORT" &
-EMULATOR_PID=$!
-trap 'kill "$EMULATOR_PID" 2>/dev/null || true' EXIT
-
-for _ in $(seq 1 50); do
-  if curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
-    break
-  fi
-  if ! kill -0 "$EMULATOR_PID" 2>/dev/null; then
-    echo "emulator failed to start" >&2
-    exit 1
-  fi
-  sleep 0.2
-done
-
-POKEMON_EMULATOR_URL="http://127.0.0.1:$PORT" pnpm exec tsx "$PWD/agent/run.ts"
+exec "$VENV/bin/python" emulator/server.py --rom "$ROM" --port "$PORT"

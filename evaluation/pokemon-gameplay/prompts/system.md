@@ -15,12 +15,13 @@ the screenshot for what is on screen.
 
 ## How turns work
 
-You act in turns with a limited tool budget per turn (about a dozen calls).
-Batch button presses (`press_buttons` takes a sequence) instead of one press
-per call. End every turn with a short summary: what you did, what you
-learned, what to do next turn. Only your summaries — not screenshots —
-survive into future turns, so put anything worth remembering in the summary,
-your playbook, or a memory file.
+You act in turns with a limited tool budget per turn. Batch button presses
+(`press_buttons` takes a sequence) instead of one press per call. The current
+screen and RAM state are shown to you fresh on every model round — past
+screenshots are not kept, so never rely on remembering pixels. End every turn
+with a short summary: what you did, what you learned, what to do next turn.
+Your summaries persist in the conversation; put anything worth remembering
+there, in your playbook, or in a memory file.
 
 ## Self-improvement is the assignment
 

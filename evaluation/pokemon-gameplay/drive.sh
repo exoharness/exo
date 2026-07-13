@@ -1,20 +1,29 @@
 #!/usr/bin/env bash
-# Long-run driver: chain agent runs until a total-turn target, snapshotting
-# state at every run boundary and producing a GIF + report at the end.
+# Long-run driver: chain exo turns until a total-turn target, snapshotting
+# state at every chunk boundary and producing a GIF + report at the end.
 #
-#   ./drive.sh --runtime runtime2 --target 250 [--chunk 50] [--port 8777]
+#   ./drive.sh --agent pokemon --conversation play --target 250 \
+#              [--runtime runtime] [--chunk 50] [--port 8777]
 #
-# Assumes the emulator sidecar is already running on the port (drive.sh will
-# restart it from the given runtime's checkpoints if it dies mid-run).
+# Assumes: the emulator sidecar is running on the port (drive.sh restarts it
+# from the runtime's checkpoints if it dies mid-run), and the exo agent +
+# conversation already exist (see README.md). Every 10th turn is a
+# no-buttons reflection turn where the agent is told to improve its
+# playbook/memories/tools/skills instead of playing.
 set -u
 cd "$(dirname "$0")"
 
+EXO="${EXO_BIN:-exo}"
+AGENT=pokemon
+CONVERSATION=play
 RUNTIME=runtime
 TARGET=250
 CHUNK=50
 PORT="${POKEMON_EMULATOR_PORT:-8777}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --agent) AGENT="$2"; shift 2 ;;
+    --conversation) CONVERSATION="$2"; shift 2 ;;
     --runtime) RUNTIME="$2"; shift 2 ;;
     --target) TARGET="$2"; shift 2 ;;
     --chunk) CHUNK="$2"; shift 2 ;;
@@ -24,11 +33,9 @@ while [[ $# -gt 0 ]]; do
 done
 mkdir -p "$RUNTIME/backups"
 VENV=$(ls -d runtime*/venv 2>/dev/null | head -1)
-ITER=0
 
-turns() {
-  python3 -c "import json;print(len(json.load(open('$RUNTIME/history.json'))))" 2>/dev/null || echo 0
-}
+PLAY_PROMPT="Continue playing. Act toward your top todo, then finish with a short summary: what you did, what you learned, what to do next turn."
+REFLECT_PROMPT="This is a scheduled self-improvement turn. Do NOT press any buttons. Review your recent turns, then update your playbook/memories/todos, and install a tool or skill if you keep repeating a mechanical sequence. Finish with a short summary of what you changed."
 
 ensure_emulator() {
   if ! curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
@@ -59,48 +66,45 @@ snapshot() {
     --exclude=venv --exclude=backups --exclude=screenshots -C "$RUNTIME" . 2>/dev/null
 }
 
-# Wait out any currently running agent before taking over.
-while pgrep -f "agent/run.ts" >/dev/null; do sleep 30; done
-
-while [ "$ITER" -lt 12 ]; do
-  ITER=$((ITER + 1))
-  T=$(turns)
+T=0
+while [ "$T" -lt "$TARGET" ]; do
+  T=$((T + 1))
   ensure_emulator
-  snapshot "$T"
-  if [ "$T" -ge "$TARGET" ]; then break; fi
-  REM=$((TARGET - T))
-  [ "$REM" -gt "$CHUNK" ] && REM=$CHUNK
-  echo "=== drive: run $ITER, $REM turns (at $T/$TARGET) ===" >> "$RUNTIME/agent.log"
-  POKEMON_EMULATOR_URL="http://127.0.0.1:$PORT" POKEMON_TURNS=$REM \
+  if [ $((T % CHUNK)) -eq 0 ]; then snapshot "$T"; fi
+  PROMPT="$PLAY_PROMPT"
+  if [ $((T % 10)) -eq 0 ]; then PROMPT="$REFLECT_PROMPT"; fi
+  echo "=== drive: turn $T/$TARGET ===" >> "$RUNTIME/agent.log"
+  POKEMON_EMULATOR_URL="http://127.0.0.1:$PORT" \
     POKEMON_RUNTIME_DIR="$PWD/$RUNTIME" \
-    pnpm exec tsx "$PWD/agent/run.ts" >> "$RUNTIME/agent.log" 2>&1
-  sleep 10 # crash-loop guard
+    "$EXO" conversation send "$AGENT" "$CONVERSATION" "$PROMPT" \
+    >> "$RUNTIME/agent.log" 2>&1
+  if [ $? -ne 0 ]; then sleep 10; fi # crash-loop guard
 done
 
-echo "=== drive: finished at $(turns) turns, wrapping up ===" >> "$RUNTIME/agent.log"
+snapshot "$T"
+echo "=== drive: finished at $T turns, wrapping up ===" >> "$RUNTIME/agent.log"
 "$VENV/bin/python" emulator/make_gif.py --fps 6 \
   --screenshots "$RUNTIME/screenshots" --out "$RUNTIME/run.gif" \
   >> "$RUNTIME/agent.log" 2>&1
-RUNTIME_DIR="$RUNTIME" python3 - <<'EOF'
+RUNTIME_DIR="$RUNTIME" TURNS="$T" python3 - <<'EOF'
 import json, os, pathlib
 rt = pathlib.Path(os.environ["RUNTIME_DIR"])
-history = json.loads((rt/"history.json").read_text())
 milestones = [json.loads(l) for l in (rt/"progress.jsonl").read_text().splitlines()] if (rt/"progress.jsonl").exists() else []
+events = [json.loads(l) for l in (rt/"events.jsonl").read_text().splitlines()] if (rt/"events.jsonl").exists() else []
 tools = sorted(p.stem for p in (rt/"tools").glob("*.mjs")) if (rt/"tools").is_dir() else []
 skills = sorted(p.name for p in (rt/"skills").iterdir() if (p/"SKILL.md").is_file()) if (rt/"skills").is_dir() else []
 memories = sorted(p.stem for p in (rt/"memory").glob("*.md")) if (rt/"memory").is_dir() else []
-improvements = sum(len(h.get("improvements", [])) for h in history)
+improvements = sum(1 for e in events if e.get("type") == "improvement")
 lines = ["# Run report", "",
-  f"- turns played: {len(history)}",
+  f"- turns driven: {os.environ['TURNS']}",
   f"- milestones: {len(milestones)}",
   f"- self-improvement actions: {improvements}",
   f"- agent-built tools: {', '.join(tools) or '(none)'}",
   f"- skills: {', '.join(skills) or '(none)'}",
   f"- memory files: {len(memories)}", "",
   "## Milestones"]
-lines += [f"- turn {m['turn']}: {m['milestone']}" for m in milestones]
-lines += ["", "## Last 10 turn summaries"]
-lines += [f"### Turn {h['turn']}\n{h['summary']}" for h in history[-10:]]
+lines += [f"- round {m['turn']}: {m['milestone']}" for m in milestones]
+lines += ["", "(Turn summaries live in the exo conversation; inspect with `exo conversation events`.)"]
 (rt/"REPORT.md").write_text("\n".join(lines) + "\n")
 EOF
-echo "drive complete at $(turns) turns"
+echo "drive complete at $T turns"

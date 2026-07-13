@@ -29,7 +29,7 @@ export function gameTools(emulator: EmulatorClient): AgentTool[] {
               "Frames to wait after each release (default 45, max 600). Increase when animations or dialog need time.",
           },
         },
-        required: ["buttons"],
+        required: ["buttons", "hold_frames", "wait_frames"],
       },
       execute: async (args) => {
         const buttons = args.buttons;
