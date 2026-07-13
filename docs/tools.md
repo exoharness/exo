@@ -129,7 +129,7 @@ agent is created or updated:
 ```bash
 exo --harness typescript agent create "Tool Demo" \
   --module examples/typescript/basic-harness.ts \
-  --model gpt-5.4 \
+  --model gpt-5.5 \
   --tool-module examples/typescript/tools/uppercase.ts
 ```
 
@@ -151,7 +151,7 @@ Agent tool creation is enabled by default. Disable or re-enable it with:
 ```bash
 exo --harness typescript agent create "Locked Down" \
   --module examples/typescript/basic-harness.ts \
-  --model gpt-5.4 \
+  --model gpt-5.5 \
   --tool-creation disabled
 
 exo agent update demo --tool-creation disabled

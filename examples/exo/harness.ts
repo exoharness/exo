@@ -48,7 +48,10 @@ export default defineHarness({
   },
 });
 
-async function registerExoTools(
+// Exported so other harnesses can extend this agent by composition: call
+// these, then append your own registrations / messages (see the game
+// integration tutorial's appendix).
+export async function registerExoTools(
   tools: HarnessToolRegistry,
   context: TurnContext,
 ): Promise<void> {
@@ -75,7 +78,9 @@ function builtInToolNames(context: TurnContext): BuiltInToolName[] {
   return defaultBuiltInToolNames(context);
 }
 
-async function exoInstructions(context: TurnContext): Promise<Message[]> {
+export async function exoInstructions(
+  context: TurnContext,
+): Promise<Message[]> {
   const repoPath = process.env.EXO_REPO ?? DEFAULT_EXO_REPO;
   const selfMapPath = process.env.EXO_SELF_MAP ?? DEFAULT_EXO_SELF_MAP;
   const agentName = context.exoharness.current.agent.record.name;

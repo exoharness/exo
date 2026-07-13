@@ -44,7 +44,7 @@ Register an OpenAI model:
 
 ```bash
 ./target/debug/exo secret set openai --env OPENAI_API_KEY
-./target/debug/exo model register gpt-5.4 --secret openai
+./target/debug/exo model register gpt-5.5 --secret openai
 ```
 
 Build the sandbox image:
@@ -60,7 +60,7 @@ Create the agent and start a conversation:
 
 ```bash
 ./target/debug/exo --harness codex agent create "TS Codex" \
-  --model gpt-5.4
+  --model gpt-5.5
 
 ./target/debug/exo conversation create ts-codex
 ./target/debug/exo conversation mount add ts-codex <conversation> "$PWD" /workspace --rw
