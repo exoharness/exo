@@ -32,11 +32,11 @@ First run creates a Python venv and installs PyBoy.
 
 ```bash
 exo secret set openai --env OPENAI_API_KEY
-exo model register gpt-5.4 --secret openai
+exo model register gpt-5.5 --secret openai
 
 exo --harness typescript agent create "Pokemon" \
   --module evaluation/pokemon-gameplay/agent/harness.ts \
-  --model gpt-5.4
+  --model gpt-5.5
 exo conversation create pokemon "Play"
 exo conversation send pokemon play "Start playing. Work toward your top todo."
 ```

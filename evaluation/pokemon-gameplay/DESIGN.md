@@ -172,7 +172,7 @@ Stretch: Viridian City, first Pokemon Center heal, Route 1 battles won.
 - **ROM**: not committed (copyright); `roms/` is gitignored and the user
   supplies the `.gb`. Save states in `runtime/` are derived from it, also
   gitignored.
-- **Model choice**: gpt-5.4 assumed good enough at sprite reading; if not,
+- **Model choice**: gpt-5.5 assumed good enough at sprite reading; if not,
   the model client is one env var away from any Responses-compatible model.
 
 ## Build order
