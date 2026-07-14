@@ -14,17 +14,17 @@
 
 </div>
 
-Exo is a systems approach to recursive self improvement. In short, it's a 
-complete AI agent harness (supporting tools, tasks, integrations, etc. 
-similar to OpenClaw, Pi or Hermes), with the crucial difference that it 
-has full visibility into both its code and runtime logs. This allows Exo 
-to incrementally improve every aspect of itself, clone itself, and even 
+Exo is a systems approach to recursive self improvement. In short, it's a
+complete AI agent harness (supporting tools, tasks, integrations, etc.
+similar to OpenClaw, Pi or Hermes), with the crucial difference that it
+has full visibility into both its code and runtime logs. This allows Exo
+to incrementally improve every aspect of itself, clone itself, and even
 manage a lineage of clones.
 
-While most agents can do some form of self improvement, such as updating 
-memory or creating skills, Exo is fully recursive in that it can clone or 
-operate on any aspect of itself, from prompts, to memory, tooling, or even 
-basic harness policy itself. It's architected so that this evolution can 
+While most agents can do some form of self improvement, such as updating
+memory or creating skills, Exo is fully recursive in that it can clone or
+operate on any aspect of itself, from prompts, to memory, tooling, or even
+basic harness policy itself. It's architected so that this evolution can
 be done incrementally
 and (mostly) safely. The only thing it can't muck with is an event log which
 provides a canonical history of what it's tried to prevent getting stuck in
@@ -67,7 +67,7 @@ _Note that Exo requires git and Docker. The setup script offers to install
 them if missing, and installs pinned node, pnpm, and rust toolchains
 automatically via [mise](https://mise.jdx.dev)._
 
-It'll build Exo (may take a few minutes), then ask for the API key and your name 
+It'll build Exo (may take a few minutes), then ask for the API key and your name
 and your agent's name, and give you the command to start Exo (./exo.sh).
 
 ## Basic Agent Interaction
