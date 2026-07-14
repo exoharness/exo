@@ -996,7 +996,8 @@ mod tests {
             "type": "tool_result",
             "tool_call_id": "call-1",
         });
-        let event: EventData = serde_json::from_value(json).expect("legacy event should parse");
+        let event: EventData =
+            serde_json::from_value(json).expect("tool result without result field should parse");
         match event {
             EventData::ToolResult { result, .. } => assert!(result.is_null()),
             _ => panic!("expected ToolResult variant"),
