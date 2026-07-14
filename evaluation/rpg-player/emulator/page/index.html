@@ -1,0 +1,64 @@
+<!doctype html>
+<!--
+  Minimal EmulatorJS embed driven headlessly by ../server.ts over Playwright.
+
+  Query params (set by the sidecar): core, data (EmulatorJS data dir URL).
+  The ROM is always served by the sidecar at /rom.
+
+  The canvas is rendered at 3x with image-rendering: pixelated so element
+  screenshots are nearest-neighbor upscaled for the vision model for free.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>rpg-player emulator</title>
+    <style>
+      body {
+        margin: 0;
+        background: #000;
+      }
+      /* SMS is 256x192; 3x = 768x576. Other cores letterbox inside this box. */
+      #game {
+        width: 768px;
+        height: 576px;
+      }
+      #game canvas {
+        image-rendering: pixelated;
+      }
+      /* The control bar overlaps the canvas bounding box and would leak into
+         element screenshots the vision model sees. */
+      .ejs_menu_bar {
+        display: none !important;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="game"></div>
+    <script>
+      const params = new URLSearchParams(location.search);
+      const dataUrl = (
+        params.get("data") || "https://cdn.emulatorjs.org/4.2.3/data/"
+      ).replace(/\/?$/, "/");
+      window.EJS_player = "#game";
+      window.EJS_core = params.get("core") || "segaMS";
+      window.EJS_gameUrl = "/rom";
+      window.EJS_gameName = "game";
+      window.EJS_pathToData = dataUrl;
+      // loader.js checks this exact (lower-case) name for where to fetch its
+      // sibling scripts; without it, it resolves them against our origin.
+      window.EJS_pathtodata = dataUrl;
+      window.EJS_startOnLoaded = true;
+      // The sidecar asks for audio in headed (watchable) runs only.
+      window.EJS_volume = params.get("audio") === "1" ? 0.7 : 0;
+      window.EJS_backgroundColor = "#000";
+      // Signal the sidecar that the core booted and gameManager is usable.
+      window.__gameStarted = false;
+      window.EJS_onGameStart = () => {
+        window.__gameStarted = true;
+      };
+      const loader = document.createElement("script");
+      loader.src = `${dataUrl}loader.js`;
+      document.body.appendChild(loader);
+    </script>
+  </body>
+</html>

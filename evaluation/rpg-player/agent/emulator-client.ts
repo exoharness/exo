@@ -1,0 +1,94 @@
+// HTTP client for the EmulatorJS sidecar (emulator/server.ts).
+//
+// Unlike the PyBoy harness (evaluation/pokemon-gameplay), EmulatorJS does not
+// give us structured RAM reads across cores, so `state` is a small generic
+// bag: whatever the sidecar (and an optional per-game probe) can tell us.
+// The screenshot is the primary channel; screen_hash powers the objective
+// exploration metric and stuck detection.
+
+export type GameState = Record<string, unknown>;
+
+export interface FramePayload {
+  screenshot_b64: string;
+  state: GameState;
+  screen_hash: string;
+  frame_count: number;
+}
+
+export class EmulatorClient {
+  private readonly baseUrl: string;
+
+  constructor(baseUrl: string) {
+    this.baseUrl = baseUrl;
+  }
+
+  async health(): Promise<{ ok: boolean; rom: string; core: string }> {
+    return await this.request("GET", "/health");
+  }
+
+  async frame(): Promise<FramePayload> {
+    return await this.request("GET", "/frame");
+  }
+
+  async press(
+    buttons: string[],
+    holdFrames?: number | null,
+    waitFrames?: number | null,
+  ): Promise<FramePayload> {
+    return await this.request("POST", "/press", {
+      buttons,
+      hold_frames: holdFrames ?? undefined,
+      wait_frames: waitFrames ?? undefined,
+    });
+  }
+
+  async tick(frames: number): Promise<FramePayload> {
+    return await this.request("POST", "/tick", { frames });
+  }
+
+  async saveCheckpoint(name: string): Promise<FramePayload> {
+    return await this.request("POST", "/checkpoint/save", { name });
+  }
+
+  async loadCheckpoint(name: string): Promise<FramePayload> {
+    return await this.request("POST", "/checkpoint/load", { name });
+  }
+
+  async listCheckpoints(): Promise<string[]> {
+    const payload = await this.request<{ checkpoints: string[] }>(
+      "GET",
+      "/checkpoints",
+    );
+    return payload.checkpoints;
+  }
+
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<T> {
+    const response = await fetch(`${this.baseUrl}${path}`, {
+      method,
+      headers: body === undefined ? {} : { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(120_000),
+    });
+    const payload = (await response.json()) as T & { error?: string };
+    if (!response.ok) {
+      throw new Error(
+        `emulator ${method} ${path} failed (${response.status}): ${payload?.error ?? "unknown error"}`,
+      );
+    }
+    return payload;
+  }
+}
+
+export function describeState(state: GameState): string {
+  const entries = Object.entries(state);
+  if (entries.length === 0) {
+    return "state: (no structured state — read the screenshot)";
+  }
+  return entries
+    .map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
+    .join("\n");
+}
