@@ -5,7 +5,8 @@
 // the agent with:
 //
 //   exo --harness typescript agent create "Pokemon" \
-//     --module evaluation/pokemon-gameplay/agent/harness.ts --model gpt-5.5
+//     --module evaluation/pokemon-gameplay/agent/harness.ts \
+//     --model gpt-5.5 --max-tool-round-trips 12
 //
 // The emulator sidecar (emulator/server.py) must already be running — see
 // ../run.sh. Env: POKEMON_EMULATOR_URL (default http://127.0.0.1:8777),
