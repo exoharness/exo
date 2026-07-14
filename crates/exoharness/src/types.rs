@@ -354,6 +354,7 @@ pub enum EventData {
     },
     ToolResult {
         tool_call_id: ToolCallId,
+        #[serde(default)]
         result: ToolResult,
     },
     LinguaStreamChunk {
@@ -986,6 +987,19 @@ mod tests {
         match event {
             EventData::Messages { usage, .. } => assert!(usage.is_none()),
             _ => panic!("expected Messages variant"),
+        }
+    }
+
+    #[test]
+    fn tool_result_event_deserializes_without_result_field() {
+        let json = serde_json::json!({
+            "type": "tool_result",
+            "tool_call_id": "call-1",
+        });
+        let event: EventData = serde_json::from_value(json).expect("legacy event should parse");
+        match event {
+            EventData::ToolResult { result, .. } => assert!(result.is_null()),
+            _ => panic!("expected ToolResult variant"),
         }
     }
 
