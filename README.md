@@ -14,34 +14,35 @@
 
 </div>
 
-Exo is a systems approach to recursive self improvement. In short, it's a
-complete agent harnes that has support for tools, tasks, integrations (e.g.
-WhatsApp, Discord or Slack), and general computer use. But most importantly it
-has full visbility of both its code and runtime logs and can incrementally
-improve every aspect of itself, clone itself, and even manage a lineage of
-clones.
+Exo is a systems approach to recursive self improvement. In short, it's a 
+complete AI agent harness (supporting tools, tasks, integrations, etc. 
+similar to OpenClaw, Pi or Hermes), with the crucial difference that it 
+has full visibility into both its code and runtime logs. This allows Exo 
+to incrementally improve every aspect of itself, clone itself, and even 
+manage a lineage of clones.
 
-While most agents can do some form of self improvement, such as evolve their
-prompts or add tools, Exo is fully recursive in that it can clone or operate on any
-aspect of itself, from prompts, to memory, to tooling, to the basic harness
-itself. And it's architected so that this evolution can be done incrementally
+While most agents can do some form of self improvement, such as updating 
+memory or creating skills, Exo is fully recursive in that it can clone or 
+operate on any aspect of itself, from prompts, to memory, tooling, or even 
+basic harness policy itself. It's architected so that this evolution can 
+be done incrementally
 and (mostly) safely. The only thing it can't muck with is an event log which
-provides canonical history of what it's tried to prevent getting stuck in
+provides a canonical history of what it's tried to prevent getting stuck in
 recursive loops.
 
 The goal of Exo is to be the minimal framework possible to give an agent full
-ability for recursive self improvmenet. Why would you want such a thing?
+ability for recursive self improvement. Why would you want such a thing?
 
-- It's a great agent framework to build exactly the agent you like that's
-  maximally bitter lesson aligned. Future smarter models can evolve every aspect
-  of the system at runtime. And do it safely with full history.
-- It'a s great framework to allow AI models to solve complex problems by
+- It's a good agent framework to build exactly the agent you like, that's
+  maximally Bitter Lesson aligned. Future smarter models can evolve every aspect
+  of the system at runtime, and do it safely with full history.
+- It's a good framework to allow AI models to solve complex problems by
   iterating on system level properties. We've had agents learn to play games,
-  cost optimize themselves, build complex systems. In each case, it required the
-  agents to modify themselves heavily.
+  cost-optimize themselves, build complex systems. In each case, it required the
+  agents to modify themselves heavily beyond memory.
 
 In short, we think this is the best way to take advantage of the growing power
-of AI models when building long lived agents.
+of AI models when building long-lived agents.
 
 For a more complete description of the architectural philosophy read
 [A Systems View of Recursive Self Improvement](docs/RSI.md)
@@ -52,7 +53,7 @@ For a more complete description of the architectural philosophy read
 
 Exo was designed to be incredibly simple to use. With just a few commands you
 should have a fully functional agent who can do standard agent tasks (computer
-use, research, coding etc.) but can also extent itself as needed.
+use, research, coding etc.) but can also extend itself as needed.
 
 To use Exo as an agent, you'll need an OpenAI or OpenRouter API key. If you
 have that, simply do the following:
@@ -66,27 +67,8 @@ _Note that Exo requires git and Docker. The setup script offers to install
 them if missing, and installs pinned node, pnpm, and rust toolchains
 automatically via [mise](https://mise.jdx.dev)._
 
-It'll ask for the API key and your name and your agent's name. Once you enter
-these, the setup will start the agent. It will also print an URL of the form.
-
-```
-https://exoharness.ai/chat?role=user&c=...#k=...
-```
-
-This is a minimal remote chat interface to your agent you can access from anywhere.
-Open that URL in your browser or on your phone.
-
-When complete, the script will drop you to a prompt you can use to talk to your
-agent locally.
-
-A good end to end test is to have it install a tool in the sandbox and use it with the task scheduler. For example,
-try the following prompt:
-
-```
-Install python3 and curl in the sandbox. You don't need sudo, just use apt-get. Once you've done that, please
-schedule a task to run every minute that grabs news headlines from the BBC RSS feed. Only print new headlines you've
-not printed before. Please print them here.
-```
+It'll build Exo (may take a few minutes), then ask for the API key and your name 
+and your agent's name, and give you the command to start Exo (./exo.sh).
 
 ## Basic Agent Interaction
 
@@ -106,6 +88,15 @@ agent to do so.
 If you ever forget or lose your exo-chat URL, you can just ask Exo for it from
 the command line.
 
+A good end-to-end test is to have it install a tool in the sandbox and use it with
+the task scheduler. For example, try the following prompt:
+
+```
+Install python3 and curl in the sandbox. You don't need sudo, just use apt-get. Once you've done that, please
+schedule a task to run every minute that grabs news headlines from the BBC RSS feed. Only print new headlines you've
+not printed before. Please print them here.
+```
+
 ## Operating Exo
 
 `setup.sh` is only for the first-time install. After that, `./exo.sh` in the
@@ -122,7 +113,7 @@ the command line.
 ./exo.sh --help         # all commands and options
 ```
 
-The most common commands: use `stop-all` when you want to shut Exo down,
+The most common command for the `./exo.sh` starter script: use `stop-all` when you want to shut Exo down,
 plain `./exo.sh` to bring it back with all state intact, and `fresh` when you
 want to throw everything away and start over with a brand-new agent.
 
@@ -146,7 +137,7 @@ and records the results. This loop runs outside the sandbox.
 
 **Sandbox** Exo uses a vanilla unbuntu sandbox where
 it can install packages, run commands, and experiment. It can snapshot and
-rewind that sandbox when it needs to back out changes.
+rewind that sandbox when it needs to back out from changes.
 
 **Tools and Adapters** These are the core methods for Exo to interact with the
 world and with itself. Tools are functions the model can call, such as executing
@@ -173,7 +164,7 @@ If you have your agent up and running, there really is little else you need to u
 
 ## Shortcomings
 
-While there are many, the most obvious is that right now there isn't a simple way for Exo to do generalized computer use of a windowed system. This is in the works and should land shortly. But in the meantime, you can get a long way by asking Exo the build such a thing for itself.
+While there are many, the most obvious is that right now there isn't a simple way for Exo to do generalized computer use of a windowed system. This is in the works and should land soon. But in the meantime, you can get a long way by asking Exo to build such a thing for itself.
 
 ## Tweaking Prompts
 
