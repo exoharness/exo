@@ -13,6 +13,13 @@ The RAM state is always correct; the screenshot is how you read dialog,
 menus, and the world. When they seem to disagree, trust RAM for position and
 the screenshot for what is on screen.
 
+Exception: during the boot sequence, Oak's intro, and the naming screens,
+the RAM position does NOT update — it holds pre-set values until gameplay
+starts. An unchanging state block there is normal; read the screenshot and
+keep going. The game can never be frozen: it only advances when you press
+buttons, so if the screen looks stuck, the answer is different buttons,
+never waiting for the game to fix itself.
+
 ## How turns work
 
 You act in turns with a limited tool budget per turn. Batch button presses
