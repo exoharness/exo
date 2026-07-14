@@ -36,7 +36,7 @@ exo model register gpt-5.5 --secret openai
 
 exo --harness typescript agent create "Pokemon" \
   --module evaluation/pokemon-gameplay/agent/harness.ts \
-  --model gpt-5.5 --max-tool-round-trips 12
+  --model gpt-5.5 --max-tool-round-trips 20
 exo conversation create pokemon "Play"
 exo conversation send pokemon play "Start playing. Work toward your top todo."
 ```

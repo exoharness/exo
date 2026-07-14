@@ -34,4 +34,23 @@ if [[ ! -x "$VENV/bin/python" ]]; then
 fi
 
 PORT="${POKEMON_EMULATOR_PORT:-8777}"
+cat <<NEXT
+
+Emulator starting on http://127.0.0.1:$PORT
+Live viewer (game frame, playbook, milestones): python3 viewer.py
+
+Next, in another terminal (from the repo root), make the agent play:
+
+  exo secret set openai --env OPENAI_API_KEY        # once
+  exo model register gpt-5.5 --secret openai        # once
+  exo --harness typescript agent create "Pokemon" \\
+    --module evaluation/pokemon-gameplay/agent/harness.ts \\
+    --model gpt-5.5 --max-tool-round-trips 20       # once
+  exo conversation create pokemon "Play"            # once
+
+  exo conversation send pokemon play "Start playing. Work toward your top todo."
+
+For long unattended runs: ./drive.sh --agent pokemon --conversation play --target 250
+
+NEXT
 exec "$VENV/bin/python" emulator/server.py --rom "$ROM" --port "$PORT"
