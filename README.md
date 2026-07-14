@@ -146,7 +146,7 @@ If you have your agent up and running, there really is little else you need to u
 
 ## Shortcomings
 
-While there are many, the most obvious is that right now there isn't a simple way for Exo to do generalized computer use of a windowed system. This is in the works and should land soon. But in the meantime, you can get a long way by asking Exo the build such a thing for itself.
+While there are many, the most obvious is that right now there isn't a simple way for Exo to do generalized computer use of a windowed system. This is in the works and should land soon. But in the meantime, you can get a long way by asking Exo to build such a thing for itself.
 
 ## Tweaking Prompts
 
