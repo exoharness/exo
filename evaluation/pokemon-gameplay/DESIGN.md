@@ -26,6 +26,7 @@ evaluation/pokemon-gameplay/
   DESIGN.md              <- this file
   README.md              <- run instructions
   run.sh                 <- venv bootstrap + starts the emulator sidecar
+  drive.sh               <- long-run driver: chains exo turns, snapshots, gif/report
   emulator/
     server.py            <- PyBoy sidecar: HTTP JSON API on localhost
     memory_map.py        <- Pokemon Red/Blue RAM addresses -> structured state
@@ -124,11 +125,10 @@ All mirrors of exo's own architecture, scoped to this evaluation:
 5. **Checkpoint / rewind** (`save_checkpoint` / `load_checkpoint`): the
    exo snapshot-rewind story. Harness auto-checkpoints on every milestone;
    the agent can rewind when it wedges itself (blacked out, stuck in a menu).
-6. **Forced reflection**: for long runs, send a reflection prompt every
-   10th turn instead of a play prompt (see the README's loop): "Review
-   recent turns. Update the playbook, memories, todos, and tools before
-   playing on." Self-improvement happens even if the model wouldn't
-   volunteer it.
+6. **Forced reflection**: every 10th turn, `drive.sh` sends a reflection
+   prompt instead of a play prompt: "Review recent turns. Update the
+   playbook, memories, todos, and tools before playing on." Self-improvement
+   happens even if the model wouldn't volunteer it.
 7. **Stuck detection**: the instructions hook hashes (map, x, y, in_battle,
    screen) across model rounds; unchanged for several rounds → inject an
    escalating nudge that names the options: try different buttons, write a

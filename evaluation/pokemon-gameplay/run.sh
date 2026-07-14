@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Boots the PyBoy emulator sidecar (foreground). The agent side runs through
-# the exo CLI — see README.md.
+# the exo CLI — see README.md, or drive.sh for long unattended runs.
 #
 #   ./run.sh                 # uses first ROM in roms/*.gb
 #   ./run.sh --rom roms/pokemon-red.gb
@@ -50,7 +50,7 @@ Next, in another terminal (from the repo root), make the agent play:
 
   exo conversation send pokemon play "Start playing. Work toward your top todo."
 
-Loop the send to keep playing; see README.md for a long-run loop.
+For long unattended runs: ./drive.sh --agent pokemon --conversation play --target 250
 
 NEXT
 exec "$VENV/bin/python" emulator/server.py --rom "$ROM" --port "$PORT"
