@@ -14,11 +14,18 @@
 
 </div>
 
-Exo is a systems approach to recursive self improvement. In short, it's a complete AI agent harness (supporting tools, tasks, integrations, etc. similar to OpenClaw, Pi or Hermes), with the crucial difference that it has full visibility into both its code and runtime logs. This allows Exo to incrementally improve every aspect of itself, clone itself, and even manage a lineage of clones.
+Exo is a systems approach to recursive self improvement. In short, it's a 
+complete AI agent harness (supporting tools, tasks, integrations, etc. 
+similar to OpenClaw, Pi or Hermes), with the crucial difference that it 
+has full visibility into both its code and runtime logs. This allows Exo 
+to incrementally improve every aspect of itself, clone itself, and even 
+manage a lineage of clones.
 
-While most agents can do some form of self improvement, such as updating memory or creating skills, Exo is fully recursive in that it can clone or operate on any
-aspect of itself, from prompts, to memory, tooling, or even basic harness policy
-itself. It's architected so that this evolution can be done incrementally
+While most agents can do some form of self improvement, such as updating 
+memory or creating skills, Exo is fully recursive in that it can clone or 
+operate on any aspect of itself, from prompts, to memory, tooling, or even 
+basic harness policy itself. It's architected so that this evolution can 
+be done incrementally
 and (mostly) safely. The only thing it can't muck with is an event log which
 provides a canonical history of what it's tried to prevent getting stuck in
 recursive loops.
@@ -36,6 +43,9 @@ ability for recursive self improvement. Why would you want such a thing?
 
 In short, we think this is the best way to take advantage of the growing power
 of AI models when building long-lived agents.
+
+For a more complete description of the architectural philosophy read
+[A Systems View of Recursive Self Improvement](docs/RSI.md)
 
 <!-- ![Exo playinb pokemon go](docs/images/exo_playing.gif) -->
 
@@ -57,7 +67,35 @@ _Note that Exo requires git and Docker. The setup script offers to install
 them if missing, and installs pinned node, pnpm, and rust toolchains
 automatically via [mise](https://mise.jdx.dev)._
 
-It'll build Exo (may take a few minutes), then ask for the API key and your name and your agent's name, and give you the command to start Exo (./exo.sh).
+It'll build Exo (may take a few minutes), then ask for the API key and your name 
+and your agent's name, and give you the command to start Exo (./exo.sh).
+
+## Basic Agent Interaction
+
+For the basic setup of Exo, there are two methods of interacting: on the command
+line where you ran the setup script (or `exo.sh`), and through a browser using
+exo-chat.
+
+Exo agents are intended to be long-running. For example, if you `/exit` from the
+command line you can still interact with it via exo-chat. And if you do exit,
+you can always connect back to the CLI chat using `./exo.sh`.
+
+Exo-chat is a minimal, web-based chat where you can talk to your agent from
+anywhere on the internet. However, Exo also supports standard chat applications
+like IRC, Discord, WhatsApp, Signal, or Slack. To configure them, just ask your
+agent to do so.
+
+If you ever forget or lose your exo-chat URL, you can just ask Exo for it from
+the command line.
+
+A good end-to-end test is to have it install a tool in the sandbox and use it with
+the task scheduler. For example, try the following prompt:
+
+```
+Install python3 and curl in the sandbox. You don't need sudo, just use apt-get. Once you've done that, please
+schedule a task to run every minute that grabs news headlines from the BBC RSS feed. Only print new headlines you've
+not printed before. Please print them here.
+```
 
 ## Operating Exo
 
@@ -73,26 +111,6 @@ the command line.
 ./exo.sh fresh          # rebuild, delete all agents/conversations, start clean
 ./exo.sh setup-profile  # update your local profile (name, preferences)
 ./exo.sh --help         # all commands and options
-```
-
-Once you start the agent, it will print an URL of the form.
-
-```
-https://exoharness.ai/chat?role=user&c=...#k=...
-```
-
-This is a minimal remote chat interface to your agent you can access from anywhere.
-Open that URL in your browser or on your phone. This interface is for convenience only, relaying Exo's messages to your device, and is end-to-end encrypted with a key kept in the URL fragment (#k=...) that never leaves your browser.
-
-You can also use Exo directly through the terminal chat interface that you are dropped into.
-
-A good end-to-end test is to have it install a tool in the sandbox and use it with the task scheduler. For example,
-try the following prompt:
-
-```
-Install python3 and curl in the sandbox. You don't need sudo, just use apt-get. Once you've done that, please
-schedule a task to run every minute that grabs news headlines from the BBC RSS feed. Only print new headlines you've
-not printed before. Please print them here.
 ```
 
 The most common command for the `./exo.sh` starter script: use `stop-all` when you want to shut Exo down,

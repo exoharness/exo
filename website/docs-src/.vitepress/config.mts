@@ -76,6 +76,10 @@ export default defineConfig({
             link: "/tutorials/write-your-own-agent",
           },
           { text: "Custom Coding Agent", link: "/tutorials/custom-coding-agent" },
+          {
+            text: "Game & Third-Party Tool Integration",
+            link: "/tutorials/game-emulator-integration",
+          },
         ],
       },
       { text: "Development", link: "/development/" },
