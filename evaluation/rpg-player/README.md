@@ -63,6 +63,29 @@ sidecar. It cannot be inflated by standing still or re-walking old rooms.
 The agent can also `claim_milestone` for story beats; claims are logged as
 claims, separate from objective metrics.
 
+## Running under exo (the supervisor experiment)
+
+The player agent cannot modify its own harness — but an exo agent can. The
+`supervisor/` directory turns this evaluation into a nested-RSI experiment:
+exo acts as the player's engineer, running it in chunks inside its sandbox,
+reading its metrics and its `harness_wishlist` memory, and improving the
+harness code one measured experiment at a time.
+
+```bash
+./exo.sh                                        # start exo as usual
+exo secret set openai-api-key                   # if not already available
+# then paste the contents of supervisor/PROMPT.md into the REPL
+# (or: exo conversation send --agent <agent> --conversation <conv> \
+#        --message "$(cat evaluation/rpg-player/supervisor/PROMPT.md)")
+```
+
+The prompt tells exo to run `supervisor/sandbox-setup.sh` (one-time
+container setup: local repo copy, Node, Playwright Chromium), then loop:
+run 25 turns, study the artifacts, change one thing, measure, log to
+`supervisor/LOG.md`. It is instructed to leave all code changes in the
+mounted working tree for human review and never to touch the canonical
+event logs.
+
 ## Fresh start
 
 ```bash
