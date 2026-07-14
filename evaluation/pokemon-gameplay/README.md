@@ -42,11 +42,15 @@ exo conversation send pokemon play "Start playing. Work toward your top todo."
 ```
 
 Each `send` runs one turn; the agent's summary persists in the conversation.
-For long unattended runs, chain turns with the driver (reflection turn every
-10th, state snapshot every chunk, GIF + report at the end):
+For long unattended runs, loop it (with a reflection prompt every 10th turn
+so the agent stops to improve its playbook/tools instead of playing):
 
 ```bash
-./drive.sh --agent pokemon --conversation play --target 250
+for i in $(seq 1 250); do
+  PROMPT="Continue playing. Work toward your top todo; end with a one-line summary."
+  [ $((i % 10)) -eq 0 ] && PROMPT="Do NOT press buttons this turn: review recent turns and update your playbook, memories, todos, and tools. Then summarize what you changed."
+  exo conversation send pokemon play "$PROMPT"
+done
 ```
 
 Env knobs: `POKEMON_EMULATOR_URL` / `POKEMON_EMULATOR_PORT` (default
