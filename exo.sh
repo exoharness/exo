@@ -16,7 +16,7 @@ fi
 EXO_BIN="${EXO_BIN:-$ROOT_DIR/target/debug/exo}"
 SCHEDULER_BIN="${EXO_SCHEDULER_BIN:-$ROOT_DIR/target/debug/exo-scheduler-runner}"
 ENV_FILE="${EXO_ENV_FILE:-$ROOT_DIR/.env}"
-MODEL="${EXO_MODEL:-gpt-5.4}"
+MODEL="${EXO_MODEL:-gpt-5.6-terra}"
 AGENT="${EXO_AGENT:-exo-agent}"
 AGENT_NAME="${EXO_AGENT_NAME:-Exo Agent}"
 CONVERSATION="${EXO_CONVERSATION:-dev}"
@@ -98,7 +98,7 @@ Subcommands:
                    image) without starting anything
 
 Options:
-  --model <model>              Model binding name (default: gpt-5.4)
+  --model <model>              Model binding name (default: gpt-5.6-terra)
   --upstream-model <model>     Upstream model id for register-model (default: --model)
   --secret-name <name>         Secret name for register-model (e.g. openai)
   --secret-env <env-var>       Environment variable holding the API key for register-model
