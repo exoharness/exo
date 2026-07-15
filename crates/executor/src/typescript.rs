@@ -369,9 +369,15 @@ impl TypeScriptRunnerProcess {
                         let status = self.child.wait().await?;
                         return Err(self.exited_error(status).await);
                     };
-                    let message: GuestToHostMessage = serde_json::from_str(&line).map_err(|error| {
-                        anyhow!("invalid TypeScript harness protocol message: {line}\ncaused by: {error}")
-                    })?;
+                    let message = match serde_json::from_str::<GuestToHostMessage>(&line) {
+                        Ok(message) => message,
+                        Err(error) => {
+                            // malformed guest message (e.g. a tool that passes bad field)
+                            // Reject explicitly so failure is clean, then keep serving the loop.
+                            self.reject_undecodable_message(&line, &error)?;
+                            continue;
+                        }
+                    };
                     match message {
                         GuestToHostMessage::RuntimeRequest { id, request } => {
                             let request_kind = request.kind();
@@ -635,6 +641,28 @@ impl TypeScriptRunnerProcess {
             sandbox_process_id,
             reused,
         })
+    }
+
+    /// Handles a guest line that failed to decode into a `GuestToHostMessage`.
+    ///
+    /// If the line is recognizably a request with an `id`, we reply with an
+    /// error response so the guest's pending call rejects and the turn keeps
+    /// running. Otherwise there is nothing to reject, so we log and drop it.
+    fn reject_undecodable_message(&self, line: &str, error: &serde_json::Error) -> Result<()> {
+        let detail =
+            format!("invalid TypeScript harness protocol message: {line}\ncaused by: {error}");
+        match undecodable_message_response(line, detail.clone()) {
+            Some(response) => {
+                tracing::warn!("{detail}");
+                send_host_message(&self.host_tx, response)
+            }
+            None => {
+                // No id (or an unrecognized kind): the guest has no pending call
+                // keyed to this line, so drop it instead of aborting the turn.
+                tracing::warn!("ignoring undecodable guest message: {detail}");
+                Ok(())
+            }
+        }
     }
 
     async fn exited_error(&mut self, status: ExitStatus) -> anyhow::Error {
@@ -903,6 +931,53 @@ enum HostToGuestMessage {
     RuntimeEvent {
         event: RuntimeEvent,
     },
+}
+
+/// A lenient view of a guest line used only to recover the `kind`/`id` when the
+/// full `GuestToHostMessage` fails to decode, so we can reject the right pending
+/// request instead of tearing down the turn.
+#[derive(Debug, Deserialize)]
+struct GuestMessagePreview {
+    kind: GuestMessageKind,
+    #[serde(default)]
+    id: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GuestMessageKind {
+    RuntimeRequest,
+    ExoRequest,
+    #[serde(other)]
+    Other,
+}
+
+/// Decides how to reply to a guest line that failed to decode into a
+/// `GuestToHostMessage`. Returns an error response keyed to the pending request
+/// when the line's `kind`/`id` can be recovered, or `None` when the line can't
+/// be tied to a pending call (so the caller drops it rather than aborting).
+fn undecodable_message_response(line: &str, detail: String) -> Option<HostToGuestMessage> {
+    match serde_json::from_str::<GuestMessagePreview>(line).ok()? {
+        GuestMessagePreview {
+            kind: GuestMessageKind::RuntimeRequest,
+            id: Some(id),
+        } => Some(HostToGuestMessage::RuntimeResponse {
+            id,
+            ok: false,
+            payload: None,
+            error: Some(detail),
+        }),
+        GuestMessagePreview {
+            kind: GuestMessageKind::ExoRequest,
+            id: Some(id),
+        } => Some(HostToGuestMessage::ExoResponse {
+            id,
+            ok: false,
+            response: Box::new(None),
+            error: Some(detail),
+        }),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1277,5 +1352,68 @@ mod tests {
             vec![None, Some(1000)]
         );
         assert!(pages.lock().expect("pages lock").is_empty());
+    }
+
+    // Regression: a tool that passes a bad field (here a secret name where a
+    // UUID is required) makes the full envelope fail to decode. That must not
+    // tear down the turn — we recover the `id` and reject just that request.
+    #[test]
+    fn undecodable_exo_request_is_rejected_by_id() {
+        let line = r#"{"kind":"exo_request","id":12,"request":{"type":"conversation_get_secret","agent_id":"019f4823-3441-7450-b14e-0d8951193dc8","conversation_id":"019f4823-34d5-76e1-b2ee-8da7ad6b0dc9","secret_id":"youtube-client-secret"}}"#;
+
+        // The full message really does fail to decode, so the fallback matters.
+        let decode_error = serde_json::from_str::<GuestToHostMessage>(line)
+            .expect_err("a non-UUID secret_id must fail to decode");
+
+        let detail = format!("bad message: {decode_error}");
+        let response = undecodable_message_response(line, detail.clone())
+            .expect("a request with an id should produce an error response");
+
+        match response {
+            HostToGuestMessage::ExoResponse {
+                id,
+                ok,
+                response,
+                error,
+            } => {
+                assert_eq!(id, 12);
+                assert!(!ok);
+                assert!(response.is_none());
+                assert_eq!(error.as_deref(), Some(detail.as_str()));
+            }
+            other => panic!("expected an ExoResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn undecodable_runtime_request_is_rejected_by_id() {
+        let line = r#"{"kind":"runtime_request","id":7,"request":{"type":"totally_unknown"}}"#;
+        let response = undecodable_message_response(line, "bad message".to_string())
+            .expect("a runtime request with an id should produce an error response");
+
+        match response {
+            HostToGuestMessage::RuntimeResponse { id, ok, .. } => {
+                assert_eq!(id, 7);
+                assert!(!ok);
+            }
+            other => panic!("expected a RuntimeResponse, got {other:?}"),
+        }
+    }
+
+    // Without an id (or with an unrecognized kind) there is no pending guest
+    // call to reject, so the line is dropped instead of aborting the turn.
+    #[test]
+    fn undecodable_message_without_id_is_dropped() {
+        for line in [
+            r#"{"kind":"exo_request","request":{"type":"conversation_get_secret"}}"#,
+            r#"{"kind":"stream_event","event":{"garbage":true}}"#,
+            r#"{"not":"even close"}"#,
+            "not json at all",
+        ] {
+            assert!(
+                undecodable_message_response(line, "bad message".to_string()).is_none(),
+                "expected {line} to be dropped",
+            );
+        }
     }
 }
