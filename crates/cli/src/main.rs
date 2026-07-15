@@ -441,6 +441,8 @@ enum AgentCommands {
         #[arg(long, value_enum)]
         sandbox_provider: Option<SandboxProviderArg>,
         #[arg(long, value_enum)]
+        sandbox_scope: Option<SandboxScopeArg>,
+        #[arg(long, value_enum)]
         networking: Option<EnabledDisabled>,
         #[arg(long)]
         model: String,
@@ -476,6 +478,8 @@ enum AgentCommands {
         #[arg(long, value_enum)]
         sandbox_provider: Option<SandboxProviderArg>,
         #[arg(long, value_enum)]
+        sandbox_scope: Option<SandboxScopeArg>,
+        #[arg(long, value_enum)]
         networking: Option<EnabledDisabled>,
         #[arg(long)]
         model: Option<String>,
@@ -496,11 +500,35 @@ enum AgentCommands {
         #[arg(long)]
         braintrust_project_id: Option<String>,
     },
+    Mount {
+        #[command(subcommand)]
+        command: AgentMountCommands,
+    },
     Show {
         agent: String,
     },
     Delete {
         agent: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentMountCommands {
+    List {
+        agent: String,
+    },
+    Add {
+        agent: String,
+        host_path: PathBuf,
+        mount_path: Option<String>,
+        #[arg(long)]
+        rw: bool,
+        #[arg(long)]
+        internal: bool,
+    },
+    Remove {
+        agent: String,
+        mount_path: String,
     },
 }
 
@@ -873,6 +901,7 @@ async fn main() -> Result<()> {
                                 .and_then(HarnessSelection::default_sandbox_image)
                                 .map(str::to_string),
                             sandbox_provider: default_sandbox_provider,
+                            sandbox_scope: None,
                             enable_networking: harness_selection
                                 .as_ref()
                                 .is_some_and(HarnessSelection::default_enable_networking),
@@ -919,6 +948,7 @@ async fn main() -> Result<()> {
                 tool_creation,
                 sandbox_image,
                 sandbox_provider,
+                sandbox_scope,
                 networking,
                 model,
                 max_output_tokens,
@@ -968,6 +998,7 @@ async fn main() -> Result<()> {
                         sandbox_provider: sandbox_provider
                             .map(SandboxProvider::from)
                             .unwrap_or(default_sandbox_provider),
+                        sandbox_scope: sandbox_scope.map(SandboxScope::from),
                         enable_networking,
                         model,
                         max_output_tokens,
@@ -996,6 +1027,7 @@ async fn main() -> Result<()> {
                 sandbox_image,
                 clear_sandbox_image,
                 sandbox_provider,
+                sandbox_scope,
                 networking,
                 model,
                 max_output_tokens,
@@ -1123,28 +1155,36 @@ async fn main() -> Result<()> {
                     }
                 }
                 if clear_sandbox_image {
-                    config.sandbox_image = None;
+                    config.sandbox.image = None;
                     changed = true;
                 } else if let Some(sandbox_image) = sandbox_image {
                     if sandbox_image.trim().is_empty() {
                         bail!("sandbox image must not be empty");
                     }
-                    config.sandbox_image = Some(sandbox_image);
+                    config.sandbox.image = Some(sandbox_image);
                     changed = true;
                 }
 
                 if let Some(sandbox_provider) = sandbox_provider {
                     let sandbox_provider = SandboxProvider::from(sandbox_provider);
-                    if config.sandbox_provider != sandbox_provider {
-                        config.sandbox_provider = sandbox_provider;
+                    if config.sandbox.provider != sandbox_provider {
+                        config.sandbox.provider = sandbox_provider;
+                        changed = true;
+                    }
+                }
+
+                if let Some(sandbox_scope) = sandbox_scope {
+                    let sandbox_scope = SandboxScope::from(sandbox_scope);
+                    if config.sandbox.scope != sandbox_scope {
+                        config.sandbox.scope = sandbox_scope;
                         changed = true;
                     }
                 }
 
                 if let Some(networking) = networking {
                     let enable_networking = networking.enabled();
-                    if config.enable_networking != enable_networking {
-                        config.enable_networking = enable_networking;
+                    if config.sandbox.enable_networking != enable_networking {
+                        config.sandbox.enable_networking = enable_networking;
                         changed = true;
                     }
                 }
@@ -1213,6 +1253,80 @@ async fn main() -> Result<()> {
                 agent.put_config(config).await?;
                 println!("updated agent {}", agent.record().slug);
             }
+            AgentCommands::Mount { command } => match command {
+                AgentMountCommands::List { agent } => {
+                    let agent = must_get_agent(harness.as_ref(), &agent).await?;
+                    let config = agent.config().await?;
+                    print_mounts(&config.sandbox.mounts);
+                }
+                AgentMountCommands::Add {
+                    agent,
+                    host_path,
+                    mount_path,
+                    rw,
+                    internal,
+                } => {
+                    let agent = must_get_agent(harness.as_ref(), &agent).await?;
+                    let canonical_host_path = canonicalize_directory(&host_path)?;
+
+                    let mut config = agent.config().await?;
+                    let mount_path = match mount_path {
+                        Some(mount_path) => {
+                            validate_mount_path(&mount_path)?;
+                            mount_path
+                        }
+                        None => default_mount_path(&canonical_host_path, &config.sandbox.mounts),
+                    };
+                    let new_mount = FileSystemMount {
+                        host_path: canonical_host_path.display().to_string(),
+                        mount_path: mount_path.clone(),
+                        mode: if rw {
+                            FileSystemMountMode::ReadWrite
+                        } else {
+                            FileSystemMountMode::ReadOnly
+                        },
+                        internal: Some(internal),
+                    };
+
+                    if let Some(existing) = config
+                        .sandbox
+                        .mounts
+                        .iter_mut()
+                        .find(|mount| mount.mount_path == mount_path)
+                    {
+                        *existing = new_mount;
+                    } else {
+                        config.sandbox.mounts.push(new_mount);
+                    }
+
+                    agent.put_config(config).await?;
+                    println!(
+                        "mounted {} -> {} ({}) for agent {}",
+                        canonical_host_path.display(),
+                        mount_path,
+                        if rw { "rw" } else { "ro" },
+                        agent.record().slug
+                    );
+                }
+                AgentMountCommands::Remove { agent, mount_path } => {
+                    let agent = must_get_agent(harness.as_ref(), &agent).await?;
+                    let mut config = agent.config().await?;
+                    let before = config.sandbox.mounts.len();
+                    config
+                        .sandbox
+                        .mounts
+                        .retain(|mount| mount.mount_path != mount_path);
+                    if config.sandbox.mounts.len() == before {
+                        bail!("mount not found: {mount_path}");
+                    }
+                    agent.put_config(config).await?;
+                    println!(
+                        "removed mount {} from agent {}",
+                        mount_path,
+                        agent.record().slug
+                    );
+                }
+            },
             AgentCommands::Show { agent } => {
                 let agent = must_get_agent(harness.as_ref(), &agent).await?;
                 let config = agent.config().await?;
@@ -1247,13 +1361,22 @@ async fn main() -> Result<()> {
                 );
                 println!(
                     "sandbox_image: {}",
-                    config.sandbox_image.as_deref().unwrap_or("default")
+                    config.sandbox.image.as_deref().unwrap_or("default")
                 );
                 println!(
                     "sandbox_provider: {}",
-                    format_sandbox_provider(config.sandbox_provider)
+                    format_sandbox_provider(config.sandbox.provider)
                 );
-                println!("enable_networking: {}", config.enable_networking);
+                println!(
+                    "sandbox_scope: {}",
+                    match config.sandbox.scope {
+                        executor::SandboxScope::Agent => "agent",
+                        executor::SandboxScope::Conversation => "conversation",
+                    }
+                );
+                println!("enable_networking: {}", config.sandbox.enable_networking);
+                println!("sandbox_mounts:");
+                print_mounts(&config.sandbox.mounts);
                 println!("model: {}", config.model);
                 println!(
                     "max_output_tokens: {}",
@@ -1959,6 +2082,11 @@ fn command_agent_ref(command: &Commands) -> Option<&str> {
             AgentCommands::Update { agent, .. }
             | AgentCommands::Show { agent }
             | AgentCommands::Delete { agent } => Some(agent.as_str()),
+            AgentCommands::Mount { command } => match command {
+                AgentMountCommands::List { agent }
+                | AgentMountCommands::Add { agent, .. }
+                | AgentMountCommands::Remove { agent, .. } => Some(agent.as_str()),
+            },
             AgentCommands::List | AgentCommands::Create { .. } => None,
         },
         Commands::Conversation { command } => match command {
