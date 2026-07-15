@@ -70,6 +70,10 @@ automatically via [mise](https://mise.jdx.dev)._
 It'll build Exo (may take a few minutes), then ask for the API key and your name
 and your agent's name, and give you the command to start Exo (./exo.sh).
 
+<div align="center">
+<img height="300" alt="exo-img" src="https://github.com/user-attachments/assets/b8fafe1c-7814-4681-b6f6-bed6859c7835" />
+</div>
+
 ## Basic Agent Interaction
 
 For the basic setup of Exo, there are two methods of interacting: on the command
