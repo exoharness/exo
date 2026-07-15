@@ -14,6 +14,7 @@ import {
   type TaskTreeSnapshot,
   writeTaskTreeSnapshot,
 } from "./task-tree-snapshot.js";
+import { unwrapHarnessToolArgs } from "./tool-args.js";
 
 type BridgeEventPayload = {
   ok: true;
@@ -330,12 +331,13 @@ function localTool(options: {
     handler: {
       async execute(args, execution): Promise<ToolResult> {
         try {
-          const bridgeEvent = options.buildEvent(args);
+          const flat = unwrapHarnessToolArgs(args as JsonObject);
+          const bridgeEvent = options.buildEvent(flat);
           if (options.mutateSnapshot) {
             const snapshot = await loadOrCreateTaskTreeSnapshot(
               execution.context,
             );
-            options.mutateSnapshot(args, snapshot);
+            options.mutateSnapshot(flat, snapshot);
             await writeTaskTreeSnapshot(execution.context, snapshot);
           }
           const payload: BridgeEventPayload = { ok: true, bridgeEvent };

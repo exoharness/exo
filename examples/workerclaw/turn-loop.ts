@@ -23,9 +23,15 @@ import {
 import { ensureTable } from "@exo/model-runtime/cost";
 
 import { materializeWorkerclawPromptMessages } from "./message-materialize.js";
+import {
+  buildTextOnlyNudgeMessage,
+  extractAssistantTextFromEvents,
+  isRoundBudgetExhausted,
+  resolveMaxTextOnlyNudges,
+  shouldExitOnTextOnly,
+} from "./turn-loop-nudge.js";
 import { resolveLlmBinding } from "../typescript/shared.js";
 import {
-  buildAutonomousContinueUserMessage,
   buildRoundBudgetContinueMessage,
   DEFAULT_ROUND_BUDGET_EXTENSIONS,
   isTaskTreeFinished,
@@ -91,20 +97,29 @@ async function runWorkerclawTurnLoop(
 ): Promise<string | null> {
   const { conversation } = context.exoharness.current;
   const maxToolRoundTrips = context.agentConfig.maxToolRoundTrips;
+  const maxTextOnlyNudges = resolveMaxTextOnlyNudges();
   let latestEventId: string | null = null;
   let budgetExtensions = 0;
+  let completeTaskCalled = false;
+  let textOnlyNudgesUsed = 0;
 
   for (let round = 0; ; round += 1) {
     if (
-      maxToolRoundTrips !== null &&
-      maxToolRoundTrips !== undefined &&
-      round > maxToolRoundTrips
+      isRoundBudgetExhausted(
+        round,
+        maxToolRoundTrips,
+        maxTextOnlyNudges,
+        completeTaskCalled,
+      )
     ) {
       const snapshot = await readTaskTreeSnapshot(context);
       if (isTaskTreeFinished(snapshot)) {
         return latestEventId;
       }
       if (budgetExtensions >= DEFAULT_ROUND_BUDGET_EXTENSIONS) {
+        console.warn(
+          `[workerclaw] round budget exhausted before complete_task (round=${round}, maxToolRoundTrips=${maxToolRoundTrips ?? "none"}, nudgesUsed=${textOnlyNudgesUsed})`,
+        );
         return latestEventId;
       }
       budgetExtensions += 1;
@@ -184,16 +199,40 @@ async function runWorkerclawTurnLoop(
       if (isTaskTreeFinished(snapshot)) {
         return latestEventId;
       }
-      const assistantText = extractAssistantTextFromEvents(events);
+      if (
+        shouldExitOnTextOnly(
+          completeTaskCalled,
+          textOnlyNudgesUsed,
+          maxTextOnlyNudges,
+        )
+      ) {
+        return latestEventId;
+      }
+
+      textOnlyNudgesUsed += 1;
+      const lastAssistantText = extractAssistantTextFromEvents(events);
+      const nudge = buildTextOnlyNudgeMessage(
+        textOnlyNudgesUsed,
+        lastAssistantText,
+      );
+      console.warn(
+        `[workerclaw] text-only exit before complete_task — nudge ${textOnlyNudgesUsed}/${maxTextOnlyNudges}`,
+      );
       latestEventId = await appendTurnEvents(context, [
         messagesEvent([
-          userTextMessage(buildAutonomousContinueUserMessage(assistantText)),
+          {
+            role: "developer",
+            content: nudge,
+          },
         ]),
       ]);
       continue;
     }
 
     for (const toolCall of toolCalls) {
+      if (toolCall.request.functionName === "complete_task") {
+        completeTaskCalled = true;
+      }
       const toolResultEvents = await runtime.traceToolCall(
         turnParent,
         context,
@@ -210,41 +249,6 @@ async function runWorkerclawTurnLoop(
       return latestEventId;
     }
   }
-}
-
-function extractAssistantTextFromEvents(events: EventData[]): string {
-  const parts: string[] = [];
-  for (const event of events) {
-    if (event.type !== "messages" || !Array.isArray(event.messages)) {
-      continue;
-    }
-    for (const message of event.messages) {
-      if (message.role !== "assistant") {
-        continue;
-      }
-      if (typeof message.content === "string" && message.content.trim()) {
-        parts.push(message.content.trim());
-        continue;
-      }
-      if (!Array.isArray(message.content)) {
-        continue;
-      }
-      for (const block of message.content) {
-        if (!block || typeof block !== "object") {
-          continue;
-        }
-        const typed = block as { type?: string; text?: string };
-        if (
-          typed.type === "text" &&
-          typeof typed.text === "string" &&
-          typed.text.trim()
-        ) {
-          parts.push(typed.text.trim());
-        }
-      }
-    }
-  }
-  return parts.join("\n").trim();
 }
 
 async function appendTurnEvents(
