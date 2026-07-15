@@ -182,6 +182,28 @@ There are a number of prompt files that Exo uses during runtime. You can edit th
 After changing prompt files, ask Exo to rebuild/restart itself for them to go in
 use.
 
+## Ongoing Work
+
+Exo is still in the early stages of development, with many areas of active
+work. We welcome participation ranging from core development to feedback from
+users. Current areas of focus include:
+
+- **Autonomous self-maintenance:** Exo should periodically inspect its context,
+  memories, tools, scheduled tasks, and running processes; identify stale or
+  conflicting state; propose or perform safe cleanup; and record what changed.
+  Success means a long-running agent becomes more organized over time rather
+  than accumulating context and tool rot.
+- **Recoverable, portable execution:** Schedulers, adapters, and other
+  long-running work should persist enough state to resume after process,
+  machine, or network failure. Work should be movable between compatible
+  machines without losing canonical history or duplicating side effects.
+- **High-level multi-agent orchestration:** Cloning and lineage are useful
+  primitives, but agents also need policies for when to clone, how to divide
+  work, how children report results, how conflicting conclusions are resolved,
+  and when a lineage should stop. The goal is a family of agents that produces
+  better results than one agent without creating unbounded cost or coordination
+  overhead.
+
 ## License
 
 MIT
