@@ -7,6 +7,8 @@ import {
   registerAgentToolsFromDirectoryIfExists,
   registerLibraryToolModulePath,
   registerAdapterTools,
+  registerSkillTools,
+  skillsInstruction,
   type BuiltInToolName,
   type HarnessToolRegistry,
   type Message,
@@ -17,6 +19,7 @@ import { registerIntrospectionTools } from "./introspection-tools";
 import { registerSandboxTools } from "./sandbox-tools";
 import { registerTaskTreeTools } from "./task-tree-tools";
 import { registerSchedulerTools } from "./scheduler-tools";
+import { memoryInstruction, registerMemoryTools } from "./memory-tools.js";
 import {
   basicHarnessInstructions,
   defaultBuiltInToolNames,
@@ -49,6 +52,8 @@ async function registerWorkerclawTools(
   registerAdapterTools(tools);
   registerIntrospectionTools(tools);
   registerSandboxTools(tools);
+  registerMemoryTools(tools);
+  registerSkillTools(tools);
   if (process.env.WORKERCLAW_ENABLE_SCHEDULER === "true") {
     registerSchedulerTools(tools);
   }
@@ -142,7 +147,9 @@ function builtInToolNames(context: TurnContext): BuiltInToolName[] {
   return defaultBuiltInToolNames(context);
 }
 
-function workerclawInstructions(context: TurnContext): Message[] {
+async function workerclawInstructions(
+  context: TurnContext,
+): Promise<Message[]> {
   const repoPath = process.env.WORKERCLAW_REPO ?? DEFAULT_WORKERCLAW_REPO;
   const selfMapPath =
     process.env.WORKERCLAW_SELF_MAP ?? DEFAULT_WORKERCLAW_SELF_MAP;
@@ -157,6 +164,17 @@ function workerclawInstructions(context: TurnContext): Message[] {
       content:
         "You have full autonomy to plan and execute work. Maintain a task tree throughout the job using task_tree_init, task_tree_upsert_node, and task_tree_update_status. Depth 1 = objectives, depth 2 = sub-objectives, depth 3 = TODO leaves (isLeaf true). Update node status as you work: pending → in_progress → completed/failed. Report client outputs with report_deliverable (presentations, files, deployed URLs) — never send E2B desktop/VNC stream URLs to the client; those are internal Live view only. Fix recoverable sandbox/tool errors with executeCommand or e2b_run_command — do not call complete_task with status failed for fixable issues. When all TODO leaves are completed and deliverables are reported, call complete_task once. You may create external adapters (Slack, WhatsApp, Signal, Discord, IRC) with create_adapter and reply with send_adapter_message; do not auto-send model text externally.",
     },
+    {
+      role: "developer",
+      content: [
+        "## Self-evolution (memory, skills, tools)",
+        "Persist what you learn across jobs:",
+        "- remember / forget — durable facts (client prefs, project conventions, lessons). Injected every turn.",
+        "- install_skill / use_skill / list_skills / uninstall_skill — reusable procedures in agent-skills format. Call use_skill before matching work. These are learned skills you author; they complement (do not replace) any methodology skills injected in the task briefing.",
+        "- install_agent_tool — when the same helper is needed across rounds/jobs and no catalog tool covers it.",
+        "Prefer remember for short facts, install_skill for multi-step playbooks, install_agent_tool for callable code helpers.",
+      ].join("\n"),
+    },
     oliviaToolLayerInstruction(context),
     {
       role: "developer",
@@ -170,18 +188,26 @@ function workerclawInstructions(context: TurnContext): Message[] {
       content: localPrompt,
     });
   }
+  const memory = await memoryInstruction(context);
+  if (memory !== null) {
+    instructions.push(memory);
+  }
+  const skills = await skillsInstruction(context);
+  if (skills !== null) {
+    instructions.push(skills);
+  }
   return instructions;
 }
 
 function oliviaToolLayerInstruction(context: TurnContext): Message {
   const layers = [
     "Tool layers (use the best match; all may be registered in the same turn):",
-    "1. Olivia platform tools — registered natively by name (e.g. createPresentation, webSearch, githubCreateRepo) from the worker's enabled catalog, plus E2B library modules (e2b_*). The task briefing (# Available tools) lists the same catalog for reference. Prefer these for GitHub, presentations, deploy, Google, etc.",
-    "2. WorkerClaw substrate — task_tree_*, report_deliverable, complete_task, adapters, sandbox/introspection tools.",
+    "1. Olivia platform tools — registered natively by name (e.g. createPresentation, webSearch, githubCreateRepo) from the worker's enabled catalog, plus E2B library modules (e2b_*). The task briefing (# Available tools) lists the catalog plus meta-tools for reference. Prefer these for GitHub, presentations, deploy, Google, etc.",
+    "2. WorkerClaw substrate — task_tree_*, report_deliverable, complete_task, adapters, sandbox/introspection, remember/forget, install_skill/use_skill.",
   ];
   if (context.agentConfig.enableAgentToolCreation) {
     layers.push(
-      "3. Agent-installed tools — previously saved under .exo/agent-tools/ (reloaded each round). Install new ones with install_agent_tool when no platform tool fits; use uninstall_agent_tool to remove obsolete or duplicate helpers. Do not reinstall tools that duplicate Olivia catalog tools (Unless the tool is not working).",
+      "3. install_agent_tool / uninstall_agent_tool — first-class. Install a reusable TypeScript tool under .exo/agent-tools/ when you need the same helper more than once and no Olivia catalog tool covers it. Previously installed agent tools reload each round. Do not reinstall duplicates of working Olivia catalog tools.",
     );
   }
   return { role: "developer", content: layers.join("\n") };
