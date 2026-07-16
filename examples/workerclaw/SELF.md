@@ -14,13 +14,23 @@ Use this map before changing WorkerClaw itself.
 
 - `examples/workerclaw/harness.ts`: assembles WorkerClaw's prompt and tool registry.
 - `examples/workerclaw/prompts/me.md`: durable identity and operating rules.
+- `examples/workerclaw/memory-tools.ts`: agent-scoped `remember` / `forget` (artifact `memory/workerclaw-memory.json`).
 - `examples/workerclaw/task-tree-tools.ts`: task tree tools + `bridgeEvent` payloads in tool results.
 - `examples/workerclaw/introspection-tools.ts`: adapter and conversation introspection.
 - `examples/workerclaw/sandbox-tools.ts`: sandbox snapshot and rewind tools.
 - `examples/workerclaw/scheduler-tools.ts`: scheduled task tools (optional via `WORKERCLAW_ENABLE_SCHEDULER`).
+- `typescript/harness/skill-tools.ts`: `install_skill` / `use_skill` / `list_skills` / `uninstall_skill` (agent artifacts).
 - `examples/workerclaw/adapters/`: adapter setup prompts and worker implementations.
 - `typescript/harness/adapter-tools.ts`: model-visible adapter tool definitions.
 - `crates/executor/src/adapter/`: Rust adapter runtime and supervision.
+
+## Self-evolution (rung 1)
+
+WorkerClaw can grow capability without rebuilding itself:
+
+- **Memory** — short durable facts across jobs (`remember` / `forget`).
+- **Skills** — multi-step playbooks as agent artifacts (`install_skill` / `use_skill`). Distinct from Olivia onboarding methodology skills injected in the task briefing.
+- **Agent tools** — TypeScript helpers via `install_agent_tool` (when enabled).
 
 ## Task Tree
 
