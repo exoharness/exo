@@ -46,6 +46,7 @@ async fn creates_agents_and_conversations_with_persisted_config() {
             enable_agent_tool_creation: true,
             sandbox_image: Some("agent-image".to_string()),
             sandbox_provider: SandboxProvider::Docker,
+            sandbox_scope: None,
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: Some(512),
@@ -109,6 +110,7 @@ async fn send_persists_messages_through_harness() {
     let harness = BasicHarness::new(
         exoharness,
         Arc::new(FakeModelClient::new(vec![ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("pong")],
             tool_calls: Vec::new(),
@@ -130,6 +132,7 @@ async fn send_persists_messages_through_harness() {
             enable_agent_tool_creation: true,
             sandbox_image: None,
             sandbox_provider: SandboxProvider::LocalProcess,
+            sandbox_scope: None,
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: None,
@@ -202,6 +205,7 @@ async fn usage_record_is_persisted_with_computed_cost() {
     let harness = BasicHarness::with_pricing_table(
         Arc::clone(&exoharness),
         Arc::new(FakeModelClient::new(vec![ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("pong")],
             tool_calls: Vec::new(),
@@ -249,6 +253,7 @@ async fn usage_record_is_persisted_with_computed_cost() {
             enable_agent_tool_creation: true,
             sandbox_image: None,
             sandbox_provider: SandboxProvider::LocalProcess,
+            sandbox_scope: None,
             enable_networking: false,
             model: "claude-sonnet-4-6".to_string(),
             max_output_tokens: None,
@@ -347,6 +352,7 @@ async fn usage_record_with_anthropic_cache_hits() {
     let harness = BasicHarness::with_pricing_table(
         Arc::clone(&exoharness),
         Arc::new(FakeModelClient::new(vec![ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("pong")],
             tool_calls: Vec::new(),
@@ -394,6 +400,7 @@ async fn usage_record_with_anthropic_cache_hits() {
             enable_agent_tool_creation: true,
             sandbox_image: None,
             sandbox_provider: SandboxProvider::LocalProcess,
+            sandbox_scope: None,
             enable_networking: false,
             model: "claude-sonnet-4-6".to_string(),
             max_output_tokens: None,
@@ -465,6 +472,7 @@ async fn usage_record_with_openai_inclusive_accounting() {
     let harness = BasicHarness::with_pricing_table(
         Arc::clone(&exoharness),
         Arc::new(FakeModelClient::new(vec![ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("pong")],
             tool_calls: Vec::new(),
@@ -514,6 +522,7 @@ async fn usage_record_with_openai_inclusive_accounting() {
             enable_agent_tool_creation: true,
             sandbox_image: None,
             sandbox_provider: SandboxProvider::LocalProcess,
+            sandbox_scope: None,
             enable_networking: false,
             model: "gpt-4o-mini".to_string(),
             max_output_tokens: None,
@@ -573,6 +582,7 @@ async fn close_session_appends_session_ended_event() {
     let harness = BasicHarness::new(
         Arc::clone(&exoharness),
         Arc::new(FakeModelClient::new(vec![ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("pong")],
             tool_calls: Vec::new(),
@@ -594,6 +604,7 @@ async fn close_session_appends_session_ended_event() {
             enable_agent_tool_creation: true,
             sandbox_image: None,
             sandbox_provider: SandboxProvider::LocalProcess,
+            sandbox_scope: None,
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: None,
@@ -651,6 +662,7 @@ async fn updating_agent_config_refreshes_executor_cache() {
     );
     let model = Arc::new(FakeModelClient::new(vec![
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("pong-1")],
             tool_calls: Vec::new(),
@@ -660,6 +672,7 @@ async fn updating_agent_config_refreshes_executor_cache() {
             duration: None,
         },
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("pong-2")],
             tool_calls: Vec::new(),
@@ -681,6 +694,7 @@ async fn updating_agent_config_refreshes_executor_cache() {
             enable_agent_tool_creation: true,
             sandbox_image: None,
             sandbox_provider: SandboxProvider::LocalProcess,
+            sandbox_scope: None,
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: None,
@@ -733,6 +747,7 @@ async fn send_executes_shell_tool_when_enabled() {
     );
     let model = Arc::new(FakeModelClient::new(vec![
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: Vec::new(),
             tool_calls: vec![PendingToolCall {
@@ -748,6 +763,7 @@ async fn send_executes_shell_tool_when_enabled() {
             duration: None,
         },
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("done")],
             tool_calls: Vec::new(),
@@ -769,6 +785,7 @@ async fn send_executes_shell_tool_when_enabled() {
             enable_agent_tool_creation: true,
             sandbox_image: Some("agent-image".to_string()),
             sandbox_provider: SandboxProvider::LocalProcess,
+            sandbox_scope: None,
             enable_networking: true,
             model: "gpt-5.4".to_string(),
             max_output_tokens: None,
@@ -863,6 +880,7 @@ async fn harness_exposes_raw_exoharness_handles() {
             enable_agent_tool_creation: true,
             sandbox_image: None,
             sandbox_provider: SandboxProvider::LocalProcess,
+            sandbox_scope: None,
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: None,
@@ -921,6 +939,7 @@ async fn updating_mounts_recreates_conversation_sandbox() {
     );
     let model = Arc::new(FakeModelClient::new(vec![
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: Vec::new(),
             tool_calls: vec![PendingToolCall {
@@ -936,6 +955,7 @@ async fn updating_mounts_recreates_conversation_sandbox() {
             duration: None,
         },
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("done-1")],
             tool_calls: Vec::new(),
@@ -945,6 +965,7 @@ async fn updating_mounts_recreates_conversation_sandbox() {
             duration: None,
         },
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: Vec::new(),
             tool_calls: vec![PendingToolCall {
@@ -960,6 +981,7 @@ async fn updating_mounts_recreates_conversation_sandbox() {
             duration: None,
         },
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("done-2")],
             tool_calls: Vec::new(),
@@ -981,6 +1003,7 @@ async fn updating_mounts_recreates_conversation_sandbox() {
             enable_agent_tool_creation: true,
             sandbox_image: None,
             sandbox_provider: SandboxProvider::LocalProcess,
+            sandbox_scope: None,
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: None,
@@ -1093,6 +1116,7 @@ async fn updating_sandbox_image_recreates_shell_sandbox_without_shell_program() 
             enable_agent_tool_creation: true,
             sandbox_image: None,
             sandbox_provider: SandboxProvider::LocalProcess,
+            sandbox_scope: None,
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: None,
@@ -1175,6 +1199,7 @@ async fn conversation_model_override_changes_effective_model() {
     );
     let model = Arc::new(FakeModelClient::new(vec![
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("first")],
             tool_calls: Vec::new(),
@@ -1184,6 +1209,7 @@ async fn conversation_model_override_changes_effective_model() {
             duration: None,
         },
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("second")],
             tool_calls: Vec::new(),
@@ -1193,6 +1219,7 @@ async fn conversation_model_override_changes_effective_model() {
             duration: None,
         },
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("third")],
             tool_calls: Vec::new(),
@@ -1214,6 +1241,7 @@ async fn conversation_model_override_changes_effective_model() {
             enable_agent_tool_creation: true,
             sandbox_image: None,
             sandbox_provider: SandboxProvider::LocalProcess,
+            sandbox_scope: None,
             enable_networking: false,
             model: "gpt-5.4".to_string(),
             max_output_tokens: Some(512),

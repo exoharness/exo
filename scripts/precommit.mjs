@@ -41,7 +41,10 @@ function filterByExtension(files, extensions) {
   return files.filter((file) => extensions.has(path.extname(file)));
 }
 
-const stagedFiles = getStagedFiles();
+// oxfmt breaks the VitePress markdown; docs content is authored by hand.
+const stagedFiles = getStagedFiles().filter(
+  (file) => !file.startsWith("website/docs-src/"),
+);
 
 if (stagedFiles.length === 0) {
   process.exit(0);

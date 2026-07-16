@@ -13,6 +13,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::time;
@@ -87,6 +88,7 @@ pub struct SandboxRequest {
     pub key: SandboxKey,
     pub spec: SandboxSpec,
     pub lifecycle: SandboxLifecycleConfig,
+    pub provider_state: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +143,18 @@ pub enum SnapshotKind {
 #[async_trait]
 pub trait ManagedSandboxHandle: Send + Sync {
     fn id(&self) -> &str;
+
+    fn provider_state(&self) -> Option<Value> {
+        None
+    }
+
+    /// The image the sandbox is actually running when the backend substituted
+    /// the requested one (e.g. a snapshot restore boots from a freshly loaded
+    /// tag). Callers persist this so every process resolves the same warm
+    /// sandbox after a restore.
+    fn effective_image(&self) -> Option<String> {
+        None
+    }
 
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput>;
 
@@ -397,6 +411,7 @@ impl CliContainerSandboxBackend {
                 default_workdir: request.spec.default_workdir,
             },
             lifecycle: request.lifecycle,
+            provider_state: request.provider_state,
         })
     }
 
@@ -628,6 +643,10 @@ struct WarmSandboxHandle {
 impl ManagedSandboxHandle for WarmSandboxHandle {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    fn effective_image(&self) -> Option<String> {
+        Some(self.request.spec.image.clone())
     }
 
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {
@@ -1438,60 +1457,7 @@ async fn cleanup_named_container(
 ) -> Result<()> {
     match cli {
         ContainerCliFlavor::AppleContainer => {
-            match run_container_admin_command(
-                container_bin,
-                WARM_SANDBOX_CLEANUP_TIMEOUT,
-                ["stop", name],
-            )
-            .await
-            {
-                Ok(stop) if stop.status.success() => {
-                    if let Err(wait_error) =
-                        wait_for_apple_container_not_running(container_bin, name).await
-                    {
-                        kill_named_container_if_present(container_bin, name).await?;
-                        wait_for_apple_container_not_running(container_bin, name)
-                            .await
-                            .map_err(|kill_wait_error| {
-                                anyhow!(
-                                    "failed to stop warm sandbox {}: {}; {}",
-                                    name,
-                                    wait_error,
-                                    kill_wait_error
-                                )
-                            })?;
-                    }
-                }
-                Ok(stop) => {
-                    let stderr = String::from_utf8_lossy(&stop.stderr).trim().to_string();
-                    if !is_missing_container_error(&stderr)
-                        && let Err(kill_error) =
-                            kill_named_container_if_present(container_bin, name).await
-                    {
-                        return Err(anyhow!(
-                            "failed to stop warm sandbox {}: {}; {}",
-                            name,
-                            stderr,
-                            kill_error
-                        ));
-                    }
-                    wait_for_apple_container_not_running(container_bin, name).await?;
-                }
-                Err(stop_error) => {
-                    if let Err(kill_error) =
-                        kill_named_container_if_present(container_bin, name).await
-                    {
-                        return Err(anyhow!(
-                            "failed to stop warm sandbox {}: {}; {}",
-                            name,
-                            stop_error,
-                            kill_error
-                        ));
-                    }
-                    wait_for_apple_container_not_running(container_bin, name).await?;
-                }
-            }
-
+            kill_named_container_if_present(container_bin, name).await?;
             let delete = run_container_admin_command(
                 container_bin,
                 WARM_SANDBOX_CLEANUP_TIMEOUT,
@@ -1555,43 +1521,6 @@ async fn reap_orphaned_warm_sandboxes(container_bin: &Path, cli: ContainerCliFla
         }
         ContainerCliFlavor::Docker => reap_orphaned_docker_warm_sandboxes(container_bin).await,
     }
-}
-
-async fn wait_for_apple_container_not_running(container_bin: &Path, name: &str) -> Result<()> {
-    let deadline = Instant::now() + WARM_SANDBOX_CLEANUP_TIMEOUT;
-    loop {
-        match apple_container_status(container_bin, name).await? {
-            None => return Ok(()),
-            Some(status) if !is_running_container_status(&status) => return Ok(()),
-            Some(_) => {}
-        }
-
-        if Instant::now() >= deadline {
-            return Err(anyhow!("container {} is still running", name));
-        }
-        time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-async fn apple_container_status(container_bin: &Path, name: &str) -> Result<Option<String>> {
-    let output = run_container_admin_command(
-        container_bin,
-        WARM_SANDBOX_CLEANUP_TIMEOUT,
-        ["list", "--format", "json"],
-    )
-    .await?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "failed to list warm sandboxes: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-
-    let containers: Vec<ContainerListItem> = serde_json::from_slice(&output.stdout)?;
-    Ok(containers
-        .into_iter()
-        .find(|container| container.configuration.id == name)
-        .and_then(|container| container.status))
 }
 
 async fn reap_orphaned_apple_warm_sandboxes(container_bin: &Path) -> Result<()> {
@@ -2034,6 +1963,7 @@ mod tests {
             lifecycle: SandboxLifecycleConfig {
                 idle_ttl: Some(Duration::from_secs(60)),
             },
+            provider_state: None,
         };
         let spec_hash = sandbox_spec_hash(&request.spec);
 
@@ -2109,6 +2039,7 @@ mod tests {
             lifecycle: SandboxLifecycleConfig {
                 idle_ttl: Some(Duration::from_secs(60)),
             },
+            provider_state: None,
         };
 
         backend
@@ -2132,6 +2063,98 @@ mod tests {
                 "rm",
                 "-f",
                 "docker-container-id",
+                "---",
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apple_container_prepare_request_reaps_orphaned_warm_sandboxes_with_kill_delete() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let script_path = temp_dir.path().join("container");
+        let args_path = temp_dir.path().join("args");
+        fs::write(
+            &script_path,
+            format!(
+                r#"#!/bin/sh
+for arg in "$@"; do
+  printf '%s\n' "$arg" >> '{}'
+done
+printf '%s\n' '---' >> '{}'
+case "$1" in
+  list)
+    printf '%s\n' '[{{"configuration":{{"id":"apple-container-id","labels":{{"{}":"conversation:conversation:sandbox","{}":"999999"}}}},"status":"running","startedDate":0}}]'
+    ;;
+  kill)
+    ;;
+  delete)
+    ;;
+esac
+"#,
+                args_path.display(),
+                args_path.display(),
+                WARM_SANDBOX_KEY_LABEL,
+                WARM_SANDBOX_OWNER_PID_LABEL,
+            ),
+        )
+        .expect("write fake container script");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("fake container metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("chmod fake container");
+
+        let backend = CliContainerSandboxBackend {
+            cli: ContainerCliFlavor::AppleContainer,
+            container_bin: script_path,
+            durable_file_system_root: None,
+            system_started: Mutex::new(false),
+            network_created: Mutex::new(false),
+            warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let request = SandboxRequest {
+            key: SandboxKey::ConversationSandbox {
+                conversation_id: "conversation".to_string(),
+                sandbox_id: "sandbox".to_string(),
+            },
+            spec: SandboxSpec {
+                image: "docker.io/library/ubuntu:24.04".to_string(),
+                mounts: Vec::new(),
+                durable_file_systems: Vec::new(),
+                network: SandboxNetworkPolicy::Disabled,
+                default_workdir: "/".to_string(),
+            },
+            lifecycle: SandboxLifecycleConfig {
+                idle_ttl: Some(Duration::from_secs(60)),
+            },
+            provider_state: None,
+        };
+
+        backend
+            .prepare_request(request)
+            .await
+            .expect("prepare request");
+
+        let args = fs::read_to_string(&args_path).expect("read fake container args");
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            vec![
+                "system",
+                "start",
+                "---",
+                "list",
+                "--format",
+                "json",
+                "---",
+                "kill",
+                "apple-container-id",
+                "---",
+                "delete",
+                "apple-container-id",
                 "---",
             ]
         );

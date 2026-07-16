@@ -100,26 +100,63 @@ export async function registerAgentToolsFromDirectoryIfExists(
   context: TurnContext,
   toolsDirectory = DEFAULT_AGENT_TOOL_DIRECTORY,
 ): Promise<void> {
+  // A broken agent-written module (duplicate tool name, failed import, ...)
+  // must not prevent the harness from starting: the agent cannot repair its
+  // own tools if it can never boot. Skip the module and keep going.
+  // Future TODO: consider self-repairing by removing the broken module.
+  for (const modulePath of await agentToolModulePaths(toolsDirectory)) {
+    try {
+      await registerAgentToolModulePath(registry, context, modulePath);
+    } catch (error) {
+      console.error(
+        `skipping agent tool module ${modulePath}: ${errorMessage(error)}`,
+      );
+    }
+  }
+}
+
+export async function findAgentToolNameConflict(
+  toolName: string,
+  moduleName: string,
+  toolsDirectory = DEFAULT_AGENT_TOOL_DIRECTORY,
+): Promise<string | null> {
+  const ownModulePath = path.resolve(toolsDirectory, `${moduleName}.ts`);
+  for (const modulePath of await agentToolModulePaths(toolsDirectory)) {
+    if (modulePath === ownModulePath) {
+      continue;
+    }
+    let entries: ToolModuleEntry[];
+    try {
+      entries = normalizeToolModuleExport(
+        await loadToolModule(modulePath, "agent"),
+        "agent",
+      );
+    } catch {
+      continue;
+    }
+    if (entries.some((entry) => entry.tool.definition.name === toolName)) {
+      return modulePath;
+    }
+  }
+  return null;
+}
+
+async function agentToolModulePaths(toolsDirectory: string): Promise<string[]> {
   let entries: Dirent[];
   try {
     entries = await fs.readdir(toolsDirectory, { withFileTypes: true });
   } catch (error) {
     if (isNotFoundError(error)) {
-      return;
+      return [];
     }
     throw error;
   }
-
-  const modulePaths = entries
+  return entries
     .filter((entry) => entry.isFile())
     .map((entry) => entry.name)
     .filter((name) => name.endsWith(".ts") && !name.endsWith(".source.ts"))
     .sort()
     .map((name) => path.resolve(toolsDirectory, name));
-
-  for (const modulePath of modulePaths) {
-    await registerAgentToolModulePath(registry, context, modulePath);
-  }
 }
 
 export async function loadToolModule(
@@ -258,6 +295,10 @@ function isToolModule(value: unknown): value is ToolModule {
 
 function isRecord(value: unknown): value is JsonObject {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function isNotFoundError(error: unknown): boolean {

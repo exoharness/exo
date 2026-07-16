@@ -549,6 +549,7 @@ mod tests {
                 default_workdir: "/mnt/workspace".to_string(),
             },
             lifecycle: SandboxLifecycleConfig::default(),
+            provider_state: None,
         }
     }
 }

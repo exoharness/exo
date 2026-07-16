@@ -22,8 +22,8 @@ use std::process::Command;
 
 use exoharness::{
     BasicExoHarness, BasicExoHarnessConfig, ConversationHandle, CreateSandboxRequest, ExoHarness,
-    NewAgentRequest, NewConversationRequest, RunInSandboxRequest, SandboxBackendChoice, SandboxId,
-    SandboxProvider, SecretBackendChoice, StartSandboxRequest,
+    NewAgentRequest, NewConversationRequest, RunInSandboxRequest, SandboxBackendRegistration,
+    SandboxId, SandboxProvider, SecretBackendChoice, StartSandboxRequest,
 };
 use futures::io::AsyncReadExt;
 use tempfile::TempDir;
@@ -47,7 +47,7 @@ async fn filesystem_snapshot_and_rewind_round_trip() {
         // it's orthogonal to what we're testing (sandbox snapshots).
         secret_backend: SecretBackendChoice::Static([7u8; 32]),
         sandbox_default: SandboxProvider::Docker,
-        sandbox_backends: vec![SandboxBackendChoice::Docker],
+        sandbox_backends: vec![SandboxBackendRegistration::docker()],
     })
     .await
     .expect("BasicExoHarness::new should succeed");
@@ -161,6 +161,7 @@ async fn filesystem_snapshot_and_rewind_round_trip() {
             id: sandbox_id.clone(),
             snapshot_id,
             idle_seconds: None,
+            provider: None,
         })
         .await
         .expect("start_sandbox (rewind) should succeed");
@@ -254,18 +255,21 @@ fn preflight() -> bool {
     true
 }
 
-/// Read a directory expected to contain exactly one entry and return that
-/// entry's path. Used to walk into the per-agent / per-conversation directories
-/// without hardcoding the test-generated UUIDs.
+/// Read a directory expected to contain exactly one record entry and return
+/// that entry's path. Used to walk into the per-agent / per-conversation
+/// directories without hardcoding the test-generated UUIDs. Skips `by-slug`,
+/// the slug-uniqueness index the harness keeps next to the agent record
+/// directories.
 fn find_single_subdir(parent: &std::path::Path) -> std::path::PathBuf {
     let mut entries: Vec<_> = std::fs::read_dir(parent)
         .unwrap_or_else(|error| panic!("read_dir({}) failed: {error:#}", parent.display()))
         .filter_map(Result::ok)
+        .filter(|entry| entry.file_name() != "by-slug")
         .collect();
     assert_eq!(
         entries.len(),
         1,
-        "expected exactly one entry under {}, found {}",
+        "expected exactly one record entry under {}, found {}",
         parent.display(),
         entries.len()
     );

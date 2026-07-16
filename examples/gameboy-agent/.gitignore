@@ -1,0 +1,7 @@
+# Copyrighted game ROMs — never commit. Supply your own under roms/.
+roms/
+
+# Regenerable runtime state
+venv/
+checkpoints/
+__pycache__/

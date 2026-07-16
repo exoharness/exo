@@ -4,6 +4,7 @@
     ".next/**",
     "coverage/**",
     "node_modules/**",
+    "website/docs-src/**",
     "scratch/**"
   ],
   "printWidth": 80

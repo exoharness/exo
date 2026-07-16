@@ -444,7 +444,12 @@ mod tests {
         let path = path.as_ref().to_path_buf();
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if let Ok(contents) = tokio::fs::read_to_string(&path).await {
+                // The worker creates the file before the content lands (shell
+                // `>` truncates first), so wait until the contents are a
+                // complete JSON document, not merely until the file exists.
+                if let Ok(contents) = tokio::fs::read_to_string(&path).await
+                    && serde_json::from_str::<serde_json::Value>(&contents).is_ok()
+                {
                     return contents;
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;

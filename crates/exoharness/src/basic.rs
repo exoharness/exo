@@ -13,6 +13,7 @@ use futures::future::BoxFuture;
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use futures::stream::{self, BoxStream};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -21,7 +22,7 @@ use crate::sandbox::{
     CliContainerSandboxBackend, LocalProcessSandboxBackend, ManagedSandboxBackend,
     ManagedSandboxHandle, SANDBOX_MAIN_MOUNT_DIR, SandboxCommand, SandboxKey,
     SandboxLifecycleConfig, SandboxMount, SandboxMountAccess, SandboxNetworkPolicy, SandboxRequest,
-    SandboxSpec, SnapshotKind, SnapshotPayload,
+    SandboxSpec, SnapshotKind, SnapshotPayload, sandbox_spec_hash,
 };
 #[cfg(feature = "apple-keychain")]
 use crate::secrets::AppleKeychainSecretKeyProvider;
@@ -47,6 +48,16 @@ use crate::{
     Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
+const SANDBOX_PROVIDER_STATE_EVENT: &str = "sandbox_provider_state";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct SandboxProviderStatePayload {
+    sandbox_id: SandboxId,
+    provider: SandboxProvider,
+    state_key: String,
+    state: Value,
+}
+
 #[derive(Debug, Clone)]
 pub enum SecretBackendChoice {
     #[cfg(feature = "apple-keychain")]
@@ -57,31 +68,159 @@ pub enum SecretBackendChoice {
     Static([u8; 32]),
 }
 
-/// How to build the backend for a [`SandboxProvider`]. Remote backends carry
-/// secret-name references, resolved from the store on first use.
-#[derive(Debug, Clone)]
-pub enum SandboxBackendChoice {
-    AppleContainer,
-    Docker,
-    LocalProcess,
-    Daytona(DaytonaBackendSpec),
-    E2b(E2bBackendSpec),
-    Sprites(SpritesBackendSpec),
-    Vercel(VercelBackendSpec),
-    AwsAgentCore,
+type SandboxBackendFactory = Arc<
+    dyn for<'a> Fn(
+            &'a BasicExoHarnessInner,
+        ) -> BoxFuture<'a, Result<Arc<dyn ManagedSandboxBackend>>>
+        + Send
+        + Sync,
+>;
+
+/// Registers a backend implementation for a [`SandboxProvider`].
+///
+/// Built-in registrations resolve remote-provider secrets lazily on first use.
+/// Callers with their own provider implementation can register an already-built
+/// trait object with [`SandboxBackendRegistration::from_backend`].
+#[derive(Clone)]
+pub struct SandboxBackendRegistration {
+    provider: SandboxProvider,
+    factory: SandboxBackendFactory,
 }
 
-impl SandboxBackendChoice {
+impl SandboxBackendRegistration {
+    pub fn from_backend(
+        provider: SandboxProvider,
+        backend: Arc<dyn ManagedSandboxBackend>,
+    ) -> Self {
+        Self::from_factory(provider, move |_| {
+            let backend = Arc::clone(&backend);
+            Box::pin(async move { Ok(backend) })
+        })
+    }
+
+    pub fn apple_container() -> Self {
+        Self::from_factory(SandboxProvider::AppleContainer, |_| {
+            Box::pin(async {
+                Ok(Arc::new(CliContainerSandboxBackend::apple_container())
+                    as Arc<dyn ManagedSandboxBackend>)
+            })
+        })
+    }
+
+    pub fn docker() -> Self {
+        Self::from_factory(SandboxProvider::Docker, |_| {
+            Box::pin(async {
+                Ok(Arc::new(CliContainerSandboxBackend::docker())
+                    as Arc<dyn ManagedSandboxBackend>)
+            })
+        })
+    }
+
+    pub fn local_process() -> Self {
+        Self::from_factory(SandboxProvider::LocalProcess, |_| {
+            Box::pin(async {
+                Ok(Arc::new(LocalProcessSandboxBackend::new()) as Arc<dyn ManagedSandboxBackend>)
+            })
+        })
+    }
+
+    pub fn daytona(spec: DaytonaBackendSpec) -> Self {
+        Self::from_factory(SandboxProvider::Daytona, move |inner| {
+            let spec = spec.clone();
+            Box::pin(async move {
+                let config = match inner.daytona_config_from_binding().await? {
+                    Some(config) => config,
+                    None => inner.daytona_config_from_spec(&spec).await?,
+                };
+                Ok(Arc::new(crate::DaytonaSandboxBackend::new(config)?)
+                    as Arc<dyn ManagedSandboxBackend>)
+            })
+        })
+    }
+
+    pub fn e2b(spec: E2bBackendSpec) -> Self {
+        Self::from_factory(SandboxProvider::E2b, move |inner| {
+            let spec = spec.clone();
+            Box::pin(async move {
+                let config = match inner.e2b_config_from_binding().await? {
+                    Some(config) => config,
+                    None => inner.e2b_config_from_spec(&spec).await?,
+                };
+                Ok(Arc::new(crate::E2bSandboxBackend::new(config)?)
+                    as Arc<dyn ManagedSandboxBackend>)
+            })
+        })
+    }
+
+    pub fn sprites(spec: SpritesBackendSpec) -> Self {
+        Self::from_factory(SandboxProvider::Sprites, move |inner| {
+            let spec = spec.clone();
+            Box::pin(async move {
+                let config = match inner.sprites_config_from_binding().await? {
+                    Some(config) => config,
+                    None => inner.sprites_config_from_spec(&spec).await?,
+                };
+                Ok(Arc::new(crate::SpritesSandboxBackend::new(config)?)
+                    as Arc<dyn ManagedSandboxBackend>)
+            })
+        })
+    }
+
+    pub fn vercel(spec: VercelBackendSpec) -> Self {
+        Self::from_factory(SandboxProvider::Vercel, move |inner| {
+            let spec = spec.clone();
+            Box::pin(async move {
+                let config = match inner.vercel_config_from_binding().await? {
+                    Some(config) => config,
+                    None => inner.vercel_config_from_spec(&spec).await?,
+                };
+                Ok(Arc::new(crate::VercelSandboxBackend::new(config)?)
+                    as Arc<dyn ManagedSandboxBackend>)
+            })
+        })
+    }
+
+    pub fn aws_agentcore() -> Self {
+        Self::from_factory(SandboxProvider::AwsAgentCore, |_inner| {
+            Box::pin(async move {
+                #[cfg(feature = "aws-agentcore")]
+                {
+                    let config = _inner.aws_agentcore_config_from_binding().await?.ok_or_else(|| {
+                        anyhow!(
+                            "aws-agentcore sandbox requested but no sandbox provider binding is configured; run `exo provider configure --provider aws-agentcore --runtime-arn <arn>`"
+                        )
+                    })?;
+                    Ok(
+                        Arc::new(crate::AwsAgentCoreSandboxBackend::new(config).await?)
+                            as Arc<dyn ManagedSandboxBackend>,
+                    )
+                }
+                #[cfg(not(feature = "aws-agentcore"))]
+                {
+                    bail!(
+                        "aws-agentcore sandbox backend requires building exoharness with the aws-agentcore feature"
+                    );
+                }
+            })
+        })
+    }
+
     pub fn provider(&self) -> SandboxProvider {
-        match self {
-            Self::AppleContainer => SandboxProvider::AppleContainer,
-            Self::Docker => SandboxProvider::Docker,
-            Self::LocalProcess => SandboxProvider::LocalProcess,
-            Self::Daytona(_) => SandboxProvider::Daytona,
-            Self::E2b(_) => SandboxProvider::E2b,
-            Self::Sprites(_) => SandboxProvider::Sprites,
-            Self::Vercel(_) => SandboxProvider::Vercel,
-            Self::AwsAgentCore => SandboxProvider::AwsAgentCore,
+        self.provider
+    }
+
+    fn from_factory<F>(provider: SandboxProvider, factory: F) -> Self
+    where
+        F: for<'a> Fn(
+                &'a BasicExoHarnessInner,
+            ) -> BoxFuture<'a, Result<Arc<dyn ManagedSandboxBackend>>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self {
+            provider,
+            factory: Arc::new(factory),
         }
     }
 }
@@ -193,7 +332,7 @@ pub struct BasicExoHarnessConfig {
     /// Default when a caller doesn't request a provider. Must be in `sandbox_backends`.
     pub sandbox_default: SandboxProvider,
     /// Supported providers; anything not listed is rejected.
-    pub sandbox_backends: Vec<SandboxBackendChoice>,
+    pub sandbox_backends: Vec<SandboxBackendRegistration>,
 }
 
 #[derive(Clone)]
@@ -205,7 +344,7 @@ struct BasicExoHarnessInner {
     storage: BasicObjectStore,
     write_lock: AsyncMutex<()>,
     subscribers: Mutex<HashMap<ConversationId, Vec<mpsc::UnboundedSender<Result<Event>>>>>,
-    sandbox_registry: HashMap<SandboxProvider, SandboxBackendChoice>,
+    sandbox_registry: HashMap<SandboxProvider, SandboxBackendRegistration>,
     /// Backends built (and secrets read) lazily on first use, cached by provider.
     sandbox_backends: AsyncMutex<HashMap<SandboxProvider, Arc<dyn ManagedSandboxBackend>>>,
     running_sandboxes: AsyncMutex<HashMap<SandboxId, Arc<dyn ManagedSandboxHandle>>>,
@@ -221,12 +360,12 @@ impl BasicExoHarnessInner {
         if let Some(backend) = self.sandbox_backends.lock().await.get(&provider) {
             return Ok(Arc::clone(backend));
         }
-        let choice = self.sandbox_registry.get(&provider).ok_or_else(|| {
+        let registration = self.sandbox_registry.get(&provider).ok_or_else(|| {
             anyhow!("sandbox provider {provider:?} is not supported by this harness")
         })?;
         // Build without the cache lock so a slow build (secret I/O) doesn't
         // serialize other providers; a concurrent build loses to `or_insert`.
-        let backend = self.build_backend(choice).await?;
+        let backend = (registration.factory)(self).await?;
         Ok(Arc::clone(
             self.sandbox_backends
                 .lock()
@@ -234,67 +373,6 @@ impl BasicExoHarnessInner {
                 .entry(provider)
                 .or_insert(backend),
         ))
-    }
-
-    async fn build_backend(
-        &self,
-        choice: &SandboxBackendChoice,
-    ) -> Result<Arc<dyn ManagedSandboxBackend>> {
-        let backend: Arc<dyn ManagedSandboxBackend> = match choice {
-            SandboxBackendChoice::AppleContainer => {
-                Arc::new(CliContainerSandboxBackend::apple_container())
-            }
-            SandboxBackendChoice::Docker => Arc::new(CliContainerSandboxBackend::docker()),
-            SandboxBackendChoice::LocalProcess => Arc::new(LocalProcessSandboxBackend::new()),
-            SandboxBackendChoice::Daytona(spec) => {
-                // Prefer a root `Binding::Sandbox` for Daytona; fall back to the
-                // spec's conventional `DAYTONA_*` secret-name lookups.
-                let config = match self.daytona_config_from_binding().await? {
-                    Some(config) => config,
-                    None => self.daytona_config_from_spec(spec).await?,
-                };
-                Arc::new(crate::DaytonaSandboxBackend::new(config)?)
-            }
-            SandboxBackendChoice::E2b(spec) => {
-                let config = match self.e2b_config_from_binding().await? {
-                    Some(config) => config,
-                    None => self.e2b_config_from_spec(spec).await?,
-                };
-                Arc::new(crate::E2bSandboxBackend::new(config)?)
-            }
-            SandboxBackendChoice::Sprites(spec) => {
-                let config = match self.sprites_config_from_binding().await? {
-                    Some(config) => config,
-                    None => self.sprites_config_from_spec(spec).await?,
-                };
-                Arc::new(crate::SpritesSandboxBackend::new(config)?)
-            }
-            SandboxBackendChoice::Vercel(spec) => {
-                let config = match self.vercel_config_from_binding().await? {
-                    Some(config) => config,
-                    None => self.vercel_config_from_spec(spec).await?,
-                };
-                Arc::new(crate::VercelSandboxBackend::new(config)?)
-            }
-            SandboxBackendChoice::AwsAgentCore => {
-                #[cfg(feature = "aws-agentcore")]
-                {
-                    let config = self.aws_agentcore_config_from_binding().await?.ok_or_else(|| {
-                        anyhow!(
-                            "aws-agentcore sandbox requested but no sandbox provider binding is configured; run `exo provider configure --provider aws-agentcore --runtime-arn <arn>`"
-                        )
-                    })?;
-                    Arc::new(crate::AwsAgentCoreSandboxBackend::new(config).await?)
-                }
-                #[cfg(not(feature = "aws-agentcore"))]
-                {
-                    bail!(
-                        "aws-agentcore sandbox backend requires building exoharness with the aws-agentcore feature"
-                    );
-                }
-            }
-        };
-        Ok(backend)
     }
 
     /// `DaytonaConfig` from the conventional `DAYTONA_*` secret-name spec.
@@ -759,6 +837,29 @@ impl BasicExoHarness {
         PathBuf::from("agents")
     }
 
+    /// Slug-uniqueness index: one marker file per slug, so the per-create
+    /// uniqueness check is O(1) instead of a full record scan.
+    fn slug_index_dir(&self) -> PathBuf {
+        self.agents_dir().join("by-slug")
+    }
+
+    fn slug_marker_path(&self, slug: &str) -> PathBuf {
+        // Encode defensively so a hostile slug cannot escape the directory.
+        let encoded: String = slug
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c.to_string()
+                } else {
+                    format!("%{:02x}", c as u32)
+                }
+            })
+            .collect();
+        // ".slug", never ".json": a slug named "record" must not match the
+        // list_agent_records key filter.
+        self.slug_index_dir().join(format!("{encoded}.slug"))
+    }
+
     fn bindings_dir(&self) -> PathBuf {
         PathBuf::from("bindings")
     }
@@ -816,8 +917,16 @@ impl ExoHarness for BasicExoHarness {
 
     async fn new_agent(&self, request: NewAgentRequest) -> Result<Arc<dyn AgentHandle>> {
         let _guard = self.inner.write_lock.lock().await;
-        let existing = self.list_agent_records().await?;
-        if existing.iter().any(|agent| agent.slug == request.slug) {
+        // TODO: claim the marker with a conditional put (put_json_if_absent,
+        // arriving in PR #113) to close the cross-process create race.
+        let marker = self.slug_marker_path(&request.slug);
+        if self
+            .inner
+            .storage
+            .get_json_if_exists::<Uuid7>(&marker)
+            .await?
+            .is_some()
+        {
             bail!("agent slug already exists: {}", request.slug);
         }
 
@@ -831,6 +940,7 @@ impl ExoHarness for BasicExoHarness {
             .storage
             .put_json(agent_dir.join("record.json"), &record)
             .await?;
+        self.inner.storage.put_json(marker, &record.id).await?;
         Ok(Arc::new(BasicAgentHandle {
             harness: self.clone(),
             record,
@@ -842,6 +952,23 @@ impl ExoHarness for BasicExoHarness {
         let agent_dir = self.agents_dir().join(id.to_string());
         if self.inner.storage.list_keys(&agent_dir).await?.is_empty() {
             return Ok(false);
+        }
+        // Release the slug before the record (its source) disappears.
+        if let Some(record) = self
+            .inner
+            .storage
+            .get_json_if_exists::<AgentRecord>(&agent_dir.join("record.json"))
+            .await?
+        {
+            self.inner
+                .storage
+                .delete_key_if_exists(self.slug_marker_path(&record.slug))
+                .await?;
+        } else {
+            tracing::warn!(
+                %id,
+                "agent dir exists without record.json; cannot release slug marker, continuing with delete"
+            );
         }
         self.inner.storage.delete_prefix(agent_dir).await?;
         Ok(true)
@@ -1443,7 +1570,17 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         let prepared = prepare_sandbox_request(self.harness, request).await?;
         let _guard = self.harness.inner.write_lock.lock().await;
         if let Some((sandbox_id, sandbox)) = self.find_matching_sandbox(&prepared).await? {
-            active_sandbox_handle(self.harness, self.owner, &sandbox_id, &sandbox).await?;
+            let (_handle, provider_state_event) = active_sandbox_handle(
+                self.harness,
+                &self.owner_dir,
+                self.owner,
+                &sandbox_id,
+                &sandbox,
+            )
+            .await?;
+            if let Some(event) = provider_state_event {
+                self.append_events_locked(vec![event]).await?;
+            }
             return Ok(sandbox_id);
         }
         self.create_new_sandbox_locked(prepared).await
@@ -1505,8 +1642,12 @@ impl<'a> BasicScopedSandboxHandle<'a> {
             request,
         )
         .await?;
-        self.append_events(vec![pending.started_event.clone()])
-            .await?;
+        let mut events = Vec::new();
+        if let Some(event) = pending.provider_state_event.clone() {
+            events.push(event);
+        }
+        events.push(pending.started_event.clone());
+        self.append_events(events).await?;
         spawn_pending_sandbox_process(self.harness, pending).await
     }
 
@@ -1614,8 +1755,17 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         if request.command.is_empty() {
             bail!("sandbox command must not be empty");
         }
-        let sandbox_handle =
-            active_sandbox_handle(self.harness, self.owner, &request.id, &sandbox).await?;
+        let (sandbox_handle, provider_state_event) = active_sandbox_handle(
+            self.harness,
+            &self.owner_dir,
+            self.owner,
+            &request.id,
+            &sandbox,
+        )
+        .await?;
+        if let Some(event) = provider_state_event {
+            self.append_events(vec![event]).await?;
+        }
         let parts = sandbox_handle
             .start_process(&SandboxCommand {
                 argv: request.command.clone(),
@@ -1640,10 +1790,16 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         let prepared = prepare_sandbox_request(self.harness, request).await?;
         let sandbox_id = format!("sandbox-{}", Uuid7::now());
         let sandbox = prepared.stored_sandbox(sandbox_id.clone());
-        let sandbox_handle =
-            create_sandbox_handle(self.harness, self.owner, &sandbox_id, &sandbox).await?;
+        let (sandbox_handle, provider_state_event) = create_sandbox_handle(
+            self.harness,
+            &self.owner_dir,
+            self.owner,
+            &sandbox_id,
+            &sandbox,
+        )
+        .await?;
         let _guard = self.harness.inner.write_lock.lock().await;
-        self.persist_created_sandbox_locked(sandbox, sandbox_handle)
+        self.persist_created_sandbox_locked(sandbox, sandbox_handle, provider_state_event)
             .await
     }
 
@@ -1653,9 +1809,15 @@ impl<'a> BasicScopedSandboxHandle<'a> {
     ) -> Result<SandboxId> {
         let sandbox_id = format!("sandbox-{}", Uuid7::now());
         let sandbox = request.stored_sandbox(sandbox_id.clone());
-        let sandbox_handle =
-            create_sandbox_handle(self.harness, self.owner, &sandbox_id, &sandbox).await?;
-        self.persist_created_sandbox_locked(sandbox, sandbox_handle)
+        let (sandbox_handle, provider_state_event) = create_sandbox_handle(
+            self.harness,
+            &self.owner_dir,
+            self.owner,
+            &sandbox_id,
+            &sandbox,
+        )
+        .await?;
+        self.persist_created_sandbox_locked(sandbox, sandbox_handle, provider_state_event)
             .await
     }
 
@@ -1663,6 +1825,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         &self,
         sandbox: StoredSandbox,
         sandbox_handle: Arc<dyn ManagedSandboxHandle>,
+        provider_state_event: Option<EventData>,
     ) -> Result<SandboxId> {
         let sandbox_id = sandbox.id.clone();
         self.harness
@@ -1679,7 +1842,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
             .lock()
             .await
             .insert(sandbox_id.clone(), sandbox_handle);
-        self.append_events_locked(vec![
+        let mut events = vec![
             EventData::SandboxCreated {
                 sandbox_id: sandbox_id.clone(),
                 name: sandbox.name,
@@ -1695,8 +1858,11 @@ impl<'a> BasicScopedSandboxHandle<'a> {
                 sandbox_id: sandbox_id.clone(),
                 snapshot_id: None,
             },
-        ])
-        .await?;
+        ];
+        if let Some(event) = provider_state_event {
+            events.push(event);
+        }
+        self.append_events_locked(events).await?;
         Ok(sandbox_id)
     }
 
@@ -2509,24 +2675,84 @@ async fn start_sandbox_side_effect(
     if let Some(idle_seconds) = request.idle_seconds {
         sandbox.idle_seconds = idle_seconds;
     }
-
-    // Remote work before the write lock: stop any previous handle, then boot
-    // the restored sandbox.
-    let previous_handle = harness
-        .inner
-        .running_sandboxes
-        .lock()
-        .await
-        .remove(&request.id);
-    if let Some(previous_handle) = previous_handle {
-        previous_handle.stop().await?;
+    // Optional provider override: restore under a different backend (e.g.
+    // teleport a Docker snapshot up to Daytona). Set before routing so the
+    // restore targets the new backend and the new provider is persisted;
+    // unsupported providers / snapshot kinds error in the calls below.
+    let previous_provider = sandbox.provider;
+    if let Some(provider) = request.provider {
+        sandbox.provider = provider;
     }
-    let sandbox_handle = harness
-        .inner
-        .sandbox_backend_for_provider(sandbox.provider)
-        .await?
-        .acquire_from_snapshot(sandbox_request(owner, &request.id, &sandbox), payload)
-        .await?;
+    let cross_provider = sandbox.provider != previous_provider;
+
+    // Remote work before the write lock. Two orders, chosen by whether the
+    // restore changes providers:
+    //   - Cross-provider (teleport): make-before-break. Boot the new sandbox
+    //     first and stop the old one only once it's up, so a failed restore
+    //     leaves the source sandbox running and serving. Safe because the two
+    //     handles live on different backends and can't collide.
+    //   - Same provider: stop-then-boot. The backend replaces the warm
+    //     container for this key itself during restore, and stopping the old
+    //     handle after the new one exists would tear down the new container's
+    //     warm-cache entry (both handles share the same SandboxKey).
+    let sandbox_handle = if cross_provider {
+        let sandbox_handle = harness
+            .inner
+            .sandbox_backend_for_provider(sandbox.provider)
+            .await?
+            .acquire_from_snapshot(sandbox_request(owner, &request.id, &sandbox, None), payload)
+            .await?;
+        let previous_handle = harness
+            .inner
+            .running_sandboxes
+            .lock()
+            .await
+            .remove(&request.id);
+        if let Some(previous_handle) = previous_handle
+            && let Err(error) = previous_handle.stop().await
+        {
+            // The new sandbox is authoritative at this point; a failure to
+            // reap the source shouldn't fail the restore.
+            tracing::warn!(
+                sandbox_id = %request.id,
+                previous_provider = %previous_provider,
+                error = format!("{error:#}"),
+                "failed to stop the source sandbox after a cross-provider restore"
+            );
+        }
+        sandbox_handle
+    } else {
+        let previous_handle = harness
+            .inner
+            .running_sandboxes
+            .lock()
+            .await
+            .remove(&request.id);
+        if let Some(previous_handle) = previous_handle {
+            previous_handle.stop().await?;
+        }
+        harness
+            .inner
+            .sandbox_backend_for_provider(sandbox.provider)
+            .await?
+            .acquire_from_snapshot(sandbox_request(owner, &request.id, &sandbox, None), payload)
+            .await?
+    };
+
+    // A restore can boot the sandbox from a different image than the one the
+    // sandbox was created with (e.g. the docker backend loads the snapshot as
+    // a new tag). Persist the effective image so every process — including
+    // scheduler and adapter runners in other processes — derives the same
+    // warm-sandbox spec and reattaches to this container instead of creating
+    // a second one. Keep the originally requested image for named matching.
+    if let Some(effective_image) = sandbox_handle.effective_image()
+        && effective_image != sandbox.image
+    {
+        sandbox
+            .requested_image
+            .get_or_insert_with(|| sandbox.image.clone());
+        sandbox.image = effective_image;
+    }
 
     let _guard = harness.inner.write_lock.lock().await;
     harness
@@ -2610,8 +2836,12 @@ async fn find_matching_stored_sandbox(
         if !sandbox.running {
             continue;
         }
+        // After a snapshot restore, `image` holds the restored tag; the
+        // caller still asks for the image it originally configured, so match
+        // against that.
+        let comparable_image = sandbox.requested_image.as_ref().unwrap_or(&sandbox.image);
         if sandbox.provider != request.provider
-            || sandbox.image != request.image
+            || comparable_image != &request.image
             || sandbox.default_workdir != request.default_workdir
             || sandbox.file_system_mounts != request.file_system_mounts
             || sandbox.durable_file_systems != request.durable_file_systems
@@ -2627,10 +2857,11 @@ async fn find_matching_stored_sandbox(
 
 async fn active_sandbox_handle(
     harness: &BasicExoHarness,
+    owner_dir: &Path,
     owner: SandboxOwner,
     sandbox_id: &SandboxId,
     sandbox: &StoredSandbox,
-) -> Result<Arc<dyn ManagedSandboxHandle>> {
+) -> Result<(Arc<dyn ManagedSandboxHandle>, Option<EventData>)> {
     if let Some(handle) = harness
         .inner
         .running_sandboxes
@@ -2639,31 +2870,130 @@ async fn active_sandbox_handle(
         .get(sandbox_id)
         .cloned()
     {
-        return Ok(handle);
+        return Ok((handle, None));
     }
 
-    let handle = create_sandbox_handle(harness, owner, sandbox_id, sandbox).await?;
+    let (handle, provider_state_event) =
+        create_sandbox_handle(harness, owner_dir, owner, sandbox_id, sandbox).await?;
     harness
         .inner
         .running_sandboxes
         .lock()
         .await
         .insert(sandbox_id.clone(), Arc::clone(&handle));
-    Ok(handle)
+    Ok((handle, provider_state_event))
 }
 
 async fn create_sandbox_handle(
     harness: &BasicExoHarness,
+    owner_dir: &Path,
     owner: SandboxOwner,
     sandbox_id: &SandboxId,
     sandbox: &StoredSandbox,
-) -> Result<Arc<dyn ManagedSandboxHandle>> {
-    harness
+) -> Result<(Arc<dyn ManagedSandboxHandle>, Option<EventData>)> {
+    let state_key = sandbox_provider_state_key(owner, sandbox_id, sandbox);
+    let previous_state = load_sandbox_provider_state(
+        harness,
+        owner_dir,
+        owner,
+        sandbox_id,
+        sandbox.provider,
+        &state_key,
+    )
+    .await?;
+    let handle = harness
         .inner
         .sandbox_backend_for_provider(sandbox.provider)
         .await?
-        .acquire(sandbox_request(owner, sandbox_id, sandbox))
-        .await
+        .acquire(sandbox_request(
+            owner,
+            sandbox_id,
+            sandbox,
+            previous_state.clone(),
+        ))
+        .await?;
+    let provider_state_event = sandbox_provider_state_event(
+        sandbox_id,
+        sandbox.provider,
+        state_key,
+        previous_state,
+        &handle,
+    )?;
+    Ok((handle, provider_state_event))
+}
+
+fn sandbox_provider_state_key(
+    owner: SandboxOwner,
+    sandbox_id: &SandboxId,
+    sandbox: &StoredSandbox,
+) -> String {
+    let request = sandbox_request(owner, sandbox_id, sandbox, None);
+    format!("{}\n{}", request.key, sandbox_spec_hash(&request.spec))
+}
+
+async fn load_sandbox_provider_state(
+    harness: &BasicExoHarness,
+    owner_dir: &Path,
+    owner: SandboxOwner,
+    sandbox_id: &SandboxId,
+    provider: SandboxProvider,
+    state_key: &str,
+) -> Result<Option<Value>> {
+    let SandboxOwner::Conversation(_) = owner else {
+        return Ok(None);
+    };
+    let mut events = load_events(&harness.inner.storage, &owner_dir.join("events"))
+        .await?
+        .into_iter()
+        .filter(|event| event.data.kind() == EventKind::custom(SANDBOX_PROVIDER_STATE_EVENT))
+        .collect::<Vec<_>>();
+    events.sort_by_key(|event| event.id);
+    for event in events.into_iter().rev() {
+        let EventData::Custom {
+            event_type,
+            payload,
+        } = event.data
+        else {
+            continue;
+        };
+        if event_type != SANDBOX_PROVIDER_STATE_EVENT {
+            continue;
+        }
+        let Ok(payload) = serde_json::from_value::<SandboxProviderStatePayload>(payload) else {
+            continue;
+        };
+        if payload.sandbox_id == *sandbox_id
+            && payload.provider == provider
+            && payload.state_key == state_key
+        {
+            return Ok(Some(payload.state));
+        }
+    }
+    Ok(None)
+}
+
+fn sandbox_provider_state_event(
+    sandbox_id: &SandboxId,
+    provider: SandboxProvider,
+    state_key: String,
+    previous_state: Option<Value>,
+    handle: &Arc<dyn ManagedSandboxHandle>,
+) -> Result<Option<EventData>> {
+    let Some(state) = handle.provider_state() else {
+        return Ok(None);
+    };
+    if previous_state.as_ref() == Some(&state) {
+        return Ok(None);
+    }
+    Ok(Some(EventData::Custom {
+        event_type: SANDBOX_PROVIDER_STATE_EVENT.to_string(),
+        payload: serde_json::to_value(SandboxProviderStatePayload {
+            sandbox_id: sandbox_id.clone(),
+            provider,
+            state_key,
+            state,
+        })?,
+    }))
 }
 
 async fn require_running_sandbox_process(
@@ -2856,6 +3186,12 @@ struct StoredSandbox {
     name: Option<String>,
     provider: SandboxProvider,
     image: String,
+    /// The image originally requested at creation, kept when a snapshot
+    /// restore rewrites `image` to the restored tag. Named-sandbox matching
+    /// compares against this so config-derived requests still resolve to the
+    /// restored sandbox instead of erroring or spawning a duplicate.
+    #[serde(default)]
+    requested_image: Option<String>,
     default_workdir: Option<String>,
     file_system_mounts: Vec<FileSystemMount>,
     #[serde(default)]
@@ -2885,6 +3221,7 @@ impl PreparedSandboxRequest {
             name: self.name.clone(),
             provider: self.provider,
             image: self.image.clone(),
+            requested_image: None,
             default_workdir: self.default_workdir.clone(),
             file_system_mounts: self.file_system_mounts.clone(),
             durable_file_systems: self.durable_file_systems.clone(),
@@ -2903,6 +3240,7 @@ struct PendingSandboxProcess {
     stderr: BoxAsyncRead,
     wait: BoxFuture<'static, Result<i32>>,
     started_event: EventData,
+    provider_state_event: Option<EventData>,
 }
 
 async fn prepare_sandbox_process(
@@ -2922,8 +3260,8 @@ async fn prepare_sandbox_process(
     if request.mode != SandboxProcessMode::Exec {
         bail!("basic sandbox backend only supports exec-mode processes");
     }
-    let sandbox_handle =
-        active_sandbox_handle(harness, owner, &request.sandbox_id, &sandbox).await?;
+    let (sandbox_handle, provider_state_event) =
+        active_sandbox_handle(harness, owner_dir, owner, &request.sandbox_id, &sandbox).await?;
     let process_id = format!("process-{}", Uuid7::now());
     let sandbox_id = request.sandbox_id.clone();
     let command = request.command.clone();
@@ -2989,6 +3327,7 @@ async fn prepare_sandbox_process(
             status: SandboxProcessStatus::Running,
             provider_state: None,
         },
+        provider_state_event,
     })
 }
 
@@ -3336,6 +3675,7 @@ fn sandbox_request(
     owner: SandboxOwner,
     sandbox_id: &str,
     sandbox: &StoredSandbox,
+    provider_state: Option<Value>,
 ) -> SandboxRequest {
     SandboxRequest {
         key: match owner {
@@ -3377,6 +3717,7 @@ fn sandbox_request(
         lifecycle: SandboxLifecycleConfig {
             idle_ttl: Some(std::time::Duration::from_secs(sandbox.idle_seconds)),
         },
+        provider_state,
     }
 }
 

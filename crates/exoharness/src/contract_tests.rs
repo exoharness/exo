@@ -6,6 +6,7 @@ use futures::io::{AsyncReadExt, AsyncWriteExt};
 use lingua::Message;
 use lingua::universal::{AssistantContent, UserContent};
 use tokio::time::timeout;
+use tracing::info;
 
 use crate::{
     AddEventsRequest, BeginTurnRequest, Binding, EventData, EventKind, EventQuery,
@@ -19,7 +20,7 @@ pub async fn supports_agent_and_conversation_crud(harness: Arc<dyn ExoHarness>) 
     let conversation_slug = unique_slug("conversation");
     let agent = harness
         .new_agent(NewAgentRequest {
-            slug: agent_slug,
+            slug: agent_slug.clone(),
             name: "Agent".to_string(),
         })
         .await
@@ -71,6 +72,21 @@ pub async fn supports_agent_and_conversation_crud(harness: Arc<dyn ExoHarness>) 
             .delete_agent(&agent.record().id)
             .await
             .expect("delete agent")
+    );
+
+    // Deleting an agent must release its slug marker for reuse.
+    let reused = harness
+        .new_agent(NewAgentRequest {
+            slug: agent_slug,
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("slug should be reusable after agent deletion");
+    assert!(
+        harness
+            .delete_agent(&reused.record().id)
+            .await
+            .expect("delete reused agent")
     );
 }
 
@@ -425,6 +441,84 @@ pub async fn sandbox_backend_durable_file_system_survives_stop_and_reacquire(
     .await
 }
 
+pub async fn sandbox_backend_workdir_survives_stop_and_reacquire(
+    backend: Arc<dyn ManagedSandboxBackend>,
+    request: SandboxRequest,
+) -> crate::Result<()> {
+    let mount_path = request.spec.default_workdir.clone();
+    let marker = format!("workdir-{}", Uuid7::now());
+
+    let first = backend
+        .acquire(request.clone())
+        .await
+        .context("acquire sandbox for workdir write")?;
+    let write_result = write_durable_marker(Arc::clone(&first), &mount_path, &marker).await;
+    stop_after_contract(first, write_result, "stop sandbox after workdir write").await?;
+
+    let second = backend
+        .acquire(request)
+        .await
+        .context("reacquire sandbox for workdir read")?;
+    let read_result = read_durable_marker(Arc::clone(&second), &mount_path, &marker).await;
+    stop_after_contract(second, read_result, "stop sandbox after workdir read").await
+}
+
+pub async fn sandbox_backend_long_running_process_and_workdir_survive_stop_and_reacquire(
+    backend: Arc<dyn ManagedSandboxBackend>,
+    request: SandboxRequest,
+) -> crate::Result<()> {
+    let mount_path = request.spec.default_workdir.clone();
+    let marker = format!("protocol-workdir-{}", Uuid7::now());
+
+    info!("contract: acquiring sandbox for initial protocol/workdir check");
+    let first = backend
+        .acquire(request.clone())
+        .await
+        .context("acquire sandbox for protocol and workdir write")?;
+    info!("contract: acquired sandbox for initial protocol/workdir check");
+    let first_result = async {
+        info!("contract: starting initial long-running protocol check");
+        sandbox_handle_start_process_supports_long_running_request_response_protocol_inner(
+            Arc::clone(&first),
+        )
+        .await?;
+        info!("contract: initial protocol check complete; writing durable marker");
+        write_durable_marker(Arc::clone(&first), &mount_path, &marker).await
+    }
+    .await;
+    info!("contract: stopping sandbox after initial protocol/workdir check");
+    stop_after_contract(
+        first,
+        first_result,
+        "stop sandbox after protocol and workdir write",
+    )
+    .await?;
+
+    info!("contract: reacquiring sandbox for resumed protocol/workdir check");
+    let second = backend
+        .acquire(request)
+        .await
+        .context("reacquire sandbox for protocol and workdir read")?;
+    info!("contract: reacquired sandbox for resumed protocol/workdir check");
+    let second_result = async {
+        info!("contract: reading durable marker after resume");
+        read_durable_marker(Arc::clone(&second), &mount_path, &marker).await?;
+        info!("contract: starting resumed long-running protocol check");
+        sandbox_handle_start_process_supports_long_running_request_response_protocol_inner(
+            Arc::clone(&second),
+        )
+        .await
+    }
+    .await;
+    info!("contract: stopping sandbox after resumed protocol/workdir check");
+    stop_after_contract(
+        second,
+        second_result,
+        "stop sandbox after protocol and workdir read",
+    )
+    .await
+}
+
 async fn sandbox_handle_start_process_supports_interactive_stdio_and_env_inner(
     handle: Arc<dyn ManagedSandboxHandle>,
 ) -> crate::Result<()> {
@@ -599,6 +693,7 @@ async fn stop_after_contract(
 async fn sandbox_handle_start_process_supports_long_running_request_response_protocol_inner(
     handle: Arc<dyn ManagedSandboxHandle>,
 ) -> crate::Result<()> {
+    info!("contract protocol: start_process");
     let mut process = handle
         .start_process(&SandboxCommand {
             argv: vec![
@@ -626,6 +721,7 @@ async fn sandbox_handle_start_process_supports_long_running_request_response_pro
         .await
         .context("start_process should start a long-running protocol process")?;
 
+    info!("contract protocol: waiting for ready marker");
     read_exact_text(
         &mut process.stdout,
         "protocol-ready\n",
@@ -633,11 +729,13 @@ async fn sandbox_handle_start_process_supports_long_running_request_response_pro
     )
     .await?;
 
+    info!("contract protocol: writing request one");
     process
         .stdin
         .write_all(b"request-one\n")
         .await
         .context("write first protocol request")?;
+    info!("contract protocol: waiting for response one");
     read_exact_text(
         &mut process.stdout,
         "response-one\n",
@@ -645,11 +743,13 @@ async fn sandbox_handle_start_process_supports_long_running_request_response_pro
     )
     .await?;
 
+    info!("contract protocol: writing request two");
     process
         .stdin
         .write_all(b"request-two\n")
         .await
         .context("write second protocol request")?;
+    info!("contract protocol: waiting for response two");
     read_exact_text(
         &mut process.stdout,
         "response-two\n",
@@ -657,12 +757,15 @@ async fn sandbox_handle_start_process_supports_long_running_request_response_pro
     )
     .await?;
 
+    info!("contract protocol: writing request three");
     process
         .stdin
         .write_all(b"request-three\n")
         .await
         .context("write shutdown protocol request")?;
+    info!("contract protocol: closing stdin");
     process.stdin.close().await.context("close process stdin")?;
+    info!("contract protocol: waiting for response three");
     read_exact_text(
         &mut process.stdout,
         "response-three\n",
@@ -670,10 +773,15 @@ async fn sandbox_handle_start_process_supports_long_running_request_response_pro
     )
     .await?;
 
+    info!("contract protocol: waiting for process exit");
     let exit_code = timeout(Duration::from_secs(30), process.wait)
         .await
         .context("protocol process wait should finish after shutdown")?
         .context("protocol process wait should succeed")?;
+    info!(
+        exit_code,
+        "contract protocol: process exited; draining stderr"
+    );
     let mut stderr = String::new();
     timeout(
         Duration::from_secs(5),
@@ -688,6 +796,7 @@ async fn sandbox_handle_start_process_supports_long_running_request_response_pro
     if stderr != "protocol-stderr-two\n" {
         bail!("unexpected protocol stderr: {stderr:?}");
     }
+    info!("contract protocol: complete");
     Ok(())
 }
 

@@ -1,0 +1,41 @@
+/* Match the exoharness.ai landing page: warm-orange accent on a near-black
+   dark theme, mono brand. */
+:root {
+  --vp-c-brand-1: #ffb088;
+  --vp-c-brand-2: #e58b5a;
+  --vp-c-brand-3: #e58b5a;
+  --vp-c-brand-soft: rgba(229, 139, 90, 0.16);
+}
+
+.dark {
+  --vp-c-bg: #111116;
+  --vp-c-bg-alt: #16161d;
+  --vp-c-bg-elv: #1b1b23;
+  --vp-c-bg-soft: #16161d;
+
+  --vp-c-divider: #292932;
+  --vp-c-border: #3c3c47;
+  --vp-c-gutter: #0d0d11;
+
+  --vp-c-text-1: #d1d1d6;
+  --vp-c-text-2: #aaaab2;
+  --vp-c-text-3: #64646f;
+
+  --vp-c-brand-1: #ffb088;
+  --vp-c-brand-2: #e58b5a;
+  --vp-c-brand-3: #e58b5a;
+  --vp-c-brand-soft: rgba(229, 139, 90, 0.16);
+}
+
+/* Mono brand mark, like the landing header. */
+.VPNavBarTitle .title {
+  font-family: var(--vp-font-family-mono);
+  font-weight: 700;
+  color: var(--vp-c-brand-1);
+}
+
+/* Slightly tighter, docs-like code blocks. */
+.vp-doc div[class*="language-"] {
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 10px;
+}

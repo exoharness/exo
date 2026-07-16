@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import type { Response } from "openai/resources/responses/responses";
 
 import {
+  AnthropicRuntime,
   ChatCompletionsRuntime,
+  isAnthropicModel,
+  isOpenRouterBinding,
   modelRequiresResponsesApi,
   responseToLinguaEvents,
   responseToolCalls,
@@ -48,6 +51,33 @@ describe("model runtime dispatch", () => {
         apiKey: "key",
       }),
     ).toBeInstanceOf(ResponsesRuntime);
+  });
+
+  it("dispatches claude models to the native Anthropic runtime", () => {
+    expect(isAnthropicModel("claude-sonnet-4-6")).toBe(true);
+    expect(isAnthropicModel("gpt-5.4")).toBe(false);
+    expect(isAnthropicModel("us.anthropic.claude-sonnet-4-6")).toBe(false);
+    expect(
+      runtimeFromModelBinding(undefined, {
+        model: "claude-sonnet-4-6",
+        apiKey: "key",
+      }),
+    ).toBeInstanceOf(AnthropicRuntime);
+  });
+
+  it("routes OpenRouter bindings through chat completions by base URL", () => {
+    expect(
+      isOpenRouterBinding({ baseUrl: "https://openrouter.ai/api/v1" }),
+    ).toBe(true);
+    expect(isOpenRouterBinding({ baseUrl: null })).toBe(false);
+    // A Responses-looking model name over OpenRouter still uses chat completions.
+    expect(
+      runtimeFromModelBinding(undefined, {
+        model: "openai/gpt-5-pro",
+        apiKey: "key",
+        baseUrl: "https://openrouter.ai/api/v1",
+      }),
+    ).toBeInstanceOf(ChatCompletionsRuntime);
   });
 });
 

@@ -624,6 +624,97 @@ describe("agent tool loading", () => {
     }
   });
 
+  it("rejects installing an agent tool whose tool name belongs to another module", async () => {
+    const previousCwd = process.cwd();
+    const tempdir = await fs.mkdtemp(path.join(os.tmpdir(), "exo-agent-tool-"));
+    process.chdir(tempdir);
+    try {
+      const context = fakeTurnContext();
+      const registry = createToolRegistry(context);
+      registerBuiltInTools(registry, context, ["install_agent_tool"]);
+
+      // Two different module files whose source defines the same tool name,
+      // reverse_text: only the first install may claim that tool name.
+      const moduleSource = reverseTextToolSource();
+      await registry.executePending([
+        installAgentToolCall("install_1", "reverse-text", moduleSource),
+      ]);
+      const events = await registry.executePending([
+        installAgentToolCall("install_2", "reverse-text-v2", moduleSource),
+      ]);
+
+      expect(events).toEqual([
+        wrappedToolResultEvent(
+          "install_2",
+          "install_agent_tool",
+          "built_in",
+          2,
+          {
+            ok: false,
+            error:
+              "tool reverse_text is already installed by module reverse-text; " +
+              "reinstall using name reverse-text to replace it, or uninstall_agent_tool it first",
+          },
+        ),
+      ]);
+      await expect(
+        fs.access(".exo/agent-tools/reverse-text-v2.ts"),
+      ).rejects.toThrow();
+    } finally {
+      process.chdir(previousCwd);
+      await fs.rm(tempdir, { recursive: true, force: true });
+    }
+  });
+
+  it("skips broken and duplicate agent tool modules instead of failing startup", async () => {
+    const previousCwd = process.cwd();
+    const tempdir = await fs.mkdtemp(path.join(os.tmpdir(), "exo-agent-tool-"));
+    process.chdir(tempdir);
+    try {
+      const toolsDirectory = ".exo/agent-tools";
+      await fs.mkdir(toolsDirectory, { recursive: true });
+      await fs.writeFile(
+        path.join(toolsDirectory, "a-broken.ts"),
+        "this is not valid typescript {{{\n",
+        "utf8",
+      );
+      await fs.writeFile(
+        path.join(toolsDirectory, "b-reverse-text.ts"),
+        reverseTextToolSource(),
+        "utf8",
+      );
+      await fs.writeFile(
+        path.join(toolsDirectory, "c-duplicate-reverse-text.ts"),
+        reverseTextToolSource(),
+        "utf8",
+      );
+
+      const context = fakeTurnContext();
+      const registry = createToolRegistry(context);
+      await registerAgentToolsFromDirectoryIfExists(registry, context);
+
+      expect(registry.get("reverse_text")?.source).toBe("agent");
+      await expect(
+        registry.executePending([
+          {
+            toolCallId: "call_1",
+            request: {
+              functionName: "reverse_text",
+              arguments: { text: "hello" },
+            },
+          },
+        ]),
+      ).resolves.toEqual([
+        wrappedToolResultEvent("call_1", "reverse_text", "agent", 1, {
+          text: "olleh",
+        }),
+      ]);
+    } finally {
+      process.chdir(previousCwd);
+      await fs.rm(tempdir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects agent tool modules without a default Tool export", async () => {
     const registry = createToolRegistry(fakeTurnContext());
 
@@ -707,6 +798,24 @@ function fakeTool(
 function ircToolModulePath(): string {
   return new URL("../../examples/typescript/tools/irc.ts", import.meta.url)
     .href;
+}
+
+function installAgentToolCall(
+  toolCallId: string,
+  moduleName: string,
+  moduleSource: string,
+) {
+  return {
+    toolCallId,
+    request: {
+      functionName: "install_agent_tool",
+      arguments: {
+        name: moduleName,
+        moduleSource,
+        initialization: {},
+      },
+    },
+  };
 }
 
 function reverseTextToolSource(): string {
@@ -816,8 +925,13 @@ function fakeTurnContext(
       harness: "typescript",
       typescript: null,
       enableAgentToolCreation: true,
-      sandboxImage: null,
-      enableNetworking: false,
+      sandbox: {
+        image: null,
+        provider: "docker",
+        mounts: [],
+        enableNetworking: false,
+        scope: "conversation",
+      },
       model: "test-model",
       maxOutputTokens: null,
       maxToolRoundTrips: null,

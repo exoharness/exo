@@ -10,6 +10,7 @@ export * from "./tools";
 export * from "./built-in-tools";
 export * from "./tool-modules";
 export * from "./adapter-tools";
+export * from "./skill-tools";
 
 export type MessageRole =
   | "system"
@@ -26,19 +27,25 @@ export interface Message {
 
 export interface AgentConfig {
   instructions: Message[];
-  harness: "basic" | "rlm" | "typescript" | "exoclaw";
+  harness: "basic" | "rlm" | "typescript" | "exo";
   typescript?: {
     modulePath: string;
     toolModulePaths: string[];
   } | null;
   enableAgentToolCreation: boolean;
-  sandboxImage?: string | null;
-  sandboxProvider: "daytona" | "apple_container" | "docker" | "local_process";
-  enableNetworking: boolean;
+  sandbox: AgentSandboxConfig;
   model: string;
   maxOutputTokens?: number | null;
   maxToolRoundTrips?: number | null;
   braintrust?: unknown;
+}
+
+export interface AgentSandboxConfig {
+  image?: string | null;
+  provider: "daytona" | "apple_container" | "docker" | "local_process";
+  mounts: FileSystemMount[];
+  enableNetworking: boolean;
+  scope: "agent" | "conversation";
 }
 
 export type Binding =

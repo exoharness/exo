@@ -1,12 +1,16 @@
 import OpenAI from "openai";
+import Anthropic from "@anthropic-ai/sdk";
 import {
   flush,
   initLogger,
   traced,
+  wrapAnthropic,
+  wrapOpenAI,
   type Span,
   type StartSpanArgs,
 } from "braintrust";
 import {
+  linguaToAnthropicMessages,
   linguaToResponsesMessages,
   responsesMessagesToLingua,
   type Message as LinguaMessage,
@@ -115,11 +119,6 @@ export interface ResponsesRuntimeLike {
   ): Promise<EventData[]>;
 }
 
-interface NativeLlmResult {
-  response: Response;
-  ttftMs: number | null;
-}
-
 interface NativeLlmTraceOptions extends NativeTraceOptions {
   streamed: boolean;
   handlers?: NativeStreamHandlers;
@@ -130,12 +129,18 @@ export class ResponsesRuntime implements ResponsesRuntimeLike {
 
   constructor(options: ResponsesRuntimeOptions = {}) {
     ensureBraintrustLogger(options.braintrust ?? null);
-    this.client = new OpenAI({
-      apiKey: options.apiKey,
-      baseURL: options.baseURL,
-      organization: options.organization,
-      project: options.project,
-    });
+    // wrapOpenAI auto-instruments chat.completions/responses calls with a
+    // braintrust LLM span. Also covers the OpenRouter path (same OpenAI client,
+    // just a different base URL) — braintrust's wrapOpenRouter is for their
+    // native SDK, not the OpenAI SDK, so it doesn't apply here.
+    this.client = wrapOpenAI(
+      new OpenAI({
+        apiKey: options.apiKey,
+        baseURL: options.baseURL,
+        organization: options.organization,
+        project: options.project,
+      }),
+    );
   }
 
   static fromEnvironment(agentConfig?: AgentConfig): ResponsesRuntime {
@@ -172,11 +177,10 @@ export class ResponsesRuntime implements ResponsesRuntimeLike {
     request: NativeResponsesRequest,
     options: NativeTraceOptions = {},
   ): Promise<Response> {
-    const { response } = await this.runLlmRequest(request, {
+    return this.runLlmRequest(request, {
       ...options,
       streamed: false,
     });
-    return response;
   }
 
   async completeStream(
@@ -184,12 +188,11 @@ export class ResponsesRuntime implements ResponsesRuntimeLike {
     handlers: NativeStreamHandlers = {},
     options: NativeTraceOptions = {},
   ): Promise<Response> {
-    const { response } = await this.runLlmRequest(request, {
+    return this.runLlmRequest(request, {
       ...options,
       streamed: true,
       handlers,
     });
-    return response;
   }
 
   async traceToolCall(
@@ -229,51 +232,14 @@ export class ResponsesRuntime implements ResponsesRuntimeLike {
   private async runLlmRequest(
     request: NativeResponsesRequest,
     options: NativeLlmTraceOptions,
-  ): Promise<NativeLlmResult> {
-    const toolNames = (request.tools ?? []).map((tool) => tool.name);
-    const run = async (span: Span): Promise<NativeLlmResult> => {
-      try {
-        const result = options.streamed
-          ? await this.completeStreamRaw(
-              buildStreamingBody(request),
-              options.handlers,
-            )
-          : {
-              response: await this.completeRaw(buildNonStreamingBody(request)),
-              ttftMs: null,
-            };
-
-        span.log({
-          output: llmOutputTraceValue(result.response),
-          metadata: {
-            response_id: result.response.id,
-          },
-          metrics: responseUsageMetrics(result.response, result.ttftMs),
-        });
-        return result;
-      } catch (error) {
-        span.log({ error: errorMessage(error) });
-        throw error;
-      }
-    };
-    const spanArgs = {
-      name: `responses:${request.model}`,
-      type: "llm" as const,
-      event: {
-        input: llmInputTraceValue(request),
-        metadata: {
-          round_index: options.roundIndex,
-          runtime: "responses",
-          model: request.model,
-          max_output_tokens: request.maxOutputTokens ?? null,
-          tool_count: toolNames.length,
-          tools: toolNames,
-          streamed: options.streamed,
-        },
-      },
-    };
-
-    return tracedUnderParent(options.parent, run, spanArgs);
+  ): Promise<Response> {
+    if (options.streamed) {
+      return this.completeStreamRaw(
+        buildStreamingBody(request),
+        options.handlers,
+      );
+    }
+    return this.completeRaw(buildNonStreamingBody(request));
   }
 
   private async completeRaw(
@@ -285,7 +251,7 @@ export class ResponsesRuntime implements ResponsesRuntimeLike {
   private async completeStreamRaw(
     body: ResponseCreateParamsStreaming,
     handlers: NativeStreamHandlers = {},
-  ): Promise<NativeLlmResult> {
+  ): Promise<Response> {
     const startedAt = performance.now();
     let sawFirstChunk = false;
     let ttftMs: number | null = null;
@@ -314,10 +280,7 @@ export class ResponsesRuntime implements ResponsesRuntimeLike {
     if (!finalResponse) {
       throw new Error("Responses API stream ended without completion");
     }
-    return {
-      response: finalResponse,
-      ttftMs,
-    };
+    return finalResponse;
   }
 }
 
@@ -325,9 +288,31 @@ export function runtimeFromModelBinding(
   agentConfig: AgentConfig | undefined,
   binding: ResponsesModelBinding,
 ): ResponsesRuntimeLike {
-  return modelRequiresResponsesApi(binding.model ?? "")
+  const model = binding.model ?? "";
+  if (isAnthropicModel(model)) {
+    return AnthropicRuntime.fromModelBinding(agentConfig, binding);
+  }
+  // OpenRouter is OpenAI-compatible but Chat Completions only (no Responses
+  // API), so force the chat path regardless of how the model name looks.
+  if (isOpenRouterBinding(binding)) {
+    return ChatCompletionsRuntime.fromModelBinding(agentConfig, binding);
+  }
+  return modelRequiresResponsesApi(model)
     ? ResponsesRuntime.fromModelBinding(agentConfig, binding)
     : ChatCompletionsRuntime.fromModelBinding(agentConfig, binding);
+}
+
+// Anthropic model bindings call the native Messages API. We detect them by
+// model name (`claude*`), mirroring the Rust runtime; Bedrock/Vertex Anthropic
+// ids carry provider prefixes and intentionally don't match here.
+export function isAnthropicModel(model: string): boolean {
+  return model.toLowerCase().startsWith("claude");
+}
+
+// OpenRouter is selected by its base URL (it aggregates many vendors, so the
+// model name isn't a reliable signal), mirroring the Rust runtime.
+export function isOpenRouterBinding(binding: ResponsesModelBinding): boolean {
+  return (binding.baseUrl ?? "").includes("openrouter.ai");
 }
 
 export function modelRequiresResponsesApi(model: string): boolean {
@@ -347,12 +332,18 @@ export class ChatCompletionsRuntime implements ResponsesRuntimeLike {
 
   constructor(options: ResponsesRuntimeOptions = {}) {
     ensureBraintrustLogger(options.braintrust ?? null);
-    this.client = new OpenAI({
-      apiKey: options.apiKey,
-      baseURL: options.baseURL,
-      organization: options.organization,
-      project: options.project,
-    });
+    // wrapOpenAI auto-instruments chat.completions/responses calls with a
+    // braintrust LLM span. Also covers the OpenRouter path (same OpenAI client,
+    // just a different base URL) — braintrust's wrapOpenRouter is for their
+    // native SDK, not the OpenAI SDK, so it doesn't apply here.
+    this.client = wrapOpenAI(
+      new OpenAI({
+        apiKey: options.apiKey,
+        baseURL: options.baseURL,
+        organization: options.organization,
+        project: options.project,
+      }),
+    );
   }
 
   static fromModelBinding(
@@ -379,11 +370,10 @@ export class ChatCompletionsRuntime implements ResponsesRuntimeLike {
     request: NativeResponsesRequest,
     options: NativeTraceOptions = {},
   ): Promise<Response> {
-    const { response } = await this.runLlmRequest(request, {
+    return this.runLlmRequest(request, {
       ...options,
       streamed: false,
     });
-    return response;
   }
 
   async completeStream(
@@ -391,12 +381,11 @@ export class ChatCompletionsRuntime implements ResponsesRuntimeLike {
     handlers: NativeStreamHandlers = {},
     options: NativeTraceOptions = {},
   ): Promise<Response> {
-    const { response } = await this.runLlmRequest(request, {
+    return this.runLlmRequest(request, {
       ...options,
       streamed: true,
       handlers,
     });
-    return response;
   }
 
   async traceToolCall(
@@ -436,51 +425,16 @@ export class ChatCompletionsRuntime implements ResponsesRuntimeLike {
   private async runLlmRequest(
     request: NativeResponsesRequest,
     options: NativeLlmTraceOptions,
-  ): Promise<NativeLlmResult> {
-    const toolNames = (request.tools ?? []).map((tool) => tool.name);
-    const run = async (span: Span): Promise<NativeLlmResult> => {
-      try {
-        const result = options.streamed
-          ? await this.completeStreamRaw(
-              buildChatStreamingBody(request),
-              options.handlers,
-            )
-          : {
-              response: chatCompletionToResponse(
-                await this.completeRaw(buildChatNonStreamingBody(request)),
-              ),
-              ttftMs: null,
-            };
-
-        span.log({
-          output: llmOutputTraceValue(result.response),
-          metadata: {
-            response_id: result.response.id,
-          },
-          metrics: responseUsageMetrics(result.response, result.ttftMs),
-        });
-        return result;
-      } catch (error) {
-        span.log({ error: errorMessage(error) });
-        throw error;
-      }
-    };
-    return tracedUnderParent(options.parent, run, {
-      name: `chat:${request.model}`,
-      type: "llm",
-      event: {
-        input: llmInputTraceValue(request),
-        metadata: {
-          round_index: options.roundIndex,
-          runtime: "chat_completions",
-          model: request.model,
-          max_output_tokens: request.maxOutputTokens ?? null,
-          tool_count: toolNames.length,
-          tools: toolNames,
-          streamed: options.streamed,
-        },
-      },
-    });
+  ): Promise<Response> {
+    if (options.streamed) {
+      return this.completeStreamRaw(
+        buildChatStreamingBody(request),
+        options.handlers,
+      );
+    }
+    return chatCompletionToResponse(
+      await this.completeRaw(buildChatNonStreamingBody(request)),
+    );
   }
 
   private async completeRaw(
@@ -492,7 +446,7 @@ export class ChatCompletionsRuntime implements ResponsesRuntimeLike {
   private async completeStreamRaw(
     body: ChatCompletionCreateParamsStreaming,
     handlers: NativeStreamHandlers = {},
-  ): Promise<NativeLlmResult> {
+  ): Promise<Response> {
     const startedAt = performance.now();
     let sawFirstChunk = false;
     let ttftMs: number | null = null;
@@ -512,11 +466,243 @@ export class ChatCompletionsRuntime implements ResponsesRuntimeLike {
       }
     }
 
-    return {
-      response: accumulator.finalize(),
-      ttftMs,
-    };
+    return accumulator.finalize();
   }
+}
+
+// Anthropic's Messages API requires `max_tokens`; the OpenAI side leaves it
+// optional. Use the binding's configured limit when present, otherwise a
+// conservative default.
+const DEFAULT_ANTHROPIC_MAX_TOKENS = 4096;
+
+// Mirrors ChatCompletionsRuntime: build a provider-native request, call the
+// provider SDK, then normalize the provider response into the OpenAI Responses
+// `Response` shape that the rest of the harness consumes.
+export class AnthropicRuntime implements ResponsesRuntimeLike {
+  private readonly client: Anthropic;
+
+  constructor(options: ResponsesRuntimeOptions = {}) {
+    ensureBraintrustLogger(options.braintrust ?? null);
+    // wrapAnthropic auto-instruments every messages.create/.stream call with a
+    // braintrust LLM span (input/output/usage), so we don't hand-roll spans.
+    this.client = wrapAnthropic(
+      new Anthropic({
+        apiKey: options.apiKey,
+        baseURL: options.baseURL,
+      }),
+    );
+  }
+
+  static fromModelBinding(
+    agentConfig: AgentConfig | undefined,
+    binding: ResponsesModelBinding,
+  ): AnthropicRuntime {
+    return new AnthropicRuntime({
+      apiKey: binding.apiKey,
+      baseURL: binding.baseUrl ?? undefined,
+      braintrust: braintrustOptionsFromAgentConfig(agentConfig),
+    });
+  }
+
+  async runTurn(
+    context: TurnContext,
+    run: (turnParent: TraceParent) => Promise<string | null>,
+  ): Promise<void> {
+    await traceExecutorTurn(context, run);
+  }
+
+  async complete(
+    request: NativeResponsesRequest,
+    options: NativeTraceOptions = {},
+  ): Promise<Response> {
+    return this.runLlmRequest(request, {
+      ...options,
+      streamed: false,
+    });
+  }
+
+  async completeStream(
+    request: NativeResponsesRequest,
+    handlers: NativeStreamHandlers = {},
+    options: NativeTraceOptions = {},
+  ): Promise<Response> {
+    return this.runLlmRequest(request, {
+      ...options,
+      streamed: true,
+      handlers,
+    });
+  }
+
+  async traceToolCall(
+    turnParent: TraceParent,
+    context: TurnContext,
+    toolCall: PendingToolCall,
+    roundIndex: number,
+    execute: ToolCallExecutor = (toolCall) =>
+      context.executePendingTools([toolCall]),
+  ): Promise<EventData[]> {
+    return tracedUnderParent(
+      turnParent,
+      async (span) => {
+        try {
+          const events = await execute(toolCall);
+          span.log({ output: toolResultTraceOutput(events) });
+          return events;
+        } catch (error) {
+          span.log({ error: errorMessage(error) });
+          throw error;
+        }
+      },
+      {
+        name: toolCall.request.functionName,
+        type: "tool",
+        spanAttributes: { purpose: "tool_call" },
+        event: {
+          input: toolCall.request,
+          metadata: {
+            round_index: roundIndex,
+          },
+        },
+      },
+    );
+  }
+
+  private async runLlmRequest(
+    request: NativeResponsesRequest,
+    options: NativeLlmTraceOptions,
+  ): Promise<Response> {
+    const body = buildAnthropicBody(request);
+    if (options.streamed) {
+      return this.completeStreamRaw(body, options.handlers);
+    }
+    return anthropicMessageToResponse(await this.client.messages.create(body));
+  }
+
+  private async completeStreamRaw(
+    body: Anthropic.MessageCreateParamsNonStreaming,
+    handlers: NativeStreamHandlers = {},
+  ): Promise<Response> {
+    const startedAt = performance.now();
+    let sawFirstChunk = false;
+    let ttftMs: number | null = null;
+    const stream = this.client.messages.stream(body);
+
+    for await (const event of stream) {
+      if (
+        event.type === "content_block_delta" &&
+        event.delta.type === "text_delta"
+      ) {
+        if (!sawFirstChunk) {
+          sawFirstChunk = true;
+          ttftMs = Math.max(0, Math.round(performance.now() - startedAt));
+          await handlers.onFirstChunk?.(ttftMs);
+        }
+        await handlers.onTextDelta?.(event.delta.text);
+      }
+    }
+
+    return anthropicMessageToResponse(await stream.finalMessage());
+  }
+}
+
+function buildAnthropicBody(
+  request: NativeResponsesRequest,
+): Anthropic.MessageCreateParamsNonStreaming {
+  const { system, messages } = splitAnthropicMessages(request.messages ?? []);
+  const tools = toolDefinitionsToAnthropicTools(request.tools ?? []);
+  return {
+    model: request.model,
+    max_tokens: request.maxOutputTokens ?? DEFAULT_ANTHROPIC_MAX_TOKENS,
+    system: system.length === 0 ? undefined : system,
+    messages,
+    tools: tools.length === 0 ? undefined : tools,
+  };
+}
+
+// Anthropic takes the system prompt as a top-level field, not a message role.
+// Pull system/developer turns out, then let lingua convert the rest — the same
+// `linguaTo<Provider>Messages` path the Responses runtime uses for its input.
+function splitAnthropicMessages(messages: Message[]): {
+  system: string;
+  messages: Anthropic.MessageParam[];
+} {
+  const systemParts: string[] = [];
+  const conversation: Message[] = [];
+  for (const message of messages) {
+    if (message.role === "system" || message.role === "developer") {
+      systemParts.push(messageContentText(message.content));
+    } else {
+      conversation.push(message);
+    }
+  }
+  return {
+    system: systemParts.join("\n\n"),
+    messages: linguaToAnthropicMessages(
+      conversation as LinguaMessage[],
+    ) as Anthropic.MessageParam[],
+  };
+}
+
+function toolDefinitionsToAnthropicTools(
+  tools: ToolDefinition[],
+): Anthropic.Tool[] {
+  return tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    input_schema: tool.parameters as Anthropic.Tool.InputSchema,
+  }));
+}
+
+function anthropicMessageToResponse(message: Anthropic.Message): Response {
+  const output: unknown[] = [];
+  const text = message.content
+    .filter((block): block is Anthropic.TextBlock => block.type === "text")
+    .map((block) => block.text)
+    .join("");
+  if (text.length > 0) {
+    output.push(responseMessageOutput(`${message.id}_message`, text));
+  }
+  for (const block of message.content) {
+    if (block.type === "tool_use") {
+      output.push(
+        responseFunctionCallOutput({
+          id: block.id,
+          type: "function",
+          function: {
+            name: block.name,
+            arguments: JSON.stringify(block.input ?? {}),
+          },
+        } as ChatFunctionToolCall),
+      );
+    }
+  }
+  return {
+    id: message.id,
+    object: "response",
+    created_at: Math.floor(Date.now() / 1000),
+    status: "completed",
+    model: message.model,
+    output,
+    usage: anthropicUsageToResponseUsage(message.usage),
+  } as unknown as Response;
+}
+
+function anthropicUsageToResponseUsage(
+  usage: Anthropic.Usage | null | undefined,
+): unknown {
+  if (!usage) {
+    return null;
+  }
+  const input = usage.input_tokens ?? 0;
+  const output = usage.output_tokens ?? 0;
+  const cached = usage.cache_read_input_tokens ?? 0;
+  return {
+    input_tokens: input,
+    output_tokens: output,
+    total_tokens: input + output,
+    input_tokens_details: { cached_tokens: cached },
+    output_tokens_details: { reasoning_tokens: 0 },
+  };
 }
 
 export async function runResponsesTurn(
@@ -1126,38 +1312,6 @@ function braintrustOptionsFromAgentConfig(
   }
 
   return options;
-}
-
-function llmInputTraceValue(request: NativeResponsesRequest): unknown {
-  return request.messages ?? request.input ?? null;
-}
-
-function llmOutputTraceValue(response: Response): Record<string, unknown> {
-  return {
-    messages: responseMessages(response),
-    tool_calls: responseToolCalls(response),
-    status: response.status,
-  };
-}
-
-function responseUsageMetrics(
-  response: Response,
-  ttftMs: number | null,
-): Record<string, number> {
-  const metrics: Record<string, number> = {};
-  const usage = response.usage;
-  if (usage) {
-    metrics.prompt_tokens = usage.input_tokens;
-    metrics.completion_tokens = usage.output_tokens;
-    metrics.tokens = usage.total_tokens;
-    metrics.prompt_cached_tokens = usage.input_tokens_details.cached_tokens;
-    metrics.completion_reasoning_tokens =
-      usage.output_tokens_details.reasoning_tokens;
-  }
-  if (ttftMs !== null) {
-    metrics.time_to_first_token = ttftMs / 1000;
-  }
-  return metrics;
 }
 
 function toolResultTraceOutput(events: EventData[]): unknown {

@@ -295,6 +295,7 @@ impl SnapshotHandle for LocalSandboxAgent {
                 id: local_id,
                 snapshot_id: request.snapshot_id,
                 idle_seconds: request.idle_seconds,
+                provider: request.provider,
             })
             .await
     }
@@ -784,6 +785,7 @@ impl SnapshotHandle for LocalSandboxConversation {
                 id: local_id,
                 snapshot_id: request.snapshot_id,
                 idle_seconds: request.idle_seconds,
+                provider: request.provider,
             })
             .await?;
         self.append_remote_sandbox_events(vec![EventData::SandboxStarted {
@@ -960,6 +962,7 @@ impl SnapshotHandle for LocalSandboxTurnHandle {
             id: local_id,
             snapshot_id: request.snapshot_id,
             idle_seconds: request.idle_seconds,
+            provider: request.provider,
         })
         .await?;
         self.remote

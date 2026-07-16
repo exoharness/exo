@@ -9,7 +9,8 @@ use crate::adapter::tools::{
 use crate::agent_sandbox::{current_agent_sandbox, ensure_agent_sandbox};
 use crate::conversation_events::execute_list_conversation_events_tool;
 use crate::conversation_sandbox::{
-    conversation_sandbox_spec, conversation_sandboxes, ensure_conversation_sandbox,
+    agent_sandbox_spec, conversation_sandbox_spec, conversation_sandboxes,
+    ensure_conversation_sandbox,
 };
 use crate::scheduler_store::SchedulerStore;
 use crate::scheduler_types::{
@@ -34,13 +35,13 @@ const SANDBOX_SNAPSHOT_REGISTRY_ARTIFACT_PATH: &str = "config/sandbox-snapshots.
 pub struct BasicToolRuntime;
 
 #[derive(Debug, Clone)]
-pub struct ExoclawToolRuntime {
+pub struct ExoToolRuntime {
     scheduler_store: SchedulerStore,
     adapter_store: AdapterStore,
     adapter_creation_options: AdapterCreationOptions,
 }
 
-impl ExoclawToolRuntime {
+impl ExoToolRuntime {
     pub fn with_roots(
         scheduler_root: impl Into<PathBuf>,
         adapter_root: impl Into<PathBuf>,
@@ -85,7 +86,7 @@ impl ToolRuntime for BasicToolRuntime {
 }
 
 #[async_trait]
-impl ToolRuntime for ExoclawToolRuntime {
+impl ToolRuntime for ExoToolRuntime {
     async fn prepare_conversation(
         &self,
         agent: &dyn AgentHandle,
@@ -95,7 +96,7 @@ impl ToolRuntime for ExoclawToolRuntime {
     ) -> Result<()> {
         match effective_sandbox_scope(agent_config, config) {
             SandboxScope::Agent => {
-                ensure_agent_sandbox(agent, agent_config, config).await?;
+                ensure_agent_sandbox(agent, agent_config).await?;
             }
             SandboxScope::Conversation => {
                 ensure_conversation_sandbox(conversation, agent_config, config).await?;
@@ -115,7 +116,7 @@ impl ToolRuntime for ExoclawToolRuntime {
     ) -> Result<ToolResult> {
         match request.function_name.as_str() {
             "shell" => {
-                execute_exoclaw_shell_tool(agent, conversation, agent_config, config, request).await
+                execute_exo_shell_tool(agent, conversation, agent_config, config, request).await
             }
             "schedule_sandbox_task" => {
                 execute_schedule_task_tool(agent, conversation, &self.scheduler_store, request)
@@ -275,8 +276,17 @@ enum SandboxControlScope {
 }
 
 impl SandboxControlScope {
-    fn or_default(scope: Option<Self>) -> Self {
-        scope.unwrap_or(Self::Agent)
+    // When the model does not name a scope, operate on whatever sandbox the
+    // convo is configured to use.
+    fn resolve(
+        scope: Option<Self>,
+        agent_config: &AgentConfig,
+        config: &ConversationConfig,
+    ) -> Self {
+        scope.unwrap_or_else(|| match effective_sandbox_scope(agent_config, config) {
+            SandboxScope::Agent => Self::Agent,
+            SandboxScope::Conversation => Self::Conversation,
+        })
     }
 
     fn as_str(self) -> &'static str {
@@ -469,11 +479,10 @@ async fn execute_list_sandbox_snapshots_tool(
 ) -> Result<ToolResult> {
     let args =
         serde_json::from_value::<SandboxScopeArguments>(Value::Object(request.arguments.clone()))?;
-    let scope = SandboxControlScope::or_default(args.scope);
+    let scope = SandboxControlScope::resolve(args.scope, agent_config, config);
     match scope {
         SandboxControlScope::Agent => {
-            let spec = conversation_sandbox_spec(agent_config, config);
-            let Some(handle) = current_agent_sandbox(agent, &spec).await? else {
+            let Some(handle) = current_agent_sandbox(agent).await? else {
                 return Ok(empty_sandbox_snapshot_result(scope));
             };
             sandbox_snapshot_result(agent, scope, None, handle.sandbox_id).await
@@ -508,10 +517,10 @@ async fn execute_snapshot_sandbox_tool(
 ) -> Result<ToolResult> {
     let args =
         serde_json::from_value::<SandboxScopeArguments>(Value::Object(request.arguments.clone()))?;
-    let scope = SandboxControlScope::or_default(args.scope);
+    let scope = SandboxControlScope::resolve(args.scope, agent_config, config);
     match scope {
         SandboxControlScope::Agent => {
-            let handle = ensure_agent_sandbox(agent, agent_config, config).await?;
+            let handle = ensure_agent_sandbox(agent, agent_config).await?;
             let snapshot_id = agent.snapshot_sandbox(handle.sandbox_id.clone()).await?;
             turn.add_events(vec![EventData::SandboxSnapshotted {
                 sandbox_id: handle.sandbox_id.clone(),
@@ -567,17 +576,18 @@ async fn execute_rewind_sandbox_tool(
 ) -> Result<ToolResult> {
     let args =
         serde_json::from_value::<RewindSandboxArguments>(Value::Object(request.arguments.clone()))?;
-    let scope = SandboxControlScope::or_default(args.scope);
+    let scope = SandboxControlScope::resolve(args.scope, agent_config, config);
     let snapshot_id = parse_snapshot_id(&args.snapshot_id)?;
-    let spec = conversation_sandbox_spec(agent_config, config);
     match scope {
         SandboxControlScope::Agent => {
-            let handle = ensure_agent_sandbox(agent, agent_config, config).await?;
+            let spec = agent_sandbox_spec(agent_config);
+            let handle = ensure_agent_sandbox(agent, agent_config).await?;
             agent
                 .start_sandbox(StartSandboxRequest {
                     id: handle.sandbox_id.clone(),
                     snapshot_id,
                     idle_seconds: Some(spec.idle_seconds),
+                    provider: None,
                 })
                 .await?;
             turn.add_events(vec![EventData::SandboxStarted {
@@ -603,12 +613,14 @@ async fn execute_rewind_sandbox_tool(
             }))
         }
         SandboxControlScope::Conversation => {
+            let spec = conversation_sandbox_spec(agent_config, config);
             let sandbox_id =
                 ensure_conversation_sandbox(conversation, agent_config, config).await?;
             turn.start_sandbox(StartSandboxRequest {
                 id: sandbox_id.clone(),
                 snapshot_id,
                 idle_seconds: Some(spec.idle_seconds),
+                provider: None,
             })
             .await?;
             record_current_sandbox_snapshot(
@@ -852,7 +864,7 @@ async fn read_shell_process(process: Box<dyn SandboxProcess>) -> Result<ToolResu
     })?)
 }
 
-async fn execute_exoclaw_shell_tool(
+async fn execute_exo_shell_tool(
     agent: &dyn AgentHandle,
     conversation: &dyn ConversationHandle,
     agent_config: &AgentConfig,
@@ -869,7 +881,7 @@ async fn execute_exoclaw_shell_tool(
         .shell_program
         .clone()
         .ok_or_else(|| anyhow::anyhow!("shell tool is not enabled for this conversation"))?;
-    let agent_sandbox = ensure_agent_sandbox(agent, agent_config, config).await?;
+    let agent_sandbox = ensure_agent_sandbox(agent, agent_config).await?;
     let process = agent
         .run_in_sandbox(RunInSandboxRequest {
             id: agent_sandbox.sandbox_id,
@@ -902,7 +914,7 @@ pub(crate) async fn ensure_shell_sandbox(
     // Empty means "unspecified"; the harness fills the provider's default.
     let requested_image = config.effective_sandbox_image(agent_config);
     let desired_image = requested_image.map(str::to_string).unwrap_or_default();
-    let desired_enable_networking = agent_config.enable_networking;
+    let desired_enable_networking = agent_config.sandbox.enable_networking;
 
     if let Some(sandbox) = latest_shell_sandbox(conversation, desired_provider).await? {
         // When no image was requested, the stored sandbox holds the provider's

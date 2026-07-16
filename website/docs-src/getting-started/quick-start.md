@@ -1,0 +1,63 @@
+---
+title: Using the CLI Directly
+description: Store a secret, register a model, and start a bare REPL.
+---
+
+# Using the CLI Directly
+
+The [setup script](./installation) does all of this for you. Use this
+page when you've [installed just the CLI](./installation#installing-just-the-cli)
+and want a bare agent — none of the canonical agent's tools or adapters — or want to understand the
+primitives the setup script drives.
+
+## 1. Store a secret
+
+```bash
+exo secret set openai --env OPENAI_API_KEY
+```
+
+This stores your API key in exo's secret store (file-backed by default,
+Apple Keychain also supported via `--secret-backend`).
+
+::: info
+  `--env` takes the variable *name* literally and reads it at use time. Use
+  `--value "$OPENAI_API_KEY"` if you intentionally want the shell to expand
+  the value and store it.
+:::
+
+## 2. Register a model
+
+```bash
+exo model register gpt-5.5 --secret openai
+```
+
+This writes a *model binding*: a named model plus the secret it
+authenticates with. Use `--base-url` to target any OpenAI-compatible
+endpoint. Model names starting with `claude` use the Anthropic API.
+
+## 3. Start the REPL
+
+```bash
+exo repl
+```
+
+`exo repl` reuses or creates a default agent and conversation and uses the
+first registered model (override with `--model`), so you can start chatting
+in one command. It's a plain chat with no shell sandbox; see
+[A Sandboxed Conversation](./sandboxed-conversation) when you want tools.
+
+## Where state lives
+
+The CLI stores everything — agents, conversations, the event log, secrets —
+under `.exo` in the current directory by default. Pass `--root <path>` to
+use a different state directory.
+
+Because all conversation state is durable and owned by the exoharness, you
+can quit the REPL and resume the same conversation later:
+
+```bash
+exo repl --agent repl --conversation <slug>
+```
+
+Use `exo conversation list` to find the slug, and
+`conversation events <slug>` to inspect the raw event log.

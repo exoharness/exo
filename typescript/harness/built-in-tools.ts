@@ -9,7 +9,11 @@ import type {
   TurnContext,
 } from "./index";
 import type { HarnessToolRegistry, ToolInstance } from "./tools";
-import { DEFAULT_AGENT_TOOL_DIRECTORY, loadAgentTool } from "./tool-modules";
+import {
+  DEFAULT_AGENT_TOOL_DIRECTORY,
+  findAgentToolNameConflict,
+  loadAgentTool,
+} from "./tool-modules";
 
 export type BuiltInToolName =
   | "shell"
@@ -265,6 +269,18 @@ async function installAgentTool(
   }
   if (!tool) {
     throw new Error("agent tool validation did not return a tool");
+  }
+
+  const conflictingModulePath = await findAgentToolNameConflict(
+    tool.definition.name,
+    name,
+    toolsDirectory,
+  );
+  if (conflictingModulePath) {
+    const conflictingModuleName = path.basename(conflictingModulePath, ".ts");
+    throw new Error(
+      `tool ${tool.definition.name} is already installed by module ${conflictingModuleName}; reinstall using name ${conflictingModuleName} to replace it, or uninstall_agent_tool it first`,
+    );
   }
 
   await fs.writeFile(sourcePath, moduleSource, "utf8");

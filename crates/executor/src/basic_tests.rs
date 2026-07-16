@@ -45,6 +45,7 @@ async fn send_appends_user_and_assistant_messages() {
         .expect("conversation should exist");
     let executor = BasicExecutor::new(
         Arc::new(FakeModelClient::new(vec![ModelResponse {
+            provider_cost_usd: None,
             response_id: None,
             messages: vec![assistant_message("pong")],
             tool_calls: vec![],
@@ -130,6 +131,7 @@ async fn send_executes_tool_round_trip() {
     let tool_call_id = "call-1".to_string();
     let model = Arc::new(FakeModelClient::new(vec![
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![],
             tool_calls: vec![PendingToolCall {
@@ -145,6 +147,7 @@ async fn send_executes_tool_round_trip() {
             duration: None,
         },
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("done")],
             tool_calls: vec![],
@@ -249,6 +252,7 @@ async fn send_records_tool_result_when_tool_execution_fails() {
     let tool_call_id = "call-1".to_string();
     let model = Arc::new(FakeModelClient::new(vec![
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![],
             tool_calls: vec![PendingToolCall {
@@ -264,6 +268,7 @@ async fn send_records_tool_result_when_tool_execution_fails() {
             duration: None,
         },
         ModelResponse {
+            provider_cost_usd: None,
             response_id: Some(Uuid7::now()),
             messages: vec![assistant_message("recovered")],
             tool_calls: vec![],
@@ -369,6 +374,7 @@ async fn send_stream_emits_chunks_and_persists_final_response() {
                 UniversalStreamChunk::finish(0, "stop"),
             ],
             final_response: ModelResponse {
+                provider_cost_usd: None,
                 response_id: Some(Uuid7::now()),
                 messages: vec![assistant_message("hello")],
                 tool_calls: vec![],
@@ -1282,9 +1288,13 @@ fn default_agent_config() -> AgentConfig {
         harness: crate::AgentHarnessKind::Basic,
         typescript: None,
         enable_agent_tool_creation: true,
-        sandbox_image: None,
-        sandbox_provider: SandboxProvider::LocalProcess,
-        enable_networking: false,
+        sandbox: crate::AgentSandboxConfig {
+            image: None,
+            provider: SandboxProvider::LocalProcess,
+            mounts: Vec::new(),
+            enable_networking: false,
+            scope: crate::SandboxScope::Conversation,
+        },
         model: "test-model".to_string(),
         max_output_tokens: None,
         max_tool_round_trips: Some(4),

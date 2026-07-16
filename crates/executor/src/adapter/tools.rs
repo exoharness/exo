@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
-use base64::Engine;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use exoharness::{
     AgentHandle, ConversationHandle, Result, RunInSandboxRequest, SandboxProcess, ToolRequest,
     ToolResult, Uuid7,
@@ -28,6 +28,7 @@ const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_ATTACHMENT_BASE64_BYTES: usize = MAX_ATTACHMENT_BYTES.div_ceil(3) * 4 + 4;
 const ATTACHMENT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_ATTACHMENT_STDERR_BYTES: usize = 64 * 1024;
+const DEFAULT_EXOCHAT_BASE_URL: &str = "https://exoharness.ai";
 
 #[derive(Debug, Clone)]
 pub struct AdapterCreationOptions {
@@ -96,6 +97,8 @@ enum AdapterCreationConfig {
     Whatsapp(WhatsappAdapterCreationConfig),
     Signal(SignalAdapterCreationConfig),
     Discord(DiscordAdapterCreationConfig),
+    Slack(SlackAdapterCreationConfig),
+    Exochat(ExochatAdapterCreationConfig),
     AgentCli(AgentCliAdapterCreationConfig),
 }
 
@@ -163,6 +166,35 @@ struct DiscordAdapterCreationConfig {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SlackAdapterCreationConfig {
+    #[serde(rename = "type")]
+    _adapter_type: SlackAdapterType,
+    bot_token_secret_id: String,
+    signing_secret_id: String,
+    port: u16,
+    path: String,
+    default_channel_id: Option<String>,
+    trigger: SlackTrigger,
+    allowed_channels: Option<Vec<String>>,
+    allow_bots: bool,
+    thread_replies: bool,
+    progress_mode: SlackProgressMode,
+    #[serde(default)]
+    conversation_scope: Option<AdapterConversationScope>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ExochatAdapterCreationConfig {
+    #[serde(rename = "type")]
+    _adapter_type: ExochatAdapterType,
+    base_url: Option<String>,
+    channel_id: Option<String>,
+    secret: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AgentCliAdapterCreationConfig {
     #[serde(rename = "type")]
     _adapter_type: AgentCliAdapterType,
@@ -209,6 +241,18 @@ enum DiscordAdapterType {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum SlackAdapterType {
+    Slack,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ExochatAdapterType {
+    Exochat,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum IrcTrigger {
     Mention,
@@ -227,6 +271,21 @@ enum ChatTrigger {
 enum DiscordTrigger {
     AllMessages,
     MentionsOnly,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SlackTrigger {
+    AllMessages,
+    MentionsOnly,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum SlackProgressMode {
+    Update,
+    Stream,
+    Off,
 }
 
 #[derive(Debug, Deserialize)]
@@ -262,6 +321,8 @@ impl AdapterCreationConfig {
             Self::Whatsapp(_) => "whatsapp",
             Self::Signal(_) => "signal",
             Self::Discord(_) => "discord",
+            Self::Slack(_) => "slack",
+            Self::Exochat(_) => "exochat",
             Self::AgentCli(_) => "agent-cli",
         }
     }
@@ -375,6 +436,63 @@ impl AdapterCreationConfig {
                     secret_env,
                 })
             }
+            Self::Slack(config) => {
+                require_source(source, AdapterSource::Library, "slack")?;
+                if !config.path.starts_with('/') {
+                    bail!("slack path must start with /");
+                }
+                Ok(AdapterConfig {
+                    adapter_type: "slack".to_string(),
+                    worker_command: options.worker_command("slack"),
+                    initialization: serde_json::json!({
+                        "botTokenEnv": "EXO_SLACK_BOT_TOKEN",
+                        "signingSecretEnv": "EXO_SLACK_SIGNING_SECRET",
+                        "port": config.port,
+                        "path": config.path,
+                        "defaultChannelId": config.default_channel_id,
+                        "trigger": config.trigger.as_str(),
+                        "allowedChannels": config.allowed_channels,
+                        "allowBots": config.allow_bots,
+                        "threadReplies": config.thread_replies,
+                        "progressMode": config.progress_mode.as_str(),
+                        "conversationScope": config
+                            .conversation_scope
+                            .map(|scope| scope.as_str())
+                            .unwrap_or("target"),
+                    }),
+                    state_dir: None,
+                    secret_env: vec![
+                        WorkerSecretEnvVar {
+                            env: "EXO_SLACK_BOT_TOKEN".to_string(),
+                            secret_id: config.bot_token_secret_id,
+                        },
+                        WorkerSecretEnvVar {
+                            env: "EXO_SLACK_SIGNING_SECRET".to_string(),
+                            secret_id: config.signing_secret_id,
+                        },
+                    ],
+                })
+            }
+            Self::Exochat(config) => {
+                require_source(source, AdapterSource::Library, "exochat")?;
+                let channel_id = config.channel_id.filter(|value| !value.trim().is_empty());
+                let secret = config.secret.filter(|value| !value.trim().is_empty());
+                if channel_id.is_some() != secret.is_some() {
+                    bail!("exochat channelId and secret must either both be set or both be null");
+                }
+                let base_url = exochat_base_url(config.base_url)?;
+                Ok(AdapterConfig {
+                    adapter_type: "exochat".to_string(),
+                    worker_command: options.worker_command("exochat"),
+                    initialization: serde_json::json!({
+                        "baseUrl": base_url,
+                        "channelId": channel_id.unwrap_or_else(|| Uuid7::now().to_string()),
+                        "secret": secret.unwrap_or_else(exochat_secret),
+                    }),
+                    state_dir: None,
+                    secret_env: Vec::new(),
+                })
+            }
             Self::AgentCli(config) => {
                 require_source(source, AdapterSource::BuiltIn, "agent-cli")?;
                 if !config.mount_root.starts_with('/') {
@@ -438,6 +556,25 @@ impl DiscordTrigger {
     }
 }
 
+impl SlackTrigger {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::AllMessages => "all_messages",
+            Self::MentionsOnly => "mentions_only",
+        }
+    }
+}
+
+impl SlackProgressMode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Update => "update",
+            Self::Stream => "stream",
+            Self::Off => "off",
+        }
+    }
+}
+
 fn require_source(
     actual: AdapterSource,
     expected: AdapterSource,
@@ -447,6 +584,22 @@ fn require_source(
         bail!("{adapter_type} adapters must use source {expected:?}");
     }
     Ok(())
+}
+
+fn exochat_base_url(value: Option<String>) -> Result<String> {
+    let value = value
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| std::env::var("EXO_CHAT_BASE_URL").ok())
+        .unwrap_or_else(|| DEFAULT_EXOCHAT_BASE_URL.to_string());
+    let value = value.trim().trim_end_matches('/').to_string();
+    if !value.starts_with("https://") && !value.starts_with("http://") {
+        bail!("exochat baseUrl must start with http:// or https://");
+    }
+    Ok(value)
+}
+
+fn exochat_secret() -> String {
+    URL_SAFE_NO_PAD.encode(format!("{}:{}", Uuid7::now(), Uuid7::now()))
 }
 
 fn worker_command(path: PathBuf) -> Vec<String> {
@@ -482,7 +635,7 @@ pub async fn execute_create_adapter_tool(
     }
     Ok(serde_json::json!({
         "ok": true,
-        "adapter": adapter,
+        "adapter": adapter_tool_result(adapter),
     }))
 }
 
@@ -502,10 +655,35 @@ pub async fn execute_list_adapters_tool(
             args.include_disabled.unwrap_or(false),
         )
         .await?;
+    let adapters = adapters
+        .into_iter()
+        .map(adapter_tool_result)
+        .collect::<Vec<_>>();
     Ok(serde_json::json!({
         "ok": true,
         "adapters": adapters,
     }))
+}
+
+fn adapter_tool_result(adapter: super::types::AdapterRecord) -> serde_json::Value {
+    let mut value = serde_json::to_value(&adapter).expect("adapter record serializes");
+    if adapter.config.adapter_type == "exochat"
+        && let Some(chat_url) = exochat_chat_url(&adapter.config)
+        && let serde_json::Value::Object(object) = &mut value
+    {
+        object.insert("chatUrl".to_string(), serde_json::Value::String(chat_url));
+    }
+    value
+}
+
+fn exochat_chat_url(config: &AdapterConfig) -> Option<String> {
+    let init = config.initialization.as_object()?;
+    let base_url = init.get("baseUrl")?.as_str()?.trim_end_matches('/');
+    let channel_id = init.get("channelId")?.as_str()?;
+    let secret = init.get("secret")?.as_str()?;
+    Some(format!(
+        "{base_url}/chat?role=user&c={channel_id}#k={secret}"
+    ))
 }
 
 pub async fn execute_list_adapter_events_tool(
@@ -607,7 +785,11 @@ pub async fn execute_send_adapter_message_tool(
     else {
         return Ok(not_found());
     };
-    let target = resolve_send_target(scoped_target.as_deref(), args.target.as_deref())?;
+    let target = resolve_send_target(
+        &adapter.config.adapter_type,
+        scoped_target.as_deref(),
+        args.target.as_deref(),
+    )?;
     let attachments = args.attachments.unwrap_or_default();
     if !attachments.is_empty()
         && adapter.config.adapter_type != "whatsapp"
@@ -698,10 +880,17 @@ fn classify_adapter_access<'a>(
 /// Resolve the effective send target, enforcing that a target-scoped
 /// conversation may only send to its mapped target (a missing target defaults
 /// to it). A root conversation sends to whatever it requested.
-fn resolve_send_target(scoped: Option<&str>, requested: Option<&str>) -> Result<Option<String>> {
+fn resolve_send_target(
+    adapter_type: &str,
+    scoped: Option<&str>,
+    requested: Option<&str>,
+) -> Result<Option<String>> {
     match scoped {
         Some(scoped) => match requested {
-            Some(requested) if requested != scoped => {
+            Some(requested)
+                if requested != scoped
+                    && !allows_scoped_alternate_target(adapter_type, requested) =>
+            {
                 bail!("target-scoped conversation may only send to mapped target {scoped}")
             }
             Some(requested) => Ok(Some(requested.to_string())),
@@ -709,6 +898,10 @@ fn resolve_send_target(scoped: Option<&str>, requested: Option<&str>) -> Result<
         },
         None => Ok(requested.map(str::to_string)),
     }
+}
+
+fn allows_scoped_alternate_target(adapter_type: &str, requested: &str) -> bool {
+    adapter_type == "slack" && requested.starts_with("dm:") && requested.len() > "dm:".len()
 }
 
 async fn resolve_sandbox_attachments(
@@ -773,7 +966,7 @@ async fn read_sandbox_file(
 ) -> Result<Vec<u8>> {
     match effective_sandbox_scope(agent_config, config) {
         SandboxScope::Agent => {
-            let sandbox = ensure_agent_sandbox(agent, agent_config, config).await?;
+            let sandbox = ensure_agent_sandbox(agent, agent_config).await?;
             read_agent_sandbox_file_bytes(agent, sandbox.sandbox_id, sandbox_path).await
         }
         SandboxScope::Conversation => {
@@ -1064,22 +1257,26 @@ mod tests {
     fn resolve_send_target_enforces_scope() {
         // Root (unscoped) passes the requested target through, or none.
         assert_eq!(
-            resolve_send_target(None, Some("x")).unwrap(),
+            resolve_send_target("discord", None, Some("x")).unwrap(),
             Some("x".into())
         );
-        assert_eq!(resolve_send_target(None, None).unwrap(), None);
+        assert_eq!(resolve_send_target("discord", None, None).unwrap(), None);
         // Scoped: missing target defaults to the mapped one.
         assert_eq!(
-            resolve_send_target(Some("chan-A"), None).unwrap(),
+            resolve_send_target("discord", Some("chan-A"), None).unwrap(),
             Some("chan-A".into())
         );
         // Scoped: matching target is allowed.
         assert_eq!(
-            resolve_send_target(Some("chan-A"), Some("chan-A")).unwrap(),
+            resolve_send_target("discord", Some("chan-A"), Some("chan-A")).unwrap(),
             Some("chan-A".into())
         );
         // Scoped: a different target is refused — the key cross-channel guard.
-        assert!(resolve_send_target(Some("chan-A"), Some("chan-B")).is_err());
+        assert!(resolve_send_target("discord", Some("chan-A"), Some("chan-B")).is_err());
+        assert_eq!(
+            resolve_send_target("slack", Some("C123:1700000000.000000"), Some("dm:U123")).unwrap(),
+            Some("dm:U123".into())
+        );
     }
 
     #[tokio::test]
@@ -1209,6 +1406,80 @@ mod tests {
             .into_adapter_config(AdapterSource::Library, &test_creation_options())
             .unwrap_err();
         assert!(error.to_string().contains("source"));
+    }
+
+    #[test]
+    fn exochat_config_applies_defaults_and_requires_library_source() {
+        let parse =
+            |channel_id: serde_json::Value, secret: serde_json::Value| -> AdapterCreationConfig {
+                serde_json::from_value(serde_json::json!({
+                    "type": "exochat",
+                    "baseUrl": null,
+                    "channelId": channel_id,
+                    "secret": secret,
+                }))
+                .unwrap()
+            };
+        let adapter_config = parse(serde_json::Value::Null, serde_json::Value::Null)
+            .into_adapter_config(AdapterSource::Library, &test_creation_options())
+            .unwrap();
+        assert_eq!(adapter_config.adapter_type, "exochat");
+        assert!(adapter_config.worker_command[2].ends_with("/tmp/exo-adapters/exochat/worker.ts"));
+        assert_eq!(
+            adapter_config.initialization["baseUrl"],
+            serde_json::json!(DEFAULT_EXOCHAT_BASE_URL)
+        );
+        assert!(
+            adapter_config.initialization["channelId"]
+                .as_str()
+                .is_some()
+        );
+        assert!(adapter_config.initialization["secret"].as_str().is_some());
+        let chat_url = exochat_chat_url(&adapter_config).unwrap();
+        assert!(chat_url.starts_with("https://exoharness.ai/chat?role=user&c="));
+        assert!(chat_url.contains("#k="));
+        assert!(adapter_config.secret_env.is_empty());
+
+        let error = parse(serde_json::Value::Null, serde_json::Value::Null)
+            .into_adapter_config(AdapterSource::BuiltIn, &test_creation_options())
+            .unwrap_err();
+        assert!(error.to_string().contains("source"));
+
+        let error = parse(serde_json::json!("channel"), serde_json::Value::Null)
+            .into_adapter_config(AdapterSource::Library, &test_creation_options())
+            .unwrap_err();
+        assert!(error.to_string().contains("channelId and secret"));
+    }
+
+    #[tokio::test]
+    async fn exochat_adapter_tool_result_includes_chat_url() {
+        let tempdir = TempDir::new().unwrap();
+        let store = AdapterStore::new(tempdir.path().join("adapters"));
+        let adapter = store
+            .create_adapter(NewAdapter {
+                agent_id: "agent".to_string(),
+                conversation_id: "conversation".to_string(),
+                name: "exochat".to_string(),
+                source: AdapterSource::Library,
+                config: AdapterConfig {
+                    adapter_type: "exochat".to_string(),
+                    worker_command: vec!["pnpm".to_string(), "tsx".to_string()],
+                    initialization: serde_json::json!({
+                        "baseUrl": "https://chat.example.test",
+                        "channelId": "channel-123",
+                        "secret": "secret-456",
+                    }),
+                    state_dir: None,
+                    secret_env: Vec::new(),
+                },
+            })
+            .await
+            .unwrap();
+        let result = adapter_tool_result(adapter);
+        assert_eq!(
+            result["chatUrl"],
+            "https://chat.example.test/chat?role=user&c=channel-123#k=secret-456"
+        );
     }
 
     #[tokio::test]
@@ -1440,12 +1711,16 @@ mod tests {
     fn test_agent_config() -> AgentConfig {
         AgentConfig {
             instructions: Vec::new(),
-            harness: AgentHarnessKind::Exoclaw,
+            harness: AgentHarnessKind::Exo,
             typescript: None,
             enable_agent_tool_creation: true,
-            sandbox_image: None,
-            sandbox_provider: SandboxProvider::Docker,
-            enable_networking: false,
+            sandbox: crate::AgentSandboxConfig {
+                image: None,
+                provider: SandboxProvider::Docker,
+                mounts: Vec::new(),
+                enable_networking: false,
+                scope: crate::SandboxScope::Agent,
+            },
             model: "test-model".to_string(),
             max_output_tokens: None,
             max_tool_round_trips: None,
