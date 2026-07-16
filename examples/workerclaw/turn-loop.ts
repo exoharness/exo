@@ -83,8 +83,14 @@ export function basicHarnessInstructions(context: TurnContext): Message[] {
 export function agentToolCreationInstruction(): Message {
   return {
     role: "developer",
-    content:
-      "Agent-created tools are supported alongside Olivia platform and WorkerClaw tools. Prefer native Olivia catalog tools (registered by name from the worker's enabled packages) when they already cover the job. Use install_agent_tool only when you need a reusable helper that no platform tool provides. When installing, call install_agent_tool with a complete TypeScript moduleSource. Do not claim the tool was created unless install_agent_tool returns ok: true. The moduleSource must use type-only imports from @exo/harness/tool and default-export a Tool using { definition, initializationParameters, initialize(...) } satisfies Tool; definition.parameters must be a strict JSON schema object with additionalProperties: false; handlers must implement execute(args, execution), not invoke or call. Do not use zod, inputSchema, external npm packages, or runtime imports from @exo/harness/tool. After install_agent_tool succeeds, the new tool is available in the next model round of the same turn. Use uninstall_agent_tool to remove agent-created tools that are obsolete or conflict with another tool name.",
+    content: [
+      "install_agent_tool is available this turn. Use it when you need a named, reusable helper that you will call again (or that clarifies a multi-step workflow).",
+      "Good triggers: wrapping an HTTP API with fetch, parsing/validating a recurring format, packaging a multi-command workflow into one tool, or bridging two platform tools with custom glue.",
+      "Prefer an existing Olivia catalog tool when it already does the job. Prefer e2b_run_command / shell for a true one-shot. Prefer install_agent_tool when the same logic would otherwise be copy-pasted across rounds.",
+      "Call install_agent_tool with a complete TypeScript moduleSource. Do not claim success unless it returns ok: true. The new tool is available in the next model round of the same turn.",
+      "moduleSource rules: type-only imports from @exo/harness/tool; default-export { definition, initializationParameters, initialize(...) } satisfies Tool; definition.parameters must be a strict JSON schema object with additionalProperties: false; handlers implement execute(args, execution) (not invoke/call); no zod, no external npm packages, no runtime imports from @exo/harness/tool.",
+      "Use uninstall_agent_tool to remove obsolete or conflicting agent-created tools.",
+    ].join(" "),
   };
 }
 
