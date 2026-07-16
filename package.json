@@ -7,6 +7,7 @@
   "scripts": {
     "check": "pnpm lint && pnpm typecheck && pnpm test",
     "e2e:agent-harnesses": "tsx scripts/agent-harness-e2e.ts",
+    "e2e:workerclaw": "tsx scripts/workerclaw-e2e.ts",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint --deny-warnings .",
