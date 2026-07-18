@@ -606,6 +606,7 @@ async fn build_model_request(
         messages,
         tools: build_tool_definitions(conversation_config),
         max_output_tokens: agent_config.max_output_tokens,
+        session_id: Some(conversation.record().id.to_string()),
     })
 }
 

@@ -93,9 +93,8 @@ Subcommands:
   stop-all         Stop the scheduler and adapter runners, preserving .exo state
   build            Install JS dependencies and build the exo CLI and scheduler
   auth             Log in to or out of an external model provider
-  register-model   Store an API-key secret and register a model binding; uses
-                   --model, --upstream-model, --secret-name, --secret-env, and
-                   optionally --base-url
+  register-model   Register a model binding; uses --model, --upstream-model,
+                   --secret-name, and optionally --secret-env and --base-url
   write-profile    Write the local profile prompt non-interactively; uses
                    --user-name and --local-prompt-file
   setup-profile    Prompt interactively and write the local profile prompt
@@ -107,7 +106,7 @@ Options:
   --model <model>              Model binding name (default: gpt-5.6-terra)
   --upstream-model <model>     Upstream model id for register-model (default: --model)
   --secret-name <name>         Secret name for register-model (e.g. openai)
-  --secret-env <env-var>       Environment variable holding the API key for register-model
+  --secret-env <env-var>       Optional environment variable holding an API key to store
   --base-url <url>             Optional API base URL for register-model
   --provider <provider>        Optional model provider id for register-model
   --user-name <name>           User name for write-profile (default: none)
@@ -352,15 +351,16 @@ build_all() {
 
 register_model() {
   [[ -n "$SECRET_NAME" ]] || die "register-model requires --secret-name"
-  [[ -n "$SECRET_ENV" ]] || die "register-model requires --secret-env"
   ensure_exo_bin
   # Repair access to an existing master key before the CLI opens the secret store.
   exo_macos_prepare_keychain_for_ssh "$ROOT_DIR" "$EXO_BIN" "$SCHEDULER_BIN"
   local upstream="${UPSTREAM_MODEL:-$MODEL}"
-  echo "Storing secret $SECRET_NAME from \$$SECRET_ENV..."
-  exo secret set "$SECRET_NAME" --env "$SECRET_ENV"
-  # A fresh secret store creates its master key above; authorize the scheduler now.
-  exo_macos_prepare_keychain_for_ssh "$ROOT_DIR" "$EXO_BIN" "$SCHEDULER_BIN"
+  if [[ -n "$SECRET_ENV" ]]; then
+    echo "Storing secret $SECRET_NAME from \$$SECRET_ENV..."
+    exo secret set "$SECRET_NAME" --env "$SECRET_ENV"
+    # A fresh secret store creates its master key above; authorize the scheduler now.
+    exo_macos_prepare_keychain_for_ssh "$ROOT_DIR" "$EXO_BIN" "$SCHEDULER_BIN"
+  fi
   echo "Registering model $MODEL -> $upstream..."
   local args=(model register "$MODEL" --model "$upstream" --secret "$SECRET_NAME")
   if [[ -n "$MODEL_PROVIDER_ID" ]]; then
@@ -375,10 +375,10 @@ register_model() {
 run_provider_auth() {
   ensure_exo_bin
   # Repair access to an existing master key before provider auth opens the store.
-  prepare_macos_keychain_for_ssh "$ROOT_DIR" "$EXO_BIN" "$SCHEDULER_BIN"
+  exo_macos_prepare_keychain_for_ssh "$ROOT_DIR" "$EXO_BIN" "$SCHEDULER_BIN"
   exo auth "${AUTH_ARGS[@]}"
   # Login may create the master key; authorize the scheduler for the new item.
-  prepare_macos_keychain_for_ssh "$ROOT_DIR" "$EXO_BIN" "$SCHEDULER_BIN"
+  exo_macos_prepare_keychain_for_ssh "$ROOT_DIR" "$EXO_BIN" "$SCHEDULER_BIN"
 }
 
 write_local_profile() {

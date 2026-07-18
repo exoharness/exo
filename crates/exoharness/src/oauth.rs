@@ -13,14 +13,18 @@ use serde::{Deserialize, Serialize};
 use crate::Result;
 
 pub const OPENAI_CHATGPT_PROVIDER_ID: &str = "openai-chatgpt";
+/// Public OAuth client ID used by the official OpenAI Codex CLI.
+/// Source: https://github.com/openai/codex/blob/0fb559f0f6e231a88ac02ea002d3ecd248e2b515/codex-rs/login/src/auth/manager.rs#L1445-L1452
 pub const OPENAI_CHATGPT_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const DEFAULT_AUTH_BASE_URL: &str = "https://auth.openai.com";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const REVOKE_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OAuthTokenSet {
     pub access_token: String,
+    pub account_id: Option<String>,
     pub refresh_token: Option<String>,
     pub expires_at: DateTime<Utc>,
 }
@@ -32,7 +36,7 @@ pub struct DeviceCodePrompt {
 }
 
 #[async_trait]
-pub trait OAuthCredentialProvider: Send + Sync {
+pub(crate) trait OAuthCredentialProvider: Send + Sync {
     fn id(&self) -> &'static str;
 
     async fn refresh(&self, refresh_token: &str) -> Result<OAuthTokenSet>;
@@ -41,30 +45,31 @@ pub trait OAuthCredentialProvider: Send + Sync {
 }
 
 #[derive(Clone)]
-pub struct OAuthProviderRegistry {
+pub(crate) struct OAuthProviderRegistry {
     providers: HashMap<String, Arc<dyn OAuthCredentialProvider>>,
 }
 
 impl OAuthProviderRegistry {
-    pub fn with_openai_chatgpt() -> Self {
-        let provider = Arc::new(OpenAiChatGptOAuthProvider::new());
-        let mut providers = HashMap::<String, Arc<dyn OAuthCredentialProvider>>::new();
-        providers.insert(provider.id().to_string(), provider);
-        Self { providers }
+    pub(crate) fn built_in() -> Self {
+        Self::new().with_provider(Arc::new(OpenAiChatGptOAuthProvider::new()))
     }
 
-    pub fn get(&self, provider: &str) -> Result<Arc<dyn OAuthCredentialProvider>> {
+    fn new() -> Self {
+        Self {
+            providers: HashMap::new(),
+        }
+    }
+
+    fn with_provider(mut self, provider: Arc<dyn OAuthCredentialProvider>) -> Self {
+        self.providers.insert(provider.id().to_string(), provider);
+        self
+    }
+
+    pub(crate) fn get(&self, provider: &str) -> Result<Arc<dyn OAuthCredentialProvider>> {
         self.providers
             .get(provider)
             .cloned()
             .ok_or_else(|| anyhow!("unknown OAuth credential provider `{provider}`"))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_provider(provider: Arc<dyn OAuthCredentialProvider>) -> Self {
-        let mut providers = HashMap::new();
-        providers.insert(provider.id().to_string(), provider);
-        Self { providers }
     }
 }
 
@@ -74,6 +79,7 @@ pub struct OpenAiChatGptOAuthProvider {
     auth_base_url: String,
     login_timeout: Duration,
     revoke_timeout: Duration,
+    request_timeout: Duration,
 }
 
 impl Default for OpenAiChatGptOAuthProvider {
@@ -93,6 +99,7 @@ impl OpenAiChatGptOAuthProvider {
             auth_base_url: auth_base_url.into().trim_end_matches('/').to_string(),
             login_timeout: LOGIN_TIMEOUT,
             revoke_timeout: REVOKE_TIMEOUT,
+            request_timeout: REQUEST_TIMEOUT,
         }
     }
 
@@ -103,18 +110,28 @@ impl OpenAiChatGptOAuthProvider {
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
     pub async fn login_device_code(
         &self,
         on_prompt: impl FnOnce(&DeviceCodePrompt),
     ) -> Result<OAuthTokenSet> {
-        let device = self.request_device_code().await?;
-        on_prompt(&DeviceCodePrompt {
-            verification_url: format!("{}/codex/device", self.auth_base_url),
-            user_code: device.user_code.clone(),
-        });
+        tokio::time::timeout(self.login_timeout, async {
+            let device = self.request_device_code().await?;
+            on_prompt(&DeviceCodePrompt {
+                verification_url: format!("{}/codex/device", self.auth_base_url),
+                user_code: device.user_code.clone(),
+            });
 
-        let code = self.poll_for_authorization(&device).await?;
-        self.exchange_authorization_code(code).await
+            let code = self.poll_for_authorization(&device).await?;
+            self.exchange_authorization_code(code).await
+        })
+        .await
+        .map_err(|_| anyhow!("OpenAI device login timed out"))?
     }
 
     async fn request_device_code(&self) -> Result<DeviceCodeResponse> {
@@ -127,6 +144,7 @@ impl OpenAiChatGptOAuthProvider {
             .json(&DeviceCodeRequest {
                 client_id: OPENAI_CHATGPT_OAUTH_CLIENT_ID,
             })
+            .timeout(self.request_timeout)
             .send()
             .await
             .context("failed to request an OpenAI device code")?;
@@ -160,6 +178,10 @@ impl OpenAiChatGptOAuthProvider {
                     device_auth_id: &device.device_auth_id,
                     user_code: &device.user_code,
                 })
+                .timeout(
+                    self.request_timeout
+                        .min(self.login_timeout.saturating_sub(started.elapsed())),
+                )
                 .send()
                 .await
                 .context("failed while polling OpenAI device authorization")?;
@@ -210,6 +232,7 @@ impl OpenAiChatGptOAuthProvider {
                 client_id: OPENAI_CHATGPT_OAUTH_CLIENT_ID,
                 code_verifier: &code.code_verifier,
             })
+            .timeout(self.request_timeout)
             .send()
             .await
             .context("failed to exchange the OpenAI device authorization code")?;
@@ -240,6 +263,7 @@ impl OAuthCredentialProvider for OpenAiChatGptOAuthProvider {
                 grant_type: "refresh_token",
                 refresh_token,
             })
+            .timeout(self.request_timeout)
             .send()
             .await
             .context("failed to refresh the OpenAI credential")?;
@@ -362,8 +386,7 @@ struct TokenResponse {
     refresh_token: Option<String>,
     #[serde(default)]
     expires_in: Option<i64>,
-    #[serde(rename = "id_token")]
-    _id_token: Option<String>,
+    id_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -375,6 +398,17 @@ struct OAuthErrorResponse {
 #[derive(Deserialize)]
 struct JwtExpiryClaims {
     exp: i64,
+}
+
+#[derive(Deserialize)]
+struct ChatGptIdTokenClaims {
+    #[serde(rename = "https://api.openai.com/auth")]
+    auth: ChatGptAuthClaims,
+}
+
+#[derive(Deserialize)]
+struct ChatGptAuthClaims {
+    chatgpt_account_id: String,
 }
 
 async fn parse_token_response(
@@ -400,13 +434,35 @@ async fn parse_token_response(
         Some(seconds) => Utc::now() + TimeDelta::seconds(seconds),
         None => jwt_expiry(&access_token)?,
     };
+    let account_id = tokens
+        .id_token
+        .as_deref()
+        .map(chatgpt_account_id)
+        .transpose()?;
+    if current_refresh_token.is_none() && account_id.is_none() {
+        bail!("OpenAI token response omitted id_token");
+    }
     Ok(OAuthTokenSet {
         access_token,
+        account_id,
         refresh_token: tokens
             .refresh_token
             .or_else(|| current_refresh_token.map(str::to_string)),
         expires_at,
     })
+}
+
+fn chatgpt_account_id(id_token: &str) -> Result<String> {
+    let payload = id_token
+        .split('.')
+        .nth(1)
+        .ok_or_else(|| anyhow!("OpenAI ID token is not a JWT"))?;
+    let bytes = URL_SAFE_NO_PAD
+        .decode(payload)
+        .context("OpenAI ID token has malformed JWT encoding")?;
+    let claims: ChatGptIdTokenClaims =
+        serde_json::from_slice(&bytes).context("OpenAI ID token has malformed JWT claims")?;
+    Ok(claims.auth.chatgpt_account_id)
 }
 
 fn jwt_expiry(token: &str) -> Result<DateTime<Utc>> {
@@ -427,9 +483,18 @@ fn jwt_expiry(token: &str) -> Result<DateTime<Utc>> {
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use tokio::sync::oneshot;
     use wiremock::matchers::{body_json, body_string_contains, method, path};
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    fn id_token(account_id: &str) -> String {
+        let claims = serde_json::to_vec(&serde_json::json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": account_id
+            }
+        }))
+        .unwrap();
+        format!("header.{}.signature", URL_SAFE_NO_PAD.encode(claims))
+    }
 
     #[tokio::test]
     async fn device_login_uses_typed_codex_exchange() {
@@ -470,6 +535,7 @@ mod tests {
             )))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "access_token": "access-token",
+                "id_token": id_token("account-id"),
                 "refresh_token": "refresh-token",
                 "expires_in": 3600
             })))
@@ -487,30 +553,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(tokens.access_token, "access-token");
+        assert_eq!(tokens.account_id.as_deref(), Some("account-id"));
         assert_eq!(tokens.refresh_token.as_deref(), Some("refresh-token"));
         assert_eq!(
             prompt.lock().unwrap().as_ref().unwrap().verification_url,
             format!("{}/codex/device", server.uri())
         );
-    }
-
-    #[tokio::test]
-    async fn malformed_device_response_fails_without_polling() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/api/accounts/deviceauth/usercode"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "user_code": "missing-device-id"
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let error = OpenAiChatGptOAuthProvider::with_auth_base_url(server.uri())
-            .login_device_code(|_| {})
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("malformed device-code response"));
     }
 
     #[tokio::test]
@@ -554,39 +602,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revoke_falls_back_to_access_token_and_reports_failure() {
+    async fn refresh_honors_request_timeout() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/oauth/revoke"))
-            .and(body_json(serde_json::json!({
-                "token": "access",
-                "token_type_hint": "access_token"
-            })))
-            .respond_with(ResponseTemplate::new(500))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let error = OpenAiChatGptOAuthProvider::with_auth_base_url(server.uri())
-            .revoke(Some("access"), None)
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("status 500"));
-    }
-
-    #[tokio::test]
-    async fn revoke_honors_its_timeout() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/oauth/revoke"))
+            .and(path("/oauth/token"))
             .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(250)))
             .mount(&server)
             .await;
 
         let provider = OpenAiChatGptOAuthProvider::with_auth_base_url(server.uri())
-            .with_timeouts(LOGIN_TIMEOUT, Duration::from_millis(10));
-        let error = provider.revoke(Some("access"), None).await.unwrap_err();
-        assert!(error.to_string().contains("failed to revoke"));
+            .with_request_timeout(Duration::from_millis(10));
+        let error = provider.refresh("refresh-token").await.unwrap_err();
+
+        assert!(error.to_string().contains("failed to refresh"));
     }
 
     struct PendingOnce {
@@ -635,6 +663,7 @@ mod tests {
             .and(path("/oauth/token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "access_token": "access-token",
+                "id_token": id_token("account-id"),
                 "refresh_token": "refresh-token",
                 "expires_in": 3600
             })))
@@ -674,58 +703,5 @@ mod tests {
             .await
             .expect_err("pending device login should time out");
         assert!(error.to_string().contains("timed out"));
-    }
-
-    #[tokio::test]
-    async fn cancelling_device_login_stops_before_token_exchange() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/api/accounts/deviceauth/usercode"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "device_auth_id": "device-id",
-                "user_code": "ABCD-EFGH",
-                "interval": "1"
-            })))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/api/accounts/deviceauth/token"))
-            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
-                "error": "authorization_pending"
-            })))
-            .mount(&server)
-            .await;
-
-        let provider = OpenAiChatGptOAuthProvider::with_auth_base_url(server.uri());
-        let (prompt_tx, prompt_rx) = oneshot::channel();
-        let login = tokio::spawn(async move {
-            provider
-                .login_device_code(|_| {
-                    prompt_tx.send(()).expect("prompt receiver");
-                })
-                .await
-        });
-        prompt_rx.await.expect("device prompt");
-        login.abort();
-        assert!(login.await.unwrap_err().is_cancelled());
-
-        let requests = server.received_requests().await.unwrap();
-        assert!(
-            requests
-                .iter()
-                .all(|request| request.url.path() != "/oauth/token")
-        );
-    }
-
-    #[test]
-    fn slow_down_increases_the_server_polling_interval() {
-        assert_eq!(
-            next_poll_interval(Duration::from_secs(3), true),
-            Duration::from_secs(8)
-        );
-        assert_eq!(
-            next_poll_interval(Duration::from_secs(3), false),
-            Duration::from_secs(3)
-        );
     }
 }

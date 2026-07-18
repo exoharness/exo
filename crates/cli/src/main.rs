@@ -642,9 +642,6 @@ enum SecretCommands {
         #[arg(long)]
         value: Option<String>,
     },
-    Delete {
-        name: String,
-    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1911,23 +1908,6 @@ async fn main() -> Result<()> {
                     .await?;
                 println!("set secret {} ({})", name, id);
             }
-            SecretCommands::Delete { name } => {
-                let Some(secret_id) =
-                    find_secret_id(harness.exoharness_handle().as_ref(), &name).await?
-                else {
-                    println!("secret {name} not found; nothing to delete");
-                    return Ok(());
-                };
-                if harness
-                    .exoharness_handle()
-                    .delete_secret(&secret_id)
-                    .await?
-                {
-                    println!("deleted secret {name}");
-                } else {
-                    println!("secret {name} not found; nothing to delete");
-                }
-            }
         },
         Commands::Auth { command } => match command {
             AuthCommands::Login { provider, name } => {
@@ -1976,6 +1956,7 @@ async fn main() -> Result<()> {
                         name: name.clone(),
                         secret: Secret::Oauth {
                             provider: Some(provider),
+                            account_id: tokens.account_id,
                             access_token: Some(tokens.access_token),
                             refresh_token: tokens.refresh_token,
                             expires_at: Some(tokens.expires_at),
@@ -3318,73 +3299,6 @@ mod create_tests {
                     ..
                 }
             }
-        ));
-    }
-
-    #[test]
-    fn oauth_auth_commands_parse_consistent_provider_and_names() {
-        use clap::Parser;
-        let login = super::Cli::try_parse_from(["exo", "auth", "login", "openai-chatgpt"])
-            .expect("auth login parses");
-        assert!(matches!(
-            login.command,
-            super::Commands::Auth {
-                command: super::AuthCommands::Login { ref provider, name: None }
-            } if provider == "openai-chatgpt"
-        ));
-        assert_eq!(super::oauth_credential_name(None), "openai-chatgpt");
-
-        let logout = super::Cli::try_parse_from([
-            "exo",
-            "auth",
-            "logout",
-            "openai-chatgpt",
-            "--name",
-            "work-chatgpt",
-        ])
-        .expect("auth logout parses");
-        assert!(matches!(
-            logout.command,
-            super::Commands::Auth {
-                command: super::AuthCommands::Logout {
-                    ref provider,
-                    name: Some(ref name),
-                }
-            } if provider == "openai-chatgpt" && name == "work-chatgpt"
-        ));
-    }
-
-    #[test]
-    fn model_provider_and_secret_delete_commands_parse() {
-        use clap::Parser;
-        let model = super::Cli::try_parse_from([
-            "exo",
-            "model",
-            "register",
-            "gpt",
-            "--secret",
-            "openai-chatgpt",
-            "--provider",
-            "openai-chatgpt",
-        ])
-        .expect("provider-tagged model parses");
-        assert!(matches!(
-            model.command,
-            super::Commands::Model {
-                command: super::ModelCommands::Register {
-                    provider: Some(ref provider),
-                    ..
-                }
-            } if provider == "openai-chatgpt"
-        ));
-
-        let secret = super::Cli::try_parse_from(["exo", "secret", "delete", "openai-chatgpt"])
-            .expect("secret delete parses");
-        assert!(matches!(
-            secret.command,
-            super::Commands::Secret {
-                command: super::SecretCommands::Delete { ref name }
-            } if name == "openai-chatgpt"
         ));
     }
 }

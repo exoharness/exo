@@ -4,7 +4,7 @@ import type { Response } from "openai/resources/responses/responses";
 import {
   AnthropicRuntime,
   ChatCompletionsRuntime,
-  isAnthropicModel,
+  isAnthropicBinding,
   isOpenRouterBinding,
   modelRequiresResponsesApi,
   responseToLinguaEvents,
@@ -54,9 +54,11 @@ describe("model runtime dispatch", () => {
   });
 
   it("dispatches claude models to the native Anthropic runtime", () => {
-    expect(isAnthropicModel("claude-sonnet-4-6")).toBe(true);
-    expect(isAnthropicModel("gpt-5.4")).toBe(false);
-    expect(isAnthropicModel("us.anthropic.claude-sonnet-4-6")).toBe(false);
+    expect(isAnthropicBinding({ model: "claude-sonnet-4-6" })).toBe(true);
+    expect(isAnthropicBinding({ model: "gpt-5.4" })).toBe(false);
+    expect(
+      isAnthropicBinding({ model: "us.anthropic.claude-sonnet-4-6" }),
+    ).toBe(false);
     expect(
       runtimeFromModelBinding(undefined, {
         model: "claude-sonnet-4-6",

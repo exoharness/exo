@@ -826,8 +826,8 @@ main() {
 
   if [[ "$MODEL_PROVIDER" == "openai-chatgpt" ]]; then
     info "Register model"
-    ./target/debug/exo model register "$MODEL_NAME" \
-      --model "$UPSTREAM_MODEL" --secret openai-chatgpt \
+    ./exo.sh register-model --model "$MODEL_NAME" \
+      --upstream-model "$UPSTREAM_MODEL" --secret-name openai-chatgpt \
       --provider openai-chatgpt
   else
     info "Store secret and register model"

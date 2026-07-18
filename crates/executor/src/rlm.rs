@@ -94,6 +94,7 @@ where
             &context_text,
             conversation_config,
         )));
+        let model_session_id = conversation.record().id.to_string();
 
         let mut round = 0u32;
         loop {
@@ -112,6 +113,7 @@ where
                 messages: history.clone(),
                 tools: build_rlm_tool_definitions(),
                 max_output_tokens: agent_config.max_output_tokens,
+                session_id: Some(model_session_id.clone()),
             };
             let llm_trace = match turn_trace {
                 Some(turn_trace) => turn_trace.start_llm_round(&request, round as usize).await,
@@ -193,6 +195,7 @@ where
                         &mut js_state,
                         agent_config,
                         &model_binding,
+                        &model_session_id,
                         &tool_call.request,
                     )
                     .await
@@ -312,6 +315,7 @@ where
         js_state: &mut JsReplState,
         agent_config: &AgentConfig,
         model_binding: &ResolvedModelBinding,
+        session_id: &str,
         request: &ToolRequest,
     ) -> Result<ToolResult> {
         match request.function_name.as_str() {
@@ -327,6 +331,7 @@ where
                     js_state,
                     agent_config,
                     model_binding,
+                    session_id,
                     &args.prompt,
                     args.target_var,
                 )
@@ -340,6 +345,7 @@ where
                     js_state,
                     agent_config,
                     model_binding,
+                    session_id,
                     &prompt,
                     args.target_var,
                 )
@@ -354,11 +360,12 @@ where
         js_state: &mut JsReplState,
         agent_config: &AgentConfig,
         model_binding: &ResolvedModelBinding,
+        session_id: &str,
         prompt: &str,
         target_var: Option<String>,
     ) -> Result<ToolResult> {
         let result = self
-            .run_subquery(agent_config, model_binding, prompt)
+            .run_subquery(agent_config, model_binding, session_id, prompt)
             .await?;
         if let Some(target_var) = &target_var {
             set_variable_value(js_state, target_var, &result);
@@ -374,6 +381,7 @@ where
         &self,
         agent_config: &AgentConfig,
         model_binding: &ResolvedModelBinding,
+        session_id: &str,
         prompt: &str,
     ) -> Result<String> {
         let mut messages = agent_config.instructions.clone();
@@ -392,6 +400,7 @@ where
                 messages,
                 tools: Vec::new(),
                 max_output_tokens: agent_config.max_output_tokens,
+                session_id: Some(session_id.to_string()),
             })
             .await?;
 

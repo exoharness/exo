@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
@@ -18,6 +18,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
+use crate::oauth::OAuthProviderRegistry;
 use crate::sandbox::{
     CliContainerSandboxBackend, LocalProcessSandboxBackend, ManagedSandboxBackend,
     ManagedSandboxHandle, SANDBOX_MAIN_MOUNT_DIR, SandboxCommand, SandboxKey,
@@ -39,14 +40,14 @@ use crate::{
     DurableFileSystem, Event, EventData, EventId, EventKind, EventQuery, EventQueryDirection,
     EventStream, ExoHarness, FileSystemMount, ForkConversationRequest, GetEventsResult,
     GetSandboxProcessEventsResult, ListConversationsRequest, ListConversationsResult,
-    LogoutOauthResult, NewAgentRequest, NewConversationRequest, OAuthProviderRegistry,
-    PutSecretRequest, ReadArtifactRequest, ResolvedSecret, Result, RunInSandboxRequest,
-    SandboxHandle, SandboxId, SandboxProcess, SandboxProcessEvent, SandboxProcessEventQuery,
-    SandboxProcessId, SandboxProcessMode, SandboxProcessParts, SandboxProcessRecord,
-    SandboxProcessStatus, SandboxProcessStdin, SandboxProvider, SandboxProviderConfig, Secret,
-    SecretId, SecretMetadata, SecretType, SessionId, SnapshotHandle, SnapshotId,
-    StartSandboxProcessRequest, StartSandboxRequest, TurnHandle, TurnId, TurnRecord, Uuid7,
-    WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
+    LogoutOauthResult, NewAgentRequest, NewConversationRequest, PutSecretRequest,
+    ReadArtifactRequest, Result, RunInSandboxRequest, SandboxHandle, SandboxId, SandboxProcess,
+    SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessId, SandboxProcessMode,
+    SandboxProcessParts, SandboxProcessRecord, SandboxProcessStatus, SandboxProcessStdin,
+    SandboxProvider, SandboxProviderConfig, Secret, SecretId, SecretMetadata, SecretType,
+    SessionId, SnapshotHandle, SnapshotId, StartSandboxProcessRequest, StartSandboxRequest,
+    TurnHandle, TurnId, TurnRecord, Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest,
+    WriteSandboxProcessInputRequest,
 };
 
 const SANDBOX_PROVIDER_STATE_EVENT: &str = "sandbox_provider_state";
@@ -344,7 +345,7 @@ pub struct BasicExoHarness {
 struct BasicExoHarnessInner {
     storage: BasicObjectStore,
     write_lock: AsyncMutex<()>,
-    secret_locks: AsyncMutex<HashMap<SecretId, Arc<AsyncMutex<()>>>>,
+    secret_locks: AsyncMutex<HashMap<SecretId, Weak<AsyncMutex<()>>>>,
     oauth_providers: OAuthProviderRegistry,
     subscribers: Mutex<HashMap<ConversationId, Vec<mpsc::UnboundedSender<Result<Event>>>>>,
     sandbox_registry: HashMap<SandboxProvider, SandboxBackendRegistration>,
@@ -772,7 +773,7 @@ fn nonempty_env(name: &str) -> Option<String> {
 
 impl BasicExoHarness {
     pub async fn new(config: BasicExoHarnessConfig) -> Result<Self> {
-        Self::new_with_backend(config, None, OAuthProviderRegistry::with_openai_chatgpt()).await
+        Self::new_with_backend(config, None).await
     }
 
     #[cfg(test)]
@@ -780,25 +781,7 @@ impl BasicExoHarness {
         config: BasicExoHarnessConfig,
         sandbox_backend: Arc<dyn ManagedSandboxBackend>,
     ) -> Result<Self> {
-        Self::new_with_backend(
-            config,
-            Some(sandbox_backend),
-            OAuthProviderRegistry::with_openai_chatgpt(),
-        )
-        .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn new_with_oauth_provider(
-        config: BasicExoHarnessConfig,
-        oauth_provider: Arc<dyn crate::OAuthCredentialProvider>,
-    ) -> Result<Self> {
-        Self::new_with_backend(
-            config,
-            None,
-            OAuthProviderRegistry::from_provider(oauth_provider),
-        )
-        .await
+        Self::new_with_backend(config, Some(sandbox_backend)).await
     }
 
     #[cfg(test)]
@@ -813,7 +796,6 @@ impl BasicExoHarness {
     async fn new_with_backend(
         config: BasicExoHarnessConfig,
         seed: Option<Arc<dyn ManagedSandboxBackend>>,
-        oauth_providers: OAuthProviderRegistry,
     ) -> Result<Self> {
         let BasicExoHarnessConfig {
             root,
@@ -852,7 +834,7 @@ impl BasicExoHarness {
                 storage,
                 write_lock: AsyncMutex::new(()),
                 secret_locks: AsyncMutex::new(HashMap::new()),
-                oauth_providers,
+                oauth_providers: OAuthProviderRegistry::built_in(),
                 subscribers: Mutex::new(HashMap::new()),
                 sandbox_registry: registry,
                 sandbox_backends: AsyncMutex::new(cache),
@@ -1042,30 +1024,11 @@ impl ExoHarness for BasicExoHarness {
     }
 
     async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>> {
-        let path = self.secrets_dir().join(format!("{id}.json"));
-        let Some(record) = self
-            .inner
-            .storage
-            .get_json_if_exists::<StoredSecret>(&path)
-            .await?
-        else {
-            return Ok(None);
-        };
-        Ok(Some(
-            self.inner.secret_cipher.decrypt_secret(&record.secret)?,
-        ))
-    }
-
-    async fn resolve_secret(&self, id: &SecretId) -> Result<Option<ResolvedSecret>> {
-        resolve_secret_in_scopes(&self.inner, &[self.secrets_dir()], id).await
+        get_secret_in_scopes(&self.inner, &[self.secrets_dir()], id).await
     }
 
     async fn logout_oauth_secret(&self, id: &SecretId) -> Result<LogoutOauthResult> {
-        logout_oauth_secret_in_scopes(&self.inner, &[self.secrets_dir()], id).await
-    }
-
-    async fn delete_secret(&self, id: &SecretId) -> Result<bool> {
-        delete_secret_in_scopes(&self.inner, &[self.secrets_dir()], id).await
+        logout_oauth_secret_in_dir(&self.inner, &self.secrets_dir(), id).await
     }
 }
 
@@ -1352,44 +1315,7 @@ impl AgentHandle for BasicAgentHandle {
     }
 
     async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>> {
-        let path = self.secrets_dir().join(format!("{id}.json"));
-        let Some(record) = self
-            .harness
-            .inner
-            .storage
-            .get_json_if_exists::<StoredSecret>(&path)
-            .await?
-        else {
-            return self.harness.get_secret(id).await;
-        };
-        Ok(Some(
-            self.harness
-                .inner
-                .secret_cipher
-                .decrypt_secret(&record.secret)?,
-        ))
-    }
-
-    async fn resolve_secret(&self, id: &SecretId) -> Result<Option<ResolvedSecret>> {
-        resolve_secret_in_scopes(
-            &self.harness.inner,
-            &[self.secrets_dir(), self.harness.secrets_dir()],
-            id,
-        )
-        .await
-    }
-
-    async fn logout_oauth_secret(&self, id: &SecretId) -> Result<LogoutOauthResult> {
-        logout_oauth_secret_in_scopes(
-            &self.harness.inner,
-            &[self.secrets_dir(), self.harness.secrets_dir()],
-            id,
-        )
-        .await
-    }
-
-    async fn delete_secret(&self, id: &SecretId) -> Result<bool> {
-        delete_secret_in_scopes(
+        get_secret_in_scopes(
             &self.harness.inner,
             &[self.secrets_dir(), self.harness.secrets_dir()],
             id,
@@ -2490,67 +2416,7 @@ impl ConversationHandle for BasicConversationHandle {
     }
 
     async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>> {
-        let local_path = self.secrets_dir().join(format!("{id}.json"));
-        if let Some(record) = self
-            .harness
-            .inner
-            .storage
-            .get_json_if_exists::<StoredSecret>(&local_path)
-            .await?
-        {
-            return Ok(Some(
-                self.harness
-                    .inner
-                    .secret_cipher
-                    .decrypt_secret(&record.secret)?,
-            ));
-        }
-        let agent_path = agent_secrets_dir(&self.harness, self.agent_id).join(format!("{id}.json"));
-        let Some(record) = self
-            .harness
-            .inner
-            .storage
-            .get_json_if_exists::<StoredSecret>(&agent_path)
-            .await?
-        else {
-            return self.harness.get_secret(id).await;
-        };
-        Ok(Some(
-            self.harness
-                .inner
-                .secret_cipher
-                .decrypt_secret(&record.secret)?,
-        ))
-    }
-
-    async fn resolve_secret(&self, id: &SecretId) -> Result<Option<ResolvedSecret>> {
-        resolve_secret_in_scopes(
-            &self.harness.inner,
-            &[
-                self.secrets_dir(),
-                agent_secrets_dir(&self.harness, self.agent_id),
-                self.harness.secrets_dir(),
-            ],
-            id,
-        )
-        .await
-    }
-
-    async fn logout_oauth_secret(&self, id: &SecretId) -> Result<LogoutOauthResult> {
-        logout_oauth_secret_in_scopes(
-            &self.harness.inner,
-            &[
-                self.secrets_dir(),
-                agent_secrets_dir(&self.harness, self.agent_id),
-                self.harness.secrets_dir(),
-            ],
-            id,
-        )
-        .await
-    }
-
-    async fn delete_secret(&self, id: &SecretId) -> Result<bool> {
-        delete_secret_in_scopes(
+        get_secret_in_scopes(
             &self.harness.inner,
             &[
                 self.secrets_dir(),
@@ -3232,13 +3098,14 @@ struct StoredSecret {
 
 impl BasicExoHarnessInner {
     async fn secret_lock(&self, id: SecretId) -> Arc<AsyncMutex<()>> {
-        Arc::clone(
-            self.secret_locks
-                .lock()
-                .await
-                .entry(id)
-                .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
-        )
+        let mut locks = self.secret_locks.lock().await;
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(&id).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(AsyncMutex::new(()));
+        locks.insert(id, Arc::downgrade(&lock));
+        lock
     }
 }
 
@@ -3359,102 +3226,82 @@ async fn find_secret_record(
     Ok(None)
 }
 
-async fn resolve_secret_in_scopes(
+async fn get_secret_in_scopes(
     inner: &BasicExoHarnessInner,
     scopes: &[PathBuf],
     id: &SecretId,
-) -> Result<Option<ResolvedSecret>> {
+) -> Result<Option<Secret>> {
     let Some((_, record)) = find_secret_record(inner, scopes, id).await? else {
         return Ok(None);
     };
     let secret = inner.secret_cipher.decrypt_secret(&record.secret)?;
-    match secret {
-        Secret::Key { value } => Ok(Some(ResolvedSecret::Key { value })),
-        Secret::Oauth {
-            provider,
-            access_token,
-            refresh_token: _,
-            expires_at,
-        } => {
-            let provider = provider
-                .ok_or_else(|| anyhow!("OAuth credential has no provider; log in again"))?;
-            let access_token = access_token.ok_or_else(|| {
-                anyhow!("OAuth credential for provider `{provider}` is logged out")
-            })?;
-            let refresh_required =
-                expires_at.is_some_and(|expiry| expiry <= Utc::now() + TimeDelta::minutes(5));
-            if !refresh_required {
-                return Ok(Some(ResolvedSecret::AccessToken {
-                    provider,
-                    access_token,
-                }));
-            }
-
-            let secret_lock = inner.secret_lock(*id).await;
-            let _secret_guard = secret_lock.lock().await;
-            let Some((path, record)) = find_secret_record(inner, scopes, id).await? else {
-                return Ok(None);
-            };
-            let secret = inner.secret_cipher.decrypt_secret(&record.secret)?;
-            let Secret::Oauth {
-                provider,
-                access_token,
-                refresh_token,
-                expires_at,
-            } = secret
-            else {
-                bail!("secret `{id}` changed type while being resolved");
-            };
-            let provider = provider
-                .ok_or_else(|| anyhow!("OAuth credential has no provider; log in again"))?;
-            let access_token = access_token.ok_or_else(|| {
-                anyhow!("OAuth credential for provider `{provider}` is logged out")
-            })?;
-            if expires_at.is_none_or(|expiry| expiry > Utc::now() + TimeDelta::minutes(5)) {
-                return Ok(Some(ResolvedSecret::AccessToken {
-                    provider,
-                    access_token,
-                }));
-            }
-            let refresh_token = refresh_token.ok_or_else(|| {
-                anyhow!(
-                    "OAuth credential for provider `{provider}` is expiring and has no refresh token; log in again"
-                )
-            })?;
-            let refreshed = inner
-                .oauth_providers
-                .get(&provider)?
-                .refresh(&refresh_token)
-                .await?;
-            let stored_access_token = refreshed.access_token.clone();
-            let refreshed_secret = Secret::Oauth {
-                provider: Some(provider.clone()),
-                access_token: Some(refreshed.access_token),
-                refresh_token: refreshed.refresh_token,
-                expires_at: Some(refreshed.expires_at),
-            };
-            let updated = StoredSecret {
-                metadata: record.metadata,
-                secret: inner.secret_cipher.encrypt_secret(&refreshed_secret)?,
-            };
-            let _write_guard = inner.write_lock.lock().await;
-            inner.storage.put_json(path, &updated).await?;
-            Ok(Some(ResolvedSecret::AccessToken {
-                provider,
-                access_token: stored_access_token,
-            }))
-        }
+    let Secret::Oauth {
+        provider: Some(_),
+        refresh_token: Some(_),
+        expires_at: Some(expires_at),
+        ..
+    } = &secret
+    else {
+        return Ok(Some(secret));
+    };
+    if *expires_at > Utc::now() + TimeDelta::minutes(5) {
+        return Ok(Some(secret));
     }
+
+    let secret_lock = inner.secret_lock(*id).await;
+    let _secret_guard = secret_lock.lock().await;
+    let Some((path, record)) = find_secret_record(inner, scopes, id).await? else {
+        return Ok(None);
+    };
+    let secret = inner.secret_cipher.decrypt_secret(&record.secret)?;
+    let Secret::Oauth {
+        provider: Some(provider),
+        account_id,
+        refresh_token: Some(refresh_token),
+        expires_at: Some(expires_at),
+        ..
+    } = &secret
+    else {
+        return Ok(Some(secret));
+    };
+    if *expires_at > Utc::now() + TimeDelta::minutes(5) {
+        return Ok(Some(secret));
+    }
+
+    let refreshed = inner
+        .oauth_providers
+        .get(provider)?
+        .refresh(refresh_token)
+        .await?;
+    let refreshed_secret = Secret::Oauth {
+        provider: Some(provider.clone()),
+        account_id: refreshed.account_id.or_else(|| account_id.clone()),
+        access_token: Some(refreshed.access_token),
+        refresh_token: refreshed.refresh_token,
+        expires_at: Some(refreshed.expires_at),
+    };
+    let updated = StoredSecret {
+        metadata: record.metadata,
+        secret: inner.secret_cipher.encrypt_secret(&refreshed_secret)?,
+    };
+    let _write_guard = inner.write_lock.lock().await;
+    inner.storage.put_json(path, &updated).await?;
+    Ok(Some(refreshed_secret))
 }
 
-async fn logout_oauth_secret_in_scopes(
+async fn logout_oauth_secret_in_dir(
     inner: &BasicExoHarnessInner,
-    scopes: &[PathBuf],
+    secrets_dir: &Path,
     id: &SecretId,
 ) -> Result<LogoutOauthResult> {
     let secret_lock = inner.secret_lock(*id).await;
     let _secret_guard = secret_lock.lock().await;
-    let Some((path, record)) = find_secret_record(inner, scopes, id).await? else {
+    let path = secrets_dir.join(format!("{id}.json"));
+    let Some(record) = inner
+        .storage
+        .get_json_if_exists::<StoredSecret>(&path)
+        .await?
+    else {
         bail!("OAuth credential `{id}` does not exist");
     };
     let secret = inner.secret_cipher.decrypt_secret(&record.secret)?;
@@ -3485,6 +3332,7 @@ async fn logout_oauth_secret_in_scopes(
 
     let logged_out = Secret::Oauth {
         provider,
+        account_id: None,
         access_token: None,
         refresh_token: None,
         expires_at: None,
@@ -3499,21 +3347,6 @@ async fn logout_oauth_secret_in_scopes(
         was_logged_in,
         remote_revocation_confirmed,
     })
-}
-
-async fn delete_secret_in_scopes(
-    inner: &BasicExoHarnessInner,
-    scopes: &[PathBuf],
-    id: &SecretId,
-) -> Result<bool> {
-    let secret_lock = inner.secret_lock(*id).await;
-    let _secret_guard = secret_lock.lock().await;
-    let Some((path, _)) = find_secret_record(inner, scopes, id).await? else {
-        return Ok(false);
-    };
-    let _write_guard = inner.write_lock.lock().await;
-    inner.storage.delete_key_if_exists(path).await?;
-    Ok(true)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

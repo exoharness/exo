@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::harness_helpers::to_lingua_value;
+use crate::harness_helpers::{model_provider, render_user_content, to_lingua_value};
 use crate::{
     ModelClient, ModelRequest, ModelResponse, ModelResponseStream, PendingToolCall, ToolDefinition,
 };
@@ -14,6 +14,8 @@ use bytes::Bytes;
 use exoharness::{Result, Uuid7};
 use futures::{Stream, StreamExt};
 use lingua::processing::adapter_for_format;
+use lingua::providers::openai::generated::InputItem;
+use lingua::providers::openai::universal_to_responses_input;
 use lingua::serde_json as lingua_json;
 use lingua::universal::{
     AssistantContent, AssistantContentPart, TextContentPart, TokenBudget, ToolCallArguments,
@@ -22,6 +24,7 @@ use lingua::universal::{
 };
 use lingua::{Message, ProviderFormat};
 use reqwest::Url;
+use serde::Serialize;
 
 type RawChunkStream = Pin<
     Box<
@@ -48,6 +51,11 @@ impl RouterModelClient {
 #[async_trait]
 impl ModelClient for RouterModelClient {
     async fn complete(&self, request: ModelRequest) -> Result<ModelResponse> {
+        if is_openai_chatgpt_request(&request) {
+            let mut stream = self.complete_stream(request).await?;
+            while stream.next_chunk().await?.is_some() {}
+            return stream.finish().await;
+        }
         let config = resolve_runtime_config(&request, self.env.as_ref())?;
         let format = config.format;
         let router = build_router(&request, format, &config)?;
@@ -68,7 +76,11 @@ impl ModelClient for RouterModelClient {
         let format = config.format;
         let router = build_router(&request, format, &config)?;
         let universal_request = build_universal_request(&request, true)?;
-        let payload = serialize_request(format, &universal_request)?;
+        let payload = if is_openai_chatgpt_request(&request) {
+            build_chatgpt_codex_payload(&universal_request, request.session_id.as_deref())?
+        } else {
+            serialize_request(format, &universal_request)?
+        };
         let route = resolve_provider_route(&router, &request.model, format)?;
         let (prepared, _router_metadata) = router
             .create_stream_request(payload, format, &route)
@@ -83,6 +95,10 @@ impl ModelClient for RouterModelClient {
             provider_cost_usd: None,
         }))
     }
+}
+
+fn is_openai_chatgpt_request(request: &ModelRequest) -> bool {
+    request.provider.as_deref() == Some(exoharness::OPENAI_CHATGPT_PROVIDER_ID)
 }
 
 struct RouterModelResponseStream {
@@ -142,7 +158,12 @@ fn resolve_runtime_config(
     request: &ModelRequest,
     env: &HashMap<String, String>,
 ) -> Result<ResolvedRuntimeConfig> {
-    match request.provider.as_str() {
+    let provider = model_provider(
+        request.provider.as_deref(),
+        &request.model,
+        request.base_url.as_deref(),
+    );
+    match provider {
         "anthropic" => resolve_anthropic_config(request, env),
         "openrouter" => resolve_openrouter_config(request, env),
         "openai" => resolve_openai_config(request, env),
@@ -260,6 +281,10 @@ fn resolve_openai_chatgpt_config(request: &ModelRequest) -> Result<ResolvedRunti
             .as_deref()
             .unwrap_or("https://chatgpt.com/backend-api/codex"),
     )?);
+    let mut client_headers = request_headers(request, Some("authorization"))?;
+    for (name, value) in chatgpt_codex_headers(request) {
+        client_headers.insert_user_configured(name, value)?;
+    }
     Ok(ResolvedRuntimeConfig {
         provider_alias: exoharness::OPENAI_CHATGPT_PROVIDER_ID.to_string(),
         provider_kind: "openai".to_string(),
@@ -272,7 +297,7 @@ fn resolve_openai_chatgpt_config(request: &ModelRequest) -> Result<ResolvedRunti
             header: Some("authorization".to_string()),
             prefix: Some("Bearer".to_string()),
         },
-        client_headers: request_headers(request, Some("authorization"))?,
+        client_headers,
     })
 }
 
@@ -391,7 +416,6 @@ fn build_universal_request(request: &ModelRequest, stream: bool) -> Result<Unive
         }),
         parallel_tool_calls: has_tools.then_some(true),
         stream: Some(stream),
-        store: (request.provider == exoharness::OPENAI_CHATGPT_PROVIDER_ID).then_some(false),
         ..Default::default()
     };
 
@@ -400,6 +424,147 @@ fn build_universal_request(request: &ModelRequest, stream: bool) -> Result<Unive
         messages: request.messages.clone(),
         params,
     })
+}
+
+#[derive(Serialize)]
+struct ChatGptCodexBody {
+    model: String,
+    input: Vec<ChatGptInputItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<lingua_json::Value>>,
+    tool_choice: &'static str,
+    parallel_tool_calls: bool,
+    reasoning: ChatGptReasoning,
+    include: [&'static str; 1],
+    prompt_cache_key: String,
+    store: bool,
+    stream: bool,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ChatGptInputItem {
+    AdditionalTools(ChatGptAdditionalTools),
+    Input(Box<InputItem>),
+}
+
+#[derive(Serialize)]
+struct ChatGptAdditionalTools {
+    #[serde(rename = "type")]
+    item_type: &'static str,
+    role: &'static str,
+    tools: Vec<lingua_json::Value>,
+}
+
+#[derive(Serialize)]
+struct ChatGptReasoning {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<&'static str>,
+}
+
+fn build_chatgpt_codex_payload(
+    request: &UniversalRequest,
+    session_id: Option<&str>,
+) -> Result<Bytes> {
+    let model = request
+        .model
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("OpenAI ChatGPT request is missing a model"))?;
+    let responses_lite = chatgpt_codex_uses_responses_lite(model);
+    let leading_instruction_count = request
+        .messages
+        .iter()
+        .take_while(|message| matches!(message, Message::System { .. } | Message::Developer { .. }))
+        .count();
+    let leading_instructions = request
+        .messages
+        .iter()
+        .take(leading_instruction_count)
+        .map(|message| match message {
+            Message::System { content } | Message::Developer { content } => {
+                render_user_content(content)
+            }
+            _ => unreachable!("take_while only retains instruction messages"),
+        })
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>();
+    let input_messages = if responses_lite {
+        request.messages.as_slice()
+    } else {
+        &request.messages[leading_instruction_count..]
+    };
+    let tools = request
+        .params
+        .tools
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(UniversalTool::to_responses_value)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut input = universal_to_responses_input(input_messages)?
+        .into_iter()
+        .map(|item| ChatGptInputItem::Input(Box::new(item)))
+        .collect::<Vec<_>>();
+    let parallel_tool_calls = !responses_lite && !tools.is_empty();
+    let body_tools = if responses_lite {
+        if !tools.is_empty() {
+            input.insert(
+                0,
+                ChatGptInputItem::AdditionalTools(ChatGptAdditionalTools {
+                    item_type: "additional_tools",
+                    role: "developer",
+                    tools,
+                }),
+            );
+        }
+        None
+    } else {
+        Some(tools)
+    };
+    let body = ChatGptCodexBody {
+        model: model.to_string(),
+        input,
+        instructions: (!responses_lite && !leading_instructions.is_empty())
+            .then(|| leading_instructions.join("\n\n")),
+        tools: body_tools,
+        tool_choice: "auto",
+        parallel_tool_calls,
+        reasoning: ChatGptReasoning {
+            context: responses_lite.then_some("all_turns"),
+        },
+        include: ["reasoning.encrypted_content"],
+        prompt_cache_key: session_id.unwrap_or("exo").to_string(),
+        store: false,
+        stream: true,
+    };
+    Ok(Bytes::from(lingua_json::to_vec(&body)?))
+}
+
+fn chatgpt_codex_headers(request: &ModelRequest) -> HashMap<String, String> {
+    let session_id = request
+        .session_id
+        .clone()
+        .unwrap_or_else(|| "exo".to_string());
+    let mut headers = HashMap::from([
+        ("session-id".to_string(), session_id.clone()),
+        ("x-client-request-id".to_string(), session_id),
+        ("accept".to_string(), "text/event-stream".to_string()),
+        ("content-type".to_string(), "application/json".to_string()),
+    ]);
+    if chatgpt_codex_uses_responses_lite(&request.model) {
+        headers.insert(
+            "x-openai-internal-codex-responses-lite".to_string(),
+            "true".to_string(),
+        );
+    }
+    headers
+}
+
+fn chatgpt_codex_uses_responses_lite(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    lower == "gpt-5.6" || lower.starts_with("gpt-5.6-")
 }
 
 fn build_universal_tools(tools: &[ToolDefinition]) -> Result<Vec<UniversalTool>> {
@@ -441,15 +606,43 @@ mod tests {
     #[derive(Debug, Deserialize)]
     struct SerializedResponsesStreamOptions {}
 
+    #[derive(Debug, Deserialize)]
+    struct SerializedChatGptBody {
+        input: Vec<SerializedChatGptInput>,
+        instructions: Option<String>,
+        tools: Option<Vec<SerializedChatGptTool>>,
+        parallel_tool_calls: bool,
+        reasoning: SerializedChatGptReasoning,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SerializedChatGptInput {
+        #[serde(rename = "type")]
+        item_type: Option<String>,
+        role: Option<String>,
+        tools: Option<Vec<SerializedChatGptTool>>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SerializedChatGptTool {
+        name: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SerializedChatGptReasoning {
+        context: Option<String>,
+    }
+
     fn model_request() -> ModelRequest {
         ModelRequest {
             model: "gpt-5.4".to_string(),
-            provider: "openai".to_string(),
+            provider: Some("openai".to_string()),
             auth: None,
             base_url: None,
             messages: Vec::new(),
             tools: Vec::new(),
             max_output_tokens: None,
+            session_id: None,
         }
     }
 
@@ -466,43 +659,92 @@ mod tests {
     }
 
     #[test]
-    fn openai_chatgpt_uses_subscription_endpoint_headers_and_disables_storage() {
+    fn openai_chatgpt_uses_subscription_endpoint() {
         let mut request = model_request();
-        request.provider = exoharness::OPENAI_CHATGPT_PROVIDER_ID.to_string();
+        request.provider = Some(exoharness::OPENAI_CHATGPT_PROVIDER_ID.to_string());
         request.auth = Some(crate::ModelRequestAuth {
             authorization: Some("Bearer subscription-token".to_string()),
-            headers: HashMap::from([
-                ("chatgpt-account-id".to_string(), "account-id".to_string()),
-                ("originator".to_string(), "exo".to_string()),
-                (
-                    "OpenAI-Beta".to_string(),
-                    "responses=experimental".to_string(),
-                ),
-            ]),
+            headers: HashMap::new(),
         });
         let config = resolve_runtime_config(&request, &HashMap::new()).unwrap();
         assert_eq!(
             config.endpoint.unwrap().as_str(),
             "https://chatgpt.com/backend-api/codex"
         );
-        let mut headers = reqwest::header::HeaderMap::new();
-        config.client_headers.apply(&mut headers);
-        assert_eq!(headers["chatgpt-account-id"], "account-id");
-        assert_eq!(headers["originator"], "exo");
-        assert_eq!(headers["OpenAI-Beta"], "responses=experimental");
+    }
+
+    #[test]
+    fn chatgpt_gpt_5_6_uses_responses_lite_contract() {
+        let mut request = model_request();
+        request.model = "gpt-5.6-terra".to_string();
+        request.provider = Some(exoharness::OPENAI_CHATGPT_PROVIDER_ID.to_string());
+        request.messages = vec![Message::Developer {
+            content: lingua::universal::UserContent::String("Be concise.".to_string()),
+        }];
+        request.tools = vec![ToolDefinition {
+            name: "weather".to_string(),
+            description: "Get the weather".to_string(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        }];
+        request.max_output_tokens = Some(100);
 
         let universal = build_universal_request(&request, true).unwrap();
-        let serialized = serialize_request(ProviderFormat::Responses, &universal).unwrap();
-        let payload: SerializedResponsesStreamRequest =
-            lingua_json::from_slice(&serialized).unwrap();
-        assert_eq!(payload.store, Some(false));
+        let serialized =
+            build_chatgpt_codex_payload(&universal, request.session_id.as_deref()).unwrap();
+        let payload: SerializedChatGptBody = lingua_json::from_slice(&serialized).unwrap();
+
+        assert!(payload.instructions.is_none());
+        assert!(payload.tools.is_none());
+        assert!(!payload.parallel_tool_calls);
+        assert_eq!(payload.reasoning.context.as_deref(), Some("all_turns"));
+        assert_eq!(
+            payload.input[0].item_type.as_deref(),
+            Some("additional_tools")
+        );
+        assert_eq!(payload.input[0].role.as_deref(), Some("developer"));
+        assert_eq!(payload.input[0].tools.as_ref().unwrap()[0].name, "weather");
+        assert_eq!(
+            chatgpt_codex_headers(&request)["x-openai-internal-codex-responses-lite"],
+            "true"
+        );
+        assert!(
+            !serialized
+                .windows(b"max_output_tokens".len())
+                .any(|window| { window == b"max_output_tokens" })
+        );
+    }
+
+    #[test]
+    fn pre_5_6_chatgpt_moves_leading_instructions_out_of_input() {
+        let mut request = model_request();
+        request.provider = Some(exoharness::OPENAI_CHATGPT_PROVIDER_ID.to_string());
+        request.messages = vec![
+            Message::Developer {
+                content: lingua::universal::UserContent::String("Be concise.".to_string()),
+            },
+            Message::User {
+                content: lingua::universal::UserContent::String("Hello".to_string()),
+            },
+        ];
+
+        let universal = build_universal_request(&request, true).unwrap();
+        let serialized =
+            build_chatgpt_codex_payload(&universal, request.session_id.as_deref()).unwrap();
+        let payload: SerializedChatGptBody = lingua_json::from_slice(&serialized).unwrap();
+
+        assert_eq!(payload.instructions.as_deref(), Some("Be concise."));
+        assert!(payload.tools.is_some());
+        assert!(!payload.parallel_tool_calls);
+        assert!(payload.reasoning.context.is_none());
+        assert_eq!(payload.input.len(), 1);
+        assert_eq!(payload.input[0].role.as_deref(), Some("user"));
     }
 
     #[test]
     fn anthropic_models_route_to_the_native_messages_api() {
         let mut request = model_request();
         request.model = "claude-sonnet-4-6".to_string();
-        request.provider = "anthropic".to_string();
+        request.provider = None;
         request.auth = Some(crate::ModelRequestAuth {
             authorization: None,
             headers: HashMap::from([("x-api-key".to_string(), "sk-ant-test".to_string())]),
@@ -537,7 +779,7 @@ mod tests {
     fn openrouter_bindings_use_openai_chat_completions() {
         let mut request = model_request();
         request.model = "openai/gpt-4o-mini".to_string();
-        request.provider = "openrouter".to_string();
+        request.provider = None;
         request.auth = Some(crate::ModelRequestAuth {
             authorization: Some("Bearer sk-or-test".to_string()),
             headers: HashMap::new(),

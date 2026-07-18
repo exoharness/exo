@@ -86,14 +86,11 @@ export type Secret =
   | {
       type: "oauth";
       provider?: string | null;
+      accountId?: string | null;
       accessToken?: string | null;
       refreshToken?: string | null;
       expiresAt?: string | null;
     };
-
-export type ResolvedSecret =
-  | { type: "key"; value: string }
-  | { type: "access_token"; provider: string; accessToken: string };
 
 export interface LogoutOauthResult {
   wasLoggedIn: boolean;
@@ -288,9 +285,6 @@ export interface Agent {
   getBinding(id: string): Promise<Binding | null>;
   listSecrets(): Promise<SecretMetadata[]>;
   getSecret(id: string): Promise<Secret | null>;
-  resolveSecret(id: string): Promise<ResolvedSecret | null>;
-  logoutOauthSecret(id: string): Promise<LogoutOauthResult>;
-  deleteSecret(id: string): Promise<boolean>;
 }
 
 export interface ExoHarness {
@@ -304,9 +298,7 @@ export interface ExoHarness {
   getBinding(id: string): Promise<Binding | null>;
   listSecrets(): Promise<SecretMetadata[]>;
   getSecret(id: string): Promise<Secret | null>;
-  resolveSecret(id: string): Promise<ResolvedSecret | null>;
   logoutOauthSecret(id: string): Promise<LogoutOauthResult>;
-  deleteSecret(id: string): Promise<boolean>;
 }
 
 export interface ExoHarnessCurrent {
@@ -353,9 +345,6 @@ export interface Conversation {
   getBinding(id: string): Promise<Binding | null>;
   listSecrets(): Promise<SecretMetadata[]>;
   getSecret(id: string): Promise<Secret | null>;
-  resolveSecret(id: string): Promise<ResolvedSecret | null>;
-  logoutOauthSecret(id: string): Promise<LogoutOauthResult>;
-  deleteSecret(id: string): Promise<boolean>;
 }
 
 export interface Turn {

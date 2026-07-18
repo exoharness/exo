@@ -14,6 +14,7 @@ import {
 } from "@exo/harness";
 import {
   errorMessage,
+  modelProvider,
   tracedUnderParent,
   type TraceParent,
 } from "@exo/model-runtime/responses";
@@ -251,17 +252,21 @@ export async function resolveLlmBinding(
   if (!binding || binding.type !== "llm") {
     throw new Error(`registered model binding disappeared: ${name}`);
   }
-  const provider =
-    binding.provider ?? inferModelProvider(binding.model, binding.baseUrl);
+  const provider = modelProvider(binding);
   let auth: ResolvedLlmBinding["auth"];
   if (binding.secretId) {
-    const secret = await context.exoharness.current.conversation.resolveSecret(
+    const secret = await context.exoharness.current.conversation.getSecret(
       binding.secretId,
     );
     if (!secret) {
       throw new Error(`model secret does not exist for ${name}`);
     }
     if (secret.type === "key") {
+      if (provider === "openai-chatgpt") {
+        throw new Error(
+          `model provider ${provider} requires an OAuth credential`,
+        );
+      }
       auth =
         provider === "anthropic"
           ? { headers: { "x-api-key": secret.value } }
@@ -270,6 +275,14 @@ export async function resolveLlmBinding(
               headers: {},
             };
     } else {
+      if (!secret.provider) {
+        throw new Error("OAuth credential has no provider; log in again");
+      }
+      if (!secret.accessToken) {
+        throw new Error(
+          `OAuth credential for provider ${secret.provider} is logged out`,
+        );
+      }
       if (secret.provider !== provider) {
         throw new Error(
           `model provider ${provider} cannot use an OAuth credential for ${secret.provider}`,
@@ -280,12 +293,15 @@ export async function resolveLlmBinding(
           `OAuth request authentication is not implemented for ${provider}`,
         );
       }
+      if (!secret.accountId) {
+        throw new Error(
+          "OpenAI ChatGPT credential has no account id; log in again",
+        );
+      }
       auth = {
         authorization: `Bearer ${secret.accessToken}`,
         headers: {
-          "chatgpt-account-id": chatgptAccountId(secret.accessToken),
-          originator: "exo",
-          "user-agent": "exo/0.1.0",
+          "chatgpt-account-id": secret.accountId,
           "OpenAI-Beta": "responses=experimental",
         },
       };
@@ -298,37 +314,6 @@ export async function resolveLlmBinding(
     auth,
     baseUrl: binding.baseUrl ?? null,
   };
-}
-
-function inferModelProvider(model: string, baseUrl?: string | null): string {
-  if ((baseUrl ?? "").includes("openrouter.ai")) {
-    return "openrouter";
-  }
-  if (model.toLowerCase().startsWith("claude")) {
-    return "anthropic";
-  }
-  return "openai";
-}
-
-interface ChatGptAccessTokenClaims {
-  "https://api.openai.com/auth": {
-    chatgpt_account_id: string;
-  };
-}
-
-function chatgptAccountId(accessToken: string): string {
-  const payload = accessToken.split(".")[1];
-  if (!payload) {
-    throw new Error("OpenAI ChatGPT access token is not a JWT");
-  }
-  const claims = JSON.parse(
-    Buffer.from(payload, "base64url").toString("utf8"),
-  ) as ChatGptAccessTokenClaims;
-  const accountId = claims["https://api.openai.com/auth"]?.chatgpt_account_id;
-  if (!accountId) {
-    throw new Error("OpenAI ChatGPT access token has no account id claim");
-  }
-  return accountId;
 }
 
 export function apiKeyFromModelBinding(

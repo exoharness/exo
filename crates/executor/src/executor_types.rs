@@ -188,12 +188,14 @@ pub trait ToolRuntime: Send + Sync {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRequest {
     pub model: String,
-    pub provider: String,
+    pub provider: Option<String>,
     pub auth: Option<ModelRequestAuth>,
     pub base_url: Option<String>,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDefinition>,
     pub max_output_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
