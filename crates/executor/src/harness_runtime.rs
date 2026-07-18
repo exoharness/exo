@@ -55,7 +55,7 @@ impl ModelClient for RouterModelClient {
         let payload = serialize_request(format, &universal_request)?;
         let route = resolve_provider_route(&router, &request.model, format)?;
         let (prepared, _router_metadata) = router.create_request(payload, format, &route).await?;
-        let body = router.complete(prepared, &ClientHeaders::new()).await?;
+        let body = router.complete(prepared, &config.client_headers).await?;
         let provider_cost_usd = extract_provider_cost(&body);
         let response = lingua::response_to_universal(body)?;
         let mut model_response = normalize_model_response(response)?;
@@ -74,7 +74,7 @@ impl ModelClient for RouterModelClient {
             .create_stream_request(payload, format, &route)
             .await?;
         let raw_stream = router
-            .complete_stream(prepared, &ClientHeaders::new(), None)
+            .complete_stream(prepared, &config.client_headers, None)
             .await?;
         Ok(Box::new(RouterModelResponseStream {
             raw: Box::pin(raw_stream),
@@ -135,41 +135,29 @@ struct ResolvedRuntimeConfig {
     endpoint_template: Option<String>,
     metadata: HashMap<String, lingua_json::Value>,
     auth: AuthConfig,
+    client_headers: ClientHeaders,
 }
 
 fn resolve_runtime_config(
     request: &ModelRequest,
     env: &HashMap<String, String>,
 ) -> Result<ResolvedRuntimeConfig> {
-    if is_anthropic_model(&request.model) {
-        resolve_anthropic_config(request, env)
-    } else if is_openrouter_request(request) {
-        resolve_openrouter_config(request, env)
-    } else {
-        resolve_openai_config(request, env)
+    match request.provider.as_str() {
+        "anthropic" => resolve_anthropic_config(request, env),
+        "openrouter" => resolve_openrouter_config(request, env),
+        "openai" => resolve_openai_config(request, env),
+        exoharness::OPENAI_CHATGPT_PROVIDER_ID => resolve_openai_chatgpt_config(request),
+        provider => Err(anyhow::anyhow!("unsupported model provider `{provider}`")),
     }
-}
-
-/// OpenRouter is an OpenAI-compatible aggregator selected by its base URL (it
-/// has no Responses API, so it can't be detected by model name the way native
-/// Anthropic is). A binding pointed at `openrouter.ai` routes through the
-/// OpenAI provider in Chat Completions mode.
-fn is_openrouter_request(request: &ModelRequest) -> bool {
-    request
-        .base_url
-        .as_deref()
-        .is_some_and(|url| url.contains("openrouter.ai"))
 }
 
 fn resolve_openrouter_config(
     request: &ModelRequest,
     env: &HashMap<String, String>,
 ) -> Result<ResolvedRuntimeConfig> {
-    let key = request
-        .api_key
-        .clone()
+    let key = request_auth_value(request, "authorization", Some("Bearer"))
         .or_else(|| optional_env(env, "OPENROUTER_API_KEY"))
-        .ok_or_else(|| anyhow::anyhow!("model request is missing an API key"))?;
+        .ok_or_else(|| anyhow::anyhow!("model request is missing authorization"))?;
     let endpoint = request
         .base_url
         .clone()
@@ -189,26 +177,17 @@ fn resolve_openrouter_config(
             header: Some("authorization".to_string()),
             prefix: Some("Bearer".to_string()),
         },
+        client_headers: request_headers(request, Some("authorization"))?,
     })
-}
-
-/// Anthropic model bindings route to the native Messages API. We detect them by
-/// model name (`claude*`). Bedrock/Vertex Anthropic ids carry provider prefixes
-/// (e.g. `us.anthropic.claude-...`) so they do not match here and keep falling
-/// through to the OpenAI-compatible path.
-fn is_anthropic_model(model: &str) -> bool {
-    model.to_ascii_lowercase().starts_with("claude")
 }
 
 fn resolve_anthropic_config(
     request: &ModelRequest,
     env: &HashMap<String, String>,
 ) -> Result<ResolvedRuntimeConfig> {
-    let key = request
-        .api_key
-        .clone()
+    let key = request_auth_value(request, "x-api-key", None)
         .or_else(|| optional_env(env, "ANTHROPIC_API_KEY"))
-        .ok_or_else(|| anyhow::anyhow!("model request is missing an API key"))?;
+        .ok_or_else(|| anyhow::anyhow!("model request is missing authorization"))?;
     // `None` lets the provider use its built-in default
     // (`https://api.anthropic.com/v1/`).
     let endpoint = request
@@ -229,6 +208,7 @@ fn resolve_anthropic_config(
             header: Some("x-api-key".to_string()),
             prefix: None,
         },
+        client_headers: request_headers(request, Some("x-api-key"))?,
     })
 }
 
@@ -236,11 +216,9 @@ fn resolve_openai_config(
     request: &ModelRequest,
     env: &HashMap<String, String>,
 ) -> Result<ResolvedRuntimeConfig> {
-    let key = request
-        .api_key
-        .clone()
+    let key = request_auth_value(request, "authorization", Some("Bearer"))
         .or_else(|| optional_env(env, "OPENAI_API_KEY"))
-        .ok_or_else(|| anyhow::anyhow!("model request is missing an API key"))?;
+        .ok_or_else(|| anyhow::anyhow!("model request is missing authorization"))?;
     let endpoint = request
         .base_url
         .clone()
@@ -269,7 +247,69 @@ fn resolve_openai_config(
             header: Some("authorization".to_string()),
             prefix: Some("Bearer".to_string()),
         },
+        client_headers: request_headers(request, Some("authorization"))?,
     })
+}
+
+fn resolve_openai_chatgpt_config(request: &ModelRequest) -> Result<ResolvedRuntimeConfig> {
+    let key = request_auth_value(request, "authorization", Some("Bearer"))
+        .ok_or_else(|| anyhow::anyhow!("OpenAI ChatGPT credential is logged out"))?;
+    let endpoint = Some(Url::parse(
+        request
+            .base_url
+            .as_deref()
+            .unwrap_or("https://chatgpt.com/backend-api/codex"),
+    )?);
+    Ok(ResolvedRuntimeConfig {
+        provider_alias: exoharness::OPENAI_CHATGPT_PROVIDER_ID.to_string(),
+        provider_kind: "openai".to_string(),
+        format: ProviderFormat::Responses,
+        endpoint,
+        endpoint_template: None,
+        metadata: HashMap::new(),
+        auth: AuthConfig::ApiKey {
+            key,
+            header: Some("authorization".to_string()),
+            prefix: Some("Bearer".to_string()),
+        },
+        client_headers: request_headers(request, Some("authorization"))?,
+    })
+}
+
+fn request_auth_value(
+    request: &ModelRequest,
+    header: &str,
+    prefix: Option<&str>,
+) -> Option<String> {
+    let auth = request.auth.as_ref()?;
+    if header.eq_ignore_ascii_case("authorization") {
+        let authorization = auth.authorization.as_deref()?;
+        return match prefix {
+            Some(prefix) => {
+                let (scheme, value) = authorization.split_once(char::is_whitespace)?;
+                (scheme.eq_ignore_ascii_case(prefix) && !value.trim().is_empty())
+                    .then(|| value.trim().to_string())
+            }
+            None => Some(authorization.to_string()),
+        };
+    }
+    auth.headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(header))
+        .map(|(_, value)| value.clone())
+}
+
+fn request_headers(request: &ModelRequest, auth_header: Option<&str>) -> Result<ClientHeaders> {
+    let mut headers = ClientHeaders::new();
+    if let Some(auth) = &request.auth {
+        for (name, value) in &auth.headers {
+            if auth_header.is_some_and(|auth_header| name.eq_ignore_ascii_case(auth_header)) {
+                continue;
+            }
+            headers.insert_user_configured(name.clone(), value.clone())?;
+        }
+    }
+    Ok(headers)
 }
 
 fn optional_env(env: &HashMap<String, String>, key: &str) -> Option<String> {
@@ -351,6 +391,7 @@ fn build_universal_request(request: &ModelRequest, stream: bool) -> Result<Unive
         }),
         parallel_tool_calls: has_tools.then_some(true),
         stream: Some(stream),
+        store: (request.provider == exoharness::OPENAI_CHATGPT_PROVIDER_ID).then_some(false),
         ..Default::default()
     };
 
@@ -393,6 +434,7 @@ mod tests {
     #[derive(Debug, Deserialize)]
     struct SerializedResponsesStreamRequest {
         stream: Option<bool>,
+        store: Option<bool>,
         stream_options: Option<SerializedResponsesStreamOptions>,
     }
 
@@ -402,7 +444,8 @@ mod tests {
     fn model_request() -> ModelRequest {
         ModelRequest {
             model: "gpt-5.4".to_string(),
-            api_key: None,
+            provider: "openai".to_string(),
+            auth: None,
             base_url: None,
             messages: Vec::new(),
             tools: Vec::new(),
@@ -418,14 +461,52 @@ mod tests {
             lingua_json::from_slice(&serialized).unwrap();
 
         assert_eq!(payload.stream, Some(true));
+        assert_eq!(payload.store, None);
         assert!(payload.stream_options.is_none());
+    }
+
+    #[test]
+    fn openai_chatgpt_uses_subscription_endpoint_headers_and_disables_storage() {
+        let mut request = model_request();
+        request.provider = exoharness::OPENAI_CHATGPT_PROVIDER_ID.to_string();
+        request.auth = Some(crate::ModelRequestAuth {
+            authorization: Some("Bearer subscription-token".to_string()),
+            headers: HashMap::from([
+                ("chatgpt-account-id".to_string(), "account-id".to_string()),
+                ("originator".to_string(), "exo".to_string()),
+                (
+                    "OpenAI-Beta".to_string(),
+                    "responses=experimental".to_string(),
+                ),
+            ]),
+        });
+        let config = resolve_runtime_config(&request, &HashMap::new()).unwrap();
+        assert_eq!(
+            config.endpoint.unwrap().as_str(),
+            "https://chatgpt.com/backend-api/codex"
+        );
+        let mut headers = reqwest::header::HeaderMap::new();
+        config.client_headers.apply(&mut headers);
+        assert_eq!(headers["chatgpt-account-id"], "account-id");
+        assert_eq!(headers["originator"], "exo");
+        assert_eq!(headers["OpenAI-Beta"], "responses=experimental");
+
+        let universal = build_universal_request(&request, true).unwrap();
+        let serialized = serialize_request(ProviderFormat::Responses, &universal).unwrap();
+        let payload: SerializedResponsesStreamRequest =
+            lingua_json::from_slice(&serialized).unwrap();
+        assert_eq!(payload.store, Some(false));
     }
 
     #[test]
     fn anthropic_models_route_to_the_native_messages_api() {
         let mut request = model_request();
         request.model = "claude-sonnet-4-6".to_string();
-        request.api_key = Some("sk-ant-test".to_string());
+        request.provider = "anthropic".to_string();
+        request.auth = Some(crate::ModelRequestAuth {
+            authorization: None,
+            headers: HashMap::from([("x-api-key".to_string(), "sk-ant-test".to_string())]),
+        });
 
         let config = resolve_runtime_config(&request, &HashMap::new()).unwrap();
 
@@ -441,7 +522,10 @@ mod tests {
     #[test]
     fn non_anthropic_models_keep_the_openai_responses_route() {
         let mut request = model_request();
-        request.api_key = Some("sk-test".to_string());
+        request.auth = Some(crate::ModelRequestAuth {
+            authorization: Some("Bearer sk-test".to_string()),
+            headers: HashMap::new(),
+        });
 
         let config = resolve_runtime_config(&request, &HashMap::new()).unwrap();
 
@@ -453,7 +537,11 @@ mod tests {
     fn openrouter_bindings_use_openai_chat_completions() {
         let mut request = model_request();
         request.model = "openai/gpt-4o-mini".to_string();
-        request.api_key = Some("sk-or-test".to_string());
+        request.provider = "openrouter".to_string();
+        request.auth = Some(crate::ModelRequestAuth {
+            authorization: Some("Bearer sk-or-test".to_string()),
+            headers: HashMap::new(),
+        });
         request.base_url = Some("https://openrouter.ai/api/v1".to_string());
 
         let config = resolve_runtime_config(&request, &HashMap::new()).unwrap();

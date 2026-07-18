@@ -6,10 +6,11 @@ use crate::{
     CloseSandboxProcessInputRequest, ConversationId, ConversationRecord, CreateSandboxRequest,
     Event, EventData, EventId, EventQuery, ForkConversationRequest, GetEventsResult,
     GetSandboxProcessEventsResult, ListConversationsRequest, ListConversationsResult,
-    NewAgentRequest, NewConversationRequest, PutSecretRequest, ReadArtifactRequest, SandboxId,
-    SandboxProcessEventQuery, SandboxProcessRecord, SandboxProcessStatus, Secret, SecretId,
-    SecretMetadata, SessionId, SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnId,
-    TurnRecord, WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
+    LogoutOauthResult, NewAgentRequest, NewConversationRequest, PutSecretRequest,
+    ReadArtifactRequest, ResolvedSecret, SandboxId, SandboxProcessEventQuery, SandboxProcessRecord,
+    SandboxProcessStatus, Secret, SecretId, SecretMetadata, SessionId, SnapshotId,
+    StartSandboxProcessRequest, StartSandboxRequest, TurnId, TurnRecord, WaitSandboxProcessRequest,
+    WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -72,6 +73,7 @@ pub enum ServerMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
+    PreflightSecretStorage,
     ListAgents,
     GetAgent {
         agent_id: AgentId,
@@ -94,6 +96,15 @@ pub enum Request {
         request: PutSecretRequest,
     },
     GetSecret {
+        secret_id: SecretId,
+    },
+    ResolveSecret {
+        secret_id: SecretId,
+    },
+    LogoutOauthSecret {
+        secret_id: SecretId,
+    },
+    DeleteSecret {
         secret_id: SecretId,
     },
     ListConversations {
@@ -185,6 +196,18 @@ pub enum Request {
         agent_id: AgentId,
         secret_id: SecretId,
     },
+    AgentResolveSecret {
+        agent_id: AgentId,
+        secret_id: SecretId,
+    },
+    AgentLogoutOauthSecret {
+        agent_id: AgentId,
+        secret_id: SecretId,
+    },
+    AgentDeleteSecret {
+        agent_id: AgentId,
+        secret_id: SecretId,
+    },
     ConversationStartSession {
         agent_id: AgentId,
         conversation_id: ConversationId,
@@ -261,6 +284,21 @@ pub enum Request {
         conversation_id: ConversationId,
         secret_id: SecretId,
     },
+    ConversationResolveSecret {
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+        secret_id: SecretId,
+    },
+    ConversationLogoutOauthSecret {
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+        secret_id: SecretId,
+    },
+    ConversationDeleteSecret {
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+        secret_id: SecretId,
+    },
     TurnAddEvents {
         agent_id: AgentId,
         conversation_id: ConversationId,
@@ -286,6 +324,7 @@ pub enum Request {
 impl Request {
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::PreflightSecretStorage => "preflight_secret_storage",
             Self::ListAgents => "list_agents",
             Self::GetAgent { .. } => "get_agent",
             Self::NewAgent { .. } => "new_agent",
@@ -296,6 +335,9 @@ impl Request {
             Self::ListSecrets => "list_secrets",
             Self::PutSecret { .. } => "put_secret",
             Self::GetSecret { .. } => "get_secret",
+            Self::ResolveSecret { .. } => "resolve_secret",
+            Self::LogoutOauthSecret { .. } => "logout_oauth_secret",
+            Self::DeleteSecret { .. } => "delete_secret",
             Self::ListConversations { .. } => "list_conversations",
             Self::GetConversation { .. } => "get_conversation",
             Self::NewConversation { .. } => "new_conversation",
@@ -319,6 +361,9 @@ impl Request {
             Self::AgentListSecrets { .. } => "agent_list_secrets",
             Self::AgentPutSecret { .. } => "agent_put_secret",
             Self::AgentGetSecret { .. } => "agent_get_secret",
+            Self::AgentResolveSecret { .. } => "agent_resolve_secret",
+            Self::AgentLogoutOauthSecret { .. } => "agent_logout_oauth_secret",
+            Self::AgentDeleteSecret { .. } => "agent_delete_secret",
             Self::ConversationStartSession { .. } => "conversation_start_session",
             Self::ConversationEndSession { .. } => "conversation_end_session",
             Self::ConversationBeginTurn { .. } => "conversation_begin_turn",
@@ -335,6 +380,9 @@ impl Request {
             Self::ConversationListSecrets { .. } => "conversation_list_secrets",
             Self::ConversationPutSecret { .. } => "conversation_put_secret",
             Self::ConversationGetSecret { .. } => "conversation_get_secret",
+            Self::ConversationResolveSecret { .. } => "conversation_resolve_secret",
+            Self::ConversationLogoutOauthSecret { .. } => "conversation_logout_oauth_secret",
+            Self::ConversationDeleteSecret { .. } => "conversation_delete_secret",
             Self::TurnAddEvents { .. } => "turn_add_events",
             Self::TurnWriteArtifact { .. } => "turn_write_artifact",
             Self::TurnFinish { .. } => "turn_finish",
@@ -408,6 +456,12 @@ pub enum Response {
     Secret {
         secret: Option<Secret>,
     },
+    ResolvedSecret {
+        secret: Option<ResolvedSecret>,
+    },
+    LogoutOauth {
+        result: LogoutOauthResult,
+    },
     BindingId {
         binding_id: BindingId,
     },
@@ -447,6 +501,8 @@ impl Response {
             Self::Binding { .. } => "binding",
             Self::Secrets { .. } => "secrets",
             Self::Secret { .. } => "secret",
+            Self::ResolvedSecret { .. } => "resolved_secret",
+            Self::LogoutOauth { .. } => "logout_oauth",
             Self::BindingId { .. } => "binding_id",
             Self::SecretId { .. } => "secret_id",
             Self::Turn { .. } => "turn",

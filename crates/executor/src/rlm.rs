@@ -106,7 +106,8 @@ where
 
             let request = ModelRequest {
                 model: model_binding.model.clone(),
-                api_key: model_binding.api_key.clone(),
+                provider: model_binding.provider.clone(),
+                auth: model_binding.auth.clone(),
                 base_url: model_binding.base_url.clone(),
                 messages: history.clone(),
                 tools: build_rlm_tool_definitions(),
@@ -385,7 +386,8 @@ where
             .model
             .complete(ModelRequest {
                 model: model_binding.model.clone(),
-                api_key: model_binding.api_key.clone(),
+                provider: model_binding.provider.clone(),
+                auth: model_binding.auth.clone(),
                 base_url: model_binding.base_url.clone(),
                 messages,
                 tools: Vec::new(),

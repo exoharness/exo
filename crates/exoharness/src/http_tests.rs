@@ -11,11 +11,11 @@ use crate::test_support::local_test_config;
 use crate::{
     BasicExoHarness, BeginTurnRequest, CreateSandboxRequest, EventData, EventKind, EventQuery,
     EventQueryDirection, ExoHarness, HttpExoHarness, ManagedSandboxBackend, ManagedSandboxHandle,
-    RunInSandboxRequest, SandboxCommand, SandboxCommandOutput, SandboxProcessEvent,
-    SandboxProcessEventQuery, SandboxProcessParts, SandboxProcessStatus, SandboxProcessStdin,
-    SandboxProvider, SandboxRequest, SnapshotKind, SnapshotPayload, StartSandboxProcessRequest,
-    StartSandboxRequest, WaitSandboxProcessRequest, WriteSandboxProcessInputRequest,
-    serve_exoharness_http_listener,
+    OAuthCredentialProvider, OAuthTokenSet, PutSecretRequest, RunInSandboxRequest, SandboxCommand,
+    SandboxCommandOutput, SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessParts,
+    SandboxProcessStatus, SandboxProcessStdin, SandboxProvider, SandboxRequest, Secret,
+    SnapshotKind, SnapshotPayload, StartSandboxProcessRequest, StartSandboxRequest,
+    WaitSandboxProcessRequest, WriteSandboxProcessInputRequest, serve_exoharness_http_listener,
 };
 
 struct HttpHarnessFixture {
@@ -69,6 +69,47 @@ async fn http_harness_with_sandbox_backend(
     }
 }
 
+struct HttpTestOAuthProvider;
+
+#[async_trait]
+impl OAuthCredentialProvider for HttpTestOAuthProvider {
+    fn id(&self) -> &'static str {
+        "http-test-oauth"
+    }
+
+    async fn refresh(&self, _refresh_token: &str) -> crate::Result<OAuthTokenSet> {
+        bail!("refresh should not be called")
+    }
+
+    async fn revoke(
+        &self,
+        _access_token: Option<&str>,
+        _refresh_token: Option<&str>,
+    ) -> crate::Result<()> {
+        Ok(())
+    }
+}
+
+async fn http_harness_with_oauth_provider() -> HttpHarnessFixture {
+    let tempdir = TempDir::new().expect("tempdir");
+    let basic = BasicExoHarness::new_with_oauth_provider(
+        local_test_config(tempdir.path()),
+        Arc::new(HttpTestOAuthProvider),
+    )
+    .await
+    .expect("basic harness");
+    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("listener");
+    let addr = listener.local_addr().expect("local addr");
+    let server = actix_web::rt::spawn(serve_exoharness_http_listener(listener, Arc::new(basic)));
+    let harness: Arc<dyn ExoHarness> =
+        Arc::new(HttpExoHarness::new(format!("http://{addr}")).expect("http harness"));
+    HttpHarnessFixture {
+        harness,
+        server,
+        _tempdir: tempdir,
+    }
+}
+
 #[actix_web::test]
 async fn http_exoharness_supports_agent_and_conversation_crud() {
     let fixture = http_harness().await;
@@ -105,6 +146,88 @@ async fn http_exoharness_conversation_scope_overrides_and_forks() {
         Arc::clone(&fixture.harness),
     )
     .await;
+}
+
+#[actix_web::test]
+async fn http_exoharness_secret_resolution_and_deletion() {
+    let fixture = http_harness().await;
+    crate::contract_tests::secret_resolution_and_deletion_work_across_scopes(Arc::clone(
+        &fixture.harness,
+    ))
+    .await;
+}
+
+#[actix_web::test]
+async fn http_exoharness_oauth_logout_works_at_root_agent_and_conversation_scopes() {
+    let fixture = http_harness_with_oauth_provider().await;
+    let secret = || Secret::Oauth {
+        provider: Some("http-test-oauth".to_string()),
+        access_token: Some("access".to_string()),
+        refresh_token: Some("refresh".to_string()),
+        expires_at: Some(chrono::Utc::now() + chrono::TimeDelta::hours(1)),
+    };
+    let secret_id = fixture
+        .harness
+        .put_secret(PutSecretRequest {
+            name: "oauth".to_string(),
+            secret: secret(),
+        })
+        .await
+        .expect("secret");
+    let agent = fixture
+        .harness
+        .new_agent(crate::NewAgentRequest {
+            slug: "oauth-http-agent".to_string(),
+            name: "OAuth HTTP Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let conversation = agent
+        .new_conversation(crate::NewConversationRequest::default())
+        .await
+        .expect("conversation");
+
+    let conversation_logout = conversation
+        .logout_oauth_secret(&secret_id)
+        .await
+        .expect("conversation logout");
+    assert!(conversation_logout.was_logged_in);
+    assert!(conversation_logout.remote_revocation_confirmed);
+    assert_eq!(
+        fixture
+            .harness
+            .put_secret(PutSecretRequest {
+                name: "oauth".to_string(),
+                secret: secret(),
+            })
+            .await
+            .expect("re-login"),
+        secret_id
+    );
+    let agent_logout = agent
+        .logout_oauth_secret(&secret_id)
+        .await
+        .expect("agent logout");
+    assert!(agent_logout.was_logged_in);
+    assert!(agent_logout.remote_revocation_confirmed);
+    assert_eq!(
+        fixture
+            .harness
+            .put_secret(PutSecretRequest {
+                name: "oauth".to_string(),
+                secret: secret(),
+            })
+            .await
+            .expect("second re-login"),
+        secret_id
+    );
+    let root_logout = fixture
+        .harness
+        .logout_oauth_secret(&secret_id)
+        .await
+        .expect("root logout");
+    assert!(root_logout.was_logged_in);
+    assert!(root_logout.remote_revocation_confirmed);
 }
 
 #[actix_web::test]

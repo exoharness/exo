@@ -20,7 +20,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use executor::{
     AgentHarnessKind, BasicExoHarness, BasicExoHarnessConfig, BasicHarness, BasicToolRuntime,
@@ -29,12 +29,13 @@ use executor::{
     E2bBackendSpec, EventKind, EventQuery, EventQueryDirection, ExoHarness,
     ExoHarnessHttpServeOptions, ExoToolRuntime, FileSystemMount, FileSystemMountMode,
     ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET, Harness, HarnessAgent,
-    HarnessConversation, HttpExoHarness, LocalSandboxExoHarness, PutSecretRequest, RlmHarness,
-    SANDBOX_MAIN_MOUNT_DIR, SandboxBackendRegistration, SandboxProvider, SandboxProviderConfig,
-    SandboxScope, Secret, SecretBackendChoice, SpritesBackendSpec, ToolRequest, ToolRuntime,
-    TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, VercelBackendSpec,
-    default_aws_agentcore_image, default_daytona_image, default_docker_image, default_e2b_template,
-    default_vercel_image, effective_sandbox_scope, load_agent_config, send_conversation_wakeup,
+    HarnessConversation, HttpExoHarness, LocalSandboxExoHarness, OPENAI_CHATGPT_PROVIDER_ID,
+    OpenAiChatGptOAuthProvider, PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR,
+    SandboxBackendRegistration, SandboxProvider, SandboxProviderConfig, SandboxScope, Secret,
+    SecretBackendChoice, SpritesBackendSpec, ToolRequest, ToolRuntime, TypeScriptHarness,
+    TypeScriptHarnessConfig, Uuid7, VercelBackendSpec, default_aws_agentcore_image,
+    default_daytona_image, default_docker_image, default_e2b_template, default_vercel_image,
+    effective_sandbox_scope, load_agent_config, send_conversation_wakeup,
     serve_exoharness_http_listener_with_options,
 };
 use lingua::Message;
@@ -399,6 +400,11 @@ enum Commands {
         #[command(subcommand)]
         command: SecretCommands,
     },
+    /// Log in to and out of OAuth-backed model providers.
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommands,
+    },
     /// Start an interactive REPL, creating a default agent and conversation when needed.
     Repl {
         /// Model binding to use (defaults to the first registered model).
@@ -636,6 +642,23 @@ enum SecretCommands {
         #[arg(long)]
         value: Option<String>,
     },
+    Delete {
+        name: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AuthCommands {
+    Login {
+        provider: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    Logout {
+        provider: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -647,6 +670,8 @@ enum ModelCommands {
         model: Option<String>,
         #[arg(long)]
         secret: String,
+        #[arg(long)]
+        provider: Option<String>,
         #[arg(long)]
         base_url: Option<String>,
     },
@@ -1863,9 +1888,10 @@ async fn main() -> Result<()> {
                 )?;
             }
             SecretCommands::Check => {
-                BasicExoHarness::new(exo_config.clone())
-                    .await?
-                    .verify_secret_key_access()?;
+                harness
+                    .exoharness_handle()
+                    .preflight_secret_storage()
+                    .await?;
             }
             SecretCommands::Set { name, env, value } => {
                 let value = match (env, value) {
@@ -1885,18 +1911,130 @@ async fn main() -> Result<()> {
                     .await?;
                 println!("set secret {} ({})", name, id);
             }
+            SecretCommands::Delete { name } => {
+                let Some(secret_id) =
+                    find_secret_id(harness.exoharness_handle().as_ref(), &name).await?
+                else {
+                    println!("secret {name} not found; nothing to delete");
+                    return Ok(());
+                };
+                if harness
+                    .exoharness_handle()
+                    .delete_secret(&secret_id)
+                    .await?
+                {
+                    println!("deleted secret {name}");
+                } else {
+                    println!("secret {name} not found; nothing to delete");
+                }
+            }
+        },
+        Commands::Auth { command } => match command {
+            AuthCommands::Login { provider, name } => {
+                require_openai_chatgpt_provider(&provider)?;
+                let name = oauth_credential_name(name);
+                harness
+                    .exoharness_handle()
+                    .preflight_secret_storage()
+                    .await
+                    .context("secret storage is unavailable; device login was not started")?;
+                if let Some(secret_id) =
+                    find_secret_id(harness.exoharness_handle().as_ref(), &name).await?
+                    && let Some(secret) = harness.exoharness_handle().get_secret(&secret_id).await?
+                {
+                    match secret {
+                        Secret::Oauth {
+                            access_token: Some(_),
+                            ..
+                        } => bail!(
+                            "OAuth credential `{name}` is already logged in; run `exo auth logout {provider} --name {name}` first"
+                        ),
+                        Secret::Oauth {
+                            provider: Some(existing_provider),
+                            ..
+                        } if existing_provider != provider => bail!(
+                            "credential `{name}` belongs to OAuth provider `{existing_provider}`"
+                        ),
+                        Secret::Oauth { .. } => {}
+                        Secret::Key { .. } => {
+                            bail!("credential `{name}` is an API key, not an OAuth credential")
+                        }
+                    }
+                }
+
+                let oauth = OpenAiChatGptOAuthProvider::new();
+                let tokens = oauth
+                    .login_device_code(|prompt| {
+                        println!("Open {}", prompt.verification_url);
+                        println!("Enter code: {}", prompt.user_code);
+                        println!("Waiting for authorization…");
+                    })
+                    .await?;
+                let secret_id = harness
+                    .exoharness_handle()
+                    .put_secret(PutSecretRequest {
+                        name: name.clone(),
+                        secret: Secret::Oauth {
+                            provider: Some(provider),
+                            access_token: Some(tokens.access_token),
+                            refresh_token: tokens.refresh_token,
+                            expires_at: Some(tokens.expires_at),
+                        },
+                    })
+                    .await?;
+                println!("logged in {name} ({secret_id})");
+            }
+            AuthCommands::Logout { provider, name } => {
+                require_openai_chatgpt_provider(&provider)?;
+                let name = oauth_credential_name(name);
+                let secret_id = find_secret_id(harness.exoharness_handle().as_ref(), &name)
+                    .await?
+                    .ok_or_else(|| anyhow!("OAuth credential not found: {name}"))?;
+                match harness
+                    .exoharness_handle()
+                    .get_secret(&secret_id)
+                    .await?
+                    .ok_or_else(|| anyhow!("OAuth credential not found: {name}"))?
+                {
+                    Secret::Oauth {
+                        provider: Some(existing_provider),
+                        ..
+                    } if existing_provider != provider => {
+                        bail!("credential `{name}` belongs to OAuth provider `{existing_provider}`")
+                    }
+                    Secret::Oauth { .. } => {}
+                    Secret::Key { .. } => {
+                        bail!("credential `{name}` is an API key, not an OAuth credential")
+                    }
+                }
+                let result = harness
+                    .exoharness_handle()
+                    .logout_oauth_secret(&secret_id)
+                    .await?;
+                if !result.was_logged_in {
+                    println!("{name} is already logged out");
+                } else {
+                    println!("logged out {name} locally");
+                }
+                if result.was_logged_in && !result.remote_revocation_confirmed {
+                    eprintln!(
+                        "warning: OpenAI did not confirm remote token revocation; local tokens were still cleared"
+                    );
+                }
+            }
         },
         Commands::Model { command } => match command {
             ModelCommands::List => {
                 let models = list_model_bindings(harness.exoharness_handle().as_ref()).await?;
                 print_table(
-                    &["MODEL", "UPSTREAM_MODEL", "SECRET", "BASE_URL"],
+                    &["MODEL", "UPSTREAM_MODEL", "PROVIDER", "SECRET", "BASE_URL"],
                     models
                         .into_iter()
                         .map(|model| {
                             vec![
                                 model.name,
                                 model.model,
+                                model.provider.unwrap_or_else(|| "inferred".to_string()),
                                 model.secret_name.unwrap_or_else(|| "none".to_string()),
                                 model.base_url.unwrap_or_else(|| "default".to_string()),
                             ]
@@ -1908,6 +2046,7 @@ async fn main() -> Result<()> {
                 name,
                 model,
                 secret,
+                provider,
                 base_url,
             } => {
                 let secret_id = find_secret_id(harness.exoharness_handle().as_ref(), &secret)
@@ -1919,6 +2058,7 @@ async fn main() -> Result<()> {
                     .put_binding(Binding::Llm {
                         name: name.clone(),
                         model: upstream_model,
+                        provider,
                         base_url,
                         secret_id: Some(secret_id),
                     })
@@ -2116,6 +2256,7 @@ fn command_agent_ref(command: &Commands) -> Option<&str> {
         },
         Commands::Repl { agent, .. } => Some(agent.as_deref().unwrap_or(DEFAULT_REPL_SLUG)),
         Commands::Secret { .. }
+        | Commands::Auth { .. }
         | Commands::Model { .. }
         | Commands::Provider { .. }
         | Commands::Adapters { .. }
@@ -2480,6 +2621,7 @@ fn write_table_row<T: AsRef<str>, W: Write>(writer: &mut W, values: &[T]) -> io:
 struct RegisteredModel {
     name: String,
     model: String,
+    provider: Option<String>,
     secret_name: Option<String>,
     base_url: Option<String>,
 }
@@ -2491,6 +2633,7 @@ async fn list_model_bindings(exoharness: &dyn ExoHarness) -> Result<Vec<Register
         let Binding::Llm {
             name,
             model,
+            provider,
             base_url,
             secret_id,
         } = metadata.binding
@@ -2506,6 +2649,7 @@ async fn list_model_bindings(exoharness: &dyn ExoHarness) -> Result<Vec<Register
         models.push(RegisteredModel {
             name,
             model,
+            provider,
             secret_name,
             base_url,
         });
@@ -2587,6 +2731,17 @@ async fn find_secret_id(exoharness: &dyn ExoHarness, name: &str) -> Result<Optio
         .rev()
         .find(|secret| secret.name == name)
         .map(|secret| secret.id))
+}
+
+fn require_openai_chatgpt_provider(provider: &str) -> Result<()> {
+    if provider != OPENAI_CHATGPT_PROVIDER_ID {
+        bail!("unsupported OAuth provider `{provider}`; expected `{OPENAI_CHATGPT_PROVIDER_ID}`");
+    }
+    Ok(())
+}
+
+fn oauth_credential_name(name: Option<String>) -> String {
+    name.unwrap_or_else(|| OPENAI_CHATGPT_PROVIDER_ID.to_string())
 }
 
 fn build_braintrust_tracing_config(
@@ -3163,6 +3318,73 @@ mod create_tests {
                     ..
                 }
             }
+        ));
+    }
+
+    #[test]
+    fn oauth_auth_commands_parse_consistent_provider_and_names() {
+        use clap::Parser;
+        let login = super::Cli::try_parse_from(["exo", "auth", "login", "openai-chatgpt"])
+            .expect("auth login parses");
+        assert!(matches!(
+            login.command,
+            super::Commands::Auth {
+                command: super::AuthCommands::Login { ref provider, name: None }
+            } if provider == "openai-chatgpt"
+        ));
+        assert_eq!(super::oauth_credential_name(None), "openai-chatgpt");
+
+        let logout = super::Cli::try_parse_from([
+            "exo",
+            "auth",
+            "logout",
+            "openai-chatgpt",
+            "--name",
+            "work-chatgpt",
+        ])
+        .expect("auth logout parses");
+        assert!(matches!(
+            logout.command,
+            super::Commands::Auth {
+                command: super::AuthCommands::Logout {
+                    ref provider,
+                    name: Some(ref name),
+                }
+            } if provider == "openai-chatgpt" && name == "work-chatgpt"
+        ));
+    }
+
+    #[test]
+    fn model_provider_and_secret_delete_commands_parse() {
+        use clap::Parser;
+        let model = super::Cli::try_parse_from([
+            "exo",
+            "model",
+            "register",
+            "gpt",
+            "--secret",
+            "openai-chatgpt",
+            "--provider",
+            "openai-chatgpt",
+        ])
+        .expect("provider-tagged model parses");
+        assert!(matches!(
+            model.command,
+            super::Commands::Model {
+                command: super::ModelCommands::Register {
+                    provider: Some(ref provider),
+                    ..
+                }
+            } if provider == "openai-chatgpt"
+        ));
+
+        let secret = super::Cli::try_parse_from(["exo", "secret", "delete", "openai-chatgpt"])
+            .expect("secret delete parses");
+        assert!(matches!(
+            secret.command,
+            super::Commands::Secret {
+                command: super::SecretCommands::Delete { ref name }
+            } if name == "openai-chatgpt"
         ));
     }
 }

@@ -42,13 +42,13 @@ describe("model runtime dispatch", () => {
     expect(
       runtimeFromModelBinding(undefined, {
         model: "deepseek-chat",
-        apiKey: "key",
+        auth: { authorization: "Bearer key" },
       }),
     ).toBeInstanceOf(ChatCompletionsRuntime);
     expect(
       runtimeFromModelBinding(undefined, {
         model: "gpt-5.4",
-        apiKey: "key",
+        auth: { authorization: "Bearer key" },
       }),
     ).toBeInstanceOf(ResponsesRuntime);
   });
@@ -60,7 +60,7 @@ describe("model runtime dispatch", () => {
     expect(
       runtimeFromModelBinding(undefined, {
         model: "claude-sonnet-4-6",
-        apiKey: "key",
+        auth: { headers: { "x-api-key": "key" } },
       }),
     ).toBeInstanceOf(AnthropicRuntime);
   });
@@ -74,10 +74,29 @@ describe("model runtime dispatch", () => {
     expect(
       runtimeFromModelBinding(undefined, {
         model: "openai/gpt-5-pro",
-        apiKey: "key",
+        auth: { authorization: "Bearer key" },
         baseUrl: "https://openrouter.ai/api/v1",
       }),
     ).toBeInstanceOf(ChatCompletionsRuntime);
+  });
+
+  it("dispatches openai-chatgpt bindings through Responses", () => {
+    expect(
+      runtimeFromModelBinding(undefined, {
+        model: "gpt-5.4",
+        provider: "openai-chatgpt",
+        auth: {
+          authorization: "Bearer token",
+          headers: { "chatgpt-account-id": "account" },
+        },
+      }),
+    ).toBeInstanceOf(ResponsesRuntime);
+    expect(() =>
+      runtimeFromModelBinding(undefined, {
+        model: "gpt-5.4",
+        provider: "openai-chatgpt",
+      }),
+    ).toThrow("logged out");
   });
 });
 

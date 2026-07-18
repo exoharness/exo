@@ -38,6 +38,7 @@ SHELL_PROGRAM="${EXO_SHELL_PROGRAM:-/bin/bash}"
 SANDBOX_SCOPE="${EXO_SANDBOX_SCOPE:-}"
 SCHEDULER_INTERVAL_SECONDS="${EXO_SCHEDULER_INTERVAL_SECONDS:-10}"
 COMMAND="repl"
+declare -a AUTH_ARGS=()
 USE_SANDBOX=true
 PULL_SANDBOX=false
 START_SCHEDULER="${EXO_START_SCHEDULER:-true}"
@@ -60,6 +61,7 @@ UPSTREAM_MODEL="${EXO_UPSTREAM_MODEL:-}"
 SECRET_NAME=""
 SECRET_ENV=""
 MODEL_BASE_URL=""
+MODEL_PROVIDER_ID=""
 USER_NAME="${EXO_USER_NAME:-}"
 export EXO_LOCAL_PROMPT_FILE="$LOCAL_PROMPT_FILE"
 
@@ -72,6 +74,7 @@ Usage:
   ./exo.sh fresh
   ./exo.sh stop-all
   ./exo.sh build
+  ./exo.sh auth <login|logout> <provider> [provider options]
   ./exo.sh register-model
   ./exo.sh write-profile
   ./exo.sh setup-profile
@@ -89,6 +92,7 @@ Subcommands:
   fresh            Rebuild, delete all state, and start a clean REPL
   stop-all         Stop the scheduler and adapter runners, preserving .exo state
   build            Install JS dependencies and build the exo CLI and scheduler
+  auth             Log in to or out of an external model provider
   register-model   Store an API-key secret and register a model binding; uses
                    --model, --upstream-model, --secret-name, --secret-env, and
                    optionally --base-url
@@ -105,6 +109,7 @@ Options:
   --secret-name <name>         Secret name for register-model (e.g. openai)
   --secret-env <env-var>       Environment variable holding the API key for register-model
   --base-url <url>             Optional API base URL for register-model
+  --provider <provider>        Optional model provider id for register-model
   --user-name <name>           User name for write-profile (default: none)
   --agent <slug>               Agent slug (default: exo-agent)
   --conversation <slug>        Conversation slug (default: dev)
@@ -358,10 +363,22 @@ register_model() {
   exo_macos_prepare_keychain_for_ssh "$ROOT_DIR" "$EXO_BIN" "$SCHEDULER_BIN"
   echo "Registering model $MODEL -> $upstream..."
   local args=(model register "$MODEL" --model "$upstream" --secret "$SECRET_NAME")
+  if [[ -n "$MODEL_PROVIDER_ID" ]]; then
+    args+=(--provider "$MODEL_PROVIDER_ID")
+  fi
   if [[ -n "$MODEL_BASE_URL" ]]; then
     args+=(--base-url "$MODEL_BASE_URL")
   fi
   exo "${args[@]}"
+}
+
+run_provider_auth() {
+  ensure_exo_bin
+  # Repair access to an existing master key before provider auth opens the store.
+  prepare_macos_keychain_for_ssh "$ROOT_DIR" "$EXO_BIN" "$SCHEDULER_BIN"
+  exo auth "${AUTH_ARGS[@]}"
+  # Login may create the master key; authorize the scheduler for the new item.
+  prepare_macos_keychain_for_ssh "$ROOT_DIR" "$EXO_BIN" "$SCHEDULER_BIN"
 }
 
 write_local_profile() {
@@ -1331,6 +1348,13 @@ while [[ $# -gt 0 ]]; do
       [[ $# -eq 0 ]] || die "build does not accept additional arguments"
       COMMAND="build"
       ;;
+    auth)
+      shift
+      [[ $# -gt 0 ]] || die "auth requires a login or logout command"
+      COMMAND="auth"
+      AUTH_ARGS=("$@")
+      break
+      ;;
     register-model)
       shift
       COMMAND="register-model"
@@ -1362,6 +1386,11 @@ while [[ $# -gt 0 ]]; do
     --base-url)
       MODEL_BASE_URL="${2:-}"
       [[ -n "$MODEL_BASE_URL" ]] || die "--base-url requires a value"
+      shift 2
+      ;;
+    --provider)
+      MODEL_PROVIDER_ID="${2:-}"
+      [[ -n "$MODEL_PROVIDER_ID" ]] || die "--provider requires a value"
       shift 2
       ;;
     --user-name)
@@ -1589,6 +1618,9 @@ case "$COMMAND" in
     ;;
   build)
     build_all
+    ;;
+  auth)
+    run_provider_auth
     ;;
   register-model)
     register_model

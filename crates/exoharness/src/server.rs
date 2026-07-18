@@ -26,6 +26,10 @@ impl ExoHarnessServer {
 
     pub async fn handle_request(&self, request: Request) -> Result<Response> {
         match request {
+            Request::PreflightSecretStorage => {
+                self.root.preflight_secret_storage().await?;
+                Ok(Response::Unit)
+            }
             Request::ListAgents => Ok(Response::Agents {
                 agents: self
                     .root
@@ -68,6 +72,15 @@ impl ExoHarnessServer {
             }),
             Request::GetSecret { secret_id } => Ok(Response::Secret {
                 secret: self.root.get_secret(&secret_id).await?,
+            }),
+            Request::ResolveSecret { secret_id } => Ok(Response::ResolvedSecret {
+                secret: self.root.resolve_secret(&secret_id).await?,
+            }),
+            Request::LogoutOauthSecret { secret_id } => Ok(Response::LogoutOauth {
+                result: self.root.logout_oauth_secret(&secret_id).await?,
+            }),
+            Request::DeleteSecret { secret_id } => Ok(Response::Bool {
+                value: self.root.delete_secret(&secret_id).await?,
             }),
             Request::ListConversations { agent_id, request } => {
                 let agent = self.require_agent(&agent_id).await?;
@@ -215,6 +228,33 @@ impl ExoHarnessServer {
                 let agent = self.require_agent(&agent_id).await?;
                 Ok(Response::Secret {
                     secret: agent.get_secret(&secret_id).await?,
+                })
+            }
+            Request::AgentResolveSecret {
+                agent_id,
+                secret_id,
+            } => {
+                let agent = self.require_agent(&agent_id).await?;
+                Ok(Response::ResolvedSecret {
+                    secret: agent.resolve_secret(&secret_id).await?,
+                })
+            }
+            Request::AgentLogoutOauthSecret {
+                agent_id,
+                secret_id,
+            } => {
+                let agent = self.require_agent(&agent_id).await?;
+                Ok(Response::LogoutOauth {
+                    result: agent.logout_oauth_secret(&secret_id).await?,
+                })
+            }
+            Request::AgentDeleteSecret {
+                agent_id,
+                secret_id,
+            } => {
+                let agent = self.require_agent(&agent_id).await?;
+                Ok(Response::Bool {
+                    value: agent.delete_secret(&secret_id).await?,
                 })
             }
             Request::ConversationStartSession {
@@ -381,6 +421,36 @@ impl ExoHarnessServer {
                 let conversation = self.require_conversation(agent_id, conversation_id).await?;
                 Ok(Response::Secret {
                     secret: conversation.get_secret(&secret_id).await?,
+                })
+            }
+            Request::ConversationResolveSecret {
+                agent_id,
+                conversation_id,
+                secret_id,
+            } => {
+                let conversation = self.require_conversation(agent_id, conversation_id).await?;
+                Ok(Response::ResolvedSecret {
+                    secret: conversation.resolve_secret(&secret_id).await?,
+                })
+            }
+            Request::ConversationLogoutOauthSecret {
+                agent_id,
+                conversation_id,
+                secret_id,
+            } => {
+                let conversation = self.require_conversation(agent_id, conversation_id).await?;
+                Ok(Response::LogoutOauth {
+                    result: conversation.logout_oauth_secret(&secret_id).await?,
+                })
+            }
+            Request::ConversationDeleteSecret {
+                agent_id,
+                conversation_id,
+                secret_id,
+            } => {
+                let conversation = self.require_conversation(agent_id, conversation_id).await?;
+                Ok(Response::Bool {
+                    value: conversation.delete_secret(&secret_id).await?,
                 })
             }
             Request::TurnAddEvents {

@@ -23,12 +23,12 @@ use crate::{
     ConversationId, ConversationRecord, CreateSandboxRequest, Event, EventData, EventId,
     EventQuery, EventStream, ExoHarness, ForkConversationRequest, GetEventsResult,
     GetSandboxProcessEventsResult, ListConversationsRequest, ListConversationsResult,
-    NewAgentRequest, NewConversationRequest, PutSecretRequest, ReadArtifactRequest, Result,
-    RunInSandboxRequest, SandboxHandle, SandboxId, SandboxProcess, SandboxProcessEventQuery,
-    SandboxProcessParts, SandboxProcessRecord, SandboxProcessStatus, Secret, SecretId,
-    SecretMetadata, SessionId, SnapshotHandle, SnapshotId, StartSandboxProcessRequest,
-    StartSandboxRequest, TurnHandle, TurnRecord, WaitSandboxProcessRequest, WriteArtifactRequest,
-    WriteSandboxProcessInputRequest,
+    LogoutOauthResult, NewAgentRequest, NewConversationRequest, PutSecretRequest,
+    ReadArtifactRequest, ResolvedSecret, Result, RunInSandboxRequest, SandboxHandle, SandboxId,
+    SandboxProcess, SandboxProcessEventQuery, SandboxProcessParts, SandboxProcessRecord,
+    SandboxProcessStatus, Secret, SecretId, SecretMetadata, SessionId, SnapshotHandle, SnapshotId,
+    StartSandboxProcessRequest, StartSandboxRequest, TurnHandle, TurnRecord,
+    WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
 #[derive(Clone)]
@@ -103,6 +103,13 @@ impl HttpExoHarness {
 
 #[async_trait]
 impl ExoHarness for HttpExoHarness {
+    async fn preflight_secret_storage(&self) -> Result<()> {
+        match self.request(Request::PreflightSecretStorage).await? {
+            Response::Unit => Ok(()),
+            response => unexpected_response(response, "unit"),
+        }
+    }
+
     async fn list_agents(&self) -> Result<Vec<Arc<dyn AgentHandle>>> {
         match self.request(Request::ListAgents).await? {
             Response::Agents { agents } => Ok(agents
@@ -181,6 +188,36 @@ impl ExoHarness for HttpExoHarness {
         match self.request(Request::GetSecret { secret_id: *id }).await? {
             Response::Secret { secret } => Ok(secret),
             response => unexpected_response(response, "secret"),
+        }
+    }
+
+    async fn resolve_secret(&self, id: &SecretId) -> Result<Option<ResolvedSecret>> {
+        match self
+            .request(Request::ResolveSecret { secret_id: *id })
+            .await?
+        {
+            Response::ResolvedSecret { secret } => Ok(secret),
+            response => unexpected_response(response, "resolved_secret"),
+        }
+    }
+
+    async fn logout_oauth_secret(&self, id: &SecretId) -> Result<LogoutOauthResult> {
+        match self
+            .request(Request::LogoutOauthSecret { secret_id: *id })
+            .await?
+        {
+            Response::LogoutOauth { result } => Ok(result),
+            response => unexpected_response(response, "logout_oauth"),
+        }
+    }
+
+    async fn delete_secret(&self, id: &SecretId) -> Result<bool> {
+        match self
+            .request(Request::DeleteSecret { secret_id: *id })
+            .await?
+        {
+            Response::Bool { value } => Ok(value),
+            response => unexpected_response(response, "bool"),
         }
     }
 }
@@ -579,6 +616,48 @@ impl AgentHandle for HttpAgentHandle {
         {
             Response::Secret { secret } => Ok(secret),
             response => unexpected_response(response, "secret"),
+        }
+    }
+
+    async fn resolve_secret(&self, id: &SecretId) -> Result<Option<ResolvedSecret>> {
+        match self
+            .harness
+            .request(Request::AgentResolveSecret {
+                agent_id: self.record.id,
+                secret_id: *id,
+            })
+            .await?
+        {
+            Response::ResolvedSecret { secret } => Ok(secret),
+            response => unexpected_response(response, "resolved_secret"),
+        }
+    }
+
+    async fn logout_oauth_secret(&self, id: &SecretId) -> Result<LogoutOauthResult> {
+        match self
+            .harness
+            .request(Request::AgentLogoutOauthSecret {
+                agent_id: self.record.id,
+                secret_id: *id,
+            })
+            .await?
+        {
+            Response::LogoutOauth { result } => Ok(result),
+            response => unexpected_response(response, "logout_oauth"),
+        }
+    }
+
+    async fn delete_secret(&self, id: &SecretId) -> Result<bool> {
+        match self
+            .harness
+            .request(Request::AgentDeleteSecret {
+                agent_id: self.record.id,
+                secret_id: *id,
+            })
+            .await?
+        {
+            Response::Bool { value } => Ok(value),
+            response => unexpected_response(response, "bool"),
         }
     }
 
@@ -988,6 +1067,51 @@ impl ConversationHandle for HttpConversationHandle {
         {
             Response::Secret { secret } => Ok(secret),
             response => unexpected_response(response, "secret"),
+        }
+    }
+
+    async fn resolve_secret(&self, id: &SecretId) -> Result<Option<ResolvedSecret>> {
+        match self
+            .harness
+            .request(Request::ConversationResolveSecret {
+                agent_id: self.agent_id,
+                conversation_id: self.record.id,
+                secret_id: *id,
+            })
+            .await?
+        {
+            Response::ResolvedSecret { secret } => Ok(secret),
+            response => unexpected_response(response, "resolved_secret"),
+        }
+    }
+
+    async fn logout_oauth_secret(&self, id: &SecretId) -> Result<LogoutOauthResult> {
+        match self
+            .harness
+            .request(Request::ConversationLogoutOauthSecret {
+                agent_id: self.agent_id,
+                conversation_id: self.record.id,
+                secret_id: *id,
+            })
+            .await?
+        {
+            Response::LogoutOauth { result } => Ok(result),
+            response => unexpected_response(response, "logout_oauth"),
+        }
+    }
+
+    async fn delete_secret(&self, id: &SecretId) -> Result<bool> {
+        match self
+            .harness
+            .request(Request::ConversationDeleteSecret {
+                agent_id: self.agent_id,
+                conversation_id: self.record.id,
+                secret_id: *id,
+            })
+            .await?
+        {
+            Response::Bool { value } => Ok(value),
+            response => unexpected_response(response, "bool"),
         }
     }
 }

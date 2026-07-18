@@ -65,6 +65,7 @@ export type Binding =
       type: "llm";
       name: string;
       model: string;
+      provider?: string | null;
       baseUrl?: string | null;
       secretId?: string | null;
     };
@@ -84,9 +85,20 @@ export type Secret =
     }
   | {
       type: "oauth";
-      accessToken: string;
+      provider?: string | null;
+      accessToken?: string | null;
       refreshToken?: string | null;
+      expiresAt?: string | null;
     };
+
+export type ResolvedSecret =
+  | { type: "key"; value: string }
+  | { type: "access_token"; provider: string; accessToken: string };
+
+export interface LogoutOauthResult {
+  wasLoggedIn: boolean;
+  remoteRevocationConfirmed: boolean;
+}
 
 export interface SecretMetadata {
   id: string;
@@ -276,10 +288,14 @@ export interface Agent {
   getBinding(id: string): Promise<Binding | null>;
   listSecrets(): Promise<SecretMetadata[]>;
   getSecret(id: string): Promise<Secret | null>;
+  resolveSecret(id: string): Promise<ResolvedSecret | null>;
+  logoutOauthSecret(id: string): Promise<LogoutOauthResult>;
+  deleteSecret(id: string): Promise<boolean>;
 }
 
 export interface ExoHarness {
   readonly current: ExoHarnessCurrent;
+  preflightSecretStorage(): Promise<void>;
   listAgents(): Promise<Agent[]>;
   getAgent(id: string): Promise<Agent | null>;
   newAgent(request: { slug: string; name: string }): Promise<Agent>;
@@ -288,6 +304,9 @@ export interface ExoHarness {
   getBinding(id: string): Promise<Binding | null>;
   listSecrets(): Promise<SecretMetadata[]>;
   getSecret(id: string): Promise<Secret | null>;
+  resolveSecret(id: string): Promise<ResolvedSecret | null>;
+  logoutOauthSecret(id: string): Promise<LogoutOauthResult>;
+  deleteSecret(id: string): Promise<boolean>;
 }
 
 export interface ExoHarnessCurrent {
@@ -334,6 +353,9 @@ export interface Conversation {
   getBinding(id: string): Promise<Binding | null>;
   listSecrets(): Promise<SecretMetadata[]>;
   getSecret(id: string): Promise<Secret | null>;
+  resolveSecret(id: string): Promise<ResolvedSecret | null>;
+  logoutOauthSecret(id: string): Promise<LogoutOauthResult>;
+  deleteSecret(id: string): Promise<boolean>;
 }
 
 export interface Turn {

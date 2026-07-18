@@ -29,7 +29,11 @@ export interface TextDeltaTraceState {
 export interface ResolvedLlmBinding {
   name: string;
   model: string;
-  apiKey?: string;
+  provider: string;
+  auth?: {
+    authorization?: string;
+    headers: Record<string, string>;
+  };
   baseUrl?: string | null;
 }
 
@@ -247,25 +251,96 @@ export async function resolveLlmBinding(
   if (!binding || binding.type !== "llm") {
     throw new Error(`registered model binding disappeared: ${name}`);
   }
-  let apiKey: string | undefined;
+  const provider =
+    binding.provider ?? inferModelProvider(binding.model, binding.baseUrl);
+  let auth: ResolvedLlmBinding["auth"];
   if (binding.secretId) {
-    const secret = await context.exoharness.current.conversation.getSecret(
+    const secret = await context.exoharness.current.conversation.resolveSecret(
       binding.secretId,
     );
     if (!secret) {
       throw new Error(`model secret does not exist for ${name}`);
     }
-    if (secret.type !== "key") {
-      throw new Error(`model secret must be a key secret for ${name}`);
+    if (secret.type === "key") {
+      auth =
+        provider === "anthropic"
+          ? { headers: { "x-api-key": secret.value } }
+          : {
+              authorization: `Bearer ${secret.value}`,
+              headers: {},
+            };
+    } else {
+      if (secret.provider !== provider) {
+        throw new Error(
+          `model provider ${provider} cannot use an OAuth credential for ${secret.provider}`,
+        );
+      }
+      if (provider !== "openai-chatgpt") {
+        throw new Error(
+          `OAuth request authentication is not implemented for ${provider}`,
+        );
+      }
+      auth = {
+        authorization: `Bearer ${secret.accessToken}`,
+        headers: {
+          "chatgpt-account-id": chatgptAccountId(secret.accessToken),
+          originator: "exo",
+          "user-agent": "exo/0.1.0",
+          "OpenAI-Beta": "responses=experimental",
+        },
+      };
     }
-    apiKey = secret.value;
   }
   return {
     name,
     model: binding.model,
-    apiKey,
+    provider,
+    auth,
     baseUrl: binding.baseUrl ?? null,
   };
+}
+
+function inferModelProvider(model: string, baseUrl?: string | null): string {
+  if ((baseUrl ?? "").includes("openrouter.ai")) {
+    return "openrouter";
+  }
+  if (model.toLowerCase().startsWith("claude")) {
+    return "anthropic";
+  }
+  return "openai";
+}
+
+interface ChatGptAccessTokenClaims {
+  "https://api.openai.com/auth": {
+    chatgpt_account_id: string;
+  };
+}
+
+function chatgptAccountId(accessToken: string): string {
+  const payload = accessToken.split(".")[1];
+  if (!payload) {
+    throw new Error("OpenAI ChatGPT access token is not a JWT");
+  }
+  const claims = JSON.parse(
+    Buffer.from(payload, "base64url").toString("utf8"),
+  ) as ChatGptAccessTokenClaims;
+  const accountId = claims["https://api.openai.com/auth"]?.chatgpt_account_id;
+  if (!accountId) {
+    throw new Error("OpenAI ChatGPT access token has no account id claim");
+  }
+  return accountId;
+}
+
+export function apiKeyFromModelBinding(
+  binding: ResolvedLlmBinding,
+): string | undefined {
+  const headerKey = Object.entries(binding.auth?.headers ?? {}).find(
+    ([name]) => name.toLowerCase() === "x-api-key",
+  )?.[1];
+  if (headerKey) {
+    return headerKey;
+  }
+  return binding.auth?.authorization?.replace(/^Bearer\s+/i, "");
 }
 
 export function markFirstTextDelta(state: TextDeltaTraceState): number | null {

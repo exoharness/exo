@@ -19,6 +19,8 @@ use crate::{Result, Uuid7};
 
 #[async_trait]
 pub trait ExoHarness: Send + Sync {
+    async fn preflight_secret_storage(&self) -> Result<()>;
+
     async fn list_agents(&self) -> Result<Vec<Arc<dyn AgentHandle>>>;
     async fn get_agent(&self, id: &AgentId) -> Result<Option<Arc<dyn AgentHandle>>>;
     async fn new_agent(&self, request: NewAgentRequest) -> Result<Arc<dyn AgentHandle>>;
@@ -31,6 +33,15 @@ pub trait ExoHarness: Send + Sync {
     async fn list_secrets(&self) -> Result<Vec<SecretMetadata>>;
     async fn put_secret(&self, request: PutSecretRequest) -> Result<SecretId>;
     async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>>;
+    async fn resolve_secret(&self, id: &SecretId) -> Result<Option<ResolvedSecret>> {
+        resolve_stored_secret(self.get_secret(id).await?)
+    }
+    async fn logout_oauth_secret(&self, _id: &SecretId) -> Result<LogoutOauthResult> {
+        anyhow::bail!("OAuth logout is not supported by this harness")
+    }
+    async fn delete_secret(&self, _id: &SecretId) -> Result<bool> {
+        anyhow::bail!("secret deletion is not supported by this harness")
+    }
 }
 
 #[async_trait]
@@ -96,6 +107,15 @@ pub trait AgentHandle: SandboxHandle {
     async fn list_secrets(&self) -> Result<Vec<SecretMetadata>>;
     async fn put_secret(&self, request: PutSecretRequest) -> Result<SecretId>;
     async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>>;
+    async fn resolve_secret(&self, id: &SecretId) -> Result<Option<ResolvedSecret>> {
+        resolve_stored_secret(self.get_secret(id).await?)
+    }
+    async fn logout_oauth_secret(&self, _id: &SecretId) -> Result<LogoutOauthResult> {
+        anyhow::bail!("OAuth logout is not supported by this harness")
+    }
+    async fn delete_secret(&self, _id: &SecretId) -> Result<bool> {
+        anyhow::bail!("secret deletion is not supported by this harness")
+    }
 
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion>;
     async fn read_artifact(&self, request: ReadArtifactRequest) -> Result<Option<Artifact>>;
@@ -131,6 +151,15 @@ pub trait ConversationHandle: SandboxHandle {
     async fn list_secrets(&self) -> Result<Vec<SecretMetadata>>;
     async fn put_secret(&self, request: PutSecretRequest) -> Result<SecretId>;
     async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>>;
+    async fn resolve_secret(&self, id: &SecretId) -> Result<Option<ResolvedSecret>> {
+        resolve_stored_secret(self.get_secret(id).await?)
+    }
+    async fn logout_oauth_secret(&self, _id: &SecretId) -> Result<LogoutOauthResult> {
+        anyhow::bail!("OAuth logout is not supported by this harness")
+    }
+    async fn delete_secret(&self, _id: &SecretId) -> Result<bool> {
+        anyhow::bail!("secret deletion is not supported by this harness")
+    }
 }
 
 #[async_trait]
@@ -815,6 +844,8 @@ pub enum Binding {
     Llm {
         name: String,
         model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
         base_url: Option<String>,
         secret_id: Option<SecretId>,
     },
@@ -928,9 +959,64 @@ pub enum Secret {
         value: String,
     },
     Oauth {
-        access_token: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        access_token: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         refresh_token: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires_at: Option<DateTimeUtc>,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResolvedSecret {
+    Key {
+        value: String,
+    },
+    AccessToken {
+        provider: String,
+        access_token: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LogoutOauthResult {
+    pub was_logged_in: bool,
+    pub remote_revocation_confirmed: bool,
+}
+
+fn resolve_stored_secret(secret: Option<Secret>) -> Result<Option<ResolvedSecret>> {
+    let Some(secret) = secret else {
+        return Ok(None);
+    };
+    match secret {
+        Secret::Key { value } => Ok(Some(ResolvedSecret::Key { value })),
+        Secret::Oauth {
+            provider,
+            access_token,
+            expires_at,
+            ..
+        } => {
+            let provider = provider
+                .ok_or_else(|| anyhow::anyhow!("OAuth credential has no provider; log in again"))?;
+            let access_token = access_token.ok_or_else(|| {
+                anyhow::anyhow!("OAuth credential for provider `{provider}` is logged out")
+            })?;
+            if expires_at.is_some_and(|expiry| expiry <= Utc::now() + chrono::TimeDelta::minutes(5))
+            {
+                anyhow::bail!(
+                    "OAuth credential for provider `{provider}` requires refresh, but this harness does not support OAuth refresh"
+                );
+            }
+            Ok(Some(ResolvedSecret::AccessToken {
+                provider,
+                access_token,
+            }))
+        }
+    }
 }
 
 pub type AgentId = Uuid7;
@@ -963,6 +1049,74 @@ crate::impl_has_uuid7_id!(SecretMetadata, id);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oauth_secrets_serialize_active_and_logged_out_states() {
+        let active = Secret::Oauth {
+            provider: Some("openai-chatgpt".to_string()),
+            access_token: Some("access".to_string()),
+            refresh_token: Some("refresh".to_string()),
+            expires_at: DateTime::from_timestamp(1_900_000_000, 0),
+        };
+        let active_json = serde_json::to_value(&active).unwrap();
+        assert_eq!(active_json["provider"], "openai-chatgpt");
+        assert_eq!(active_json["access_token"], "access");
+        assert!(active_json.get("expires_at").is_some());
+
+        let logged_out = Secret::Oauth {
+            provider: Some("openai-chatgpt".to_string()),
+            access_token: None,
+            refresh_token: None,
+            expires_at: None,
+        };
+        let logged_out_json = serde_json::to_value(&logged_out).unwrap();
+        assert_eq!(logged_out_json["provider"], "openai-chatgpt");
+        assert!(logged_out_json.get("access_token").is_none());
+        assert!(logged_out_json.get("refresh_token").is_none());
+    }
+
+    #[test]
+    fn legacy_oauth_and_llm_records_deserialize_without_provider_fields() {
+        let secret: Secret = serde_json::from_value(serde_json::json!({
+            "type": "oauth",
+            "access_token": "legacy-access",
+            "refresh_token": "legacy-refresh"
+        }))
+        .unwrap();
+        assert_eq!(
+            secret,
+            Secret::Oauth {
+                provider: None,
+                access_token: Some("legacy-access".to_string()),
+                refresh_token: Some("legacy-refresh".to_string()),
+                expires_at: None,
+            }
+        );
+
+        let binding: Binding = serde_json::from_value(serde_json::json!({
+            "type": "llm",
+            "name": "gpt",
+            "model": "gpt-5.4",
+            "base_url": null,
+            "secret_id": null
+        }))
+        .unwrap();
+        assert!(matches!(binding, Binding::Llm { provider: None, .. }));
+    }
+
+    #[test]
+    fn provider_tagged_llm_binding_round_trips() {
+        let binding = Binding::Llm {
+            name: "chatgpt".to_string(),
+            model: "gpt-5.4".to_string(),
+            provider: Some("openai-chatgpt".to_string()),
+            base_url: None,
+            secret_id: None,
+        };
+        let value = serde_json::to_value(&binding).unwrap();
+        assert_eq!(value["provider"], "openai-chatgpt");
+        assert_eq!(serde_json::from_value::<Binding>(value).unwrap(), binding);
+    }
 
     #[test]
     fn serializes_event_types_as_snake_case() {

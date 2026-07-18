@@ -57,6 +57,8 @@ export interface NativeBraintrustOptions {
 
 export interface ResponsesRuntimeOptions {
   apiKey?: string;
+  authorization?: string;
+  headers?: Record<string, string>;
   baseURL?: string;
   organization?: string;
   project?: string;
@@ -65,7 +67,11 @@ export interface ResponsesRuntimeOptions {
 
 export interface ResponsesModelBinding {
   model?: string;
-  apiKey?: string;
+  provider?: string;
+  auth?: {
+    authorization?: string;
+    headers?: Record<string, string>;
+  };
   baseUrl?: string | null;
 }
 
@@ -135,8 +141,9 @@ export class ResponsesRuntime implements ResponsesRuntimeLike {
     // native SDK, not the OpenAI SDK, so it doesn't apply here.
     this.client = wrapOpenAI(
       new OpenAI({
-        apiKey: options.apiKey,
+        apiKey: options.apiKey ?? bearerToken(options.authorization),
         baseURL: options.baseURL,
+        defaultHeaders: options.headers,
         organization: options.organization,
         project: options.project,
       }),
@@ -157,9 +164,20 @@ export class ResponsesRuntime implements ResponsesRuntimeLike {
     agentConfig: AgentConfig | undefined,
     binding: ResponsesModelBinding,
   ): ResponsesRuntime {
+    if (
+      binding.provider === "openai-chatgpt" &&
+      !bearerToken(binding.auth?.authorization)
+    ) {
+      throw new Error("OpenAI ChatGPT credential is logged out");
+    }
     return new ResponsesRuntime({
-      apiKey: binding.apiKey,
-      baseURL: binding.baseUrl ?? undefined,
+      authorization: binding.auth?.authorization,
+      headers: binding.auth?.headers,
+      baseURL:
+        binding.baseUrl ??
+        (binding.provider === "openai-chatgpt"
+          ? "https://chatgpt.com/backend-api/codex"
+          : undefined),
       organization: process.env.OPENAI_ORG_ID,
       project: process.env.OPENAI_PROJECT,
       braintrust: braintrustOptionsFromAgentConfig(agentConfig),
@@ -288,14 +306,31 @@ export function runtimeFromModelBinding(
   agentConfig: AgentConfig | undefined,
   binding: ResponsesModelBinding,
 ): ResponsesRuntimeLike {
+  if (
+    binding.provider &&
+    !["openai", "openai-chatgpt", "openrouter", "anthropic"].includes(
+      binding.provider,
+    )
+  ) {
+    throw new Error(`unsupported model provider ${binding.provider}`);
+  }
   const model = binding.model ?? "";
-  if (isAnthropicModel(model)) {
+  if (
+    binding.provider === "anthropic" ||
+    (!binding.provider && isAnthropicModel(model))
+  ) {
     return AnthropicRuntime.fromModelBinding(agentConfig, binding);
   }
   // OpenRouter is OpenAI-compatible but Chat Completions only (no Responses
   // API), so force the chat path regardless of how the model name looks.
-  if (isOpenRouterBinding(binding)) {
+  if (
+    binding.provider === "openrouter" ||
+    (!binding.provider && isOpenRouterBinding(binding))
+  ) {
     return ChatCompletionsRuntime.fromModelBinding(agentConfig, binding);
+  }
+  if (binding.provider === "openai-chatgpt") {
+    return ResponsesRuntime.fromModelBinding(agentConfig, binding);
   }
   return modelRequiresResponsesApi(model)
     ? ResponsesRuntime.fromModelBinding(agentConfig, binding)
@@ -327,6 +362,23 @@ export function modelRequiresResponsesApi(model: string): boolean {
   );
 }
 
+function bearerToken(authorization?: string): string | undefined {
+  if (!authorization) {
+    return undefined;
+  }
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  return match?.[1];
+}
+
+function headerValue(
+  headers: Record<string, string> | undefined,
+  name: string,
+): string | undefined {
+  return Object.entries(headers ?? {}).find(
+    ([key]) => key.toLowerCase() === name.toLowerCase(),
+  )?.[1];
+}
+
 export class ChatCompletionsRuntime implements ResponsesRuntimeLike {
   private readonly client: OpenAI;
 
@@ -338,8 +390,9 @@ export class ChatCompletionsRuntime implements ResponsesRuntimeLike {
     // native SDK, not the OpenAI SDK, so it doesn't apply here.
     this.client = wrapOpenAI(
       new OpenAI({
-        apiKey: options.apiKey,
+        apiKey: options.apiKey ?? bearerToken(options.authorization),
         baseURL: options.baseURL,
+        defaultHeaders: options.headers,
         organization: options.organization,
         project: options.project,
       }),
@@ -351,7 +404,8 @@ export class ChatCompletionsRuntime implements ResponsesRuntimeLike {
     binding: ResponsesModelBinding,
   ): ChatCompletionsRuntime {
     return new ChatCompletionsRuntime({
-      apiKey: binding.apiKey,
+      authorization: binding.auth?.authorization,
+      headers: binding.auth?.headers,
       baseURL: binding.baseUrl ?? undefined,
       organization: process.env.OPENAI_ORG_ID,
       project: process.env.OPENAI_PROJECT,
@@ -487,8 +541,12 @@ export class AnthropicRuntime implements ResponsesRuntimeLike {
     // braintrust LLM span (input/output/usage), so we don't hand-roll spans.
     this.client = wrapAnthropic(
       new Anthropic({
-        apiKey: options.apiKey,
+        apiKey:
+          options.apiKey ??
+          headerValue(options.headers, "x-api-key") ??
+          bearerToken(options.authorization),
         baseURL: options.baseURL,
+        defaultHeaders: options.headers,
       }),
     );
   }
@@ -498,7 +556,8 @@ export class AnthropicRuntime implements ResponsesRuntimeLike {
     binding: ResponsesModelBinding,
   ): AnthropicRuntime {
     return new AnthropicRuntime({
-      apiKey: binding.apiKey,
+      authorization: binding.auth?.authorization,
+      headers: binding.auth?.headers,
       baseURL: binding.baseUrl ?? undefined,
       braintrust: braintrustOptionsFromAgentConfig(agentConfig),
     });

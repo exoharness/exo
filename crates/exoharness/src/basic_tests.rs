@@ -2,6 +2,7 @@ use std::env;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -23,11 +24,12 @@ use crate::{
     BoxAsyncWrite, CloseSandboxProcessInputRequest, CreateSandboxRequest, DurableFileSystem,
     EventData, EventKind, EventQuery, EventQueryDirection, ExoHarness, FileSystemMountMode,
     ForkConversationRequest, ManagedSandboxBackend, ManagedSandboxHandle, NewAgentRequest,
-    NewConversationRequest, PutSecretRequest, RunInSandboxRequest, SandboxCommand,
-    SandboxCommandOutput, SandboxKey, SandboxLifecycleConfig, SandboxNetworkPolicy,
-    SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessParts, SandboxProcessStatus,
-    SandboxProcessStdin, SandboxProvider, SandboxProviderConfig, SandboxRequest, SandboxSpec,
-    Secret, SnapshotKind, SnapshotPayload, StartSandboxProcessRequest, StartSandboxRequest, Uuid7,
+    NewConversationRequest, OAuthCredentialProvider, OAuthTokenSet, PutSecretRequest,
+    ResolvedSecret, RunInSandboxRequest, SandboxCommand, SandboxCommandOutput, SandboxKey,
+    SandboxLifecycleConfig, SandboxNetworkPolicy, SandboxProcessEvent, SandboxProcessEventQuery,
+    SandboxProcessParts, SandboxProcessStatus, SandboxProcessStdin, SandboxProvider,
+    SandboxProviderConfig, SandboxRequest, SandboxSpec, Secret, SecretBackendChoice, SnapshotKind,
+    SnapshotPayload, StartSandboxProcessRequest, StartSandboxRequest, Uuid7,
     WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
@@ -91,6 +93,17 @@ async fn basic_backend_contract_conversation_scope_overrides_and_forks() {
         harness,
     )
     .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn basic_backend_contract_secret_resolution_and_deletion() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness: Arc<dyn ExoHarness> = Arc::new(
+        BasicExoHarness::new(local_test_config(tempdir.path()))
+            .await
+            .expect("harness should initialize"),
+    );
+    crate::contract_tests::secret_resolution_and_deletion_work_across_scopes(harness).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -866,6 +879,329 @@ async fn secrets_are_encrypted_at_rest() {
     assert!(!stored_text.contains("super-secret-token"));
     assert!(stored_text.contains("\"ciphertext\""));
     assert!(stored_text.contains("\"algorithm\""));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn secret_storage_preflight_fails_before_secret_persistence() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let master_key_path = tempdir.path().join("invalid-master.key");
+    fs::write(&master_key_path, b"not-a-valid-master-key")
+        .await
+        .expect("invalid master key fixture");
+    let mut config = local_test_config(tempdir.path().join("store"));
+    config.secret_backend = SecretBackendChoice::File {
+        path: Some(master_key_path),
+    };
+    let harness = BasicExoHarness::new(config)
+        .await
+        .expect("harness initialization remains lazy");
+
+    let error = harness
+        .preflight_secret_storage()
+        .await
+        .expect_err("invalid master key should fail preflight");
+    assert!(format!("{error:#}").contains("invalid master key length"));
+    assert!(harness.list_secrets().await.unwrap().is_empty());
+}
+
+struct TestOAuthProvider {
+    refresh_calls: AtomicUsize,
+    revoke_calls: AtomicUsize,
+    revoke_succeeds: bool,
+}
+
+#[async_trait]
+impl OAuthCredentialProvider for TestOAuthProvider {
+    fn id(&self) -> &'static str {
+        "test-oauth"
+    }
+
+    async fn refresh(&self, _refresh_token: &str) -> crate::Result<OAuthTokenSet> {
+        self.refresh_calls.fetch_add(1, Ordering::SeqCst);
+        sleep(Duration::from_millis(25)).await;
+        Ok(OAuthTokenSet {
+            access_token: "refreshed-access".to_string(),
+            refresh_token: Some("rotated-refresh".to_string()),
+            expires_at: chrono::Utc::now() + chrono::TimeDelta::hours(1),
+        })
+    }
+
+    async fn revoke(
+        &self,
+        _access_token: Option<&str>,
+        _refresh_token: Option<&str>,
+    ) -> crate::Result<()> {
+        self.revoke_calls.fetch_add(1, Ordering::SeqCst);
+        if !self.revoke_succeeds {
+            bail!("simulated revocation failure");
+        }
+        Ok(())
+    }
+}
+
+fn expiring_test_oauth_secret() -> Secret {
+    Secret::Oauth {
+        provider: Some("test-oauth".to_string()),
+        access_token: Some("old-access".to_string()),
+        refresh_token: Some("old-refresh".to_string()),
+        expires_at: Some(chrono::Utc::now() - chrono::TimeDelta::minutes(1)),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn oauth_refresh_is_serialized_and_persists_rotated_tokens() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let provider = Arc::new(TestOAuthProvider {
+        refresh_calls: AtomicUsize::new(0),
+        revoke_calls: AtomicUsize::new(0),
+        revoke_succeeds: true,
+    });
+    let harness = Arc::new(
+        BasicExoHarness::new_with_oauth_provider(
+            local_test_config(tempdir.path()),
+            provider.clone(),
+        )
+        .await
+        .expect("harness"),
+    );
+    let secret_id = harness
+        .put_secret(PutSecretRequest {
+            name: "oauth".to_string(),
+            secret: expiring_test_oauth_secret(),
+        })
+        .await
+        .expect("secret");
+    let stored = fs::read_to_string(
+        tempdir
+            .path()
+            .join("secrets")
+            .join(format!("{secret_id}.json")),
+    )
+    .await
+    .expect("stored OAuth credential");
+    assert!(!stored.contains("old-access"));
+    assert!(!stored.contains("old-refresh"));
+
+    let first = {
+        let harness = Arc::clone(&harness);
+        tokio::spawn(async move { harness.resolve_secret(&secret_id).await })
+    };
+    let second = {
+        let harness = Arc::clone(&harness);
+        tokio::spawn(async move { harness.resolve_secret(&secret_id).await })
+    };
+    let (first, second) = tokio::join!(first, second);
+    assert_eq!(
+        first.unwrap().unwrap(),
+        Some(ResolvedSecret::AccessToken {
+            provider: "test-oauth".to_string(),
+            access_token: "refreshed-access".to_string(),
+        })
+    );
+    assert_eq!(second.unwrap().unwrap(), first_result());
+    assert_eq!(provider.refresh_calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        harness.get_secret(&secret_id).await.unwrap(),
+        Some(Secret::Oauth {
+            access_token: Some(access),
+            refresh_token: Some(refresh),
+            ..
+        }) if access == "refreshed-access" && refresh == "rotated-refresh"
+    ));
+}
+
+fn first_result() -> Option<ResolvedSecret> {
+    Some(ResolvedSecret::AccessToken {
+        provider: "test-oauth".to_string(),
+        access_token: "refreshed-access".to_string(),
+    })
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn oauth_logout_relogin_and_delete_preserve_binding_identity() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let provider = Arc::new(TestOAuthProvider {
+        refresh_calls: AtomicUsize::new(0),
+        revoke_calls: AtomicUsize::new(0),
+        revoke_succeeds: false,
+    });
+    let harness = BasicExoHarness::new_with_oauth_provider(
+        local_test_config(tempdir.path()),
+        provider.clone(),
+    )
+    .await
+    .expect("harness");
+    let secret_id = harness
+        .put_secret(PutSecretRequest {
+            name: "oauth".to_string(),
+            secret: expiring_test_oauth_secret(),
+        })
+        .await
+        .expect("secret");
+    let binding_id = harness
+        .put_binding(Binding::Llm {
+            name: "chat".to_string(),
+            model: "model".to_string(),
+            provider: Some("test-oauth".to_string()),
+            base_url: None,
+            secret_id: Some(secret_id),
+        })
+        .await
+        .expect("binding");
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "oauth-agent".to_string(),
+            name: "OAuth Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let conversation = agent
+        .new_conversation(NewConversationRequest::default())
+        .await
+        .expect("conversation");
+
+    let result = conversation
+        .logout_oauth_secret(&secret_id)
+        .await
+        .expect("local logout succeeds");
+    assert!(result.was_logged_in);
+    assert!(!result.remote_revocation_confirmed);
+    assert_eq!(provider.revoke_calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        harness.get_secret(&secret_id).await.unwrap(),
+        Some(Secret::Oauth {
+            provider: Some(provider),
+            access_token: None,
+            refresh_token: None,
+            expires_at: None,
+        }) if provider == "test-oauth"
+    ));
+    assert!(conversation.resolve_secret(&secret_id).await.is_err());
+
+    let repeated = conversation
+        .logout_oauth_secret(&secret_id)
+        .await
+        .expect("repeated logout succeeds");
+    assert!(!repeated.was_logged_in);
+    assert!(!repeated.remote_revocation_confirmed);
+    assert_eq!(provider.revoke_calls.load(Ordering::SeqCst), 1);
+
+    let relogged_id = harness
+        .put_secret(PutSecretRequest {
+            name: "oauth".to_string(),
+            secret: Secret::Oauth {
+                provider: Some("test-oauth".to_string()),
+                access_token: Some("new-login".to_string()),
+                refresh_token: Some("new-refresh".to_string()),
+                expires_at: Some(chrono::Utc::now() + chrono::TimeDelta::hours(1)),
+            },
+        })
+        .await
+        .expect("re-login");
+    assert_eq!(relogged_id, secret_id);
+    assert!(matches!(
+        harness.get_binding(&binding_id).await.unwrap(),
+        Some(Binding::Llm { secret_id: Some(id), .. }) if id == secret_id
+    ));
+    assert!(agent.delete_secret(&secret_id).await.unwrap());
+    assert!(!harness.delete_secret(&secret_id).await.unwrap());
+    assert!(harness.get_binding(&binding_id).await.unwrap().is_some());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn oauth_refresh_and_logout_are_serialized() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let provider = Arc::new(TestOAuthProvider {
+        refresh_calls: AtomicUsize::new(0),
+        revoke_calls: AtomicUsize::new(0),
+        revoke_succeeds: true,
+    });
+    let harness = Arc::new(
+        BasicExoHarness::new_with_oauth_provider(
+            local_test_config(tempdir.path()),
+            provider.clone(),
+        )
+        .await
+        .expect("harness"),
+    );
+    let secret_id = harness
+        .put_secret(PutSecretRequest {
+            name: "oauth".to_string(),
+            secret: expiring_test_oauth_secret(),
+        })
+        .await
+        .expect("secret");
+
+    let resolving = {
+        let harness = Arc::clone(&harness);
+        tokio::spawn(async move { harness.resolve_secret(&secret_id).await })
+    };
+    sleep(Duration::from_millis(5)).await;
+    let logout = harness
+        .logout_oauth_secret(&secret_id)
+        .await
+        .expect("logout");
+    assert!(logout.was_logged_in);
+    assert!(logout.remote_revocation_confirmed);
+    assert!(resolving.await.unwrap().is_ok());
+    assert_eq!(provider.refresh_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.revoke_calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        harness.get_secret(&secret_id).await.unwrap(),
+        Some(Secret::Oauth {
+            access_token: None,
+            refresh_token: None,
+            expires_at: None,
+            ..
+        })
+    ));
+}
+
+struct FailingRefreshProvider;
+
+#[async_trait]
+impl OAuthCredentialProvider for FailingRefreshProvider {
+    fn id(&self) -> &'static str {
+        "test-oauth"
+    }
+
+    async fn refresh(&self, _refresh_token: &str) -> crate::Result<OAuthTokenSet> {
+        bail!("simulated refresh failure")
+    }
+
+    async fn revoke(
+        &self,
+        _access_token: Option<&str>,
+        _refresh_token: Option<&str>,
+    ) -> crate::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn failed_oauth_refresh_does_not_mutate_stored_tokens() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new_with_oauth_provider(
+        local_test_config(tempdir.path()),
+        Arc::new(FailingRefreshProvider),
+    )
+    .await
+    .expect("harness");
+    let original = expiring_test_oauth_secret();
+    let secret_id = harness
+        .put_secret(PutSecretRequest {
+            name: "oauth".to_string(),
+            secret: original.clone(),
+        })
+        .await
+        .expect("secret");
+
+    let error = harness.resolve_secret(&secret_id).await.unwrap_err();
+    assert!(error.to_string().contains("simulated refresh failure"));
+    assert_eq!(
+        harness.get_secret(&secret_id).await.unwrap(),
+        Some(original)
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -137,6 +137,7 @@ type RawBinding =
       type: "llm";
       name: string;
       model: string;
+      provider?: string | null;
       base_url?: string | null;
       secret_id?: string | null;
     };
@@ -156,9 +157,20 @@ type RawSecret =
     }
   | {
       type: "oauth";
-      access_token: string;
+      provider?: string | null;
+      access_token?: string | null;
       refresh_token?: string | null;
+      expires_at?: string | null;
     };
+
+type RawResolvedSecret =
+  | { type: "key"; value: string }
+  | { type: "access_token"; provider: string; access_token: string };
+
+interface RawLogoutOauthResult {
+  was_logged_in: boolean;
+  remote_revocation_confirmed: boolean;
+}
 
 interface RawSecretMetadata {
   id: string;
@@ -251,6 +263,7 @@ type RawRuntimeEvent =
     };
 
 type RawExoRequest =
+  | { type: "preflight_secret_storage" }
   | { type: "list_agents" }
   | { type: "get_agent"; agent_id: string }
   | { type: "new_agent"; request: { slug: string; name: string } }
@@ -259,6 +272,9 @@ type RawExoRequest =
   | { type: "get_binding"; binding_id: string }
   | { type: "list_secrets" }
   | { type: "get_secret"; secret_id: string }
+  | { type: "resolve_secret"; secret_id: string }
+  | { type: "logout_oauth_secret"; secret_id: string }
+  | { type: "delete_secret"; secret_id: string }
   | { type: "list_conversations"; agent_id: string }
   | { type: "get_conversation"; agent_id: string; conversation_id: string }
   | {
@@ -282,6 +298,9 @@ type RawExoRequest =
   | { type: "agent_get_binding"; agent_id: string; binding_id: string }
   | { type: "agent_list_secrets"; agent_id: string }
   | { type: "agent_get_secret"; agent_id: string; secret_id: string }
+  | { type: "agent_resolve_secret"; agent_id: string; secret_id: string }
+  | { type: "agent_logout_oauth_secret"; agent_id: string; secret_id: string }
+  | { type: "agent_delete_secret"; agent_id: string; secret_id: string }
   | {
       type: "conversation_start_session";
       agent_id: string;
@@ -372,6 +391,24 @@ type RawExoRequest =
       secret_id: string;
     }
   | {
+      type: "conversation_resolve_secret";
+      agent_id: string;
+      conversation_id: string;
+      secret_id: string;
+    }
+  | {
+      type: "conversation_logout_oauth_secret";
+      agent_id: string;
+      conversation_id: string;
+      secret_id: string;
+    }
+  | {
+      type: "conversation_delete_secret";
+      agent_id: string;
+      conversation_id: string;
+      secret_id: string;
+    }
+  | {
       type: "turn_add_events";
       agent_id: string;
       conversation_id: string;
@@ -412,6 +449,8 @@ type RawExoResponse =
   | { type: "binding"; binding: RawBinding | null }
   | { type: "secrets"; secrets: RawSecretMetadata[] }
   | { type: "secret"; secret: RawSecret | null }
+  | { type: "resolved_secret"; secret: RawResolvedSecret | null }
+  | { type: "logout_oauth"; result: RawLogoutOauthResult }
   | { type: "turn"; turn: RawTurnHandleInfo }
   | { type: "event_id"; event_id: string }
   | { type: "unit" };
@@ -958,6 +997,7 @@ function toBinding(raw: RawBinding): Binding {
     type: "llm",
     name: raw.name,
     model: raw.model,
+    provider: raw.provider ?? null,
     baseUrl: raw.base_url ?? null,
     secretId: raw.secret_id ?? null,
   };
@@ -981,8 +1021,32 @@ function toSecret(raw: RawSecret): Secret {
   }
   return {
     type: "oauth",
-    accessToken: raw.access_token,
+    provider: raw.provider ?? null,
+    accessToken: raw.access_token ?? null,
     refreshToken: raw.refresh_token ?? null,
+    expiresAt: raw.expires_at ?? null,
+  };
+}
+
+function toResolvedSecret(
+  raw: RawResolvedSecret,
+): import("./index.js").ResolvedSecret {
+  if (raw.type === "key") {
+    return raw;
+  }
+  return {
+    type: "access_token",
+    provider: raw.provider,
+    accessToken: raw.access_token,
+  };
+}
+
+function toLogoutOauthResult(
+  raw: RawLogoutOauthResult,
+): import("./index.js").LogoutOauthResult {
+  return {
+    wasLoggedIn: raw.was_logged_in,
+    remoteRevocationConfirmed: raw.remote_revocation_confirmed,
   };
 }
 
@@ -1256,6 +1320,44 @@ function createAgent(client: ProtocolClient, raw: RawAgentRecord): Agent {
       }
       return payload.secret ? toSecret(payload.secret) : null;
     },
+
+    async resolveSecret(id) {
+      const payload = await client.requestExo({
+        type: "agent_resolve_secret",
+        agent_id: record.id,
+        secret_id: id,
+      });
+      if (payload.type !== "resolved_secret") {
+        throw new Error(
+          `expected resolved_secret payload, got ${payload.type}`,
+        );
+      }
+      return payload.secret ? toResolvedSecret(payload.secret) : null;
+    },
+
+    async logoutOauthSecret(id) {
+      const payload = await client.requestExo({
+        type: "agent_logout_oauth_secret",
+        agent_id: record.id,
+        secret_id: id,
+      });
+      if (payload.type !== "logout_oauth") {
+        throw new Error(`expected logout_oauth payload, got ${payload.type}`);
+      }
+      return toLogoutOauthResult(payload.result);
+    },
+
+    async deleteSecret(id) {
+      const payload = await client.requestExo({
+        type: "agent_delete_secret",
+        agent_id: record.id,
+        secret_id: id,
+      });
+      if (payload.type !== "bool") {
+        throw new Error(`expected bool payload, got ${payload.type}`);
+      }
+      return payload.value;
+    },
   };
   return agent;
 }
@@ -1266,6 +1368,15 @@ function createExoHarness(
 ): ExoHarness {
   return {
     current,
+
+    async preflightSecretStorage(): Promise<void> {
+      const payload = await client.requestExo({
+        type: "preflight_secret_storage",
+      });
+      if (payload.type !== "unit") {
+        throw new Error(`expected unit payload, got ${payload.type}`);
+      }
+    },
 
     async listAgents(): Promise<Agent[]> {
       const payload = await client.requestExo({ type: "list_agents" });
@@ -1344,6 +1455,41 @@ function createExoHarness(
         throw new Error(`expected secret payload, got ${payload.type}`);
       }
       return payload.secret ? toSecret(payload.secret) : null;
+    },
+
+    async resolveSecret(id) {
+      const payload = await client.requestExo({
+        type: "resolve_secret",
+        secret_id: id,
+      });
+      if (payload.type !== "resolved_secret") {
+        throw new Error(
+          `expected resolved_secret payload, got ${payload.type}`,
+        );
+      }
+      return payload.secret ? toResolvedSecret(payload.secret) : null;
+    },
+
+    async logoutOauthSecret(id) {
+      const payload = await client.requestExo({
+        type: "logout_oauth_secret",
+        secret_id: id,
+      });
+      if (payload.type !== "logout_oauth") {
+        throw new Error(`expected logout_oauth payload, got ${payload.type}`);
+      }
+      return toLogoutOauthResult(payload.result);
+    },
+
+    async deleteSecret(id) {
+      const payload = await client.requestExo({
+        type: "delete_secret",
+        secret_id: id,
+      });
+      if (payload.type !== "bool") {
+        throw new Error(`expected bool payload, got ${payload.type}`);
+      }
+      return payload.value;
     },
   };
 }
@@ -1554,6 +1700,47 @@ function createConversation(
         throw new Error(`expected secret payload, got ${payload.type}`);
       }
       return payload.secret ? toSecret(payload.secret) : null;
+    },
+
+    async resolveSecret(id) {
+      const payload = await client.requestExo({
+        type: "conversation_resolve_secret",
+        agent_id: raw.agent_id,
+        conversation_id: record.id,
+        secret_id: id,
+      });
+      if (payload.type !== "resolved_secret") {
+        throw new Error(
+          `expected resolved_secret payload, got ${payload.type}`,
+        );
+      }
+      return payload.secret ? toResolvedSecret(payload.secret) : null;
+    },
+
+    async logoutOauthSecret(id) {
+      const payload = await client.requestExo({
+        type: "conversation_logout_oauth_secret",
+        agent_id: raw.agent_id,
+        conversation_id: record.id,
+        secret_id: id,
+      });
+      if (payload.type !== "logout_oauth") {
+        throw new Error(`expected logout_oauth payload, got ${payload.type}`);
+      }
+      return toLogoutOauthResult(payload.result);
+    },
+
+    async deleteSecret(id) {
+      const payload = await client.requestExo({
+        type: "conversation_delete_secret",
+        agent_id: raw.agent_id,
+        conversation_id: record.id,
+        secret_id: id,
+      });
+      if (payload.type !== "bool") {
+        throw new Error(`expected bool payload, got ${payload.type}`);
+      }
+      return payload.value;
     },
   };
   return conversation;
