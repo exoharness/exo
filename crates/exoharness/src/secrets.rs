@@ -63,6 +63,10 @@ impl SecretCipher {
             .context("failed to decrypt secret payload")?;
         serde_json::from_slice(&plaintext).map_err(Into::into)
     }
+
+    pub(crate) fn verify_key_access(&self) -> Result<()> {
+        self.key_provider.get_or_create_key().map(|_| ())
+    }
 }
 
 pub(crate) trait SecretKeyProvider: Send + Sync {
@@ -117,7 +121,7 @@ impl SecretKeyProvider for AppleKeychainSecretKeyProvider {
                 let key = random_master_key();
                 entry
                     .set_password(&serde_json::to_string(&key.to_vec())?)
-                    .context("failed to persist exoharness master key in keychain")?;
+                    .context("failed to persist namespaced exoharness master key in keychain")?;
                 key
             }
             Err(error) => return Err(error.into()),
@@ -126,6 +130,99 @@ impl SecretKeyProvider for AppleKeychainSecretKeyProvider {
             Ok(()) => Ok(key),
             Err(key) => Ok(self.key.get().copied().unwrap_or(key)),
         }
+    }
+}
+
+#[cfg(feature = "apple-keychain")]
+pub(crate) fn migrate_apple_keychain_master_key(account: &str, legacy_account: &str) -> Result<()> {
+    use keyring_core::Entry;
+
+    ensure_apple_keychain_store()?;
+    let entry = Entry::new(KEYCHAIN_SERVICE, account)?;
+    let legacy_entry = Entry::new(KEYCHAIN_SERVICE, legacy_account)?;
+    migrate_keychain_master_key_entries(&entry, &legacy_entry, |serialized| {
+        entry.set_password(serialized).map_err(Into::into)
+    })
+}
+
+#[cfg(feature = "apple-keychain")]
+fn migrate_keychain_master_key_entries(
+    entry: &keyring_core::Entry,
+    legacy_entry: &keyring_core::Entry,
+    set_password: impl FnOnce(&str) -> Result<()>,
+) -> Result<()> {
+    use keyring_core::Error as KeyringError;
+
+    match entry.get_password() {
+        Ok(_) => return Ok(()),
+        Err(KeyringError::NoEntry) => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    let serialized = match legacy_entry.get_password() {
+        Ok(serialized) => serialized,
+        Err(KeyringError::NoEntry) => bail!(
+            "existing encrypted secrets require the legacy keychain master key, but it was not found"
+        ),
+        Err(error) => return Err(error.into()),
+    };
+    deserialize_key(&serialized)?;
+    set_password(&serialized)
+        .context("failed to migrate exoharness master key to its namespaced keychain account")
+}
+
+#[cfg(all(test, feature = "apple-keychain"))]
+mod keychain_migration_tests {
+    use keyring_core::api::CredentialStoreApi;
+    use keyring_core::mock;
+
+    use super::{KEYCHAIN_SERVICE, migrate_keychain_master_key_entries};
+
+    #[test]
+    fn migration_copies_the_legacy_master_key() {
+        let store = mock::Store::new().expect("mock keychain");
+        let current = store
+            .build(KEYCHAIN_SERVICE, "current", None)
+            .expect("current entry");
+        let legacy = store
+            .build(KEYCHAIN_SERVICE, "legacy", None)
+            .expect("legacy entry");
+        let serialized = serde_json::to_string(&vec![7u8; 32]).expect("serialize key");
+        legacy.set_password(&serialized).expect("legacy key");
+
+        migrate_keychain_master_key_entries(&current, &legacy, |serialized| {
+            current.set_password(serialized).map_err(Into::into)
+        })
+        .expect("migrate key");
+
+        assert_eq!(current.get_password().expect("current key"), serialized);
+    }
+
+    #[test]
+    fn migration_does_not_replace_an_existing_namespaced_key() {
+        let store = mock::Store::new().expect("mock keychain");
+        let current = store
+            .build(KEYCHAIN_SERVICE, "current", None)
+            .expect("current entry");
+        let legacy = store
+            .build(KEYCHAIN_SERVICE, "legacy", None)
+            .expect("legacy entry");
+        let current_serialized = serde_json::to_string(&vec![3u8; 32]).expect("serialize current");
+        let legacy_serialized = serde_json::to_string(&vec![7u8; 32]).expect("serialize legacy");
+        current
+            .set_password(&current_serialized)
+            .expect("current key");
+        legacy.set_password(&legacy_serialized).expect("legacy key");
+
+        migrate_keychain_master_key_entries(&current, &legacy, |serialized| {
+            current.set_password(serialized).map_err(Into::into)
+        })
+        .expect("check migration");
+
+        assert_eq!(
+            current.get_password().expect("preserved current key"),
+            current_serialized
+        );
     }
 }
 
