@@ -75,6 +75,16 @@ _exo_macos_keychain_account_for_existing_master_key() {
   esac
 }
 
+_exo_macos_unlock_keychain() {
+  local keychain_path="$1"
+  echo "The macOS login keychain must be unlocked before Exo can use credentials over SSH."
+  echo "Enter the macOS login keychain password when prompted."
+  if ! security unlock-keychain "$keychain_path"; then
+    echo "error: could not unlock the macOS login keychain" >&2
+    return 1
+  fi
+}
+
 _exo_macos_ensure_keychain_access() {
   local exo_binary="$1"
   local keychain_path="$2"
@@ -83,10 +93,7 @@ _exo_macos_ensure_keychain_access() {
     return 0
   fi
 
-  echo "The macOS login keychain must be unlocked before Exo can use credentials over SSH."
-  echo "Enter the macOS login keychain password when prompted."
-  if ! security unlock-keychain "$keychain_path"; then
-    echo "error: could not unlock the macOS login keychain" >&2
+  if ! _exo_macos_unlock_keychain "$keychain_path"; then
     return 1
   fi
   if ! "$exo_binary" secret check >/dev/null 2>&1; then
@@ -142,8 +149,12 @@ exo_macos_prepare_keychain_for_ssh() {
   security find-generic-password -a "$account" -s "$service" \
     "$keychain_path" >/dev/null 2>&1 || find_status=$?
   if [[ "$find_status" -eq 44 ]]; then
-    # A fresh store has no master-key item to authorize yet. The caller creates
-    # it by storing the first secret, then invokes this helper a second time.
+    # A fresh store has no master-key item to authorize yet. Unlock the
+    # Keychain so the caller can create it by storing the first secret, then
+    # authorize the new item when this helper is invoked a second time.
+    if ! _exo_macos_unlock_keychain "$keychain_path"; then
+      return 1
+    fi
     return 0
   elif [[ "$find_status" -ne 0 ]]; then
     echo "error: could not query the Exo master key" >&2

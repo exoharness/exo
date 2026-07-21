@@ -65,11 +65,15 @@ impl SecretCipher {
     }
 
     pub(crate) fn verify_key_access(&self) -> Result<()> {
-        self.key_provider.get_or_create_key().map(|_| ())
+        if self.key_provider.get_key_if_exists()?.is_none() {
+            bail!("secret master key does not exist");
+        }
+        Ok(())
     }
 }
 
 pub(crate) trait SecretKeyProvider: Send + Sync {
+    fn get_key_if_exists(&self) -> Result<Option<[u8; MASTER_KEY_LEN]>>;
     fn get_or_create_key(&self) -> Result<[u8; MASTER_KEY_LEN]>;
 }
 
@@ -84,6 +88,10 @@ impl StaticSecretKeyProvider {
 }
 
 impl SecretKeyProvider for StaticSecretKeyProvider {
+    fn get_key_if_exists(&self) -> Result<Option<[u8; MASTER_KEY_LEN]>> {
+        Ok(Some(self.key))
+    }
+
     fn get_or_create_key(&self) -> Result<[u8; MASTER_KEY_LEN]> {
         Ok(self.key)
     }
@@ -107,29 +115,33 @@ impl AppleKeychainSecretKeyProvider {
 
 #[cfg(feature = "apple-keychain")]
 impl SecretKeyProvider for AppleKeychainSecretKeyProvider {
-    fn get_or_create_key(&self) -> Result<[u8; MASTER_KEY_LEN]> {
+    fn get_key_if_exists(&self) -> Result<Option<[u8; MASTER_KEY_LEN]>> {
         use keyring_core::{Entry, Error as KeyringError};
 
         if let Some(key) = self.key.get() {
-            return Ok(*key);
+            return Ok(Some(*key));
         }
         ensure_apple_keychain_store()?;
         let entry = Entry::new(KEYCHAIN_SERVICE, &self.account)?;
-        let key = match entry.get_password() {
-            Ok(serialized) => deserialize_key(&serialized)?,
-            Err(KeyringError::NoEntry) => {
-                let key = random_master_key();
-                entry
-                    .set_password(&serde_json::to_string(&key.to_vec())?)
-                    .context("failed to persist namespaced exoharness master key in keychain")?;
-                key
-            }
-            Err(error) => return Err(error.into()),
-        };
-        match self.key.set(key) {
-            Ok(()) => Ok(key),
-            Err(key) => Ok(self.key.get().copied().unwrap_or(key)),
+        match entry.get_password() {
+            Ok(serialized) => Ok(Some(cache_key(&self.key, deserialize_key(&serialized)?))),
+            Err(KeyringError::NoEntry) => Ok(None),
+            Err(error) => Err(error.into()),
         }
+    }
+
+    fn get_or_create_key(&self) -> Result<[u8; MASTER_KEY_LEN]> {
+        use keyring_core::Entry;
+
+        if let Some(key) = self.get_key_if_exists()? {
+            return Ok(key);
+        }
+        let key = random_master_key();
+        let entry = Entry::new(KEYCHAIN_SERVICE, &self.account)?;
+        entry
+            .set_password(&serde_json::to_string(&key.to_vec())?)
+            .context("failed to persist namespaced exoharness master key in keychain")?;
+        Ok(cache_key(&self.key, key))
     }
 }
 
@@ -241,25 +253,53 @@ impl FileBackedSecretKeyProvider {
 }
 
 impl SecretKeyProvider for FileBackedSecretKeyProvider {
-    fn get_or_create_key(&self) -> Result<[u8; MASTER_KEY_LEN]> {
+    fn get_key_if_exists(&self) -> Result<Option<[u8; MASTER_KEY_LEN]>> {
         if let Some(key) = self.key.get() {
-            return Ok(*key);
+            return Ok(Some(*key));
         }
-        let key = match std::fs::read(&self.path) {
-            Ok(bytes) => parse_master_key_bytes(&bytes)
-                .with_context(|| format!("reading master key at {}", self.path.display()))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let key = random_master_key();
-                write_master_key_file(&self.path, &key)?;
-                key
-            }
-            Err(error) => {
-                return Err(anyhow::Error::from(error)
-                    .context(format!("reading master key at {}", self.path.display())));
-            }
-        };
-        let _ = self.key.set(key);
-        Ok(key)
+        match std::fs::read(&self.path) {
+            Ok(bytes) => Ok(Some(cache_key(
+                &self.key,
+                parse_master_key_bytes(&bytes)
+                    .with_context(|| format!("reading master key at {}", self.path.display()))?,
+            ))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(anyhow::Error::from(error)
+                .context(format!("reading master key at {}", self.path.display()))),
+        }
+    }
+
+    fn get_or_create_key(&self) -> Result<[u8; MASTER_KEY_LEN]> {
+        if let Some(key) = self.get_key_if_exists()? {
+            return Ok(key);
+        }
+        let key = random_master_key();
+        write_master_key_file(&self.path, &key)?;
+        Ok(cache_key(&self.key, key))
+    }
+}
+
+#[cfg(test)]
+mod key_provider_tests {
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+
+    use super::{FileBackedSecretKeyProvider, SecretCipher};
+
+    #[test]
+    fn verifying_key_access_does_not_create_a_missing_key() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let key_path = tempdir.path().join("master.key");
+        let cipher =
+            SecretCipher::new(Arc::new(FileBackedSecretKeyProvider::new(key_path.clone())));
+
+        let error = cipher
+            .verify_key_access()
+            .expect_err("missing key should fail verification");
+
+        assert!(error.to_string().contains("master key does not exist"));
+        assert!(!key_path.exists());
     }
 }
 
@@ -292,6 +332,16 @@ fn random_master_key() -> [u8; MASTER_KEY_LEN] {
     key[..16].copy_from_slice(Uuid::new_v4().as_bytes());
     key[16..].copy_from_slice(Uuid::new_v4().as_bytes());
     key
+}
+
+fn cache_key(
+    cache: &OnceLock<[u8; MASTER_KEY_LEN]>,
+    key: [u8; MASTER_KEY_LEN],
+) -> [u8; MASTER_KEY_LEN] {
+    match cache.set(key) {
+        Ok(()) => key,
+        Err(key) => cache.get().copied().unwrap_or(key),
+    }
 }
 
 fn random_nonce() -> [u8; NONCE_LEN] {
