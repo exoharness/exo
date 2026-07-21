@@ -1,0 +1,165 @@
+# Exoclaw Self-Control
+
+Exoclaw is meant to be a long-running agent that can understand, maintain, and evolve the system it is operating inside.
+
+This document defines the self-introspection and self-control capability areas we want Exoclaw to have, and for each one, what exists in the codebase today and what is still missing. The capability areas are:
+
+1. **Self-knowledge**: see all of its own code, edit it, build it, and rerun itself on the result.
+2. **Durable memory and identity**: know what state constitutes "itself", which parts survive restarts, rewinds, and rebuilds, and keep an append-only event log so it knows what it has tried even after rolling state back.
+3. **Component observability**: logs and telemetry for the scheduler, adapters, tools, and host services, to debug and evolve them.
+4. **Sandbox control**: snapshot, rewind, and (eventually) clone its execution environment.
+5. **Capability extension**: add tools and adapters for itself.
+6. **Prompt evolution**: inspect and change the prompts that define its own behavior.
+7. **Cloning and migration**: reproduce itself on another machine or platform. _(Not yet built.)_
+8. **Self-verification and rollback**: validate a change to itself before adopting it, and undo it cleanly when it fails.
+
+## Mutation and Transparency Design Principle
+
+- Every self-modification should be auditable after the fact: from the canonical
+  event log, git history, and host logs it should be possible to reconstruct what
+  Exoclaw changed about itself and why.
+- Every aspect of the system should be visible to the agent, from code to logs to events.
+- Durable mutations go through named tools with clear schemas, not hidden
+  conventions or ad-hoc file edits to host state. Explicit surfaces are what make
+  the audit trail complete: a mutation path that bypasses the tools also bypasses
+  the record.
+- Mutations are reversible by default: prefer disabling and checkpointing over
+  deletion and irreversible rewrites unless the user asks for a permanent change.
+  An audit record of an unrecoverable action is not a substitute for being able
+  to undo it.
+
+## 1. Self-Knowledge: Code, Build, and Rerun
+
+Exoclaw should always be able to inspect the code that defines its own behavior, change it, and restart itself on the new build.
+
+**Seeing its own code.** Local startup with `examples/exoclaw/scripts/exoclaw-control` mounts the repository into the sandbox at `/workspace/exo` (configurable with `--self-repo-mount` or `EXOCLAW_REPO`). The shell tool therefore starts with a stable view of the source tree. `examples/exoclaw/SELF.md` is the checked-in self map — a compact navigation guide to prompts, harness assembly, adapters, scheduler, supervisors, and local state — and the harness tells Exoclaw its path each turn through `EXOCLAW_SELF_MAP`. The self map is intentionally navigational, not a full architecture document.
+
+**Editing its own code.** Edits happen through the shell tool against the repo mount. Git is the change history and the rollback mechanism for code: Exoclaw can diff, commit, and revert its own modifications (see area 8).
+
+**Building and rerunning itself.** Host-side actions happen outside the sandbox through two cooperating supervisors:
+
+- `examples/exoclaw/scripts/exoclaw-service-guardian` is the host service supervisor: it builds Exoclaw, shows service status, prints scheduler and adapter logs, and restarts the scheduler or adapter runners while preserving `.exo` state.
+- `examples/exoclaw/scripts/exoclaw-control --control` is the terminal supervisor: it keeps the user's terminal open, streams service logs, runs the interactive `exo repl` as a child, and can restart only that child after a rebuild.
+
+The model-visible `guardian_action` tool wraps the guardian script with a strict allowlist: `status`, `build`, `start_services`, `stop_services`, `restart_services`, `restart_adapters`, `restart_scheduler`, `restart_all`, and `logs`. It does not accept arbitrary shell commands. The `restart_*` actions are deferred briefly and handed to a detached guardian process so the current model turn can finish and report that the restart was scheduled. `restart_all` is the normal self-reboot path; `start_services`, `stop_services`, and `restart_services` are lower-level controls for the guardian-managed scheduler and adapter runner.
+
+Service restarts drain instead of killing blindly: the guardian writes a restart marker (`.exo/exoclaw-adapters.restart` or `.exo/exoclaw-scheduler.restart`); the runner claims the marker, finishes in-flight wakeup turns or scheduler passes, and exits on its own. A runner that never claims the marker is stopped with a process-tree kill after a short wait. Adapter workers run in their own process groups so stopping a worker also terminates the `pnpm`/`tsx`/`node` children holding the external connection. Builds also write `.exo/exoclaw-control.restart`, which the control wrapper claims to restart only the `exo repl` child without closing the user's terminal.
+
+Reboots are announced through the adapters: because restarts are deferred, the agent can post a "going down" message with `send_adapter_message` in the same turn that requests the restart. The guardian writes `.exo/exoclaw-reboot-notice.json`; the fresh adapter runner claims it and sends one wakeup per adapter conversation so the agent can announce its return. Announcements queue in the durable adapter outbox and deliver when the worker reconnects. Stale notices (older than 15 minutes) are discarded.
+
+The canonical local startup is `examples/exoclaw/scripts/exoclaw-control canonical` (Docker provider/backend, repo self-map mount, guardian config, adapter setup prompts, control REPL). `fresh --canonical` gives the same shape from a clean agent/conversation state.
+
+## 2. Durable Memory and Identity
+
+Exoclaw's identity is its durable state. Rollback, cloning, and migration all depend on knowing which state is identity-critical and what survives each kind of reset:
+
+| State                                       | Lives in                  | Survives sandbox rewind    | Survives service restart       | Checked in |
+| ------------------------------------------- | ------------------------- | -------------------------- | ------------------------------ | ---------- |
+| Code + prompts                              | git repo                  | yes                        | yes                            | yes        |
+| Conversation history + event log            | `.exo/exoharness`         | yes                        | yes                            | no         |
+| Agent artifacts (sandbox registry, configs) | `.exo/exoharness`         | yes                        | yes                            | no         |
+| Adapter + scheduler records                 | `.exo`                    | yes                        | yes                            | no         |
+| Secrets                                     | Keychain / secret backend | yes                        | yes                            | no         |
+| Local profile memory                        | `.exo/exoclaw-profile.md` | yes                        | yes                            | no         |
+| Sandbox filesystem                          | sandbox backend           | **no** (that is the point) | yes (warm sandbox)             | no         |
+| Worker connections                          | adapter worker processes  | yes                        | **no** (reconnect after drain) | no         |
+
+The operating rules that follow: preserve `.exo` unless the user explicitly asks to delete state; never store durable memory only in the sandbox filesystem (it is the one resettable layer); put user-specific memory in the local profile and behavioral changes in checked-in prompts; and treat secrets as the one category that cannot be casually copied or recreated.
+
+**The immutable event log.** Within this inventory, the exoharness conversation event log is the append-only record that lets Exoclaw answer "what happened to me, and what have I already tried?" — especially after rolling back sandbox state, when the filesystem no longer reflects past attempts. It captures sessions, turns, messages, tool requests and results, errors, artifact writes, and sandbox lifecycle events. Host components write into the same log as `Custom` events so host actions are part of the immutable history rather than living only in side channels: the adapter runner appends `host_reboot` when it claims a reboot notice (with the guardian's reason), `adapter_runner_started` on every start (a start without a preceding `host_reboot` implies a crash or manual restart), and `adapter_runner_draining` when a graceful drain begins.
+
+The agent reads this history back with `list_conversation_events`, which defaults to lifecycle and host event kinds (sessions, errors, sandbox events, host events) and supports explicit kind filters, pagination cursors, and ordering — including the per-turn traffic kinds (`messages`, `tool_requested`, `tool_result`) when the agent needs to reconstruct exactly what a past turn did.
+
+Two properties matter for rollback:
+
+- **Rewind does not erase history.** `rewind_sandbox` restores sandbox filesystem state; it does not roll back conversation events, artifacts, adapter records, scheduler records, or secrets. `snapshot_sandbox` records a `sandbox_snapshotted` event and `rewind_sandbox` records a snapshot-backed `sandbox_started` event in the same active turn, so later readers can reconstruct what was rolled back and when.
+- **Git is the second immutable log.** Code changes are visible in git history even after a sandbox rewind, because the repo mount is host-backed.
+
+Gap: host events currently cover the adapter runner only. The scheduler runner and the control REPL do not yet write start/drain/crash events into the log, and there is no agent-level (cross-conversation) event stream — host events are fanned out to each adapter-attached conversation.
+
+## 3. Component Observability: Logs and Telemetry
+
+Exoclaw should be able to inspect each of its components when debugging or evolving them, before escalating to restarts.
+
+- **Host services**: `guardian_action` with `status` shows service state (including pending restart markers); `logs` prints scheduler and adapter runner logs (`logTarget`: `scheduler`, `adapters`, or both). `start_services`, `stop_services`, and `restart_services` manage the guardian-supervised scheduler and adapter runner directly, while `restart_adapters`, `restart_scheduler`, and `restart_all` are the usual targeted restart actions. Deferred guardian actions log to `.exo/exoclaw-service-guardian-actions.log`.
+- **Adapters**: `list_adapters` returns each adapter's `enabled` state plus health fields `last_connected_at_ms` and `last_error`. `list_adapter_events` returns per-adapter telemetry newest first — `connected`, `disconnected`, `inbound`, `outbound`, `error`, and `lifecycle` records — with `eventType` and `sinceMs` filters. The diagnosis path is: health fields first, then event history, then guardian logs, then restarts.
+- **Scheduler**: `list_scheduled_tasks` shows tasks and their recent run results (exit codes, errors). Scheduler runner logs are reachable through `guardian_action logs`.
+- **Conversation and host lifecycle**: `list_conversation_events` (area 2).
+- **Sandbox processes**: the shell tool itself, plus sandbox process events recorded in the conversation log.
+
+Gap: tool executions are recorded as `tool_requested`/`tool_result` events but there is no aggregated "tool health" view (failure rates, slow tools). REPL/turn-level host logs are visible to the user's terminal but not directly queryable by the agent.
+
+## 4. Sandbox Control
+
+Exoclaw's shell tool runs inside a sandbox, and the agent should have full control over that environment's lifecycle.
+
+By default Exoclaw conversations use `sandboxScope: "agent"`: shell commands share one persistent agent sandbox across conversations, implemented as an agent-owned named reusable sandbox (the owner conversation and sandbox name live in an agent artifact, resolved through `create_sandbox`). A conversation can opt into `sandboxScope: "conversation"` for isolation. The repo mount is part of the sandbox spec, and the default workdir is the first configured mount, so shell inspection starts in Exoclaw's own source tree.
+
+Checkpointing tools:
+
+- `list_sandbox_snapshots` lists snapshots for the selected scope and reports the current snapshot id when known. It reads Exoclaw's snapshot registry (an agent artifact at `config/exoclaw-sandbox-snapshots.json`) — snapshots created through these tools, not every backend snapshot ever made.
+- `snapshot_sandbox` captures a filesystem checkpoint.
+- `rewind_sandbox` restarts the selected sandbox from a prior snapshot id.
+
+Tool results return the selected scope, sandbox id, owner conversation id, and snapshot id so later actions can target the same environment explicitly. Snapshot/rewind availability depends on the backend: Docker warm sandboxes support the flow; unsupported backends report clear errors. Rewind restores filesystem state only (see area 2 for what it does not roll back).
+
+Gap: there is no sandbox _cloning_ — starting a second sandbox from an existing snapshot while keeping the original running. That is the natural primitive for self-experimentation (try a change in a clone, compare, then adopt) and a prerequisite for cloning the whole agent (area 7).
+
+## 5. Capability Extension: Tools and Adapters
+
+**Tools.** Tools are layered: the TypeScript registry defines what the model can see and call, and a handler either runs in TypeScript or delegates execution to the Rust tool runtime (`crates/executor/src/harness_tool.rs`) via `execution.context.executeTool(...)` with the same function name. Rust-backed tools therefore always need a TypeScript definition; `registerHostTool` in `examples/exoclaw/host-tools.ts` is the standard bridge, and `examples/exoclaw/sandbox-tools.ts` is the reference example. A Rust match arm without a registered TypeScript definition is unreachable, and an agent-installed tool must never reuse the name of a Rust-backed tool.
+
+For agent-generated tools, `install_agent_tool` provides the host-validated installation path: the agent writes a small TypeScript tool module with a strict input schema and a handler, the host validates and installs it as an agent-owned tool, and it becomes available on the next model turn (not halfway through the current call). `uninstall_agent_tool` removes it. Generated tools should use stable platform APIs, avoid extra npm dependencies by default, and declare required initialization such as environment variable names for API keys. New Rust-backed capability goes through the code-edit path instead (area 1): implement the match arm, register the definition, rebuild, restart.
+
+**Adapters.** Adapters connect conversations to external systems:
+
+- `create_adapter` creates an enabled adapter record for the current conversation; the adapter supervisor notices it and starts the worker process.
+- `list_adapters` shows ids, types, configuration summaries, enabled state, and health fields.
+- `disable_adapter` marks an adapter disabled; the worker observes this and exits, preserving history and configuration.
+- `delete_adapter` removes the record and stored state for permanent cleanup.
+- `send_adapter_message` sends an intentional outbound reply to an external target.
+
+There is no separate `start_adapter`/`stop_adapter`/`restart_adapter`: starting is creating an enabled adapter, stopping is disabling. A future resume surface should be explicit (`enable_adapter` or `restart_adapter`) so a disabled adapter can come back without being recreated. The safety boundary: inbound adapter messages wake the conversation, but model text is never automatically posted back externally — `send_adapter_message` is always an explicit decision.
+
+## 6. Prompt Evolution
+
+Exoclaw's behavior is defined by a small set of prompt surfaces it can read (and, through the code-edit path, change):
+
+- `examples/exoclaw/prompts/me.md` — the durable identity prompt: broad behavioral rules such as when to inspect state first, when to prefer reversible operations, and how to think about external side effects.
+- `examples/exoclaw/harness.ts` — assembles the developer prompt each turn and describes the available self-control surfaces at a high level.
+- `examples/exoclaw/SELF.md` — the compact self map for navigating its own code.
+- Tool definitions — `examples/exoclaw/sandbox-tools.ts`, `scheduler-tools.ts`, `guardian-tools.ts`, `introspection-tools.ts`, and `typescript/harness/adapter-tools.ts` carry model-visible descriptions and JSON schemas; these are the most direct prompts for when and how to call each tool. `typescript/harness/built-in-tools.ts` describes `shell`, `install_agent_tool`, and `uninstall_agent_tool`, including the generated-tool contract.
+- `examples/exoclaw/adapters/*/setup-prompt.md` — setup-time guidance for creating specific adapters.
+- Wakeup prompts — `crates/executor/src/adapter/runtime.rs` builds the inbound-message wakeup prompts (including the reply-externally contract), and `crates/executor/src/scheduler_runtime.rs` builds scheduled-task wakeup prompts from each task's `reportPrompt`.
+- `.exo/exoclaw-profile.md` (or `EXOCLAW_LOCAL_PROMPT_FILE`) — local, user-specific instructions that are not checked in.
+
+Checked-in prompts evolve through the normal self-modification loop: edit, commit, rebuild, restart (areas 1 and 8), which makes prompt history auditable in git. The local profile can be edited directly for user-specific memory that should not be committed.
+
+Prompts should keep teaching the same operating model: inspect state before changing it, prefer reversible operations, carry ids from inspection tools into follow-up actions, explain destructive actions before taking them, start self-maintenance from the self map, snapshot before risky experiments, and treat self-restart as a supervisor handoff.
+
+## 7. Cloning and Migration _(not yet built)_
+
+Exoclaw should eventually be able to reproduce itself: spin up a second instance for experimentation, or move itself to another machine or platform. Nothing implements this today; this section sketches the intended shape.
+
+What constitutes "Exoclaw" for cloning purposes (the area 2 inventory):
+
+- **Code**: the git repository at a known commit — already portable.
+- **Harness state**: `.exo/exoharness` (agents, conversations, event logs, artifacts), adapter/scheduler records under `.exo`, and the guardian config.
+- **Secrets**: API keys and adapter credentials. The hardest part: on macOS they live in the Keychain, so they cannot be copied as files and need explicit export/re-provisioning on the target.
+- **Sandbox state**: snapshots of the agent sandbox, which are backend-specific (Docker image/volume vs. apple-container).
+- **External identities**: adapter endpoints (Discord bot token, IRC nick, WhatsApp pairing) — single-session by nature, so a clone must either get fresh identities or take over the originals, never share them.
+
+Building blocks that already exist: conversation `fork` in the exoharness API, sandbox snapshots, the adapter records being plain JSON under `.exo`, and the canonical event log for the clone to know its own provenance (a `cloned_from` custom event would make lineage explicit).
+
+The likely path is an export/import pair: a guardian-level `export` action that produces a portable bundle (git ref + `.exo` state + secret manifest listing what must be re-provisioned + snapshot references), and a bootstrap path on the target (`exoclaw-control` already encapsulates most platform differences: Docker vs. apple-container, launch mechanics). Migration is then export, transfer, import, re-provision secrets, and re-bind adapter identities — with the old instance drained (area 1's markers) before the new one takes over the external identities.
+
+## 8. Self-Verification and Rollback
+
+Self-modification needs a verification loop, or failed changes accumulate as corruption. Today this exists as practice and primitives rather than as a single tool:
+
+- **Before a change**: `snapshot_sandbox` for filesystem experiments; a clean git state for code changes.
+- **Validating a change**: build via `guardian_action build` (or `cargo`/`pnpm` checks in the sandbox against the repo mount), run the relevant tests, and for behavior changes, restart and observe (`status`, `logs`, the reboot wakeup, and the event log).
+- **Adopting a change**: commit to git; restart services on the new build with the drain/marker flow.
+- **Rolling back**: `git revert`/`restore` for code, `rewind_sandbox` for filesystem state, `uninstall_agent_tool` for installed tools, `disable_adapter` for adapters — while the event log (area 2) preserves the record of what was tried, so the next attempt starts from knowledge rather than amnesia.
+
+Gap worth closing eventually: a canary path — run the changed build against a cloned sandbox or forked conversation (areas 4 and 7) and compare behavior before adopting it on the live instance, instead of validating on the only copy of itself.
