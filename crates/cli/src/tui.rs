@@ -758,9 +758,6 @@ impl ChatRepl {
         Ok(())
     }
 
-    /// Returns `None` when stdin is not a tty (piped/scripted input):
-    /// rustyline's external printer needs a terminal, and the printer only
-    /// echoes events from other sessions — a display nicety we can skip.
     fn spawn_event_printer(&mut self) -> Result<Option<JoinHandle<()>>> {
         if !io::stdin().is_terminal() {
             return Ok(None);
