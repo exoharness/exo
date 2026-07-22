@@ -317,7 +317,11 @@ fn aws_region_from_arn(resource_arn: &str, expected_service: &str) -> Option<Str
 
 #[cfg(target_os = "macos")]
 fn default_secret_backend() -> SecretBackendArg {
-    SecretBackendArg::AppleKeychain
+    if std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some() {
+        SecretBackendArg::File
+    } else {
+        SecretBackendArg::AppleKeychain
+    }
 }
 
 #[cfg(not(target_os = "macos"))]

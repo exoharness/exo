@@ -205,7 +205,11 @@ async fn exo_harness(
 
 #[cfg(target_os = "macos")]
 fn default_secret_backend() -> SecretBackendChoice {
-    SecretBackendChoice::AppleKeychain
+    if std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some() {
+        SecretBackendChoice::File { path: None }
+    } else {
+        SecretBackendChoice::AppleKeychain
+    }
 }
 
 #[cfg(not(target_os = "macos"))]

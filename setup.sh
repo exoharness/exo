@@ -11,6 +11,11 @@ AGENT_NAME="${EXO_AGENT_NAME:-Exo}"
 USER_NAME="${EXO_USER_NAME:-}"
 FORCE_INSTALL="${EXO_SETUP_FORCE:-false}"
 INSTALL_DEPS="${EXO_SETUP_INSTALL_DEPS:-false}"
+CONTAINER_RUNTIME="${EXO_CONTAINER_RUNTIME:-auto}"
+SECRET_BACKEND="${EXO_SECRET_BACKEND:-auto}"
+COLIMA_CPU="${EXO_COLIMA_CPU:-4}"
+COLIMA_MEMORY="${EXO_COLIMA_MEMORY:-4}"
+COLIMA_DISK="${EXO_COLIMA_DISK:-60}"
 DOCKER_GROUP_ADDED=false
 SETUP_ARGS=()
 DEFAULT_EXO_CHAT_BASE_URL="https://exoharness.ai"
@@ -45,6 +50,9 @@ Environment overrides:
   EXO_REPO_URL, EXO_REPO_REF, EXO_INSTALL_DIR, EXO_MODEL_PROVIDER, EXO_MODEL,
   EXO_UPSTREAM_MODEL, EXO_AGENT_NAME, EXO_USER_NAME, EXO_CHAT_BASE_URL,
   EXO_LOCAL_PROMPT_FILE, EXO_SETUP_FORCE, EXO_SETUP_INSTALL_DEPS,
+  EXO_CONTAINER_RUNTIME (auto, desktop, or colima),
+  EXO_SECRET_BACKEND (auto, file, or apple-keychain), EXO_COLIMA_CPU,
+  EXO_COLIMA_MEMORY, EXO_COLIMA_DISK,
   OPENAI_API_KEY, OPENROUTER_API_KEY
 EOF
 }
@@ -84,6 +92,82 @@ require_command() {
   fi
 }
 
+# macOS does not ship the GNU timeout command. Keep dependency checks bounded
+# with a small, portable watchdog so a wedged CLI cannot hang setup forever.
+run_with_timeout() {
+  local seconds="$1"
+  shift
+  local command_pid watchdog_pid command_status=0
+
+  "$@" &
+  command_pid=$!
+  (
+    sleep "$seconds"
+    kill -TERM "$command_pid" 2>/dev/null || exit 0
+    sleep 1
+    kill -KILL "$command_pid" 2>/dev/null || true
+  ) &
+  watchdog_pid=$!
+
+  wait "$command_pid" || command_status=$?
+  kill "$watchdog_pid" 2>/dev/null || true
+  wait "$watchdog_pid" 2>/dev/null || true
+  return "$command_status"
+}
+
+docker_responds() {
+  local seconds="$1"
+  shift
+  run_with_timeout "$seconds" docker "$@"
+}
+
+is_headless_macos() {
+  [[ "$(uname -s)" == "Darwin" ]] || return 1
+  if [[ -n "${SSH_CONNECTION:-}" || -n "${SSH_TTY:-}" ]]; then
+    return 0
+  fi
+  local console_user
+  console_user="$(stat -f '%Su' /dev/console 2>/dev/null || true)"
+  [[ -z "$console_user" || "$console_user" == "root" ||
+    "$console_user" == "loginwindow" || "$console_user" == "_mbsetupuser" ]]
+}
+
+select_container_runtime() {
+  case "$CONTAINER_RUNTIME" in
+    auto)
+      if is_headless_macos; then
+        CONTAINER_RUNTIME=colima
+      else
+        CONTAINER_RUNTIME=desktop
+      fi
+      ;;
+    desktop) ;;
+    colima)
+      [[ "$(uname -s)" == "Darwin" ]] ||
+        die "EXO_CONTAINER_RUNTIME=colima is currently supported only on macOS"
+      ;;
+    *) die "invalid EXO_CONTAINER_RUNTIME: $CONTAINER_RUNTIME (expected auto, desktop, or colima)" ;;
+  esac
+}
+
+select_secret_backend() {
+  case "$SECRET_BACKEND" in
+    auto)
+      if [[ "$(uname -s)" == "Darwin" ]] && ! is_headless_macos; then
+        SECRET_BACKEND=apple-keychain
+      else
+        SECRET_BACKEND=file
+      fi
+      ;;
+    file) ;;
+    apple-keychain)
+      [[ "$(uname -s)" == "Darwin" ]] ||
+        die "EXO_SECRET_BACKEND=apple-keychain is supported only on macOS"
+      ;;
+    *) die "invalid EXO_SECRET_BACKEND: $SECRET_BACKEND (expected auto, file, or apple-keychain)" ;;
+  esac
+}
+
 source_cargo_env() {
   if [[ -f "$HOME/.cargo/env" ]]; then
     # Pick up a rustup-managed toolchain that is not on PATH yet.
@@ -103,9 +187,15 @@ collect_missing_dependencies() {
     MISSING_DEPS+=("git")
     SYSTEM_MISSING+=("git")
   fi
-  if ! command -v docker >/dev/null 2>&1; then
+  if ! command -v docker >/dev/null 2>&1 ||
+    { [[ "$CONTAINER_RUNTIME" == "colima" ]] &&
+      ! docker_responds 3 --version >/dev/null 2>&1; }; then
     MISSING_DEPS+=("docker")
     SYSTEM_MISSING+=("docker")
+  fi
+  if [[ "$CONTAINER_RUNTIME" == "colima" ]] && ! command -v colima >/dev/null 2>&1; then
+    MISSING_DEPS+=("colima")
+    SYSTEM_MISSING+=("colima")
   fi
   if [[ "$(uname -s)" == "Linux" ]] && ! command -v cc >/dev/null 2>&1; then
     MISSING_DEPS+=("build-tools")
@@ -130,6 +220,13 @@ print_dependency_status() {
       echo "  - $dep (installed)"
     fi
   done
+  if [[ "$CONTAINER_RUNTIME" == "colima" ]]; then
+    if missing_has colima "${MISSING_DEPS[@]}"; then
+      echo "  - colima (missing; selected for headless macOS)"
+    else
+      echo "  - colima (installed; selected for headless macOS)"
+    fi
+  fi
   if missing_has build-tools "${MISSING_DEPS[@]}"; then
     echo "  - C build tools (missing)"
   fi
@@ -265,9 +362,14 @@ install_missing_dependencies_macos() {
     info "Installing git with Homebrew"
     brew install git
   fi
-  if missing_has docker "$@"; then
+  if [[ "$CONTAINER_RUNTIME" == "colima" ]] &&
+    { missing_has docker "$@" || missing_has colima "$@"; }; then
+    info "Installing the Docker CLI, Compose, and Colima for headless macOS"
+    brew install docker docker-compose colima
+    configure_colima_compose_plugin
+  elif missing_has docker "$@"; then
     info "Installing Docker Desktop"
-    brew install --cask docker
+    brew install --cask docker-desktop
     open -a Docker || true
   fi
 }
@@ -356,9 +458,14 @@ print_macos_dependency_install_help() {
   if missing_has git "$@"; then
     echo "  xcode-select --install  # includes Git, if Apple developer tools are missing" >&2
   fi
-  if missing_has docker "$@"; then
-    echo "  brew install --cask docker" >&2
-    echo "  open -a Docker" >&2
+  if missing_has docker "$@" || missing_has colima "$@"; then
+    if [[ "$CONTAINER_RUNTIME" == "colima" ]]; then
+      echo "  brew install docker docker-compose colima" >&2
+      echo "  colima start --runtime docker" >&2
+    else
+      echo "  brew install --cask docker-desktop" >&2
+      echo "  open -a Docker" >&2
+    fi
   fi
 }
 
@@ -431,23 +538,42 @@ prompt_yes_no() {
 read_secret() {
   local prompt="$1"
   local value=""
-  local char
+  local char=""
+  local suffix=""
+  local tty_state=""
   printf '%s: ' "$prompt" >&2
-  while IFS= read -r -s -n1 char; do
-    if [[ -z "$char" ]]; then # Enter
-      break
-    fi
-    if [[ "$char" == $'\x7f' || "$char" == $'\x08' ]]; then # Backspace
-      if [[ -n "$value" ]]; then
-        value="${value%?}"
-        printf '\b \b' >&2
+  if [[ -t 0 ]]; then
+    tty_state="$(stty -g < /dev/tty)"
+    trap 'stty "$tty_state" < /dev/tty 2>/dev/null || true' EXIT
+    stty -echo < /dev/tty
+    while IFS= read -r -n1 char; do
+      if [[ -z "$char" ]]; then
+        break
       fi
-      continue
-    fi
-    value+="$char"
-    printf '*' >&2
-  done
+      if [[ "$char" == $'\x7f' || "$char" == $'\x08' ]]; then
+        if [[ -n "$value" ]]; then
+          value="${value%?}"
+          printf '\b \b' >&2
+        fi
+        continue
+      fi
+      value+="$char"
+      printf '*' >&2
+    done
+    stty "$tty_state" < /dev/tty
+    trap - EXIT
+  else
+    IFS= read -r value
+  fi
   echo >&2
+  if [[ -n "$value" ]]; then
+    suffix="$value"
+    if ((${#suffix} > 4)); then
+      suffix="${suffix: -4}"
+    fi
+    printf '******** Received %d characters (ending ...%s).\n' \
+      "${#value}" "$suffix" >&2
+  fi
   printf '%s' "$value"
 }
 
@@ -583,18 +709,69 @@ prompt_env_secret() {
   fi
 }
 
-ensure_docker_running() {
+configure_colima_compose_plugin() {
+  local plugin_source plugin_dir plugin_target
+  plugin_source="$(brew --prefix)/lib/docker/cli-plugins/docker-compose"
+  plugin_dir="$HOME/.docker/cli-plugins"
+  plugin_target="$plugin_dir/docker-compose"
+  [[ -x "$plugin_source" ]] ||
+    die "Docker Compose plugin was not found at $plugin_source"
+  mkdir -p "$plugin_dir"
+  if [[ -e "$plugin_target" && ! -L "$plugin_target" ]]; then
+    # Preserve a user-managed plugin if it already works.
+    docker_responds 5 compose version >/dev/null 2>&1 && return
+    die "$plugin_target exists but is not a working Docker Compose plugin"
+  fi
+  ln -sfn "$plugin_source" "$plugin_target"
+}
+
+ensure_colima_running() {
+  require_command colima "Install it with: brew install colima"
+  require_command docker "Install the Docker CLI with: brew install docker"
+  docker_responds 8 --version >/dev/null 2>&1 ||
+    die "the Docker CLI is installed but not responding"
+  configure_colima_compose_plugin
+
+  if docker_responds 3 info >/dev/null 2>&1; then
+    docker_responds 5 compose version >/dev/null 2>&1 ||
+      die "Docker is running, but the Compose plugin is unavailable"
+    return
+  fi
+
+  info "Starting Colima (headless Docker runtime)"
+  echo "Resources: ${COLIMA_CPU} CPUs, ${COLIMA_MEMORY} GiB RAM, ${COLIMA_DISK} GiB disk"
+  run_with_timeout 300 colima start --runtime docker \
+    --cpu "$COLIMA_CPU" --memory "$COLIMA_MEMORY" --disk "$COLIMA_DISK" ||
+    die "Colima did not start successfully. Run 'colima status' for details."
+  docker_responds 10 info >/dev/null 2>&1 ||
+    die "Colima started, but the Docker daemon is not reachable"
+  docker_responds 5 compose version >/dev/null 2>&1 ||
+    die "Colima started, but the Docker Compose plugin is unavailable"
+}
+
+ensure_docker_desktop_running() {
   require_command docker "Install Docker Desktop: https://www.docker.com/products/docker-desktop/"
-  if docker info >/dev/null 2>&1; then
+  if ! docker_responds 8 --version >/dev/null 2>&1; then
+    echo "error: Docker is installed at $(command -v docker), but the CLI is not responding." >&2
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+      echo "Quit any stuck Docker processes, reinstall Docker Desktop, restart macOS, and rerun setup." >&2
+      echo "Docker's macOS install guide: https://docs.docker.com/desktop/setup/install/mac-install/" >&2
+    else
+      echo "Restart Docker (and, if needed, reinstall it), then rerun setup." >&2
+    fi
+    exit 1
+  fi
+  if docker_responds 3 info >/dev/null 2>&1; then
     return
   fi
   if [[ "$(uname -s)" == "Darwin" ]] && command -v open >/dev/null 2>&1; then
     echo "Docker does not appear to be running. Opening Docker Desktop..."
-    open -a Docker || true
-    for _ in $(seq 1 60); do
-      if docker info >/dev/null 2>&1; then
+    run_with_timeout 10 open -a Docker || true
+    for attempt in $(seq 1 30); do
+      if docker_responds 3 info >/dev/null 2>&1; then
         return
       fi
+      echo "Waiting for Docker Desktop... ($attempt/30)"
       sleep 2
     done
     die "Docker is not running. Start Docker Desktop, then rerun this script."
@@ -608,14 +785,22 @@ ensure_docker_running() {
       sudo_run usermod -aG docker "$(id -un)"
       DOCKER_GROUP_ADDED=true
       maybe_reexec_for_docker_group
-      docker info >/dev/null 2>&1 && return
+      docker_responds 3 info >/dev/null 2>&1 && return
     fi
   fi
   sudo_run systemctl start docker 2>/dev/null || true
-  if docker info >/dev/null 2>&1; then
+  if docker_responds 3 info >/dev/null 2>&1; then
     return
   fi
   die "Docker is installed but the daemon is not reachable. Start it (e.g. sudo systemctl start docker), then rerun this script."
+}
+
+ensure_container_runtime() {
+  if [[ "$CONTAINER_RUNTIME" == "colima" ]]; then
+    ensure_colima_running
+  else
+    ensure_docker_desktop_running
+  fi
 }
 
 trust_mise_config() {
@@ -751,14 +936,18 @@ clone_or_reuse_repo() {
 main() {
   SETUP_ARGS=("$@")
   parse_args "$@"
+  select_container_runtime
+  select_secret_backend
 
   echo "Exo canonical setup"
   echo "This will install Exo into the current directory, write local keys to .env, and start Exo."
   echo "Repository: $REPO_URL"
   echo "Git ref: $REPO_REF"
+  echo "Container runtime: $CONTAINER_RUNTIME"
+  echo "Secret backend: $SECRET_BACKEND"
 
   check_dependencies
-  ensure_docker_running
+  ensure_container_runtime
 
   local install_dir launch_dir="$PWD"
   install_dir="$(choose_install_dir)"
@@ -798,6 +987,8 @@ main() {
   fi
 
   info "Configure API keys"
+  EXO_SECRET_BACKEND="$SECRET_BACKEND"
+  export EXO_SECRET_BACKEND
   prompt_env_secret "$MODEL_API_KEY_ENV" "$env_file" \
     "$MODEL_PROVIDER_LABEL API key" true
   set_env_default "EXO_CHAT_BASE_URL" "${EXO_CHAT_BASE_URL:-$DEFAULT_EXO_CHAT_BASE_URL}" "$env_file"
