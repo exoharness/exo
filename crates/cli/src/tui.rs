@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -467,8 +467,10 @@ impl ChatRepl {
             let prompt = format!("{}> ", self.conversation.record().slug);
             let event_printer = self.spawn_event_printer()?;
             let readline_result = self.editor.readline(&prompt);
-            event_printer.abort();
-            let _ = event_printer.await;
+            if let Some(event_printer) = event_printer {
+                event_printer.abort();
+                let _ = event_printer.await;
+            }
 
             match readline_result {
                 Ok(line) => {
@@ -583,7 +585,10 @@ impl ChatRepl {
                         }
                         _ => {
                             self.editor.add_history_entry(line.as_str())?;
-                            self.send(trimmed).await?;
+                            if let Err(error) = self.send(trimmed).await {
+                                println!();
+                                println!("turn failed: {error:#}");
+                            }
                         }
                     }
                 }
@@ -753,11 +758,17 @@ impl ChatRepl {
         Ok(())
     }
 
-    fn spawn_event_printer(&mut self) -> Result<JoinHandle<()>> {
+    /// Returns `None` when stdin is not a tty (piped/scripted input):
+    /// rustyline's external printer needs a terminal, and the printer only
+    /// echoes events from other sessions — a display nicety we can skip.
+    fn spawn_event_printer(&mut self) -> Result<Option<JoinHandle<()>>> {
+        if !io::stdin().is_terminal() {
+            return Ok(None);
+        }
         let conversation = self.conversation.exoharness_handle();
         let watch_after = Arc::clone(&self.watch_after);
         let mut printer = self.editor.create_external_printer()?;
-        Ok(tokio::spawn(async move {
+        Ok(Some(tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {
                 interval.tick().await;
@@ -788,7 +799,7 @@ impl ChatRepl {
                     }
                 }
             }
-        }))
+        })))
     }
 
     async fn run_shell(&self, command: &str) -> Result<()> {
