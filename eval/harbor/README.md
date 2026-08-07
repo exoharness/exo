@@ -65,28 +65,42 @@ stale from an earlier run in a reused `exo_root`.
 
 ## Running
 
-```bash
-pip install -e eval/harbor
-pnpm install
-cargo build -p exo
+The usual entry point is deliberately small:
 
-harbor run \
-  --env docker \
-  --n-concurrent 1 \
-  --agent exo_harbor.agent:ExoAgent \
-  --plugin exo_harbor.plugin:ExoSessionPlugin \
-  --ak exo_root="$PWD/.local/run/exo" \
-  --ak exo_bin="$PWD/target/debug/exo" \
-  --ak exo_model=<registered-exo-model> \
-  --dataset hello-world@1.0
+```bash
+cd eval/harbor
+./eval.sh --dataset=terminal-bench
 ```
 
-Both `--agent` and `--plugin` are required. `--n-concurrent 1` is enforced:
-trials share one Exo, and reflection on trial N must complete before trial N+1
-starts.
+It defaults to GPT-5.5, ten tasks, and one attempt. Flags can override those
+defaults:
 
-## Status
+```bash
+./eval.sh --dataset=terminal-bench --model=gpt-5.5 --n-tasks=10 --n-attempts=2
+```
 
-Skeleton. Every module is signatures and comments; nothing is implemented.
-Pinned to `harbor>=0.20,<0.21` — the `JobPlugin` protocol and the
-`TrialEvent.END` payload are the parts most likely to move on a bump.
+For repeatable runs, copy [`eval.example.toml`](eval.example.toml), edit it,
+and run:
+
+```bash
+./eval.sh --config=my-eval.toml
+```
+
+Command-line flags take precedence over the config file. Harbor datasets can
+also be given as `name@version`. Endless Terminals is not currently in the
+Harbor registry, so pass a local checkout with
+`--dataset=endless-terminals --dataset-path=/path/to/dataset`.
+
+The wrapper creates `.venv` on its first run. The runner builds Exo, starts the
+evaluation, shows Harbor's live task progress, and prints the score and result
+paths when it finishes. Runs are saved under `.local/harbor-evals` at the
+repository root. Harbor also prints a `harbor view ...` command for opening its
+full results UI. Each trial's Trajectory tab shows the Exo rollout, including
+model messages, tool calls and results, token usage, and cost. In shared
+conversation mode the exporter selects only the Exo turn for that Harbor trial.
+
+`--n-concurrent 1` is intentionally fixed: trials share one Exo, and reflection
+on trial N must complete before trial N+1 starts.
+
+The package is pinned to `harbor>=0.20,<0.21` because the `JobPlugin` protocol
+and the `TrialEvent.END` payload may move between Harbor minor releases.

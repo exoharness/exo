@@ -50,6 +50,32 @@ class ExoClientTest(unittest.IsolatedAsyncioTestCase):
         ):
             await self.client.verify_sandbox_unchanged("conversation", "sandbox-1")
 
+    async def test_read_conversation_events_filters_one_turn(self) -> None:
+        run = AsyncMock(return_value='{"events":[],"cursor":null}')
+        with patch.object(ExoClient, "run", run):
+            result = await self.client.read_conversation_events(
+                "conversation",
+                types=["messages", "tool_result"],
+                turn_id="turn-1",
+                limit=10_000,
+            )
+
+        self.assertEqual(result, '{"events":[],"cursor":null}')
+        run.assert_awaited_once_with(
+            "conversation",
+            "events",
+            "harbor-eval",
+            "conversation",
+            "--type",
+            "messages",
+            "--type",
+            "tool_result",
+            "--turn-id",
+            "turn-1",
+            "--limit",
+            "10000",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

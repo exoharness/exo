@@ -1,9 +1,4 @@
-"""ExoAgent — the per-task RPC stub.
-
-This class is *not* the agent. Harbor constructs a fresh instance for every
-trial (``Trial.__init__`` -> ``_init_agent()``) and throws it away when the
-trial finishes, so it can hold no cross-task state. The real agent is the Exo
-process, whose lifetime belongs to ExoSessionPlugin.
+"""ExoAgent — the per-task RPC stub for Harbor integration.
 
 Where this sits in Harbor's trial lifecycle:
 
@@ -19,14 +14,12 @@ Where this sits in Harbor's trial lifecycle:
         _stop_agent_environment()
       _finalize() -> TrialEvent.END   <- plugin detaches + sends feedback
 
-Two consequences worth holding onto:
-
-* ``setup()`` is per *trial*, ``run()`` is per *step*. For a multi-step task
-  Harbor calls ``run()`` then ``resume()`` against the same environment. So
-  attach belongs in ``setup()`` and detach belongs in the plugin's trial-end
-  hook — putting detach in ``run()``'s ``finally`` breaks step 2.
-* ``run()`` returns *before* the verifier executes. This class can never see a
-  reward. That is the plugin's job.
+Notes:
+ * a fresh instance is constructed for each trial then thrown away, so holds
+no cross-task state. The actual Exo process is managed by ExoSessionPlugin.
+ * setup() is called for each trial, and run()/resume() for each step.
+ * run() returns before the verifier executres -- rewards/feedback are shared by
+    plugin.py.
 """
 
 from __future__ import annotations
@@ -43,6 +36,7 @@ from exo_harbor import conventions
 from exo_harbor.docker import resolve_main_container
 from exo_harbor.exo import ExoClient
 from exo_harbor.protocol import TaskStarted, send_task_started
+from exo_harbor.trajectory import export_trial_trajectory
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +46,7 @@ class ExoAgent(BaseAgent):
 
     # Can be enabled for multi-step tasks after resume() support is added.
     SUPPORTS_RESUME = False
-    SUPPORTS_ATIF = False
+    SUPPORTS_ATIF = True
     SUPPORTS_WINDOWS = False
 
     def __init__(
@@ -165,6 +159,18 @@ class ExoAgent(BaseAgent):
         await self._client.verify_sandbox_unchanged(
             self._conversation, self._sandbox_id
         )
+        try:
+            await export_trial_trajectory(
+                self._client,
+                self._conversation,
+                str(self.context_id),
+                instruction,
+                self.logs_dir / "trajectory.json",
+            )
+        except Exception:
+            logger.exception(
+                "failed to export Harbor trajectory for %s", self.context_id
+            )
 
         self._populate_metadata(context, summary=response.summary)
 

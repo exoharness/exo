@@ -241,6 +241,28 @@ class ExoClient:
             "--json",
         )
 
+    async def read_conversation_events(
+        self,
+        conversation: str,
+        *,
+        types: list[str],
+        turn_id: str | None = None,
+        limit: int,
+    ) -> str:
+        """Return canonical Exo conversation events as JSON."""
+        args = [
+            "conversation",
+            "events",
+            conventions.AGENT_SLUG,
+            conversation,
+        ]
+        for event_type in types:
+            args.extend(("--type", event_type))
+        if turn_id is not None:
+            args.extend(("--turn-id", turn_id))
+        args.extend(("--limit", str(limit)))
+        return await self.run(*args)
+
     # ---- plumbing ---------------------------------------------------------
 
     def _argv(self, *args: str) -> list[str]:
