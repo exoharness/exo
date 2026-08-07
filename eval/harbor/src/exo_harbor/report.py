@@ -1,44 +1,40 @@
 """What Exo accumulated over a job, and when.
 
-Two kinds of output, deliberately kept apart:
+Measured from Exo's own CLI — installed tools, and the diff of its workspace.
+No model call, so it is cheap enough to run after every trial, and cheap is the
+point: a final inventory says what Exo ended up with, but the per-trial series
+says *when* each piece appeared. That is what lets a tool install be lined up
+against the point where the correctness curve bends, which is the
+self-improvement claim.
 
-* **Inventory** — measured from Exo's own CLI and workspace. Installed tools,
-  memory entries, source diffs. Deterministic, no model call. This is the
-  evidence.
-* **Narrative** — Exo's own account of what it learned. A model turn, so it
-  costs a wake and a third adapter exchange. Useful qualitative color for a
-  writeup; not proof of anything, because it is self-report.
-
-A reader of the artifact must be able to tell which is which, so they are
-separate fields and never merged into one summary.
-
-Snapshots are taken per trial rather than once at the end. A final inventory
-says what Exo ended up with; the series says *when* each piece appeared, which
-is what lets a tool install be lined up against the point where the
-correctness curve bends. That correlation is the self-improvement claim.
+Deliberately no self-narrative. Asking Exo what it learned would need a third
+adapter exchange and would produce self-report, which is not evidence. If that
+is wanted later it belongs in a separate field, clearly labelled.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+import logging
+import subprocess
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+REPORT_FILENAME = "exo-job-report.json"
 
 
 @dataclass(frozen=True)
 class Inventory:
     """A point-in-time measurement of Exo's durable state."""
 
-    # Installed managed tools: stable id, name, source. From `exo tools list`.
-    tools: list[dict] = field(default_factory=list)
-    # Memory entries. Identity + a digest, not full content — this is sampled
-    # every trial and full bodies would dwarf the rest of the artifact.
-    memories: list[dict] = field(default_factory=list)
-    # Files changed under exo_root against the baseline commit, with line
-    # counts. Exo editing its own source is the strongest self-modification
-    # signal and the easiest to measure.
-    source_diff_stat: dict[str, int] = field(default_factory=dict)
-    # Adapters, scheduler entries, and anything else Exo can durably create.
-    other: dict = field(default_factory=dict)
+    # Installed managed tools, one raw line each from `exo tools list`.
+    tools: list[str] = field(default_factory=list)
+    # Files changed under the workspace against the baseline commit. Exo
+    # editing its own source is the strongest self-modification signal and the
+    # easiest to measure.
+    changed_files: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -57,41 +53,41 @@ class TrialSnapshot:
 @dataclass(frozen=True)
 class JobReport:
     job_id: str
-    # Every snapshot in trial order. Diffing consecutive entries gives the
-    # timeline of what appeared when.
     snapshots: list[TrialSnapshot]
     final: Inventory
-    # Exo's self-report. None when the narrative was skipped or failed —
-    # which must not invalidate everything above it.
-    narrative: str | None = None
-    narrative_error: str | None = None
 
 
-def capture_inventory(exo_root: Path, exo_bin: Path) -> Inventory:
+async def capture_inventory(list_tools_output: str, repo_root: Path) -> Inventory:
     """Measure Exo's durable state. No model call, no wake.
 
-    Cheap enough to run after every trial. Must never raise into the caller:
-    a failed measurement is an empty field, not a dead job.
+    Never raises into the caller: a failed measurement is an empty field, not
+    a dead job. This runs inside a trial-end hook, where an exception would
+    escape trial.run() and cost the whole trial result.
     """
-    # TODO: shell out to `exo tools list`, read the memory store, and run a
-    # diff of exo_root against the baseline commit recorded at job start.
-    raise NotImplementedError
-
-
-def diff_inventories(before: Inventory, after: Inventory) -> dict:
-    """What appeared, changed, or vanished between two snapshots.
-
-    The per-trial deltas are the interesting series; the absolute inventories
-    are just what they are computed from.
-    """
-    raise NotImplementedError
+    tools = [line for line in list_tools_output.splitlines()[1:] if line.strip()]
+    return Inventory(tools=tools, changed_files=_changed_files(repo_root))
 
 
 def write_report(job_dir: Path, report: JobReport) -> Path:
-    """Write exo-job-report.json beside Harbor's job result.
+    """Write exo-job-report.json beside Harbor's job result."""
+    path = job_dir / REPORT_FILENAME
+    path.write_text(json.dumps(asdict(report), indent=2))
+    return path
 
-    Called BEFORE the narrative is requested, then again after. on_job_end
-    exceptions are swallowed by finalize_job_plugins, so an unwritten report
-    fails silently — get the measured half on disk first.
-    """
-    raise NotImplementedError
+
+def _changed_files(repo_root: Path) -> list[str]:
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            return []
+        return [line for line in result.stdout.splitlines() if line.strip()]
+    except (OSError, subprocess.SubprocessError) as error:
+        logger.warning("could not read workspace diff: %s", error)
+        return []

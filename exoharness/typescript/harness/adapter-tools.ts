@@ -551,6 +551,19 @@ function adapterConfigSchema(): ToolDefinition["parameters"] {
         },
         required: ["type", "socketPath", "mountRoot", "mountPath"],
       },
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          type: { type: "string", enum: ["harbor"] },
+          socketPath: {
+            type: "string",
+            description:
+              "Absolute host unix socket path the worker listens on for the Harbor evaluation harness. Required: the harness scopes it to its own run directory so concurrent jobs do not share a socket.",
+          },
+        },
+        required: ["type", "socketPath"],
+      },
     ],
   } as ToolDefinition["parameters"];
 }
@@ -572,7 +585,8 @@ function validateAdapterSource(source: string, type: string): void {
       type === "whatsapp" ||
       type === "signal" ||
       type === "discord" ||
-      type === "slack") &&
+      type === "slack" ||
+      type === "harbor") &&
     source !== "library"
   ) {
     throw new Error(`${type} adapters must use source 'library'`);

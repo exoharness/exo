@@ -3,7 +3,7 @@
 Runs Exo as a Harbor external agent so it can be evaluated over Harbor's
 benchmark catalog. The Exo-side adapter that handles waking Exo's
 conversation and waiting on a response lives in
-[`examples/exo/adapters/harbor`](../../examples/exo/adapters/harbor).
+[`exo/adapters/harbor`](../../exo/adapters/harbor).
 
 ## The split
 

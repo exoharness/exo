@@ -1,7 +1,7 @@
 # Harbor Adapter
 
 This adapter exists to allow the Harbor framework to wake up and await Exo
-working on some task. The Harbor-side code lives in [`eval/harbor`](../../../../eval/harbor).
+working on some task. The Harbor-side code lives in [`eval/harbor`](../../../eval/harbor).
 
 Transport is a local unix socket, default `~/.exo/harbor.sock`, one JSON line
 per message. Each exchange is one request from Harbor and one blocking wait for

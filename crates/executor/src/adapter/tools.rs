@@ -100,6 +100,7 @@ enum AdapterCreationConfig {
     Slack(SlackAdapterCreationConfig),
     Exochat(ExochatAdapterCreationConfig),
     AgentCli(AgentCliAdapterCreationConfig),
+    Harbor(HarborAdapterCreationConfig),
 }
 
 #[derive(Debug, Deserialize)]
@@ -201,6 +202,22 @@ struct AgentCliAdapterCreationConfig {
     socket_path: Option<String>,
     mount_root: String,
     mount_path: Option<String>,
+}
+
+/// Bridges the Harbor eval harness (host-side) to an Exo conversation
+/// over a local unix socket.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HarborAdapterCreationConfig {
+    #[serde(rename = "type")]
+    _adapter_type: HarborAdapterType,
+    socket_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum HarborAdapterType {
+    Harbor,
 }
 
 #[derive(Debug, Deserialize)]
@@ -324,6 +341,7 @@ impl AdapterCreationConfig {
             Self::Slack(_) => "slack",
             Self::Exochat(_) => "exochat",
             Self::AgentCli(_) => "agent-cli",
+            Self::Harbor(_) => "harbor",
         }
     }
 
@@ -520,6 +538,27 @@ impl AdapterCreationConfig {
                         "mountRoot": config.mount_root,
                         "mountPath": mount_path,
                     }),
+                    state_dir: None,
+                    secret_env: Vec::new(),
+                })
+            }
+            Self::Harbor(config) => {
+                require_source(source, AdapterSource::Library, "harbor")?;
+                if !config.socket_path.starts_with('/') {
+                    bail!("harbor socketPath must be an absolute host path");
+                }
+                Ok(AdapterConfig {
+                    adapter_type: "harbor".to_string(),
+                    worker_command: options.worker_command("harbor"),
+                    initialization: serde_json::json!({
+                        "socketPath": config.socket_path,
+                        // One adapter serves every task conversation in a job;
+                        // each message names the conversation it wakes.
+                        "conversationScope": "explicit",
+                    }),
+                    // Defaults to .exo/adapters/harbor/<adapter_id>. The worker
+                    // persists completed responses there so a host-side retry
+                    // replays the answer instead of waking Exo a second time.
                     state_dir: None,
                     secret_env: Vec::new(),
                 })
@@ -882,13 +921,12 @@ pub async fn execute_send_adapter_message_tool(
     let Some(adapter) = store.get_adapter(&args.adapter_id).await? else {
         return Ok(not_found());
     };
-    let Some(scoped_target) = adapter_access_target(store, agent, conversation, &adapter).await?
-    else {
+    let Some(access) = adapter_access(store, agent, conversation, &adapter).await? else {
         return Ok(not_found());
     };
     let target = resolve_send_target(
         &adapter.config.adapter_type,
-        scoped_target.as_deref(),
+        &access,
         args.target.as_deref(),
     )?;
     let attachments = args.attachments.unwrap_or_default();
@@ -932,15 +970,13 @@ pub async fn execute_send_adapter_message_tool(
 
 /// Determine whether `conversation` may send through `adapter`, gathering the
 /// target-conversation mappings from the store and delegating the decision to
-/// the pure [`classify_adapter_access`]. The outer `Option` is authorization
-/// (None = denied); the inner `Option` is the send constraint (None = root
-/// conversation, any target allowed; `Some(target)` = scoped, that target only).
-async fn adapter_access_target(
+/// the pure [`classify_adapter_access`].
+async fn adapter_access(
     store: &AdapterStore,
     agent: &dyn AgentHandle,
     conversation: &dyn ConversationHandle,
     adapter: &super::types::AdapterRecord,
-) -> Result<Option<Option<String>>> {
+) -> Result<Option<AdapterAccess>> {
     let conversation_id = conversation.record().id.to_string();
     let mappings = store.list_target_conversations(&adapter.id).await?;
     Ok(classify_adapter_access(
@@ -954,51 +990,61 @@ async fn adapter_access_target(
     ))
 }
 
-/// Pure authorization decision. `None`: this conversation may not use the
-/// adapter. `Some(None)`: the adapter's root conversation — may send to any
-/// target. `Some(Some(target))`: a target-scoped conversation — may send only
-/// to `target`.
+#[derive(Debug, PartialEq, Eq)]
+enum AdapterAccess {
+    Root,
+    Targets(Vec<String>),
+}
+
+/// Pure authorization decision. The root conversation may use any target;
+/// mapped conversations may use every target currently routed to them.
 fn classify_adapter_access<'a>(
     adapter_agent_id: &str,
     adapter_root_conversation_id: &str,
     agent_id: &str,
     conversation_id: &str,
     target_mappings: impl Iterator<Item = (&'a str, &'a str)>,
-) -> Option<Option<String>> {
+) -> Option<AdapterAccess> {
     if adapter_agent_id != agent_id {
         return None;
     }
     if adapter_root_conversation_id == conversation_id {
-        return Some(None);
+        return Some(AdapterAccess::Root);
     }
-    for (mapped_conversation, target) in target_mappings {
-        if mapped_conversation == conversation_id {
-            return Some(Some(target.to_string()));
-        }
+    let targets = target_mappings
+        .filter(|(mapped_conversation, _)| *mapped_conversation == conversation_id)
+        .map(|(_, target)| target.to_string())
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        None
+    } else {
+        Some(AdapterAccess::Targets(targets))
     }
-    None
 }
 
-/// Resolve the effective send target, enforcing that a target-scoped
-/// conversation may only send to its mapped target (a missing target defaults
-/// to it). A root conversation sends to whatever it requested.
+/// Resolve the effective send target while enforcing a mapped conversation's
+/// allowed targets. A target is required when more than one is mapped.
 fn resolve_send_target(
     adapter_type: &str,
-    scoped: Option<&str>,
+    access: &AdapterAccess,
     requested: Option<&str>,
 ) -> Result<Option<String>> {
-    match scoped {
-        Some(scoped) => match requested {
+    match access {
+        AdapterAccess::Root => Ok(requested.map(str::to_string)),
+        AdapterAccess::Targets(targets) => match requested {
             Some(requested)
-                if requested != scoped
-                    && !allows_scoped_alternate_target(adapter_type, requested) =>
+                if targets.iter().any(|target| target == requested)
+                    || allows_scoped_alternate_target(adapter_type, requested) =>
             {
-                bail!("target-scoped conversation may only send to mapped target {scoped}")
+                Ok(Some(requested.to_string()))
             }
-            Some(requested) => Ok(Some(requested.to_string())),
-            None => Ok(Some(scoped.to_string())),
+            Some(_) => bail!(
+                "target-scoped conversation may only send to one of its mapped targets: {}",
+                targets.join(", ")
+            ),
+            None if targets.len() == 1 => Ok(Some(targets[0].clone())),
+            None => bail!("target is required because this conversation has multiple mappings"),
         },
-        None => Ok(requested.map(str::to_string)),
     }
 }
 
@@ -1334,10 +1380,9 @@ mod tests {
 
     #[test]
     fn root_conversation_may_send_to_any_target() {
-        // Some(None) => root conversation, no target constraint.
         assert_eq!(
             classify_adapter_access("a", "root", "a", "root", std::iter::empty()),
-            Some(None)
+            Some(AdapterAccess::Root)
         );
     }
 
@@ -1346,7 +1391,7 @@ mod tests {
         let mappings = [("conv-A", "chan-A"), ("conv-B", "chan-B")];
         assert_eq!(
             classify_adapter_access("a", "root", "a", "conv-B", mappings.into_iter()),
-            Some(Some("chan-B".to_string()))
+            Some(AdapterAccess::Targets(vec!["chan-B".to_string()]))
         );
         // A conversation with no mapping and not the root is denied.
         assert_eq!(
@@ -1357,28 +1402,42 @@ mod tests {
 
     #[test]
     fn resolve_send_target_enforces_scope() {
-        // Root (unscoped) passes the requested target through, or none.
         assert_eq!(
-            resolve_send_target("discord", None, Some("x")).unwrap(),
+            resolve_send_target("discord", &AdapterAccess::Root, Some("x")).unwrap(),
             Some("x".into())
         );
-        assert_eq!(resolve_send_target("discord", None, None).unwrap(), None);
-        // Scoped: missing target defaults to the mapped one.
         assert_eq!(
-            resolve_send_target("discord", Some("chan-A"), None).unwrap(),
+            resolve_send_target("discord", &AdapterAccess::Root, None).unwrap(),
+            None
+        );
+        let one = AdapterAccess::Targets(vec!["chan-A".to_string()]);
+        assert_eq!(
+            resolve_send_target("discord", &one, None).unwrap(),
             Some("chan-A".into())
         );
-        // Scoped: matching target is allowed.
         assert_eq!(
-            resolve_send_target("discord", Some("chan-A"), Some("chan-A")).unwrap(),
+            resolve_send_target("discord", &one, Some("chan-A")).unwrap(),
             Some("chan-A".into())
         );
-        // Scoped: a different target is refused — the key cross-channel guard.
-        assert!(resolve_send_target("discord", Some("chan-A"), Some("chan-B")).is_err());
+        assert!(resolve_send_target("discord", &one, Some("chan-B")).is_err());
         assert_eq!(
-            resolve_send_target("slack", Some("C123:1700000000.000000"), Some("dm:U123")).unwrap(),
+            resolve_send_target("slack", &one, Some("dm:U123")).unwrap(),
             Some("dm:U123".into())
         );
+        let multiple = AdapterAccess::Targets(vec![
+            "harbor:trial:task_started".to_string(),
+            "harbor:trial:verification_result".to_string(),
+        ]);
+        assert_eq!(
+            resolve_send_target(
+                "harbor",
+                &multiple,
+                Some("harbor:trial:verification_result")
+            )
+            .unwrap(),
+            Some("harbor:trial:verification_result".to_string())
+        );
+        assert!(resolve_send_target("harbor", &multiple, None).is_err());
     }
 
     #[tokio::test]

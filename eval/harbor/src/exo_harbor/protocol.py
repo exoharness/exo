@@ -1,6 +1,6 @@
 """Message types for the Exo Harbor adapter, and the client that sends them.
 
-The adapter worker (examples/exo/adapters/harbor/worker.ts) listens on a local
+The adapter worker (exo/adapters/harbor/worker.ts) listens on a local
 unix socket. Sending a message is: open the socket, write one JSON line, read
 one JSON line back, close. The dataclasses below are those lines; ``_request``
 is the four steps. That is the whole file.
@@ -11,7 +11,11 @@ correlated by ``trial_id``. Two exchanges exist per trial:
     task_started        -> task_complete          (sent by ExoAgent.run)
     verification_result -> feedback_processed     (sent by ExoSessionPlugin)
 
-Both are blocking: the Harbor side does not advance until Exo answers.
+Both are blocking: the Harbor side does not advance until Exo answers. The wait
+can be long. Exo may rebuild and restart itself mid-task, which ends the turn
+without answering; the guardian reboot notice then wakes the conversation again
+and work continues. Only the explicit reply means "finished", which is why this
+cannot be collapsed into a plain synchronous `exo conversation send`.
 
 Not to be confused with the exoharness HTTP surface used by exo.py. That one
 reads and writes exoharness state — agents, conversations, sandboxes — and
@@ -19,15 +23,17 @@ nothing on it makes Exo think. This socket is the only way to wake a
 conversation and get a reply, which is why the two live in separate modules.
 
 The dataclasses are the contract, mirrored field-for-field in
-examples/exo/adapters/harbor/harbor.ts. Keeping them typed means a rename
-fails here rather than becoming a payload the adapter nacks mid-trial.
+exo/adapters/harbor/harbor.ts.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+import json
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
+from uuid import uuid4
 
 
 # --------------------------------------------------------------------------
@@ -50,8 +56,7 @@ class TaskStarted:
     type: Literal["task_started"] = "task_started"
 
     def payload(self) -> dict[str, Any]:
-        # TODO: asdict + stamp a fresh message_id for adapter-side dedup.
-        raise NotImplementedError
+        return _with_message_id(self)
 
 
 @dataclass(frozen=True)
@@ -78,8 +83,7 @@ class VerificationResult:
     type: Literal["verification_result"] = "verification_result"
 
     def payload(self) -> dict[str, Any]:
-        # TODO: as above.
-        raise NotImplementedError
+        return _with_message_id(self)
 
 
 # --------------------------------------------------------------------------
@@ -102,7 +106,7 @@ class FeedbackProcessed:
 
 
 class HarborAdapterError(RuntimeError):
-    pass
+    """The adapter rejected a message, or replied with something unusable."""
 
 
 # --------------------------------------------------------------------------
@@ -116,16 +120,10 @@ async def send_task_started(
     *,
     timeout_sec: float,
 ) -> TaskComplete:
-    """Block until Exo reports the task done.
-
-    Raises HarborAdapterError on adapter-level failure; asyncio.TimeoutError
-    if Exo never answers. Both must surface as Harbor agent errors rather than
-    being swallowed into a zero score.
-    """
-    # TODO: _request(...), assert the response type is task_complete, and that
-    # its trial_id matches. A response for the wrong trial is a bug, not a
-    # retry.
-    raise NotImplementedError
+    """Block until Exo reports the task ready to be graded."""
+    event = await _request(socket_path, request.payload(), timeout_sec=timeout_sec)
+    _expect(event, "task_complete", request.trial_id)
+    return TaskComplete(trial_id=request.trial_id, summary=event.get("summary"))
 
 
 async def send_verification_result(
@@ -135,17 +133,29 @@ async def send_verification_result(
     timeout_sec: float,
 ) -> FeedbackProcessed:
     """Block until Exo finishes reflecting on the grade."""
-    # TODO: same shape as above, expecting feedback_processed.
-    raise NotImplementedError
+    event = await _request(socket_path, request.payload(), timeout_sec=timeout_sec)
+    _expect(event, "feedback_processed", request.trial_id)
+    return FeedbackProcessed(
+        trial_id=request.trial_id, summary=event.get("summary")
+    )
 
 
 async def probe(socket_path: Path, *, timeout_sec: float) -> bool:
     """Return True once the adapter socket accepts a connection.
 
-    Used by the plugin to wait out adapter startup before the first trial,
-    so a slow Exo boot does not look like a task failure.
+    Polls rather than connecting once: the caller uses this to wait out Exo's
+    startup, and to check that a run was launched with --plugin at all.
     """
-    raise NotImplementedError
+    deadline = asyncio.get_running_loop().time() + timeout_sec
+    while True:
+        try:
+            _, writer = await asyncio.open_unix_connection(str(socket_path))
+            writer.close()
+            return True
+        except (OSError, asyncio.TimeoutError):
+            if asyncio.get_running_loop().time() >= deadline:
+                return False
+            await asyncio.sleep(0.5)
 
 
 async def _request(
@@ -156,10 +166,49 @@ async def _request(
 ) -> dict[str, Any]:
     """One JSON line out, one JSON line back, over a unix socket.
 
-    The socket is the only coupling to a local runtime. Swapping it for HTTP
-    is what a remote Harbor environment would need; nothing above this
-    function should have to change.
+    The socket is the only coupling to a local runtime. Swapping it for HTTP is
+    what a remote Harbor environment would need; nothing above this function
+    should have to change.
     """
-    # TODO: asyncio.open_unix_connection, write f"{json.dumps(payload)}\n",
-    # readline, parse, close. Wrap the whole thing in wait_for(timeout_sec).
-    raise NotImplementedError
+
+    async def exchange() -> dict[str, Any]:
+        reader, writer = await asyncio.open_unix_connection(str(socket_path))
+        try:
+            writer.write(f"{json.dumps(payload)}\n".encode())
+            await writer.drain()
+            line = await reader.readline()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+        if not line:
+            raise HarborAdapterError("Harbor adapter closed without replying")
+        message = json.loads(line)
+        if message.get("type") == "error":
+            raise HarborAdapterError(str(message.get("message")))
+        if message.get("type") != "response":
+            raise HarborAdapterError(f"unexpected adapter reply: {message!r}")
+        return message["event"]
+
+    return await asyncio.wait_for(exchange(), timeout=timeout_sec)
+
+
+def _expect(event: dict[str, Any], expected_type: str, trial_id: str) -> None:
+    if event.get("type") != expected_type:
+        raise HarborAdapterError(
+            f"expected {expected_type}, got {event.get('type')!r}"
+        )
+    if event.get("trial_id") != trial_id:
+        # The worker checks this too. Checking on both sides is cheap, and a
+        # reply landing on the wrong trial would corrupt a result silently.
+        raise HarborAdapterError(
+            f"{expected_type} is for trial {event.get('trial_id')!r}, "
+            f"not {trial_id!r}"
+        )
+
+
+def _with_message_id(request: Any) -> dict[str, Any]:
+    payload = asdict(request)
+    # Stamped per send so the adapter can dedupe a redelivered request.
+    payload["message_id"] = str(uuid4())
+    return payload

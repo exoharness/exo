@@ -25,6 +25,7 @@ exo_root.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 # Slug for the Exo agent the plugin creates and every trial addresses. Fixed
@@ -38,6 +39,10 @@ AGENT_SLUG = "harbor-eval"
 # from the Harbor trial name.
 SHARED_CONVERSATION_SLUG = "harbor-shared"
 
+# Owns the Harbor adapter. Kept apart from every task conversation so adapter
+# setup chatter never lands in a conversation whose context is being measured.
+SETUP_CONVERSATION_SLUG = "harbor-setup"
+
 
 def socket_path(exo_root: Path) -> Path:
     """Where the Harbor adapter listens for this job.
@@ -49,6 +54,10 @@ def socket_path(exo_root: Path) -> Path:
 
 
 def conversation_slug(trial_name: str) -> str:
-    """Conversation slug for a trial in per_task mode."""
-    # TODO: normalize trial_name into a slug-safe string.
-    raise NotImplementedError
+    """Conversation slug for a trial in per_task mode.
+
+    Derived from Harbor's trial name so the two histories can be lined up by
+    eye when reading either side's logs.
+    """
+    slug = re.sub(r"[^a-z0-9-]+", "-", trial_name.lower()).strip("-")
+    return f"harbor-{slug}" if slug else "harbor-trial"

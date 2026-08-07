@@ -39,6 +39,10 @@ from harbor.agents.base import BaseAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
+from exo_harbor import conventions
+from exo_harbor.docker import resolve_main_container
+from exo_harbor.exo import ExoClient
+from exo_harbor.protocol import TaskStarted, send_task_started
 
 logger = logging.getLogger(__name__)
 
@@ -46,31 +50,36 @@ logger = logging.getLogger(__name__)
 class ExoAgent(BaseAgent):
     """Attaches Harbor's task container to an Exo conversation and waits."""
 
-    # Multi-step tasks call resume() for continuation steps.
-    SUPPORTS_RESUME = True
+    # Can be enabled for multi-step tasks after resume() support is added.
+    SUPPORTS_RESUME = False
     SUPPORTS_ATIF = False
     SUPPORTS_WINDOWS = False
 
     def __init__(
         self,
         *args: Any,
-        # Set by --ak. exo_root is the only one the plugin also needs; it
-        # reads it back off job.config.agents[...].kwargs so the value is
-        # never written down twice.
+        # Set by --ak. The plugin reads these same values back off job.config.agents[0].kwargs.
         exo_root: str | Path,
+        exo_bin: str | Path,
+        exo_repo_root: str | Path,
+        exo_model: str,
+        conversation_mode: str = "per_task",
         task_timeout_sec: float | str = 1800,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._exo_root = Path(exo_root)
         self._task_timeout_sec = float(task_timeout_sec)
+        self._conversation_mode = conversation_mode
+        self._client = ExoClient(
+            exo_bin=Path(exo_bin),
+            exo_root=Path(exo_root),
+            repo_root=Path(exo_repo_root),
+            model=exo_model,
+        )
 
-        # Resolved in setup(), valid for this trial only.
-        self._conversation_id: str | None = None
+        self._conversation: str | None = None
         self._sandbox_id: str | None = None
-        # Harbor's Docker container id. Kept alongside the Exo sandbox id so
-        # the completion check can compare both — Exo's bookkeeping and the
-        # container it actually resolves to.
         self._container_id: str | None = None
 
     @staticmethod
@@ -80,77 +89,50 @@ class ExoAgent(BaseAgent):
 
     @override
     def version(self) -> str | None:
-        # TODO: report the Exo build the session is running, not this
-        # package's version — the eval result needs to identify the agent
-        # under test.
-        raise NotImplementedError
+        # TODO: report the Exo build under test rather than this package's
+        # version — the eval result needs to identify the agent, and "0.1.0"
+        # identifies the wrapper.
+        return None
 
     # ----------------------------------------------------------------------
     # Per-trial setup
     # ----------------------------------------------------------------------
-
     @override
     async def setup(self, environment: BaseEnvironment) -> None:
         """Bind this trial's container to an Exo conversation.
 
         Runs once per trial, after Harbor has started and health-checked the
-        environment. Everything expensive already happened in on_job_start,
-        so this should be fast.
+        environment. Everything expensive happened in on_job_start.
         """
-        # 1. Confirm the adapter is actually listening.
-        #
-        #    This is the preflight that catches a run launched with --agent and
-        #    no --plugin. Without it every convention below still resolves to
-        #    something plausible, so the job runs all its tasks, scores them,
-        #    and reports a result that measures nothing — Exo never receives a
-        #    single verification_result.
-        #
-        #    A live probe beats a marker file: it proves the adapter is up now,
-        #    rather than that something wrote a file at some point which may be
-        #    left over from a previous run in a reused exo_root.
-        # TODO: if not await probe(socket_path(self._exo_root), timeout_sec=...):
-        #           raise RuntimeError("no Harbor adapter; pass --plugin ...")
+        socket_path = conventions.socket_path(self._exo_root)
+        if not socket_path.exists():
+            raise RuntimeError(
+                f"no Harbor adapter socket at {socket_path}. Pass "
+                "--plugin exo_harbor.plugin:ExoSessionPlugin alongside --agent."
+            )
 
-        # 2. Pick this trial's conversation. per_task creates a fresh one;
-        #    shared reuses the job-wide one. Neither uses the conversation
-        #    that owns the adapter. The Exo agent is addressed by its fixed
-        #    slug (conventions.AGENT_SLUG) — agent refs resolve by slug as
-        #    well as UUID, so no generated id has to reach this class.
-        # TODO: self._conversation_id = client.ensure_conversation(...)
+        self._conversation = (
+            conventions.SHARED_CONVERSATION_SLUG
+            if self._conversation_mode == "shared"
+            else conventions.conversation_slug(self.session_id or "trial")
+        )
+        await self._client.ensure_conversation(self._conversation)
 
-        # 3. Resolve Harbor's running `main` container by Compose label and
-        #    borrow it. Held until the plugin detaches at trial end.
-        # TODO: container = resolve_main_container(environment.session_id)
-        # TODO: self._sandbox_id = client.attach_sandbox(...)
-        raise NotImplementedError
+        container = resolve_main_container(environment.session_id)
+        self._container_id = container.container_id
+        self._sandbox_id = await self._client.attach_sandbox(
+            self._conversation, container.container_id
+        )
+        logger.info(
+            "attached container %s as sandbox %s on %s",
+            container.container_id[:12],
+            self._sandbox_id,
+            self._conversation,
+        )
 
     # ----------------------------------------------------------------------
     # Per-step execution
     # ----------------------------------------------------------------------
-
-    # Harbor's run/resume split is about the agent's *own session*, not about
-    # the environment — the container is attached per trial and is identical
-    # for both. Harbor's wording: resume "the agent's native session from the
-    # previous step instead of starting a fresh conversation on each step".
-    #
-    # Exo's native session is the conversation, so:
-    #
-    #   run()     step gets a fresh conversation
-    #   resume()  step continues the previous step's conversation
-    #
-    # Gated on --resume-trajectory, which defaults OFF. Default multi-step
-    # behavior is (fresh, fresh, fresh, ...) — resume() is never called.
-    #
-    # OPEN: this collides with conversation_mode, which already decides
-    # conversation reuse at the *trial* level. The matrix of
-    # {per_task, shared} x {fresh-per-step, resume-per-step} needs a defined
-    # answer before either flag can be trusted in a result.
-    #
-    # OPEN: if a step really gets a fresh conversation, the borrowed container
-    # has to be attached to *that* conversation, so attach cannot live wholly
-    # in setup() as it does below. Attach is Exo-side bookkeeping with no
-    # Docker call, so re-attaching per step is cheap — but then the plugin's
-    # trial-end detach has more than one attachment to release.
 
     @override
     async def run(
@@ -159,80 +141,48 @@ class ExoAgent(BaseAgent):
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
-        """Work a task (or a step) in a fresh conversation."""
-        await self._work(instruction, context, resumed=False)
+        """Hand Exo the task and block until it says it is done."""
+        if self._conversation is None or self._sandbox_id is None:
+            raise RuntimeError("ExoAgent.run called before setup")
 
-    @override
-    async def resume(
-        self,
-        instruction: str,
-        environment: BaseEnvironment,
-        context: AgentContext,
-    ) -> None:
-        """Work a step in the previous step's conversation, turns intact."""
-        await self._work(instruction, context, resumed=True)
-
-    async def _work(
-        self,
-        instruction: str,
-        context: AgentContext,
-        *,
-        resumed: bool,
-    ) -> None:
-        # Populate metadata FIRST. It is the only channel back to the plugin,
-        # and the plugin needs it to detach and deliver feedback even when
-        # this step times out or raises.
         self._populate_metadata(context)
 
-        # Send task_started and block on task_complete.
-        #
-        # Completion is the explicit adapter message, never the presence of a
-        # final assistant turn — Exo decides when the container is ready to be
-        # graded. The failure mode that buys us: Exo stops without sending it
-        # and we burn to the agent timeout. If that shows up in practice the
-        # answer is a nudge-and-rewake here, not treating text as completion.
-        #
-        # No detach in a finally block. Detach is the plugin's, at trial end.
-        # TODO: response = await send_task_started(...)
-        # TODO: record response.summary on the context
+        response = await send_task_started(
+            conventions.socket_path(self._exo_root),
+            TaskStarted(
+                trial_id=str(self.context_id),
+                task_name=self.session_id or "task",
+                instruction=instruction,
+                conversation_id=self._conversation,
+                sandbox_id=self._sandbox_id,
+            ),
+            timeout_sec=self._task_timeout_sec,
+        )
 
-        # Assert Exo is still in the container Harbor is about to grade.
-        #
-        # This must run HERE — after task_complete, before returning — because
-        # Harbor starts the verifier the instant run() returns. Checking any
-        # later means the wrong container has already been graded and the
-        # score written.
-        #
-        # Guards a failure that is possible today: CreateSandbox is not
-        # blocked for a conversation, and sandbox resolution falls back to the
-        # most recent created-or-attached handle, so Exo can quietly relocate
-        # mid-task and leave the borrowed container untouched. Harbor would
-        # then grade an empty container and record a plausible zero with no
-        # error anywhere.
-        #
-        # Raising propagates as a Harbor agent error, so the trial carries
-        # exception_info instead of a reward — void, not failed. Keeping those
-        # apart matters: a silently voided task read as a genuine zero would
-        # bend the learning curve downward for a reason that has nothing to do
-        # with Exo's competence.
-        #
-        # TODO: BLOCKED — needs `exo conversation sandbox status`, which does
-        # not exist yet. See ExoClient.verify_sandbox_unchanged.
-        # TODO: client.verify_sandbox_unchanged(
-        #     agent_id=..., conversation_id=self._conversation_id,
-        #     sandbox_id=self._sandbox_id, container_id=self._container_id,
-        # )
-        raise NotImplementedError
+        # Assert Exo is still in the container Harbor is about to grade. This can
+        # fail if Exo chooses to snapshot + rollback during runtime. TODO to handle
+        # this case cleanly, currently fail loudly.
+        await self._client.verify_sandbox_unchanged(
+            self._conversation, self._sandbox_id
+        )
 
-    def _populate_metadata(self, context: AgentContext) -> None:
+        self._populate_metadata(context, summary=response.summary)
+
+    def _populate_metadata(
+        self, context: AgentContext, summary: str | None = None
+    ) -> None:
         """Write the agent -> plugin handoff into Harbor's own data flow.
 
-        Harbor carries AgentContext into TrialResult, which the plugin reads
-        at TrialEvent.END. This is how the plugin learns which conversation to
+        Harbor carries AgentContext into TrialResult, which the plugin reads at
+        TrialEvent.END. This is how the plugin learns which conversation to
         send the grade to and which sandbox to release.
         """
-        # TODO: context.metadata["exo"] = {
-        #     "conversation_id": ..., "sandbox_id": ...,
-        #     "socket_path": str(...), "agent_id": ...,
-        # }
-        raise NotImplementedError
+        context.metadata = {
+            **(context.metadata or {}),
+            "exo": {
+                "conversation": self._conversation,
+                "sandbox_id": self._sandbox_id,
+                "container_id": self._container_id,
+                "summary": summary,
+            },
+        }
