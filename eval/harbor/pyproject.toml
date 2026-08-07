@@ -4,10 +4,10 @@ version = "0.1.0"
 description = "Run Exo as a Harbor external agent"
 requires-python = ">=3.12"
 dependencies = [
-    # Pinned to the minor. The integration depends on the JobPlugin protocol
-    # and the TrialEvent.END hook payload, both of which are young enough to
-    # move between minors.
-    "harbor>=0.20,<0.21",
+  # Pinned to the minor. The integration depends on the JobPlugin protocol
+  # and the TrialEvent.END hook payload, both of which are young enough to
+  # move between minors.
+  "harbor>=0.20,<0.21",
 ]
 
 [project.entry-points."harbor.plugins"]
