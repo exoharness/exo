@@ -79,6 +79,12 @@ defaults:
 ./eval.sh --dataset=terminal-bench --model=gpt-5.5 --n-tasks=10 --n-attempts=2
 ```
 
+For a quick end-to-end check using the bundled tiny task:
+
+```bash
+./eval.sh --dataset=smoke-test --n-tasks=1
+```
+
 For repeatable runs, copy [`eval.example.toml`](eval.example.toml), edit it,
 and run:
 

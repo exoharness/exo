@@ -58,7 +58,10 @@ def parse_args() -> argparse.Namespace:
     parser.set_defaults(**defaults)
     parser.add_argument(
         "--dataset",
-        help="terminal-bench, terminal-bench-sample, terminal-bench-pro, or name@version",
+        help=(
+            "smoke-test, terminal-bench, terminal-bench-sample, "
+            "terminal-bench-pro, or name@version"
+        ),
     )
     parser.add_argument(
         "--dataset-path",
@@ -87,6 +90,8 @@ def dataset_arguments(args: argparse.Namespace) -> list[str]:
         if not dataset_path.is_dir():
             raise ValueError(f"dataset path is not a directory: {dataset_path}")
         return ["--path", str(dataset_path)]
+    if args.dataset == "smoke-test":
+        return ["--path", str(Path(__file__).resolve().parent / "smoke-task")]
     if args.dataset == "endless-terminals":
         raise ValueError(
             "Endless Terminals is not in Harbor's registry; pass --dataset-path"

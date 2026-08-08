@@ -63,6 +63,14 @@ class EvalScriptTest(unittest.TestCase):
                 eval_script.dataset_arguments(args), ["--path", str(dataset)]
             )
 
+    def test_smoke_test_uses_the_bundled_task(self) -> None:
+        args = self.parse("--dataset=smoke-test")
+
+        self.assertEqual(
+            eval_script.dataset_arguments(args),
+            ["--path", str(SCRIPT.parent / "smoke-task")],
+        )
+
     def test_result_paths_include_exo_learning_report(self) -> None:
         output = io.StringIO()
 
