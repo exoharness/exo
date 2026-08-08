@@ -1648,21 +1648,28 @@ impl<'a> BasicScopedSandboxHandle<'a> {
     async fn detach_sandbox(&self, sandbox_id: SandboxId) -> Result<SandboxAttachment> {
         self.ensure_full_sandbox_scope("detach_sandbox")?;
         let mut sandbox = self.load_sandbox(&sandbox_id).await?;
+        // Note: `running` is Exoharness lifecycle state, not the provider-side state. This
+        // means the sandbox is active in the bookkeeping.
         if !sandbox.running {
             if let Some(attachment) = sandbox.attachment {
                 return Ok(attachment);
             }
             bail!("sandbox is not running: {sandbox_id}");
         }
-        let (sandbox_handle, provider_state_event) = active_sandbox_handle(
-            self.harness,
-            &self.owner_dir,
-            self.owner,
-            &sandbox_id,
-            &sandbox,
-        )
-        .await?;
-        let attachment = sandbox_handle.detach().await?;
+        // Use the attachment handle if it exists.
+        let (attachment, provider_state_event) = if let Some(attachment) = &sandbox.attachment {
+            (attachment.clone(), None)
+        } else {
+            let (sandbox_handle, provider_state_event) = active_sandbox_handle(
+                self.harness,
+                &self.owner_dir,
+                self.owner,
+                &sandbox_id,
+                &sandbox,
+            )
+            .await?;
+            (sandbox_handle.detach().await?, provider_state_event)
+        };
         let _guard = self.harness.inner.write_lock.lock().await;
         self.harness
             .inner

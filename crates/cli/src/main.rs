@@ -35,10 +35,10 @@ use executor::{
     PutSecretRequest, RlmHarness, SANDBOX_MAIN_MOUNT_DIR, SandboxAttachment,
     SandboxBackendRegistration, SandboxProvider, SandboxProviderConfig, SandboxScope, Secret,
     SecretBackendChoice, SpritesBackendSpec, ToolRequest, ToolRuntime, TypeScriptHarness,
-    TypeScriptHarnessConfig, Uuid7, VercelBackendSpec, default_aws_agentcore_image,
-    default_daytona_image, default_docker_image, default_e2b_template, default_vercel_image,
-    effective_sandbox_scope, finalize_rebuild_update_file, load_agent_config, record_host_event,
-    send_conversation_wakeup, serve_exoharness_http_listener_with_options,
+    TypeScriptHarnessConfig, Uuid7, VercelBackendSpec, attached_conversation_sandbox,
+    default_aws_agentcore_image, default_daytona_image, default_docker_image, default_e2b_template,
+    default_vercel_image, effective_sandbox_scope, finalize_rebuild_update_file, load_agent_config,
+    record_host_event, send_conversation_wakeup, serve_exoharness_http_listener_with_options,
 };
 use serde::Deserialize;
 use tabwriter::TabWriter;
@@ -655,11 +655,24 @@ enum ConversationSandboxCommands {
         external_id: String,
         #[arg(long)]
         default_workdir: Option<String>,
+        /// Emit the result as JSON instead of prose, for programmatic callers.
+        #[arg(long)]
+        json: bool,
     },
     Detach {
         agent: String,
         conversation: String,
         sandbox_id: String,
+        /// Emit the result as JSON instead of prose, for programmatic callers.
+        #[arg(long)]
+        json: bool,
+    },
+    Status {
+        agent: String,
+        conversation: String,
+        /// Emit the result as JSON instead of prose, for programmatic callers.
+        #[arg(long)]
+        json: bool,
     },
     Run {
         agent: String,
@@ -1737,6 +1750,7 @@ async fn main() -> Result<()> {
                     provider,
                     external_id,
                     default_workdir,
+                    json,
                 } => {
                     let provider = SandboxProvider::from(provider);
                     let attachment = if provider == SandboxProvider::Docker {
@@ -1758,16 +1772,26 @@ async fn main() -> Result<()> {
                             default_workdir,
                         })
                         .await?;
-                    println!(
-                        "attached Docker container as sandbox {} for {}",
-                        sandbox_id,
-                        conversation.record().slug
-                    );
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&serde_json::json!({
+                                "sandbox_id": sandbox_id,
+                            }))?
+                        );
+                    } else {
+                        println!(
+                            "attached Docker container as sandbox {} for {}",
+                            sandbox_id,
+                            conversation.record().slug
+                        );
+                    }
                 }
                 ConversationSandboxCommands::Detach {
                     agent,
                     conversation,
                     sandbox_id,
+                    json,
                 } => {
                     let conversation =
                         must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
@@ -1775,12 +1799,52 @@ async fn main() -> Result<()> {
                         .exoharness_handle()
                         .detach_sandbox(sandbox_id.clone())
                         .await?;
-                    println!(
-                        "detached sandbox {} from {}: {}",
-                        sandbox_id,
-                        conversation.record().slug,
-                        serde_json::to_string(&attachment)?
-                    );
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&serde_json::json!({
+                                "sandbox_id": sandbox_id,
+                                "attachment": attachment,
+                            }))?
+                        );
+                    } else {
+                        println!(
+                            "detached sandbox {} from {}: {}",
+                            sandbox_id,
+                            conversation.record().slug,
+                            serde_json::to_string(&attachment)?
+                        );
+                    }
+                }
+                ConversationSandboxCommands::Status {
+                    agent,
+                    conversation,
+                    json,
+                } => {
+                    let conversation =
+                        must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
+                    let sandbox_id =
+                        attached_conversation_sandbox(conversation.exoharness_handle().as_ref())
+                            .await?;
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&serde_json::json!({
+                                "sandbox_id": sandbox_id,
+                            }))?
+                        );
+                    } else if let Some(sandbox_id) = sandbox_id {
+                        println!(
+                            "active attached sandbox for {}: {}",
+                            conversation.record().slug,
+                            sandbox_id
+                        );
+                    } else {
+                        println!(
+                            "{} has no active attached sandbox",
+                            conversation.record().slug
+                        );
+                    }
                 }
                 ConversationSandboxCommands::Run {
                     agent,
@@ -2259,6 +2323,7 @@ fn command_agent_ref(command: &Commands) -> Option<&str> {
             ConversationCommands::Sandbox { command } => match command {
                 ConversationSandboxCommands::Attach { agent, .. }
                 | ConversationSandboxCommands::Detach { agent, .. }
+                | ConversationSandboxCommands::Status { agent, .. }
                 | ConversationSandboxCommands::Run { agent, .. } => Some(agent.as_str()),
             },
             ConversationCommands::CompleteRebuildUpdate { .. } => None,
@@ -3218,12 +3283,40 @@ mod create_tests {
                         provider: super::SandboxProviderArg::Docker,
                         external_id,
                         default_workdir: Some(default_workdir),
+                        json: false,
                     },
                 }
             } if agent == "agent"
                 && conversation == "conv"
                 && external_id == "harbor-task"
                 && default_workdir == "/task"
+        ));
+    }
+
+    #[test]
+    fn conversation_sandbox_status_json_command_parses() {
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from([
+            "exo",
+            "conversation",
+            "sandbox",
+            "status",
+            "agent",
+            "conv",
+            "--json",
+        ])
+        .expect("conversation sandbox status parses");
+        assert!(matches!(
+            cli.command,
+            super::Commands::Conversation {
+                command: super::ConversationCommands::Sandbox {
+                    command: super::ConversationSandboxCommands::Status {
+                        agent,
+                        conversation,
+                        json: true,
+                    },
+                }
+            } if agent == "agent" && conversation == "conv"
         ));
     }
 
