@@ -41,12 +41,12 @@ use executor::{
     RlmHarness, RunInSandboxRequest, SANDBOX_MAIN_MOUNT_DIR, SandboxAttachment,
     SandboxBackendRegistration, SandboxProcess, SandboxProvider, SandboxProviderConfig,
     SandboxResourceShape, SandboxScope, Secret, SecretBackendChoice, SpritesBackendSpec,
-    ToolRequest, ToolRuntime, TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, VercelBackendSpec,
-    default_aws_agentcore_image, default_daytona_image, default_docker_image, default_e2b_template,
-    default_firecracker_image, default_vercel_image, effective_sandbox_scope,
-    finalize_rebuild_update_file, format_user_facing_error, load_agent_config, record_host_event,
-    send_conversation_wakeup, serve_exoharness_http_listener_with_options,
-    unregistered_model_message,
+    ToolRequest, ToolRuntime, TypeScriptHarness, TypeScriptHarnessConfig, UnregisteredModelError,
+    Uuid7, VercelBackendSpec, default_aws_agentcore_image, default_daytona_image,
+    default_docker_image, default_e2b_template, default_firecracker_image, default_vercel_image,
+    effective_sandbox_scope, finalize_rebuild_update_file, format_user_facing_error,
+    load_agent_config, record_host_event, send_conversation_wakeup,
+    serve_exoharness_http_listener_with_options,
 };
 use serde::Deserialize;
 use tabwriter::TabWriter;
@@ -68,12 +68,10 @@ use tui::run_chat_repl;
 const SANDBOX_CLI_AGENT_SLUG: &str = "__exo_sandbox_cli";
 
 pub(crate) fn format_repl_failure(error: &anyhow::Error, prefix: &str) -> String {
-    let formatted = format_user_facing_error(error);
-    if formatted.starts_with("model `") {
-        formatted
-    } else {
-        format!("{prefix}: {formatted}")
+    if error.downcast_ref::<UnregisteredModelError>().is_some() {
+        return format_user_facing_error(error);
     }
+    format!("{prefix}: {}", format_user_facing_error(error))
 }
 
 #[derive(Debug, Parser)]
@@ -3453,12 +3451,12 @@ fn pick_repl_model(registered: &[String], requested: Option<String>) -> Result<S
         if registered.iter().any(|name| name == &requested) {
             return Ok(requested);
         }
-        bail!("{}", unregistered_model_message(&requested));
+        return Err(anyhow::Error::new(UnregisteredModelError::new(requested)));
     }
     registered
         .first()
         .cloned()
-        .ok_or_else(|| anyhow!("{}", unregistered_model_message("gpt-5.6-terra")))
+        .ok_or_else(|| anyhow::Error::new(UnregisteredModelError::new("gpt-5.6-terra")))
 }
 
 async fn find_secret_id(exoharness: &dyn ExoHarness, name: &str) -> Result<Option<Uuid7>> {
