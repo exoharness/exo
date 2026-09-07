@@ -4074,7 +4074,12 @@ fn launch_snapshot_clone(
     fs::create_dir_all(&snapshot)?;
     let template = snapshot_template_dir(config, template_key)?;
     replace_hard_link(&template.join("state"), &snapshot.join("state"))?;
-    replace_hard_link(&template.join("memory"), &snapshot.join("memory"))?;
+    let memory = snapshot.join("memory");
+    if memory.try_exists()? {
+        fs::remove_file(&memory)?;
+    }
+    copy_sparse_reflink(&template.join("memory"), &memory)?;
+    chown(&memory, Some(host_uid), Some(host_uid))?;
     for path in [snapshot.join("state"), snapshot.join("memory")] {
         fs::set_permissions(path, Permissions::from_mode(0o444))?;
     }
