@@ -3912,11 +3912,30 @@ fn capture_snapshot_template(
     let snapshot_path = format!("/{output_name}/state");
     let memory_path = format!("/{output_name}/memory");
     let paused_result = (|| {
-        if source.snapshot_template.is_some() {
-            let memory = output.join("memory");
-            copy_sparse_reflink(&root.join("snapshot/memory"), &memory)?;
+        if let Some(base) = &source.snapshot_template {
+            let memory = temporary.join("memory-seed");
+            copy_sparse_reflink(
+                &snapshot_template_dir(config, &base.key)?.join("memory"),
+                &memory,
+            )?;
             chown(&memory, Some(uid), Some(uid))?;
             fs::set_permissions(&memory, Permissions::from_mode(0o600))?;
+            let output_dir = rustix::fs::open(
+                &output,
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::DIRECTORY
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )?;
+            rustix::fs::linkat(
+                rustix::fs::CWD,
+                &memory,
+                &output_dir,
+                "memory",
+                rustix::fs::AtFlags::empty(),
+            )?;
+            fs::remove_file(&memory)?;
         }
         // A fresh VM's sparse snapshot is complete on its own. Restored VMs
         // apply their resident pages over a private reflink of the base memory.
