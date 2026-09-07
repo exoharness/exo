@@ -111,7 +111,7 @@ format name includes a version when its wire representation can evolve.
 `ManagedSandboxHandle::snapshot` (Docker):
 
 1. `ensure_warm_sandbox_ready` — make sure the container exists and is the
-   one in the warm cache for this `SandboxKey`.
+   one in the warm cache for this sandbox ID.
 2. `docker commit -p <container> exo-snap-<uuid>` — pause the container
    during commit for a consistent filesystem capture, then create a new
    image from its layers.
@@ -129,7 +129,7 @@ format name includes a version when its wire representation can evolve.
    `Loaded image: <ref>`).
 3. Build a fresh `SandboxRequest` with `spec.image` swapped for the loaded
    reference. Mounts, network policy, default workdir, lifecycle, and
-   `SandboxKey` are preserved from the original request.
+   sandbox ID and optional scope are preserved from the original request.
 4. Evict any pre-existing warm container for this key (we want a fresh
    container booted from the restored image, not a reuse of whatever was
    running before).

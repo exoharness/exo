@@ -424,8 +424,8 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
         reject_unsupported_spec(&request.spec)?;
         match self.resolve_mode(&request).await {
             SmolvmExecutionMode::Warm => {
-                let machine = machine_name(request.key.sandbox_id());
-                self.ensure_machine_started(&machine, &request.spec, request.key.sandbox_id())
+                let machine = machine_name(request.sandbox_id.as_str());
+                self.ensure_machine_started(&machine, &request.spec, request.sandbox_id.as_str())
                     .await?;
                 self.reap_idle_machines(&request, &machine).await;
                 if self.labels_supported().await {
@@ -440,7 +440,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             }
             // `Auto` is resolved by `resolve_mode`, so it never reaches here.
             _ => Ok(Arc::new(SmolvmOneShotHandle {
-                id: format!("smolvm-oneshot:{}", request.key.sandbox_id()),
+                id: format!("smolvm-oneshot:{}", request.sandbox_id.as_str()),
                 binary: self.binary.clone(),
                 boot_binary: self.boot_binary().await.clone(),
                 request,
@@ -485,7 +485,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             );
         }
 
-        let machine = machine_name(request.key.sandbox_id());
+        let machine = machine_name(request.sandbox_id.as_str());
         // Unconditional: delete already tolerates "not found".
         self.delete_machine_if_present(&machine).await?;
 
@@ -498,7 +498,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             .arg("--from")
             .arg(&manifest.pack_path);
         // A restored machine is ours too, or reaping would never see it.
-        self.stamp_labels(&mut create, request.key.sandbox_id())
+        self.stamp_labels(&mut create, request.sandbox_id.as_str())
             .await;
         configure_spec_args(&mut create, &request.spec);
         run_checked(create, "smolvm machine create --from").await?;
@@ -938,7 +938,7 @@ async fn run_checked(mut process: Command, what: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SandboxKey;
+    use crate::SandboxScope;
     use crate::sandbox::SandboxLifecycleConfig;
 
     /// A configured boot binary is used as given. The point is what does *not*
@@ -1018,10 +1018,10 @@ mod tests {
 
     fn test_request(idle_ttl: Option<Duration>) -> SandboxRequest {
         SandboxRequest {
-            key: SandboxKey::AgentSandbox {
+            sandbox_id: "s".into(),
+            scope: Some(SandboxScope::Agent {
                 agent_id: "a".into(),
-                sandbox_id: "s".into(),
-            },
+            }),
             spec: SandboxSpec {
                 image: "alpine".into(),
                 resources: Default::default(),
@@ -1139,24 +1139,19 @@ mod tests {
 
     #[test]
     fn machine_name_uses_sandbox_id_without_owner_scope() {
-        let a = SandboxKey::AgentSandbox {
-            agent_id: "agent-1".into(),
-            sandbox_id: "sandbox-1".into(),
-        };
-        let b = SandboxKey::ConversationSandbox {
-            thread_id: "agent-1".into(),
-            sandbox_id: "sandbox-1".into(),
-        };
-        assert_eq!(machine_name(a.sandbox_id()), machine_name(a.sandbox_id()));
-        assert_eq!(machine_name(a.sandbox_id()), machine_name(b.sandbox_id()));
-        assert_ne!(machine_name(a.sandbox_id()), machine_name("sandbox-2"));
-        assert!(machine_name(a.sandbox_id()).starts_with("exo-"));
+        let mut request = test_request(None);
+        let name = machine_name(&request.sandbox_id);
+        request.scope = Some(SandboxScope::Conversation {
+            thread_id: "thread".into(),
+        });
+        assert_eq!(name, machine_name(&request.sandbox_id));
+        request.scope = None;
+        assert_eq!(name, machine_name(&request.sandbox_id));
+        request.sandbox_id = "sandbox-2".into();
+        assert_ne!(name, machine_name(&request.sandbox_id));
+        assert!(name.starts_with("exo-"));
         // These go on the CLI and into paths: keep them boring.
-        assert!(
-            machine_name(a.sandbox_id())
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-')
-        );
+        assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
     }
 
     #[test]

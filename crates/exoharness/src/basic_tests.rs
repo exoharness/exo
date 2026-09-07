@@ -27,9 +27,9 @@ use crate::{
     ForkConversationRequest, ManagedSandboxBackend, ManagedSandboxHandle, NewAgentRequest,
     NewConversationRequest, PutSecretRequest, RestoreSandboxRequest, RunInSandboxRequest,
     SandboxAttachment, SandboxBackendRegistration, SandboxCommand, SandboxCommandOutput,
-    SandboxKey, SandboxLifecycleConfig, SandboxNetworkPolicy, SandboxProcessEvent,
-    SandboxProcessEventQuery, SandboxProcessParts, SandboxProcessStatus, SandboxProcessStdin,
-    SandboxProvider, SandboxProviderConfig, SandboxRequest, SandboxSpec, Secret, SnapshotFormat,
+    SandboxLifecycleConfig, SandboxNetworkPolicy, SandboxProcessEvent, SandboxProcessEventQuery,
+    SandboxProcessParts, SandboxProcessStatus, SandboxProcessStdin, SandboxProvider,
+    SandboxProviderConfig, SandboxRequest, SandboxScope, SandboxSpec, Secret, SnapshotFormat,
     SnapshotPayload, StartSandboxProcessRequest, StartSandboxRequest, Uuid7,
     WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
@@ -669,10 +669,10 @@ async fn local_process_contract_handle(
         Arc::new(crate::LocalProcessSandboxBackend::new());
     backend
         .acquire(SandboxRequest {
-            key: SandboxKey::ConversationSandbox {
+            sandbox_id: sandbox_id.to_string(),
+            scope: Some(SandboxScope::Conversation {
                 thread_id: Uuid7::now().to_string(),
-                sandbox_id: sandbox_id.to_string(),
-            },
+            }),
             spec: SandboxSpec {
                 image: "local-process".to_string(),
                 resources: Default::default(),
@@ -870,10 +870,10 @@ fn provider_contract_request(
     default_workdir: &str,
 ) -> SandboxRequest {
     SandboxRequest {
-        key: SandboxKey::ConversationSandbox {
+        sandbox_id: format!("{provider}-{contract}-contract"),
+        scope: Some(SandboxScope::Conversation {
             thread_id: Uuid7::now().to_string(),
-            sandbox_id: format!("{provider}-{contract}-contract"),
-        },
+        }),
         spec: SandboxSpec {
             image,
             resources: Default::default(),

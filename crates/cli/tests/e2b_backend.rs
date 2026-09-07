@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use exoharness::{
-    E2bConfig, E2bSandboxBackend, ManagedSandboxBackend, SandboxCommand, SandboxKey,
-    SandboxLifecycleConfig, SandboxMount, SandboxMountAccess, SandboxNetworkPolicy, SandboxRequest,
+    E2bConfig, E2bSandboxBackend, ManagedSandboxBackend, SandboxCommand, SandboxLifecycleConfig,
+    SandboxMount, SandboxMountAccess, SandboxNetworkPolicy, SandboxRequest, SandboxScope,
     SandboxSpec, SnapshotFormat, SnapshotPayload,
 };
 use serde_json::{Value, json};
@@ -16,10 +16,10 @@ use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
 fn make_request(thread_id: &str, sandbox_id: &str) -> SandboxRequest {
     SandboxRequest {
-        key: SandboxKey::ConversationSandbox {
+        sandbox_id: sandbox_id.into(),
+        scope: Some(SandboxScope::Conversation {
             thread_id: thread_id.into(),
-            sandbox_id: sandbox_id.into(),
-        },
+        }),
         spec: SandboxSpec {
             image: "base".into(),
             resources: Default::default(),

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use exoharness::{
     E2bConfig, E2bSandboxBackend, ManagedSandboxBackend, ManagedSandboxHandle, SandboxCommand,
-    SandboxKey, SandboxLifecycleConfig, SandboxNetworkPolicy, SandboxRequest, SandboxSpec,
+    SandboxLifecycleConfig, SandboxNetworkPolicy, SandboxRequest, SandboxScope, SandboxSpec,
     SpritesConfig, SpritesSandboxBackend,
 };
 use futures::io::AsyncReadExt;
@@ -35,10 +35,10 @@ fn live_provider_secret(provider: &str, secret_name: &str) -> Option<String> {
 
 fn make_e2b_request(thread_id: &str, sandbox_id: &str) -> SandboxRequest {
     SandboxRequest {
-        key: SandboxKey::ConversationSandbox {
+        sandbox_id: sandbox_id.into(),
+        scope: Some(SandboxScope::Conversation {
             thread_id: thread_id.into(),
-            sandbox_id: sandbox_id.into(),
-        },
+        }),
         spec: SandboxSpec {
             image: e2b_template_id(),
             resources: Default::default(),
@@ -85,10 +85,10 @@ fn sprites_config_from_env() -> Option<SpritesConfig> {
 
 fn make_sprites_request(thread_id: &str, sandbox_id: &str) -> SandboxRequest {
     SandboxRequest {
-        key: SandboxKey::ConversationSandbox {
+        sandbox_id: sandbox_id.into(),
+        scope: Some(SandboxScope::Conversation {
             thread_id: thread_id.into(),
-            sandbox_id: sandbox_id.into(),
-        },
+        }),
         spec: SandboxSpec {
             image: "default".into(),
             resources: Default::default(),

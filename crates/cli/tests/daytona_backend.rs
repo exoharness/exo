@@ -8,8 +8,8 @@ use std::collections::HashMap;
 
 use bytes::Bytes;
 use exoharness::{
-    DaytonaConfig, DaytonaSandboxBackend, ManagedSandboxBackend, SandboxKey,
-    SandboxLifecycleConfig, SandboxMount, SandboxMountAccess, SandboxNetworkPolicy, SandboxRequest,
+    DaytonaConfig, DaytonaSandboxBackend, ManagedSandboxBackend, SandboxLifecycleConfig,
+    SandboxMount, SandboxMountAccess, SandboxNetworkPolicy, SandboxRequest, SandboxScope,
     SandboxSpec, SnapshotFormat, SnapshotPayload,
 };
 use futures::io::{AsyncReadExt, AsyncWriteExt};
@@ -25,10 +25,10 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 /// format matches what the find-by-label query expects to see.
 fn make_request(thread_id: &str, sandbox_id: &str) -> SandboxRequest {
     SandboxRequest {
-        key: SandboxKey::ConversationSandbox {
+        sandbox_id: sandbox_id.into(),
+        scope: Some(SandboxScope::Conversation {
             thread_id: thread_id.into(),
-            sandbox_id: sandbox_id.into(),
-        },
+        }),
         spec: SandboxSpec {
             image: "docker.io/library/ubuntu:24.04".into(),
             resources: Default::default(),
@@ -120,7 +120,7 @@ async fn acquire_creates_when_no_warm_match() {
         .expect("POST /sandbox (create) should have been called");
     let body: Value = serde_json::from_slice(&create.body).expect("body is JSON");
 
-    // Labels carry the SandboxKey + spec hash; their absence would break
+    // Labels carry the sandbox ID + spec hash; their absence would break
     // cross-process recovery by label.
     let labels = body
         .get("labels")

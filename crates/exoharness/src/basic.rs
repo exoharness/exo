@@ -21,8 +21,8 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use crate::sandbox::{
     BoxSandboxTcpStream, CliContainerSandboxBackend, LocalProcessSandboxBackend,
     ManagedSandboxBackend, ManagedSandboxHandle, SANDBOX_MAIN_MOUNT_DIR, SandboxCommand,
-    SandboxKey, SandboxLifecycleConfig, SandboxMount, SandboxMountAccess, SandboxNetworkPolicy,
-    SandboxRequest, SandboxSpec, SnapshotFormat, SnapshotPayload, sandbox_spec_hash,
+    SandboxLifecycleConfig, SandboxMount, SandboxMountAccess, SandboxNetworkPolicy, SandboxRequest,
+    SandboxScope, SandboxSpec, SnapshotFormat, SnapshotPayload, sandbox_spec_hash,
 };
 #[cfg(feature = "apple-keychain")]
 use crate::secrets::AppleKeychainSecretKeyProvider;
@@ -3320,7 +3320,7 @@ async fn start_sandbox_side_effect(
     //   - Same provider: stop-then-boot. The backend replaces the warm
     //     container for this key itself during restore, and stopping the old
     //     handle after the new one exists would tear down the new container's
-    //     warm-cache entry (both handles share the same SandboxKey).
+    //     warm-cache entry (both handles share the same sandbox ID).
     let sandbox_handle = if cross_provider {
         let sandbox_handle = backend
             .acquire_from_snapshot(sandbox_request(owner, &request.id, &sandbox, None), payload)
@@ -3645,7 +3645,14 @@ fn sandbox_provider_state_key(
     sandbox: &StoredSandbox,
 ) -> String {
     let request = sandbox_request(owner, sandbox_id, sandbox, None);
-    format!("{}\n{}", request.key, sandbox_spec_hash(&request.spec))
+    let owner_key = match owner {
+        SandboxOwner::Agent(agent_id) => format!("agent:{agent_id}"),
+        SandboxOwner::Conversation(thread_id) => format!("thread:{thread_id}"),
+    };
+    format!(
+        "{owner_key}:{sandbox_id}\n{}",
+        sandbox_spec_hash(&request.spec)
+    )
 }
 
 async fn load_sandbox_provider_state(
@@ -4415,16 +4422,15 @@ fn sandbox_request(
     provider_state: Option<Value>,
 ) -> SandboxRequest {
     SandboxRequest {
-        key: match owner {
-            SandboxOwner::Agent(agent_id) => SandboxKey::AgentSandbox {
+        sandbox_id: sandbox_id.to_string(),
+        scope: Some(match owner {
+            SandboxOwner::Agent(agent_id) => SandboxScope::Agent {
                 agent_id: agent_id.to_string(),
-                sandbox_id: sandbox_id.to_string(),
             },
-            SandboxOwner::Conversation(thread_id) => SandboxKey::ConversationSandbox {
+            SandboxOwner::Conversation(thread_id) => SandboxScope::Conversation {
                 thread_id: thread_id.to_string(),
-                sandbox_id: sandbox_id.to_string(),
             },
-        },
+        }),
         spec: SandboxSpec {
             image: sandbox.image.clone(),
             resources: sandbox.resources,

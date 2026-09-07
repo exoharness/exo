@@ -869,11 +869,11 @@ impl FirecrackerSandboxBackend {
         captured_lease: Option<File>,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
         let spec_hash = sandbox_spec_hash(&request.spec);
-        let machine_id = machine_id(request.key.sandbox_id(), &spec_hash);
+        let machine_id = machine_id(request.sandbox_id.as_str(), &spec_hash);
         let _lifecycle_guard = self
             .shared
             .lifecycle_locks
-            .lock_sandbox(request.key.sandbox_id())
+            .lock_sandbox(request.sandbox_id.as_str())
             .await;
         self.restore_snapshot_locked(
             request,
@@ -1008,14 +1008,14 @@ impl FirecrackerSandboxBackend {
         let one_shot = request.lifecycle.idle_ttl.is_none();
         let machine_id = if one_shot {
             let sequence = ONE_SHOT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            one_shot_machine_id(request.key.sandbox_id(), &spec_hash, sequence)
+            one_shot_machine_id(request.sandbox_id.as_str(), &spec_hash, sequence)
         } else {
-            machine_id(request.key.sandbox_id(), &spec_hash)
+            machine_id(request.sandbox_id.as_str(), &spec_hash)
         };
         let _lifecycle_guard = self
             .shared
             .lifecycle_locks
-            .lock_sandbox(request.key.sandbox_id())
+            .lock_sandbox(request.sandbox_id.as_str())
             .await;
         self.acquire_resolved_locked(request, spec_hash, machine_id, one_shot, None)
             .await
@@ -1032,8 +1032,8 @@ impl FirecrackerSandboxBackend {
         one_shot: bool,
         capacity_reservation: Option<MachineCapacityReservation>,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        let stable_machine_id = machine_id(request.key.sandbox_id(), &spec_hash);
-        let machine_key_prefix = format!("fc-{}-", stable_id(request.key.sandbox_id()));
+        let stable_machine_id = machine_id(request.sandbox_id.as_str(), &spec_hash);
+        let machine_key_prefix = format!("fc-{}-", stable_id(request.sandbox_id.as_str()));
 
         if let Some(state) = request
             .provider_state
@@ -1053,9 +1053,9 @@ impl FirecrackerSandboxBackend {
         if !one_shot {
             let replaced = {
                 let mut machines = self.shared.warm_machines.lock().await;
-                match machines.get(request.key.sandbox_id()) {
+                match machines.get(request.sandbox_id.as_str()) {
                     Some(entry) if entry.spec_hash == spec_hash => None,
-                    Some(_) => machines.remove(request.key.sandbox_id()),
+                    Some(_) => machines.remove(request.sandbox_id.as_str()),
                     None => None,
                 }
             };
@@ -1079,7 +1079,7 @@ impl FirecrackerSandboxBackend {
         if !one_shot {
             self.shared.touch_machine_lease(&target_machine_id).await?;
             self.shared.warm_machines.lock().await.insert(
-                request.key.sandbox_id().to_string(),
+                request.sandbox_id.clone(),
                 WarmMachineEntry {
                     machine_id: target_machine_id.clone(),
                     spec_hash: spec_hash.clone(),
@@ -1145,7 +1145,7 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
             .transpose()?
             .map(|state| state.machine_id);
         if let Some(machine_id) = persisted_machine_id.as_deref() {
-            let machine_key_prefix = format!("fc-{}-", stable_id(request.key.sandbox_id()));
+            let machine_key_prefix = format!("fc-{}-", stable_id(request.sandbox_id.as_str()));
             if !valid_machine_id(machine_id) || !machine_id.starts_with(&machine_key_prefix) {
                 bail!("Firecracker provider state does not match the terminated sandbox key");
             }
@@ -1153,19 +1153,19 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
         let _lifecycle_guard = self
             .shared
             .lifecycle_locks
-            .lock_sandbox(request.key.sandbox_id())
+            .lock_sandbox(request.sandbox_id.as_str())
             .await;
         let machine_id = self
             .shared
             .warm_machines
             .lock()
             .await
-            .remove(request.key.sandbox_id())
+            .remove(request.sandbox_id.as_str())
             .map(|entry| entry.machine_id)
             .or(persisted_machine_id)
             .unwrap_or_else(|| {
                 let spec_hash = sandbox_spec_hash(&request.spec);
-                machine_id(request.key.sandbox_id(), &spec_hash)
+                machine_id(request.sandbox_id.as_str(), &spec_hash)
             });
         self.shared.cleanup_machine(&machine_id, true).await
     }
@@ -1177,22 +1177,22 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
         let mut source = prepare_request(source)?;
         let target = self.resolve_request(target).await?;
-        if source.key.sandbox_id() == target.key.sandbox_id() {
+        if source.sandbox_id == target.sandbox_id {
             bail!("Firecracker fork source and target must be different sandboxes")
         }
         let target_spec_hash = sandbox_spec_hash(&target.spec);
-        let target_machine_id = machine_id(target.key.sandbox_id(), &target_spec_hash);
+        let target_machine_id = machine_id(&target.sandbox_id, &target_spec_hash);
         let (_first_lifecycle_guard, _second_lifecycle_guard) = self
             .shared
             .lifecycle_locks
-            .lock_sandbox_pair(source.key.sandbox_id(), target.key.sandbox_id())
+            .lock_sandbox_pair(&source.sandbox_id, &target.sandbox_id)
             .await;
         let source_entry = self
             .shared
             .warm_machines
             .lock()
             .await
-            .get(source.key.sandbox_id())
+            .get(&source.sandbox_id)
             .cloned()
             .context("Firecracker fork source is not active")?;
         let source_record = self
@@ -1311,7 +1311,7 @@ impl ManagedSandboxHandle for FirecrackerSandboxHandle {
             touch_machine(
                 &self.shared,
                 &self.shared.warm_machines,
-                self.request.key.sandbox_id(),
+                self.request.sandbox_id.as_str(),
                 &self.machine.record.machine_id,
             )
             .await?;
@@ -1335,7 +1335,7 @@ impl ManagedSandboxHandle for FirecrackerSandboxHandle {
             touch_machine(
                 &self.shared,
                 &self.shared.warm_machines,
-                self.request.key.sandbox_id(),
+                self.request.sandbox_id.as_str(),
                 &self.machine.record.machine_id,
             )
             .await?;
@@ -1363,7 +1363,7 @@ impl ManagedSandboxHandle for FirecrackerSandboxHandle {
             touch_machine(
                 &self.shared,
                 &self.shared.warm_machines,
-                self.request.key.sandbox_id(),
+                self.request.sandbox_id.as_str(),
                 &self.machine.record.machine_id,
             )
             .await?;
@@ -1691,7 +1691,7 @@ impl Shared {
                 .map(|file_system| {
                     stable_id(&format!(
                         "{}\n{}",
-                        request.key.sandbox_id(),
+                        request.sandbox_id.as_str(),
                         file_system.name
                     ))
                 })

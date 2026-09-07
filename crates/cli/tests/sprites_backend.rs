@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use exoharness::{
-    ManagedSandboxBackend, SandboxKey, SandboxLifecycleConfig, SandboxMount, SandboxMountAccess,
-    SandboxNetworkPolicy, SandboxRequest, SandboxSpec, SnapshotFormat, SnapshotPayload,
-    SpritesConfig, SpritesSandboxBackend,
+    ManagedSandboxBackend, SandboxLifecycleConfig, SandboxMount, SandboxMountAccess,
+    SandboxNetworkPolicy, SandboxRequest, SandboxScope, SandboxSpec, SnapshotFormat,
+    SnapshotPayload, SpritesConfig, SpritesSandboxBackend,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path, path_regex};
@@ -17,10 +17,10 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn make_request(thread_id: &str, sandbox_id: &str) -> SandboxRequest {
     SandboxRequest {
-        key: SandboxKey::ConversationSandbox {
+        sandbox_id: sandbox_id.into(),
+        scope: Some(SandboxScope::Conversation {
             thread_id: thread_id.into(),
-            sandbox_id: sandbox_id.into(),
-        },
+        }),
         spec: SandboxSpec {
             image: "default".into(),
             resources: Default::default(),
@@ -44,7 +44,7 @@ fn sandbox_spec_hash(spec: &SandboxSpec) -> String {
 
 fn expected_sprite_name(request: &SandboxRequest) -> String {
     let mut hasher = DefaultHasher::new();
-    request.key.sandbox_id().hash(&mut hasher);
+    request.sandbox_id.as_str().hash(&mut hasher);
     sandbox_spec_hash(&request.spec).hash(&mut hasher);
     format!("exo-{:016x}", hasher.finish())
 }
