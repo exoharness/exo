@@ -837,7 +837,7 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
         {
             cleanup_named_container(&self.container_bin, self.cli, &entry.name).await?;
         }
-        for container in find_sandbox_containers_for_key(
+        for container in find_sandbox_containers_for_id(
             &self.container_bin,
             self.cli,
             request.sandbox_id.as_str(),
@@ -1173,7 +1173,7 @@ fn resolve_local_workdir(spec: &SandboxSpec, cwd: &str) -> Option<PathBuf> {
 }
 
 fn materialize_durable_file_systems(
-    key: &str,
+    sandbox_id: &str,
     file_systems: &[DurableFileSystem],
     configured_root: Option<&Path>,
 ) -> Result<Vec<SandboxMount>> {
@@ -1184,7 +1184,10 @@ fn materialize_durable_file_systems(
     file_systems
         .iter()
         .map(|file_system| {
-            let host_path = root.join(stable_fnv1a_hex(&format!("{}\n{}", key, file_system.name)));
+            let host_path = root.join(stable_fnv1a_hex(&format!(
+                "{}\n{}",
+                sandbox_id, file_system.name
+            )));
             std::fs::create_dir_all(&host_path).with_context(|| {
                 format!(
                     "creating durable file system {} at {}",
@@ -1307,10 +1310,10 @@ pub(crate) fn stable_fnv1a_hex(input: &str) -> String {
 
 async fn touch_warm_sandbox(
     warm_sandboxes: &Arc<Mutex<HashMap<SandboxId, WarmSandboxEntry>>>,
-    key: &str,
+    sandbox_id: &str,
 ) {
     let mut warm_sandboxes = warm_sandboxes.lock().await;
-    if let Some(entry) = warm_sandboxes.get_mut(key) {
+    if let Some(entry) = warm_sandboxes.get_mut(sandbox_id) {
         entry.last_used_at = Instant::now();
     }
 }
@@ -1398,12 +1401,12 @@ async fn find_running_warm_sandbox(
     }
 }
 
-/// Every container labelled for `key`, running or not, so termination also
+/// Every container labelled for `sandbox_id`, running or not, so termination also
 /// clears records left behind by an earlier process.
-async fn find_sandbox_containers_for_key(
+async fn find_sandbox_containers_for_id(
     container_bin: &Path,
     cli: ContainerCliFlavor,
-    key: &str,
+    sandbox_id: &str,
 ) -> Result<Vec<String>> {
     match cli {
         ContainerCliFlavor::AppleContainer => {
@@ -1427,17 +1430,17 @@ async fn find_sandbox_containers_for_key(
                         .configuration
                         .labels
                         .get(WARM_SANDBOX_KEY_LABEL)
-                        .is_some_and(|value| value == &key.to_string())
+                        .is_some_and(|value| value == &sandbox_id.to_string())
                 })
                 .map(|container| container.configuration.id)
                 .collect())
         }
         ContainerCliFlavor::Docker => {
-            let key_filter = format!("label={WARM_SANDBOX_KEY_LABEL}={key}");
+            let id_filter = format!("label={WARM_SANDBOX_KEY_LABEL}={sandbox_id}");
             let output = run_container_admin_command(
                 container_bin,
                 WARM_SANDBOX_CLEANUP_TIMEOUT,
-                ["ps", "-aq", "--no-trunc", "--filter", key_filter.as_str()],
+                ["ps", "-aq", "--no-trunc", "--filter", id_filter.as_str()],
             )
             .await?;
             if !output.status.success() {
@@ -2184,9 +2187,9 @@ fn network_name_for_policy(policy: SandboxNetworkPolicy) -> Option<&'static str>
     matches!(policy, SandboxNetworkPolicy::Enabled).then_some(DEFAULT_ENABLED_NETWORK_NAME)
 }
 
-fn new_warm_container_name(key: &str) -> String {
+fn new_warm_container_name(sandbox_id: &str) -> String {
     let mut hasher = DefaultHasher::new();
-    key.hash(&mut hasher);
+    sandbox_id.hash(&mut hasher);
     let hash = hasher.finish();
     let generation = Uuid::new_v4().simple().to_string();
     format!("exo-{hash:016x}-{}", &generation[..8])
