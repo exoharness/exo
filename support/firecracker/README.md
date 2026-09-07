@@ -138,17 +138,19 @@ use forks, the guest kernel must additionally be 5.18 or newer with
 `CONFIG_HW_RANDOM_VIRTIO=y` lets the guest draw extra entropy from the
 attached virtio-rng device.
 
-Snapshot capture requires host swap to be disabled. With the Firecracker 1.16.1
-bundle above, Exo captures resident guest-memory pages into sparse snapshots
-instead of writing the entire configured RAM size. A restored VM's capture
-merges these pages into a private reflink of its immutable base, producing an
-independently restorable snapshot. Published templates remain read-only, and
-disk and memory are captured while the guest is paused.
+Exo enables dirty-page tracking and captures sparse memory snapshots instead
+of writing the entire configured RAM size. Each capture merges changes into a
+private reflink of the machine's latest captured memory, or its original restore
+template on the first capture. The result is independently restorable. Published
+templates remain read-only and shared by restored VMs; disk and memory are
+captured while the guest is paused.
 
-Each restored VM receives its own reflinked memory inode, owned by its jailer
-UID. Linux otherwise hides page residency from Firecracker for the root-owned
-template file, making subsequent sparse captures write all pages. Reflinks
-share disk extents, but separate inodes do not share the host's file page cache.
+The latest memory base is retained outside the writable jail, counted against
+the snapshot budget, and removed with the machine. An interrupted capture blocks
+further snapshots until that sandbox is restarted: Firecracker may already have
+cleared dirty bits, so repeating a diff against the previous base would be unsafe.
+Host swap must remain disabled, including when adopting a VM started without
+dirty-page tracking by an older backend.
 
 Install matching official Firecracker and jailer release binaries under
 `/usr/local/bin`, and install the guest kernel at

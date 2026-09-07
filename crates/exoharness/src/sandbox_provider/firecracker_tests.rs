@@ -720,4 +720,13 @@ fn snapshot_budget_counts_retained_logical_bytes_and_pending_capture() {
     assert!(enforce_snapshot_budget(&config, MAX_SNAPSHOT_BYTES - 1024).is_ok());
     assert!(enforce_snapshot_budget(&config, MAX_SNAPSHOT_BYTES - 1023).is_err());
     assert!(enforce_snapshot_budget(&config, u64::MAX).is_err());
+
+    let machine = jail_dir(&config, "fc-0000000000000000-00000000");
+    fs::create_dir_all(&machine).unwrap();
+    fs::hard_link(snapshot.join("memory"), machine.join("snapshot-memory")).unwrap();
+    assert!(enforce_snapshot_budget(&config, MAX_SNAPSHOT_BYTES - 2048).is_ok());
+    assert!(enforce_snapshot_budget(&config, MAX_SNAPSHOT_BYTES - 2047).is_err());
+    fs::remove_dir_all(snapshot).unwrap();
+    assert!(enforce_snapshot_budget(&config, MAX_SNAPSHOT_BYTES - 1024).is_ok());
+    assert!(enforce_snapshot_budget(&config, MAX_SNAPSHOT_BYTES - 1023).is_err());
 }
