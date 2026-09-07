@@ -25,7 +25,10 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 /// format matches what the find-by-label query expects to see.
 fn make_request(thread_id: &str, sandbox_id: &str) -> SandboxRequest {
     SandboxRequest {
-        key: sandbox_id.into(),
+        key: SandboxKey::ConversationSandbox {
+            thread_id: thread_id.into(),
+            sandbox_id: sandbox_id.into(),
+        },
         spec: SandboxSpec {
             image: "docker.io/library/ubuntu:24.04".into(),
             resources: Default::default(),

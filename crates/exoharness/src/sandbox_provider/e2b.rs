@@ -143,7 +143,10 @@ impl E2bSandboxBackend {
         template_id: &str,
     ) -> Result<E2bSandboxCreated> {
         let mut metadata = HashMap::new();
-        metadata.insert(WARM_SANDBOX_KEY_LABEL.to_string(), request.key.to_string());
+        metadata.insert(
+            WARM_SANDBOX_KEY_LABEL.to_string(),
+            request.key.sandbox_id().to_string(),
+        );
         metadata.insert(
             WARM_SANDBOX_SPEC_HASH_LABEL.to_string(),
             spec_hash.to_string(),
@@ -230,7 +233,7 @@ impl ManagedSandboxBackend for E2bSandboxBackend {
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
         reject_host_mounts(&request)?;
         let spec_hash = sandbox_spec_hash(&request.spec);
-        let key_label = request.key.to_string();
+        let key_label = request.key.sandbox_id().to_string();
         let template_id = resolve_template_id(&request.spec, &self.template_id);
 
         if let Some(existing) = self
@@ -246,7 +249,7 @@ impl ManagedSandboxBackend for E2bSandboxBackend {
                 envd_access_token = connected.envd_access_token;
             }
             return Ok(Arc::new(E2bSandboxHandle {
-                id: format!("e2b:{}", request.key),
+                id: format!("e2b:{}", request.key.sandbox_id()),
                 sandbox_id: existing.sandbox_id,
                 envd_access_token,
                 request,
@@ -258,7 +261,7 @@ impl ManagedSandboxBackend for E2bSandboxBackend {
             .create_sandbox(&request, &spec_hash, &template_id)
             .await?;
         Ok(Arc::new(E2bSandboxHandle {
-            id: format!("e2b:{}", request.key),
+            id: format!("e2b:{}", request.key.sandbox_id()),
             sandbox_id: sandbox.sandbox_id,
             envd_access_token: sandbox.envd_access_token,
             request,
@@ -294,7 +297,7 @@ impl ManagedSandboxBackend for E2bSandboxBackend {
             .create_sandbox(&request, &spec_hash, &manifest.snapshot_id)
             .await?;
         Ok(Arc::new(E2bSandboxHandle {
-            id: format!("e2b-restored:{}", request.key),
+            id: format!("e2b-restored:{}", request.key.sandbox_id()),
             sandbox_id: sandbox.sandbox_id,
             envd_access_token: sandbox.envd_access_token,
             request,

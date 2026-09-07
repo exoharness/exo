@@ -441,7 +441,7 @@ fn normalize_agentcore_session_storage_mount_path(path: &str) -> Result<String> 
 }
 
 fn agentcore_runtime_session_id(request: &SandboxRequest, spec_hash: &str) -> String {
-    let input = format!("{}\n{spec_hash}", request.key);
+    let input = format!("{}\n{spec_hash}", request.key.sandbox_id());
     format!("exo-{}-session-0000000000", stable_fnv1a_hex(&input))
 }
 
@@ -511,8 +511,8 @@ struct AgentCoreExecResponse {
 mod tests {
     use super::*;
     use crate::{
-        DurableFileSystem, FileSystemMountMode, SandboxLifecycleConfig, SandboxNetworkPolicy,
-        SandboxSpec,
+        DurableFileSystem, FileSystemMountMode, SandboxKey, SandboxLifecycleConfig,
+        SandboxNetworkPolicy, SandboxSpec,
     };
 
     #[test]
@@ -554,7 +554,10 @@ mod tests {
 
     fn durable_request(mount_path: &str, mode: FileSystemMountMode) -> SandboxRequest {
         SandboxRequest {
-            key: "sandbox".to_string(),
+            key: SandboxKey::ConversationSandbox {
+                thread_id: "thread".to_string(),
+                sandbox_id: "sandbox".to_string(),
+            },
             spec: SandboxSpec {
                 image: "agentcore".to_string(),
                 resources: Default::default(),

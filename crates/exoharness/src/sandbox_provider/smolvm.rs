@@ -28,7 +28,7 @@ use tokio::sync::OnceCell;
 
 use crate::SandboxAttachment;
 use crate::sandbox::{
-    ManagedSandboxBackend, ManagedSandboxHandle, SandboxCommand, SandboxCommandOutput, SandboxKey,
+    ManagedSandboxBackend, ManagedSandboxHandle, SandboxCommand, SandboxCommandOutput,
     SandboxMountAccess, SandboxNetworkPolicy, SandboxRequest, SandboxSpec, SnapshotFormat,
     SnapshotPayload, WARM_SANDBOX_KEY_LABEL, WARM_SANDBOX_OWNER_PID_LABEL, owner_pid_is_alive,
     run_command, spawn_sandbox_process,
@@ -235,7 +235,7 @@ impl SmolvmSandboxBackend {
         &self,
         name: &str,
         spec: &SandboxSpec,
-        key: &SandboxKey,
+        key: &str,
     ) -> Result<()> {
         let mut create = Command::new(&self.binary);
         create.arg("machine").arg("create").arg("--name").arg(name);
@@ -308,7 +308,7 @@ impl SmolvmSandboxBackend {
 
     /// Record which sandbox a machine serves and which process owns it, under the
     /// same keys the Docker backend uses. A no-op without `--label`.
-    async fn stamp_labels(&self, command: &mut Command, key: &SandboxKey) {
+    async fn stamp_labels(&self, command: &mut Command, key: &str) {
         if !self.labels_supported().await {
             return;
         }
@@ -424,8 +424,8 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
         reject_unsupported_spec(&request.spec)?;
         match self.resolve_mode(&request).await {
             SmolvmExecutionMode::Warm => {
-                let machine = machine_name(&request.key);
-                self.ensure_machine_started(&machine, &request.spec, &request.key)
+                let machine = machine_name(request.key.sandbox_id());
+                self.ensure_machine_started(&machine, &request.spec, request.key.sandbox_id())
                     .await?;
                 self.reap_idle_machines(&request, &machine).await;
                 if self.labels_supported().await {
@@ -440,7 +440,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             }
             // `Auto` is resolved by `resolve_mode`, so it never reaches here.
             _ => Ok(Arc::new(SmolvmOneShotHandle {
-                id: format!("smolvm-oneshot:{}", request.key),
+                id: format!("smolvm-oneshot:{}", request.key.sandbox_id()),
                 binary: self.binary.clone(),
                 boot_binary: self.boot_binary().await.clone(),
                 request,
@@ -485,7 +485,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             );
         }
 
-        let machine = machine_name(&request.key);
+        let machine = machine_name(request.key.sandbox_id());
         // Unconditional: delete already tolerates "not found".
         self.delete_machine_if_present(&machine).await?;
 
@@ -498,7 +498,8 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             .arg("--from")
             .arg(&manifest.pack_path);
         // A restored machine is ours too, or reaping would never see it.
-        self.stamp_labels(&mut create, &request.key).await;
+        self.stamp_labels(&mut create, request.key.sandbox_id())
+            .await;
         configure_spec_args(&mut create, &request.spec);
         run_checked(create, "smolvm machine create --from").await?;
 
@@ -911,9 +912,9 @@ fn is_local_image_ref(image: &str) -> bool {
 
 /// Stable, filesystem-safe machine name for a sandbox key. FNV-1a rather than
 /// `DefaultHasher`, whose output is not stable across processes or releases.
-fn machine_name(key: &SandboxKey) -> String {
+fn machine_name(key: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in key.to_string().as_bytes() {
+    for byte in key.as_bytes() {
         hash ^= *byte as u64;
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
@@ -937,6 +938,7 @@ async fn run_checked(mut process: Command, what: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SandboxKey;
     use crate::sandbox::SandboxLifecycleConfig;
 
     /// A configured boot binary is used as given. The point is what does *not*
@@ -1016,7 +1018,10 @@ mod tests {
 
     fn test_request(idle_ttl: Option<Duration>) -> SandboxRequest {
         SandboxRequest {
-            key: "s".into(),
+            key: SandboxKey::AgentSandbox {
+                agent_id: "a".into(),
+                sandbox_id: "s".into(),
+            },
             spec: SandboxSpec {
                 image: "alpine".into(),
                 resources: Default::default(),
@@ -1133,15 +1138,22 @@ mod tests {
     }
 
     #[test]
-    fn machine_name_is_stable_and_key_specific() {
-        let a = "sandbox-1".into();
-        let b = "sandbox-2".into();
-        assert_eq!(machine_name(&a), machine_name(&a));
-        assert_ne!(machine_name(&a), machine_name(&b));
-        assert!(machine_name(&a).starts_with("exo-"));
+    fn machine_name_uses_sandbox_id_without_owner_scope() {
+        let a = SandboxKey::AgentSandbox {
+            agent_id: "agent-1".into(),
+            sandbox_id: "sandbox-1".into(),
+        };
+        let b = SandboxKey::ConversationSandbox {
+            thread_id: "agent-1".into(),
+            sandbox_id: "sandbox-1".into(),
+        };
+        assert_eq!(machine_name(a.sandbox_id()), machine_name(a.sandbox_id()));
+        assert_eq!(machine_name(a.sandbox_id()), machine_name(b.sandbox_id()));
+        assert_ne!(machine_name(a.sandbox_id()), machine_name("sandbox-2"));
+        assert!(machine_name(a.sandbox_id()).starts_with("exo-"));
         // These go on the CLI and into paths: keep them boring.
         assert!(
-            machine_name(&a)
+            machine_name(a.sandbox_id())
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-')
         );

@@ -103,7 +103,10 @@ impl VercelSandboxBackend {
         spec_hash: &str,
     ) -> Result<VercelSandboxSessionResponse> {
         let mut tags = HashMap::new();
-        tags.insert(WARM_SANDBOX_KEY_LABEL.to_string(), request.key.to_string());
+        tags.insert(
+            WARM_SANDBOX_KEY_LABEL.to_string(),
+            request.key.sandbox_id().to_string(),
+        );
         tags.insert(
             WARM_SANDBOX_SPEC_HASH_LABEL.to_string(),
             spec_hash.to_string(),
@@ -635,7 +638,7 @@ fn parse_log_stream(text: &str) -> Result<VercelCommandLogs> {
 }
 
 fn vercel_sandbox_name(request: &SandboxRequest, spec_hash: &str) -> String {
-    let key = format!("{}\n{spec_hash}", request.key);
+    let key = format!("{}\n{spec_hash}", request.key.sandbox_id());
     format!("exo-{}", stable_fnv1a_hex(&key))
 }
 

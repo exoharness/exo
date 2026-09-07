@@ -142,7 +142,10 @@ impl DaytonaSandboxBackend {
         snapshot_name: Option<&str>,
     ) -> Result<DaytonaSandbox> {
         let mut labels = HashMap::new();
-        labels.insert(WARM_SANDBOX_KEY_LABEL.to_string(), request.key.to_string());
+        labels.insert(
+            WARM_SANDBOX_KEY_LABEL.to_string(),
+            request.key.sandbox_id().to_string(),
+        );
         labels.insert(
             WARM_SANDBOX_SPEC_HASH_LABEL.to_string(),
             spec_hash.to_string(),
@@ -262,7 +265,7 @@ impl ManagedSandboxBackend for DaytonaSandboxBackend {
         // Reuse a matching sandbox if one exists (also how we recover across exo
         // restarts); Daytona keeps its filesystem across stop.
         let sandbox = match self
-            .find_sandbox_by_labels(&request.key.to_string(), &spec_hash)
+            .find_sandbox_by_labels(request.key.sandbox_id(), &spec_hash)
             .await?
         {
             // Replace a terminal/error sandbox; start only durably-stopped ones
@@ -278,7 +281,7 @@ impl ManagedSandboxBackend for DaytonaSandboxBackend {
 
         self.wait_until_started(&sandbox.id).await?;
         Ok(Arc::new(DaytonaSandboxHandle {
-            id: format!("daytona:{}", request.key),
+            id: format!("daytona:{}", request.key.sandbox_id()),
             sandbox_id: sandbox.id,
             request,
             backend: self.handle_backend(),
@@ -317,7 +320,7 @@ impl ManagedSandboxBackend for DaytonaSandboxBackend {
             .await?;
         self.wait_until_started(&sandbox.id).await?;
         Ok(Arc::new(DaytonaSandboxHandle {
-            id: format!("daytona:{}", request.key),
+            id: format!("daytona:{}", request.key.sandbox_id()),
             sandbox_id: sandbox.id,
             request,
             backend: self.handle_backend(),

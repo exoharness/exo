@@ -1,4 +1,5 @@
 use super::*;
+use crate::SandboxKey;
 use tokio::net::UnixListener;
 
 fn test_host_runtime() -> FirecrackerHostFingerprint {
@@ -113,9 +114,42 @@ fn resource_names_and_addresses_are_distinct() {
 fn validates_machine_ids() {
     assert!(valid_machine_id("fc-0123456789abcdef-01234567"));
     assert!(!valid_machine_id("../firecracker"));
-    let one_shot = one_shot_machine_id(&"sandbox".to_string(), "0123456789abcdef", u64::MAX);
+    let one_shot = one_shot_machine_id("sandbox", "0123456789abcdef", u64::MAX);
     assert!(valid_machine_id(&one_shot));
     assert_eq!(one_shot.len(), MAX_MACHINE_ID.len());
+}
+
+#[test]
+fn machine_identity_uses_sandbox_id_without_owner_scope() {
+    let agent = SandboxKey::AgentSandbox {
+        agent_id: "agent".to_string(),
+        sandbox_id: "sandbox".to_string(),
+    };
+    let conversation = SandboxKey::ConversationSandbox {
+        thread_id: "thread".to_string(),
+        sandbox_id: "sandbox".to_string(),
+    };
+    let standalone = SandboxKey::StandaloneSandbox {
+        sandbox_id: "sandbox".to_string(),
+    };
+    let spec_hash = "0123456789abcdef";
+    assert_ne!(agent, conversation);
+    assert_eq!(
+        machine_id(agent.sandbox_id(), spec_hash),
+        machine_id(conversation.sandbox_id(), spec_hash)
+    );
+    assert_eq!(
+        machine_id(agent.sandbox_id(), spec_hash),
+        machine_id(standalone.sandbox_id(), spec_hash)
+    );
+    assert_ne!(
+        machine_id(agent.sandbox_id(), spec_hash),
+        machine_id("another-sandbox", spec_hash)
+    );
+    assert_eq!(
+        sandbox_lifecycle_key(agent.sandbox_id()),
+        sandbox_lifecycle_key(conversation.sandbox_id())
+    );
 }
 
 #[tokio::test]
@@ -147,9 +181,12 @@ async fn lifecycle_locks_serialize_a_machine_family_but_not_other_machines() {
     .await
     .expect("the machine-family lock must be released with its guard");
 
-    let key = "sandbox".to_string();
-    let machine_id = machine_id(&key, "0123456789abcdef");
-    let sandbox_guard = locks.lock_sandbox(&key).await;
+    let key = SandboxKey::AgentSandbox {
+        agent_id: "agent".to_string(),
+        sandbox_id: "sandbox".to_string(),
+    };
+    let machine_id = machine_id(key.sandbox_id(), "0123456789abcdef");
+    let sandbox_guard = locks.lock_sandbox(key.sandbox_id()).await;
     assert!(
         tokio::time::timeout(Duration::from_millis(20), locks.lock_machine(&machine_id))
             .await
@@ -157,18 +194,29 @@ async fn lifecycle_locks_serialize_a_machine_family_but_not_other_machines() {
     );
     drop(sandbox_guard);
 
-    let other_key = "other".to_string();
-    let (first_pair_guard, second_pair_guard) = locks.lock_sandbox_pair(&key, &other_key).await;
+    let other_key = SandboxKey::AgentSandbox {
+        agent_id: "agent".to_string(),
+        sandbox_id: "other".to_string(),
+    };
+    let (first_pair_guard, second_pair_guard) = locks
+        .lock_sandbox_pair(key.sandbox_id(), other_key.sandbox_id())
+        .await;
     assert!(second_pair_guard.is_some());
     assert!(
-        tokio::time::timeout(Duration::from_millis(20), locks.lock_sandbox(&key))
-            .await
-            .is_err()
+        tokio::time::timeout(
+            Duration::from_millis(20),
+            locks.lock_sandbox(key.sandbox_id())
+        )
+        .await
+        .is_err()
     );
     assert!(
-        tokio::time::timeout(Duration::from_millis(20), locks.lock_sandbox(&other_key))
-            .await
-            .is_err()
+        tokio::time::timeout(
+            Duration::from_millis(20),
+            locks.lock_sandbox(other_key.sandbox_id())
+        )
+        .await
+        .is_err()
     );
     drop(first_pair_guard);
     drop(second_pair_guard);

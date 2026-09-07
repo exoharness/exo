@@ -44,8 +44,8 @@ use uuid::Uuid;
 
 use crate::sandbox::{
     BoxSandboxTcpStream, ManagedSandboxBackend, ManagedSandboxHandle, SandboxCommand,
-    SandboxCommandOutput, SandboxKey, SandboxNetworkPolicy, SandboxRequest, SandboxSpec,
-    SnapshotFormat, SnapshotPayload, sandbox_spec_hash,
+    SandboxCommandOutput, SandboxNetworkPolicy, SandboxRequest, SandboxSpec, SnapshotFormat,
+    SnapshotPayload, sandbox_spec_hash,
 };
 use crate::sandbox_provider::process_bridge;
 use crate::{
@@ -499,14 +499,14 @@ impl MachineLifecycleLocks {
         self.lock_key(machine_lifecycle_key(machine_id)).await
     }
 
-    async fn lock_sandbox(&self, key: &SandboxKey) -> OwnedMutexGuard<()> {
+    async fn lock_sandbox(&self, key: &str) -> OwnedMutexGuard<()> {
         self.lock_key(sandbox_lifecycle_key(key)).await
     }
 
     async fn lock_sandbox_pair(
         &self,
-        first: &SandboxKey,
-        second: &SandboxKey,
+        first: &str,
+        second: &str,
     ) -> (OwnedMutexGuard<()>, Option<OwnedMutexGuard<()>>) {
         let first = sandbox_lifecycle_key(first);
         let second = sandbox_lifecycle_key(second);
@@ -577,7 +577,7 @@ struct Shared {
     // matching machines after the prior controller releases this lock; the
     // lock prevents concurrent controllers from racing that reconciliation.
     _state_lock: File,
-    warm_machines: Mutex<HashMap<SandboxKey, WarmMachineEntry>>,
+    warm_machines: Mutex<HashMap<String, WarmMachineEntry>>,
     lifecycle_locks: MachineLifecycleLocks,
     capacity_gate: Mutex<()>,
     starting_machines: Arc<StdMutex<HashSet<String>>>,
@@ -869,8 +869,12 @@ impl FirecrackerSandboxBackend {
         captured_lease: Option<File>,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
         let spec_hash = sandbox_spec_hash(&request.spec);
-        let machine_id = machine_id(&request.key, &spec_hash);
-        let _lifecycle_guard = self.shared.lifecycle_locks.lock_sandbox(&request.key).await;
+        let machine_id = machine_id(request.key.sandbox_id(), &spec_hash);
+        let _lifecycle_guard = self
+            .shared
+            .lifecycle_locks
+            .lock_sandbox(request.key.sandbox_id())
+            .await;
         self.restore_snapshot_locked(
             request,
             manifest,
@@ -1004,11 +1008,15 @@ impl FirecrackerSandboxBackend {
         let one_shot = request.lifecycle.idle_ttl.is_none();
         let machine_id = if one_shot {
             let sequence = ONE_SHOT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            one_shot_machine_id(&request.key, &spec_hash, sequence)
+            one_shot_machine_id(request.key.sandbox_id(), &spec_hash, sequence)
         } else {
-            machine_id(&request.key, &spec_hash)
+            machine_id(request.key.sandbox_id(), &spec_hash)
         };
-        let _lifecycle_guard = self.shared.lifecycle_locks.lock_sandbox(&request.key).await;
+        let _lifecycle_guard = self
+            .shared
+            .lifecycle_locks
+            .lock_sandbox(request.key.sandbox_id())
+            .await;
         self.acquire_resolved_locked(request, spec_hash, machine_id, one_shot, None)
             .await
     }
@@ -1024,8 +1032,8 @@ impl FirecrackerSandboxBackend {
         one_shot: bool,
         capacity_reservation: Option<MachineCapacityReservation>,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        let stable_machine_id = machine_id(&request.key, &spec_hash);
-        let machine_key_prefix = format!("fc-{}-", stable_id(&request.key.to_string()));
+        let stable_machine_id = machine_id(request.key.sandbox_id(), &spec_hash);
+        let machine_key_prefix = format!("fc-{}-", stable_id(request.key.sandbox_id()));
 
         if let Some(state) = request
             .provider_state
@@ -1045,9 +1053,9 @@ impl FirecrackerSandboxBackend {
         if !one_shot {
             let replaced = {
                 let mut machines = self.shared.warm_machines.lock().await;
-                match machines.get(&request.key) {
+                match machines.get(request.key.sandbox_id()) {
                     Some(entry) if entry.spec_hash == spec_hash => None,
-                    Some(_) => machines.remove(&request.key),
+                    Some(_) => machines.remove(request.key.sandbox_id()),
                     None => None,
                 }
             };
@@ -1071,7 +1079,7 @@ impl FirecrackerSandboxBackend {
         if !one_shot {
             self.shared.touch_machine_lease(&target_machine_id).await?;
             self.shared.warm_machines.lock().await.insert(
-                request.key.clone(),
+                request.key.sandbox_id().to_string(),
                 WarmMachineEntry {
                     machine_id: target_machine_id.clone(),
                     spec_hash: spec_hash.clone(),
@@ -1137,23 +1145,27 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
             .transpose()?
             .map(|state| state.machine_id);
         if let Some(machine_id) = persisted_machine_id.as_deref() {
-            let machine_key_prefix = format!("fc-{}-", stable_id(&request.key.to_string()));
+            let machine_key_prefix = format!("fc-{}-", stable_id(request.key.sandbox_id()));
             if !valid_machine_id(machine_id) || !machine_id.starts_with(&machine_key_prefix) {
                 bail!("Firecracker provider state does not match the terminated sandbox key");
             }
         }
-        let _lifecycle_guard = self.shared.lifecycle_locks.lock_sandbox(&request.key).await;
+        let _lifecycle_guard = self
+            .shared
+            .lifecycle_locks
+            .lock_sandbox(request.key.sandbox_id())
+            .await;
         let machine_id = self
             .shared
             .warm_machines
             .lock()
             .await
-            .remove(&request.key)
+            .remove(request.key.sandbox_id())
             .map(|entry| entry.machine_id)
             .or(persisted_machine_id)
             .unwrap_or_else(|| {
                 let spec_hash = sandbox_spec_hash(&request.spec);
-                machine_id(&request.key, &spec_hash)
+                machine_id(request.key.sandbox_id(), &spec_hash)
             });
         self.shared.cleanup_machine(&machine_id, true).await
     }
@@ -1165,22 +1177,22 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
         let mut source = prepare_request(source)?;
         let target = self.resolve_request(target).await?;
-        if source.key == target.key {
+        if source.key.sandbox_id() == target.key.sandbox_id() {
             bail!("Firecracker fork source and target must be different sandboxes")
         }
         let target_spec_hash = sandbox_spec_hash(&target.spec);
-        let target_machine_id = machine_id(&target.key, &target_spec_hash);
+        let target_machine_id = machine_id(target.key.sandbox_id(), &target_spec_hash);
         let (_first_lifecycle_guard, _second_lifecycle_guard) = self
             .shared
             .lifecycle_locks
-            .lock_sandbox_pair(&source.key, &target.key)
+            .lock_sandbox_pair(source.key.sandbox_id(), target.key.sandbox_id())
             .await;
         let source_entry = self
             .shared
             .warm_machines
             .lock()
             .await
-            .get(&source.key)
+            .get(source.key.sandbox_id())
             .cloned()
             .context("Firecracker fork source is not active")?;
         let source_record = self
@@ -1299,7 +1311,7 @@ impl ManagedSandboxHandle for FirecrackerSandboxHandle {
             touch_machine(
                 &self.shared,
                 &self.shared.warm_machines,
-                &self.request.key,
+                self.request.key.sandbox_id(),
                 &self.machine.record.machine_id,
             )
             .await?;
@@ -1323,7 +1335,7 @@ impl ManagedSandboxHandle for FirecrackerSandboxHandle {
             touch_machine(
                 &self.shared,
                 &self.shared.warm_machines,
-                &self.request.key,
+                self.request.key.sandbox_id(),
                 &self.machine.record.machine_id,
             )
             .await?;
@@ -1351,7 +1363,7 @@ impl ManagedSandboxHandle for FirecrackerSandboxHandle {
             touch_machine(
                 &self.shared,
                 &self.shared.warm_machines,
-                &self.request.key,
+                self.request.key.sandbox_id(),
                 &self.machine.record.machine_id,
             )
             .await?;
@@ -1676,7 +1688,13 @@ impl Shared {
                 .spec
                 .durable_file_systems
                 .first()
-                .map(|file_system| stable_id(&format!("{}\n{}", request.key, file_system.name)))
+                .map(|file_system| {
+                    stable_id(&format!(
+                        "{}\n{}",
+                        request.key.sandbox_id(),
+                        file_system.name
+                    ))
+                })
         } else {
             None
         };
@@ -2238,11 +2256,11 @@ fn binary_version(path: &Path) -> Result<String> {
         .ok_or_else(|| anyhow!("could not parse version from {}", path.display()))
 }
 
-fn machine_id(key: &SandboxKey, spec_hash: &str) -> String {
-    format!("fc-{}-{}", stable_id(&key.to_string()), &spec_hash[..8])
+fn machine_id(key: &str, spec_hash: &str) -> String {
+    format!("fc-{}-{}", stable_id(key), &spec_hash[..8])
 }
 
-fn one_shot_machine_id(key: &SandboxKey, spec_hash: &str, sequence: u64) -> String {
+fn one_shot_machine_id(key: &str, spec_hash: &str, sequence: u64) -> String {
     format!(
         "fc-{}-{}",
         stable_id(&format!("{key}\n{}\n{sequence}", std::process::id())),
@@ -2250,8 +2268,8 @@ fn one_shot_machine_id(key: &SandboxKey, spec_hash: &str, sequence: u64) -> Stri
     )
 }
 
-fn sandbox_lifecycle_key(key: &SandboxKey) -> String {
-    format!("fc-{}", stable_id(&key.to_string()))
+fn sandbox_lifecycle_key(key: &str) -> String {
+    format!("fc-{}", stable_id(key))
 }
 
 fn machine_lifecycle_key(machine_id: &str) -> String {
@@ -4667,8 +4685,8 @@ fn wait_for_guest_blocking(
 
 async fn touch_machine(
     shared: &Shared,
-    machines: &Mutex<HashMap<SandboxKey, WarmMachineEntry>>,
-    key: &SandboxKey,
+    machines: &Mutex<HashMap<String, WarmMachineEntry>>,
+    key: &str,
     machine_id: &str,
 ) -> Result<()> {
     let touched = {

@@ -24,7 +24,47 @@ use uuid::Uuid;
 
 use crate::{DurableFileSystem, SandboxAttachment};
 
-pub type SandboxKey = String;
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SandboxKey {
+    StandaloneSandbox {
+        sandbox_id: String,
+    },
+    AgentSandbox {
+        agent_id: String,
+        sandbox_id: String,
+    },
+    ConversationSandbox {
+        #[serde(alias = "conversation_id")]
+        thread_id: String,
+        sandbox_id: String,
+    },
+}
+
+impl SandboxKey {
+    pub fn sandbox_id(&self) -> &str {
+        match self {
+            Self::StandaloneSandbox { sandbox_id }
+            | Self::AgentSandbox { sandbox_id, .. }
+            | Self::ConversationSandbox { sandbox_id, .. } => sandbox_id,
+        }
+    }
+}
+
+impl fmt::Display for SandboxKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StandaloneSandbox { sandbox_id } => write!(f, "sandbox:{sandbox_id}"),
+            Self::AgentSandbox {
+                agent_id,
+                sandbox_id,
+            } => write!(f, "agent:{agent_id}:{sandbox_id}"),
+            Self::ConversationSandbox {
+                thread_id,
+                sandbox_id,
+            } => write!(f, "thread:{thread_id}:{sandbox_id}"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxLifecycleConfig {
@@ -457,7 +497,7 @@ pub struct CliContainerSandboxBackend {
     durable_file_system_root: Option<PathBuf>,
     system_started: Mutex<bool>,
     network_created: Mutex<bool>,
-    warm_sandboxes: Arc<Mutex<HashMap<SandboxKey, WarmSandboxEntry>>>,
+    warm_sandboxes: Arc<Mutex<HashMap<String, WarmSandboxEntry>>>,
 }
 
 static DOCKER_CONSUMABLE_SNAPSHOT_FORMATS: [SnapshotFormat; 1] = [SnapshotFormat::DockerImageTar];
@@ -578,7 +618,7 @@ impl CliContainerSandboxBackend {
             })
             .collect::<Result<Vec<_>>>()?;
         mounts.extend(materialize_durable_file_systems(
-            &request.key,
+            request.key.sandbox_id(),
             &request.spec.durable_file_systems,
             self.durable_file_system_root.as_deref(),
         )?);
@@ -652,7 +692,7 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
 
         if request.lifecycle.idle_ttl.is_none() {
             return Ok(Arc::new(OneShotSandboxHandle {
-                id: format!("oneshot:{}", request.key),
+                id: format!("oneshot:{}", request.key.sandbox_id()),
                 container_bin: self.container_bin.clone(),
                 request,
             }));
@@ -662,17 +702,17 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
 
         let replaced = {
             let mut warm_sandboxes = self.warm_sandboxes.lock().await;
-            match warm_sandboxes.get(&request.key) {
+            match warm_sandboxes.get(request.key.sandbox_id()) {
                 Some(entry) if entry.request.spec == request.spec => {
                     return Ok(Arc::new(WarmSandboxHandle {
-                        id: format!("warm:{}", request.key),
+                        id: format!("warm:{}", request.key.sandbox_id()),
                         cli: self.cli,
                         container_bin: self.container_bin.clone(),
                         request,
                         warm_sandboxes: Arc::clone(&self.warm_sandboxes),
                     }));
                 }
-                Some(_) => warm_sandboxes.remove(&request.key),
+                Some(_) => warm_sandboxes.remove(request.key.sandbox_id()),
                 None => None,
             }
         };
@@ -694,7 +734,7 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
         {
             let mut warm_sandboxes = self.warm_sandboxes.lock().await;
             warm_sandboxes.insert(
-                request.key.clone(),
+                request.key.sandbox_id().to_string(),
                 WarmSandboxEntry {
                     name: name.clone(),
                     request: request.clone(),
@@ -705,7 +745,7 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
         }
 
         Ok(Arc::new(WarmSandboxHandle {
-            id: format!("warm:{}", request.key),
+            id: format!("warm:{}", request.key.sandbox_id()),
             cli: self.cli,
             container_bin: self.container_bin.clone(),
             request,
@@ -757,7 +797,7 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
         // whatever was running before.
         let replaced = {
             let mut warm_sandboxes = self.warm_sandboxes.lock().await;
-            warm_sandboxes.remove(&request.key)
+            warm_sandboxes.remove(request.key.sandbox_id())
         };
         if let Some(entry) = replaced {
             schedule_cleanup_named_container(self.container_bin.clone(), self.cli, entry.name);
@@ -767,7 +807,7 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
         {
             let mut warm_sandboxes = self.warm_sandboxes.lock().await;
             warm_sandboxes.insert(
-                request.key.clone(),
+                request.key.sandbox_id().to_string(),
                 WarmSandboxEntry {
                     name: name.clone(),
                     request: request.clone(),
@@ -778,7 +818,7 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
         }
 
         Ok(Arc::new(WarmSandboxHandle {
-            id: format!("warm:{}", request.key),
+            id: format!("warm:{}", request.key.sandbox_id()),
             cli: self.cli,
             container_bin: self.container_bin.clone(),
             request,
@@ -787,11 +827,17 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
     }
 
     async fn terminate(&self, request: SandboxRequest) -> Result<()> {
-        if let Some(entry) = self.warm_sandboxes.lock().await.remove(&request.key) {
+        if let Some(entry) = self
+            .warm_sandboxes
+            .lock()
+            .await
+            .remove(request.key.sandbox_id())
+        {
             cleanup_named_container(&self.container_bin, self.cli, &entry.name).await?;
         }
         for container in
-            find_sandbox_containers_for_key(&self.container_bin, self.cli, &request.key).await?
+            find_sandbox_containers_for_key(&self.container_bin, self.cli, request.key.sandbox_id())
+                .await?
         {
             cleanup_named_container(&self.container_bin, self.cli, &container).await?;
         }
@@ -889,7 +935,7 @@ struct WarmSandboxHandle {
     cli: ContainerCliFlavor,
     container_bin: PathBuf,
     request: SandboxRequest,
-    warm_sandboxes: Arc<Mutex<HashMap<SandboxKey, WarmSandboxEntry>>>,
+    warm_sandboxes: Arc<Mutex<HashMap<String, WarmSandboxEntry>>>,
 }
 
 #[async_trait]
@@ -910,9 +956,9 @@ impl ManagedSandboxHandle for WarmSandboxHandle {
             &self.warm_sandboxes,
         )
         .await?;
-        touch_warm_sandbox(&self.warm_sandboxes, &self.request.key).await;
+        touch_warm_sandbox(&self.warm_sandboxes, self.request.key.sandbox_id()).await;
         let output = exec_warm(&self.container_bin, &name, &self.request.spec, command).await;
-        touch_warm_sandbox(&self.warm_sandboxes, &self.request.key).await;
+        touch_warm_sandbox(&self.warm_sandboxes, self.request.key.sandbox_id()).await;
         output
     }
 
@@ -924,14 +970,14 @@ impl ManagedSandboxHandle for WarmSandboxHandle {
             &self.warm_sandboxes,
         )
         .await?;
-        touch_warm_sandbox(&self.warm_sandboxes, &self.request.key).await;
+        touch_warm_sandbox(&self.warm_sandboxes, self.request.key.sandbox_id()).await;
         start_warm_process(&self.container_bin, &name, &self.request.spec, command).await
     }
 
     async fn stop(&self) -> Result<()> {
         let removed = {
             let mut warm_sandboxes = self.warm_sandboxes.lock().await;
-            warm_sandboxes.remove(&self.request.key)
+            warm_sandboxes.remove(self.request.key.sandbox_id())
         };
 
         if let Some(entry) = removed
@@ -957,7 +1003,7 @@ impl ManagedSandboxHandle for WarmSandboxHandle {
         let container_id = inspect_running_docker_container(&self.container_bin, &name).await?;
         let mut warm_sandboxes = self.warm_sandboxes.lock().await;
         let entry = warm_sandboxes
-            .get_mut(&self.request.key)
+            .get_mut(self.request.key.sandbox_id())
             .ok_or_else(|| anyhow!("warm sandbox disappeared while detaching"))?;
         entry.owned = false;
         Ok(SandboxAttachment::DockerContainer { container_id })
@@ -973,7 +1019,7 @@ impl ManagedSandboxHandle for WarmSandboxHandle {
                     &self.warm_sandboxes,
                 )
                 .await?;
-                touch_warm_sandbox(&self.warm_sandboxes, &self.request.key).await;
+                touch_warm_sandbox(&self.warm_sandboxes, self.request.key.sandbox_id()).await;
                 docker_snapshot_container(&self.container_bin, &name).await
             }
             // The Apple `container` CLI exposes `container image save` and a
@@ -1014,7 +1060,7 @@ impl ManagedSandboxBackend for LocalProcessSandboxBackend {
             bail!("local-process sandbox backend does not support durable file systems");
         }
         Ok(Arc::new(LocalProcessSandboxHandle {
-            id: format!("local:{}", request.key),
+            id: format!("local:{}", request.key.sandbox_id()),
             request,
         }))
     }
@@ -1122,7 +1168,7 @@ fn resolve_local_workdir(spec: &SandboxSpec, cwd: &str) -> Option<PathBuf> {
 }
 
 fn materialize_durable_file_systems(
-    key: &SandboxKey,
+    key: &str,
     file_systems: &[DurableFileSystem],
     configured_root: Option<&Path>,
 ) -> Result<Vec<SandboxMount>> {
@@ -1255,8 +1301,8 @@ pub(crate) fn stable_fnv1a_hex(input: &str) -> String {
 }
 
 async fn touch_warm_sandbox(
-    warm_sandboxes: &Arc<Mutex<HashMap<SandboxKey, WarmSandboxEntry>>>,
-    key: &SandboxKey,
+    warm_sandboxes: &Arc<Mutex<HashMap<String, WarmSandboxEntry>>>,
+    key: &str,
 ) {
     let mut warm_sandboxes = warm_sandboxes.lock().await;
     if let Some(entry) = warm_sandboxes.get_mut(key) {
@@ -1276,7 +1322,10 @@ async fn create_named_warm_sandbox(
         .arg("--name")
         .arg(name)
         .arg("--label")
-        .arg(format!("{WARM_SANDBOX_KEY_LABEL}={}", request.key))
+        .arg(format!(
+            "{WARM_SANDBOX_KEY_LABEL}={}",
+            request.key.sandbox_id()
+        ))
         .arg("--label")
         .arg(format!(
             "{WARM_SANDBOX_SPEC_HASH_LABEL}={}",
@@ -1315,7 +1364,7 @@ async fn create_unique_warm_sandbox(
     request: &SandboxRequest,
 ) -> Result<String> {
     for _ in 0..4 {
-        let name = new_warm_container_name(&request.key);
+        let name = new_warm_container_name(request.key.sandbox_id());
         match create_named_warm_sandbox(container_bin, request, &name).await {
             Ok(()) => return Ok(name),
             Err(err) if is_already_exists_error(&err.to_string()) => continue,
@@ -1325,7 +1374,7 @@ async fn create_unique_warm_sandbox(
 
     Err(anyhow!(
         "failed to allocate a unique warm sandbox name for {}",
-        request.key
+        request.key.sandbox_id()
     ))
 }
 
@@ -1349,7 +1398,7 @@ async fn find_running_warm_sandbox(
 async fn find_sandbox_containers_for_key(
     container_bin: &Path,
     cli: ContainerCliFlavor,
-    key: &SandboxKey,
+    key: &str,
 ) -> Result<Vec<String>> {
     match cli {
         ContainerCliFlavor::AppleContainer => {
@@ -1428,7 +1477,7 @@ async fn find_running_apple_container_warm_sandbox(
         let labels = &container.configuration.labels;
         let key_matches = labels
             .get(WARM_SANDBOX_KEY_LABEL)
-            .is_some_and(|value| value == &request.key.to_string());
+            .is_some_and(|value| value == request.key.sandbox_id());
         let spec_matches = labels
             .get(WARM_SANDBOX_SPEC_HASH_LABEL)
             .is_some_and(|value| value == &spec_hash);
@@ -1441,7 +1490,10 @@ async fn find_running_docker_warm_sandbox(
     request: &SandboxRequest,
 ) -> Result<Option<String>> {
     let spec_hash = sandbox_spec_hash(&request.spec);
-    let key_filter = format!("label={WARM_SANDBOX_KEY_LABEL}={}", request.key);
+    let key_filter = format!(
+        "label={WARM_SANDBOX_KEY_LABEL}={}",
+        request.key.sandbox_id()
+    );
     let spec_filter = format!("label={WARM_SANDBOX_SPEC_HASH_LABEL}={spec_hash}");
     let output = run_container_admin_command(
         container_bin,
@@ -1477,7 +1529,7 @@ async fn ensure_warm_sandbox_ready(
     container_bin: &Path,
     cli: ContainerCliFlavor,
     request: &SandboxRequest,
-    warm_sandboxes: &Arc<Mutex<HashMap<SandboxKey, WarmSandboxEntry>>>,
+    warm_sandboxes: &Arc<Mutex<HashMap<String, WarmSandboxEntry>>>,
 ) -> Result<String> {
     let healthcheck = SandboxCommand {
         argv: vec!["/bin/true".to_string()],
@@ -1488,14 +1540,14 @@ async fn ensure_warm_sandbox_ready(
     };
 
     let mut warm_sandboxes = warm_sandboxes.lock().await;
-    let (current_name, current_owned) = match warm_sandboxes.get_mut(&request.key) {
+    let (current_name, current_owned) = match warm_sandboxes.get_mut(request.key.sandbox_id()) {
         Some(entry) if entry.request.spec == request.spec => {
             entry.last_used_at = Instant::now();
             (entry.name.clone(), entry.owned)
         }
         Some(_) => {
             let stale = warm_sandboxes
-                .remove(&request.key)
+                .remove(request.key.sandbox_id())
                 .expect("entry disappeared while locked");
             if stale.owned {
                 schedule_cleanup_named_container(container_bin.to_path_buf(), cli, stale.name);
@@ -1509,7 +1561,7 @@ async fn ensure_warm_sandbox_ready(
                 ),
             };
             warm_sandboxes.insert(
-                request.key.clone(),
+                request.key.sandbox_id().to_string(),
                 WarmSandboxEntry {
                     name: name.clone(),
                     request: request.clone(),
@@ -1529,7 +1581,7 @@ async fn ensure_warm_sandbox_ready(
                 ),
             };
             warm_sandboxes.insert(
-                request.key.clone(),
+                request.key.sandbox_id().to_string(),
                 WarmSandboxEntry {
                     name: name.clone(),
                     request: request.clone(),
@@ -1558,7 +1610,7 @@ async fn ensure_warm_sandbox_ready(
             ),
         };
     warm_sandboxes.insert(
-        request.key.clone(),
+        request.key.sandbox_id().to_string(),
         WarmSandboxEntry {
             name: replacement_name.clone(),
             request: request.clone(),
@@ -2127,7 +2179,7 @@ fn network_name_for_policy(policy: SandboxNetworkPolicy) -> Option<&'static str>
     matches!(policy, SandboxNetworkPolicy::Enabled).then_some(DEFAULT_ENABLED_NETWORK_NAME)
 }
 
-fn new_warm_container_name(key: &SandboxKey) -> String {
+fn new_warm_container_name(key: &str) -> String {
     let mut hasher = DefaultHasher::new();
     key.hash(&mut hasher);
     let hash = hasher.finish();
@@ -2275,6 +2327,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn conversation_sandbox_key_uses_thread_id_and_reads_conversation_id() {
+        let key = SandboxKey::ConversationSandbox {
+            thread_id: "thread-1".to_string(),
+            sandbox_id: "sandbox-1".to_string(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&key).unwrap(),
+            serde_json::json!({
+                "ConversationSandbox": {
+                    "thread_id": "thread-1",
+                    "sandbox_id": "sandbox-1"
+                }
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<SandboxKey>(serde_json::json!({
+                "ConversationSandbox": {
+                    "conversation_id": "thread-1",
+                    "sandbox_id": "sandbox-1"
+                }
+            }))
+            .unwrap(),
+            key
+        );
+        assert_eq!(key.to_string(), "thread:thread-1:sandbox-1");
+    }
+
+    #[test]
     fn apple_container_list_item_reads_current_status_shape() {
         let container: ContainerListItem = serde_json::from_value(serde_json::json!({
             "configuration": {
@@ -2385,7 +2466,10 @@ mod tests {
         fs::set_permissions(&script_path, permissions).expect("chmod fake docker");
 
         let request = SandboxRequest {
-            key: "sandbox".to_string(),
+            key: SandboxKey::ConversationSandbox {
+                thread_id: "thread".to_string(),
+                sandbox_id: "sandbox".to_string(),
+            },
             spec: SandboxSpec {
                 image: "docker.io/library/ubuntu:24.04".to_string(),
                 resources: Default::default(),
@@ -2406,7 +2490,10 @@ mod tests {
             .expect("find warm sandbox");
         assert_eq!(name.as_deref(), Some("warm-name"));
 
-        let key_filter = format!("label={WARM_SANDBOX_KEY_LABEL}={}", request.key);
+        let key_filter = format!(
+            "label={WARM_SANDBOX_KEY_LABEL}={}",
+            request.key.sandbox_id()
+        );
         let spec_filter = format!("label={WARM_SANDBOX_SPEC_HASH_LABEL}={spec_hash}");
         let args = fs::read_to_string(&args_path).expect("read fake docker args");
         assert_eq!(
@@ -2459,7 +2546,10 @@ mod tests {
             warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),
         };
         let request = SandboxRequest {
-            key: "sandbox".to_string(),
+            key: SandboxKey::ConversationSandbox {
+                thread_id: "thread".to_string(),
+                sandbox_id: "sandbox".to_string(),
+            },
             spec: SandboxSpec {
                 image: "docker.io/library/ubuntu:24.04".to_string(),
                 resources: Default::default(),
@@ -2549,7 +2639,10 @@ esac
             warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),
         };
         let request = SandboxRequest {
-            key: "sandbox".to_string(),
+            key: SandboxKey::ConversationSandbox {
+                thread_id: "thread".to_string(),
+                sandbox_id: "sandbox".to_string(),
+            },
             spec: SandboxSpec {
                 image: "docker.io/library/ubuntu:24.04".to_string(),
                 resources: Default::default(),
@@ -2658,7 +2751,10 @@ esac
             warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),
         };
         let request = SandboxRequest {
-            key: "sandbox".to_string(),
+            key: SandboxKey::ConversationSandbox {
+                thread_id: "thread".to_string(),
+                sandbox_id: "sandbox".to_string(),
+            },
             spec: SandboxSpec {
                 image: "task-image".to_string(),
                 resources: Default::default(),

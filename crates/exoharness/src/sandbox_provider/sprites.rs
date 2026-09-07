@@ -182,7 +182,7 @@ impl ManagedSandboxBackend for SpritesSandboxBackend {
         let sprite_name = sprite_name_for_request(&request);
         self.ensure_sprite(&sprite_name, &request).await?;
         Ok(Arc::new(SpritesSandboxHandle {
-            id: format!("sprites:{}", request.key),
+            id: format!("sprites:{}", request.key.sandbox_id()),
             sprite_name,
             request,
             backend: self.handle_backend(),
@@ -228,7 +228,7 @@ impl ManagedSandboxBackend for SpritesSandboxBackend {
         )
         .await?;
         Ok(Arc::new(SpritesSandboxHandle {
-            id: format!("sprites-restored:{}", request.key),
+            id: format!("sprites-restored:{}", request.key.sandbox_id()),
             sprite_name,
             request,
             backend: self.handle_backend(),
@@ -746,7 +746,7 @@ fn parse_checkpoint_id_from_stream(body: &str) -> Result<String> {
 fn sprite_name_for_request(request: &SandboxRequest) -> String {
     let spec_hash = sandbox_spec_hash(&request.spec);
     let mut hasher = DefaultHasher::new();
-    request.key.hash(&mut hasher);
+    request.key.sandbox_id().hash(&mut hasher);
     spec_hash.hash(&mut hasher);
     format!("exo-{:016x}", hasher.finish())
 }
@@ -780,7 +780,7 @@ fn sprite_labels_for_request(
     let mut labels = Vec::with_capacity(extra_labels.len() + 2);
     labels.push(sprite_label(
         WARM_SANDBOX_KEY_LABEL,
-        &request.key.to_string(),
+        request.key.sandbox_id(),
     ));
     labels.push(sprite_label(WARM_SANDBOX_SPEC_HASH_LABEL, spec_hash));
     labels.extend(extra_labels.iter().cloned());
