@@ -3848,6 +3848,13 @@ fn capture_snapshot_template(
     template_key: &str,
     lifecycle: SnapshotTemplateLifecycle,
 ) -> Result<File> {
+    if fs::read_to_string("/proc/swaps")?
+        .lines()
+        .skip(1)
+        .any(|line| !line.trim().is_empty())
+    {
+        bail!("sparse Firecracker snapshots require host swap to be disabled");
+    }
     let capture_lock = OpenOptions::new()
         .read(true)
         .write(true)
@@ -3905,21 +3912,35 @@ fn capture_snapshot_template(
     let snapshot_path = format!("/{output_name}/state");
     let memory_path = format!("/{output_name}/memory");
     let paused_result = (|| {
-        // A snapshot captures a full point-in-time device/RAM image once. Clones
-        // map the immutable memory file privately and get independent COW disks.
+        if source.snapshot_template.is_some() {
+            let memory = output.join("memory");
+            copy_sparse_reflink(&root.join("snapshot/memory"), &memory)?;
+            chown(&memory, Some(uid), Some(uid))?;
+            fs::set_permissions(&memory, Permissions::from_mode(0o600))?;
+        }
+        // A fresh VM's sparse snapshot is complete on its own. Restored VMs
+        // apply their resident pages over a private reflink of the base memory.
         // https://github.com/firecracker-microvm/firecracker/blob/main/docs/snapshotting/snapshot-support.md#full-and-diff-snapshots
         // https://github.com/firecracker-microvm/firecracker/blob/main/docs/snapshotting/snapshot-support.md#memory-backend
-        firecracker_api_request(
-            &api,
-            "PUT",
-            "/snapshot/create",
-            &FirecrackerSnapshotCreate {
-                snapshot_type: "Full",
-                snapshot_path: &snapshot_path,
-                mem_file_path: &memory_path,
-            },
-            FIRECRACKER_SNAPSHOT_CREATE_TIMEOUT,
-        )?;
+        tracing::info_span!("firecracker.snapshot_memory").in_scope(|| {
+            firecracker_api_request(
+                &api,
+                "PUT",
+                "/snapshot/create",
+                &FirecrackerSnapshotCreate {
+                    snapshot_type: "Diff",
+                    snapshot_path: &snapshot_path,
+                    mem_file_path: &memory_path,
+                },
+                FIRECRACKER_SNAPSHOT_CREATE_TIMEOUT,
+            )
+        })?;
+        let memory = fs::metadata(output.join("memory"))?;
+        tracing::info!(
+            memory_bytes = memory.len(),
+            allocated_bytes = memory.blocks() * 512,
+            "captured Firecracker snapshot memory"
+        );
         // Only the disk copy must happen inside the pause window: the overlay
         // has to match the memory image byte-for-byte, and the source starts
         // writing to it again the moment it resumes.
