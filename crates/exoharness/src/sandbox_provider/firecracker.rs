@@ -49,7 +49,7 @@ use crate::sandbox::{
 };
 use crate::sandbox_provider::process_bridge;
 use crate::{
-    FileSystemMountMode, SandboxAttachment, SandboxProcessParts, SandboxResourceShape,
+    FileSystemMountMode, SandboxAttachment, SandboxId, SandboxProcessParts, SandboxResourceShape,
     SandboxTerminalParts, SandboxTerminalSize,
 };
 
@@ -577,7 +577,7 @@ struct Shared {
     // matching machines after the prior controller releases this lock; the
     // lock prevents concurrent controllers from racing that reconciliation.
     _state_lock: File,
-    warm_machines: Mutex<HashMap<String, WarmMachineEntry>>,
+    warm_machines: Mutex<HashMap<SandboxId, WarmMachineEntry>>,
     lifecycle_locks: MachineLifecycleLocks,
     capacity_gate: Mutex<()>,
     starting_machines: Arc<StdMutex<HashSet<String>>>,
@@ -1113,6 +1113,27 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
 
     fn consumable_snapshot_formats(&self) -> &[SnapshotFormat] {
         &CONSUMABLE_SNAPSHOT_FORMATS
+    }
+
+    async fn resolve_image(&self, image: &str) -> Result<crate::ResolvedSandboxImage> {
+        let path = resolve_image(
+            &self.shared.config.state_root,
+            image,
+            self.shared.config.image_size_gib,
+            &self.shared.config.allowed_local_images,
+            &self.shared.config.allowed_registries,
+        )
+        .await?;
+        tokio::task::spawn_blocking(move || {
+            let file = File::open(path.with_extension("config.json"))?;
+            let configuration = serde_json::from_reader(std::io::Read::take(file, 65_536))?;
+            Ok(crate::ResolvedSandboxImage {
+                image: path.to_string_lossy().into_owned(),
+                configuration,
+            })
+        })
+        .await
+        .context("joining Firecracker image configuration read")?
     }
 
     #[tracing::instrument(name = "firecracker.acquire", skip_all)]
@@ -4685,7 +4706,7 @@ fn wait_for_guest_blocking(
 
 async fn touch_machine(
     shared: &Shared,
-    machines: &Mutex<HashMap<String, WarmMachineEntry>>,
+    machines: &Mutex<HashMap<SandboxId, WarmMachineEntry>>,
     key: &str,
     machine_id: &str,
 ) -> Result<()> {

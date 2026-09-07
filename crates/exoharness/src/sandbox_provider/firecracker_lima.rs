@@ -115,6 +115,19 @@ impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
         &CONSUMABLE_SNAPSHOT_FORMATS
     }
 
+    async fn resolve_image(&self, image: &str) -> Result<crate::ResolvedSandboxImage> {
+        match self
+            .request(FirecrackerBridgeRequest::ResolveImage {
+                config: self.config.clone(),
+                image: image.to_owned(),
+            })
+            .await?
+        {
+            FirecrackerBridgeResponse::Image(image) => Ok(image),
+            _ => bail!("Firecracker Lima bridge returned the wrong response to resolve_image"),
+        }
+    }
+
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
         // A one-shot Firecracker handle destroys its VM after the command. Do
         // not eagerly acquire it here and then acquire a second VM when the

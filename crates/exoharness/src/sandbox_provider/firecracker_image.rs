@@ -18,6 +18,7 @@ use std::process::{Command, Stdio};
 use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, SystemTime};
 
+use crate::SandboxImageConfiguration;
 use anyhow::{Context, Result, anyhow, bail};
 use docker_credential::{CredentialRetrievalError, DockerCredential};
 use flate2::read::MultiGzDecoder;
@@ -30,7 +31,7 @@ use tempfile::{Builder as TempBuilder, NamedTempFile};
 use tokio::io::AsyncWriteExt;
 use tracing::Instrument;
 
-const MATERIALIZER_VERSION: u32 = 4;
+const MATERIALIZER_VERSION: u32 = 5;
 const EXT4_MAGIC_OFFSET: u64 = 1024 + 0x38;
 const EXT4_MAGIC: [u8; 2] = [0x53, 0xef];
 const GUEST_UID: u32 = 10_001;
@@ -50,10 +51,33 @@ const STALE_TEMPORARY_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 // https://github.com/docker/docker-credential-helpers/blob/main/credentials/error.go#L10-L52
 const HELPER_CREDENTIALS_NOT_FOUND: &str = "credentials not found in native keychain";
 
+#[test]
+fn runtime_configuration_survives_materialization_metadata() {
+    let configuration: OciImageConfiguration = serde_json::from_str(
+        r#"{
+        "architecture": "arm64", "os": "linux", "config": {
+            "Entrypoint": ["/bin/sh", "-c"], "Cmd": ["exec server"],
+            "Env": ["HOME=/home/exo"], "WorkingDir": "/home/exo",
+            "Healthcheck": {"Test": ["CMD", "/bin/true"], "Timeout": 1000000000}
+        }
+    }"#,
+    )
+    .unwrap();
+    let restored: SandboxImageConfiguration =
+        serde_json::from_slice(&serde_json::to_vec(&configuration.config).unwrap()).unwrap();
+    assert_eq!(restored.entrypoint.unwrap(), ["/bin/sh", "-c"]);
+    assert_eq!(restored.cmd.unwrap(), ["exec server"]);
+    assert_eq!(restored.env.unwrap(), ["HOME=/home/exo"]);
+    assert_eq!(restored.working_dir.as_deref(), Some("/home/exo"));
+    assert_eq!(restored.healthcheck.unwrap().test, ["CMD", "/bin/true"]);
+}
+
 #[derive(Debug, Deserialize)]
 struct OciImageConfiguration {
     architecture: String,
     os: String,
+    #[serde(default)]
+    config: SandboxImageConfiguration,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,6 +95,7 @@ struct CachedImageMetadata {
     source_digest: String,
     manifest_digest: String,
     platform: String,
+    configuration: SandboxImageConfiguration,
 }
 
 #[derive(Debug, Clone)]
@@ -235,6 +260,7 @@ pub(super) async fn resolve_image(
         source_digest: source_digest.clone(),
         manifest_digest: manifest_digest.clone(),
         platform: platform.clone(),
+        configuration: image_config.config,
     };
     let build_cache_root = cache_root.clone();
     let build_cache_dir = cache_dir.clone();
@@ -303,6 +329,14 @@ fn cache_local_image(
     validate_allowed_local_image(state_root, &source, allowed_local_images)?;
     validate_ext4_image(&source)?;
     let metadata = fs::metadata(&source)?;
+    let configuration = match File::open(source.with_extension("config.json")) {
+        Ok(file) => serde_json::from_reader::<_, SandboxImageConfiguration>(file.take(65_536))
+            .context("decoding local Firecracker image configuration")?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            SandboxImageConfiguration::default()
+        }
+        Err(error) => return Err(error).context("reading local Firecracker image configuration"),
+    };
     let identity = format!(
         "{}:{}:{}:{}:{}:{}:{}",
         metadata.dev(),
@@ -313,7 +347,10 @@ fn cache_local_image(
         metadata.ctime(),
         metadata.ctime_nsec()
     );
-    let digest = format!("{:x}", Sha256::digest(identity.as_bytes()));
+    let mut hasher = Sha256::new();
+    hasher.update(identity.as_bytes());
+    hasher.update(serde_json::to_vec(&configuration)?);
+    let digest = format!("{:x}", hasher.finalize());
     let local_root = state_root
         .join("images")
         .join(format!("v{MATERIALIZER_VERSION}"))
@@ -344,6 +381,10 @@ fn cache_local_image(
     })?;
     fs::set_permissions(&staged, Permissions::from_mode(0o444))?;
     validate_ext4_image(&staged)?;
+    fs::write(
+        temporary.path().join("rootfs.config.json"),
+        serde_json::to_vec(&configuration)?,
+    )?;
     let temporary_path = temporary.keep();
     match fs::rename(&temporary_path, &cache_dir) {
         Ok(()) => {}
@@ -741,6 +782,10 @@ fn build_and_publish_image(
     fs::set_permissions(&image, Permissions::from_mode(0o444))?;
     validate_ext4_image(&image)?;
 
+    fs::write(
+        temporary.path().join("rootfs.config.json"),
+        serde_json::to_vec(&metadata.configuration)?,
+    )?;
     fs::write(
         temporary.path().join("metadata.json"),
         serde_json::to_vec_pretty(&metadata)?,
@@ -1617,7 +1662,7 @@ mod tests {
         let digest = format!("sha256:{}", "a".repeat(64));
         assert_eq!(
             cache_image_dir(Path::new("/cache"), "linux-arm64", &digest).unwrap(),
-            Path::new("/cache/v4/linux-arm64").join("a".repeat(64))
+            Path::new("/cache/v5/linux-arm64").join("a".repeat(64))
         );
         assert!(cache_image_dir(Path::new("/cache"), "linux-arm64", "latest").is_err());
     }

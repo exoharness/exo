@@ -26,6 +26,10 @@ const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(2);
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum FirecrackerBridgeRequest {
+    ResolveImage {
+        config: FirecrackerConfig,
+        image: String,
+    },
     Acquire {
         config: FirecrackerConfig,
         request: SandboxRequest,
@@ -84,6 +88,7 @@ impl FirecrackerBridgeRequest {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum FirecrackerBridgeResponse {
+    Image(crate::ResolvedSandboxImage),
     Handle {
         id: String,
         provider_state: Option<Value>,
@@ -299,6 +304,15 @@ async fn handle_request(
     backends: &BridgeBackendCache,
 ) -> Result<FirecrackerBridgeResponse> {
     match request {
+        FirecrackerBridgeRequest::ResolveImage { config, image } => {
+            Ok(FirecrackerBridgeResponse::Image(
+                backends
+                    .backend(config)
+                    .await?
+                    .resolve_image(&image)
+                    .await?,
+            ))
+        }
         FirecrackerBridgeRequest::Acquire { config, request } => {
             let handle = backends.acquire(config, request).await?;
             Ok(FirecrackerBridgeResponse::Handle {

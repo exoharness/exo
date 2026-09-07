@@ -22,7 +22,7 @@ use tokio::time;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use uuid::Uuid;
 
-use crate::{DurableFileSystem, SandboxAttachment};
+use crate::{DurableFileSystem, SandboxAttachment, SandboxId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SandboxScope {
@@ -73,7 +73,7 @@ pub struct SandboxSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxRequest {
-    pub sandbox_id: String,
+    pub sandbox_id: SandboxId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<SandboxScope>,
     pub spec: SandboxSpec,
@@ -250,12 +250,42 @@ impl<T> SandboxTcpStream for T where T: tokio::io::AsyncRead + tokio::io::AsyncW
 
 pub type BoxSandboxTcpStream = Pin<Box<dyn SandboxTcpStream>>;
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct SandboxImageConfiguration {
+    pub entrypoint: Option<Vec<String>>,
+    pub cmd: Option<Vec<String>>,
+    pub env: Option<Vec<String>>,
+    pub working_dir: Option<String>,
+    pub healthcheck: Option<SandboxImageHealthcheck>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct SandboxImageHealthcheck {
+    pub test: Vec<String>,
+    pub interval: Option<u64>,
+    pub timeout: Option<u64>,
+    pub start_period: Option<u64>,
+    pub retries: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolvedSandboxImage {
+    pub image: String,
+    pub configuration: SandboxImageConfiguration,
+}
+
 #[async_trait]
 pub trait ManagedSandboxBackend: Send + Sync {
     fn is_local(&self) -> bool;
 
     /// Formats this backend can consume in `acquire_from_snapshot`.
     fn consumable_snapshot_formats(&self) -> &[SnapshotFormat];
+
+    async fn resolve_image(&self, _image: &str) -> Result<ResolvedSandboxImage> {
+        bail!("sandbox backend does not expose image configuration")
+    }
 
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>>;
     async fn attach(
@@ -468,7 +498,7 @@ pub struct CliContainerSandboxBackend {
     durable_file_system_root: Option<PathBuf>,
     system_started: Mutex<bool>,
     network_created: Mutex<bool>,
-    warm_sandboxes: Arc<Mutex<HashMap<String, WarmSandboxEntry>>>,
+    warm_sandboxes: Arc<Mutex<HashMap<SandboxId, WarmSandboxEntry>>>,
 }
 
 static DOCKER_CONSUMABLE_SNAPSHOT_FORMATS: [SnapshotFormat; 1] = [SnapshotFormat::DockerImageTar];
@@ -910,7 +940,7 @@ struct WarmSandboxHandle {
     cli: ContainerCliFlavor,
     container_bin: PathBuf,
     request: SandboxRequest,
-    warm_sandboxes: Arc<Mutex<HashMap<String, WarmSandboxEntry>>>,
+    warm_sandboxes: Arc<Mutex<HashMap<SandboxId, WarmSandboxEntry>>>,
 }
 
 #[async_trait]
@@ -1276,7 +1306,7 @@ pub(crate) fn stable_fnv1a_hex(input: &str) -> String {
 }
 
 async fn touch_warm_sandbox(
-    warm_sandboxes: &Arc<Mutex<HashMap<String, WarmSandboxEntry>>>,
+    warm_sandboxes: &Arc<Mutex<HashMap<SandboxId, WarmSandboxEntry>>>,
     key: &str,
 ) {
     let mut warm_sandboxes = warm_sandboxes.lock().await;
@@ -1504,7 +1534,7 @@ async fn ensure_warm_sandbox_ready(
     container_bin: &Path,
     cli: ContainerCliFlavor,
     request: &SandboxRequest,
-    warm_sandboxes: &Arc<Mutex<HashMap<String, WarmSandboxEntry>>>,
+    warm_sandboxes: &Arc<Mutex<HashMap<SandboxId, WarmSandboxEntry>>>,
 ) -> Result<String> {
     let healthcheck = SandboxCommand {
         argv: vec!["/bin/true".to_string()],
