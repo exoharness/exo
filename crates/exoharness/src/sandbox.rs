@@ -194,6 +194,10 @@ pub trait ManagedSandboxHandle: Send + Sync {
         None
     }
 
+    async fn is_running(&self) -> Result<Option<bool>> {
+        Ok(None)
+    }
+
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput>;
 
     async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts>;

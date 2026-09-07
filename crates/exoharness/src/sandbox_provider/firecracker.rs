@@ -1264,6 +1264,13 @@ impl ManagedSandboxHandle for FirecrackerSandboxHandle {
         Some(self.request.spec.image.clone())
     }
 
+    async fn is_running(&self) -> Result<Option<bool>> {
+        let pid_path = self.shared.pid_path(&self.machine.record.machine_id);
+        tokio::task::spawn_blocking(move || observe_machine_process(&pid_path))
+            .await
+            .context("joining Firecracker liveness observation")?
+    }
+
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {
         let output = GuestClient::new(Arc::clone(&self.shared), self.machine.vsock_path.clone())
             .exec(&self.request.spec, command)
@@ -4046,6 +4053,28 @@ fn process_running(pid_path: &Path) -> bool {
         return false;
     };
     PathBuf::from(format!("/proc/{pid}")).exists()
+}
+
+#[cfg(target_os = "linux")]
+fn observe_machine_process(pid_path: &Path) -> Result<Option<bool>> {
+    let pid = match fs::read_to_string(pid_path) {
+        Ok(pid) => pid,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Some(false)),
+        Err(error) => return Err(error).context("reading Firecracker pid"),
+    };
+    let pid = Pid::from_raw(pid.trim().parse().context("invalid Firecracker pid")?)
+        .context("invalid Firecracker pid")?;
+    let pidfd = match pidfd_open(pid, PidfdFlags::empty()) {
+        Ok(pidfd) => pidfd,
+        Err(rustix::io::Errno::SRCH) => return Ok(Some(false)),
+        Err(error) => return Err(error).context("opening Firecracker pidfd"),
+    };
+    Ok(Some(!wait_for_pidfd(&pidfd, Duration::ZERO)?))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn observe_machine_process(_pid_path: &Path) -> Result<Option<bool>> {
+    Ok(None)
 }
 
 #[cfg(target_os = "linux")]
