@@ -56,7 +56,7 @@ bytes.workspace = true
 chrono.workspace = true
 docker_credential = { workspace = true, optional = true }
 exo-firecracker-protocol = { path = "../firecracker-protocol", optional = true }
-flate2 = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true, features = ["zlib-rs"] }
 futures.workspace = true
 ipnet = { workspace = true, optional = true }
 keyring = { version = "4.0.0-rc.3", optional = true }

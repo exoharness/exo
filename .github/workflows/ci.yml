@@ -66,3 +66,6 @@ jobs:
 
       - name: Run Rust tests
         run: cargo test --workspace --all-targets
+
+      - name: Check Firecracker image materialization
+        run: cargo test -p exoharness --features firecracker firecracker_image --lib --locked

@@ -243,6 +243,8 @@ pub(super) async fn resolve_image(
     }
 
     let blob_root = cache_root.join("blobs/sha256");
+    let layer_count = manifest.layers.len();
+    let (layer_sender, mut layer_receiver) = tokio::sync::mpsc::channel(1);
     let layers = stream::iter(manifest.layers)
         .map(|descriptor| {
             let (client, reference, blob_root) = (&client, &reference, &blob_root);
@@ -254,10 +256,18 @@ pub(super) async fn resolve_image(
                 })
             }
         })
-        .buffered(MAX_LAYER_DOWNLOADS)
-        .try_collect()
-        .instrument(tracing::info_span!("firecracker.image.download_layers"))
-        .await?;
+        .buffered(MAX_LAYER_DOWNLOADS);
+    let downloads = async move {
+        futures::pin_mut!(layers);
+        while let Some(layer) = layers.try_next().await? {
+            layer_sender
+                .send(layer)
+                .await
+                .context("Firecracker image extraction stopped before download completed")?;
+        }
+        Ok::<_, anyhow::Error>(())
+    }
+    .instrument(tracing::info_span!("firecracker.image.download_layers"));
 
     let metadata = CachedImageMetadata {
         materializer_version: MATERIALIZER_VERSION,
@@ -271,8 +281,13 @@ pub(super) async fn resolve_image(
     let build_cache_dir = cache_dir.clone();
     let build_source = source.to_string();
     let span = tracing::Span::current();
-    tokio::task::spawn_blocking(move || {
+    let build = tokio::task::spawn_blocking(move || {
         let _entered = span.enter();
+        let layers = (0..layer_count).map(|_| {
+            layer_receiver
+                .blocking_recv()
+                .context("OCI layer download ended before the image was complete")
+        });
         build_and_publish_image(
             &build_cache_root,
             &build_cache_dir,
@@ -281,9 +296,13 @@ pub(super) async fn resolve_image(
             metadata,
             image_size_gib,
         )
-    })
-    .await
-    .context("joining Firecracker image materialization")?
+    });
+    let (_, image) = tokio::try_join!(downloads, async {
+        build
+            .await
+            .context("joining Firecracker image materialization")?
+    })?;
+    Ok(image)
 }
 
 // Empty allowlist means unrestricted (the default). Entries match either the
@@ -710,7 +729,7 @@ fn build_and_publish_image(
     cache_root: &Path,
     cache_dir: &Path,
     source: &str,
-    layers: Vec<CachedLayer>,
+    layers: impl Iterator<Item = Result<CachedLayer>>,
     metadata: CachedImageMetadata,
     image_size_gib: u64,
 ) -> Result<PathBuf> {
@@ -733,8 +752,9 @@ fn build_and_publish_image(
     // filesystem, so a tree with more inodes than this could never fit the
     // generated ext4 anyway; rejecting early bounds host inode consumption.
     let inode_budget = (image_bytes / 16384).max(65_536);
-    for layer in &layers {
-        apply_layer(&rootfs, layer, image_bytes.saturating_mul(2))?;
+    for layer in layers {
+        let layer = layer?;
+        apply_layer(&rootfs, &layer, image_bytes.saturating_mul(2))?;
         // Content that cannot fit in the ext4 image would only fail in
         // mkfs.ext4 later; checking after each layer bounds how much host
         // disk and how many host inodes an oversized image can consume in
@@ -1499,6 +1519,38 @@ mod tests {
             path,
             media_type: "application/vnd.oci.image.layer.v1.tar".to_string(),
         }
+    }
+
+    #[test]
+    fn failed_layer_download_does_not_publish_a_partial_image() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache_root = directory.path().join("cache");
+        fs::create_dir(&cache_root).unwrap();
+        let cache_dir = cache_root.join("image");
+        let layer = write_layer(directory.path(), "base.tar", &[("file", b"content")]);
+        let layers = [Ok(layer), Err(anyhow::anyhow!("download failed"))];
+        let metadata = CachedImageMetadata {
+            materializer_version: MATERIALIZER_VERSION,
+            source: "example.com/image:latest".to_string(),
+            source_digest: String::new(),
+            manifest_digest: String::new(),
+            platform: "linux/amd64".to_string(),
+            configuration: SandboxImageConfiguration::default(),
+        };
+
+        let error = build_and_publish_image(
+            &cache_root,
+            &cache_dir,
+            &metadata.source.clone(),
+            layers.into_iter(),
+            metadata,
+            1,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "download failed");
+        assert!(!cache_dir.exists());
+        assert_eq!(fs::read_dir(cache_root).unwrap().count(), 0);
     }
 
     #[test]
