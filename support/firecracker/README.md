@@ -138,6 +138,18 @@ use forks, the guest kernel must additionally be 5.18 or newer with
 `CONFIG_HW_RANDOM_VIRTIO=y` lets the guest draw extra entropy from the
 attached virtio-rng device.
 
+Snapshot capture requires host swap to be disabled. With the Firecracker 1.16.1
+bundle above, Exo captures resident guest-memory pages into sparse snapshots
+instead of writing the entire configured RAM size. A restored VM's capture
+merges these pages into a private reflink of its immutable base, producing an
+independently restorable snapshot. Published templates remain read-only, and
+disk and memory are captured while the guest is paused.
+
+Each restored VM receives its own reflinked memory inode, owned by its jailer
+UID. Linux otherwise hides page residency from Firecracker for the root-owned
+template file, making subsequent sparse captures write all pages. Reflinks
+share disk extents, but separate inodes do not share the host's file page cache.
+
 Install matching official Firecracker and jailer release binaries under
 `/usr/local/bin`, and install the guest kernel at
 `/var/lib/exo/firecracker/vmlinux`. The binaries and all parent directories
