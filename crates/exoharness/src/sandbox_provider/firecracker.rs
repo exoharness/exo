@@ -499,8 +499,8 @@ impl MachineLifecycleLocks {
         self.lock_key(machine_lifecycle_key(machine_id)).await
     }
 
-    async fn lock_sandbox(&self, key: &str) -> OwnedMutexGuard<()> {
-        self.lock_key(sandbox_lifecycle_key(key)).await
+    async fn lock_sandbox(&self, sandbox_id: &str) -> OwnedMutexGuard<()> {
+        self.lock_key(sandbox_lifecycle_key(sandbox_id)).await
     }
 
     async fn lock_sandbox_pair(
@@ -2256,20 +2256,20 @@ fn binary_version(path: &Path) -> Result<String> {
         .ok_or_else(|| anyhow!("could not parse version from {}", path.display()))
 }
 
-fn machine_id(key: &str, spec_hash: &str) -> String {
-    format!("fc-{}-{}", stable_id(key), &spec_hash[..8])
+fn machine_id(sandbox_id: &str, spec_hash: &str) -> String {
+    format!("fc-{}-{}", stable_id(sandbox_id), &spec_hash[..8])
 }
 
-fn one_shot_machine_id(key: &str, spec_hash: &str, sequence: u64) -> String {
+fn one_shot_machine_id(sandbox_id: &str, spec_hash: &str, sequence: u64) -> String {
     format!(
         "fc-{}-{}",
-        stable_id(&format!("{key}\n{}\n{sequence}", std::process::id())),
+        stable_id(&format!("{sandbox_id}\n{}\n{sequence}", std::process::id())),
         &spec_hash[..8]
     )
 }
 
-fn sandbox_lifecycle_key(key: &str) -> String {
-    format!("fc-{}", stable_id(key))
+fn sandbox_lifecycle_key(sandbox_id: &str) -> String {
+    format!("fc-{}", stable_id(sandbox_id))
 }
 
 fn machine_lifecycle_key(machine_id: &str) -> String {
@@ -4686,12 +4686,12 @@ fn wait_for_guest_blocking(
 async fn touch_machine(
     shared: &Shared,
     machines: &Mutex<HashMap<SandboxId, WarmMachineEntry>>,
-    key: &str,
+    sandbox_id: &str,
     machine_id: &str,
 ) -> Result<()> {
     let touched = {
         let mut machines = machines.lock().await;
-        if let Some(entry) = machines.get_mut(key)
+        if let Some(entry) = machines.get_mut(sandbox_id)
             && entry.machine_id == machine_id
         {
             entry.last_used_at = Instant::now();
