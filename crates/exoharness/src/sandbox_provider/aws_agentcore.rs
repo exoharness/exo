@@ -555,7 +555,7 @@ mod tests {
     fn durable_request(mount_path: &str, mode: FileSystemMountMode) -> SandboxRequest {
         SandboxRequest {
             sandbox_id: "sandbox".to_string(),
-            scope: Some(SandboxScope::Conversation {
+            scope: Some(SandboxScope::Thread {
                 thread_id: "thread".to_string(),
             }),
             spec: SandboxSpec {

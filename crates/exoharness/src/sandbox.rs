@@ -29,7 +29,7 @@ pub enum SandboxScope {
     Agent {
         agent_id: String,
     },
-    Conversation {
+    Thread {
         #[serde(alias = "conversation_id")]
         thread_id: String,
     },
@@ -2302,19 +2302,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn conversation_scope_uses_thread_id_and_reads_conversation_id() {
-        let scope = SandboxScope::Conversation {
+    fn thread_scope_uses_thread_id_and_reads_conversation_id() {
+        let scope = SandboxScope::Thread {
             thread_id: "thread-1".to_string(),
         };
         assert_eq!(
             serde_json::to_value(&scope).unwrap(),
             serde_json::json!({
-                "Conversation": { "thread_id": "thread-1" }
+                "Thread": { "thread_id": "thread-1" }
             })
         );
         assert_eq!(
             serde_json::from_value::<SandboxScope>(serde_json::json!({
-                "Conversation": { "conversation_id": "thread-1" }
+                "Thread": { "conversation_id": "thread-1" }
             }))
             .unwrap(),
             scope
@@ -2456,7 +2456,7 @@ mod tests {
 
         let request = SandboxRequest {
             sandbox_id: "sandbox".to_string(),
-            scope: Some(SandboxScope::Conversation {
+            scope: Some(SandboxScope::Thread {
                 thread_id: "thread".to_string(),
             }),
             spec: SandboxSpec {
@@ -2536,7 +2536,7 @@ mod tests {
         };
         let request = SandboxRequest {
             sandbox_id: "sandbox".to_string(),
-            scope: Some(SandboxScope::Conversation {
+            scope: Some(SandboxScope::Thread {
                 thread_id: "thread".to_string(),
             }),
             spec: SandboxSpec {
@@ -2629,7 +2629,7 @@ esac
         };
         let request = SandboxRequest {
             sandbox_id: "sandbox".to_string(),
-            scope: Some(SandboxScope::Conversation {
+            scope: Some(SandboxScope::Thread {
                 thread_id: "thread".to_string(),
             }),
             spec: SandboxSpec {
@@ -2741,7 +2741,7 @@ esac
         };
         let request = SandboxRequest {
             sandbox_id: "sandbox".to_string(),
-            scope: Some(SandboxScope::Conversation {
+            scope: Some(SandboxScope::Thread {
                 thread_id: "thread".to_string(),
             }),
             spec: SandboxSpec {

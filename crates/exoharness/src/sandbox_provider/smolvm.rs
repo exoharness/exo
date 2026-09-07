@@ -1141,7 +1141,7 @@ mod tests {
     fn machine_name_uses_sandbox_id_without_owner_scope() {
         let mut request = test_request(None);
         let name = machine_name(&request.sandbox_id);
-        request.scope = Some(SandboxScope::Conversation {
+        request.scope = Some(SandboxScope::Thread {
             thread_id: "thread".into(),
         });
         assert_eq!(name, machine_name(&request.sandbox_id));

@@ -4427,7 +4427,7 @@ fn sandbox_request(
             SandboxOwner::Agent(agent_id) => SandboxScope::Agent {
                 agent_id: agent_id.to_string(),
             },
-            SandboxOwner::Conversation(thread_id) => SandboxScope::Conversation {
+            SandboxOwner::Conversation(thread_id) => SandboxScope::Thread {
                 thread_id: thread_id.to_string(),
             },
         }),

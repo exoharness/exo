@@ -16,7 +16,7 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 fn make_request(thread_id: &str, sandbox_id: &str) -> SandboxRequest {
     SandboxRequest {
         sandbox_id: sandbox_id.into(),
-        scope: Some(SandboxScope::Conversation {
+        scope: Some(SandboxScope::Thread {
             thread_id: thread_id.into(),
         }),
         spec: SandboxSpec {

@@ -36,7 +36,7 @@ fn live_provider_secret(provider: &str, secret_name: &str) -> Option<String> {
 fn make_e2b_request(thread_id: &str, sandbox_id: &str) -> SandboxRequest {
     SandboxRequest {
         sandbox_id: sandbox_id.into(),
-        scope: Some(SandboxScope::Conversation {
+        scope: Some(SandboxScope::Thread {
             thread_id: thread_id.into(),
         }),
         spec: SandboxSpec {
@@ -86,7 +86,7 @@ fn sprites_config_from_env() -> Option<SpritesConfig> {
 fn make_sprites_request(thread_id: &str, sandbox_id: &str) -> SandboxRequest {
     SandboxRequest {
         sandbox_id: sandbox_id.into(),
-        scope: Some(SandboxScope::Conversation {
+        scope: Some(SandboxScope::Thread {
             thread_id: thread_id.into(),
         }),
         spec: SandboxSpec {
