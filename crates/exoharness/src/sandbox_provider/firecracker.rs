@@ -49,7 +49,7 @@ use crate::sandbox::{
 };
 use crate::sandbox_provider::process_bridge;
 use crate::{
-    FileSystemMountMode, SandboxAttachment, SandboxProcessParts, SandboxResourceShape,
+    FileSystemMountMode, SandboxAttachment, SandboxId, SandboxProcessParts, SandboxResourceShape,
     SandboxTerminalParts, SandboxTerminalSize,
 };
 
@@ -577,7 +577,7 @@ struct Shared {
     // matching machines after the prior controller releases this lock; the
     // lock prevents concurrent controllers from racing that reconciliation.
     _state_lock: File,
-    warm_machines: Mutex<HashMap<String, WarmMachineEntry>>,
+    warm_machines: Mutex<HashMap<SandboxId, WarmMachineEntry>>,
     lifecycle_locks: MachineLifecycleLocks,
     capacity_gate: Mutex<()>,
     starting_machines: Arc<StdMutex<HashSet<String>>>,
@@ -4685,7 +4685,7 @@ fn wait_for_guest_blocking(
 
 async fn touch_machine(
     shared: &Shared,
-    machines: &Mutex<HashMap<String, WarmMachineEntry>>,
+    machines: &Mutex<HashMap<SandboxId, WarmMachineEntry>>,
     key: &str,
     machine_id: &str,
 ) -> Result<()> {

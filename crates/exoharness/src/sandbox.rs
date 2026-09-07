@@ -22,7 +22,7 @@ use tokio::time;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use uuid::Uuid;
 
-use crate::{DurableFileSystem, SandboxAttachment};
+use crate::{DurableFileSystem, SandboxAttachment, SandboxId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SandboxScope {
@@ -73,7 +73,7 @@ pub struct SandboxSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxRequest {
-    pub sandbox_id: String,
+    pub sandbox_id: SandboxId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<SandboxScope>,
     pub spec: SandboxSpec,
@@ -468,7 +468,7 @@ pub struct CliContainerSandboxBackend {
     durable_file_system_root: Option<PathBuf>,
     system_started: Mutex<bool>,
     network_created: Mutex<bool>,
-    warm_sandboxes: Arc<Mutex<HashMap<String, WarmSandboxEntry>>>,
+    warm_sandboxes: Arc<Mutex<HashMap<SandboxId, WarmSandboxEntry>>>,
 }
 
 static DOCKER_CONSUMABLE_SNAPSHOT_FORMATS: [SnapshotFormat; 1] = [SnapshotFormat::DockerImageTar];
@@ -910,7 +910,7 @@ struct WarmSandboxHandle {
     cli: ContainerCliFlavor,
     container_bin: PathBuf,
     request: SandboxRequest,
-    warm_sandboxes: Arc<Mutex<HashMap<String, WarmSandboxEntry>>>,
+    warm_sandboxes: Arc<Mutex<HashMap<SandboxId, WarmSandboxEntry>>>,
 }
 
 #[async_trait]
@@ -1276,7 +1276,7 @@ pub(crate) fn stable_fnv1a_hex(input: &str) -> String {
 }
 
 async fn touch_warm_sandbox(
-    warm_sandboxes: &Arc<Mutex<HashMap<String, WarmSandboxEntry>>>,
+    warm_sandboxes: &Arc<Mutex<HashMap<SandboxId, WarmSandboxEntry>>>,
     key: &str,
 ) {
     let mut warm_sandboxes = warm_sandboxes.lock().await;
@@ -1504,7 +1504,7 @@ async fn ensure_warm_sandbox_ready(
     container_bin: &Path,
     cli: ContainerCliFlavor,
     request: &SandboxRequest,
-    warm_sandboxes: &Arc<Mutex<HashMap<String, WarmSandboxEntry>>>,
+    warm_sandboxes: &Arc<Mutex<HashMap<SandboxId, WarmSandboxEntry>>>,
 ) -> Result<String> {
     let healthcheck = SandboxCommand {
         argv: vec!["/bin/true".to_string()],
