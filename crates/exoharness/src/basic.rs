@@ -1166,18 +1166,13 @@ impl ExoHarness for BasicExoHarness {
     }
 
     async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>> {
-        let path = self.secrets_dir().join(format!("{id}.json"));
-        let Some(record) = self
-            .inner
-            .storage
-            .get_json_if_exists::<StoredSecret>(&path)
-            .await?
-        else {
-            return Ok(None);
-        };
-        Ok(Some(
-            self.inner.secret_cipher.decrypt_secret(&record.secret)?,
-        ))
+        resolve_effective_secret(
+            &self.inner.storage,
+            &self.inner.secret_cipher,
+            &[self.secrets_dir()],
+            id,
+        )
+        .await
     }
 }
 
@@ -1553,22 +1548,13 @@ impl AgentHandle for BasicAgentHandle {
     }
 
     async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>> {
-        let path = self.secrets_dir().join(format!("{id}.json"));
-        let Some(record) = self
-            .harness
-            .inner
-            .storage
-            .get_json_if_exists::<StoredSecret>(&path)
-            .await?
-        else {
-            return self.harness.get_secret(id).await;
-        };
-        Ok(Some(
-            self.harness
-                .inner
-                .secret_cipher
-                .decrypt_secret(&record.secret)?,
-        ))
+        resolve_effective_secret(
+            &self.harness.inner.storage,
+            &self.harness.inner.secret_cipher,
+            &[self.harness.secrets_dir(), self.secrets_dir()],
+            id,
+        )
+        .await
     }
 
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion> {
@@ -3103,37 +3089,17 @@ impl ConversationHandle for BasicConversationHandle {
     }
 
     async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>> {
-        let local_path = self.secrets_dir().join(format!("{id}.json"));
-        if let Some(record) = self
-            .harness
-            .inner
-            .storage
-            .get_json_if_exists::<StoredSecret>(&local_path)
-            .await?
-        {
-            return Ok(Some(
-                self.harness
-                    .inner
-                    .secret_cipher
-                    .decrypt_secret(&record.secret)?,
-            ));
-        }
-        let agent_path = agent_secrets_dir(&self.harness, self.agent_id).join(format!("{id}.json"));
-        let Some(record) = self
-            .harness
-            .inner
-            .storage
-            .get_json_if_exists::<StoredSecret>(&agent_path)
-            .await?
-        else {
-            return self.harness.get_secret(id).await;
-        };
-        Ok(Some(
-            self.harness
-                .inner
-                .secret_cipher
-                .decrypt_secret(&record.secret)?,
-        ))
+        resolve_effective_secret(
+            &self.harness.inner.storage,
+            &self.harness.inner.secret_cipher,
+            &[
+                self.harness.secrets_dir(),
+                agent_secrets_dir(&self.harness, self.agent_id),
+                self.secrets_dir(),
+            ],
+            id,
+        )
+        .await
     }
 }
 
@@ -4703,6 +4669,46 @@ fn stored_binding(id: BindingId, binding: Binding) -> StoredBinding {
             binding,
         },
     }
+}
+
+/// Reads the secret a stored id refers to, following rotations of its name.
+///
+/// `put_secret` stores a rotated key as a new record rather than overwriting
+/// the old one, so anything holding an id — a model binding, an adapter — would
+/// otherwise stay pinned to a superseded value. Resolving through the name
+/// applies the precedence `list_secrets` already reports: the narrowest scope
+/// wins, and within a scope the newest record wins. `scopes` runs widest to
+/// narrowest.
+async fn resolve_effective_secret(
+    storage: &BasicObjectStore,
+    cipher: &SecretCipher,
+    scopes: &[PathBuf],
+    id: &SecretId,
+) -> Result<Option<Secret>> {
+    let mut per_scope = Vec::with_capacity(scopes.len());
+    for dir in scopes {
+        per_scope.push(list_secret_metadata(storage, dir).await?);
+    }
+    let Some(name) = per_scope
+        .iter()
+        .flatten()
+        .find(|metadata| &metadata.id == id)
+        .map(|metadata| metadata.name.clone())
+    else {
+        return Ok(None);
+    };
+    let effective = merge_secret_metadata(per_scope)
+        .into_iter()
+        .find(|metadata| metadata.name == name)
+        .map_or(*id, |metadata| metadata.id);
+
+    for dir in scopes.iter().rev() {
+        let path = dir.join(format!("{effective}.json"));
+        if let Some(record) = storage.get_json_if_exists::<StoredSecret>(&path).await? {
+            return Ok(Some(cipher.decrypt_secret(&record.secret)?));
+        }
+    }
+    Ok(None)
 }
 
 async fn list_secret_metadata(

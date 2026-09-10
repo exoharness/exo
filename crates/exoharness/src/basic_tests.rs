@@ -1186,6 +1186,95 @@ async fn legacy_json_artifacts_are_still_readable() {
     assert_eq!(loaded.contents, br#"{"model":"gpt-5.4"}"#);
 }
 
+/// Rotating a key is `secret set <name>` with the new value. The model binding
+/// must then send the new key: a binding keeps working across a rotation.
+#[tokio::test(flavor = "current_thread")]
+async fn a_model_binding_uses_the_latest_secret_stored_under_its_name() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
+        .await
+        .expect("harness should initialize");
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let conversation = agent
+        .new_conversation(NewConversationRequest {
+            slug: Some("dev".to_string()),
+            name: Some("Dev".to_string()),
+        })
+        .await
+        .expect("conversation");
+
+    // The key in use, then a model bound to it.
+    let stale_secret_id = conversation
+        .put_secret(PutSecretRequest {
+            name: "openrouter".to_string(),
+            secret: Secret::Key {
+                value: "stale-key".to_string(),
+            },
+        })
+        .await
+        .expect("stale secret");
+    conversation
+        .put_binding(Binding::Llm {
+            name: "model".to_string(),
+            model: "some/model".to_string(),
+            base_url: None,
+            secret_id: Some(stale_secret_id),
+        })
+        .await
+        .expect("binding");
+    assert_eq!(
+        resolved_model_key(conversation.as_ref()).await,
+        "stale-key",
+        "the binding should start out on the key it was registered with"
+    );
+
+    // The key is rotated: `secret set openrouter` with the new value.
+    conversation
+        .put_secret(PutSecretRequest {
+            name: "openrouter".to_string(),
+            secret: Secret::Key {
+                value: "rotated-key".to_string(),
+            },
+        })
+        .await
+        .expect("rotated secret");
+
+    assert_eq!(
+        resolved_model_key(conversation.as_ref()).await,
+        "rotated-key",
+        "the binding should send the rotated key without being re-registered"
+    );
+}
+
+/// Mirrors how a model call resolves its API key from the named binding.
+async fn resolved_model_key(conversation: &dyn crate::ConversationHandle) -> String {
+    let binding = conversation
+        .list_bindings()
+        .await
+        .expect("list bindings")
+        .into_iter()
+        .find(|record| matches!(&record.binding, Binding::Llm { name, .. } if name == "model"))
+        .expect("model binding");
+    let Binding::Llm { secret_id, .. } = binding.binding else {
+        panic!("expected an llm binding");
+    };
+    let secret = conversation
+        .get_secret(&secret_id.expect("secret id"))
+        .await
+        .expect("get secret")
+        .expect("secret should exist");
+    match secret {
+        Secret::Key { value } => value,
+        Secret::Oauth { .. } => panic!("expected a key secret"),
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn conversation_scope_overrides_agent_scope_and_fork_copies_local_state() {
     let tempdir = TempDir::new().expect("tempdir");
