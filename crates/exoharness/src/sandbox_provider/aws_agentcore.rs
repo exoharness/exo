@@ -104,17 +104,19 @@ impl ManagedSandboxBackend for AwsAgentCoreSandboxBackend {
         reject_unsupported_request(&request, self.session_storage_mount_path.as_deref())?;
         let spec_hash = sandbox_spec_hash(&request.spec);
         let runtime_session_id = agentcore_runtime_session_id(&request, &spec_hash);
-        Ok(Arc::new(AwsAgentCoreSandboxHandle {
-            id: format!("aws-agentcore:{runtime_session_id}"),
-            runtime_session_id,
-            request,
-            backend: AwsAgentCoreBackendHandle {
-                client: self.client.clone(),
-                runtime_arn: self.runtime_arn.clone(),
-                invoke_target: self.invoke_target.clone(),
-                qualifier: self.qualifier.clone(),
+        Ok(crate::with_process_management(Arc::new(
+            AwsAgentCoreSandboxHandle {
+                id: format!("aws-agentcore:{runtime_session_id}"),
+                runtime_session_id,
+                request,
+                backend: AwsAgentCoreBackendHandle {
+                    client: self.client.clone(),
+                    runtime_arn: self.runtime_arn.clone(),
+                    invoke_target: self.invoke_target.clone(),
+                    qualifier: self.qualifier.clone(),
+                },
             },
-        }))
+        )))
     }
 
     async fn attach(

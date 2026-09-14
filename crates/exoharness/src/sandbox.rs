@@ -213,6 +213,42 @@ pub trait ManagedSandboxHandle: Send + Sync {
 
     async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts>;
 
+    /// Start a process whose ID remains usable through this sandbox's process API.
+    /// Once started, dropping a wait or output request must not cancel the process.
+    async fn start_managed_process(
+        &self,
+        _command: &SandboxCommand,
+        _stdin: crate::SandboxProcessStdin,
+    ) -> Result<crate::SandboxProcessId> {
+        bail!("sandbox backend does not support managed processes")
+    }
+
+    async fn write_process_input(&self, _process_id: &str, _data: &[u8]) -> Result<()> {
+        bail!("sandbox backend does not support managed processes")
+    }
+
+    async fn close_process_input(&self, _process_id: &str) -> Result<()> {
+        bail!("sandbox backend does not support managed processes")
+    }
+
+    /// Events strictly after `after`, ordered by cursor, with current status.
+    /// A terminal status guarantees that the terminal event is available.
+    async fn process_events(
+        &self,
+        _process_id: &str,
+        _after: u64,
+    ) -> Result<crate::GetSandboxProcessEventsResult> {
+        bail!("sandbox backend does not support managed processes")
+    }
+
+    async fn wait_process(&self, _process_id: &str) -> Result<crate::SandboxProcessStatus> {
+        bail!("sandbox backend does not support managed processes")
+    }
+
+    async fn cancel_process(&self, _process_id: &str) -> Result<crate::SandboxProcessStatus> {
+        bail!("sandbox backend does not support managed processes")
+    }
+
     async fn start_terminal(
         &self,
         _command: &SandboxCommand,
@@ -693,11 +729,13 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
         let request = self.prepare_request(request).await?;
 
         if request.lifecycle.idle_ttl.is_none() {
-            return Ok(Arc::new(OneShotSandboxHandle {
-                id: format!("oneshot:{}", request.sandbox_id.as_str()),
-                container_bin: self.container_bin.clone(),
-                request,
-            }));
+            return Ok(crate::with_process_management(Arc::new(
+                OneShotSandboxHandle {
+                    id: format!("oneshot:{}", request.sandbox_id.as_str()),
+                    container_bin: self.container_bin.clone(),
+                    request,
+                },
+            )));
         }
 
         self.reap_expired_warm_sandboxes().await;
@@ -706,13 +744,15 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
             let mut warm_sandboxes = self.warm_sandboxes.lock().await;
             match warm_sandboxes.get(request.sandbox_id.as_str()) {
                 Some(entry) if entry.request.spec == request.spec => {
-                    return Ok(Arc::new(WarmSandboxHandle {
-                        id: format!("warm:{}", request.sandbox_id.as_str()),
-                        cli: self.cli,
-                        container_bin: self.container_bin.clone(),
-                        request,
-                        warm_sandboxes: Arc::clone(&self.warm_sandboxes),
-                    }));
+                    return Ok(crate::with_process_management(Arc::new(
+                        WarmSandboxHandle {
+                            id: format!("warm:{}", request.sandbox_id.as_str()),
+                            cli: self.cli,
+                            container_bin: self.container_bin.clone(),
+                            request,
+                            warm_sandboxes: Arc::clone(&self.warm_sandboxes),
+                        },
+                    )));
                 }
                 Some(_) => warm_sandboxes.remove(request.sandbox_id.as_str()),
                 None => None,
@@ -746,13 +786,15 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
             );
         }
 
-        Ok(Arc::new(WarmSandboxHandle {
-            id: format!("warm:{}", request.sandbox_id.as_str()),
-            cli: self.cli,
-            container_bin: self.container_bin.clone(),
-            request,
-            warm_sandboxes: Arc::clone(&self.warm_sandboxes),
-        }))
+        Ok(crate::with_process_management(Arc::new(
+            WarmSandboxHandle {
+                id: format!("warm:{}", request.sandbox_id.as_str()),
+                cli: self.cli,
+                container_bin: self.container_bin.clone(),
+                request,
+                warm_sandboxes: Arc::clone(&self.warm_sandboxes),
+            },
+        )))
     }
 
     async fn attach(
@@ -766,12 +808,14 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
         let SandboxAttachment::DockerContainer { container_id } = attachment;
         let container_id =
             inspect_running_docker_container(&self.container_bin, &container_id).await?;
-        Ok(Arc::new(BorrowedDockerSandboxHandle {
-            id: format!("borrowed-docker:{container_id}"),
-            container_bin: self.container_bin.clone(),
-            container_id,
-            spec: request.spec,
-        }))
+        Ok(crate::with_process_management(Arc::new(
+            BorrowedDockerSandboxHandle {
+                id: format!("borrowed-docker:{container_id}"),
+                container_bin: self.container_bin.clone(),
+                container_id,
+                spec: request.spec,
+            },
+        )))
     }
 
     async fn acquire_from_snapshot(
@@ -819,13 +863,15 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
             );
         }
 
-        Ok(Arc::new(WarmSandboxHandle {
-            id: format!("warm:{}", request.sandbox_id.as_str()),
-            cli: self.cli,
-            container_bin: self.container_bin.clone(),
-            request,
-            warm_sandboxes: Arc::clone(&self.warm_sandboxes),
-        }))
+        Ok(crate::with_process_management(Arc::new(
+            WarmSandboxHandle {
+                id: format!("warm:{}", request.sandbox_id.as_str()),
+                cli: self.cli,
+                container_bin: self.container_bin.clone(),
+                request,
+                warm_sandboxes: Arc::clone(&self.warm_sandboxes),
+            },
+        )))
     }
 
     async fn terminate(&self, request: SandboxRequest) -> Result<()> {
@@ -1064,10 +1110,12 @@ impl ManagedSandboxBackend for LocalProcessSandboxBackend {
         if !request.spec.durable_file_systems.is_empty() {
             bail!("local-process sandbox backend does not support durable file systems");
         }
-        Ok(Arc::new(LocalProcessSandboxHandle {
-            id: format!("local:{}", request.sandbox_id.as_str()),
-            request,
-        }))
+        Ok(crate::with_process_management(Arc::new(
+            LocalProcessSandboxHandle {
+                id: format!("local:{}", request.sandbox_id.as_str()),
+                request,
+            },
+        )))
     }
 
     async fn attach(

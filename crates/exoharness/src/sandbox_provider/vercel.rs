@@ -174,13 +174,15 @@ impl ManagedSandboxBackend for VercelSandboxBackend {
             }
         };
 
-        Ok(Arc::new(VercelSandboxHandle {
-            id: format!("vercel:{sandbox_name}"),
-            sandbox_name,
-            session_id: response.session.id,
-            request,
-            backend: self.handle_backend(),
-        }))
+        Ok(crate::with_process_management(Arc::new(
+            VercelSandboxHandle {
+                id: format!("vercel:{sandbox_name}"),
+                sandbox_name,
+                session_id: response.session.id,
+                request,
+                backend: self.handle_backend(),
+            },
+        )))
     }
 
     async fn attach(

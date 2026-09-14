@@ -248,25 +248,25 @@ impl ManagedSandboxBackend for E2bSandboxBackend {
                     .await?;
                 envd_access_token = connected.envd_access_token;
             }
-            return Ok(Arc::new(E2bSandboxHandle {
+            return Ok(crate::with_process_management(Arc::new(E2bSandboxHandle {
                 id: format!("e2b:{}", request.sandbox_id.as_str()),
                 sandbox_id: existing.sandbox_id,
                 envd_access_token,
                 request,
                 backend: self.handle_backend(),
-            }));
+            })));
         }
 
         let sandbox = self
             .create_sandbox(&request, &spec_hash, &template_id)
             .await?;
-        Ok(Arc::new(E2bSandboxHandle {
+        Ok(crate::with_process_management(Arc::new(E2bSandboxHandle {
             id: format!("e2b:{}", request.sandbox_id.as_str()),
             sandbox_id: sandbox.sandbox_id,
             envd_access_token: sandbox.envd_access_token,
             request,
             backend: self.handle_backend(),
-        }))
+        })))
     }
 
     async fn attach(
@@ -296,13 +296,13 @@ impl ManagedSandboxBackend for E2bSandboxBackend {
         let sandbox = self
             .create_sandbox(&request, &spec_hash, &manifest.snapshot_id)
             .await?;
-        Ok(Arc::new(E2bSandboxHandle {
+        Ok(crate::with_process_management(Arc::new(E2bSandboxHandle {
             id: format!("e2b-restored:{}", request.sandbox_id.as_str()),
             sandbox_id: sandbox.sandbox_id,
             envd_access_token: sandbox.envd_access_token,
             request,
             backend: self.handle_backend(),
-        }))
+        })))
     }
 }
 

@@ -1094,14 +1094,16 @@ impl FirecrackerSandboxBackend {
         } else {
             format!("firecracker:{target_machine_id}")
         };
-        Ok(Arc::new(FirecrackerSandboxHandle {
-            id,
-            machine,
-            request,
-            spec_hash,
-            shared: Arc::clone(&self.shared),
-            one_shot,
-        }))
+        Ok(crate::with_process_management(Arc::new(
+            FirecrackerSandboxHandle {
+                id,
+                machine,
+                request,
+                spec_hash,
+                shared: Arc::clone(&self.shared),
+                one_shot,
+            },
+        )))
     }
 }
 

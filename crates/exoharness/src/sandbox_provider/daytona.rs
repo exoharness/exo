@@ -280,12 +280,14 @@ impl ManagedSandboxBackend for DaytonaSandboxBackend {
         };
 
         self.wait_until_started(&sandbox.id).await?;
-        Ok(Arc::new(DaytonaSandboxHandle {
-            id: format!("daytona:{}", request.sandbox_id.as_str()),
-            sandbox_id: sandbox.id,
-            request,
-            backend: self.handle_backend(),
-        }))
+        Ok(crate::with_process_management(Arc::new(
+            DaytonaSandboxHandle {
+                id: format!("daytona:{}", request.sandbox_id.as_str()),
+                sandbox_id: sandbox.id,
+                request,
+                backend: self.handle_backend(),
+            },
+        )))
     }
 
     async fn attach(
@@ -319,12 +321,14 @@ impl ManagedSandboxBackend for DaytonaSandboxBackend {
             .create_sandbox(&request, &spec_hash, Some(&snapshot_name))
             .await?;
         self.wait_until_started(&sandbox.id).await?;
-        Ok(Arc::new(DaytonaSandboxHandle {
-            id: format!("daytona:{}", request.sandbox_id.as_str()),
-            sandbox_id: sandbox.id,
-            request,
-            backend: self.handle_backend(),
-        }))
+        Ok(crate::with_process_management(Arc::new(
+            DaytonaSandboxHandle {
+                id: format!("daytona:{}", request.sandbox_id.as_str()),
+                sandbox_id: sandbox.id,
+                request,
+                backend: self.handle_backend(),
+            },
+        )))
     }
 }
 

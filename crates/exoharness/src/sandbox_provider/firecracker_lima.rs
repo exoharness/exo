@@ -91,13 +91,15 @@ impl LimaFirecrackerSandboxBackend {
             .context("Firecracker Lima bridge did not return a resolved image for its handle")?;
         request.spec.image.clone_from(&effective_image);
         request.provider_state.clone_from(&provider_state);
-        Ok(Arc::new(LimaFirecrackerSandboxHandle {
-            id,
-            provider_state,
-            effective_image: Some(effective_image),
-            request,
-            backend: self.client(),
-        }))
+        Ok(crate::with_process_management(Arc::new(
+            LimaFirecrackerSandboxHandle {
+                id,
+                provider_state,
+                effective_image: Some(effective_image),
+                request,
+                backend: self.client(),
+            },
+        )))
     }
 
     fn client(&self) -> Arc<Self> {
@@ -134,13 +136,15 @@ impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
         // command crosses the bridge.
         if request.lifecycle.idle_ttl.is_none() {
             let sequence = LIMA_ONE_SHOT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            return Ok(Arc::new(LimaFirecrackerSandboxHandle {
-                id: format!("firecracker-lima-oneshot:{sequence}"),
-                provider_state: None,
-                effective_image: None,
-                request,
-                backend: self.client(),
-            }));
+            return Ok(crate::with_process_management(Arc::new(
+                LimaFirecrackerSandboxHandle {
+                    id: format!("firecracker-lima-oneshot:{sequence}"),
+                    provider_state: None,
+                    effective_image: None,
+                    request,
+                    backend: self.client(),
+                },
+            )));
         }
         let response = self
             .request(FirecrackerBridgeRequest::Acquire {

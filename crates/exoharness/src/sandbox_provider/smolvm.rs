@@ -431,20 +431,22 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
                 if self.labels_supported().await {
                     self.reap_abandoned_machines(&machine).await;
                 }
-                Ok(Arc::new(SmolvmWarmHandle {
+                Ok(crate::with_process_management(Arc::new(SmolvmWarmHandle {
                     id: format!("smolvm:{machine}"),
                     binary: self.binary.clone(),
                     machine,
                     request,
-                }))
+                })))
             }
             // `Auto` is resolved by `resolve_mode`, so it never reaches here.
-            _ => Ok(Arc::new(SmolvmOneShotHandle {
-                id: format!("smolvm-oneshot:{}", request.sandbox_id.as_str()),
-                binary: self.binary.clone(),
-                boot_binary: self.boot_binary().await.clone(),
-                request,
-            })),
+            _ => Ok(crate::with_process_management(Arc::new(
+                SmolvmOneShotHandle {
+                    id: format!("smolvm-oneshot:{}", request.sandbox_id.as_str()),
+                    binary: self.binary.clone(),
+                    boot_binary: self.boot_binary().await.clone(),
+                    request,
+                },
+            ))),
         }
     }
 
@@ -511,12 +513,12 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             .arg(&machine);
         run_checked(start, "smolvm machine start").await?;
 
-        Ok(Arc::new(SmolvmWarmHandle {
+        Ok(crate::with_process_management(Arc::new(SmolvmWarmHandle {
             id: format!("smolvm:{machine}"),
             binary: self.binary.clone(),
             machine,
             request,
-        }))
+        })))
     }
 }
 
