@@ -443,7 +443,10 @@ pub enum EventData {
     },
     SessionStarted,
     SessionEnded,
-    TurnStarted,
+    TurnStarted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_id: Option<String>,
+    },
     TurnEnded,
     Messages {
         messages: Vec<Message>,
@@ -550,7 +553,7 @@ impl EventData {
             Self::ThreadForked { .. } => EventKind::THREAD_FORKED,
             Self::SessionStarted => EventKind::SESSION_STARTED,
             Self::SessionEnded => EventKind::SESSION_ENDED,
-            Self::TurnStarted => EventKind::TURN_STARTED,
+            Self::TurnStarted { .. } => EventKind::TURN_STARTED,
             Self::TurnEnded => EventKind::TURN_ENDED,
             Self::Messages { .. } => EventKind::MESSAGES,
             Self::ToolRequested { .. } => EventKind::TOOL_REQUESTED,
@@ -1183,6 +1186,22 @@ crate::impl_has_uuid7_id!(SecretMetadata, id);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_started_preserves_user_and_accepts_older_events() {
+        for user_id in [None, Some("user-1".to_string())] {
+            let event = EventData::TurnStarted {
+                user_id: user_id.clone(),
+            };
+            let value = serde_json::to_value(&event).unwrap();
+            let decoded: EventData = serde_json::from_value(value).unwrap();
+            assert!(
+                matches!(decoded, EventData::TurnStarted { user_id: actual } if actual == user_id)
+            );
+        }
+        let event: EventData = serde_json::from_str(r#"{"type":"turn_started"}"#).unwrap();
+        assert!(matches!(event, EventData::TurnStarted { user_id: None }));
+    }
 
     #[test]
     fn serializes_event_types_as_snake_case() {

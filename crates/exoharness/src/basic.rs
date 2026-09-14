@@ -2711,7 +2711,7 @@ impl ConversationHandle for BasicConversationHandle {
         if request.session_id.is_none() {
             events_to_append.push(EventData::SessionStarted);
         }
-        events_to_append.push(EventData::TurnStarted);
+        events_to_append.push(EventData::TurnStarted { user_id: None });
         if !request.input.is_empty() {
             events_to_append.push(EventData::Messages {
                 messages: request.input,
