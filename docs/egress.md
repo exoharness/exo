@@ -196,8 +196,33 @@ additional transport support. Model credential bindings are not inferred
 automatically.
 
 Firecracker proxy policies do not yet support snapshots/forks, external
-attachments, or one-shot sandboxes. HTTP/2, WebSockets, arbitrary TCP, Git Basic
-auth encoding, and signed requests are also outside this initial implementation.
+attachments, or one-shot sandboxes. HTTP/2, WebSockets, arbitrary TCP, and signed
+requests are also outside this initial implementation.
+
+## Git over HTTPS
+
+Git read and write operations use ordinary smart HTTP. A read uses
+`GET /repo.git/info/refs?service=git-upload-pack` followed by
+`POST /repo.git/git-upload-pack`; a write uses
+`GET /repo.git/info/refs?service=git-receive-pack` followed by
+`POST /repo.git/git-receive-pack`. These paths are forwarded when the caller's
+`EgressCredentialResolver` authorizes the destination and operation. A binding's
+environment variable is injected as an `exo_egress_...` placeholder inside the
+sandbox. Configure it with Git's `http.<url>.extraHeader` setting:
+
+```bash
+git -C "$repo" config --local \
+  'http.https://git.example.com/.extraHeader' \
+  "Authorization: Basic $GIT_AUTH"
+```
+
+For Basic authentication, the resolver returns the Base64 payload expected after
+`Basic`, and the proxy substitutes it for the placeholder. `Git-Protocol: version=2`
+passes through unchanged, and `GIT_SSL_CAINFO` provides trust for the
+proxy's certificate. Redirects are not followed. Request bodies over 8 MiB are
+rejected, so larger push packfiles need additional support. Repository and
+operation authorization remain the caller's responsibility; Exo resolves the
+selected binding and forwards only requests the resolver authorizes.
 
 ## Tests
 
