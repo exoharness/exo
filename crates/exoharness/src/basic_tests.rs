@@ -671,6 +671,7 @@ async fn local_process_contract_handle(
         .acquire(SandboxRequest {
             sandbox_id: sandbox_id.to_string(),
             scope: Some(SandboxScope::Thread {
+                agent_id: "agent-1".into(),
                 thread_id: Uuid7::now().to_string(),
             }),
             spec: SandboxSpec {
@@ -678,7 +679,7 @@ async fn local_process_contract_handle(
                 resources: Default::default(),
                 mounts: Vec::new(),
                 durable_file_systems: Vec::new(),
-                network: SandboxNetworkPolicy::Enabled,
+                policy: SandboxNetworkPolicy::Unrestricted.into(),
                 default_workdir: tempdir.path().display().to_string(),
             },
             lifecycle: SandboxLifecycleConfig::default(),
@@ -872,6 +873,7 @@ fn provider_contract_request(
     SandboxRequest {
         sandbox_id: format!("{provider}-{contract}-contract"),
         scope: Some(SandboxScope::Thread {
+            agent_id: "agent-1".into(),
             thread_id: Uuid7::now().to_string(),
         }),
         spec: SandboxSpec {
@@ -879,7 +881,7 @@ fn provider_contract_request(
             resources: Default::default(),
             mounts: Vec::new(),
             durable_file_systems: Vec::new(),
-            network: SandboxNetworkPolicy::Enabled,
+            policy: SandboxNetworkPolicy::Unrestricted.into(),
             default_workdir: default_workdir.to_string(),
         },
         lifecycle: SandboxLifecycleConfig {
@@ -1353,6 +1355,7 @@ async fn basic_backend_runs_commands_in_created_sandbox() {
             default_workdir: Some(tempdir.path().display().to_string()),
             file_system_mounts: None,
             durable_file_systems: None,
+            policy: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })
@@ -1450,6 +1453,7 @@ async fn agent_scoped_sandbox_is_shared_without_conversation_ownership() {
         default_workdir: Some(tempdir.path().display().to_string()),
         file_system_mounts: None,
         durable_file_systems: None,
+        policy: None,
         enable_networking: Some(true),
         idle_seconds: Some(60),
     };
@@ -1571,6 +1575,7 @@ async fn conversation_create_sandbox_is_not_turn_scoped() {
             default_workdir: Some(tempdir.path().display().to_string()),
             file_system_mounts: None,
             durable_file_systems: None,
+            policy: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })
@@ -1625,6 +1630,7 @@ async fn basic_backend_reuses_named_sandbox() {
         default_workdir: Some(tempdir.path().display().to_string()),
         file_system_mounts: None,
         durable_file_systems: None,
+        policy: None,
         enable_networking: Some(true),
         idle_seconds: Some(60),
     };
@@ -1677,6 +1683,7 @@ async fn basic_backend_reattaches_running_sandbox_in_new_harness_process() {
             default_workdir: Some(tempdir.path().display().to_string()),
             file_system_mounts: None,
             durable_file_systems: None,
+            policy: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })
@@ -1757,6 +1764,7 @@ async fn basic_backend_exposes_process_events_and_input() {
             default_workdir: Some(tempdir.path().display().to_string()),
             file_system_mounts: None,
             durable_file_systems: None,
+            policy: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })
@@ -1883,6 +1891,7 @@ async fn basic_backend_records_process_name_metadata() {
             default_workdir: Some(tempdir.path().display().to_string()),
             file_system_mounts: None,
             durable_file_systems: None,
+            policy: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })
@@ -2091,6 +2100,7 @@ async fn test_sandbox(conversation: &Arc<dyn crate::ConversationHandle>) -> Stri
             default_workdir: Some("/".to_string()),
             file_system_mounts: None,
             durable_file_systems: None,
+            policy: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })
@@ -2139,6 +2149,7 @@ async fn basic_backend_rejects_daytona_provider() {
             default_workdir: Some("/".to_string()),
             file_system_mounts: None,
             durable_file_systems: None,
+            policy: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })
@@ -2179,6 +2190,7 @@ async fn advertised_daytona_without_secret_errors_at_first_use() {
             default_workdir: Some("/".to_string()),
             file_system_mounts: None,
             durable_file_systems: None,
+            policy: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })
@@ -2196,10 +2208,22 @@ async fn sandbox_provider_state_persists_through_events_after_harness_reload() {
         "endpoint": "https://example.com"
     });
     let first_backend = Arc::new(TestProviderStateBackend::new(state.clone()));
-    let harness =
-        BasicExoHarness::new_with_sandbox_backend(local_test_config(tempdir.path()), first_backend)
-            .await
-            .expect("harness should initialize");
+    let policy = crate::EgressPolicy {
+        networking: SandboxNetworkPolicy::Limited {
+            allowed_hosts: vec!["api.example.com".into()],
+        },
+        credentials: vec![crate::EgressCredentialBinding {
+            name: "thread-credential".into(),
+            environment_variable: "API_KEY".into(),
+            networking: crate::CredentialNetworkPolicy::Unrestricted,
+            injection_location: crate::CredentialInjectionLocation { header: true },
+        }],
+    };
+    let mut config = local_test_config(tempdir.path());
+    config.sandbox_policy = Some(policy.clone());
+    let harness = BasicExoHarness::new_with_sandbox_backend(config, first_backend.clone())
+        .await
+        .expect("harness should initialize");
     let agent = harness
         .new_agent(NewAgentRequest {
             slug: "agent".to_string(),
@@ -2244,11 +2268,17 @@ async fn sandbox_provider_state_persists_through_events_after_harness_reload() {
         .await
         .expect("conversation lookup should succeed")
         .expect("conversation should exist");
+    assert_eq!(*first_backend.policies.lock().await, vec![policy.clone()]);
+    let mut request = provider_state_test_create_request();
+    request.policy = Some(policy.clone());
     let reused_sandbox_id = reloaded_conversation
-        .create_sandbox(provider_state_test_create_request())
+        .create_sandbox(request.clone())
         .await
         .expect("sandbox should be reused");
     assert_eq!(reused_sandbox_id, sandbox_id);
+    assert_eq!(*second_backend.policies.lock().await, vec![policy]);
+    request.policy.as_mut().unwrap().credentials.clear();
+    assert!(reloaded_conversation.create_sandbox(request).await.is_err());
     assert_eq!(
         second_backend.requests.lock().await.as_slice(),
         &[Some(state)]
@@ -2322,6 +2352,7 @@ fn provider_state_test_create_request() -> CreateSandboxRequest {
         default_workdir: Some("/".to_string()),
         file_system_mounts: None,
         durable_file_systems: None,
+        policy: None,
         enable_networking: Some(true),
         idle_seconds: Some(60),
     }
@@ -2330,6 +2361,7 @@ fn provider_state_test_create_request() -> CreateSandboxRequest {
 struct TestProviderStateBackend {
     state: Value,
     requests: Arc<AsyncMutex<Vec<Option<Value>>>>,
+    policies: Arc<AsyncMutex<Vec<crate::EgressPolicy>>>,
     cleanup_count: Arc<AsyncMutex<usize>>,
 }
 
@@ -2338,6 +2370,7 @@ impl TestProviderStateBackend {
         Self {
             state,
             requests: Arc::new(AsyncMutex::new(Vec::new())),
+            policies: Arc::new(AsyncMutex::new(Vec::new())),
             cleanup_count: Arc::new(AsyncMutex::new(0)),
         }
     }
@@ -2357,6 +2390,7 @@ impl ManagedSandboxBackend for TestProviderStateBackend {
         &self,
         request: SandboxRequest,
     ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+        self.policies.lock().await.push(request.spec.policy.clone());
         self.requests.lock().await.push(request.provider_state);
         Ok(Arc::new(TestProviderStateHandle {
             state: self.state.clone(),
@@ -2597,6 +2631,7 @@ async fn restored_sandbox_image_persists_for_cross_process_reattach() {
         default_workdir: Some("/".to_string()),
         file_system_mounts: None,
         durable_file_systems: None,
+        policy: None,
         enable_networking: Some(true),
         idle_seconds: Some(60),
     };
@@ -2674,6 +2709,7 @@ async fn restore_sandbox_creates_a_new_target_without_a_cold_acquire() {
             default_workdir: Some("/".to_string()),
             file_system_mounts: None,
             durable_file_systems: None,
+            policy: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })
@@ -2693,6 +2729,7 @@ async fn restore_sandbox_creates_a_new_target_without_a_cold_acquire() {
         default_workdir: Some("/".to_string()),
         file_system_mounts: None,
         durable_file_systems: None,
+        policy: None,
         enable_networking: Some(true),
         idle_seconds: Some(60),
     };
@@ -2865,4 +2902,32 @@ async fn daytona_sandbox_binding_drives_provider_config() {
     assert_eq!(config.target.as_deref(), Some("experimental"));
     assert_eq!(config.organization_id.as_deref(), Some("org-1"));
     assert_eq!(config.api_url, crate::DEFAULT_DAYTONA_API_URL);
+}
+
+#[tokio::test]
+async fn local_process_sandbox_rejects_disabled_networking() {
+    let backend = crate::LocalProcessSandboxBackend::new();
+    let result = backend
+        .acquire(crate::SandboxRequest {
+            sandbox_id: "disabled-network".into(),
+            scope: None,
+            provider_state: None,
+            spec: crate::SandboxSpec {
+                image: String::new(),
+                resources: Default::default(),
+                mounts: vec![],
+                durable_file_systems: vec![],
+                default_workdir: "/tmp".into(),
+                policy: crate::SandboxNetworkPolicy::Disabled.into(),
+            },
+            lifecycle: crate::SandboxLifecycleConfig::default(),
+        })
+        .await;
+    assert!(
+        result
+            .err()
+            .expect("disabled networking must be rejected")
+            .to_string()
+            .contains("policy.networking.disabled")
+    );
 }

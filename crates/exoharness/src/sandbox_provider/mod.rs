@@ -51,6 +51,8 @@ mod firecracker_image;
     feature = "firecracker"
 ))]
 mod firecracker_lima;
+#[cfg(all(target_os = "macos", feature = "firecracker"))]
+pub use firecracker_lima::LimaFirecrackerSandboxBackend;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub mod process_bridge;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
@@ -89,7 +91,7 @@ pub use firecracker::{
     DEFAULT_FIRECRACKER_KERNEL, DEFAULT_FIRECRACKER_STATE_ROOT, DEFAULT_IMAGE_SIZE_GIB,
     DEFAULT_JAILER_UID_BASE, DEFAULT_MEMORY_MIB, DEFAULT_NETWORK_BYTES_PER_SECOND,
     DEFAULT_VCPU_COUNT, DEFAULT_WORKSPACE_SIZE_GIB, FirecrackerConfig,
-    FirecrackerNetworkDevicePolicy, FirecrackerSandboxBackend,
+    FirecrackerNetworkDevicePolicy, FirecrackerRequest, FirecrackerSandboxBackend,
 };
 #[cfg(all(not(target_arch = "wasm32"), feature = "firecracker"))]
 pub use firecracker_bridge::run_firecracker_bridge;
@@ -122,22 +124,50 @@ pub async fn firecracker_backend(
     config: FirecrackerConfig,
     lima: FirecrackerLimaConfig,
 ) -> anyhow::Result<FirecrackerBackend> {
+    configured_firecracker_backend(config, lima, None).await
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "firecracker"))]
+pub async fn firecracker_backend_with_credentials(
+    config: FirecrackerConfig,
+    lima: FirecrackerLimaConfig,
+    resolver: Arc<dyn crate::egress::EgressCredentialResolver>,
+) -> anyhow::Result<FirecrackerBackend> {
+    configured_firecracker_backend(config, lima, Some(resolver)).await
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "firecracker"))]
+async fn configured_firecracker_backend(
+    config: FirecrackerConfig,
+    lima: FirecrackerLimaConfig,
+    resolver: Option<Arc<dyn crate::egress::EgressCredentialResolver>>,
+) -> anyhow::Result<FirecrackerBackend> {
     #[cfg(target_os = "linux")]
-    {
+    let backend = {
         drop(lima);
-        Ok(Arc::new(FirecrackerSandboxBackend::new(config).await?))
-    }
+        FirecrackerSandboxBackend::new_with_egress(
+            config,
+            resolver,
+            Arc::new(crate::egress::PublicUpstreamResolver),
+        )
+        .await?
+    };
     #[cfg(target_os = "macos")]
+    let backend = firecracker_lima::LimaFirecrackerSandboxBackend::new_with_egress(
+        config,
+        lima,
+        resolver,
+        Arc::new(crate::egress::PublicUpstreamResolver),
+    )
+    .await?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        Ok(Arc::new(
-            firecracker_lima::LimaFirecrackerSandboxBackend::new(config, lima).await?,
-        ))
+        Ok(Arc::new(backend))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        drop(config);
-        drop(lima);
-        anyhow::bail!("Firecracker sandbox execution is only supported on Linux or macOS with Lima")
+        drop((config, lima, resolver));
+        anyhow::bail!("Firecracker sandbox execution requires Linux or macOS with Lima")
     }
 }
 

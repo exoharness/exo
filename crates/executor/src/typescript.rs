@@ -414,7 +414,7 @@ impl TypeScriptRunnerProcess {
                         }
                         GuestToHostMessage::ExoRequest { id, request } => {
                             let request_kind = request.kind();
-                            let response = match exoharness_server.handle_request(request).await {
+                            let response = match exoharness_server.handle_request(*request).await {
                                 Ok(response) => HostToGuestMessage::ExoResponse {
                                     id,
                                     ok: true,
@@ -990,7 +990,7 @@ enum GuestToHostMessage {
     },
     ExoRequest {
         id: u64,
-        request: ExoRequest,
+        request: Box<ExoRequest>,
     },
     StreamEvent {
         event: TypeScriptStreamEvent,

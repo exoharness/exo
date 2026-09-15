@@ -176,6 +176,7 @@ async fn exo_harness(
         root: root.join("exoharness"),
         secret_backend: default_secret_backend(),
         sandbox_default: default_sandbox_provider(),
+        sandbox_policy: None,
         sandbox_backends: vec![
             SandboxBackendRegistration::apple_container(),
             SandboxBackendRegistration::docker(),

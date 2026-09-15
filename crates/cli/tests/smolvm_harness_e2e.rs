@@ -48,6 +48,7 @@ async fn agent_runs_a_command_in_a_smolvm_microvm() {
         root: tempdir.path().to_path_buf(),
         secret_backend: SecretBackendChoice::Static([7u8; 32]),
         sandbox_default: SandboxProvider::Smolvm,
+        sandbox_policy: None,
         sandbox_backends: vec![
             SandboxBackendRegistration::from_builtin_provider(SandboxProvider::Smolvm)
                 .expect("smolvm is a builtin provider"),
@@ -75,6 +76,7 @@ async fn agent_runs_a_command_in_a_smolvm_microvm() {
             file_system_mounts: None,
             durable_file_systems: None,
             // Off, so reaching the guest kernel proves the VM boundary.
+            policy: None,
             enable_networking: Some(false),
             idle_seconds: Some(120),
         })
@@ -173,6 +175,7 @@ async fn agent_runs_the_default_sandbox_shape() {
         root: tempdir.path().to_path_buf(),
         secret_backend: SecretBackendChoice::Static([7u8; 32]),
         sandbox_default: SandboxProvider::Smolvm,
+        sandbox_policy: None,
         sandbox_backends: vec![
             SandboxBackendRegistration::from_builtin_provider(SandboxProvider::Smolvm)
                 .expect("smolvm is a builtin provider"),
@@ -199,6 +202,7 @@ async fn agent_runs_the_default_sandbox_shape() {
             file_system_mounts: None,
             durable_file_systems: None,
             // Left unset on purpose: this is the whole point of the test.
+            policy: None,
             enable_networking: None,
             idle_seconds: None,
         })

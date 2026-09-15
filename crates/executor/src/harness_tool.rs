@@ -1010,6 +1010,7 @@ pub(crate) async fn ensure_shell_sandbox(
             default_workdir: Some(desired_default_workdir),
             file_system_mounts: Some(desired_mounts),
             durable_file_systems: Some(desired_durable_file_systems),
+            policy: None,
             enable_networking: Some(desired_enable_networking),
             idle_seconds: Some(300),
         })

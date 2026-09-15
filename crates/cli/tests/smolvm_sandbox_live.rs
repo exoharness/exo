@@ -100,7 +100,7 @@ fn request(
                 internal: false,
             }],
             durable_file_systems: Vec::new(),
-            network,
+            policy: network.into(),
             default_workdir: "/".into(),
         },
         lifecycle: SandboxLifecycleConfig { idle_ttl },
@@ -389,7 +389,7 @@ async fn snapshot_round_trip_preserves_guest_state() {
         .acquire(request(
             image.clone(),
             &workspace,
-            SandboxNetworkPolicy::Enabled,
+            SandboxNetworkPolicy::Unrestricted,
             "snap-source",
             ttl,
         ))
@@ -415,7 +415,7 @@ async fn snapshot_round_trip_preserves_guest_state() {
             request(
                 image,
                 &workspace,
-                SandboxNetworkPolicy::Enabled,
+                SandboxNetworkPolicy::Unrestricted,
                 "snap-restored",
                 ttl,
             ),

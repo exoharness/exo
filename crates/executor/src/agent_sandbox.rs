@@ -118,6 +118,7 @@ async fn attach_agent_sandbox(
             default_workdir: Some(spec.default_workdir.clone()),
             file_system_mounts: Some(spec.file_system_mounts.clone()),
             durable_file_systems: Some(spec.durable_file_systems.clone()),
+            policy: None,
             enable_networking: Some(spec.enable_networking),
             idle_seconds: Some(spec.idle_seconds),
         })
@@ -211,7 +212,7 @@ mod tests {
             image: image.map(str::to_string),
             provider: SandboxProvider::LocalProcess,
             mounts: vec![],
-            enable_networking: false,
+            enable_networking: true,
             scope: SandboxScope::Agent,
         }
     }

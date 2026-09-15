@@ -138,9 +138,17 @@ impl SandboxBackendRegistration {
         Self::from_factory(
             SandboxProvider::Firecracker,
             cfg!(any(target_os = "linux", target_os = "macos")),
-            move |_| {
+            move |inner| {
                 let spec = spec.clone();
-                Box::pin(crate::firecracker_backend(spec.config, spec.lima))
+                let resolver = Arc::new(LocalEgressResolver {
+                    storage: inner.storage.clone(),
+                    cipher: inner.secret_cipher.clone(),
+                });
+                Box::pin(crate::firecracker_backend_with_credentials(
+                    spec.config,
+                    spec.lima,
+                    resolver,
+                ))
             },
         )
     }
@@ -401,6 +409,7 @@ pub struct BasicExoHarnessConfig {
     pub secret_backend: SecretBackendChoice,
     /// Default when a caller doesn't request a provider. Must be in `sandbox_backends`.
     pub sandbox_default: SandboxProvider,
+    pub sandbox_policy: Option<crate::EgressPolicy>,
     /// Supported providers; anything not listed is rejected.
     pub sandbox_backends: Vec<SandboxBackendRegistration>,
 }
@@ -415,6 +424,7 @@ struct BasicExoHarnessInner {
     write_lock: AsyncMutex<()>,
     subscribers: Mutex<HashMap<ConversationId, Vec<mpsc::UnboundedSender<Result<Event>>>>>,
     sandbox_registry: HashMap<SandboxProvider, SandboxBackendRegistration>,
+    sandbox_policy: Option<crate::EgressPolicy>,
     /// Backends built (and secrets read) lazily on first use, cached by provider.
     sandbox_backends: AsyncMutex<HashMap<SandboxProvider, Arc<dyn ManagedSandboxBackend>>>,
     running_sandboxes: AsyncMutex<HashMap<SandboxId, Arc<dyn ManagedSandboxHandle>>>,
@@ -898,6 +908,7 @@ impl BasicExoHarness {
             secret_backend,
             sandbox_default,
             sandbox_backends,
+            sandbox_policy,
         } = config;
 
         let mut registry = HashMap::new();
@@ -924,6 +935,7 @@ impl BasicExoHarness {
                 storage,
                 write_lock: AsyncMutex::new(()),
                 subscribers: Mutex::new(HashMap::new()),
+                sandbox_policy,
                 sandbox_registry: registry,
                 sandbox_backends: AsyncMutex::new(cache),
                 running_sandboxes: AsyncMutex::new(HashMap::new()),
@@ -1068,6 +1080,7 @@ impl ExoHarness for BasicExoHarness {
                     .join(conversation_id.to_string());
                 terminate_running_sandboxes(&BasicScopedSandboxHandle::conversation(
                     self,
+                    *id,
                     conversation_id,
                     conversation_dir,
                 ))
@@ -1087,6 +1100,7 @@ impl ExoHarness for BasicExoHarness {
                     .join(conversation_id.to_string());
                 scopes.push(BasicScopedSandboxHandle::conversation(
                     self,
+                    *id,
                     conversation_id,
                     conversation_dir,
                 ));
@@ -1428,8 +1442,12 @@ impl AgentHandle for BasicAgentHandle {
             return Ok(false);
         }
 
-        let sandbox_handle =
-            BasicScopedSandboxHandle::conversation(&self.harness, *id, conversation_dir.clone());
+        let sandbox_handle = BasicScopedSandboxHandle::conversation(
+            &self.harness,
+            self.record.id,
+            *id,
+            conversation_dir.clone(),
+        );
         // Sandbox creation persists its record under the write lock, so the
         // only way to guarantee no VM outlives its conversation record is to
         // observe "no running sandboxes" while holding that lock and delete
@@ -1703,7 +1721,10 @@ fn paginate_conversation_records(
 #[derive(Debug, Clone, Copy)]
 enum SandboxOwner {
     Agent(AgentId),
-    Conversation(ConversationId),
+    Conversation {
+        agent_id: AgentId,
+        thread_id: ConversationId,
+    },
 }
 
 // Deletion helpers shared by delete_agent and delete_conversation: an owner's
@@ -1818,19 +1839,24 @@ impl<'a> BasicScopedSandboxHandle<'a> {
 
     fn conversation(
         harness: &'a BasicExoHarness,
+        agent_id: AgentId,
         conversation_id: ConversationId,
         conversation_dir: PathBuf,
     ) -> Self {
         Self {
             harness,
             owner_dir: conversation_dir,
-            owner: SandboxOwner::Conversation(conversation_id),
+            owner: SandboxOwner::Conversation {
+                agent_id,
+                thread_id: conversation_id,
+            },
             event_sink: BasicSandboxEventSink::Conversation { conversation_id },
         }
     }
 
     fn turn(
         harness: &'a BasicExoHarness,
+        agent_id: AgentId,
         conversation_id: ConversationId,
         conversation_dir: PathBuf,
         session_id: SessionId,
@@ -1840,7 +1866,10 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         Self {
             harness,
             owner_dir: conversation_dir,
-            owner: SandboxOwner::Conversation(conversation_id),
+            owner: SandboxOwner::Conversation {
+                agent_id,
+                thread_id: conversation_id,
+            },
             event_sink: BasicSandboxEventSink::Turn {
                 conversation_id,
                 session_id,
@@ -2028,7 +2057,14 @@ impl<'a> BasicScopedSandboxHandle<'a> {
             default_workdir: Some(request.default_workdir.unwrap_or_default()),
             file_system_mounts: Vec::new(),
             durable_file_systems: Vec::new(),
-            enable_networking: true,
+            network: StoredSandboxPolicy::Policy {
+                policy: self
+                    .harness
+                    .inner
+                    .sandbox_policy
+                    .clone()
+                    .unwrap_or_else(|| SandboxNetworkPolicy::Unrestricted.into()),
+            },
             idle_seconds: 0,
             running: true,
             latest_snapshot_id: None,
@@ -2414,6 +2450,8 @@ impl<'a> BasicScopedSandboxHandle<'a> {
             .lock()
             .await
             .insert(sandbox_id.clone(), sandbox_handle);
+        let policy = sandbox.policy();
+        let enable_networking = policy.networking_enabled();
         let mut events = vec![
             EventData::SandboxCreated {
                 sandbox_id: sandbox_id.clone(),
@@ -2423,7 +2461,8 @@ impl<'a> BasicScopedSandboxHandle<'a> {
                 default_workdir: sandbox.default_workdir.unwrap_or_default(),
                 file_system_mounts: sandbox.file_system_mounts,
                 durable_file_systems: sandbox.durable_file_systems,
-                enable_networking: sandbox.enable_networking,
+                policy: Some(policy),
+                enable_networking,
                 idle_seconds: sandbox.idle_seconds,
             },
             EventData::SandboxStarted {
@@ -2526,7 +2565,6 @@ impl<'a> BasicScopedSandboxHandle<'a> {
                 default_workdir,
                 file_system_mounts,
                 durable_file_systems,
-                enable_networking,
                 idle_seconds,
                 ..
             } = event.data
@@ -2545,7 +2583,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
                 || default_workdir != request.default_workdir.clone().unwrap_or_default()
                 || file_system_mounts != request.file_system_mounts
                 || durable_file_systems != request.durable_file_systems
-                || enable_networking != request.enable_networking
+                || sandbox.policy() != request.policy
                 || idle_seconds != request.idle_seconds
             {
                 bail!("sandbox name {name:?} already exists with a different configuration");
@@ -2739,6 +2777,7 @@ impl ConversationHandle for BasicConversationHandle {
 
         Ok(Arc::new(BasicTurnHandle {
             harness: self.harness.clone(),
+            agent_id: self.agent_id,
             conversation_dir,
             conversation_id: self.record.id,
             record: turn_record,
@@ -2770,6 +2809,7 @@ impl ConversationHandle for BasicConversationHandle {
         }
         Ok(Arc::new(BasicTurnHandle {
             harness: self.harness.clone(),
+            agent_id: self.agent_id,
             conversation_dir: self.conversation_dir(),
             conversation_id: self.record.id,
             record,
@@ -3141,6 +3181,7 @@ impl BasicSandboxScope for BasicConversationHandle {
     fn sandbox_handle(&self) -> BasicScopedSandboxHandle<'_> {
         BasicScopedSandboxHandle::conversation(
             &self.harness,
+            self.agent_id,
             self.record.id,
             self.conversation_dir(),
         )
@@ -3476,6 +3517,16 @@ async fn prepare_sandbox_request(
         request.image.clone()
     };
 
+    let policy = request
+        .policy
+        .or_else(|| harness.inner.sandbox_policy.clone())
+        .unwrap_or_else(|| {
+            if request.enable_networking.unwrap_or(true) {
+                SandboxNetworkPolicy::Unrestricted.into()
+            } else {
+                SandboxNetworkPolicy::Disabled.into()
+            }
+        });
     Ok(PreparedSandboxRequest {
         name: request.name,
         provider: request.provider,
@@ -3484,7 +3535,7 @@ async fn prepare_sandbox_request(
         default_workdir: request.default_workdir,
         file_system_mounts: request.file_system_mounts.unwrap_or_default(),
         durable_file_systems: request.durable_file_systems.unwrap_or_default(),
-        enable_networking: request.enable_networking.unwrap_or(true),
+        policy,
         idle_seconds: request.idle_seconds.unwrap_or(60),
     })
 }
@@ -3518,7 +3569,7 @@ async fn find_matching_stored_sandbox(
             || sandbox.default_workdir != request.default_workdir
             || sandbox.file_system_mounts != request.file_system_mounts
             || sandbox.durable_file_systems != request.durable_file_systems
-            || sandbox.enable_networking != request.enable_networking
+            || sandbox.policy() != request.policy
             || sandbox.idle_seconds != request.idle_seconds
         {
             bail!("sandbox name {name:?} already exists with a different configuration");
@@ -3647,7 +3698,7 @@ fn sandbox_provider_state_key(
     let request = sandbox_request(owner, sandbox_id, sandbox, None);
     let owner_key = match owner {
         SandboxOwner::Agent(agent_id) => format!("agent:{agent_id}"),
-        SandboxOwner::Conversation(thread_id) => format!("thread:{thread_id}"),
+        SandboxOwner::Conversation { thread_id, .. } => format!("thread:{thread_id}"),
     };
     format!(
         "{owner_key}:{sandbox_id}\n{}",
@@ -3663,7 +3714,7 @@ async fn load_sandbox_provider_state(
     provider: SandboxProvider,
     state_key: &str,
 ) -> Result<Option<Value>> {
-    let SandboxOwner::Conversation(_) = owner else {
+    let SandboxOwner::Conversation { .. } = owner else {
         return Ok(None);
     };
     let mut events = load_events(&harness.inner.storage, &owner_dir.join("events"))
@@ -3741,6 +3792,7 @@ async fn require_running_sandbox_process(
 
 struct BasicTurnHandle {
     harness: BasicExoHarness,
+    agent_id: AgentId,
     conversation_dir: PathBuf,
     conversation_id: ConversationId,
     record: TurnRecord,
@@ -3756,6 +3808,7 @@ impl BasicSandboxScope for BasicTurnHandle {
     fn sandbox_handle(&self) -> BasicScopedSandboxHandle<'_> {
         BasicScopedSandboxHandle::turn(
             &self.harness,
+            self.agent_id,
             self.conversation_id,
             self.conversation_dir.clone(),
             self.record.session_id,
@@ -3922,12 +3975,34 @@ struct StoredSandbox {
     file_system_mounts: Vec<FileSystemMount>,
     #[serde(default)]
     durable_file_systems: Vec<DurableFileSystem>,
-    enable_networking: bool,
+    #[serde(flatten)]
+    network: StoredSandboxPolicy,
     idle_seconds: u64,
     running: bool,
     latest_snapshot_id: Option<SnapshotId>,
     #[serde(default)]
     attachment: Option<SandboxAttachment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+enum StoredSandboxPolicy {
+    Policy { policy: crate::EgressPolicy },
+    Legacy { enable_networking: bool },
+}
+
+impl StoredSandbox {
+    fn policy(&self) -> crate::EgressPolicy {
+        match &self.network {
+            StoredSandboxPolicy::Policy { policy } => policy.clone(),
+            StoredSandboxPolicy::Legacy {
+                enable_networking: true,
+            } => SandboxNetworkPolicy::Unrestricted.into(),
+            StoredSandboxPolicy::Legacy {
+                enable_networking: false,
+            } => SandboxNetworkPolicy::Disabled.into(),
+        }
+    }
 }
 
 impl From<StoredSandbox> for SandboxRecord {
@@ -3951,7 +4026,7 @@ struct PreparedSandboxRequest {
     default_workdir: Option<String>,
     file_system_mounts: Vec<FileSystemMount>,
     durable_file_systems: Vec<DurableFileSystem>,
-    enable_networking: bool,
+    policy: crate::EgressPolicy,
     idle_seconds: u64,
 }
 
@@ -3967,7 +4042,9 @@ impl PreparedSandboxRequest {
             default_workdir: self.default_workdir.clone(),
             file_system_mounts: self.file_system_mounts.clone(),
             durable_file_systems: self.durable_file_systems.clone(),
-            enable_networking: self.enable_networking,
+            network: StoredSandboxPolicy::Policy {
+                policy: self.policy.clone(),
+            },
             idle_seconds: self.idle_seconds,
             running: true,
             latest_snapshot_id: None,
@@ -4427,7 +4504,11 @@ fn sandbox_request(
             SandboxOwner::Agent(agent_id) => SandboxScope::Agent {
                 agent_id: agent_id.to_string(),
             },
-            SandboxOwner::Conversation(thread_id) => SandboxScope::Thread {
+            SandboxOwner::Conversation {
+                agent_id,
+                thread_id,
+            } => SandboxScope::Thread {
+                agent_id: agent_id.to_string(),
                 thread_id: thread_id.to_string(),
             },
         }),
@@ -4448,11 +4529,7 @@ fn sandbox_request(
                 })
                 .collect(),
             durable_file_systems: sandbox.durable_file_systems.clone(),
-            network: if sandbox.enable_networking {
-                SandboxNetworkPolicy::Enabled
-            } else {
-                SandboxNetworkPolicy::Disabled
-            },
+            policy: sandbox.policy(),
             default_workdir: sandbox
                 .default_workdir
                 .clone()
@@ -4824,6 +4901,90 @@ fn build_secret_cipher(
     Ok(SecretCipher::new(provider))
 }
 
+#[cfg(feature = "firecracker")]
+struct LocalEgressResolver {
+    storage: BasicObjectStore,
+    cipher: SecretCipher,
+}
+
+#[cfg(feature = "firecracker")]
+#[async_trait]
+impl crate::egress::EgressCredentialResolver for LocalEgressResolver {
+    async fn resolve(
+        &self,
+        identity: &crate::egress::EgressIdentity,
+        binding_name: &str,
+        _destination: &crate::egress::EgressDestination,
+    ) -> Result<String> {
+        for directory in self.secret_directories(identity).await? {
+            let stored = self
+                .storage
+                .list_json_matching_suffix::<StoredSecret>(&directory, ".json")
+                .await?;
+            let mut matches = stored.into_iter().filter(|s| {
+                s.metadata.name == binding_name || s.metadata.id.to_string() == binding_name
+            });
+            let Some(record) = matches.next() else {
+                continue;
+            };
+            anyhow::ensure!(
+                matches.next().is_none(),
+                "egress credential reference is ambiguous; use its id"
+            );
+            return match self.cipher.decrypt_secret(&record.secret)? {
+                Secret::Key { value } => Ok(value),
+                Secret::Oauth { .. } => bail!("egress credential must be an API key"),
+            };
+        }
+        bail!("egress credential not found")
+    }
+}
+
+#[cfg(feature = "firecracker")]
+impl LocalEgressResolver {
+    async fn secret_directories(
+        &self,
+        identity: &crate::egress::EgressIdentity,
+    ) -> Result<Vec<PathBuf>> {
+        let mut directories = Vec::new();
+        let agent_dir = match &identity.scope {
+            Some(SandboxScope::Agent { agent_id }) => {
+                let agent_id: AgentId =
+                    agent_id.parse().context("invalid egress agent identity")?;
+                Some(PathBuf::from("agents").join(agent_id.to_string()))
+            }
+            Some(SandboxScope::Thread {
+                agent_id,
+                thread_id,
+            }) => {
+                let agent_id: AgentId =
+                    agent_id.parse().context("invalid egress agent identity")?;
+                let thread_id: ConversationId = thread_id
+                    .parse()
+                    .context("invalid egress thread identity")?;
+                let agent_dir = PathBuf::from("agents").join(agent_id.to_string());
+                let thread_dir = agent_dir.join("conversations").join(thread_id.to_string());
+                self.storage
+                    .get_json::<ConversationRecord>(thread_dir.join("record.json"))
+                    .await
+                    .context("egress thread not found")?;
+                directories.push(thread_dir.join("secrets"));
+                Some(agent_dir)
+            }
+            None => None,
+        };
+        if let Some(agent_dir) = agent_dir {
+            self.storage
+                .get_json::<AgentRecord>(agent_dir.join("record.json"))
+                .await
+                .context("egress agent not found")?;
+            directories.push(agent_dir.join("secrets"));
+        }
+        directories.push(PathBuf::from("secrets"));
+        Ok(directories)
+    }
+}
+
 #[cfg(test)]
 mod snapshot_manifest_tests {
     use super::*;
@@ -4863,5 +5024,223 @@ mod snapshot_manifest_tests {
         let rewritten = serde_json::to_value(manifest).expect("serialize snapshot manifest");
         assert_eq!(rewritten.get("format").unwrap(), "docker-image-tar");
         assert!(rewritten.get("kind").is_none());
+    }
+}
+
+#[cfg(test)]
+mod stored_policy_tests {
+    use super::*;
+
+    #[test]
+    fn reads_legacy_networking_and_writes_only_the_policy() {
+        let mut legacy: StoredSandbox = serde_json::from_value(serde_json::json!({
+            "id": "legacy", "provider": "local_process", "image": "",
+            "default_workdir": null, "file_system_mounts": [],
+            "enable_networking": false, "idle_seconds": 60,
+            "running": true, "latest_snapshot_id": null
+        }))
+        .unwrap();
+        assert!(!legacy.policy().networking_enabled());
+        legacy.network = StoredSandboxPolicy::Policy {
+            policy: legacy.policy(),
+        };
+        let serialized = serde_json::to_string(&legacy).unwrap();
+        assert!(!serialized.contains("enable_networking"));
+        let current: StoredSandbox = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(current.policy(), legacy.policy());
+        assert!(
+            serde_json::from_value::<StoredSandbox>(serde_json::json!({
+                "id": "invalid-policy", "provider": "local_process", "image": "",
+                "default_workdir": null, "file_system_mounts": [],
+                "enable_networking": true, "idle_seconds": 60,
+                "running": true, "latest_snapshot_id": null,
+                "policy": {"networking": {"type": "unsupported"}}
+            }))
+            .is_err()
+        );
+    }
+}
+
+#[cfg(all(test, feature = "firecracker"))]
+mod egress_resolution_tests {
+    use super::*;
+    use crate::egress::{EgressCredentialResolver, EgressDestination, EgressIdentity};
+
+    #[tokio::test]
+    async fn local_credentials_follow_scope_and_reject_other_threads() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let harness =
+            BasicExoHarness::new(crate::test_support::local_test_config(directory.path())).await?;
+        let resolver = LocalEgressResolver {
+            storage: harness.inner.storage.clone(),
+            cipher: harness.inner.secret_cipher.clone(),
+        };
+        let secret = |value: &str| PutSecretRequest {
+            name: "token".into(),
+            secret: Secret::Key {
+                value: value.into(),
+            },
+        };
+        let global_id = harness.put_secret(secret("global")).await?;
+        let agent = harness
+            .new_agent(NewAgentRequest {
+                slug: "agent".into(),
+                name: "agent".into(),
+            })
+            .await?;
+        agent.put_secret(secret("agent")).await?;
+        let first = agent
+            .new_conversation(NewConversationRequest::default())
+            .await?;
+        let second = agent
+            .new_conversation(NewConversationRequest::default())
+            .await?;
+        let first_id = first.put_secret(secret("first")).await?;
+        second.put_secret(secret("second")).await?;
+        let destination = EgressDestination {
+            host: "api.test".into(),
+            port: 443,
+            method: hyper::Method::GET,
+            path: "/".into(),
+        };
+        for (scope, expected) in [
+            (None, "global"),
+            (
+                Some(SandboxScope::Agent {
+                    agent_id: agent.record().id.to_string(),
+                }),
+                "agent",
+            ),
+            (
+                Some(SandboxScope::Thread {
+                    agent_id: agent.record().id.to_string(),
+                    thread_id: first.record().id.to_string(),
+                }),
+                "first",
+            ),
+            (
+                Some(SandboxScope::Thread {
+                    agent_id: agent.record().id.to_string(),
+                    thread_id: second.record().id.to_string(),
+                }),
+                "second",
+            ),
+        ] {
+            let identity = EgressIdentity {
+                sandbox_id: "test".into(),
+                scope,
+            };
+            assert_eq!(
+                resolver.resolve(&identity, "token", &destination).await?,
+                expected
+            );
+        }
+        let second_identity = EgressIdentity {
+            sandbox_id: "second".into(),
+            scope: Some(SandboxScope::Thread {
+                agent_id: agent.record().id.to_string(),
+                thread_id: second.record().id.to_string(),
+            }),
+        };
+        assert!(
+            resolver
+                .resolve(&second_identity, &first_id.to_string(), &destination)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            resolver
+                .resolve(&second_identity, &global_id.to_string(), &destination)
+                .await?,
+            "global"
+        );
+        let inherited = agent
+            .new_conversation(NewConversationRequest::default())
+            .await?;
+        let mut identity = EgressIdentity {
+            sandbox_id: "test".into(),
+            scope: Some(SandboxScope::Thread {
+                agent_id: agent.record().id.to_string(),
+                thread_id: inherited.record().id.to_string(),
+            }),
+        };
+        assert_eq!(
+            resolver.resolve(&identity, "token", &destination).await?,
+            "agent"
+        );
+        let other_agent = harness
+            .new_agent(NewAgentRequest {
+                slug: "other".into(),
+                name: "other".into(),
+            })
+            .await?;
+        identity.scope = Some(SandboxScope::Thread {
+            agent_id: other_agent.record().id.to_string(),
+            thread_id: first.record().id.to_string(),
+        });
+        assert!(
+            resolver
+                .resolve(&identity, "token", &destination)
+                .await
+                .is_err()
+        );
+        for thread_id in [Uuid7::now().to_string(), "../../secrets".into()] {
+            identity.scope = Some(SandboxScope::Thread {
+                agent_id: agent.record().id.to_string(),
+                thread_id,
+            });
+            assert!(
+                resolver
+                    .resolve(&identity, "token", &destination)
+                    .await
+                    .is_err()
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn policy_overrides_the_legacy_networking_flag() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let mut config = crate::test_support::local_test_config(directory.path());
+        let limited: crate::EgressPolicy = SandboxNetworkPolicy::Limited {
+            allowed_hosts: vec!["api.test".into()],
+        }
+        .into();
+        config.sandbox_policy = Some(limited.clone());
+        let harness = BasicExoHarness::new(config).await?;
+        let request = CreateSandboxRequest {
+            name: None,
+            provider: SandboxProvider::LocalProcess,
+            image: "".into(),
+            resources: Default::default(),
+            default_workdir: None,
+            file_system_mounts: None,
+            durable_file_systems: None,
+            policy: None,
+            enable_networking: Some(false),
+            idle_seconds: None,
+        };
+        assert_eq!(
+            prepare_sandbox_request(&harness, request.clone())
+                .await?
+                .policy,
+            limited
+        );
+        assert_eq!(
+            prepare_sandbox_request(
+                &harness,
+                CreateSandboxRequest {
+                    policy: Some(SandboxNetworkPolicy::Disabled.into()),
+                    enable_networking: Some(true),
+                    ..request
+                }
+            )
+            .await?
+            .policy
+            .networking,
+            SandboxNetworkPolicy::Disabled
+        );
+        Ok(())
     }
 }

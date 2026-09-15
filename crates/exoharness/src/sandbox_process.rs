@@ -457,7 +457,7 @@ mod tests {
                 resources: Default::default(),
                 mounts: vec![],
                 durable_file_systems: vec![],
-                network: SandboxNetworkPolicy::Enabled,
+                policy: SandboxNetworkPolicy::Unrestricted.into(),
                 default_workdir: "/tmp".into(),
             },
             lifecycle: SandboxLifecycleConfig::default(),

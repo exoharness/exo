@@ -488,6 +488,8 @@ pub enum EventData {
         file_system_mounts: Vec<FileSystemMount>,
         #[serde(default)]
         durable_file_systems: Vec<DurableFileSystem>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        policy: Option<EgressPolicy>,
         enable_networking: bool,
         idle_seconds: u64,
     },
@@ -678,6 +680,113 @@ pub struct SandboxRecord {
     pub running: bool,
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+pub(crate) fn canonical_egress_host(host: &str) -> Result<String> {
+    anyhow::ensure!(
+        !host.is_empty() && host.len() <= 253 && !host.ends_with('.'),
+        "invalid egress hostname"
+    );
+    let host = host.to_ascii_lowercase();
+    anyhow::ensure!(
+        host.parse::<std::net::IpAddr>().is_err(),
+        "IP literals are not egress hostnames"
+    );
+    anyhow::ensure!(
+        host.split('.').all(|label| !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')),
+        "expected an exact ASCII hostname"
+    );
+    Ok(host)
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+pub(crate) fn canonical_egress_hosts(
+    hosts: &[String],
+) -> Result<std::collections::HashSet<String>> {
+    const MAX_ALLOWED_HOSTS: usize = 128;
+    anyhow::ensure!(hosts.len() <= MAX_ALLOWED_HOSTS, "too many allowed hosts");
+    hosts
+        .iter()
+        .map(|host| canonical_egress_host(host))
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SandboxNetworkPolicy {
+    Unrestricted,
+    Disabled,
+    Limited { allowed_hosts: Vec<String> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EgressPolicy {
+    pub networking: SandboxNetworkPolicy,
+    #[serde(default)]
+    pub credentials: Vec<EgressCredentialBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EgressCredentialBinding {
+    pub name: String,
+    pub environment_variable: String,
+    pub networking: CredentialNetworkPolicy,
+    pub injection_location: CredentialInjectionLocation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CredentialNetworkPolicy {
+    Unrestricted,
+    Limited { allowed_hosts: Vec<String> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialInjectionLocation {
+    #[serde(default)]
+    pub header: bool,
+}
+
+impl EgressPolicy {
+    pub fn networking_enabled(&self) -> bool {
+        self.networking != SandboxNetworkPolicy::Disabled
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+    pub(crate) fn validate_basic(&self, provider: &str) -> Result<()> {
+        if !self.credentials.is_empty() {
+            anyhow::bail!("{provider} does not support policy.credentials");
+        }
+        if matches!(self.networking, SandboxNetworkPolicy::Limited { .. }) {
+            anyhow::bail!("{provider} does not support policy.networking.limited");
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "firecracker")]
+    pub(crate) fn requires_proxy(&self) -> bool {
+        !self.credentials.is_empty()
+            || matches!(self.networking, SandboxNetworkPolicy::Limited { .. })
+    }
+}
+
+impl From<SandboxNetworkPolicy> for EgressPolicy {
+    fn from(networking: SandboxNetworkPolicy) -> Self {
+        Self {
+            networking,
+            credentials: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreateSandboxRequest {
     #[serde(default)]
@@ -689,6 +798,8 @@ pub struct CreateSandboxRequest {
     pub default_workdir: Option<String>,
     pub file_system_mounts: Option<Vec<FileSystemMount>>,
     pub durable_file_systems: Option<Vec<DurableFileSystem>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<EgressPolicy>,
     pub enable_networking: Option<bool>,
     pub idle_seconds: Option<u64>,
 }

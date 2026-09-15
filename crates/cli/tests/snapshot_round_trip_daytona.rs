@@ -33,6 +33,7 @@ async fn daytona_snapshot_and_rewind_round_trip() {
         root: root.path().to_path_buf(),
         secret_backend: SecretBackendChoice::Static([7u8; 32]),
         sandbox_default: SandboxProvider::Daytona,
+        sandbox_policy: None,
         sandbox_backends: vec![SandboxBackendRegistration::daytona(
             DaytonaBackendSpec::with_conventional_secrets(),
         )],
@@ -73,6 +74,7 @@ async fn daytona_snapshot_and_rewind_round_trip() {
             default_workdir: Some("/".into()),
             file_system_mounts: None,
             durable_file_systems: None,
+            policy: None,
             enable_networking: Some(true),
             idle_seconds: Some(300),
         })

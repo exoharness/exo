@@ -6,6 +6,9 @@ a minimal initramfs. It launches Firecracker only through the matching `jailer` 
 communicates with a static Rust PID 1 over virtio-vsock, and adds a TAP device
 only when the sandbox requests networking.
 
+See [sandbox egress](../../docs/egress.md) for network policies, credential
+substitution, and the Firecracker proxy smoke tests.
+
 ## Compatible host artifact bundle
 
 Install Firecracker, jailer, the guest kernel, and the Exo initramfs as one

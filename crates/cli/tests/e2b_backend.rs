@@ -18,6 +18,7 @@ fn make_request(thread_id: &str, sandbox_id: &str) -> SandboxRequest {
     SandboxRequest {
         sandbox_id: sandbox_id.into(),
         scope: Some(SandboxScope::Thread {
+            agent_id: "agent-1".into(),
             thread_id: thread_id.into(),
         }),
         spec: SandboxSpec {
@@ -25,7 +26,7 @@ fn make_request(thread_id: &str, sandbox_id: &str) -> SandboxRequest {
             resources: Default::default(),
             mounts: Vec::new(),
             durable_file_systems: Vec::new(),
-            network: SandboxNetworkPolicy::Enabled,
+            policy: SandboxNetworkPolicy::Unrestricted.into(),
             default_workdir: "/home/user".into(),
         },
         lifecycle: SandboxLifecycleConfig {

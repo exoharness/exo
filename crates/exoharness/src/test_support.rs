@@ -10,6 +10,7 @@ pub(crate) fn local_test_config(root: impl Into<PathBuf>) -> BasicExoHarnessConf
         root: root.into(),
         secret_backend: SecretBackendChoice::Static([7u8; 32]),
         sandbox_default: SandboxProvider::LocalProcess,
+        sandbox_policy: None,
         sandbox_backends: vec![SandboxBackendRegistration::local_process()],
     }
 }
@@ -22,6 +23,7 @@ pub(crate) fn local_test_config_with_daytona(root: impl Into<PathBuf>) -> BasicE
         root: root.into(),
         secret_backend: SecretBackendChoice::Static([7u8; 32]),
         sandbox_default: SandboxProvider::LocalProcess,
+        sandbox_policy: None,
         sandbox_backends: vec![
             SandboxBackendRegistration::local_process(),
             SandboxBackendRegistration::daytona(DaytonaBackendSpec::default()),

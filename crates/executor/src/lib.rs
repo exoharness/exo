@@ -96,3 +96,5 @@ pub use scheduler_types::{
 pub use typescript::TypeScriptHarness;
 
 pub(crate) use basic::BasicExecutor;
+
+pub use exoharness::EgressPolicy;

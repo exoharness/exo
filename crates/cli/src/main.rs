@@ -73,6 +73,10 @@ const SANDBOX_CLI_AGENT_SLUG: &str = "__exo_sandbox_cli";
     after_help = "Runtime options:\n  --braintrust-api-key <BRAINTRUST_API_KEY>\n  --braintrust-app-url <BRAINTRUST_APP_URL>\n  --braintrust-api-url <BRAINTRUST_API_URL>\n\nThese options are accepted globally, including after subcommands, but are hidden from subcommand help to reduce noise."
 )]
 struct Cli {
+    /// JSON, YAML, or TOML policy for sandbox hosts and credential substitution.
+    #[arg(long, global = true, conflicts_with = "exoharness_url")]
+    egress_policy: Option<PathBuf>,
+
     #[arg(long, global = true, default_value = ".exo")]
     root: PathBuf,
     /// Executor runtime: basic, rlm, typescript, codex, claude-code, cursor, or a TypeScript module path.
@@ -262,6 +266,7 @@ impl FirecrackerArgs {
             .chain(self.allowed_local_images.iter().cloned())
             .collect();
         let config = FirecrackerConfig {
+            egress_listen: None,
             firecracker_bin: self.firecracker_bin.clone(),
             jailer_bin: self.jailer_bin.clone(),
             kernel: self.kernel.clone(),
@@ -340,10 +345,6 @@ impl HarnessSelection {
             Self::TypeScriptPreset(preset) => preset.sandbox_image(),
             Self::Kind(_) | Self::TypeScriptModule(_) => None,
         }
-    }
-
-    fn default_enable_networking(&self) -> bool {
-        matches!(self, Self::TypeScriptPreset(_))
     }
 }
 
@@ -442,6 +443,22 @@ impl From<SandboxProviderArg> for SandboxProvider {
     }
 }
 
+fn read_config_file<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> Result<T> {
+    let contents =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+    match extension.as_deref() {
+        Some("json") => serde_json::from_str(&contents).context("invalid JSON"),
+        Some("yaml" | "yml") => serde_yaml_ng::from_str(&contents).context("invalid YAML"),
+        Some("toml") => toml::from_str(&contents).context("invalid TOML"),
+        _ => anyhow::bail!("configuration file must use .json, .yaml, .yml, or .toml"),
+    }
+    .with_context(|| format!("parsing {}", path.display()))
+}
+
 fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
     let secret_backend = match cli.secret_backend.unwrap_or_else(default_secret_backend) {
         SecretBackendArg::AppleKeychain => SecretBackendChoice::AppleKeychain,
@@ -456,11 +473,18 @@ fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
         .unwrap_or_default();
     #[cfg(not(feature = "firecracker"))]
     let firecracker_spec = FirecrackerBackendSpec::default();
+    let sandbox_backends = default_sandbox_backends(firecracker_spec);
+    let sandbox_policy = cli
+        .egress_policy
+        .as_ref()
+        .map(|path| read_config_file(path))
+        .transpose()?;
     Ok(BasicExoHarnessConfig {
         root: cli.root.join("exoharness"),
         secret_backend,
         sandbox_default: default_local_sandbox_provider(),
-        sandbox_backends: default_sandbox_backends(firecracker_spec),
+        sandbox_policy,
+        sandbox_backends,
     })
 }
 
@@ -1311,9 +1335,7 @@ async fn main() -> Result<()> {
                                 .map(str::to_string),
                             sandbox_provider: default_sandbox_provider,
                             sandbox_scope: None,
-                            enable_networking: harness_selection
-                                .as_ref()
-                                .is_some_and(HarnessSelection::default_enable_networking),
+                            enable_networking: true,
                             model,
                             max_output_tokens: None,
                             max_tool_round_trips: None,
@@ -1396,12 +1418,7 @@ async fn main() -> Result<()> {
                         .and_then(HarnessSelection::default_sandbox_image)
                         .map(str::to_string)
                 });
-                let enable_networking =
-                    networking.map(EnabledDisabled::enabled).unwrap_or_else(|| {
-                        harness_selection
-                            .as_ref()
-                            .is_some_and(HarnessSelection::default_enable_networking)
-                    });
+                let enable_networking = networking.map(EnabledDisabled::enabled).unwrap_or(true);
                 let agent = harness
                     .create_agent(CreateAgentRequest {
                         slug,
@@ -2840,6 +2857,7 @@ async fn start_sandbox(
             file_system_mounts: (!mounts.is_empty()).then_some(mounts),
             durable_file_systems: (!durable_file_systems.is_empty())
                 .then_some(durable_file_systems),
+            policy: None,
             enable_networking: networking.map(EnabledDisabled::enabled),
             idle_seconds,
         })

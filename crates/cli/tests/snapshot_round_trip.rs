@@ -47,6 +47,7 @@ async fn filesystem_snapshot_and_rewind_round_trip() {
         // it's orthogonal to what we're testing (sandbox snapshots).
         secret_backend: SecretBackendChoice::Static([7u8; 32]),
         sandbox_default: SandboxProvider::Docker,
+        sandbox_policy: None,
         sandbox_backends: vec![SandboxBackendRegistration::docker()],
     })
     .await
@@ -77,6 +78,7 @@ async fn filesystem_snapshot_and_rewind_round_trip() {
             default_workdir: Some("/".into()),
             file_system_mounts: None,
             durable_file_systems: None,
+            policy: None,
             enable_networking: Some(false),
             idle_seconds: Some(60),
         })

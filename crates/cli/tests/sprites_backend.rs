@@ -19,6 +19,7 @@ fn make_request(thread_id: &str, sandbox_id: &str) -> SandboxRequest {
     SandboxRequest {
         sandbox_id: sandbox_id.into(),
         scope: Some(SandboxScope::Thread {
+            agent_id: "agent-1".into(),
             thread_id: thread_id.into(),
         }),
         spec: SandboxSpec {
@@ -26,7 +27,7 @@ fn make_request(thread_id: &str, sandbox_id: &str) -> SandboxRequest {
             resources: Default::default(),
             mounts: Vec::new(),
             durable_file_systems: Vec::new(),
-            network: SandboxNetworkPolicy::Enabled,
+            policy: SandboxNetworkPolicy::Unrestricted.into(),
             default_workdir: "/home/sprite".into(),
         },
         lifecycle: SandboxLifecycleConfig {
@@ -461,4 +462,21 @@ async fn acquire_from_snapshot_rejects_wrong_format() {
         msg.contains("sprites") || msg.contains("format"),
         "unexpected: {msg}"
     );
+}
+
+#[tokio::test]
+async fn disabled_networking_fails_before_any_provider_request() {
+    let server = MockServer::start().await;
+    let backend = backend_for_mock(&server);
+    let mut request = make_request("thread", "disabled");
+    request.spec.policy = SandboxNetworkPolicy::Disabled.into();
+    let result = backend.acquire(request).await;
+    assert!(
+        result
+            .err()
+            .expect("unsupported networking")
+            .to_string()
+            .contains("policy.networking.disabled")
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
 }

@@ -46,6 +46,7 @@ async fn teleport_docker_sandbox_to_daytona_keeps_files() {
         root: root.path().to_path_buf(),
         secret_backend: SecretBackendChoice::Static([7u8; 32]),
         sandbox_default: SandboxProvider::Docker,
+        sandbox_policy: None,
         sandbox_backends: vec![
             SandboxBackendRegistration::docker(),
             SandboxBackendRegistration::daytona(DaytonaBackendSpec::with_conventional_secrets()),
@@ -88,6 +89,7 @@ async fn teleport_docker_sandbox_to_daytona_keeps_files() {
             default_workdir: Some("/".into()),
             file_system_mounts: None,
             durable_file_systems: None,
+            policy: None,
             enable_networking: Some(false),
             idle_seconds: Some(300),
         })
@@ -155,6 +157,7 @@ async fn teleport_docker_sandbox_to_daytona_keeps_files() {
                 internal: None,
             }]),
             durable_file_systems: None,
+            policy: None,
             enable_networking: Some(false),
             idle_seconds: Some(300),
         })

@@ -1,4 +1,5 @@
 use super::*;
+use crate::egress::{EgressTransport, LocalEgressTransport};
 use tokio::net::UnixListener;
 
 fn test_host_runtime() -> FirecrackerHostFingerprint {
@@ -38,30 +39,33 @@ fn network_device_policy_can_keep_disabled_sandboxes_host_reachable() {
     let mut config = FirecrackerConfig::default();
     assert!(network_device_enabled(
         &config,
-        SandboxNetworkPolicy::Enabled
+        &SandboxNetworkPolicy::Unrestricted
     ));
     assert!(!network_device_enabled(
         &config,
-        SandboxNetworkPolicy::Disabled
+        &SandboxNetworkPolicy::Disabled
     ));
 
     config.network_device_policy = FirecrackerNetworkDevicePolicy::AllSandboxes;
     assert!(network_device_enabled(
         &config,
-        SandboxNetworkPolicy::Enabled
+        &SandboxNetworkPolicy::Unrestricted
     ));
     assert!(network_device_enabled(
         &config,
-        SandboxNetworkPolicy::Disabled
+        &SandboxNetworkPolicy::Disabled
     ));
 }
 
 #[test]
 fn disabled_sandbox_network_rejects_unconfigured_egress() {
-    let mut config = FirecrackerConfig::default();
-    config.allowed_egress_cidrs = vec!["192.0.2.0/24".parse().unwrap()];
+    let config = FirecrackerConfig {
+        allowed_egress_cidrs: vec!["192.0.2.0/24".parse().unwrap()],
+        ..Default::default()
+    };
     let network = network_config(1);
-    let rules = network_firewall_rules(&config, &network, SandboxNetworkPolicy::Disabled).unwrap();
+    let rules =
+        network_firewall_rules(&config, &network, &SandboxNetworkPolicy::Disabled, None).unwrap();
 
     assert!(rules.contains("ip daddr 192.0.2.0/24 counter accept"));
     assert!(rules.contains(&format!(
@@ -78,12 +82,59 @@ fn disabled_sandbox_network_rejects_unconfigured_egress() {
 fn enabled_sandbox_network_accepts_public_egress() {
     let config = FirecrackerConfig::default();
     let network = network_config(1);
-    let rules = network_firewall_rules(&config, &network, SandboxNetworkPolicy::Enabled).unwrap();
+    let rules =
+        network_firewall_rules(&config, &network, &SandboxNetworkPolicy::Unrestricted, None)
+            .unwrap();
 
     assert!(rules.contains(&format!(
         "forward iifname {} counter accept\n",
         network.host_veth
     )));
+}
+
+#[test]
+fn proxy_transport_enforces_egress_independently_of_network_policy() {
+    let config = FirecrackerConfig {
+        allowed_egress_cidrs: vec!["0.0.0.0/0".parse().unwrap()],
+        ..Default::default()
+    };
+    let network = network_config(1);
+    let proxy = crate::SandboxEgressProxy {
+        http: "192.0.2.10:18080".parse().unwrap(),
+        https: "192.0.2.10:18443".parse().unwrap(),
+        dns: "192.0.2.10:1053".parse().unwrap(),
+    };
+    let limited = SandboxNetworkPolicy::Limited {
+        allowed_hosts: vec!["api.notion.com".into()],
+    };
+    let request = |networking, egress_proxy| FirecrackerRequest {
+        sandbox: SandboxRequest {
+            sandbox_id: "policy-validation".into(),
+            scope: None,
+            provider_state: None,
+            spec: SandboxSpec {
+                image: String::new(),
+                resources: Default::default(),
+                mounts: vec![],
+                durable_file_systems: vec![],
+                default_workdir: "/home/exo/workspace".into(),
+                policy: crate::EgressPolicy::from(networking),
+            },
+            lifecycle: Default::default(),
+        },
+        egress_proxy,
+    };
+    assert!(prepare_request(request(limited.clone(), None)).is_err());
+    assert!(prepare_request(request(SandboxNetworkPolicy::Disabled, Some(proxy))).is_err());
+    for policy in [limited, SandboxNetworkPolicy::Unrestricted] {
+        let rules = network_firewall_rules(&config, &network, &policy, Some(proxy)).unwrap();
+        assert!(rules.contains("tcp dport 443 counter dnat ip to 192.0.2.10:18443"));
+        assert!(rules.contains(&format!(
+            "forward iifname {} counter reject",
+            network.host_veth
+        )));
+        assert!(!rules.contains("ip daddr 0.0.0.0/0 counter accept"));
+    }
 }
 
 #[test]
@@ -729,4 +780,395 @@ fn snapshot_budget_counts_retained_logical_bytes_and_pending_capture() {
     fs::remove_dir_all(snapshot).unwrap();
     assert!(enforce_snapshot_budget(&config, MAX_SNAPSHOT_BYTES - 1024).is_ok());
     assert!(enforce_snapshot_budget(&config, MAX_SNAPSHOT_BYTES - 1023).is_err());
+}
+
+fn test_shared(
+    config: FirecrackerConfig,
+    warm_machines: HashMap<SandboxId, WarmMachineEntry>,
+) -> Result<Arc<Shared>> {
+    let state_lock = File::create(config.state_root.join("backend.lock"))?;
+    Ok(Arc::new(Shared {
+        config,
+        host_fingerprint: test_host_runtime(),
+        _state_lock: state_lock,
+        warm_machines: Mutex::new(warm_machines),
+        egress_transports: StdMutex::new(HashMap::new()),
+        lifecycle_locks: MachineLifecycleLocks::default(),
+        capacity_gate: Mutex::new(()),
+        starting_machines: Arc::new(StdMutex::new(HashSet::new())),
+    }))
+}
+
+#[tokio::test]
+async fn idle_reap_closes_egress_before_machine_cleanup_can_fail() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    for name in ["manifests", "leases"] {
+        fs::create_dir(directory.path().join(name))?;
+    }
+    let config = FirecrackerConfig {
+        state_root: directory.path().into(),
+        ..Default::default()
+    };
+    let record = MachineRecord {
+        machine_id: "fc-egress-reaped".into(),
+        spec_hash: "test".into(),
+        runtime: test_runtime(),
+        resolved_image: "/images/test.ext4".into(),
+        slot: 1,
+        network_enabled: false,
+        workspace_id: None,
+        idle_ttl_seconds: Some(0),
+        snapshot_template: None,
+        snapshot_network_slot: None,
+    };
+    write_manifest(directory.path(), &record)?;
+    let shared = test_shared(config, HashMap::new())?;
+    let pid_path = shared.pid_path(&record.machine_id);
+    fs::create_dir_all(pid_path.parent().unwrap())?;
+    fs::write(&pid_path, "invalid-pid")?;
+    let listener = Arc::new(LocalEgressTransport::for_hosts(&["api.test".into()]).await?);
+    shared
+        .egress_transports
+        .lock()
+        .unwrap()
+        .insert(record.machine_id.clone(), listener.clone());
+    let backend = FirecrackerSandboxBackend {
+        shared: shared.clone(),
+        egress: Arc::new(EgressRuntime::new(None, Arc::new(PublicUpstreamResolver))),
+    };
+    assert_eq!(shared.is_running(&record.machine_id).await?, Some(false));
+    assert!(backend.reap_expired_machines().await.is_err());
+    assert!(listener.is_closed());
+    assert!(shared.egress_transports.lock().unwrap().is_empty());
+    let endpoints = listener.endpoints();
+    let replacement = LocalEgressTransport::with_config(
+        crate::EgressListenConfig {
+            bind_address: *endpoints.http.ip(),
+            advertised_address: *endpoints.http.ip(),
+            http_port: endpoints.http.port(),
+            https_port: endpoints.https.port(),
+            dns_port: endpoints.dns.port(),
+        },
+        &[],
+    )
+    .await?;
+    replacement.close();
+    Ok(())
+}
+
+struct DurableStopFixture {
+    _directory: tempfile::TempDir,
+    backend: FirecrackerSandboxBackend,
+    request: SandboxRequest,
+    machine: Machine,
+    listener: UnixListener,
+    handle: Arc<FirecrackerSandboxHandle>,
+    egress_transport: Arc<LocalEgressTransport>,
+}
+
+impl DurableStopFixture {
+    async fn new() -> Result<Self> {
+        let directory = tempfile::tempdir_in("/tmp")?;
+        for name in ["manifests", "leases", "slots"] {
+            fs::create_dir(directory.path().join(name))?;
+        }
+        let config = FirecrackerConfig {
+            state_root: directory.path().into(),
+            ..Default::default()
+        };
+        let request = SandboxRequest {
+            sandbox_id: "durable".into(),
+            scope: None,
+            spec: SandboxSpec {
+                image: "/images/test.ext4".into(),
+                resources: Default::default(),
+                mounts: vec![],
+                durable_file_systems: vec![],
+                policy: SandboxNetworkPolicy::Limited {
+                    allowed_hosts: vec!["api.test".into()],
+                }
+                .into(),
+                default_workdir: "/workspace".into(),
+            },
+            lifecycle: crate::SandboxLifecycleConfig {
+                idle_ttl: Some(Duration::from_secs(60)),
+            },
+            provider_state: None,
+        };
+        let record = MachineRecord {
+            machine_id: "fc-durable".into(),
+            spec_hash: sandbox_spec_hash(&request.spec),
+            runtime: test_runtime(),
+            resolved_image: request.spec.image.clone(),
+            slot: 1,
+            network_enabled: false,
+            workspace_id: Some("workspace".into()),
+            idle_ttl_seconds: None,
+            snapshot_template: None,
+            snapshot_network_slot: None,
+        };
+        write_manifest(directory.path(), &record)?;
+        let shared = test_shared(
+            config,
+            HashMap::from([(
+                request.sandbox_id.clone(),
+                WarmMachineEntry {
+                    egress_proxy: None,
+                    machine_id: record.machine_id.clone(),
+                    spec_hash: record.spec_hash.clone(),
+                    idle_ttl: None,
+                    last_used_at: Instant::now(),
+                },
+            )]),
+        )?;
+        let machine = machine_from_record(&shared.config, record);
+        fs::create_dir_all(machine.vsock_path.parent().unwrap())?;
+        let listener = UnixListener::bind(&machine.vsock_path)?;
+        // Only liveness reads this PID. The fake guest removes it before a
+        // reply that permits cleanup so it never signals the test process.
+        fs::write(
+            shared.pid_path(&machine.record.machine_id),
+            std::process::id().to_string(),
+        )?;
+        let backend = FirecrackerSandboxBackend {
+            shared,
+            egress: Arc::new(EgressRuntime::new(None, Arc::new(PublicUpstreamResolver))),
+        };
+        let egress_transport =
+            Arc::new(LocalEgressTransport::for_hosts(&["api.test".into()]).await?);
+        backend
+            .shared
+            .egress_transports
+            .lock()
+            .unwrap()
+            .insert(machine.record.machine_id.clone(), egress_transport.clone());
+        let handle = backend
+            .egress
+            .acquire(
+                request.clone(),
+                |_| async { Ok(egress_transport.clone() as Arc<dyn EgressTransport>) },
+                |egress| async {
+                    Ok(FirecrackerSandboxHandle {
+                        egress,
+                        id: request.sandbox_id.clone(),
+                        machine: machine.clone(),
+                        request: request.clone().into(),
+                        spec_hash: machine.record.spec_hash.clone(),
+                        shared: backend.shared.clone(),
+                        one_shot: false,
+                    })
+                },
+                async { panic!("successful acquisition must not terminate the sandbox") },
+            )
+            .await?;
+        Ok(Self {
+            _directory: directory,
+            backend,
+            request,
+            machine,
+            listener,
+            handle,
+            egress_transport,
+        })
+    }
+
+    async fn sync_request(&self) -> Result<UnixStream> {
+        let (stream, _) = self.listener.accept().await?;
+        let mut stream = AsyncBufReader::new(stream);
+        let mut handshake = String::new();
+        stream.read_line(&mut handshake).await?;
+        assert_eq!(handshake, "CONNECT 10052\n");
+        stream.get_mut().write_all(b"OK 1073741824\n").await?;
+        let mut stream = stream.into_inner();
+        let length = stream.read_u32().await? as usize;
+        let mut payload = vec![0; length];
+        stream.read_exact(&mut payload).await?;
+        let request: Message<ProtocolGuestRequest<()>> = serde_json::from_slice(&payload)?;
+        assert!(
+            matches!(request.payload, ProtocolGuestRequest::SyncFilesystem { path } if path == "/workspace")
+        );
+        Ok(stream)
+    }
+
+    async fn sync_reply(&self, response: GuestResponse, exit_guest: bool) -> Result<()> {
+        let mut stream = self.sync_request().await?;
+        if exit_guest {
+            fs::remove_file(
+                self.backend
+                    .shared
+                    .pid_path(&self.machine.record.machine_id),
+            )?;
+        }
+        let payload = serde_json::to_vec(&Message::new(response))?;
+        stream.write_u32(payload.len() as u32).await?;
+        stream.write_all(&payload).await?;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "uses Linux process liveness; no VM required"
+)]
+async fn terminate_flushes_durable_guest_without_acquiring_a_vm() -> Result<()> {
+    let fixture = DurableStopFixture::new().await?;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::try_join!(
+            fixture.backend.terminate(fixture.request.clone()),
+            fixture.sync_reply(GuestResponse::ok(), true),
+        )
+    })
+    .await??;
+    assert!(
+        !fixture
+            .backend
+            .shared
+            .manifest_path(&fixture.machine.record.machine_id)
+            .exists()
+    );
+    assert!(fixture.backend.shared.warm_machines.lock().await.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "uses Linux process liveness; no VM required"
+)]
+async fn failed_stop_keeps_the_vm_and_egress_usable_until_retry() -> Result<()> {
+    let fixture = DurableStopFixture::new().await?;
+    let (stop, reply) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(
+            fixture.handle.stop(),
+            fixture.sync_reply(GuestResponse::error("sync failed"), false),
+        )
+    })
+    .await?;
+    reply?;
+    assert!(format!("{:#}", stop.unwrap_err()).contains("sync failed"));
+    assert!(!fixture.egress_transport.is_closed());
+    assert!(
+        fixture
+            .backend
+            .shared
+            .pid_path(&fixture.machine.record.machine_id)
+            .exists()
+    );
+    assert!(
+        fixture
+            .backend
+            .shared
+            .manifest_path(&fixture.machine.record.machine_id)
+            .exists()
+    );
+    assert!(
+        fixture
+            .backend
+            .shared
+            .warm_machines
+            .lock()
+            .await
+            .contains_key(&fixture.request.sandbox_id)
+    );
+    // The non-booting request path used by Lima must preserve the same state.
+    let (stop, reply) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(
+            fixture.backend.stop_request(fixture.request.clone()),
+            fixture.sync_reply(GuestResponse::error("sync failed"), false),
+        )
+    })
+    .await?;
+    reply?;
+    assert!(format!("{:#}", stop.unwrap_err()).contains("sync failed"));
+    assert!(!fixture.egress_transport.is_closed());
+    // A subsequent successful stop closes egress even while the handle is retained.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::try_join!(
+            fixture.handle.stop(),
+            fixture.sync_reply(GuestResponse::ok(), true)
+        )
+    })
+    .await??;
+    assert!(fixture.egress_transport.is_closed());
+    assert!(
+        !fixture
+            .backend
+            .shared
+            .manifest_path(&fixture.machine.record.machine_id)
+            .exists()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "uses Linux process liveness; no VM required"
+)]
+async fn terminate_cleans_up_after_a_failed_durable_sync() -> Result<()> {
+    let fixture = DurableStopFixture::new().await?;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::try_join!(
+            fixture.backend.terminate(fixture.request.clone()),
+            fixture.sync_reply(GuestResponse::error("sync failed"), true),
+        )
+    })
+    .await??;
+    assert!(fixture.egress_transport.is_closed());
+    assert!(
+        !fixture
+            .backend
+            .shared
+            .manifest_path(&fixture.machine.record.machine_id)
+            .exists()
+    );
+    assert!(fixture.backend.shared.warm_machines.lock().await.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "uses Linux process liveness; no VM required"
+)]
+async fn terminate_cleans_up_when_the_guest_never_answers_sync() -> Result<()> {
+    let fixture = DurableStopFixture::new().await?;
+    let (finished, completion) = tokio::sync::oneshot::channel();
+    let terminate = async {
+        let result = fixture.backend.terminate(fixture.request.clone()).await;
+        finished.send(()).unwrap();
+        result
+    };
+    let silent_guest = async {
+        let stream = fixture.sync_request().await?;
+        // Simulate VM exit so cleanup can run without signaling the test process,
+        // but hold its connection open to exercise the sync timeout, not EOF.
+        fs::remove_file(
+            fixture
+                .backend
+                .shared
+                .pid_path(&fixture.machine.record.machine_id),
+        )?;
+        tokio::time::pause();
+        tokio::time::advance(GUEST_REQUEST_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::time::resume();
+        completion.await?;
+        drop(stream);
+        Ok::<_, anyhow::Error>(())
+    };
+    tokio::time::timeout(GUEST_REQUEST_TIMEOUT * 2, async {
+        tokio::try_join!(terminate, silent_guest)
+    })
+    .await??;
+    assert!(fixture.egress_transport.is_closed());
+    assert!(
+        !fixture
+            .backend
+            .shared
+            .manifest_path(&fixture.machine.record.machine_id)
+            .exists()
+    );
+    assert!(fixture.backend.shared.warm_machines.lock().await.is_empty());
+    Ok(())
 }

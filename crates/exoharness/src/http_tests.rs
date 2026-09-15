@@ -149,6 +149,7 @@ async fn http_exoharness_runs_noninteractive_sandbox_commands() {
             default_workdir: Some("/".to_string()),
             file_system_mounts: None,
             durable_file_systems: None,
+            policy: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })
@@ -202,6 +203,7 @@ async fn http_exoharness_runs_agent_scoped_sandbox_commands() {
             default_workdir: Some("/".to_string()),
             file_system_mounts: None,
             durable_file_systems: None,
+            policy: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })
@@ -274,6 +276,7 @@ async fn http_exoharness_supports_sandbox_process_events() {
             default_workdir: Some("/".to_string()),
             file_system_mounts: None,
             durable_file_systems: None,
+            policy: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })
@@ -362,6 +365,7 @@ async fn http_exoharness_supports_turn_scoped_sandbox_snapshot_and_start() {
             default_workdir: Some("/".to_string()),
             file_system_mounts: None,
             durable_file_systems: None,
+            policy: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })
@@ -454,6 +458,7 @@ async fn http_exoharness_restores_a_snapshot_into_a_new_sandbox() {
             default_workdir: Some("/".to_string()),
             file_system_mounts: None,
             durable_file_systems: None,
+            policy: None,
             enable_networking: Some(true),
             idle_seconds: Some(60),
         })
@@ -474,6 +479,7 @@ async fn http_exoharness_restores_a_snapshot_into_a_new_sandbox() {
                 default_workdir: Some("/".to_string()),
                 file_system_mounts: None,
                 durable_file_systems: None,
+                policy: None,
                 enable_networking: Some(true),
                 idle_seconds: Some(60),
             },
