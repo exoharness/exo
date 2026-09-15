@@ -7,7 +7,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+#[cfg(any(feature = "firecracker", test))]
+use std::net::Ipv4Addr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -38,7 +40,14 @@ use crate::{
 
 mod transport;
 pub use transport::{EgressTransport, LocalEgressTransport};
+mod hosted;
+pub use hosted::{
+    EgressAllocation, EgressGuestConfig, HostedEgressSession, HostedEgressTransport,
+    HostedEgressTransportSession,
+};
+#[cfg(feature = "firecracker")]
 mod sandbox;
+#[cfg(feature = "firecracker")]
 pub(crate) use sandbox::{EgressRuntime, SandboxEgress};
 
 const PLACEHOLDER_PREFIX: &str = "exo_egress_";
@@ -99,11 +108,29 @@ pub struct EgressDestination {
     pub path: String,
 }
 
+#[derive(Debug, Default)]
+pub struct EgressRequestContext {
+    /// Names of credential bindings whose placeholders appeared in the request.
+    /// This contains no credential values.
+    pub credential_bindings: Vec<String>,
+}
+
 /// Looks up a binding for this sandbox's agent/thread on every use. The local
 /// implementation reads Exo's encrypted store; a hosted implementation can use
 /// its own vault and authorization. Only the proxy receives the returned value.
 #[async_trait]
 pub trait EgressCredentialResolver: Send + Sync {
+    /// Optionally authorize the normalized request before Exo resolves or
+    /// forwards any credential. The default preserves host-only policies.
+    async fn authorize(
+        &self,
+        _identity: &EgressIdentity,
+        _destination: &EgressDestination,
+        _context: &EgressRequestContext,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     async fn resolve(
         &self,
         identity: &EgressIdentity,
@@ -152,6 +179,38 @@ struct State {
     upstream: Arc<dyn UpstreamResolver>,
 }
 
+// Policy validation and proxy state are shared by native and hosted backends.
+// Backends create their transport after this step so they can use the
+// canonicalized host set to configure their network path.
+struct EgressProxyConfig {
+    state: State,
+}
+
+impl EgressProxyConfig {
+    fn new(
+        identity: EgressIdentity,
+        policy: EgressPolicy,
+        resolver: Option<Arc<dyn EgressCredentialResolver>>,
+        upstream: Arc<dyn UpstreamResolver>,
+    ) -> Result<Self> {
+        State::new(identity, policy, resolver, upstream).map(|state| Self { state })
+    }
+
+    fn allowed_hosts(&self) -> Vec<String> {
+        let mut hosts = self.state.hosts.iter().cloned().collect::<Vec<_>>();
+        hosts.sort_unstable();
+        hosts
+    }
+
+    async fn start(
+        self,
+        transport: Arc<dyn EgressTransport>,
+        cancel: CancellationToken,
+    ) -> Result<EgressProxy> {
+        EgressProxy::start_with_transport(transport, self.state, cancel).await
+    }
+}
+
 impl EgressProxy {
     async fn start_with_transport(
         transport: Arc<dyn EgressTransport>,
@@ -178,6 +237,7 @@ impl EgressProxy {
         })
     }
 
+    #[cfg(any(feature = "firecracker", test))]
     async fn bind_source(&self, source_ip: Ipv4Addr) -> Result<()> {
         self.transport.bind_source(source_ip).await
     }
@@ -197,6 +257,19 @@ impl EgressProxy {
     fn close(&self) {
         self.cancel.cancel();
         self.transport.close();
+    }
+
+    async fn join_with_timeout(&mut self) -> Result<()> {
+        match tokio::time::timeout(IO_TIMEOUT, &mut self.task).await {
+            Ok(result) => {
+                result.context("joining egress proxy")?;
+                Ok(())
+            }
+            Err(_) => {
+                self.task.abort();
+                Err(anyhow!("timed out joining egress proxy"))
+            }
+        }
     }
 }
 
@@ -279,7 +352,8 @@ impl State {
     ) -> Result<Response<ProxyBody>> {
         let (destination, url) = self.destination(&request, sni)?;
         let mut headers = request.headers().clone();
-        self.validate_credentials(&headers, &destination.host, sni.is_some())?;
+        let context = self.validate_credentials(&headers, &destination.host, sni.is_some())?;
+        self.authorize(&destination, &context).await?;
         strip_hop_headers(&mut headers)?;
         let client = self.client(&destination.host, destination.port).await?;
         self.substitute_credentials(&mut headers, &destination)
@@ -356,7 +430,13 @@ impl State {
         Ok((destination, url))
     }
 
-    fn validate_credentials(&self, headers: &HeaderMap, host: &str, tls: bool) -> Result<()> {
+    fn validate_credentials(
+        &self,
+        headers: &HeaderMap,
+        host: &str,
+        tls: bool,
+    ) -> Result<EgressRequestContext> {
+        let mut credential_bindings = HashSet::new();
         for (header, value) in headers {
             if !contains_placeholder(value.as_bytes()) {
                 continue;
@@ -372,8 +452,9 @@ impl State {
             );
             let mut unresolved = value.to_str()?.to_owned();
             for binding in &self.bindings {
-                if binding.permits_header(host) {
+                if binding.permits_header(host) && unresolved.contains(&binding.placeholder) {
                     unresolved = unresolved.replace(&binding.placeholder, "");
+                    credential_bindings.insert(binding.config.name.clone());
                 }
             }
             ensure!(
@@ -381,7 +462,28 @@ impl State {
                 "credential placeholder does not match this request"
             );
         }
-        Ok(())
+        let mut credential_bindings = credential_bindings.into_iter().collect::<Vec<_>>();
+        credential_bindings.sort_unstable();
+        Ok(EgressRequestContext {
+            credential_bindings,
+        })
+    }
+
+    async fn authorize(
+        &self,
+        destination: &EgressDestination,
+        context: &EgressRequestContext,
+    ) -> Result<()> {
+        let Some(resolver) = &self.resolver else {
+            return Ok(());
+        };
+        let result = tokio::time::timeout(
+            IO_TIMEOUT,
+            resolver.authorize(&self.identity, destination, context),
+        )
+        .await
+        .map_err(|_| anyhow!("request authorization timed out"))?;
+        result.map_err(|_| anyhow!("request is not authorized"))
     }
 
     async fn substitute_credentials(
