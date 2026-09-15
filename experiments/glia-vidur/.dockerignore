@@ -1,0 +1,15 @@
+**
+!Dockerfile
+!requirements.lock
+!benchmark.py
+!evaluate.py
+!.work
+.work/**
+!.work/vidur
+.work/vidur/**
+!.work/vidur/vidur
+!.work/vidur/vidur/**
+!.work/vidur/data
+!.work/vidur/data/**
+!.work/vidur/LICENSE
+!.work/vidur-revision

@@ -79,7 +79,7 @@ struct Cli {
 
     #[arg(long, global = true, default_value = ".exo")]
     root: PathBuf,
-    /// Executor runtime: basic, rlm, typescript, codex, claude-code, cursor, or a TypeScript module path.
+    /// Executor runtime: basic, rlm, glia, typescript, codex, claude-code, cursor, or a TypeScript module path.
     #[arg(long, global = true, value_name = "HARNESS")]
     harness: Option<HarnessSelection>,
     #[arg(long, global = true, value_enum, env = "EXO_SECRET_BACKEND")]
@@ -314,6 +314,7 @@ enum HarnessSelection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TypeScriptHarnessPreset {
+    Glia,
     Codex,
     ClaudeCode,
     Cursor,
@@ -357,6 +358,7 @@ impl FromStr for HarnessSelection {
             "rlm" => Ok(Self::Kind(HarnessKind::Rlm)),
             "typescript" => Ok(Self::Kind(HarnessKind::TypeScript)),
             "exo" => Ok(Self::Kind(HarnessKind::Exo)),
+            "glia" => Ok(Self::TypeScriptPreset(TypeScriptHarnessPreset::Glia)),
             "codex" => Ok(Self::TypeScriptPreset(TypeScriptHarnessPreset::Codex)),
             "pi" => Ok(Self::TypeScriptPreset(TypeScriptHarnessPreset::Pi)),
             "claude-code" => Ok(Self::TypeScriptPreset(TypeScriptHarnessPreset::ClaudeCode)),
@@ -365,7 +367,7 @@ impl FromStr for HarnessSelection {
                 Ok(Self::TypeScriptModule(PathBuf::from(value)))
             }
             _ => Err(format!(
-                "unknown harness `{raw}`; expected basic, rlm, typescript, exo, codex, claude-code, cursor, or a TypeScript module path"
+                "unknown harness `{raw}`; expected basic, rlm, glia, typescript, exo, codex, claude-code, cursor, or a TypeScript module path"
             )),
         }
     }
@@ -374,6 +376,7 @@ impl FromStr for HarnessSelection {
 impl TypeScriptHarnessPreset {
     fn agent_slug(self) -> &'static str {
         match self {
+            Self::Glia => "glia",
             Self::Codex => "codex",
             Self::ClaudeCode => "claude-code",
             Self::Cursor => "cursor",
@@ -383,6 +386,7 @@ impl TypeScriptHarnessPreset {
 
     fn module_path(self) -> &'static Path {
         match self {
+            Self::Glia => Path::new("exoharness/examples/typescript/glia-harness.ts"),
             Self::Codex => Path::new("exoharness/examples/typescript/codex-harness.ts"),
             Self::ClaudeCode => Path::new("exoharness/examples/typescript/claude-code-harness.ts"),
             Self::Cursor => Path::new("exoharness/examples/typescript/cursor-sdk-harness.ts"),
@@ -392,6 +396,7 @@ impl TypeScriptHarnessPreset {
 
     fn sandbox_image(self) -> Option<&'static str> {
         match self {
+            Self::Glia => None,
             Self::Codex => Some("exo-codex-sandbox:latest"),
             Self::ClaudeCode => Some("exo-claude-code-sandbox:latest"),
             Self::Cursor => Some("exo-cursor-sdk-sandbox:latest"),
@@ -3332,6 +3337,7 @@ fn format_harness_selection(selection: &HarnessSelection) -> String {
             HarnessKind::Exo => "exo".to_string(),
         },
         HarnessSelection::TypeScriptPreset(preset) => match preset {
+            TypeScriptHarnessPreset::Glia => "glia".to_string(),
             TypeScriptHarnessPreset::Pi => "pi".to_string(),
             TypeScriptHarnessPreset::Codex => "codex".to_string(),
             TypeScriptHarnessPreset::ClaudeCode => "claude-code".to_string(),
@@ -3909,6 +3915,22 @@ mod create_tests {
                 ..
             } if conversation == "existing"
         ));
+    }
+
+    #[test]
+    fn glia_preset_selects_typescript_policy() {
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from(["exo", "repl", "--harness", "glia"])
+            .expect("repl parses with the Glia harness");
+        let selection = cli.harness.expect("harness selection");
+        assert_eq!(selection.harness_kind(), super::HarnessKind::TypeScript);
+        assert_eq!(selection.default_agent_slug().as_deref(), Some("glia"));
+        assert_eq!(selection.default_sandbox_image(), None);
+        let config = super::TypeScriptHarnessPreset::Glia;
+        assert_eq!(
+            config.module_path(),
+            std::path::Path::new("exoharness/examples/typescript/glia-harness.ts")
+        );
     }
 
     #[test]
