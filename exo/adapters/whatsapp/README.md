@@ -18,6 +18,11 @@ Use the Exo setup flow:
 
 The script watches `.exo/exo-adapters.log`, prints the QR code if it appears, and pauses while you scan it. Scan from WhatsApp using the linked-device flow.
 
+Background logs do not stream into the REPL. Run `./exo.sh logs` in another
+terminal to follow pairing updates and service errors. The worker logs each
+distinct QR code once; newly rotated codes remain available there if the code
+shown during setup expires.
+
 The setup prompt at `setup-prompt.md` asks Exo to create a library adapter similar to:
 
 ```json
