@@ -125,14 +125,13 @@ struct EgressProxy {
 
 struct Binding {
     config: EgressCredentialBinding,
-    hosts: Option<HashSet<String>>,
+    hosts: HashSet<String>,
     placeholder: String,
 }
 
 impl Binding {
     fn permits_header(&self, host: &str) -> bool {
-        self.config.injection_location.header
-            && self.hosts.as_ref().is_none_or(|hosts| hosts.contains(host))
+        self.config.injection_location.header && self.hosts.contains(host)
     }
 }
 
@@ -231,12 +230,8 @@ impl State {
         let mut variables = HashSet::new();
         let mut bindings = Vec::new();
         for config in policy.credentials {
-            let hosts = match &config.networking {
-                CredentialNetworkPolicy::Unrestricted => None,
-                CredentialNetworkPolicy::Limited { allowed_hosts } => {
-                    Some(canonical_egress_hosts(allowed_hosts)?)
-                }
-            };
+            let CredentialNetworkPolicy::Limited { allowed_hosts } = &config.networking;
+            let hosts = canonical_egress_hosts(allowed_hosts)?;
             ensure!(
                 !config.name.is_empty(),
                 "credential binding name is required"

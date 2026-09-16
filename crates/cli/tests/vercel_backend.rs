@@ -546,7 +546,9 @@ async fn unsupported_credentials_fail_before_any_provider_request() {
         .push(exoharness::EgressCredentialBinding {
             name: "braintrust".into(),
             environment_variable: "BRAINTRUST_API_KEY".into(),
-            networking: exoharness::CredentialNetworkPolicy::Unrestricted,
+            networking: exoharness::CredentialNetworkPolicy::Limited {
+                allowed_hosts: vec!["api.braintrust.dev".into()],
+            },
             injection_location: exoharness::CredentialInjectionLocation { header: true },
         });
     let result = backend.acquire(request).await;

@@ -744,7 +744,6 @@ pub struct EgressCredentialBinding {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CredentialNetworkPolicy {
-    Unrestricted,
     Limited { allowed_hosts: Vec<String> },
 }
 
@@ -1312,6 +1311,29 @@ mod tests {
         }
         let event: EventData = serde_json::from_str(r#"{"type":"turn_started"}"#).unwrap();
         assert!(matches!(event, EventData::TurnStarted { user_id: None }));
+    }
+
+    #[test]
+    fn credential_network_policy_requires_explicit_hosts() {
+        for json in [
+            r#"{"type":"unrestricted"}"#,
+            r#"{"type":"limited"}"#,
+            r#"{}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<CredentialNetworkPolicy>(json).is_err(),
+                "credential policy must specify allowed hosts: {json}"
+            );
+        }
+        let json = r#"{"type":"limited","allowed_hosts":["api.notion.com"]}"#;
+        let policy = serde_json::from_str::<CredentialNetworkPolicy>(json).unwrap();
+        assert_eq!(
+            policy,
+            CredentialNetworkPolicy::Limited {
+                allowed_hosts: vec!["api.notion.com".into()],
+            }
+        );
+        assert_eq!(serde_json::to_string(&policy).unwrap(), json);
     }
 
     #[test]

@@ -68,8 +68,15 @@ injects the environment without adding a credential inventory to its prompt.
 
 `SandboxNetworkPolicy` controls where the sandbox can connect. Each binding's
 `CredentialNetworkPolicy` separately controls where substitution is permitted.
-Both must allow the destination. An unrestricted credential inherits the
-sandbox's permitted destinations.
+Every credential must specify `networking: { "type": "limited", "allowed_hosts": [...] }`.
+Both allowlists must contain the destination: allowing the sandbox to reach
+`api.notion.com` and `api.github.com` does not permit a Notion credential restricted
+to `api.notion.com` to be sent to GitHub. Expanding the sandbox's allowlist never
+expands a credential's allowed destinations. An empty credential allowlist
+disables substitution for that credential.
+
+Credential policies using `"type": "unrestricted"` are rejected and must be updated
+to list their allowed hosts explicitly. They do not inherit the sandbox's allowlist.
 
 Binding names are scoped references, not storage IDs. Two threads can both
 request `notion` and resolve different secrets. Implement `EgressCredentialResolver`:

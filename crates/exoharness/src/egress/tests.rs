@@ -695,6 +695,8 @@ async fn proxy_rejects_cleartext_wrong_destinations_and_other_sandboxes() -> Res
             .status()
             .is_server_error()
     );
+    assert!(resolver.uses.read().await.is_empty());
+    assert_eq!(upstream.connections.load(Ordering::SeqCst), 0);
     let redirect = proxy_client
         .get("https://api.test/redirect")
         .header("authorization", &bearer)
@@ -766,7 +768,6 @@ fn rejects_unsafe_policy_and_addresses() {
 #[test]
 fn credential_networking_is_independent_of_environment_networking() -> Result<()> {
     let mut config = policy();
-    config.credentials[0].networking = CredentialNetworkPolicy::Unrestricted;
     let state = State::new(
         identity("one"),
         config.clone(),
@@ -775,7 +776,9 @@ fn credential_networking_is_independent_of_environment_networking() -> Result<()
     )?;
     assert!(state.hosts.contains("public.test"));
     assert!(!state.hosts.contains("blocked.test"));
-    assert!(state.bindings[0].permits_header("public.test"));
+    assert!(state.bindings[0].permits_header("api.test"));
+    assert!(!state.bindings[0].permits_header("public.test"));
+    assert!(!state.bindings[0].permits_header("blocked.test"));
     config.credentials[0].injection_location.header = false;
     let state = State::new(
         identity("one"),
@@ -799,6 +802,25 @@ fn credential_networking_is_independent_of_environment_networking() -> Result<()
         )
         .is_err()
     );
+    Ok(())
+}
+
+#[test]
+fn empty_credential_allowlist_does_not_inherit_sandbox_hosts() -> Result<()> {
+    let mut config = policy();
+    config.credentials[0].networking = CredentialNetworkPolicy::Limited {
+        allowed_hosts: vec![],
+    };
+    let state = State::new(
+        identity("one"),
+        config,
+        Some(TestResolver::new()),
+        Arc::new(PublicUpstreamResolver),
+    )?;
+    assert!(state.hosts.contains("api.test"));
+    assert!(state.hosts.contains("public.test"));
+    assert!(!state.bindings[0].permits_header("api.test"));
+    assert!(!state.bindings[0].permits_header("public.test"));
     Ok(())
 }
 
