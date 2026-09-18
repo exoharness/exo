@@ -131,6 +131,12 @@ class ExoAgent(BaseAgent):
                 )
 
 
+# TODO: it's a kludge that we have to replicate the setup behavior across here
+# and the docker container initialization for regular Exoharness Pi executor
+# (referring to exoharness/containers/pi-sandbox/Dockerfile).
+# We ought to fix this – would require refacotriing the *setup* logic out
+# into its own script that can be invoked from both places.
+
 # Matches the node major exoharness/containers/pi-sandbox builds on; pi's bundle
 # needs node 22.
 NODE_VERSION = "v22.15.0"
@@ -154,13 +160,8 @@ npm install -g --ignore-scripts "{PI_PACKAGE}"
 pi --version
 """
 
-
 async def install_pi(environment: BaseEnvironment) -> None:
-    """Install node and the Pi coding agent into Harbor's task container.
-
-    The same shape as Harbor's own Pi agent install, but system-wide so that
-    `pi` is on PATH for the non-interactive shells exo execs.
-    """
+    """Install node and the Pi coding agent into Harbor's task container."""
     result = await environment.exec(
         command=PI_INSTALL_SCRIPT,
         user="root",

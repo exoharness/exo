@@ -17,17 +17,12 @@ logger = logging.getLogger(__name__)
 
 
 class ExoSessionPlugin(BaseJobPlugin):
-    """Create the Exo agent every trial's conversation hangs off.
-
-    Trials run sequentially against one agent so that memory, tools, and
-    source changes made in one trial are visible to the next.
-    """
-
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._client: ExoClient | None = None
 
     async def on_job_start(self, job: Job) -> None:
+        # Run at the start of the job (full run): sets up the Agent for all trials to share.
         if job.config.environment.type != EnvironmentType.DOCKER:
             raise ValueError("ExoSessionPlugin must be on Docker")
         if len(job.config.agents) != 1:
@@ -36,10 +31,8 @@ class ExoSessionPlugin(BaseJobPlugin):
         kwargs = job.config.agents[0].kwargs
         harness = kwargs.get("harness", EXO_HARNESS)
         if job.config.n_concurrent_trials != 1 and harness == EXO_HARNESS:
-            # Exo trials all write to one agent's memory, tools, and source,
-            # and each is meant to see what earlier ones learned. That only
-            # holds in sequence. Harnesses without agent state (basic, pi)
-            # have nothing to race on, so they may run in parallel.
+            # Exo self-edits, so to avoid races and enable learning from one
+            # trial to the next, we require sequential trials. 
             raise ValueError(
                 f"--n-concurrent {job.config.n_concurrent_trials} is not allowed "
                 "with the exo harness: trials share one self-evolving agent and "

@@ -116,8 +116,7 @@ class ExoClient:
         """Run one Exo turn to completion and return its printed messages.
 
         Blocks for as long as the turn takes. On timeout the subprocess is
-        killed, which aborts the turn; convo survives in the state so can
-        still be inspected.
+        killed, which aborts the turn, but convo state remains.
         """
         return await self._run(
             "conversation",
