@@ -42,6 +42,7 @@ CONFIG_FIELDS = {
     "n_attempts",
     "n_concurrent",
     "include_task_names",
+    "reflection",
     "harness",
     "provider_model",
     "api_key_env",
@@ -71,6 +72,7 @@ def parse_args() -> argparse.Namespace:
         "n_attempts": 1,
         "n_concurrent": 1,
         "include_task_names": [],
+        "reflection": False,
         "provider_model": None,
         "api_key_env": "OPENAI_API_KEY",
         "base_url": None,
@@ -158,6 +160,15 @@ def parse_args() -> argparse.Namespace:
             "shell -- no memory, no skills, no self-editing; `pi` drives the "
             "Pi coding agent inside the task container, installing it there "
             "first"
+        ),
+    )
+    parser.add_argument(
+        "--reflection",
+        action="store_true",
+        help=(
+            "after each trial, let Exo review the grade inside a fork of its "
+            "final sandbox so it can carry lessons into later trials; off by "
+            "default. Only meaningful with --harness=exo"
         ),
     )
     parser.add_argument(
@@ -310,6 +321,8 @@ def harbor_command(
         # Read by the agent, and by the plugin through the agent's kwargs.
         "--ak",
         f"harness={args.harness or 'exo'}",
+        "--ak",
+        f"reflection={str(bool(args.reflection)).lower()}",
         "--jobs-dir",
         str(jobs_dir),
         *task_limit,

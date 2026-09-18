@@ -1924,9 +1924,6 @@ impl<'a> BasicScopedSandboxHandle<'a> {
     async fn fork_sandbox(&self, request: ForkSandboxRequest) -> Result<SandboxId> {
         self.ensure_full_sandbox_scope("fork_sandbox")?;
         let source = self.load_sandbox(&request.source_id).await?;
-        if source.attachment.is_some() {
-            bail!("attached sandboxes cannot be forked");
-        }
         if !source.running {
             bail!("source sandbox is not running: {}", request.source_id);
         }
@@ -1939,7 +1936,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
             );
         }
         let sandbox_id = format!("sandbox-{}", Uuid7::now());
-        let sandbox = prepared.stored_sandbox(sandbox_id.clone());
+        let mut sandbox = prepared.stored_sandbox(sandbox_id.clone());
         let backend = self
             .harness
             .inner
@@ -1947,7 +1944,33 @@ impl<'a> BasicScopedSandboxHandle<'a> {
             .await?;
         let source_request = sandbox_request(self.owner, &request.source_id, &source, None);
         let target_request = sandbox_request(self.owner, &sandbox_id, &sandbox, None);
-        let sandbox_handle = backend.fork_sandbox(source_request, target_request).await?;
+        let sandbox_handle = if source.attachment.is_some() {
+            // An attachment is externally owned, but forking only reads its
+            // current state. Capture that state through the borrowed handle
+            // and restore it into a new, Exo-owned sandbox.
+            let source_handle = active_sandbox_handle(
+                self.harness,
+                &self.owner_dir,
+                self.owner,
+                &request.source_id,
+                &source,
+            )
+            .await?
+            .0;
+            let payload = source_handle.snapshot().await?;
+            ensure_snapshot_format_supported(backend.as_ref(), &sandbox.provider, &payload.format)?;
+            backend
+                .acquire_from_snapshot(target_request, payload)
+                .await?
+        } else {
+            backend.fork_sandbox(source_request, target_request).await?
+        };
+        if let Some(effective_image) = sandbox_handle.effective_image()
+            && effective_image != sandbox.image
+        {
+            sandbox.requested_image = Some(sandbox.image.clone());
+            sandbox.image = effective_image;
+        }
         let provider_state_event = sandbox_provider_state_event(
             &sandbox_id,
             sandbox.provider.clone(),
@@ -2103,10 +2126,10 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         let _guard = self.harness.inner.write_lock.lock().await;
         let mut sandbox = self.load_sandbox(&sandbox_id).await?;
         if !sandbox.running {
+            if let Some(attachment) = sandbox.attachment {
+                return Ok(attachment);
+            }
             bail!("sandbox is not running: {sandbox_id}");
-        }
-        if sandbox.attachment.is_some() {
-            bail!("sandbox is already detached: {sandbox_id}");
         }
         let attachment = sandbox_handle.detach().await?;
         self.harness
@@ -2139,7 +2162,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
 
     async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
         let (snapshot_id, event) =
-            snapshot_sandbox_side_effect(self.harness, &self.owner_dir, id).await?;
+            snapshot_sandbox_side_effect(self.harness, &self.owner_dir, self.owner, id).await?;
         self.append_events(vec![event]).await?;
         Ok(snapshot_id)
     }
@@ -3262,22 +3285,21 @@ impl BasicConversationHandle {
 async fn snapshot_sandbox_side_effect(
     harness: &BasicExoHarness,
     owner_dir: &Path,
+    owner: SandboxOwner,
     id: SandboxId,
 ) -> Result<(SnapshotId, EventData)> {
     let sandbox = load_stored_sandbox(harness, owner_dir, &id).await?;
-    if sandbox.attachment.is_some() {
-        bail!("attached sandboxes cannot be snapshotted");
+    if !sandbox.running {
+        bail!("sandbox is not running: {id}");
     }
     // Capture the payload before taking the write lock. Backends may need to
     // talk to docker or pause the container, which can be slow.
-    let handle = harness
-        .inner
-        .running_sandboxes
-        .lock()
-        .await
-        .get(&id)
-        .cloned()
-        .ok_or_else(|| anyhow!("sandbox {id} is not running; start it before snapshotting"))?;
+    //
+    // Resolved through active_sandbox_handle rather than only the in-process
+    // map: each CLI invocation is its own process, so a sandbox created by an
+    // earlier one has no live handle here even though it is still running.
+    let (handle, _provider_state_event) =
+        active_sandbox_handle(harness, owner_dir, owner, &id, &sandbox).await?;
     let payload = handle.snapshot().await?;
 
     let _guard = harness.inner.write_lock.lock().await;

@@ -40,9 +40,9 @@ it, and the restore path that actually consumes it.
 - **Not a conversation rewind.** The event log, message history, and prior
   tool calls are untouched. Use `conversation fork` to rewind the
   conversation itself.
-- **Not yet cross-process.** A snapshot can only be taken of a sandbox that
-  is live in the _current_ `exo` process (`running_sandboxes` is per-process).
-  See "Known limits" below.
+- **Borrowed containers remain externally owned.** An attached Docker container
+  can be snapshotted, but Exo cannot stop or terminate it. Restore creates a
+  separate Exo-owned sandbox.
 
 ## Model
 
@@ -51,7 +51,7 @@ Snapshots are an interaction between three layers:
 ```
 ConversationHandle             ManagedSandboxHandle           ManagedSandboxBackend
        │                              │                                │
-  snapshot_sandbox(id) ──► running_sandboxes.get(id).snapshot() ──┐    │
+  snapshot_sandbox(id) ──► active_sandbox_handle(...).snapshot() ─┐    │
        │                                                          │    │
        ◄────────── SnapshotPayload { format, bytes } ──────────────┘    │
        │                                                                │
@@ -188,9 +188,18 @@ Inside the chat REPL (`exo chat repl <agent> <conv>`):
 /help               show command list
 ```
 
-There is intentionally no top-level `exo conversation snapshot` subcommand
-today — see "Known limits" for the cross-invocation gap that makes such
-a subcommand useless until it's resolved.
+The sandbox CLI exposes a point-in-time fork:
+
+```bash
+exo sandbox fork --agent <agent> --conversation <conversation> \
+  <source-sandbox-id> --provider docker
+```
+
+The command prints the new sandbox ID. For an attached Docker source it reads
+the borrowed container through its handle and restores the captured state into
+an Exo-owned target; the source remains externally owned. Use `sandbox select`
+to make a conversation run in the fork. Omit `--conversation` to address an
+agent-owned source.
 
 ## Executable demo
 
@@ -248,20 +257,9 @@ and CLI surface are all backend-agnostic.
 
 ### Cross-invocation container adoption
 
-Today each `exo` process maintains its own `running_sandboxes` map. A
-container created by one invocation is not adopted by a later one even
-though it is still alive on the docker daemon, so snapshots can only be
-taken of sandboxes acquired in the current process. That is why the
-snapshot/rewind UX lives in the chat REPL (one long-running process holds
-the container for the conversation's duration) rather than as standalone
-`exo` subcommands.
-
-The fix is well-scoped — on `acquire`, query
-`docker ps --filter label=exo.sandbox.key=<key> --filter status=running` and
-adopt the existing container if its `exo.sandbox.spec-hash` label matches
-the requested spec. Once that lands, `exo conversation snapshot` and
-`exo conversation rewind` become trivial CLI subcommands that just call the
-same `ConversationHandle` methods the REPL slash commands use.
+Snapshotting resolves the active handle from persisted sandbox state, so the
+container need not have been acquired in the current process. The sandbox must
+still be running and its provider must support recovering the live handle.
 
 ### Payload size
 

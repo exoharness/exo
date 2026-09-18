@@ -9,5 +9,8 @@ n_attempts = 1
 n_concurrent = 1
 
 # Each task has its own conversation; agent memory and tools persist across tasks.
+# Review grader feedback after each task inside a fork of its final sandbox
+# and persist lessons for later tasks. Only meaningful with harness = "exo".
+reflection = false
 # "basic" uses the shell-only executor as a control; "exo" enables Exo tools.
 harness = "exo"

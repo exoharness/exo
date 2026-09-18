@@ -24,13 +24,13 @@ use crate::{
     Artifact, ArtifactVersion, BasicExoHarness, BeginTurnRequest, Binding, BoxAsyncRead,
     BoxAsyncWrite, CloseSandboxProcessInputRequest, CreateSandboxRequest, DurableFileSystem,
     EventData, EventKind, EventQuery, EventQueryDirection, ExoHarness, FileSystemMountMode,
-    ForkConversationRequest, ManagedSandboxBackend, ManagedSandboxHandle, NewAgentRequest,
-    NewConversationRequest, PutSecretRequest, RestoreSandboxRequest, RunInSandboxRequest,
-    SandboxAttachment, SandboxBackendRegistration, SandboxCommand, SandboxCommandOutput,
-    SandboxLifecycleConfig, SandboxNetworkPolicy, SandboxProcessEvent, SandboxProcessEventQuery,
-    SandboxProcessParts, SandboxProcessStatus, SandboxProcessStdin, SandboxProvider,
-    SandboxProviderConfig, SandboxRequest, SandboxScope, SandboxSpec, Secret, SnapshotFormat,
-    SnapshotPayload, StartSandboxProcessRequest, StartSandboxRequest, Uuid7,
+    ForkConversationRequest, ForkSandboxRequest, ManagedSandboxBackend, ManagedSandboxHandle,
+    NewAgentRequest, NewConversationRequest, PutSecretRequest, RestoreSandboxRequest,
+    RunInSandboxRequest, SandboxAttachment, SandboxBackendRegistration, SandboxCommand,
+    SandboxCommandOutput, SandboxLifecycleConfig, SandboxNetworkPolicy, SandboxProcessEvent,
+    SandboxProcessEventQuery, SandboxProcessParts, SandboxProcessStatus, SandboxProcessStdin,
+    SandboxProvider, SandboxProviderConfig, SandboxRequest, SandboxScope, SandboxSpec, Secret,
+    SnapshotFormat, SnapshotPayload, StartSandboxProcessRequest, StartSandboxRequest, Uuid7,
     WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
@@ -2768,9 +2768,79 @@ async fn restore_sandbox_creates_a_new_target_without_a_cold_acquire() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn attached_sandbox_can_be_forked_without_transferring_ownership() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let mut config = local_test_config(tempdir.path());
+    config.sandbox_default = SandboxProvider::Docker;
+    config.sandbox_backends = vec![SandboxBackendRegistration::docker()];
+    let backend = Arc::new(RestoreImageTestBackend::default());
+    let harness = BasicExoHarness::new_with_sandbox_backend(config, backend.clone())
+        .await
+        .expect("harness should initialize");
+    let conversation = test_conversation(&harness).await;
+    let source_id = conversation
+        .attach_sandbox(crate::AttachSandboxRequest {
+            attachment: SandboxAttachment::DockerContainer {
+                container_id: "external-container".to_string(),
+            },
+            default_workdir: Some("/workspace".to_string()),
+        })
+        .await
+        .expect("external container should attach");
+
+    let target_id = conversation
+        .fork_sandbox(ForkSandboxRequest {
+            source_id: source_id.clone(),
+            sandbox: CreateSandboxRequest {
+                name: None,
+                provider: SandboxProvider::Docker,
+                image: String::new(),
+                resources: Default::default(),
+                default_workdir: Some("/workspace".to_string()),
+                file_system_mounts: None,
+                durable_file_systems: None,
+                policy: None,
+                enable_networking: Some(true),
+                idle_seconds: Some(60),
+            },
+        })
+        .await
+        .expect("attached sandbox should fork");
+
+    let sandboxes = conversation
+        .list_sandboxes()
+        .await
+        .expect("sandboxes should list");
+    assert!(sandboxes.iter().any(|sandbox| sandbox.id == source_id));
+    assert!(sandboxes.iter().any(|sandbox| sandbox.id == target_id));
+    assert_ne!(source_id, target_id);
+    assert_eq!(
+        backend.restored_payloads.lock().await.as_slice(),
+        &[b"restore-image-test".to_vec()]
+    );
+
+    let error = conversation
+        .terminate_sandbox(source_id)
+        .await
+        .expect_err("attached source must remain externally owned");
+    assert!(
+        error
+            .to_string()
+            .contains("attached sandboxes cannot be terminated")
+    );
+    conversation
+        .terminate_sandbox(target_id.clone())
+        .await
+        .expect("owned fork should terminate");
+    assert_eq!(backend.terminated_ids.lock().await.as_slice(), &[target_id]);
+}
+
 #[derive(Default)]
 struct RestoreImageTestBackend {
     acquired_images: Arc<AsyncMutex<Vec<String>>>,
+    restored_payloads: Arc<AsyncMutex<Vec<Vec<u8>>>>,
+    terminated_ids: Arc<AsyncMutex<Vec<String>>>,
 }
 
 #[async_trait]
@@ -2802,19 +2872,30 @@ impl ManagedSandboxBackend for RestoreImageTestBackend {
         _request: SandboxRequest,
         _attachment: SandboxAttachment,
     ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
-        bail!("restore-image test backend does not support attachment")
+        Ok(Arc::new(RestoreImageTestHandle {
+            image: String::new(),
+        }))
     }
 
     async fn acquire_from_snapshot(
         &self,
         _request: SandboxRequest,
-        _payload: SnapshotPayload,
+        payload: SnapshotPayload,
     ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+        self.restored_payloads
+            .lock()
+            .await
+            .push(payload.bytes.to_vec());
         // Like the docker backend, a restore boots from a freshly loaded tag
         // rather than the requested image.
         Ok(Arc::new(RestoreImageTestHandle {
             image: "restored-image".to_string(),
         }))
+    }
+
+    async fn terminate(&self, request: SandboxRequest) -> crate::Result<()> {
+        self.terminated_ids.lock().await.push(request.sandbox_id);
+        Ok(())
     }
 }
 

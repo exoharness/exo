@@ -806,7 +806,7 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
             match find_running_warm_sandbox(&self.container_bin, self.cli, &request).await? {
                 Some(name) => (name, false),
                 None => (
-                    create_unique_warm_sandbox(&self.container_bin, &request).await?,
+                    create_unique_warm_sandbox(&self.container_bin, self.cli, &request).await?,
                     true,
                 ),
             };
@@ -893,7 +893,7 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
             schedule_cleanup_named_container(self.container_bin.clone(), self.cli, entry.name);
         }
 
-        let name = create_unique_warm_sandbox(&self.container_bin, &request).await?;
+        let name = create_unique_warm_sandbox(&self.container_bin, self.cli, &request).await?;
         {
             let mut warm_sandboxes = self.warm_sandboxes.lock().await;
             warm_sandboxes.insert(
@@ -974,7 +974,12 @@ impl ManagedSandboxHandle for BorrowedDockerSandboxHandle {
     }
 
     async fn snapshot(&self) -> Result<SnapshotPayload> {
-        bail!("borrowed Docker containers cannot be snapshotted")
+        // Snapshotting reads the container: `docker commit` pauses it only for
+        // the commit itself and transfers no lifecycle ownership, so Exo still
+        // cannot stop or delete a container it merely borrows. Without this,
+        // work done inside an attached container cannot be captured at all,
+        // which rules out restoring it later for review.
+        docker_snapshot_container(&self.container_bin, &self.container_id).await
     }
 }
 
@@ -1417,6 +1422,7 @@ async fn touch_warm_sandbox(
 
 async fn create_named_warm_sandbox(
     container_bin: &Path,
+    cli: ContainerCliFlavor,
     request: &SandboxRequest,
     name: &str,
 ) -> Result<()> {
@@ -1440,9 +1446,20 @@ async fn create_named_warm_sandbox(
         .arg(format!(
             "{WARM_SANDBOX_OWNER_PID_LABEL}={}",
             std::process::id()
-        ))
-        .arg("--workdir")
-        .arg(&request.spec.default_workdir);
+        ));
+
+    if cli == ContainerCliFlavor::Docker {
+        // A sandbox restored from `docker commit` inherits the source image's
+        // labels. Clear Compose identity labels so a fork of an externally
+        // managed container is not mistaken for another service instance.
+        process
+            .arg("--label")
+            .arg("com.docker.compose.project=")
+            .arg("--label")
+            .arg("com.docker.compose.service=");
+    }
+
+    process.arg("--workdir").arg(&request.spec.default_workdir);
 
     configure_network_args(
         &mut process,
@@ -1466,11 +1483,12 @@ async fn create_named_warm_sandbox(
 
 async fn create_unique_warm_sandbox(
     container_bin: &Path,
+    cli: ContainerCliFlavor,
     request: &SandboxRequest,
 ) -> Result<String> {
     for _ in 0..4 {
         let name = new_warm_container_name(request.sandbox_id.as_str());
-        match create_named_warm_sandbox(container_bin, request, &name).await {
+        match create_named_warm_sandbox(container_bin, cli, request, &name).await {
             Ok(()) => return Ok(name),
             Err(err) if is_already_exists_error(&err.to_string()) => continue,
             Err(err) => return Err(err),
@@ -1661,7 +1679,7 @@ async fn ensure_warm_sandbox_ready(
             {
                 Some(name) => (name, false),
                 None => (
-                    create_unique_warm_sandbox(container_bin, request).await?,
+                    create_unique_warm_sandbox(container_bin, cli, request).await?,
                     true,
                 ),
             };
@@ -1681,7 +1699,7 @@ async fn ensure_warm_sandbox_ready(
             {
                 Some(name) => (name, false),
                 None => (
-                    create_unique_warm_sandbox(container_bin, request).await?,
+                    create_unique_warm_sandbox(container_bin, cli, request).await?,
                     true,
                 ),
             };
@@ -1710,7 +1728,7 @@ async fn ensure_warm_sandbox_ready(
         match find_running_warm_sandbox(container_bin, cli, request).await? {
             Some(name) => (name, false),
             None => (
-                create_unique_warm_sandbox(container_bin, request).await?,
+                create_unique_warm_sandbox(container_bin, cli, request).await?,
                 true,
             ),
         };
@@ -2635,6 +2653,60 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn docker_warm_sandbox_clears_inherited_compose_identity() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let script_path = temp_dir.path().join("docker");
+        let args_path = temp_dir.path().join("args");
+        fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\nfor arg in \"$@\"; do\n  printf '%s\\n' \"$arg\" >> '{}'\ndone\n",
+                args_path.display()
+            ),
+        )
+        .expect("write fake docker script");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("fake docker metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("chmod fake docker");
+
+        let request = SandboxRequest {
+            sandbox_id: "fork-target".to_string(),
+            scope: None,
+            spec: SandboxSpec {
+                image: "fork-image".to_string(),
+                resources: Default::default(),
+                mounts: Vec::new(),
+                durable_file_systems: Vec::new(),
+                policy: SandboxNetworkPolicy::Disabled.into(),
+                default_workdir: "/".to_string(),
+            },
+            lifecycle: SandboxLifecycleConfig {
+                idle_ttl: Some(Duration::from_secs(60)),
+            },
+            provider_state: None,
+        };
+
+        create_named_warm_sandbox(
+            &script_path,
+            ContainerCliFlavor::Docker,
+            &request,
+            "fork-target-container",
+        )
+        .await
+        .expect("create fork target");
+
+        let args = fs::read_to_string(&args_path).expect("read fake docker args");
+        assert!(args.contains("com.docker.compose.project=\n"));
+        assert!(args.contains("com.docker.compose.service=\n"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn docker_prepare_request_reaps_orphaned_warm_sandboxes_with_real_cli_commands() {
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
@@ -2830,7 +2902,7 @@ esac
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn borrowed_docker_sandbox_execs_without_taking_container_ownership() {
+    async fn borrowed_docker_sandbox_execs_and_snapshots_without_taking_ownership() {
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
 
@@ -2851,6 +2923,9 @@ case "$1" in
     ;;
   exec)
     printf 'borrowed output'
+    ;;
+  save)
+    printf 'snapshot payload'
     ;;
 esac
 "#,
@@ -2918,10 +2993,21 @@ esac
             }
         );
 
+        let snapshot = handle
+            .snapshot()
+            .await
+            .expect("snapshot borrowed container");
+        assert_eq!(snapshot.format, SnapshotFormat::DockerImageTar);
+        assert_eq!(snapshot.bytes.as_ref(), b"snapshot payload");
+
         let args = fs::read_to_string(&args_path).expect("read fake docker args");
         assert!(args.contains("inspect\nharbor-task\n---"));
         assert!(args.contains("exec\n--workdir\n/task\ncanonical-id"));
-        assert!(!args.lines().any(|arg| arg == "rm"));
+        // Committing reads the container and cleans up its own temporary
+        // image; it must never remove or stop the borrowed container itself.
+        assert!(args.contains("commit\n-p\ncanonical-id\nexo-snap-"));
+        assert!(args.contains("image\nrm\nexo-snap-"));
+        assert!(!args.contains("rm\ncanonical-id"));
         assert!(!args.lines().any(|arg| arg == "stop"));
         assert!(!args.lines().any(|arg| arg == "kill"));
     }

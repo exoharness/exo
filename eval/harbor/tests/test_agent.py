@@ -92,6 +92,78 @@ class SetupTest(unittest.IsolatedAsyncioTestCase):
         agent._client.attach_container.assert_awaited_once_with(
             f"trial-{agent.context_id}", "abc123"
         )
+        # Attaching alone leaves the container unused, and the trial would be
+        # graded on a sandbox Harbor never sees.
+        agent._client.select_sandbox.assert_awaited_once_with(
+            f"trial-{agent.context_id}", "sandbox-1"
+        )
+
+
+class ReflectionFlagTest(unittest.IsolatedAsyncioTestCase):
+    """Without reflection nothing uses the fork, so do not create one.
+
+    Harbor passes agent kwargs as strings, so the flag has to survive "false"
+    rather than being read as a truthy value.
+    """
+
+    def build(self, reflection: object) -> ExoAgent:
+        agent = ExoAgent(
+            logs_dir=Path("/tmp/logs"),
+            exo_root="/runs/one/exo",
+            exo_bin="/repo/target/debug/exo",
+            exo_repo_root="/repo",
+            exo_model="gpt-5.5",
+            reflection=reflection,
+        )
+        agent.context_id = uuid4()
+        agent._container_id = "abc123"
+        agent._sandbox_id = "sandbox-1"
+        agent._client = AsyncMock()
+        agent._client.fork_sandbox.return_value = "sandbox-fork"
+        return agent
+
+    async def test_the_string_false_does_not_enable_reflection(self) -> None:
+        agent = self.build("false")
+        context = SimpleNamespace(metadata=None)
+        with patch("exo_harbor.agent.export_trial_trajectory", AsyncMock()):
+            await agent.run("do the thing", SimpleNamespace(), context)
+        agent._client.fork_sandbox.assert_not_awaited()
+        self.assertIsNone(context.metadata["exo_reflection_sandbox_id"])
+
+    async def test_reflection_forks_the_submitted_sandbox(self) -> None:
+        agent = self.build("true")
+        context = SimpleNamespace(metadata=None)
+        with patch("exo_harbor.agent.export_trial_trajectory", AsyncMock()):
+            await agent.run("do the thing", SimpleNamespace(), context)
+        agent._client.fork_sandbox.assert_awaited_once_with(
+            f"trial-{agent.context_id}", "sandbox-1"
+        )
+        self.assertEqual(context.metadata["exo_reflection_sandbox_id"], "sandbox-fork")
+
+    async def test_a_timeout_still_forks(self) -> None:
+        # The trial is over, but the container is alive until the verifier
+        # finishes -- this is the last chance to capture it for reflection.
+        agent = self.build("true")
+        agent._client.send.side_effect = TimeoutError("task timeout")
+        context = SimpleNamespace(metadata=None)
+        with patch("exo_harbor.agent.export_trial_trajectory", AsyncMock()):
+            with self.assertRaises(TimeoutError):
+                await agent.run("do the thing", SimpleNamespace(), context)
+        agent._client.fork_sandbox.assert_awaited_once()
+        self.assertEqual(context.metadata["exo_reflection_sandbox_id"], "sandbox-fork")
+
+    async def test_a_failed_fork_does_not_mask_the_real_error(self) -> None:
+        # Raising from the finally would replace the timeout and Harbor would
+        # record the wrong reason for the failure.
+        agent = self.build("true")
+        agent._client.send.side_effect = TimeoutError("task timeout")
+        agent._client.fork_sandbox.side_effect = RuntimeError("no sandbox")
+        context = SimpleNamespace(metadata=None)
+        with patch("exo_harbor.agent.export_trial_trajectory", AsyncMock()):
+            with self.assertRaises(TimeoutError):
+                await agent.run("do the thing", SimpleNamespace(), context)
+        # No fork id means the plugin skips reflection.
+        self.assertIsNone(context.metadata["exo_reflection_sandbox_id"])
 
 
 class RunTest(unittest.IsolatedAsyncioTestCase):
@@ -118,6 +190,8 @@ class RunTest(unittest.IsolatedAsyncioTestCase):
             {
                 "existing": "kept",
                 "exo_conversation_id": f"trial-{agent.context_id}",
+                "exo_reflection_sandbox_id": None,
+                "exo_instruction": "do the thing",
             },
         )
         export.assert_awaited_once()
