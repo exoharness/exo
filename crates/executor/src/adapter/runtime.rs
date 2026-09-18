@@ -938,20 +938,18 @@ fn compose_inbound_wakeup_prompt(
         "{} message received at target `{}` from {} via adapter `{}`:\n\n{}",
         config.adapter_type, target, sender, adapter.name, text,
     );
-    if config.adapter_type == "slack" {
-        if let Some(dm_target) = metadata.get("dmTarget").and_then(|value| value.as_str()) {
-            prompt.push_str(&format!(
-                "\n\nSlack sender DM target: `{dm_target}`. Use this only for appropriate private follow-up; do not use DM to bypass safety policy.",
-            ));
-        }
-        if metadata
-            .get("isActiveThread")
-            .and_then(|value| value.as_bool())
-            == Some(true)
-        {
-            prompt.push_str(
-                "\n\nThis Slack message is from an active thread, but it may be ambient conversation. Only call send_adapter_message if the message appears directed at Exo, asks Exo to do something, or clearly needs an Exo response. If no response is needed, do nothing.",
-            );
+    // Guidance the worker chooses to attach. The host appends it without
+    // knowing the adapter's protocol: protocol-specific prompt text belongs to
+    // the worker, while the host only frames the wakeup. See
+    // `exo/docs/tools-and-adapters.md` ("Protocol-specific behavior stays in
+    // each worker") and issue #186.
+    if let Some(notes) = metadata
+        .get("promptNotes")
+        .and_then(|value| value.as_array())
+    {
+        for note in notes.iter().filter_map(|note| note.as_str()) {
+            prompt.push_str("\n\n");
+            prompt.push_str(note);
         }
     }
     if !attachments.is_empty() {
@@ -1254,7 +1252,40 @@ mod tests {
     }
 
     #[test]
-    fn wakeup_prompt_includes_slack_dm_target() {
+    fn wakeup_prompt_appends_worker_prompt_notes_in_order() {
+        // The host appends whatever guidance the worker supplies, in order,
+        // without knowing the adapter's protocol (issue #186).
+        let prompt = compose_inbound_wakeup_prompt(
+            &test_adapter_config(),
+            &test_adapter_record(),
+            "channel-9",
+            Some("martin"),
+            "hello",
+            &serde_json::json!({
+                "promptNotes": ["first worker note", "second worker note"]
+            }),
+            &[],
+            0,
+        );
+        assert!(prompt.contains("\n\nfirst worker note"));
+        assert!(prompt.contains("\n\nsecond worker note"));
+        let first = prompt
+            .find("first worker note")
+            .expect("first note missing");
+        let second = prompt
+            .find("second worker note")
+            .expect("second note missing");
+        assert!(first < second, "prompt notes were not appended in order");
+        assert!(prompt.contains("send_adapter_message using adapterId `adapter-1`"));
+    }
+
+    #[test]
+    fn wakeup_prompt_ignores_metadata_keys_the_host_does_not_own() {
+        // Regression for issue #186: the host used to branch on
+        // `adapter_type == "slack"` and render Slack guidance from the
+        // `dmTarget` / `isActiveThread` keys. That protocol knowledge now
+        // travels in `promptNotes`, so these keys alone must produce no
+        // host-authored text.
         let mut adapter = test_adapter_record();
         adapter.config.adapter_type = "slack".to_string();
         adapter.name = "slack-dev".to_string();
@@ -1268,9 +1299,50 @@ mod tests {
             &[],
             0,
         );
-        assert!(prompt.contains("Slack sender DM target: `dm:U123`"));
-        assert!(prompt.contains("do not use DM to bypass safety policy"));
-        assert!(prompt.contains("Only call send_adapter_message"));
-        assert!(prompt.contains("If no response is needed, do nothing"));
+        assert!(!prompt.contains("Slack sender DM target"));
+        assert!(!prompt.contains("only for appropriate private follow-up"));
+        assert!(!prompt.contains("active thread"));
+    }
+
+    #[test]
+    fn wakeup_prompt_ignores_non_string_prompt_notes() {
+        // `promptNotes` is worker-controlled JSON of unknown shape: only
+        // string entries are rendered.
+        let prompt = compose_inbound_wakeup_prompt(
+            &test_adapter_config(),
+            &test_adapter_record(),
+            "channel-9",
+            Some("martin"),
+            "hello",
+            &serde_json::json!({ "promptNotes": ["kept", 42, null, { "nested": true }] }),
+            &[],
+            0,
+        );
+        assert!(prompt.contains("\n\nkept"));
+        assert!(!prompt.contains("42"));
+        assert!(!prompt.contains("nested"));
+    }
+
+    #[test]
+    fn wakeup_prompt_tolerates_missing_or_non_array_prompt_notes() {
+        for metadata in [
+            serde_json::json!({}),
+            serde_json::json!({ "promptNotes": "not an array" }),
+            serde_json::json!({ "promptNotes": null }),
+        ] {
+            let prompt = compose_inbound_wakeup_prompt(
+                &test_adapter_config(),
+                &test_adapter_record(),
+                "channel-9",
+                Some("martin"),
+                "hello",
+                &metadata,
+                &[],
+                0,
+            );
+            assert!(prompt.starts_with(
+                "discord message received at target `channel-9` from martin via adapter `discord-dev`:\n\nhello"
+            ));
+        }
     }
 }

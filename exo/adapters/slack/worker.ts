@@ -754,6 +754,21 @@ function inboundMessageFromPayload(
     isDm,
   });
 
+  // Protocol-specific prompt guidance travels with the message so the host can
+  // append it without knowing anything about Slack (see issue #186). Order
+  // matters: the host appends these in array order.
+  const promptNotes: string[] = [];
+  if (dmTarget !== null) {
+    promptNotes.push(
+      `Slack sender DM target: \`${dmTarget}\`. Use this only for appropriate private follow-up; do not use DM to bypass safety policy.`,
+    );
+  }
+  if (isActiveThread) {
+    promptNotes.push(
+      "This Slack message is from an active thread, but it may be ambient conversation. Only call send_adapter_message if the message appears directed at Exo, asks Exo to do something, or clearly needs an Exo response. If no response is needed, do nothing.",
+    );
+  }
+
   return {
     target,
     sender,
@@ -776,6 +791,7 @@ function inboundMessageFromPayload(
       dmThreadTarget,
       progressMode,
       progressEligible: progress !== null,
+      promptNotes,
     },
   };
 }
