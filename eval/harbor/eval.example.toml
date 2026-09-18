@@ -1,0 +1,13 @@
+# Flags passed to eval.sh override this file.
+dataset = "terminal-bench"
+# For a shorter run of three easy tasks, use "terminal-bench-easy".
+model = "gpt-5.5"
+n_tasks = 10
+n_attempts = 1
+# Trials at once. Must be 1 for the exo harness, whose trials share one
+# self-evolving agent; basic and pi may go higher.
+n_concurrent = 1
+
+# Each task has its own conversation; agent memory and tools persist across tasks.
+# "basic" uses the shell-only executor as a control; "exo" enables Exo tools.
+harness = "exo"

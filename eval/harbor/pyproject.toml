@@ -1,0 +1,22 @@
+[project]
+name = "exo-harbor"
+version = "0.1.0"
+description = "Run Exo as a Harbor external agent"
+requires-python = ">=3.12"
+dependencies = [
+  # The integration only uses the external-agent and JobPlugin surface plus
+  # the ATIF trajectory models, all stable across recent minors. Verified on
+  # 0.20 and 0.23.
+  "harbor>=0.23",
+]
+
+[project.entry-points."harbor.plugins"]
+# Lets runs say `--plugin exo-session` instead of the full import path.
+exo-session = "exo_harbor.plugin:ExoSessionPlugin"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
