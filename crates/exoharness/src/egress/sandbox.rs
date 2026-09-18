@@ -10,7 +10,8 @@ use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    EgressCredentialResolver, EgressIdentity, EgressProxy, EgressTransport, State, UpstreamResolver,
+    EgressCredentialResolver, EgressIdentity, EgressProxy, EgressProxyConfig, EgressTransport,
+    UpstreamResolver,
 };
 use crate::{ManagedSandboxHandle, SandboxCommand, SandboxRequest};
 
@@ -209,7 +210,7 @@ impl<H: ManagedSandboxHandle + 'static> EgressRuntime<H> {
             request.lifecycle.idle_ttl.is_some(),
             "proxy egress requires a managed sandbox lifecycle"
         );
-        let state = State::new(
+        let proxy_config = EgressProxyConfig::new(
             EgressIdentity {
                 sandbox_id: request.sandbox_id.clone(),
                 scope: request.scope.clone(),
@@ -220,9 +221,10 @@ impl<H: ManagedSandboxHandle + 'static> EgressRuntime<H> {
         )?;
         // The proxy must exist before boot so the backend can install its
         // endpoints in the VM's network rules. It admits no source yet.
-        let transport = transport(state.hosts.iter().cloned().collect()).await?;
+        let transport = transport(proxy_config.allowed_hosts()).await?;
         let egress = Arc::new(SandboxEgress {
-            proxy: EgressProxy::start_with_transport(transport, state, self.closed.child_token())
+            proxy: proxy_config
+                .start(transport, self.closed.child_token())
                 .await?,
             ca_path: format!("/tmp/exo-egress-{}.pem", uuid::Uuid::new_v4().simple()),
         });

@@ -85,23 +85,38 @@ struct GitResolver;
 
 #[async_trait]
 impl EgressCredentialResolver for GitResolver {
-    async fn resolve(
+    async fn authorize(
         &self,
         _identity: &EgressIdentity,
-        binding_name: &str,
         destination: &EgressDestination,
-    ) -> Result<String> {
+        context: &EgressRequestContext,
+    ) -> Result<()> {
         let authorized_path = (destination.method == Method::GET
             && (destination.path == GIT_REFS_PATH || destination.path == GIT_RECEIVE_REFS_PATH))
             || (destination.method == Method::POST
                 && (destination.path == GIT_UPLOAD_PACK_PATH
                     || destination.path == GIT_RECEIVE_PACK_PATH));
         ensure!(
-            binding_name == "test-credential"
+            context.credential_bindings == ["test-credential"]
                 && destination.host == "api.test"
                 && destination.port == 443
                 && authorized_path,
             "git request is not authorized"
+        );
+        Ok(())
+    }
+
+    async fn resolve(
+        &self,
+        _identity: &EgressIdentity,
+        binding_name: &str,
+        destination: &EgressDestination,
+    ) -> Result<String> {
+        ensure!(
+            binding_name == "test-credential"
+                && destination.host == "api.test"
+                && destination.port == 443,
+            "wrong git credential use"
         );
         Ok("eC1hY2Nlc3MtdG9rZW46Y2FuYXJ5LXYx".into())
     }
@@ -542,6 +557,16 @@ async fn proxy_supports_git_smart_http() -> Result<()> {
     let (proxy, proxy_client) = bound_proxy(&upstream, "git", Arc::new(GitResolver)).await?;
     let authorization = format!("Basic {}", proxy.environment()["TEST_API_KEY"]);
 
+    assert_eq!(
+        proxy_client
+            .get(format!("https://api.test{GIT_REFS_PATH}"))
+            .header("git-protocol", "version=2")
+            .send()
+            .await?
+            .status(),
+        StatusCode::BAD_GATEWAY
+    );
+
     let refs = proxy_client
         .get(format!("https://api.test{GIT_REFS_PATH}"))
         .header("authorization", &authorization)
@@ -864,6 +889,7 @@ fn dns_only_answers_exact_allowed_names() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "firecracker")]
 async fn guest(
     handle: &Arc<dyn crate::ManagedSandboxHandle>,
     proxy: &EgressProxy,
@@ -889,6 +915,7 @@ async fn guest(
     Ok(output.stdout)
 }
 
+#[cfg(feature = "firecracker")]
 #[tokio::test]
 #[ignore = "requires root, Linux/KVM, and the Exo Firecracker artifact bundle"]
 async fn firecracker_transparent_egress_live() -> Result<()> {

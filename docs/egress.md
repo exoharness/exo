@@ -4,15 +4,23 @@ Sandbox policy is part of `SandboxSpec`. Each backend enforces the policy when
 it acquires, attaches, or restores a sandbox, before returning a usable handle.
 Unsupported policies fail with an error identifying the unsupported field.
 
-The existing `firecracker` build feature includes the proxy; there is no
-separate egress feature to enable. Firecracker implements credential
-substitution with a transparent HTTP/HTTPS proxy. Programs receive placeholder
-environment variables; the proxy resolves credentials outside the VM and
-substitutes them on authorized requests.
+The `egress` build feature includes the policy engine and proxy. The
+`firecracker` feature enables the native Firecracker/Lima acquisition path on
+top of it. Firecracker implements credential substitution with a transparent
+HTTP/HTTPS proxy. Programs receive placeholder environment variables; the
+proxy resolves credentials outside the VM and substitutes them on authorized
+requests.
 
 On macOS, TLS and credential resolution run in the native Exo process. The
 existing Lima bridge carries streams and DNS configuration, without receiving
 credentials or the TLS signing key.
+
+Hosted providers can enable `egress` without the native Firecracker backend.
+`HostedEgressSession` starts the same policy-enforcing HTTP/HTTPS proxy and
+returns its guest endpoints, credential placeholders, and CA certificate. The
+provider must route the guest's isolated network through the returned
+transport, enforce the allowlist and attachment on its DNS path, and apply the
+returned guest configuration to every command path.
 
 ## Try it
 
@@ -82,6 +90,13 @@ Binding names are scoped references, not storage IDs. Two threads can both
 request `notion` and resolve different secrets. Implement `EgressCredentialResolver`:
 
 ```rust
+async fn authorize(
+    &self,
+    identity: &EgressIdentity,
+    destination: &EgressDestination,
+    context: &EgressRequestContext,
+) -> anyhow::Result<()>;
+
 async fn resolve(
     &self,
     identity: &EgressIdentity,
@@ -95,9 +110,12 @@ resolved again, so rotation and revocation take effect without replacing the
 sandbox. Identity includes the sandbox ID and agent/thread scope; destination
 includes the host, port, method, and normalized path/query. A vault adapter can
 pin a binding to a vault/secret reference per thread and enforce its stored
-destination restrictions. The local CLI resolver assumes a single user owns the
-secret store; hosted resolvers must supply their own authorization. Resolver
-failures are sanitized before returning them to the guest.
+destination restrictions. `authorize` runs before forwarding even when no
+placeholder is present; its context lists only the credential binding names used
+by the request and never contains credential values. The local CLI resolver uses
+the default allow-all authorization; hosted resolvers must supply their own
+authorization. Resolver failures are sanitized before returning them to the
+guest.
 
 ```rust
 let backend = firecracker_backend_with_credentials(config, lima, resolver).await?;
@@ -227,8 +245,9 @@ For Basic authentication, the resolver returns the Base64 payload expected after
 `Basic`, and the proxy substitutes it for the placeholder. `Git-Protocol: version=2`
 passes through unchanged, and `GIT_SSL_CAINFO` provides trust for the
 proxy's certificate. Redirects are not followed. Request bodies over 8 MiB are
-rejected, so larger push packfiles need additional support. Repository and
-operation authorization remain the caller's responsibility; Exo resolves the
+rejected, so larger push packfiles need additional support. The resolver's
+`authorize` method must reject repositories and operations outside the caller's
+grant, including requests that omit the credential placeholder; Exo resolves the
 selected binding and forwards only requests the resolver authorizes.
 
 ## Tests
