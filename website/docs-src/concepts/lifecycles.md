@@ -409,8 +409,10 @@ exo adapters list
 ```
 
 Health signals: `last_connected_at_ms`, `last_error` on each record;
-runner and worker logs under the paths `./exo.sh` / guardian use for
-control logs.
+runner and worker logs are in `.exo/exo-scheduler.log` and
+`.exo/exo-adapters.log`. Run `./exo.sh logs` in another terminal to follow
+both. The control wrapper supervises REPL restarts without streaming
+background logs into the interactive terminal.
 
 ---
 
