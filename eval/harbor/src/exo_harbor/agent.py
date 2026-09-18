@@ -35,12 +35,14 @@ class ExoAgent(BaseAgent):
         exo_repo_root: str | Path,
         exo_model: str,
         harness: str = "exo",
+        reflection: bool | str = False,
         task_timeout_sec: float | str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._model = exo_model
         self._harness = harness
+        self._reflection = conventions.parse_flag(reflection)
         self._task_timeout_sec = (
             float(task_timeout_sec) if task_timeout_sec is not None else None
         )
@@ -80,12 +82,13 @@ class ExoAgent(BaseAgent):
 
         # setup dedicated conversation for the trial
         await self._client.ensure_conversation(self._conversation)
-        # The executor runs every turn of this conversation in the attached
-        # container from here on. Harbor owns the container and removes it
-        # after grading; Exo only borrows it.
+        # Harbor owns the container and removes it after grading; Exo only
+        # borrows it. Attaching registers it; selecting is what makes the
+        # conversation's turns run there.
         self._sandbox_id = await self._client.attach_container(
             self._conversation, self._container_id
         )
+        await self._client.select_sandbox(self._conversation, self._sandbox_id)
 
         logger.info(
             "trial %s attached Harbor container %s as sandbox %s in conversation %s",
@@ -102,17 +105,32 @@ class ExoAgent(BaseAgent):
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
-        """Hand Exo the task and export its trajectory for Harbor."""
+        """Hand Exo the task, then preserve its submitted state for reflection."""
         assert self._sandbox_id is not None, "ExoAgent.run called before setup"
 
+        reflection_sandbox_id: str | None = None
         try:
             await self._client.send(
                 self._conversation, instruction, timeout_sec=self._task_timeout_sec
             )
         finally:
+            # Fork while Harbor's container is still alive: this is the last
+            # chance to capture what was submitted before Harbor verifies and
+            # removes it. The fork is Exo-owned and outlives the container.
+            # Only reflection reads it, so skip the cost otherwise.
+            if self._reflection:
+                try:
+                    reflection_sandbox_id = await self._client.fork_sandbox(
+                        self._conversation, self._sandbox_id
+                    )
+                except Exception:
+                    logger.exception("trial %s failed to fork at end", self.context_id)
+
             context.metadata = {
                 **(context.metadata or {}),
                 conventions.CONVERSATION_METADATA_KEY: self._conversation,
+                conventions.REFLECTION_SANDBOX_METADATA_KEY: reflection_sandbox_id,
+                conventions.INSTRUCTION_METADATA_KEY: instruction,
             }
 
             # A timed-out trial still has a partial trajectory worth keeping.

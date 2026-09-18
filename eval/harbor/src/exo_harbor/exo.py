@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,10 +13,6 @@ from exo_harbor import conventions
 EXO_HARNESS = "exo"
 BASIC_HARNESS = "basic"
 PI_HARNESS = "pi"
-
-# `exo conversation sandbox attach` reports the new sandbox in prose:
-# "attached Docker container as sandbox <id> for <conversation>".
-ATTACHED_SANDBOX_ID = re.compile(r"as sandbox (\S+) for ")
 
 
 class ExoCommandError(RuntimeError):
@@ -76,6 +71,15 @@ class ExoClient:
             "conversation",
         )
 
+    def _owner(self, conversation: str) -> list[str]:
+        """Address the conversation as the sandbox owner.
+
+        A sandbox id resolves only against its owner, so every `exo sandbox`
+        call has to name the conversation; without it the sandbox would belong
+        to the agent and the conversation could not use it.
+        """
+        return ["--agent", conventions.AGENT_SLUG, "--conversation", conversation]
+
     async def attach_container(
         self,
         conversation: str,
@@ -85,16 +89,13 @@ class ExoClient:
     ) -> str:
         """Attach Harbor's task container and return the Exo sandbox id.
 
-        An attached sandbox is where the conversation's turns run from then
-        on; the executor prefers it over anything it would otherwise build
-        from the conversation's configuration.
+        Attaching only registers the container as a sandbox the conversation
+        owns. Nothing runs there until it is selected.
         """
         arguments = [
-            "conversation",
             "sandbox",
             "attach",
-            conventions.AGENT_SLUG,
-            conversation,
+            *self._owner(conversation),
             "--provider",
             "docker",
             "--external-id",
@@ -102,13 +103,37 @@ class ExoClient:
         ]
         if default_workdir is not None:
             arguments.extend(("--default-workdir", default_workdir))
-        output = await self._run(*arguments)
-        match = ATTACHED_SANDBOX_ID.search(output)
-        if match is None:
-            raise ExoCommandError(
-                f"could not find the sandbox id in attach output: {output!r}"
+        return (await self._run(*arguments)).strip()
+
+    async def select_sandbox(self, conversation: str, sandbox_id: str) -> None:
+        """Make the conversation run in this sandbox.
+
+        Without it the turn falls through to the conversation's configured spec
+        and builds a fresh sandbox, so the trial would be graded on a machine
+        Harbor never sees.
+        """
+        await self._run("sandbox", "select", *self._owner(conversation), sandbox_id)
+
+    async def fork_sandbox(self, conversation: str, sandbox_id: str) -> str:
+        """Clone Harbor's attached container into a new Exo-owned sandbox."""
+        return (
+            await self._run(
+                "sandbox",
+                "fork",
+                *self._owner(conversation),
+                sandbox_id,
+                "--provider",
+                "docker",
             )
-        return match.group(1)
+        ).strip()
+
+    async def terminate_sandbox(self, conversation: str, sandbox_id: str) -> None:
+        """Destroy a sandbox this conversation owns.
+
+        Only safe for sandboxes Exo created, such as a fork. Harbor's task
+        container is attached, so Exo refuses to terminate it.
+        """
+        await self._run("sandbox", "terminate", *self._owner(conversation), sandbox_id)
 
     async def send(
         self, conversation: str, prompt: str, *, timeout_sec: float | None
@@ -163,7 +188,7 @@ class ExoClient:
             )
         except (asyncio.TimeoutError, asyncio.CancelledError):
             # Kill rather than terminate: the turn holds a sandbox and we want
-            # the process gone before the caller moves on.
+            # the process gone before the caller moves on to forking.
             process.kill()
             await process.wait()
             raise
