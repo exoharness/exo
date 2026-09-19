@@ -138,8 +138,18 @@ function usageRecord(
   const record: Record<string, JsonValue> = {
     model: String(message.model ?? context.agentConfig.model),
   };
+  // pi's `input` excludes cache reads and writes. exo's records count every
+  // prompt token with the cached ones as a subset (the OpenAI convention the
+  // codex harness and the pricing table follow), so fold them back in.
+  const input = number(usage.input);
+  const promptTokens =
+    input === undefined
+      ? undefined
+      : input +
+        (number(usage.cacheRead) ?? 0) +
+        (number(usage.cacheWrite) ?? 0);
   const fields: Array<[string, number | undefined]> = [
-    ["prompt_tokens", number(usage.input)],
+    ["prompt_tokens", promptTokens],
     ["completion_tokens", number(usage.output)],
     ["prompt_cached_tokens", number(usage.cacheRead)],
     ["prompt_cache_creation_tokens", number(usage.cacheWrite)],
@@ -155,7 +165,8 @@ function usageRecord(
 }
 
 // map pi's steps to exo events: a tool call, its result, and assistant text.
-function eventsForPiEvent(
+// Exported for tests.
+export function eventsForPiEvent(
   context: TurnContext,
   event: Record<string, unknown>,
 ) {
@@ -186,12 +197,16 @@ function eventsForPiEvent(
     const message = event.message as Record<string, unknown> | undefined;
     if (message?.role === "assistant") {
       const text = assistantText(message);
-      if (text) {
+      const usage = usageRecord(context, message);
+      // Every assistant message is one LLM call, and most of them only carry
+      // a tool call with no text. Their usage still has to reach the turn, so
+      // record it on an event with no messages (as the codex harness does).
+      if (text || usage) {
         return [
           messagesEvent(
-            [assistantTextMessage(text)],
+            text ? [assistantTextMessage(text)] : [],
             undefined,
-            usageRecord(context, message),
+            usage,
           ),
         ];
       }

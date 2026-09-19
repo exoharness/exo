@@ -74,10 +74,12 @@ export function computeCostUsd(
   const cached = Math.max(0, tokens.cached ?? 0);
   const created = Math.max(0, tokens.cacheCreation ?? 0);
 
-  // Anthropic-family `prompt_tokens` excludes cached (additive); else inclusive.
+  // Anthropic-family `prompt_tokens` excludes cached and cache-creation
+  // tokens (additive); everyone else includes both in the prompt count, so
+  // subtract them before billing fresh input or they are charged twice.
   const fresh = isAdditive(entry.litellm_provider)
     ? prompt
-    : Math.max(0, prompt - cached);
+    : Math.max(0, prompt - cached - created);
   return (
     fresh * input +
     cached * cacheRead +
