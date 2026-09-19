@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+import urllib.request
 from pathlib import Path
 from typing import Any, override
 
@@ -142,26 +143,53 @@ class ExoAgent(BaseAgent):
 NODE_VERSION = "v22.15.0"
 PI_PACKAGE = "@earendil-works/pi-coding-agent"
 PI_INSTALL_TIMEOUT_SEC = 600
+NODE_ARCHES = {"x86_64": "x64", "aarch64": "arm64"}
+# The node tarball is fetched once on the host and copied into each task
+# container. Some benchmark images (Debian bullseye and older) have an apt
+# that can no longer install anything, and most lack curl and xz, so the
+# install must not depend on apt: only tar and gzip, which every image has.
+NODE_CACHE_DIR = Path(__file__).resolve().parents[2] / ".local" / "cache"
+NODE_TARBALL_IN_CONTAINER = "/tmp/exo-node.tar.gz"
 
 # Installed under /usr/local rather than through nvm because exo reaches the
 # container with a plain `docker exec`, which has no login shell to load nvm.
+# git and ripgrep are conveniences for the agent; apt is best effort for them.
 PI_INSTALL_SCRIPT = f"""set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq --no-install-recommends ca-certificates curl xz-utils
-case "$(uname -m)" in
-  x86_64) arch=x64 ;;
-  aarch64) arch=arm64 ;;
-  *) echo "unsupported architecture $(uname -m)" >&2; exit 1 ;;
-esac
-curl -fsSL "https://nodejs.org/dist/{NODE_VERSION}/node-{NODE_VERSION}-linux-$arch.tar.xz" \\
-  | tar -xJ -C /usr/local --strip-components=1
+tar -xzf {NODE_TARBALL_IN_CONTAINER} -C /usr/local --strip-components=1
+rm -f {NODE_TARBALL_IN_CONTAINER}
+export PATH=/usr/local/bin:$PATH
+if ! command -v git >/dev/null || ! command -v rg >/dev/null; then
+  (export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && \\
+   apt-get install -y -qq --no-install-recommends ca-certificates git ripgrep) >/dev/null 2>&1 \\
+   || echo "warning: apt could not install git/ripgrep; continuing without them" >&2
+fi
 npm install -g --ignore-scripts "{PI_PACKAGE}"
 pi --version
 """
 
+
+def node_tarball(arch: str) -> Path:
+    """Path of the cached node tarball for a container architecture, fetched once."""
+    name = f"node-{NODE_VERSION}-linux-{arch}.tar.gz"
+    path = NODE_CACHE_DIR / name
+    if not path.is_file():
+        NODE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        url = f"https://nodejs.org/dist/{NODE_VERSION}/{name}"
+        logger.info("fetching %s", url)
+        partial = path.with_suffix(".part")
+        urllib.request.urlretrieve(url, partial)
+        partial.replace(path)
+    return path
+
+
 async def install_pi(environment: BaseEnvironment) -> None:
     """Install node and the Pi coding agent into Harbor's task container."""
+    probe = await environment.exec(command="uname -m", user="root")
+    machine = (probe.stdout or "").strip()
+    arch = NODE_ARCHES.get(machine)
+    if arch is None:
+        raise RuntimeError(f"unsupported task container architecture {machine!r}")
+    await environment.upload_file(node_tarball(arch), NODE_TARBALL_IN_CONTAINER)
     result = await environment.exec(
         command=PI_INSTALL_SCRIPT,
         user="root",
