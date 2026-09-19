@@ -56,6 +56,19 @@ describe("cost", () => {
     ).toBeCloseTo(0.0008625, 12);
   });
 
+  it("does not bill OpenAI cache-creation tokens twice", () => {
+    // 300 of the 2000 prompt tokens were cache writes: 1200 fresh + 300 at
+    // the cache-write rate (defaults to input) equals the 1500-fresh bill.
+    expect(
+      computeCostUsd(table, "gpt-4o-mini", {
+        prompt: 2_000,
+        completion: 1_000,
+        cached: 500,
+        cacheCreation: 300,
+      }),
+    ).toBeCloseTo(0.0008625, 12);
+  });
+
   it("treats Bedrock as inclusive, not additive", () => {
     const expected = 1_500 * 3.3e-6 + 500 * 3.3e-7 + 1_000 * 1.65e-5;
     expect(
