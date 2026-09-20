@@ -10,5 +10,6 @@ tsconfig.tsbuildinfo
 website/dist
 website/.wrangler
 .exo
+.exo-poc
 .brain
 .local
