@@ -715,7 +715,7 @@ function claudeSandboxExecutable(): string {
   return DEFAULT_CLAUDE_CODE_SANDBOX_EXECUTABLE;
 }
 
-function claudeSandboxBaseEnv(
+export function claudeSandboxBaseEnv(
   modelBinding: ResolvedLlmBinding,
 ): Record<string, string> {
   const env = pickEnv((key) => {
@@ -727,6 +727,15 @@ function claudeSandboxBaseEnv(
     );
   });
   if (modelBinding.apiKey) {
+    if (env.CLAUDE_CODE_OAUTH_TOKEN) {
+      throw new Error(
+        "Claude Code auth is ambiguous: both an ANTHROPIC_API_KEY-backed " +
+          "model secret and CLAUDE_CODE_OAUTH_TOKEN are present. Configure " +
+          "exactly one: register the model binding with a key secret for " +
+          "API-key auth, or leave it without a secret and set " +
+          "CLAUDE_CODE_OAUTH_TOKEN for subscription auth.",
+      );
+    }
     env.ANTHROPIC_API_KEY = modelBinding.apiKey;
   }
   if (modelBinding.baseUrl) {
@@ -735,7 +744,7 @@ function claudeSandboxBaseEnv(
   return env;
 }
 
-function claudeSandboxEnv(
+export function claudeSandboxEnv(
   env: Record<string, string | undefined>,
 ): Record<string, string> {
   const selected = pickEnvFrom(env, (key) => {
