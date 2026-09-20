@@ -681,7 +681,7 @@ impl FirecrackerSandboxBackend {
                 machine_id(request.sandbox_id.as_str(), &spec_hash)
             });
         self.shared
-            .shutdown_machine(&machine_id, &request.spec.default_workdir, mode)
+            .shutdown_machine_locked(&machine_id, &request.spec.default_workdir, mode)
             .await
     }
 
@@ -1647,8 +1647,13 @@ impl ManagedSandboxHandle for FirecrackerSandboxHandle {
 
     #[tracing::instrument(name = "firecracker.stop", skip_all)]
     async fn stop(&self) -> Result<()> {
+        let _lifecycle_guard = self
+            .shared
+            .lifecycle_locks
+            .lock_machine(&self.machine.record.machine_id)
+            .await;
         self.shared
-            .shutdown_machine(
+            .shutdown_machine_locked(
                 &self.machine.record.machine_id,
                 &self.request.spec.default_workdir,
                 ShutdownMode::Stop,
@@ -2075,13 +2080,12 @@ impl Shared {
 
     // Stop leaves the VM and its network usable if syncing fails. Terminate
     // still destroys it after a failed or timed-out sync. Neither path boots a VM.
-    async fn shutdown_machine(
+    async fn shutdown_machine_locked(
         self: &Arc<Self>,
         machine_id: &str,
         workdir: &str,
         mode: ShutdownMode,
     ) -> Result<()> {
-        let _lifecycle_guard = self.lifecycle_locks.lock_machine(machine_id).await;
         if let Some(record) = self.load_machine_record(machine_id).await?
             && record.workspace_id.is_some()
             && process_running(&self.pid_path(machine_id))
