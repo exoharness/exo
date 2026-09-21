@@ -8,7 +8,7 @@ use crate::{
 use anyhow::{anyhow, bail};
 use async_trait::async_trait;
 use exoharness::{
-    BasicExoHarness, Binding, EventData, EventQuery, EventQueryDirection, ExoHarness,
+    BasicExoHarness, Binding, EventData, EventQuery, EventQueryDirection, ExoHarness, LlmAuthMode,
     PutSecretRequest, SandboxProvider, Secret, ToolRequest, Uuid7,
 };
 use lingua::universal::{AssistantContent, UserContent};
@@ -651,6 +651,7 @@ async fn register_test_model(exoharness: &dyn ExoHarness) {
             model: "gpt-5.4".to_string(),
             base_url: None,
             secret_id: Some(secret_id),
+            auth_mode: LlmAuthMode::ApiKey,
         })
         .await
         .expect("test model should register");

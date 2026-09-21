@@ -11,6 +11,7 @@ function binding(
     model: "claude-opus-5",
     apiKey: undefined,
     baseUrl: null,
+    authMode: "api-key",
     ...overrides,
   };
 }
@@ -23,7 +24,9 @@ describe("claudeSandboxBaseEnv", () => {
   it("passes through a subscription token and sets no ANTHROPIC_API_KEY when the binding has no secret", () => {
     vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-test-token");
 
-    const env = claudeSandboxBaseEnv(binding({ apiKey: undefined }));
+    const env = claudeSandboxBaseEnv(
+      binding({ apiKey: undefined, authMode: "subscription" }),
+    );
 
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("sk-ant-oat-test-token");
     expect(env.ANTHROPIC_API_KEY).toBeUndefined();
@@ -31,7 +34,7 @@ describe("claudeSandboxBaseEnv", () => {
 
   it("sets ANTHROPIC_API_KEY when the binding has a key secret and no token is present", () => {
     const env = claudeSandboxBaseEnv(
-      binding({ apiKey: "sk-ant-api-test-key" }),
+      binding({ apiKey: "sk-ant-api-test-key", authMode: "api-key" }),
     );
 
     expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-api-test-key");
@@ -42,8 +45,18 @@ describe("claudeSandboxBaseEnv", () => {
     vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-test-token");
 
     expect(() =>
-      claudeSandboxBaseEnv(binding({ apiKey: "sk-ant-api-test-key" })),
+      claudeSandboxBaseEnv(
+        binding({ apiKey: "sk-ant-api-test-key", authMode: "api-key" }),
+      ),
     ).toThrow(/ambiguous/i);
+  });
+
+  it("throws with an actionable message when authMode is subscription but no token is present anywhere in the environment", () => {
+    expect(() =>
+      claudeSandboxBaseEnv(
+        binding({ apiKey: undefined, authMode: "subscription" }),
+      ),
+    ).toThrow(/CLAUDE_CODE_OAUTH_TOKEN is not set/);
   });
 });
 

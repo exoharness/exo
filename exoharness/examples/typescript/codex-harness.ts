@@ -48,6 +48,7 @@ import {
   stringOrNull,
   traceExoharnessToolCall,
   traceObservedToolCall,
+  tracingOnlyModelBinding,
   WarmResourceCache,
   type ResolvedLlmBinding,
 } from "@exo/model-runtime/shared";
@@ -127,7 +128,7 @@ class CodexWarmSession {
     let session: CodexWarmSession | null = null;
     const pendingProtocol: CodexProtocolLogEntry[] = [];
     const process = await scope.context.startSandboxProcess({
-      command: codexSandboxCommand(scope.context),
+      command: codexSandboxCommand(scope.context, modelBinding),
       env: codexSandboxEnv(modelBinding),
       reuseKey: sessionKey,
     });
@@ -201,7 +202,7 @@ export default defineHarness({
     const modelBinding = await resolveLlmBinding(context);
     const runtime = ResponsesRuntime.fromModelBinding(
       context.agentConfig,
-      modelBinding,
+      tracingOnlyModelBinding(modelBinding),
     );
     await runtime.runTurn(context, (turnParent) =>
       runCodexTurn(context, turnParent, modelBinding),
@@ -220,7 +221,7 @@ async function runCodexTurn(
   const protocolLog = new CodexProtocolEventBuffer(context);
   const scope: CodexWarmTurnScope = { context, protocolLog, turnParent };
   const sessionKey = codexWarmSessionKey(context, modelBinding);
-  const sandboxRuntime = codexSandboxRuntimeKey(context);
+  const sandboxRuntime = codexSandboxRuntimeKey(context, modelBinding);
   const { resource: session, reused: appServerReused } = await traceCodexTask(
     turnParent,
     "codex_app_server_ready",
@@ -1068,20 +1069,33 @@ function codexEffectiveNetworking(context: TurnContext): boolean {
   return context.agentConfig.sandbox.enableNetworking;
 }
 
-function codexSandboxCommand(context: TurnContext): string[] {
+export function codexSandboxCommand(
+  context: TurnContext,
+  modelBinding: ResolvedLlmBinding,
+): string[] {
   const shell = context.conversationConfig.shellProgram ?? "/bin/bash";
-  const command = [
+  const commandParts = [
     "set -e;",
     'mkdir -p "${HOME:-/tmp/exo-home}" "${CODEX_HOME:-/tmp/exo-codex-home}" >/dev/null 2>/tmp/codex-setup.stderr;',
     'if [ -n "${OPENAI_API_KEY:-}" ] && [ ! -f "${CODEX_HOME:-/tmp/exo-codex-home}/auth.json" ]; then',
     'printf "%s" "$OPENAI_API_KEY" | codex login --with-api-key >/dev/null 2>/tmp/codex-login.stderr;',
     "fi;",
+  ];
+  if (modelBinding.authMode === "subscription") {
+    commandParts.push(
+      'if [ ! -f "${CODEX_HOME:-/tmp/exo-codex-home}/auth.json" ]; then',
+      "echo 'model is registered with --auth-mode subscription but no auth.json was found in CODEX_HOME; mount a ChatGPT-subscription auth.json (from `codex login`) into CODEX_HOME with a writable --internal-mount' >&2;",
+      "exit 1;",
+      "fi;",
+    );
+  }
+  commandParts.push(
     "exec codex app-server --listen stdio:// 2>/tmp/codex-app-server.stderr",
-  ].join(" ");
-  return [shell, "-lc", command];
+  );
+  return [shell, "-lc", commandParts.join(" ")];
 }
 
-function codexSandboxEnv(
+export function codexSandboxEnv(
   modelBinding: ResolvedLlmBinding,
 ): Record<string, string> {
   const env: Record<string, string> = {
@@ -1142,7 +1156,10 @@ function codexEffectiveSandboxImage(context: TurnContext): string | null {
   );
 }
 
-function codexSandboxRuntimeKey(context: TurnContext): JsonValue {
+function codexSandboxRuntimeKey(
+  context: TurnContext,
+  modelBinding: ResolvedLlmBinding,
+): JsonValue {
   return {
     provider: codexEffectiveSandboxProvider(context),
     image: codexEffectiveSandboxImage(context),
@@ -1155,7 +1172,7 @@ function codexSandboxRuntimeKey(context: TurnContext): JsonValue {
       mode: mount.mode,
       internal: mount.internal ?? false,
     })),
-    command: codexSandboxCommand(context),
+    command: codexSandboxCommand(context, modelBinding),
     external_sandbox: useCodexExternalSandbox(),
   };
 }
@@ -1170,7 +1187,8 @@ function codexWarmSessionKey(
     model_binding: modelBinding.name,
     model: modelBinding.model,
     base_url: modelBinding.baseUrl ?? null,
-    sandbox_runtime: codexSandboxRuntimeKey(context),
+    auth_mode: modelBinding.authMode,
+    sandbox_runtime: codexSandboxRuntimeKey(context, modelBinding),
   });
 }
 

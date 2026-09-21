@@ -44,6 +44,7 @@ import {
   projectAnthropicMessageToolEvents,
   resolveLlmBinding,
   sandboxCwd,
+  tracingOnlyModelBinding,
   type ResolvedLlmBinding,
 } from "@exo/model-runtime/shared";
 
@@ -71,7 +72,7 @@ export default defineHarness({
     const modelBinding = await resolveLlmBinding(context);
     const runtime = ResponsesRuntime.fromModelBinding(
       context.agentConfig,
-      modelBinding,
+      tracingOnlyModelBinding(modelBinding),
     );
     await runtime.runTurn(context, (turnParent) =>
       runClaudeCodeTurn(context, turnParent, modelBinding),
@@ -736,7 +737,19 @@ export function claudeSandboxBaseEnv(
           "CLAUDE_CODE_OAUTH_TOKEN for subscription auth.",
       );
     }
+    // authMode "subscription" is validated by resolveLlmBinding to never
+    // carry a key secret, so reaching here with an apiKey means api-key
+    // mode: safe to set unconditionally.
     env.ANTHROPIC_API_KEY = modelBinding.apiKey;
+  } else if (
+    modelBinding.authMode === "subscription" &&
+    !env.CLAUDE_CODE_OAUTH_TOKEN
+  ) {
+    throw new Error(
+      "model is registered with --auth-mode subscription but " +
+        "CLAUDE_CODE_OAUTH_TOKEN is not set; run `claude setup-token` and " +
+        "set CLAUDE_CODE_OAUTH_TOKEN in the exo process environment",
+    );
   }
   if (modelBinding.baseUrl) {
     env.ANTHROPIC_BASE_URL = modelBinding.baseUrl;

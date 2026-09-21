@@ -29,6 +29,9 @@ export default defineConfig({
           import.meta.url,
         ),
       ),
+      "@exo/codex/app-server": fileURLToPath(
+        new URL("./exoharness/typescript/codex/app-server.ts", import.meta.url),
+      ),
     },
   },
 });

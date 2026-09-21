@@ -1103,6 +1103,19 @@ pub enum SecretType {
     Oauth,
 }
 
+/// How an LLM binding authenticates. `ApiKey` (the default) requires a key
+/// secret, matching all behavior prior to subscription-auth support.
+/// `Subscription` requires the *absence* of a key secret; the harness reads
+/// credentials from the environment or a mounted file instead (e.g.
+/// `CLAUDE_CODE_OAUTH_TOKEN`, or a mounted Codex `auth.json`).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LlmAuthMode {
+    #[default]
+    ApiKey,
+    Subscription,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Binding {
@@ -1121,6 +1134,8 @@ pub enum Binding {
         model: String,
         base_url: Option<String>,
         secret_id: Option<SecretId>,
+        #[serde(default)]
+        auth_mode: LlmAuthMode,
     },
     /// How to reach a remote sandbox provider.
     Sandbox {

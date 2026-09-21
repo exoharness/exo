@@ -8,8 +8,8 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use exoharness::{
     AddEventsRequest, BasicExoHarness, Binding, EventData, EventKind, EventQuery,
-    EventQueryDirection, ExoHarness, FileSystemMount, FileSystemMountMode, PutSecretRequest,
-    Result, SandboxAttachment, SandboxProvider, Secret, ToolRequest, Uuid7,
+    EventQueryDirection, ExoHarness, FileSystemMount, FileSystemMountMode, LlmAuthMode,
+    PutSecretRequest, Result, SandboxAttachment, SandboxProvider, Secret, ToolRequest, Uuid7,
 };
 use lingua::universal::{AssistantContent, UserContent};
 use lingua::{Message, UniversalStreamChunk, UniversalUsage};
@@ -240,6 +240,7 @@ async fn usage_record_is_persisted_with_computed_cost() {
             model: "claude-sonnet-4-6".to_string(),
             base_url: None,
             secret_id: Some(secret_id),
+            auth_mode: LlmAuthMode::ApiKey,
         })
         .await
         .expect("binding should register");
@@ -387,6 +388,7 @@ async fn usage_record_with_anthropic_cache_hits() {
             model: "claude-sonnet-4-6".to_string(),
             base_url: None,
             secret_id: Some(secret_id),
+            auth_mode: LlmAuthMode::ApiKey,
         })
         .await
         .expect("binding should register");
@@ -509,6 +511,7 @@ async fn usage_record_with_openai_inclusive_accounting() {
             model: "gpt-4o-mini".to_string(),
             base_url: None,
             secret_id: Some(secret_id),
+            auth_mode: LlmAuthMode::ApiKey,
         })
         .await
         .expect("binding should register");
@@ -1497,6 +1500,7 @@ async fn register_test_models(exoharness: &dyn ExoHarness) {
                 model: model.to_string(),
                 base_url: None,
                 secret_id: Some(secret_id),
+                auth_mode: LlmAuthMode::ApiKey,
             })
             .await
             .expect("test model should register");

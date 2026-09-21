@@ -31,6 +31,7 @@ export interface ResolvedLlmBinding {
   model: string;
   apiKey?: string;
   baseUrl?: string | null;
+  authMode: "api-key" | "subscription";
 }
 
 export class AsyncQueue<T> {
@@ -247,6 +248,21 @@ export async function resolveLlmBinding(
   if (!binding || binding.type !== "llm") {
     throw new Error(`registered model binding disappeared: ${name}`);
   }
+  const authMode = binding.authMode ?? "api-key";
+  if (authMode === "api-key" && !binding.secretId) {
+    throw new Error(
+      `model ${name} is registered with --auth-mode api-key but has no ` +
+        `secret; run \`exo model register ${name} --secret <secret>\` or ` +
+        `re-register it with --auth-mode subscription`,
+    );
+  }
+  if (authMode === "subscription" && binding.secretId) {
+    throw new Error(
+      `model ${name} is registered with --auth-mode subscription but also ` +
+        `has an API-key secret attached; subscription auth must not carry ` +
+        `a key secret, re-register without --secret`,
+    );
+  }
   let apiKey: string | undefined;
   if (binding.secretId) {
     const secret = await context.exoharness.current.conversation.getSecret(
@@ -265,7 +281,28 @@ export async function resolveLlmBinding(
     model: binding.model,
     apiKey,
     baseUrl: binding.baseUrl ?? null,
+    authMode,
   };
+}
+
+/**
+ * A harness's own model-provider client (`ResponsesRuntime`) requires a
+ * non-nullish `apiKey` to construct, even when a caller only ever uses it
+ * for tracing (`runTurn`) and never sends a real request through it — as is
+ * the case for the codex and claude-code harnesses, which run turns through
+ * their own CLI/app-server instead. Under subscription auth there is no
+ * `apiKey`, so construct the tracing client with an inert placeholder
+ * instead. Never pass the result of this function to `.complete()` /
+ * `.completeStream()` — those would send the placeholder as a real
+ * credential.
+ */
+export function tracingOnlyModelBinding(
+  binding: ResolvedLlmBinding,
+): ResolvedLlmBinding {
+  if (binding.apiKey) {
+    return binding;
+  }
+  return { ...binding, apiKey: "unused-subscription-auth-tracing-placeholder" };
 }
 
 export function markFirstTextDelta(state: TextDeltaTraceState): number | null {

@@ -37,8 +37,8 @@ use executor::{
     EventQuery, EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions, ExoToolRuntime,
     FileSystemMount, FileSystemMountMode, FirecrackerBackendSpec, ForkConversationRequest,
     HOST_EVENT_REBUILD_AND_RESTART, HTTP_EXOHARNESS_TRACING_TARGET, Harness, HarnessAgent,
-    HarnessConversation, HttpExoHarness, LocalSandboxExoHarness, NewAgentRequest, PutSecretRequest,
-    RlmHarness, RunInSandboxRequest, SANDBOX_MAIN_MOUNT_DIR, SandboxAttachment,
+    HarnessConversation, HttpExoHarness, LlmAuthMode, LocalSandboxExoHarness, NewAgentRequest,
+    PutSecretRequest, RlmHarness, RunInSandboxRequest, SANDBOX_MAIN_MOUNT_DIR, SandboxAttachment,
     SandboxBackendRegistration, SandboxProcess, SandboxProvider, SandboxProviderConfig,
     SandboxResourceShape, SandboxScope, Secret, SecretBackendChoice, SpritesBackendSpec,
     ToolRequest, ToolRuntime, TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, VercelBackendSpec,
@@ -1031,6 +1031,21 @@ enum SecretCommands {
     },
 }
 
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum LlmAuthModeArg {
+    ApiKey,
+    Subscription,
+}
+
+impl From<LlmAuthModeArg> for LlmAuthMode {
+    fn from(value: LlmAuthModeArg) -> Self {
+        match value {
+            LlmAuthModeArg::ApiKey => LlmAuthMode::ApiKey,
+            LlmAuthModeArg::Subscription => LlmAuthMode::Subscription,
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum ModelCommands {
     List,
@@ -1038,10 +1053,18 @@ enum ModelCommands {
         name: String,
         #[arg(long)]
         model: Option<String>,
+        /// Secret holding the API key. Required for --auth-mode api-key
+        /// (the default); must be omitted for --auth-mode subscription.
         #[arg(long)]
-        secret: String,
+        secret: Option<String>,
         #[arg(long)]
         base_url: Option<String>,
+        /// api-key (default): authenticate with the --secret key.
+        /// subscription: no key secret; the harness reads credentials from
+        /// the environment or a mounted file (e.g. CLAUDE_CODE_OAUTH_TOKEN,
+        /// or a mounted Codex auth.json).
+        #[arg(long, value_enum)]
+        auth_mode: Option<LlmAuthModeArg>,
     },
 }
 
@@ -2415,7 +2438,7 @@ async fn main() -> Result<()> {
             ModelCommands::List => {
                 let models = list_model_bindings(harness.exoharness_handle().as_ref()).await?;
                 print_table(
-                    &["MODEL", "UPSTREAM_MODEL", "SECRET", "BASE_URL"],
+                    &["MODEL", "UPSTREAM_MODEL", "SECRET", "BASE_URL", "AUTH_MODE"],
                     models
                         .into_iter()
                         .map(|model| {
@@ -2424,6 +2447,10 @@ async fn main() -> Result<()> {
                                 model.model,
                                 model.secret_name.unwrap_or_else(|| "none".to_string()),
                                 model.base_url.unwrap_or_else(|| "default".to_string()),
+                                match model.auth_mode {
+                                    LlmAuthMode::ApiKey => "api-key".to_string(),
+                                    LlmAuthMode::Subscription => "subscription".to_string(),
+                                },
                             ]
                         })
                         .collect(),
@@ -2434,10 +2461,32 @@ async fn main() -> Result<()> {
                 model,
                 secret,
                 base_url,
+                auth_mode,
             } => {
-                let secret_id = find_secret_id(harness.exoharness_handle().as_ref(), &secret)
-                    .await?
-                    .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
+                let auth_mode: LlmAuthMode = auth_mode.map(LlmAuthMode::from).unwrap_or_default();
+                let secret_id = match (auth_mode, secret) {
+                    (LlmAuthMode::ApiKey, Some(secret)) => Some(
+                        find_secret_id(harness.exoharness_handle().as_ref(), &secret)
+                            .await?
+                            .ok_or_else(|| anyhow!("secret not found: {secret}"))?,
+                    ),
+                    (LlmAuthMode::ApiKey, None) => {
+                        bail!(
+                            "--secret is required for --auth-mode api-key (the default); \
+                             pass --auth-mode subscription to register a binding with no \
+                             API-key secret"
+                        );
+                    }
+                    (LlmAuthMode::Subscription, None) => None,
+                    (LlmAuthMode::Subscription, Some(_)) => {
+                        bail!(
+                            "--secret must not be set for --auth-mode subscription; the \
+                             harness reads subscription credentials from the environment \
+                             or a mounted file instead (e.g. CLAUDE_CODE_OAUTH_TOKEN, or a \
+                             mounted Codex auth.json)"
+                        );
+                    }
+                };
                 let upstream_model = model.unwrap_or_else(|| name.clone());
                 let id = harness
                     .exoharness_handle()
@@ -2445,7 +2494,8 @@ async fn main() -> Result<()> {
                         name: name.clone(),
                         model: upstream_model,
                         base_url,
-                        secret_id: Some(secret_id),
+                        secret_id,
+                        auth_mode,
                     })
                     .await?;
                 println!("registered model {} ({})", name, id);
@@ -3377,6 +3427,7 @@ struct RegisteredModel {
     model: String,
     secret_name: Option<String>,
     base_url: Option<String>,
+    auth_mode: LlmAuthMode,
 }
 
 async fn list_model_bindings(exoharness: &dyn ExoHarness) -> Result<Vec<RegisteredModel>> {
@@ -3388,6 +3439,7 @@ async fn list_model_bindings(exoharness: &dyn ExoHarness) -> Result<Vec<Register
             model,
             base_url,
             secret_id,
+            auth_mode,
         } = metadata.binding
         else {
             continue;
@@ -3403,6 +3455,7 @@ async fn list_model_bindings(exoharness: &dyn ExoHarness) -> Result<Vec<Register
             model,
             secret_name,
             base_url,
+            auth_mode,
         });
     }
     let mut deduped = Vec::<RegisteredModel>::new();

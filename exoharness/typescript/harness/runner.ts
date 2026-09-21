@@ -139,6 +139,7 @@ type RawBinding =
       model: string;
       base_url?: string | null;
       secret_id?: string | null;
+      auth_mode?: "api-key" | "subscription";
     };
 
 interface RawBindingRecord {
@@ -960,6 +961,7 @@ function toBinding(raw: RawBinding): Binding {
     model: raw.model,
     baseUrl: raw.base_url ?? null,
     secretId: raw.secret_id ?? null,
+    authMode: raw.auth_mode ?? "api-key",
   };
 }
 

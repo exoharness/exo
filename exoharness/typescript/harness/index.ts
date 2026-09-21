@@ -67,6 +67,7 @@ export type Binding =
       model: string;
       baseUrl?: string | null;
       secretId?: string | null;
+      authMode: "api-key" | "subscription";
     };
 
 export interface BindingRecord {
