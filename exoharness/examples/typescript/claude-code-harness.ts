@@ -49,7 +49,7 @@ import {
 
 const DEFAULT_CLAUDE_CODE_SANDBOX_EXECUTABLE = "/usr/local/bin/claude-code";
 const ANTHROPIC_API_HOST = "api.anthropic.com";
-const CLAUDE_RESULT_GRACE_MS = 5_000;
+const CLAUDE_RESULT_GRACE_MS = 30_000;
 const CLAUDE_MAX_API_RETRIES = 2;
 const CLAUDE_STDERR_PREVIEW_CHARS = 4_000;
 const CLAUDE_STARTUP_TIMEOUT_MS = 20_000;
@@ -179,11 +179,25 @@ async function consumeClaudeQuery(
     }
   };
 
+  // A finished session reports a `result` within about a second of its last
+  // text, so a long silence after text-only output means the SDK stream is
+  // hung, and the turn is closed with the text it has. The model narrates
+  // between tool calls, so the timer only counts silence: any later message,
+  // stream deltas included, cancels it.
   const scheduleGraceClose = () => {
     if (state.result || graceTimer) {
       return;
     }
     graceTimer = setTimeout(() => {
+      void appendCustomEvent(
+        context.exoharness.current.turn,
+        "claude_query_closed_after_text",
+        {
+          metadata: turnMetadata(context),
+          grace_ms: CLAUDE_RESULT_GRACE_MS,
+          reason: "no SDK message followed the final assistant text",
+        },
+      );
       claudeQuery.close();
     }, CLAUDE_RESULT_GRACE_MS);
     graceTimer.unref?.();
@@ -193,6 +207,7 @@ async function consumeClaudeQuery(
     for await (const message of claudeQuery) {
       sawSdkMessage = true;
       clearTimeout(startupTimer);
+      clearGraceTimer();
       await handleClaudeMessage(context, turnParent, state, message);
       const apiRetryError = claudeApiRetryLimitError(message);
       if (apiRetryError) {

@@ -148,9 +148,13 @@ class ExoAgent(BaseAgent):
 # Matches the node major exoharness/containers/pi-sandbox builds on; pi's bundle
 # needs node 22.
 NODE_VERSION = "v22.15.0"
-PI_PACKAGE = "@earendil-works/pi-coding-agent"
+# Pinned so every trial of a sweep runs the same agent. pi in particular
+# changed model handling between releases: 0.86.1 sent Anthropic's newer Opus
+# models a thinking parameter they reject and produced empty turns.
+PI_PACKAGE = "@earendil-works/pi-coding-agent@0.87.0"
 CLAUDE_AGENT_SDK_PACKAGE = "@anthropic-ai/claude-agent-sdk"
-CODEX_PACKAGE = "@openai/codex"
+CLAUDE_AGENT_SDK_VERSION = "0.3.278"
+CODEX_PACKAGE = "@openai/codex@0.155.1"
 INSTALL_TIMEOUT_SEC = 600
 
 # Installed under /usr/local rather than through nvm because exo reaches the
@@ -180,7 +184,7 @@ pi --version
 # /usr/local/bin/claude-code with HOME=/home/exo.
 CLAUDE_CODE_INSTALL_SCRIPT = (
     NODE_INSTALL_SCRIPT
-    + f"""npm install -g "{CLAUDE_AGENT_SDK_PACKAGE}" "{CLAUDE_AGENT_SDK_PACKAGE}-linux-$arch"
+    + f"""npm install -g "{CLAUDE_AGENT_SDK_PACKAGE}@{CLAUDE_AGENT_SDK_VERSION}" "{CLAUDE_AGENT_SDK_PACKAGE}-linux-$arch@{CLAUDE_AGENT_SDK_VERSION}"
 claude_bin="$(find "$(npm root -g)" -path "*/{CLAUDE_AGENT_SDK_PACKAGE}-linux-$arch/claude" -type f -print -quit)"
 test -n "$claude_bin"
 chmod +x "$claude_bin"

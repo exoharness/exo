@@ -2,3 +2,4 @@
 # task-template/, this file, README.md) is tracked.
 /*/
 !/task-template/
+task_order.json

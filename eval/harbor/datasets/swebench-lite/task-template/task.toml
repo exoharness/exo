@@ -21,8 +21,9 @@ timeout_sec = {max_timeout}
 
 [agent]
 # The agent works from the repository alone: no fetching the upstream fix,
-# the issue thread, or extra packages.
-network_mode = "no-network"
+# the issue thread, or extra packages. generate.py --allow-host opens only the
+# named hosts, for agents that call their model from inside the container.
+{agent_network}
 timeout_sec = {max_timeout}
 
 [environment]

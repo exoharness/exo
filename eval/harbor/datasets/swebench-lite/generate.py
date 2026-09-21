@@ -13,6 +13,7 @@ rendered from ./task-template:
     <instance_id>/
       instruction.md        the issue, with a short framing preamble
       task.toml             Harbor config; agent phase runs without network
+                            unless --allow-host names what it may reach
       environment/Dockerfile   FROM the prebuilt SWE-bench instance image
       tests/test.sh         runs the hidden tests and the SWE-bench grader
       tests/config.json     the raw dataset record the grader reads
@@ -160,7 +161,17 @@ def test_commands(record: dict) -> str:
     )
 
 
-def write_task(record: dict, out_dir: Path, timeout_sec: float) -> Path:
+def agent_network(allowed_hosts: list[str]) -> str:
+    """The agent phase's network policy: sealed, or open to just these hosts."""
+    if not allowed_hosts:
+        return 'network_mode = "no-network"'
+    hosts = ", ".join(json.dumps(host) for host in allowed_hosts)
+    return f'network_mode = "allowlist"\nallowed_hosts = [{hosts}]'
+
+
+def write_task(
+    record: dict, out_dir: Path, timeout_sec: float, allowed_hosts: list[str]
+) -> Path:
     task_dir = out_dir / record["instance_id"]
     if task_dir.exists():
         shutil.rmtree(task_dir)
@@ -175,6 +186,7 @@ def write_task(record: dict, out_dir: Path, timeout_sec: float) -> Path:
             record["problem_statement"].replace("\r\n", "\n")
         ).strip(),
         "max_timeout": str(int(timeout_sec)),
+        "agent_network": agent_network(allowed_hosts),
         "docker_image": image_name(record),
         "test_commands": test_commands(record),
         "patch": record["patch"].strip(),
@@ -218,6 +230,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset", default=DATASET, help="HuggingFace dataset to generate from"
     )
+    parser.add_argument(
+        "--allow-host",
+        action="append",
+        dest="allowed_hosts",
+        default=[],
+        help=(
+            "let the agent phase reach this host (repeatable); the default "
+            "gives it no network at all. Agents that call their model from "
+            "inside the container (pi, claude-code, codex) need their API "
+            "host here, or the address of a gateway on the Docker host"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -236,8 +260,13 @@ def main() -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Writing {len(ids)} tasks from {args.dataset} into {args.output_dir}")
     for index, instance_id in enumerate(ids, 1):
-        write_task(records[instance_id], args.output_dir, args.timeout)
+        write_task(
+            records[instance_id], args.output_dir, args.timeout, args.allowed_hosts
+        )
         print(f"[{index}/{len(ids)}] {instance_id}")
+    # eval.py runs an ordered dataset's tasks explicitly, so every job over
+    # this directory sees the same tasks in the same order.
+    (args.output_dir / "task_order.json").write_text(json.dumps(ids, indent=2) + "\n")
     return 0
 
 
