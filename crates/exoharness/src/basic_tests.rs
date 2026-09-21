@@ -27,11 +27,12 @@ use crate::{
     ForkConversationRequest, ManagedSandboxBackend, ManagedSandboxHandle, NewAgentRequest,
     NewConversationRequest, PutSecretRequest, RestoreSandboxRequest, RunInSandboxRequest,
     SandboxAttachment, SandboxBackendRegistration, SandboxCommand, SandboxCommandOutput,
-    SandboxLifecycleConfig, SandboxNetworkPolicy, SandboxProcessEvent, SandboxProcessEventQuery,
-    SandboxProcessParts, SandboxProcessStatus, SandboxProcessStdin, SandboxProvider,
-    SandboxProviderConfig, SandboxRequest, SandboxScope, SandboxSpec, Secret, SnapshotFormat,
-    SnapshotPayload, StartSandboxProcessRequest, StartSandboxRequest, Uuid7,
-    WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
+    SandboxLifecycleConfig, SandboxMount, SandboxMountAccess, SandboxNetworkPolicy,
+    SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessParts, SandboxProcessStatus,
+    SandboxProcessStdin, SandboxProvider, SandboxProviderConfig, SandboxRequest, SandboxScope,
+    SandboxSpec, Secret, SnapshotFormat, SnapshotPayload, StartSandboxProcessRequest,
+    StartSandboxRequest, Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest,
+    WriteSandboxProcessInputRequest,
 };
 
 const DEFAULT_DURABLE_CONTRACT_MOUNT_PATH: &str = "/home/exo/workspace";
@@ -616,6 +617,66 @@ async fn docker_sandbox_contract_durable_file_system_survives_stop_and_reacquire
     )
     .await
     .expect("Docker sandbox durable filesystem contract");
+}
+
+/// Regression check for the subscription-auth credential-hygiene invariant:
+/// a credential mounted with `internal: true` (e.g. a mounted Codex
+/// `auth.json` or Claude subscription token file) must not have its *bytes*
+/// end up inside a `snapshot()` of the sandbox, since snapshots can be
+/// cloned/restored elsewhere (time-travel). The Docker backend's
+/// `snapshot()` is `docker commit` + `docker save`, and `docker commit` only
+/// captures the container's own writable filesystem layer — bind mounts
+/// (which is what every exo mount is, `internal` or not) are excluded by
+/// Docker itself, not by anything exo does. This test proves that
+/// structurally rather than by reading the Docker docs: it mounts a
+/// directory containing a credential marker, takes a snapshot, and asserts
+/// the marker content is absent from the snapshot bytes.
+///
+/// Note: the mount's *guest path string* (not its contents) can still show
+/// up in the snapshot, since exo records mount configuration as container
+/// metadata (labels/env), which `docker commit` does capture. That's a path
+/// disclosure, not a credential leak — this test only asserts on content,
+/// which is the actual security invariant `internal` mounts exist for.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "uses a real Docker sandbox; run this test explicitly"]
+async fn docker_snapshot_excludes_internal_mounted_credential_content() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let credential_dir = tempdir.path().join("credential");
+    std::fs::create_dir_all(&credential_dir).expect("credential dir should be created");
+    let marker = "exo-test-credential-marker-3f9a1c7e";
+    std::fs::write(credential_dir.join("auth.json"), marker)
+        .expect("credential marker file should be written");
+
+    let backend: Arc<dyn ManagedSandboxBackend> =
+        Arc::new(crate::CliContainerSandboxBackend::docker());
+    let mut request = provider_contract_request(
+        "docker",
+        "internal-mount-snapshot",
+        env_or("DOCKER_IMAGE", &crate::default_docker_image()),
+        "/home/exo/workspace",
+    );
+    request.spec.mounts.push(SandboxMount {
+        host_path: credential_dir,
+        guest_path: "/tmp/exo-credential".to_string(),
+        access: SandboxMountAccess::ReadWrite,
+        internal: true,
+    });
+
+    let handle = backend
+        .acquire(request.clone())
+        .await
+        .expect("docker sandbox with internal mount should acquire");
+    let snapshot = handle
+        .snapshot()
+        .await
+        .expect("docker sandbox snapshot should succeed");
+    let _ = backend.terminate(request).await;
+
+    let haystack = String::from_utf8_lossy(&snapshot.bytes);
+    assert!(
+        !haystack.contains(marker),
+        "internal-mounted credential content leaked into the snapshot"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
