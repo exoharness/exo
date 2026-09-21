@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, override
 
 from harbor.agents.base import BaseAgent
+from harbor.agents.options import AgentOptions
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
@@ -22,33 +23,36 @@ from exo_harbor.trajectory import export_trial_trajectory
 logger = logging.getLogger(__name__)
 
 
+class ExoAgentOptions(AgentOptions):
+    """The `--ak key=value` kwargs ExoAgent accepts. Harbor validates them
+    against this model once at preflight and again per trial."""
+
+    exo_root: Path
+    exo_bin: Path
+    exo_repo_root: Path
+    exo_model: str
+    harness: str = "exo"
+    task_timeout_sec: float | None = None
+
+
 class ExoAgent(BaseAgent):
     SUPPORTS_RESUME = False
     SUPPORTS_ATIF = True
     SUPPORTS_WINDOWS = False
+    options_model = ExoAgentOptions
 
-    def __init__(
-        self,
-        *args: Any,
-        exo_root: str | Path,
-        exo_bin: str | Path,
-        exo_repo_root: str | Path,
-        exo_model: str,
-        harness: str = "exo",
-        task_timeout_sec: float | str | None = None,
-        **kwargs: Any,
-    ) -> None:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self._model = exo_model
-        self._harness = harness
-        self._task_timeout_sec = (
-            float(task_timeout_sec) if task_timeout_sec is not None else None
-        )
+        assert isinstance(self.options, ExoAgentOptions)
+        options = self.options
+        self._model = options.exo_model
+        self._harness = options.harness
+        self._task_timeout_sec = options.task_timeout_sec
         self._client = ExoClient(
-            exo_bin=Path(exo_bin),
-            exo_root=Path(exo_root),
-            repo_root=Path(exo_repo_root),
-            harness=harness,
+            exo_bin=options.exo_bin,
+            exo_root=options.exo_root,
+            repo_root=options.exo_repo_root,
+            harness=options.harness,
         )
         self._container_id: str | None = None
         self._sandbox_id: str | None = None
