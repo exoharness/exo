@@ -18,6 +18,7 @@ from harbor.models.agent.context import AgentContext
 
 from exo_harbor import conventions
 from exo_harbor.exo import CLAUDE_CODE_HARNESS, CODEX_HARNESS, PI_HARNESS, ExoClient
+from exo_harbor.gateway import SANDBOX_CA_PATH
 from exo_harbor.trajectory import export_trial_trajectory
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,8 @@ class ExoAgentOptions(AgentOptions):
     exo_repo_root: Path
     exo_model: str
     harness: str = "exo"
+    # Host path of the model gateway's certificate, when the job runs one.
+    gateway_ca: str | None = None
     task_timeout_sec: float | None = None
 
 
@@ -47,12 +50,14 @@ class ExoAgent(BaseAgent):
         options = self.options
         self._model = options.exo_model
         self._harness = options.harness
+        self._gateway_ca = Path(options.gateway_ca) if options.gateway_ca else None
         self._task_timeout_sec = options.task_timeout_sec
         self._client = ExoClient(
             exo_bin=options.exo_bin,
             exo_root=options.exo_root,
             repo_root=options.exo_repo_root,
             harness=options.harness,
+            sandbox_ca_path=SANDBOX_CA_PATH if options.gateway_ca else None,
         )
         self._container_id: str | None = None
         self._sandbox_id: str | None = None
@@ -85,6 +90,8 @@ class ExoAgent(BaseAgent):
             await install_claude_code(environment)
         elif self._harness == CODEX_HARNESS:
             await install_codex(environment)
+        if self._gateway_ca is not None:
+            await install_gateway_ca(environment, self._gateway_ca.read_text())
 
         # setup dedicated conversation for the trial
         await self._client.ensure_conversation(self._conversation)
@@ -202,6 +209,35 @@ CODEX_INSTALL_SCRIPT = (
 codex --version
 """
 )
+
+
+# Codex trusts the system store; Claude Code takes NODE_EXTRA_CA_CERTS, which
+# the harness sets from EXO_SANDBOX_CA_CERTS.
+GATEWAY_CA_INSTALL_SCRIPT = f"""set -euo pipefail
+mkdir -p "$(dirname {SANDBOX_CA_PATH})"
+cat > {SANDBOX_CA_PATH} <<'EXO_GATEWAY_CA'
+{{certificate}}
+EXO_GATEWAY_CA
+if command -v update-ca-certificates >/dev/null 2>&1; then
+  update-ca-certificates >/dev/null
+elif [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+  cat {SANDBOX_CA_PATH} >> /etc/ssl/certs/ca-certificates.crt
+elif [ -f /etc/pki/tls/certs/ca-bundle.crt ]; then
+  cat {SANDBOX_CA_PATH} >> /etc/pki/tls/certs/ca-bundle.crt
+else
+  echo "no system certificate store to add the gateway certificate to" >&2; exit 1
+fi
+echo "gateway certificate installed"
+"""
+
+
+async def install_gateway_ca(environment: BaseEnvironment, certificate: str) -> None:
+    """Make the task container trust the model gateway's certificate."""
+    await install_coding_agent(
+        environment,
+        "gateway certificate",
+        GATEWAY_CA_INSTALL_SCRIPT.replace("{certificate}", certificate.strip()),
+    )
 
 
 async def install_pi(environment: BaseEnvironment) -> None:

@@ -450,6 +450,9 @@ def main() -> int:
             gateway = ModelGateway.start(upstream_model, run_dir / "gateway.log")
             base_url = gateway.base_url
             print(f"Gateway: {base_url} for {upstream_model} (log: {gateway.log_path})")
+            if gateway.ca_path is not None:
+                # The agent installs it into each task container at setup.
+                command += ["--ak", f"gateway_ca={gateway.ca_path}"]
         try:
             if base_url:
                 register.extend(("--base-url", base_url))

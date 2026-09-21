@@ -148,7 +148,10 @@ because Claude Code appends `/v1/messages` itself. In gateway mode the harness
 also passes the key as a bearer token, pins Claude Code's Haiku, Sonnet, Opus,
 and subagent model slots to the registered model so background calls do not
 ask the gateway for a Claude model it cannot serve, and turns off Claude Code's
-nonessential traffic.
+nonessential traffic. A gateway that serves TLS with a private certificate needs
+the sandbox to trust it: set `EXO_SANDBOX_CA_CERTS` where exo runs to the
+certificate's path inside the sandbox and the harness hands it to Claude Code
+as `NODE_EXTRA_CA_CERTS`. Codex reads the sandbox's system certificate store.
 
 ## Cursor
 
