@@ -42,6 +42,7 @@ import {
   pickEnv,
   pickEnvFrom,
   projectAnthropicMessageToolEvents,
+  reportAuthDiagnostic,
   resolveLlmBinding,
   sandboxCwd,
   tracingOnlyModelBinding,
@@ -70,6 +71,13 @@ interface ClaudeTraceState {
 export default defineHarness({
   async runTurn(context) {
     const modelBinding = await resolveLlmBinding(context);
+    await reportAuthDiagnostic(context, modelBinding, {
+      competingCredentialPresent: Boolean(
+        modelBinding.apiKey &&
+        pickEnv((key) => key === "CLAUDE_CODE_OAUTH_TOKEN")
+          .CLAUDE_CODE_OAUTH_TOKEN,
+      ),
+    });
     const runtime = ResponsesRuntime.fromModelBinding(
       context.agentConfig,
       tracingOnlyModelBinding(modelBinding),

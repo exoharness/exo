@@ -1,4 +1,5 @@
 import {
+  appendCustomEvent,
   materializeEventsToMessages,
   messageText,
   stringifyValue,
@@ -303,6 +304,46 @@ export function tracingOnlyModelBinding(
     return binding;
   }
   return { ...binding, apiKey: "unused-subscription-auth-tracing-placeholder" };
+}
+
+export interface AuthDiagnostic {
+  authMode: "api-key" | "subscription";
+  hasKeySecret: boolean;
+  warning: string | null;
+}
+
+/**
+ * Builds a startup diagnostic reporting which auth mode a turn is running
+ * under, without ever including credential material — only booleans and the
+ * mode name. Pass `competingCredentialPresent: true` when the caller has
+ * separately detected that both a key secret and a subscription credential
+ * apply to the same turn (e.g. a stray CLAUDE_CODE_OAUTH_TOKEN alongside an
+ * api-key binding); this never suppresses the hard failure that invariant
+ * requires elsewhere, it only makes the condition visible in the event log.
+ */
+export function authDiagnostic(
+  binding: ResolvedLlmBinding,
+  options: { competingCredentialPresent?: boolean } = {},
+): AuthDiagnostic {
+  return {
+    authMode: binding.authMode,
+    hasKeySecret: Boolean(binding.apiKey),
+    warning: options.competingCredentialPresent
+      ? "both an API-key secret and a subscription credential appear to be configured for this turn"
+      : null,
+  };
+}
+
+export async function reportAuthDiagnostic(
+  context: TurnContext,
+  binding: ResolvedLlmBinding,
+  options: { competingCredentialPresent?: boolean } = {},
+): Promise<void> {
+  await appendCustomEvent(
+    context.exoharness.current.turn,
+    "subscription_auth_diagnostic",
+    authDiagnostic(binding, options),
+  );
 }
 
 export function markFirstTextDelta(state: TextDeltaTraceState): number | null {

@@ -41,6 +41,7 @@ import {
   numberField,
   objectArgs,
   pickEnv,
+  reportAuthDiagnostic,
   resolveLlmBinding,
   sandboxCwd,
   shellToolResultText,
@@ -200,6 +201,11 @@ const codexSessions = new WarmResourceCache<CodexWarmSession>();
 export default defineHarness({
   async runTurn(context) {
     const modelBinding = await resolveLlmBinding(context);
+    // Unlike Claude, Codex's subscription credential is a mounted file
+    // (auth.json), not an env var — there is no host-visible "competing
+    // credential" signal to check here. The subscription-mode boot script
+    // already fails fast if auth.json is missing (codexSandboxCommand).
+    await reportAuthDiagnostic(context, modelBinding);
     const runtime = ResponsesRuntime.fromModelBinding(
       context.agentConfig,
       tracingOnlyModelBinding(modelBinding),
