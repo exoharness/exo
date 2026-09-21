@@ -8,6 +8,12 @@ dependencies = [
   # ATIF trajectory models. ExoAgent declares an options_model, a hook that
   # first shipped in 0.23.
   "harbor>=0.23",
+  # The model gateway (exo_harbor.gateway) is LiteLLM's proxy. Its extra pins
+  # rich<14 against harbor's rich>=14.1 for no reason that survives testing
+  # (rich is only used by litellm's admin CLI); overrides.txt lifts the pin and
+  # https://github.com/BerriAI/litellm/pull/42322 asks upstream to. Pinned to
+  # the version the Messages and Responses translation was verified against.
+  "litellm[proxy]==1.101.0",
 ]
 
 [project.entry-points."harbor.plugins"]

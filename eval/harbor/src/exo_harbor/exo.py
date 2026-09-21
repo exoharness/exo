@@ -32,6 +32,8 @@ class ExoClient:
     exo_root: Path
     repo_root: Path
     harness: str = EXO_HARNESS
+    # In-sandbox path of a CA the coding agent must trust (the model gateway's).
+    sandbox_ca_path: str | None = None
 
     async def ensure_agent(self, model: str) -> None:
         if await self._exists("agent", "show", conventions.AGENT_SLUG):
@@ -195,11 +197,14 @@ class ExoClient:
         )
 
     def _environment(self) -> dict[str, str]:
-        return {
+        environment = {
             **os.environ,
             "EXO_PROFILE": os.environ.get("EXO_PROFILE", "practical"),
             "EXO_ROOT": str(self.exo_root),
         }
+        if self.sandbox_ca_path is not None:
+            environment["EXO_SANDBOX_CA_CERTS"] = self.sandbox_ca_path
+        return environment
 
     def _argv(self, *args: str) -> list[str]:
         return [

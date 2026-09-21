@@ -1,0 +1,4 @@
+# uv --override file for eval.sh: litellm[proxy] pins rich<14 but only uses
+# rich in its admin CLI; harbor needs rich>=14.1. Upstream fix:
+# https://github.com/BerriAI/litellm/pull/42322
+rich>=14.1.0

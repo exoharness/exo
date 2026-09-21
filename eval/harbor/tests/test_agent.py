@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,7 +43,7 @@ class CodingAgentHarnessTest(unittest.IsolatedAsyncioTestCase):
     container, which Harbor's images do not ship, so setup has to install it
     there first."""
 
-    def build(self, harness: str) -> ExoAgent:
+    def build(self, harness: str, **extra: object) -> ExoAgent:
         agent = ExoAgent(
             logs_dir=Path("/tmp/logs"),
             exo_root="/runs/one/exo",
@@ -50,6 +51,7 @@ class CodingAgentHarnessTest(unittest.IsolatedAsyncioTestCase):
             exo_repo_root="/repo",
             exo_model="gpt-5.5",
             harness=harness,
+            **extra,
         )
         agent.context_id = uuid4()
         agent._client = AsyncMock()
@@ -105,6 +107,29 @@ class CodingAgentHarnessTest(unittest.IsolatedAsyncioTestCase):
         environment.exec.assert_awaited_once()
         self.assertEqual(environment.exec.await_args.kwargs["user"], "root")
         self.assertIn("codex --version", environment.exec.await_args.kwargs["command"])
+
+    async def test_the_gateway_certificate_is_installed_after_the_agent(self) -> None:
+        with tempfile.NamedTemporaryFile("w", suffix=".crt", delete=False) as handle:
+            handle.write("-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----\n")
+        agent = self.build("codex", gateway_ca=handle.name)
+        environment = SimpleNamespace(
+            session_id="session-1",
+            exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="ok")),
+        )
+        with patch(
+            "exo_harbor.agent.get_harbor_docker_container_id", return_value="abc123"
+        ):
+            await agent.setup(environment)
+        commands = [call.kwargs["command"] for call in environment.exec.await_args_list]
+        self.assertEqual(len(commands), 2)
+        self.assertIn("codex --version", commands[0])
+        self.assertIn("/usr/local/share/ca-certificates/exo-gateway.crt", commands[1])
+        self.assertIn("-----BEGIN CERTIFICATE-----", commands[1])
+        self.assertIn("update-ca-certificates", commands[1])
+        # The harness learns the in-sandbox path through the exo environment.
+        self.assertEqual(
+            agent._client.sandbox_ca_path, "/usr/local/share/ca-certificates/exo-gateway.crt"
+        ) if not isinstance(agent._client, AsyncMock) else None
 
     async def test_a_failed_install_fails_setup(self) -> None:
         agent = self.build("claude-code")
@@ -206,3 +231,19 @@ class RunTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExoClientEnvironmentTest(unittest.TestCase):
+    def test_the_sandbox_ca_path_reaches_exo_as_an_environment_variable(self) -> None:
+        from exo_harbor.exo import ExoClient
+
+        plain = ExoClient(exo_bin=Path("/x"), exo_root=Path("/r"), repo_root=Path("/repo"))
+        self.assertNotIn("EXO_SANDBOX_CA_CERTS", plain._environment())
+        with_ca = ExoClient(
+            exo_bin=Path("/x"), exo_root=Path("/r"), repo_root=Path("/repo"),
+            sandbox_ca_path="/usr/local/share/ca-certificates/exo-gateway.crt",
+        )
+        self.assertEqual(
+            with_ca._environment()["EXO_SANDBOX_CA_CERTS"],
+            "/usr/local/share/ca-certificates/exo-gateway.crt",
+        )

@@ -750,6 +750,12 @@ export function claudeSandboxBaseEnv(
   if (modelBinding.apiKey) {
     env.ANTHROPIC_API_KEY = modelBinding.apiKey;
   }
+  // A private CA the sandbox must trust, such as a TLS model gateway's; the
+  // value is a path inside the sandbox. Claude Code reads Node's variable.
+  const sandboxCaCerts = process.env.EXO_SANDBOX_CA_CERTS;
+  if (sandboxCaCerts) {
+    env.NODE_EXTRA_CA_CERTS = sandboxCaCerts;
+  }
   const gateway = claudeGatewayBaseUrl(modelBinding);
   if (gateway === null) {
     if (modelBinding.baseUrl) {
@@ -809,6 +815,7 @@ function claudeSandboxEnv(
     return (
       key.startsWith("ANTHROPIC_") ||
       key.startsWith("CLAUDE_") ||
+      key === "NODE_EXTRA_CA_CERTS" ||
       key === "TRACEPARENT" ||
       key === "TRACESTATE"
     );

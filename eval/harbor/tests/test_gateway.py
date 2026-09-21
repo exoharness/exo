@@ -12,6 +12,7 @@ from exo_harbor.gateway import (
     GatewayError,
     free_port,
     gateway_executable,
+    generate_certificate,
     is_anthropic_model,
     needs_gateway,
     wait_for_health,
@@ -34,25 +35,22 @@ class GatewayTest(unittest.TestCase):
             self.assertFalse(needs_gateway(harness, "claude-sonnet-4-6"))
             self.assertFalse(needs_gateway(harness, "gpt-5.5"))
 
-    def test_an_installed_gateway_is_reused_without_installing(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            venv = Path(directory)
-            (venv / "bin").mkdir()
-            (venv / "bin" / "litellm").write_text("#!/bin/sh\n")
-            with patch("exo_harbor.gateway.subprocess.run") as run:
-                self.assertEqual(gateway_executable(venv), venv / "bin" / "litellm")
-            run.assert_not_called()
+    def test_the_gateway_command_lives_beside_the_interpreter(self) -> None:
+        with patch("exo_harbor.gateway.Path.is_file", return_value=True):
+            self.assertEqual(gateway_executable().name, "litellm")
+        with patch("exo_harbor.gateway.Path.is_file", return_value=False):
+            with self.assertRaisesRegex(GatewayError, "litellm[^ ]* is missing"):
+                gateway_executable()
 
-    def test_a_missing_gateway_is_installed_into_its_own_venv(self) -> None:
+    def test_the_certificate_names_the_docker_host_address(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            venv = Path(directory) / "gateway"
-            with patch("exo_harbor.gateway.subprocess.run") as run:
-                with self.assertRaisesRegex(GatewayError, "still missing"):
-                    gateway_executable(venv)
-            commands = [call.args[0] for call in run.call_args_list]
-            self.assertEqual(commands[0][1:], ["-m", "venv", str(venv)])
-            self.assertEqual(commands[1][0], str(venv / "bin" / "pip"))
-            self.assertIn("litellm[proxy]==1.101.0", commands[1])
+            cert, key = generate_certificate("172.17.0.1", Path(directory))
+            self.assertTrue(cert.is_file() and key.is_file())
+            text = subprocess.run(
+                ["openssl", "x509", "-in", str(cert), "-noout", "-text"],
+                capture_output=True, text=True, check=True,
+            ).stdout
+            self.assertIn("IP Address:172.17.0.1", text)
 
     def test_free_port_is_usable(self) -> None:
         port = free_port()

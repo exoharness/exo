@@ -112,9 +112,13 @@ Claude Code only speaks the Anthropic Messages API and Codex only the OpenAI
 Responses API, so `--harness=claude-code` on an OpenAI model, or
 `--harness=codex` on an Anthropic one, needs a gateway that serves the model in
 the CLI's format. With no `--base-url`, the eval runs one itself for the length
-of the job: a LiteLLM proxy on the host, in its own virtualenv beside the eval's
-(`.gateway-venv`, installed on first use), forwarding to the provider with the
-key named by `--api-key-env`. That variable has to be the provider's own
+of the job: a LiteLLM proxy on the host, forwarding to the provider with the
+key named by `--api-key-env`. It serves TLS with a certificate generated for
+the Docker bridge address, because Harbor's egress sidecar proxies plain HTTP
+and drops a response whose headers take over about 15 seconds (routine for a
+slow model on a large prompt), while it passes TLS through untouched. Each
+trial installs the certificate into its task container at setup. The key
+variable has to be the provider's own
 (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, ...), since LiteLLM reads it by name:
 
 ```bash
@@ -125,11 +129,18 @@ key named by `--api-key-env`. That variable has to be the provider's own
 ```
 
 The same gateway serves a plain exo agent outside the eval. Run it, register
-the model against the URL it prints, and create the agent as usual:
+the model against the URL it prints, and create the agent as usual. A plain exo
+Docker sandbox has no egress proxy, so `--no-tls` avoids having to trust a
+certificate there:
 
 ```bash
-OPENAI_API_KEY=... .venv/bin/python -m exo_harbor.gateway gpt-5.5
+OPENAI_API_KEY=... .venv/bin/python -m exo_harbor.gateway --no-tls gpt-5.5
 ```
+
+`eval.sh` sets the environment up with [uv](https://docs.astral.sh/uv/), which
+has to be installed. pip cannot install `litellm[proxy]` next to harbor because
+litellm pins `rich<14` for its admin CLI alone; `overrides.txt` lifts the pin
+for uv, and https://github.com/BerriAI/litellm/pull/42322 asks upstream to.
 
 A `--base-url` skips the local gateway and points Claude Code at a hosted one
 instead. OpenRouter serves its whole catalog in Anthropic format, and the
