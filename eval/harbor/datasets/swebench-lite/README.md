@@ -14,22 +14,20 @@ It is a self-contained `uv run` script: uv fetches the pinned `swebench`
 package, which supplies each repository's test command and the per-instance
 image name. Each task is rendered from `task-template/`:
 
-| File                     | Purpose                                                                                                                                                                                                                    |
-| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `instruction.md`         | the issue text, with a short preamble saying the repository is at `/testbed` and hidden tests grade a code change. Without it, an agent can read an issue phrased as a question as something to answer rather than fix.    |
-| `task.toml`              | Harbor config. The agent phase runs with `network_mode = "no-network"` so it cannot fetch the upstream fix or the issue thread; the verifier stays public because its grading script installs the swebench parser with uv. |
-| `environment/Dockerfile` | `FROM` the prebuilt `swebench/sweb.eval.x86_64.*` image, plus uv for the verifier.                                                                                                                                         |
-| `tests/test.sh`          | resets and applies the hidden test patch, runs the tests, and grades the log with SWE-bench's parser.                                                                                                                      |
-| `tests/config.json`      | the raw dataset record the grader reads.                                                                                                                                                                                   |
-| `solution/solve.sh`      | applies the gold patch, for Harbor's oracle agent.                                                                                                                                                                         |
+| File                     | Purpose                                                                                                            |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| `instruction.md`         | the issue text, with a short preamble saying the repository is at `/testbed` and hidden tests grade a code change. |
+| `task.toml`              | Harbor config (w/ `network_mode = "no-network"` to prevent upstream fix fetching)                                  |
+| `environment/Dockerfile` | `FROM` the prebuilt `swebench/sweb.eval.x86_64.*` image, plus uv for the verifier.                                 |
+| `tests/test.sh`          | resets and applies the hidden test patch, runs the tests, and grades the log with SWE-bench's parser.              |
+| `tests/config.json`      | the raw dataset record the grader reads.                                                                           |
+| `solution/solve.sh`      | applies the gold patch, for Harbor's oracle agent.                                                                 |
 
 The test-script construction follows Harbor's own swebench adapter, which
 mirrors SWE-bench's evaluation script. Each task's first run pulls a
 multi-gigabyte image from Docker Hub.
 
-Switching network modes between phases uses Harbor's egress-control sidecar,
-which needs nftables fib support in the Docker host's kernel. Note that
-Exo's `web_search` and `web_fetch` tools run on the host, outside the
+Note: Exo's `web_search` and `web_fetch` tools run on the host, outside the
 container, so the task's network policy does not cover them.
 
 The generated task directories are gitignored; only the recipe is tracked.
