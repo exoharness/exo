@@ -16,6 +16,8 @@ import tomllib
 from fnmatch import fnmatch
 from pathlib import Path
 
+from exo_harbor.gateway import GatewayError, ModelGateway, is_anthropic_model
+
 
 DATASETS = {
     "terminal-bench": "terminal-bench@2.0",
@@ -120,7 +122,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--base-url",
-        help="provider base URL; omitted uses the OpenAI default",
+        help="provider base URL; omitted uses the provider's default endpoint",
     )
     parser.add_argument("--n-tasks", type=int)
     parser.add_argument(
@@ -152,12 +154,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--harness",
-        choices=("exo", "basic", "pi"),
+        choices=("exo", "basic", "pi", "claude-code"),
         help=(
             "which executor to evaluate; `basic` is a control arm with only a "
-            "shell -- no memory, no skills, no self-editing; `pi` drives the "
-            "Pi coding agent inside the task container, installing it there "
-            "first"
+            "shell -- no memory, no skills, no self-editing; `pi` and "
+            "`claude-code` drive the Pi coding agent or Claude Code inside the "
+            "task container, installing it there first. Claude Code speaks "
+            "only the Anthropic Messages API, so on a non-Anthropic --model the "
+            "eval runs a local LiteLLM gateway for the job unless --base-url "
+            "names a hosted one, for example https://openrouter.ai/api/v1"
         ),
     )
     parser.add_argument(
@@ -428,17 +433,34 @@ def main() -> int:
             "--model",
             args.provider_model or args.model,
         ]
-        if args.base_url:
-            register.extend(("--base-url", args.base_url))
-        subprocess.run(register, cwd=repo, check=True)
-        print(f"Run directory: {run_dir}")
+        gateway: ModelGateway | None = None
+        base_url = args.base_url
+        upstream_model = args.provider_model or args.model
+        if (
+            args.harness == "claude-code"
+            and base_url is None
+            and not is_anthropic_model(upstream_model)
+        ):
+            # Claude Code only speaks the Anthropic Messages API, so any other
+            # provider sits behind a translating gateway for this job.
+            gateway = ModelGateway.start(upstream_model, run_dir / "gateway.log")
+            base_url = gateway.base_url
+            print(f"Gateway: {base_url} for {upstream_model} (log: {gateway.log_path})")
+        try:
+            if base_url:
+                register.extend(("--base-url", base_url))
+            subprocess.run(register, cwd=repo, check=True)
+            print(f"Run directory: {run_dir}")
 
-        print("\n===Trials===", flush=True)
-        # Let Harbor own the terminal so its built-in live progress UI works.
-        subprocess.run(command, cwd=repo, check=True)
+            print("\n===Trials===", flush=True)
+            # Let Harbor own the terminal so its built-in live progress UI works.
+            subprocess.run(command, cwd=repo, check=True)
+        finally:
+            if gateway is not None:
+                gateway.close()
         print_result_paths(jobs_dir, job_name)
         return 0
-    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+    except (OSError, ValueError, GatewayError, subprocess.CalledProcessError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:

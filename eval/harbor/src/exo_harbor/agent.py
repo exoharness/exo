@@ -16,7 +16,7 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
 from exo_harbor import conventions
-from exo_harbor.exo import PI_HARNESS, ExoClient
+from exo_harbor.exo import CLAUDE_CODE_HARNESS, PI_HARNESS, ExoClient
 from exo_harbor.trajectory import export_trial_trajectory
 
 logger = logging.getLogger(__name__)
@@ -73,10 +73,12 @@ class ExoAgent(BaseAgent):
     @override
     async def setup(self, environment: BaseEnvironment) -> None:
         self._container_id = get_harbor_docker_container_id(environment.session_id)
+        # The coding-agent harnesses run their agent binary inside the
+        # sandbox, and Harbor's task images do not ship it.
         if self._harness == PI_HARNESS:
-            # Exo's pi harness runs the `pi` binary inside the sandbox, and
-            # Harbor's task images do not ship it.
             await install_pi(environment)
+        elif self._harness == CLAUDE_CODE_HARNESS:
+            await install_claude_code(environment)
 
         # setup dedicated conversation for the trial
         await self._client.ensure_conversation(self._conversation)
@@ -141,11 +143,12 @@ class ExoAgent(BaseAgent):
 # needs node 22.
 NODE_VERSION = "v22.15.0"
 PI_PACKAGE = "@earendil-works/pi-coding-agent"
-PI_INSTALL_TIMEOUT_SEC = 600
+CLAUDE_AGENT_SDK_PACKAGE = "@anthropic-ai/claude-agent-sdk"
+INSTALL_TIMEOUT_SEC = 600
 
 # Installed under /usr/local rather than through nvm because exo reaches the
 # container with a plain `docker exec`, which has no login shell to load nvm.
-PI_INSTALL_SCRIPT = f"""set -euo pipefail
+NODE_INSTALL_SCRIPT = f"""set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends ca-certificates curl xz-utils
@@ -156,23 +159,58 @@ case "$(uname -m)" in
 esac
 curl -fsSL "https://nodejs.org/dist/{NODE_VERSION}/node-{NODE_VERSION}-linux-$arch.tar.xz" \\
   | tar -xJ -C /usr/local --strip-components=1
-npm install -g --ignore-scripts "{PI_PACKAGE}"
+"""
+
+PI_INSTALL_SCRIPT = (
+    NODE_INSTALL_SCRIPT
+    + f"""npm install -g --ignore-scripts "{PI_PACKAGE}"
 pi --version
 """
+)
+
+# Mirrors exoharness/containers/claude-code-sandbox/Dockerfile: the CLI ships
+# in a per-platform native package, and the harness runs it as
+# /usr/local/bin/claude-code with HOME=/home/exo.
+CLAUDE_CODE_INSTALL_SCRIPT = (
+    NODE_INSTALL_SCRIPT
+    + f"""npm install -g "{CLAUDE_AGENT_SDK_PACKAGE}" "{CLAUDE_AGENT_SDK_PACKAGE}-linux-$arch"
+claude_bin="$(find "$(npm root -g)" -path "*/{CLAUDE_AGENT_SDK_PACKAGE}-linux-$arch/claude" -type f -print -quit)"
+test -n "$claude_bin"
+chmod +x "$claude_bin"
+ln -sf "$claude_bin" /usr/local/bin/claude-code
+mkdir -p /home/exo/.claude
+chmod -R a+rwX /home/exo
+claude-code --version
+"""
+)
+
 
 async def install_pi(environment: BaseEnvironment) -> None:
     """Install node and the Pi coding agent into Harbor's task container."""
+    await install_coding_agent(environment, "pi", PI_INSTALL_SCRIPT)
+
+
+async def install_claude_code(environment: BaseEnvironment) -> None:
+    """Install node and Claude Code into Harbor's task container."""
+    await install_coding_agent(environment, "claude-code", CLAUDE_CODE_INSTALL_SCRIPT)
+
+
+async def install_coding_agent(
+    environment: BaseEnvironment, name: str, script: str
+) -> None:
     result = await environment.exec(
-        command=PI_INSTALL_SCRIPT,
+        command=script,
         user="root",
-        timeout_sec=PI_INSTALL_TIMEOUT_SEC,
+        timeout_sec=INSTALL_TIMEOUT_SEC,
     )
     if result.return_code != 0:
         raise RuntimeError(
-            f"installing pi into the task container failed ({result.return_code}): "
+            f"installing {name} into the task container failed ({result.return_code}): "
             f"{(result.stderr or result.stdout or '').strip()[-2000:]}"
         )
-    logger.info("installed %s", (result.stdout or "").strip().splitlines()[-1:])
+    logger.info(
+        "installed %s %s", name, (result.stdout or "").strip().splitlines()[-1:]
+    )
 
 
 def get_harbor_docker_container_id(session_id: str) -> str:

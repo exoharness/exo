@@ -1,7 +1,6 @@
 FROM node:22-bookworm-slim
 
 ARG CLAUDE_AGENT_SDK_PACKAGE=@anthropic-ai/claude-agent-sdk
-ARG CLAUDE_AGENT_SDK_NATIVE_PACKAGE=@anthropic-ai/claude-agent-sdk-linux-arm64
 
 ENV CLAUDE_CONFIG_DIR=/home/exo/.claude
 ENV HOME=/home/exo
@@ -17,10 +16,18 @@ RUN apt-get update \
         ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g \
+# The Claude Code CLI ships as a per-platform native package next to the SDK.
+# Pick the one for the image's own architecture so this file builds under
+# Apple container (arm64) and Docker on x86 hosts alike.
+RUN case "$(uname -m)" in \
+        x86_64) arch=x64 ;; \
+        aarch64) arch=arm64 ;; \
+        *) echo "unsupported architecture $(uname -m)" >&2; exit 1 ;; \
+    esac \
+    && npm install -g \
         "${CLAUDE_AGENT_SDK_PACKAGE}" \
-        "${CLAUDE_AGENT_SDK_NATIVE_PACKAGE}" \
-    && CLAUDE_BIN="$(find "$(npm root -g)" -path "*/@anthropic-ai/claude-agent-sdk-linux-arm64/claude" -type f -print -quit)" \
+        "@anthropic-ai/claude-agent-sdk-linux-${arch}" \
+    && CLAUDE_BIN="$(find "$(npm root -g)" -path "*/@anthropic-ai/claude-agent-sdk-linux-${arch}/claude" -type f -print -quit)" \
     && test -n "${CLAUDE_BIN}" \
     && chmod +x "${CLAUDE_BIN}" \
     && ln -sf "${CLAUDE_BIN}" /usr/local/bin/claude-code

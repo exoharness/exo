@@ -37,9 +37,10 @@ class ExoAgentTest(unittest.TestCase):
         agent.context_id = second
         self.assertEqual(agent._conversation, f"trial-{second}")
 
-class PiHarnessTest(unittest.IsolatedAsyncioTestCase):
-    """The pi harness runs `pi` inside the task container, which Harbor's
-    images do not ship, so setup has to install it there first."""
+class CodingAgentHarnessTest(unittest.IsolatedAsyncioTestCase):
+    """The pi and claude-code harnesses run their agent inside the task
+    container, which Harbor's images do not ship, so setup has to install it
+    there first."""
 
     def build(self, harness: str) -> ExoAgent:
         agent = ExoAgent(
@@ -68,6 +69,41 @@ class PiHarnessTest(unittest.IsolatedAsyncioTestCase):
         environment.exec.assert_awaited_once()
         self.assertEqual(environment.exec.await_args.kwargs["user"], "root")
         self.assertIn("pi --version", environment.exec.await_args.kwargs["command"])
+
+    async def test_claude_code_installs_into_the_container_as_root(self) -> None:
+        agent = self.build("claude-code")
+        environment = SimpleNamespace(
+            session_id="session-1",
+            exec=AsyncMock(
+                return_value=SimpleNamespace(return_code=0, stdout="2.1.0 (Claude Code)")
+            ),
+        )
+        with patch(
+            "exo_harbor.agent.get_harbor_docker_container_id", return_value="abc123"
+        ):
+            await agent.setup(environment)
+        environment.exec.assert_awaited_once()
+        self.assertEqual(environment.exec.await_args.kwargs["user"], "root")
+        command = environment.exec.await_args.kwargs["command"]
+        # The harness spawns this exact path with HOME=/home/exo.
+        self.assertIn("/usr/local/bin/claude-code", command)
+        self.assertIn("/home/exo/.claude", command)
+        self.assertIn("claude-code --version", command)
+
+    async def test_a_failed_install_fails_setup(self) -> None:
+        agent = self.build("claude-code")
+        environment = SimpleNamespace(
+            session_id="session-1",
+            exec=AsyncMock(
+                return_value=SimpleNamespace(return_code=1, stdout="", stderr="npm ERR!")
+            ),
+        )
+        with patch(
+            "exo_harbor.agent.get_harbor_docker_container_id", return_value="abc123"
+        ):
+            with self.assertRaisesRegex(RuntimeError, "installing claude-code"):
+                await agent.setup(environment)
+        agent._client.attach_container.assert_not_awaited()
 
 
 class SetupTest(unittest.IsolatedAsyncioTestCase):

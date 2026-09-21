@@ -96,6 +96,38 @@ Create the agent and start a conversation:
 ./target/debug/exo repl --agent ts-claude-code --conversation <conversation>
 ```
 
+The harness runs Claude Code headless with permission prompts bypassed; the
+exoharness sandbox is the boundary. In Claude Code's default mode a run with
+nobody to approve prompts has every file edit and most shell commands denied.
+
+### Claude Code on a non-Anthropic model
+
+Claude Code only speaks the Anthropic Messages API, so any other model reaches
+it through a gateway that serves the model in that format: OpenRouter does for
+its whole catalog, and a LiteLLM proxy (`litellm --model gpt-5.5`, reachable
+from Docker sandboxes at the bridge gateway, usually `http://172.17.0.1:4000`)
+or Ollama work the same way. The Harbor eval starts a LiteLLM gateway itself
+when the model is not Anthropic's; see `eval/harbor/README.md`. Register the
+model with the gateway's key and base URL; a base URL that is not
+`api.anthropic.com` switches the harness into gateway mode:
+
+```bash
+./target/debug/exo secret set openrouter --env OPENROUTER_API_KEY
+./target/debug/exo model register openai/gpt-5.5 --secret openrouter \
+  --base-url https://openrouter.ai/api/v1
+
+./target/debug/exo --harness claude-code agent create "Claude Code on GPT" \
+  --model openai/gpt-5.5
+```
+
+The OpenAI-style `/v1` base URL is the same one exo's other harnesses take for
+OpenRouter, so one binding serves them all; the harness drops that segment
+because Claude Code appends `/v1/messages` itself. In gateway mode the harness
+also passes the key as a bearer token, pins Claude Code's Haiku, Sonnet, Opus,
+and subagent model slots to the registered model so background calls do not
+ask the gateway for a Claude model it cannot serve, and turns off Claude Code's
+nonessential traffic.
+
 ## Cursor
 
 Register a Cursor model:
