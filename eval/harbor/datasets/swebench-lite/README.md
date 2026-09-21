@@ -1,34 +1,39 @@
 # SWE-bench Lite
 
 The 300-instance SWE-bench Lite split as Harbor tasks. Harbor's registry has
-SWE-bench Verified but not Lite, so `generate.sh` builds the task directories
-locally from Harbor's own swebench adapter:
+SWE-bench Verified but not Lite, so `generate.py` builds the task directories
+here from the HuggingFace dataset and the prebuilt SWE-bench images:
 
 ```bash
-./generate.sh                                  # all 300 tasks
-./generate.sh --limit 10                       # first 10, alphabetical
-./generate.sh --instance-id django__django-11099
+./generate.py                                    # all 300 tasks
+./generate.py --limit 10                         # first 10, by instance id
+./generate.py --instance-id django__django-11099 # one task; repeatable
 ```
 
-It clones the adapter at a pinned commit into `.upstream/`, applies
-`adapter-dataset-flag.patch`, and writes one directory per instance here.
-The patch makes three changes to the upstream adapter:
+It is a self-contained `uv run` script: uv fetches the pinned `swebench`
+package, which supplies each repository's test command and the per-instance
+image name. Each task is rendered from `task-template/`:
 
-- a `--dataset` flag, since upstream hardcodes SWE-bench Verified;
-- a short preamble in `instruction.md` telling the agent the repository is
-  at `/testbed` and that hidden tests grade a code change (upstream passes
-  the raw issue text, which an agent can mistake for a question);
-- `network_mode = "no-network"` for the agent phase, so the agent cannot
-  fetch the upstream fix or the issue thread. The verifier keeps public
-  access because its grading script installs the swebench parser with uv.
-  Harbor switches the container's policy between phases through its
-  egress-control sidecar, which needs nftables fib support in the Docker
-  host's kernel. Note that Exo's `web_search` and `web_fetch` tools run on
-  the host, outside the container, so the task policy does not cover them. Each task's
-  Dockerfile starts from the prebuilt `swebench/sweb.eval.x86_64.*` image on
-  Docker Hub, so the first run of each task pulls a multi-gigabyte image.
+| File                     | Purpose                                                                                                                                                                                                                    |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `instruction.md`         | the issue text, with a short preamble saying the repository is at `/testbed` and hidden tests grade a code change. Without it, an agent can read an issue phrased as a question as something to answer rather than fix.    |
+| `task.toml`              | Harbor config. The agent phase runs with `network_mode = "no-network"` so it cannot fetch the upstream fix or the issue thread; the verifier stays public because its grading script installs the swebench parser with uv. |
+| `environment/Dockerfile` | `FROM` the prebuilt `swebench/sweb.eval.x86_64.*` image, plus uv for the verifier.                                                                                                                                         |
+| `tests/test.sh`          | resets and applies the hidden test patch, runs the tests, and grades the log with SWE-bench's parser.                                                                                                                      |
+| `tests/config.json`      | the raw dataset record the grader reads.                                                                                                                                                                                   |
+| `solution/solve.sh`      | applies the gold patch, for Harbor's oracle agent.                                                                                                                                                                         |
 
-The generated directories are gitignored. Run the eval with:
+The test-script construction follows Harbor's own swebench adapter, which
+mirrors SWE-bench's evaluation script. Each task's first run pulls a
+multi-gigabyte image from Docker Hub.
+
+Switching network modes between phases uses Harbor's egress-control sidecar,
+which needs nftables fib support in the Docker host's kernel. Note that
+Exo's `web_search` and `web_fetch` tools run on the host, outside the
+container, so the task's network policy does not cover them.
+
+The generated task directories are gitignored; only the recipe is tracked.
+Run the eval with:
 
 ```bash
 ../../eval.sh --dataset=swebench-lite --n-tasks=3

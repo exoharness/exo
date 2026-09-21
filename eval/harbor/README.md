@@ -65,7 +65,7 @@ custom tools persist across trials and exercises restart and timeout handling.
 ```
 
 SWE-bench Lite is not in Harbor's registry. Generate its 300 tasks once with
-[`datasets/swebench-lite/generate.sh`](datasets/swebench-lite/generate.sh),
+[`datasets/swebench-lite/generate.py`](datasets/swebench-lite/generate.py),
 then run them like any other dataset:
 
 ```bash

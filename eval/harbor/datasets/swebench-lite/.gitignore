@@ -1,3 +1,4 @@
-# Generated SWE-bench Lite task directories and the upstream Harbor checkout.
-# Only the recipe (generate.sh, the patch, this file, README.md) is tracked.
-*/
+# Generated SWE-bench Lite task directories. Only the recipe (generate.py,
+# task-template/, this file, README.md) is tracked.
+/*/
+!/task-template/
