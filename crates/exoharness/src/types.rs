@@ -845,6 +845,7 @@ pub struct SandboxProvider(Cow<'static, str>);
 impl SandboxProvider {
     pub const Daytona: Self = Self::from_static("daytona");
     pub const E2b: Self = Self::from_static("e2b");
+    pub const Runta: Self = Self::from_static("runta");
     pub const Sprites: Self = Self::from_static("sprites");
     pub const Vercel: Self = Self::from_static("vercel");
     pub const AwsAgentCore: Self = Self::from_static("aws_agentcore");
@@ -1186,6 +1187,14 @@ pub enum SandboxProviderConfig {
         #[serde(default = "default_e2b_template")]
         default_image: String,
     },
+    Runta {
+        token_secret_id: SecretId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_url: Option<String>,
+        /// Runta Runtime Image id; empty selects the platform default.
+        #[serde(default)]
+        default_image: String,
+    },
     Sprites {
         token_secret_id: SecretId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1230,6 +1239,7 @@ impl SandboxProviderConfig {
         match self {
             Self::Daytona { .. } => SandboxProvider::Daytona,
             Self::E2b { .. } => SandboxProvider::E2b,
+            Self::Runta { .. } => SandboxProvider::Runta,
             Self::Sprites { .. } => SandboxProvider::Sprites,
             Self::Vercel { .. } => SandboxProvider::Vercel,
             Self::Docker { .. } => SandboxProvider::Docker,
@@ -1247,6 +1257,7 @@ impl SandboxProviderConfig {
             | Self::Docker { default_image, .. }
             | Self::Smolvm { default_image, .. }
             | Self::Firecracker { default_image, .. }
+            | Self::Runta { default_image, .. }
             | Self::E2b { default_image, .. }
             | Self::AwsAgentCore { default_image, .. } => Some(default_image),
             Self::Sprites { .. } => None,

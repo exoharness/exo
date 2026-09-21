@@ -213,7 +213,7 @@ pub(crate) fn agent_sandbox_spec(agent_config: &AgentConfig) -> ConversationSand
             .sandbox
             .image
             .clone()
-            .unwrap_or_else(|| DEFAULT_SANDBOX_IMAGE.to_string()),
+            .unwrap_or_else(|| default_sandbox_image(&agent_config.sandbox.provider)),
         default_workdir: agent_config
             .sandbox
             .mounts
@@ -236,7 +236,9 @@ pub(crate) fn conversation_sandbox_spec(
         image: config
             .effective_sandbox_image(agent_config)
             .map(str::to_string)
-            .unwrap_or_else(|| DEFAULT_SANDBOX_IMAGE.to_string()),
+            .unwrap_or_else(|| {
+                default_sandbox_image(&config.effective_sandbox_provider(agent_config))
+            }),
         default_workdir: config
             .mounts
             .first()
@@ -281,4 +283,14 @@ fn conversation_sandbox_lock(conversation_id: &str) -> Arc<AsyncMutex<()>> {
             .entry(conversation_id.to_string())
             .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
     )
+}
+
+// Runta selects a Runtime Image, not a Docker image. An empty image also lets
+// the harness resolve a provider binding's configured default.
+fn default_sandbox_image(provider: &SandboxProvider) -> String {
+    if *provider == SandboxProvider::Runta {
+        String::new()
+    } else {
+        DEFAULT_SANDBOX_IMAGE.to_string()
+    }
 }

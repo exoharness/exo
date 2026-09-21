@@ -56,9 +56,13 @@ pub use firecracker_lima::LimaFirecrackerSandboxBackend;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub mod process_bridge;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+mod runta;
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod smolvm;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod sprites;
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+pub use runta::{DEFAULT_RUNTA_API_URL, RuntaConfig, RuntaSandboxBackend};
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod vercel;
 #[cfg(not(all(not(target_arch = "wasm32"), feature = "basic-backend")))]

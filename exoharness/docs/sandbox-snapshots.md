@@ -1,6 +1,6 @@
 # Sandbox Snapshots
 
-Status: implemented for Docker, Daytona, E2B, Sprites, SmolVM, and
+Status: implemented for Docker, Daytona, E2B, Runta, Sprites, SmolVM, and
 Firecracker. Daytona can additionally restore a Docker snapshot (the
 cross-provider "teleport" bridge).
 
@@ -101,6 +101,7 @@ format name includes a version when its wire representation can evolve.
 | `docker-image-tar`     | Docker                            | Docker, Daytona                    |
 | `daytona-ref`          | Daytona                           | Daytona                            |
 | `e2b-ref`              | E2B                               | E2B                                |
+| `runta-ref`            | Runta                             | Runta                              |
 | `sprites-ref`          | Sprites                           | Sprites                            |
 | `smolvm-machine-pack`  | SmolVM                            | SmolVM                             |
 | `firecracker-host-ref` | Firecracker                       | Firecracker, Firecracker-over-Lima |

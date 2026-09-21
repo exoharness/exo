@@ -102,6 +102,7 @@ impl SandboxBackendRegistration {
             "firecracker" => Ok(Self::firecracker(FirecrackerBackendSpec::default())),
             "local_process" => Ok(Self::local_process()),
             "smolvm" => Ok(Self::smolvm()),
+            "runta" => Ok(Self::runta(RuntaBackendSpec::default())),
             "sprites" => Ok(Self::sprites(SpritesBackendSpec::default())),
             "vercel" => Ok(Self::vercel(VercelBackendSpec::with_conventional_secrets())),
             _ => bail!("sandbox provider {provider} is not built into exoharness"),
@@ -211,6 +212,20 @@ impl SandboxBackendRegistration {
                     None => inner.e2b_config_from_spec(&spec).await?,
                 };
                 Ok(Arc::new(crate::E2bSandboxBackend::new(config)?)
+                    as Arc<dyn ManagedSandboxBackend>)
+            })
+        })
+    }
+
+    pub fn runta(spec: RuntaBackendSpec) -> Self {
+        Self::from_factory(SandboxProvider::Runta, false, move |inner| {
+            let spec = spec.clone();
+            Box::pin(async move {
+                let config = match inner.runta_config_from_binding().await? {
+                    Some(config) => config,
+                    None => inner.runta_config_from_spec(&spec).await?,
+                };
+                Ok(Arc::new(crate::RuntaSandboxBackend::new(config)?)
                     as Arc<dyn ManagedSandboxBackend>)
             })
         })
@@ -352,6 +367,22 @@ impl Default for E2bBackendSpec {
             api_url: crate::DEFAULT_E2B_API_URL.to_string(),
             api_key_secret: "E2B_API_KEY".to_string(),
             template_id: crate::default_e2b_template(),
+        }
+    }
+}
+
+/// Runta connection config, resolved lazily from the secret store.
+#[derive(Debug, Clone)]
+pub struct RuntaBackendSpec {
+    pub api_url: String,
+    pub token_secret: String,
+}
+
+impl Default for RuntaBackendSpec {
+    fn default() -> Self {
+        Self {
+            api_url: crate::DEFAULT_RUNTA_API_URL.to_string(),
+            token_secret: "RUNTA_TOKEN".to_string(),
         }
     }
 }
@@ -541,6 +572,54 @@ impl BasicExoHarnessInner {
             envd_port: crate::DEFAULT_E2B_ENVD_PORT,
             envd_base_url: None,
             secure: false,
+        }))
+    }
+
+    async fn runta_config_from_spec(&self, spec: &RuntaBackendSpec) -> Result<crate::RuntaConfig> {
+        let token = self.secret_key(&spec.token_secret).await?.ok_or_else(|| {
+            anyhow!(
+                "runta sandbox requested but secret {:?} is not set",
+                spec.token_secret
+            )
+        })?;
+        Ok(crate::RuntaConfig {
+            token,
+            api_url: spec.api_url.clone(),
+        })
+    }
+
+    async fn runta_config_from_binding(&self) -> Result<Option<crate::RuntaConfig>> {
+        let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
+        let Some((token_secret_id, api_url)) =
+            bindings
+                .into_iter()
+                .rev()
+                .find_map(|record| match record.binding {
+                    Binding::Sandbox {
+                        config:
+                            SandboxProviderConfig::Runta {
+                                token_secret_id,
+                                api_url,
+                                ..
+                            },
+                        ..
+                    } => Some((token_secret_id, api_url)),
+                    _ => None,
+                })
+        else {
+            return Ok(None);
+        };
+        let token = self
+            .secret_key_by_id(token_secret_id)
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "runta sandbox binding references secret id {token_secret_id}, which is not set"
+                )
+            })?;
+        Ok(Some(crate::RuntaConfig {
+            token,
+            api_url: api_url.unwrap_or_else(|| crate::DEFAULT_RUNTA_API_URL.to_string()),
         }))
     }
 
@@ -895,6 +974,13 @@ impl BasicExoHarness {
         &self,
     ) -> Result<Option<crate::DaytonaConfig>> {
         self.inner.daytona_config_from_binding().await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn runta_config_from_binding_for_test(
+        &self,
+    ) -> Result<Option<crate::RuntaConfig>> {
+        self.inner.runta_config_from_binding().await
     }
 
     /// `seed` pre-populates the cache for the default provider, letting tests
