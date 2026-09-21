@@ -64,6 +64,14 @@ custom tools persist across trials and exercises restart and timeout handling.
 ./eval.sh --dataset=self-evolution-smoke-test
 ```
 
+SWE-bench Lite is not in Harbor's registry. Generate its 300 tasks once with
+[`datasets/swebench-lite/generate.sh`](datasets/swebench-lite/generate.sh),
+then run them like any other dataset:
+
+```bash
+./eval.sh --dataset=swebench-lite --n-tasks=3
+```
+
 For a short real benchmark run, `terminal-bench-easy` selects three Terminal
 Bench 2 tasks marked easy: `fix-git`, `prove-plus-comm`, and
 `cobol-modernization`.

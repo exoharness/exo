@@ -1,0 +1,3 @@
+# Generated SWE-bench Lite task directories and the upstream Harbor checkout.
+# Only the recipe (generate.sh, the patch, this file, README.md) is tracked.
+*/
