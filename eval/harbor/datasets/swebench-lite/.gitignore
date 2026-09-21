@@ -1,0 +1,4 @@
+# Generated SWE-bench Lite task directories. Only the recipe (generate.py,
+# task-template/, this file, README.md) is tracked.
+/*/
+!/task-template/

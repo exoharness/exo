@@ -4,9 +4,9 @@ version = "0.1.0"
 description = "Run Exo as a Harbor external agent"
 requires-python = ">=3.12"
 dependencies = [
-  # The integration only uses the external-agent and JobPlugin surface plus
-  # the ATIF trajectory models, all stable across recent minors. Verified on
-  # 0.20 and 0.23.
+  # The integration uses the external-agent and JobPlugin surface plus the
+  # ATIF trajectory models. ExoAgent declares an options_model, a hook that
+  # first shipped in 0.23.
   "harbor>=0.23",
 ]
 

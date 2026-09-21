@@ -11,6 +11,7 @@ pub mod contract_tests;
 #[cfg(all(not(target_arch = "wasm32"), feature = "firecracker"))]
 pub mod egress;
 mod error;
+pub mod harness;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod http;
 #[cfg(all(test, not(target_arch = "wasm32"), feature = "basic-backend"))]

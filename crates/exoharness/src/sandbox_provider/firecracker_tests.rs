@@ -896,7 +896,7 @@ impl DurableStopFixture {
             provider_state: None,
         };
         let record = MachineRecord {
-            machine_id: "fc-durable".into(),
+            machine_id: machine_id(&request.sandbox_id, &sandbox_spec_hash(&request.spec)),
             spec_hash: sandbox_spec_hash(&request.spec),
             runtime: test_runtime(),
             resolved_image: request.spec.image.clone(),
