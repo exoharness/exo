@@ -16,7 +16,7 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
 from exo_harbor import conventions
-from exo_harbor.exo import CLAUDE_CODE_HARNESS, PI_HARNESS, ExoClient
+from exo_harbor.exo import CLAUDE_CODE_HARNESS, CODEX_HARNESS, PI_HARNESS, ExoClient
 from exo_harbor.trajectory import export_trial_trajectory
 
 logger = logging.getLogger(__name__)
@@ -79,6 +79,8 @@ class ExoAgent(BaseAgent):
             await install_pi(environment)
         elif self._harness == CLAUDE_CODE_HARNESS:
             await install_claude_code(environment)
+        elif self._harness == CODEX_HARNESS:
+            await install_codex(environment)
 
         # setup dedicated conversation for the trial
         await self._client.ensure_conversation(self._conversation)
@@ -144,6 +146,7 @@ class ExoAgent(BaseAgent):
 NODE_VERSION = "v22.15.0"
 PI_PACKAGE = "@earendil-works/pi-coding-agent"
 CLAUDE_AGENT_SDK_PACKAGE = "@anthropic-ai/claude-agent-sdk"
+CODEX_PACKAGE = "@openai/codex"
 INSTALL_TIMEOUT_SEC = 600
 
 # Installed under /usr/local rather than through nvm because exo reaches the
@@ -184,6 +187,14 @@ claude-code --version
 """
 )
 
+# Mirrors exoharness/containers/codex-sandbox/Dockerfile.
+CODEX_INSTALL_SCRIPT = (
+    NODE_INSTALL_SCRIPT
+    + f"""npm install -g "{CODEX_PACKAGE}"
+codex --version
+"""
+)
+
 
 async def install_pi(environment: BaseEnvironment) -> None:
     """Install node and the Pi coding agent into Harbor's task container."""
@@ -193,6 +204,11 @@ async def install_pi(environment: BaseEnvironment) -> None:
 async def install_claude_code(environment: BaseEnvironment) -> None:
     """Install node and Claude Code into Harbor's task container."""
     await install_coding_agent(environment, "claude-code", CLAUDE_CODE_INSTALL_SCRIPT)
+
+
+async def install_codex(environment: BaseEnvironment) -> None:
+    """Install node and Codex into Harbor's task container."""
+    await install_coding_agent(environment, "codex", CODEX_INSTALL_SCRIPT)
 
 
 async def install_coding_agent(

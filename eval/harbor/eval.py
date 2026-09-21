@@ -16,7 +16,7 @@ import tomllib
 from fnmatch import fnmatch
 from pathlib import Path
 
-from exo_harbor.gateway import GatewayError, ModelGateway, is_anthropic_model
+from exo_harbor.gateway import GatewayError, ModelGateway, needs_gateway
 
 
 DATASETS = {
@@ -154,15 +154,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--harness",
-        choices=("exo", "basic", "pi", "claude-code"),
+        choices=("exo", "basic", "pi", "claude-code", "codex"),
         help=(
             "which executor to evaluate; `basic` is a control arm with only a "
-            "shell -- no memory, no skills, no self-editing; `pi` and "
-            "`claude-code` drive the Pi coding agent or Claude Code inside the "
-            "task container, installing it there first. Claude Code speaks "
-            "only the Anthropic Messages API, so on a non-Anthropic --model the "
-            "eval runs a local LiteLLM gateway for the job unless --base-url "
-            "names a hosted one, for example https://openrouter.ai/api/v1"
+            "shell -- no memory, no skills, no self-editing; `pi`, "
+            "`claude-code` and `codex` drive that coding agent inside the task "
+            "container, installing it there first. Claude Code speaks only the "
+            "Anthropic API and Codex only OpenAI's, so on the other vendor's "
+            "--model the eval runs a local LiteLLM gateway for the job unless "
+            "--base-url names a hosted one, for example "
+            "https://openrouter.ai/api/v1 for Claude Code"
         ),
     )
     parser.add_argument(
@@ -436,12 +437,8 @@ def main() -> int:
         gateway: ModelGateway | None = None
         base_url = args.base_url
         upstream_model = args.provider_model or args.model
-        if (
-            args.harness == "claude-code"
-            and base_url is None
-            and not is_anthropic_model(upstream_model)
-        ):
-            # Claude Code only speaks the Anthropic Messages API, so any other
+        if base_url is None and needs_gateway(args.harness or "exo", upstream_model):
+            # The vendor CLIs each speak one wire format, so the other vendor's
             # provider sits behind a translating gateway for this job.
             gateway = ModelGateway.start(upstream_model, run_dir / "gateway.log")
             base_url = gateway.base_url

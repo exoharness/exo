@@ -15,6 +15,7 @@ EXO_HARNESS = "exo"
 BASIC_HARNESS = "basic"
 PI_HARNESS = "pi"
 CLAUDE_CODE_HARNESS = "claude-code"
+CODEX_HARNESS = "codex"
 
 # `exo conversation sandbox attach` reports the new sandbox in prose:
 # "attached Docker container as sandbox <id> for <conversation>".

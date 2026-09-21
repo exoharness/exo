@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 from exo_harbor.trajectory import (
+    ToolResultData,
     ConversationEvents,
     build_trajectory,
     export_trial_trajectory,
@@ -316,3 +317,45 @@ class TrajectoryTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ToolResultShapesTest(unittest.TestCase):
+    """Each coding-agent harness records tool results in its own shape."""
+
+    def parse(self, result: dict) -> object:
+        return ToolResultData.model_validate(
+            {"type": "tool_result", "tool_call_id": "call-1", "result": result}
+        ).result
+
+    def test_pi_results(self) -> None:
+        result = self.parse(
+            {"is_error": False, "result": {"content": [{"type": "text", "text": "wrote"}]}}
+        )
+        self.assertEqual((result.ok(), result.text()), (True, "wrote"))
+
+    def test_claude_code_results(self) -> None:
+        result = self.parse({"content": "hello\n", "is_error": False})
+        self.assertEqual((result.ok(), result.text()), (True, "hello\n"))
+        result = self.parse(
+            {"content": [{"type": "text", "text": "<tool_use_error>bad</tool_use_error>"}], "is_error": True}
+        )
+        self.assertEqual((result.ok(), result.text()), (False, "<tool_use_error>bad</tool_use_error>"))
+
+    def test_codex_command_results(self) -> None:
+        result = self.parse(
+            {"duration_ms": 49, "exit_code": 0, "output": "hello from codex\n", "status": "completed"}
+        )
+        self.assertEqual((result.ok(), result.text()), (True, "hello from codex\n"))
+        result = self.parse(
+            {"duration_ms": 3, "exit_code": 1, "output": "boom", "status": "completed"}
+        )
+        self.assertFalse(result.ok())
+
+    def test_codex_item_and_error_results(self) -> None:
+        result = self.parse({"status": "completed", "result": {"content": [{"type": "text", "text": "ok"}]}, "error": None})
+        self.assertEqual((result.ok(), result.text()), (True, "ok"))
+        result = self.parse({"status": "failed", "result": None, "error": {"message": "denied"}})
+        self.assertFalse(result.ok())
+        self.assertIn("denied", result.text())
+        result = self.parse({"error": "tool exploded"})
+        self.assertEqual((result.ok(), result.text()), (False, "tool exploded"))

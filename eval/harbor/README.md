@@ -15,9 +15,9 @@ trials learned. The basic and pi harnesses carry no agent state, so they may
 run with `--n-concurrent` above 1.
 
 Use `--harness=exo` (the default) for Exo's tools and memory,
-`--harness=basic` for a shell-only control, `--harness=pi` to drive the Pi
-coding agent through Exo, or `--harness=claude-code` to drive Claude Code. Pi
-and Claude Code run inside the task container, so those arms install Node and
+`--harness=basic` for a shell-only control, or `--harness=pi`,
+`--harness=claude-code` or `--harness=codex` to drive that coding agent through
+Exo. Those three run inside the task container, so their arms install Node and
 the agent there at the start of each trial.
 
 ## How a trial runs in Harbor's container
@@ -100,17 +100,27 @@ For another provider, set `--api-key-env`, `--base-url`, and optionally
 name. These flags also work as `api_key_env`, `base_url`, and `provider_model`
 in the TOML config.
 
-Claude Code only speaks the Anthropic Messages API, so `--harness=claude-code`
-on a non-Anthropic model needs a gateway that serves the model in that format.
-With no `--base-url`, the eval runs one itself for the length of the job: a
-LiteLLM proxy on the host, in its own virtualenv beside the eval's
+Claude Code only speaks the Anthropic Messages API and Codex only the OpenAI
+Responses API, so `--harness=claude-code` on an OpenAI model, or
+`--harness=codex` on an Anthropic one, needs a gateway that serves the model in
+the CLI's format. With no `--base-url`, the eval runs one itself for the length
+of the job: a LiteLLM proxy on the host, in its own virtualenv beside the eval's
 (`.gateway-venv`, installed on first use), forwarding to the provider with the
 key named by `--api-key-env`. That variable has to be the provider's own
-(`OPENAI_API_KEY`, `GEMINI_API_KEY`, ...), since LiteLLM reads it by name:
+(`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, ...), since LiteLLM reads it by name:
 
 ```bash
 ./eval.sh --dataset=terminal-bench-easy --harness=claude-code \
   --model=gpt-5.5 --api-key-env=OPENAI_API_KEY
+./eval.sh --dataset=terminal-bench-easy --harness=codex \
+  --model=claude-sonnet-4-6 --api-key-env=ANTHROPIC_API_KEY
+```
+
+The same gateway serves a plain exo agent outside the eval. Run it, register
+the model against the URL it prints, and create the agent as usual:
+
+```bash
+OPENAI_API_KEY=... .venv/bin/python -m exo_harbor.gateway gpt-5.5
 ```
 
 A `--base-url` skips the local gateway and points Claude Code at a hosted one

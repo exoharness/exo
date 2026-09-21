@@ -67,6 +67,28 @@ Create the agent and start a conversation:
 ./target/debug/exo repl --agent ts-codex --conversation <conversation>
 ```
 
+### Codex on an Anthropic model
+
+Codex only speaks the OpenAI Responses API, so an Anthropic model reaches it
+through a gateway that serves that API, such as a LiteLLM proxy
+(`litellm --model claude-sonnet-4-6`, reachable from Docker sandboxes at the
+bridge gateway, usually `http://172.17.0.1:4000/v1`). The Harbor eval starts one
+itself, and `python -m exo_harbor.gateway <model>` from the eval's virtualenv
+runs the same gateway for a plain agent; see `eval/harbor/README.md`. Register
+the model with the gateway's base URL. Codex ignores `OPENAI_BASE_URL`, so the
+harness turns a binding's base URL into a Codex model provider (`-c` overrides
+on app-server) and starts threads on it; OpenRouter gets Chat Completions since
+it has no Responses API.
+
+```bash
+./target/debug/exo secret set anthropic --env ANTHROPIC_API_KEY
+./target/debug/exo model register claude-sonnet-4-6 --secret anthropic \
+  --base-url http://172.17.0.1:4000/v1
+
+./target/debug/exo --harness codex agent create "Codex on Claude" \
+  --model claude-sonnet-4-6
+```
+
 ## Claude Code
 
 Register an Anthropic model:

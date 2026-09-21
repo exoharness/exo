@@ -13,6 +13,7 @@ from exo_harbor.gateway import (
     free_port,
     gateway_executable,
     is_anthropic_model,
+    needs_gateway,
     wait_for_health,
 )
 
@@ -23,6 +24,15 @@ class GatewayTest(unittest.TestCase):
         self.assertTrue(is_anthropic_model("Claude-Opus-5"))
         self.assertFalse(is_anthropic_model("gpt-5.5"))
         self.assertFalse(is_anthropic_model("openai/gpt-5.5"))
+
+    def test_only_a_vendor_cli_on_the_other_vendors_model_needs_a_gateway(self) -> None:
+        self.assertTrue(needs_gateway("claude-code", "gpt-5.5"))
+        self.assertFalse(needs_gateway("claude-code", "claude-sonnet-4-6"))
+        self.assertTrue(needs_gateway("codex", "claude-sonnet-4-6"))
+        self.assertFalse(needs_gateway("codex", "gpt-5.5"))
+        for harness in ("exo", "basic", "pi"):
+            self.assertFalse(needs_gateway(harness, "claude-sonnet-4-6"))
+            self.assertFalse(needs_gateway(harness, "gpt-5.5"))
 
     def test_an_installed_gateway_is_reused_without_installing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

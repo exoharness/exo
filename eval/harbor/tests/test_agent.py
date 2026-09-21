@@ -38,7 +38,7 @@ class ExoAgentTest(unittest.TestCase):
         self.assertEqual(agent._conversation, f"trial-{second}")
 
 class CodingAgentHarnessTest(unittest.IsolatedAsyncioTestCase):
-    """The pi and claude-code harnesses run their agent inside the task
+    """The pi, claude-code and codex harnesses run their agent inside the task
     container, which Harbor's images do not ship, so setup has to install it
     there first."""
 
@@ -89,6 +89,22 @@ class CodingAgentHarnessTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/usr/local/bin/claude-code", command)
         self.assertIn("/home/exo/.claude", command)
         self.assertIn("claude-code --version", command)
+
+    async def test_codex_installs_into_the_container_as_root(self) -> None:
+        agent = self.build("codex")
+        environment = SimpleNamespace(
+            session_id="session-1",
+            exec=AsyncMock(
+                return_value=SimpleNamespace(return_code=0, stdout="codex-cli 0.50.0")
+            ),
+        )
+        with patch(
+            "exo_harbor.agent.get_harbor_docker_container_id", return_value="abc123"
+        ):
+            await agent.setup(environment)
+        environment.exec.assert_awaited_once()
+        self.assertEqual(environment.exec.await_args.kwargs["user"], "root")
+        self.assertIn("codex --version", environment.exec.await_args.kwargs["command"])
 
     async def test_a_failed_install_fails_setup(self) -> None:
         agent = self.build("claude-code")

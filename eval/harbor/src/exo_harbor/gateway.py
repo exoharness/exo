@@ -1,19 +1,25 @@
-"""A local Anthropic Messages gateway for Claude Code on non-Anthropic models.
+"""A local translating gateway for coding agents on another vendor's models.
 
-Claude Code speaks only the Anthropic Messages API. For any other provider the
-eval runs a LiteLLM proxy on the host for the length of the job: it accepts
-Messages-format requests, forwards them to the provider with that provider's
-own key, and translates the reply back, streaming and tool calls included.
+Claude Code speaks only the Anthropic Messages API and Codex only the OpenAI
+Responses API. When the model comes from the other vendor, the eval runs a
+LiteLLM proxy on the host for the length of the job: it serves both APIs,
+forwards to the provider with that provider's own key, and translates the reply
+back, streaming and tool calls included.
 Task containers reach the host through Docker's bridge gateway address, which
 every Docker network can route to.
 
 The proxy lives in its own virtualenv beside the eval's: litellm[proxy] pins
 `rich` below 14 while harbor needs 14.1 or newer, so the two cannot share one.
+
+Outside the eval, `python -m exo_harbor.gateway <model>` runs the same gateway
+for a plain exo agent and prints the `exo model register` line to point at it.
 """
 
 from __future__ import annotations
 
+import argparse
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -37,8 +43,21 @@ class GatewayError(RuntimeError):
 
 
 def is_anthropic_model(model: str) -> bool:
-    """Claude Code can call these directly; mirrors exo's own routing rule."""
+    """Anthropic's models, by exo's own routing rule (`claude*`)."""
     return model.lower().startswith("claude")
+
+
+def needs_gateway(harness: str, model: str) -> bool:
+    """Whether `harness` cannot call `model`'s provider in its native API.
+
+    exo's own harnesses translate for themselves; pi picks a provider from the
+    model name. Only the vendor CLIs are locked to one wire format.
+    """
+    if harness == "claude-code":
+        return not is_anthropic_model(model)
+    if harness == "codex":
+        return is_anthropic_model(model)
+    return False
 
 
 def docker_host_ip() -> str:
@@ -132,14 +151,21 @@ class ModelGateway:
                     "0.0.0.0",
                     "--port",
                     str(port),
+                    # Each CLI sends its own vendor's extras (Codex's
+                    # prompt_cache_key, for one); drop what the provider
+                    # cannot take instead of failing the request.
+                    "--drop_params",
                 ],
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 env=os.environ,
             )
+        # Codex appends `/responses` to an OpenAI-style `/v1` base URL, and the
+        # Claude Code harness drops that segment before appending its own
+        # `/v1/messages`, so one URL serves both.
         gateway = cls(
             process=process,
-            base_url=f"http://{docker_host_ip()}:{port}",
+            base_url=f"http://{docker_host_ip()}:{port}/v1",
             log_path=log_path,
         )
         try:
@@ -162,3 +188,42 @@ class ModelGateway:
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run a translating gateway so Claude Code can use a non-Anthropic "
+            "model, or Codex an Anthropic one. The provider key is read from "
+            "its usual variable (OPENAI_API_KEY, ANTHROPIC_API_KEY, ...)."
+        )
+    )
+    parser.add_argument("model", help="upstream model id, for example gpt-5.5")
+    parser.add_argument(
+        "--log",
+        type=Path,
+        default=Path("gateway.log"),
+        help="where the proxy writes its log (default: ./gateway.log)",
+    )
+    args = parser.parse_args()
+    try:
+        gateway = ModelGateway.start(args.model, args.log)
+    except GatewayError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    print(f"Gateway for {args.model}: {gateway.base_url} (log: {gateway.log_path})")
+    print("Register the model against it, then create the agent as usual:")
+    print(
+        f"  exo model register {args.model} --secret <secret> "
+        f"--base-url {gateway.base_url}"
+    )
+    print("Press Ctrl-C to stop.", flush=True)
+    try:
+        signal.sigwait({signal.SIGINT, signal.SIGTERM})
+    finally:
+        gateway.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
