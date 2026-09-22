@@ -26,7 +26,7 @@ impl SchedulerStore {
 
     pub async fn create_task(&self, request: NewScheduledTask) -> Result<ScheduledTaskRecord> {
         let task = ScheduledTaskRecord::new(request, now_ms())?;
-        self.put_task(&task).await?;
+        self.write_task(&task, Write::CreateOrReplace).await?;
         Ok(task)
     }
 
@@ -114,12 +114,31 @@ impl SchedulerStore {
         }
     }
 
+    /// Replaces an existing task record, and does nothing if the task is gone.
+    ///
+    /// A fire runs a model turn, so a task can be deleted while a run holds a
+    /// copy of its record. Writing that copy back must not bring the task
+    /// back, so this never creates the file. The existence check and the write
+    /// happen under the tasks lock, so a delete cannot land between them. Use
+    /// `create_task` to add a task.
     pub async fn put_task(&self, task: &ScheduledTaskRecord) -> Result<()> {
+        self.write_task(task, Write::ReplaceIfExists).await
+    }
+
+    async fn write_task(&self, task: &ScheduledTaskRecord, mode: Write) -> Result<()> {
         fs::create_dir_all(self.tasks_dir()).await?;
+        let root = self.root.clone();
         let path = self.task_path(&task.id);
-        write_json_file(&path, task)
-            .await
-            .with_context(|| format!("failed to write scheduled task {}", path.display()))
+        let bytes = serde_json::to_vec_pretty(task)?;
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let _lock = TasksLock::acquire(&root)?;
+            if mode == Write::ReplaceIfExists && !path.exists() {
+                return Ok(());
+            }
+            write_json_file_blocking(&path, &bytes)
+                .with_context(|| format!("failed to write scheduled task {}", path.display()))
+        })
+        .await?
     }
 
     pub async fn disable_task(&self, task_id: &str) -> Result<Option<ScheduledTaskRecord>> {
@@ -136,7 +155,13 @@ impl SchedulerStore {
         let Some(task) = self.get_task(task_id).await? else {
             return Ok(None);
         };
-        remove_file_if_exists(self.task_path(task_id)).await?;
+        let root = self.root.clone();
+        let path = self.task_path(task_id);
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let _lock = TasksLock::acquire(&root)?;
+            remove_file_if_exists_blocking(&path)
+        })
+        .await??;
         remove_dir_if_exists(self.runs_dir(task_id)).await?;
         Ok(Some(task))
     }
@@ -264,11 +289,16 @@ fn decode_task(bytes: &[u8]) -> Result<ScheduledTaskRecord> {
 /// record intact instead of a half-written one. Same shape as the adapter
 /// store's writer.
 async fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(value)?;
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || write_json_file_blocking(&path, &bytes)).await?
+}
+
+fn write_json_file_blocking(path: &Path, bytes: &[u8]) -> Result<()> {
     let temp_path = path.with_extension(format!("json.{}.tmp", Uuid7::now()));
-    fs::write(&temp_path, serde_json::to_vec_pretty(value)?)
-        .await
+    std::fs::write(&temp_path, bytes)
         .with_context(|| format!("failed to write temp file {}", temp_path.display()))?;
-    fs::rename(&temp_path, path).await.with_context(|| {
+    std::fs::rename(&temp_path, path).with_context(|| {
         format!(
             "failed to replace {} with temp file {}",
             path.display(),
@@ -277,8 +307,47 @@ async fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     })
 }
 
-async fn remove_file_if_exists(path: PathBuf) -> Result<()> {
-    match fs::remove_file(&path).await {
+/// Whether a task file write may bring the record into existence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Write {
+    /// Write unconditionally: the record is created, and a file already at
+    /// that path is overwritten.
+    CreateOrReplace,
+    /// Write only if the file is still there; a no-op once it is gone.
+    ReplaceIfExists,
+}
+
+/// Serializes task-file writes against deletes across processes: the runner,
+/// the CLI, and the harness all touch the same directory. Held around the file
+/// operations only, never across a run, and released by the OS if a holder
+/// dies.
+struct TasksLock(std::fs::File);
+
+impl TasksLock {
+    fn acquire(root: &Path) -> Result<Self> {
+        let path = root.join("tasks.lock");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("failed to open tasks lock {}", path.display()))?;
+        file.lock()
+            .with_context(|| format!("failed to lock tasks lock {}", path.display()))?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for TasksLock {
+    fn drop(&mut self) {
+        if let Err(error) = self.0.unlock() {
+            tracing::error!(%error, "failed to release scheduler tasks lock");
+        }
+    }
+}
+
+fn remove_file_if_exists_blocking(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => {
@@ -367,6 +436,40 @@ mod tests {
         let deleted = store.delete_task(&task.id).await.unwrap().unwrap();
         assert_eq!(deleted.id, task.id);
         assert!(store.get_task(&task.id).await.unwrap().is_none());
+    }
+
+    /// A run holds a task record across a fire, and a delete lands while it is
+    /// away. Writing that stale record back must not bring the task back.
+    #[tokio::test]
+    async fn a_task_deleted_during_a_run_stays_deleted() {
+        let tempdir = TempDir::new().unwrap();
+        let store = SchedulerStore::new(tempdir.path());
+        let task = store
+            .create_task(NewScheduledTask {
+                agent_id: "agent".to_string(),
+                conversation_id: "conversation".to_string(),
+                name: "check".to_string(),
+                schedule: "@every 1m".to_string(),
+                sandbox_mode: None,
+                setup_command: None,
+                command: vec!["true".to_string()],
+                report_prompt: "Report.".to_string(),
+                max_output_bytes: None,
+                missed: None,
+            })
+            .await
+            .unwrap();
+
+        // The runner reads the task and starts firing.
+        let mut in_flight = store.get_task(&task.id).await.unwrap().unwrap();
+        // delete_scheduled_task lands mid-run.
+        store.delete_task(&task.id).await.unwrap();
+        // The run finishes and puts the task back on the grid.
+        in_flight.next_run_at_ms = in_flight.next_run_at_ms.saturating_add(60_000);
+        store.put_task(&in_flight).await.unwrap();
+
+        assert!(store.get_task(&task.id).await.unwrap().is_none());
+        assert!(store.list_tasks().await.unwrap().is_empty());
     }
 
     #[tokio::test]
