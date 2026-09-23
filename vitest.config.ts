@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 
 // Mirror the tsconfig path aliases so tests can import modules that use them.
 export default defineConfig({
@@ -30,5 +30,9 @@ export default defineConfig({
         ),
       ),
     },
+  },
+  test: {
+    // Eval recipes clone benchmark repos, with their own test suites, here.
+    exclude: [...configDefaults.exclude, ".local/**"],
   },
 });
