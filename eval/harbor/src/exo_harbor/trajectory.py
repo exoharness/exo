@@ -213,9 +213,25 @@ def build_trajectory(
     ]
     calls: dict[str, Step] = {}
     usages: list[Usage] = []
+    # The first user message is the instruction step above; later ones are
+    # follow-up turns such as reflection on grader feedback.
+    instruction_seen = False
 
     for event in events:
         if isinstance(event.data, MessagesData):
+            for message in event.data.messages:
+                if not isinstance(message, UserMessage):
+                    continue
+                if instruction_seen:
+                    steps.append(
+                        Step(
+                            step_id=len(steps) + 1,
+                            timestamp=event.created_at,
+                            source="user",
+                            message=message.content,
+                        )
+                    )
+                instruction_seen = True
             assistant_messages = [
                 message
                 for message in event.data.messages

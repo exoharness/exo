@@ -33,16 +33,16 @@ MUTATION_TOOLS = {
     "uninstall_agent_tool",
     "uninstall_skill",
 }
-EXO_AGENT_REGISTRATION = """
-  - name: exo
-    kickoff_command: 'python -c "import signal; signal.pause()"'
-    kickoff_workdir: .
-    kickoff_env: null
-    install_script: null
-    agent_version: null
+SREGYM_PATCH = Path(__file__).with_name("sregym.patch")
+REVIEW_TIMEOUT_ENV = "SREGYM_REVIEW_TIMEOUT_SECONDS"
+REFLECTION_INSTRUCTIONS = """The benchmark has graded your work on this incident. Review your work and the grader feedback below.
+
+The cluster is still deployed exactly as you left it, so inspect it to understand what actually happened and what you missed. The benchmark no longer accepts submissions for this incident.
+
+Determine what went well or wrong and extract general lessons that will help you handle future incidents. Future incidents will not be identical to this one, but they may be similar: different faults in the same or similar applications, or the same kind of fault somewhere else. Prefer lessons and checks that transfer across incidents over details specific to this one. Before ending this turn, persist any useful generalizable lesson in durable memory so later incident conversations can use it. If any routine appeared that may be reusable, create or improve a tool or skill for it. Also add tools that would make investigating similar incidents quicker or cheaper, for example commands you ran repeatedly, sweeps you should have run early, or checks that would have found this fault sooner. If there is any mechanism in your own policy or implementation that could be improved for this class of task, change it. Anything you only say in your reply is a report to the evaluator; it does not persist learning. If there is genuinely nothing worth retaining, say so explicitly.
+
+Grader feedback:
 """
-PASSIVE_AGENTS = 'if agent in {"autosubmit", "debug"}:'
-PATCHED_PASSIVE_AGENTS = 'if agent in {"autosubmit", "debug", "exo"}:'
 
 
 def parse_args(arguments: list[str] | None = None) -> argparse.Namespace:
@@ -74,6 +74,8 @@ def parse_args(arguments: list[str] | None = None) -> argparse.Namespace:
         "--container-hardening", choices=("on", "off"), default="on"
     )
     parser.add_argument("--noise", action="store_true")
+    parser.add_argument("--reflection", action="store_true")
+    parser.add_argument("--reflection-timeout", type=int, default=900)
     parser.add_argument("--baseline", type=int)
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--force-build-sregym", action="store_true")
@@ -84,7 +86,12 @@ def parse_args(arguments: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--mcp-port", type=int, default=9954)
     parser.add_argument("--k8s-proxy-port", type=int, default=16443)
     parser.add_argument("--dry-run", action="store_true")
-    return parser.parse_args(arguments)
+    args = parser.parse_args(arguments)
+    if args.reflection and args.n_attempts > 1:
+        # The graded cluster shows Exo the answer, which would contaminate a
+        # later attempt at the same problem.
+        parser.error("--reflection requires --n-attempts 1")
+    return args
 
 
 def run(
@@ -148,24 +155,16 @@ def ensure_sregym_checkout(path: Path, *, repo: Path) -> None:
         )
 
 
-def ensure_agent_registration(sregym_root: Path) -> None:
-    registry = sregym_root / "agents.yaml"
-    text = registry.read_text()
-    if re.search(r"^\s*- name: exo\s*$", text, flags=re.MULTILINE):
+def ensure_sregym_patch(sregym_root: Path, patch: Path = SREGYM_PATCH) -> None:
+    """Apply the Exo agent registration, egress exemption, and review hold."""
+    applied = subprocess.run(
+        ["git", "apply", "--check", "--reverse", str(patch)],
+        cwd=sregym_root,
+        capture_output=True,
+    )
+    if applied.returncode == 0:
         return
-    registry.write_text(text.rstrip() + "\n" + EXO_AGENT_REGISTRATION)
-
-
-def ensure_provider_exemption(sregym_root: Path) -> None:
-    # Exo calls its model from the host, so the agent container needs no
-    # provider egress, like SREGym's own passive agents.
-    source = sregym_root / "sregym/service/provider_endpoints.py"
-    text = source.read_text()
-    if PATCHED_PASSIVE_AGENTS in text:
-        return
-    if PASSIVE_AGENTS not in text:
-        raise ValueError(f"cannot find SREGym's passive agent set in {source}")
-    source.write_text(text.replace(PASSIVE_AGENTS, PATCHED_PASSIVE_AGENTS))
+    run(["git", "apply", str(patch)], cwd=sregym_root)
 
 
 class ExoClient:
@@ -359,6 +358,39 @@ def api_json(port: int, path: str) -> dict[str, Any]:
         return json.load(response)
 
 
+def wait_for_review(port: int, process: subprocess.Popen[bytes]) -> dict[str, Any] | None:
+    """Return the grades once SREGym holds the attempt for review.
+
+    None means the attempt ended without a review, for example because the
+    agent timed out before submitting every stage.
+    """
+    while process.poll() is None:
+        try:
+            stage = api_json(port, "/status").get("stage")
+            if stage == "review":
+                return api_json(port, "/results")
+            if stage in {"tearing_down", "done", "aborted"}:
+                return None
+        except (OSError, urllib.error.URLError, json.JSONDecodeError):
+            pass
+        time.sleep(1)
+    return None
+
+
+def release_review(port: int) -> None:
+    request = urllib.request.Request(f"http://127.0.0.1:{port}/release", method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=5):
+            pass
+    except (OSError, urllib.error.URLError):
+        # Nothing is held: the attempt ended some other way, or SREGym exited.
+        pass
+
+
+def build_reflection(results: dict[str, Any]) -> str:
+    return REFLECTION_INSTRUCTIONS + json.dumps(results, indent=2, default=str) + "\n"
+
+
 def wait_for_app(port: int, process: subprocess.Popen[bytes]) -> dict[str, Any]:
     while process.poll() is None:
         try:
@@ -492,12 +524,14 @@ def write_artifacts(
     events: dict[str, Any],
     conversation: str,
     container_id: str,
+    reflected: bool,
 ) -> None:
     logs.mkdir(parents=True, exist_ok=True)
     (logs / "exo-trajectory.json").write_text(json.dumps(events, indent=2) + "\n")
     report = {
         "conversation": conversation,
         "container": container_id,
+        "reflected": reflected,
         "actions": improvement_actions(events),
     }
     (logs / "exo-self-improvements.json").write_text(
@@ -532,16 +566,31 @@ def run_trials(
         print(f"\n=== Exo trial {artifact_id} ({container_id[:12]}) ===", flush=True)
         client.ensure_conversation(conversation)
         client.attach(conversation, container_id)
+        reflected = False
         try:
             client.send(conversation, instruction, timeout)
+            if args.reflection:
+                results = wait_for_review(args.api_port, process)
+                if results is None:
+                    print("SREGym ended the attempt without a review", flush=True)
+                else:
+                    print("Reflecting on the graded incident", flush=True)
+                    client.send(
+                        conversation, build_reflection(results), args.reflection_timeout
+                    )
+                    reflected = True
         finally:
             try:
+                if args.reflection:
+                    # Let SREGym tear down before its agent container disappears.
+                    release_review(args.api_port)
                 events = client.events(conversation)
                 write_artifacts(
                     logs,
                     events=events,
                     conversation=conversation,
                     container_id=container_id,
+                    reflected=reflected,
                 )
             finally:
                 stop_container(container_id)
@@ -579,8 +628,7 @@ def main() -> int:
 
         run_dir.mkdir(parents=True, exist_ok=False)
         ensure_sregym_checkout(sregym_root, repo=repo)
-        ensure_agent_registration(sregym_root)
-        ensure_provider_exemption(sregym_root)
+        ensure_sregym_patch(sregym_root)
         run(["uv", "sync"], cwd=sregym_root)
 
         exo_binary = repo / "target/debug/exo"
@@ -607,6 +655,10 @@ def main() -> int:
             "MCP_SERVER_PORT": str(args.mcp_port),
             "K8S_PROXY_PORT": str(args.k8s_proxy_port),
         }
+        if args.reflection:
+            # SREGym's own deadline for the review hold; the runner releases
+            # first unless its reflection turn hangs past its timeout.
+            environment[REVIEW_TIMEOUT_ENV] = str(args.reflection_timeout + 120)
         if args.base_url:
             environment["JUDGE_API_BASE"] = args.base_url
             environment["JUDGE_API_KEY"] = os.environ[args.api_key_env]

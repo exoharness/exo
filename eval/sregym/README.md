@@ -4,8 +4,10 @@ This recipe evaluates one durable Exo agent across SREGym's native live
 Kubernetes incidents.
 
 The runner clones a pinned SREGym revision with submodules under
-`.local/sregym-evals/upstream/`, adds a passive `exo` agent registration, and
-starts SREGym normally. For each incident, Exo attaches to SREGym's isolated
+`.local/sregym-evals/upstream/`, applies `sregym.patch`, and starts SREGym
+normally. The patch registers a passive `exo` agent, exempts it from provider
+egress rules (Exo calls its model from the host), and adds an optional review
+hold used by `--reflection`. For each incident, Exo attaches to SREGym's isolated
 agent container. SREGym still owns the cluster, fault injection, network policy,
 agent container, grading, timeout, and cleanup.
 
@@ -43,6 +45,24 @@ Run the leaderboard-compatible 21-problem suite:
 
 Use `--provider-model` when Exo's local model name differs from the provider
 model ID. `--judge-model` independently selects the SREGym diagnosis judge.
+
+## Reflection
+
+With `--reflection`, SREGym holds each graded incident's cluster instead of
+tearing it down at once. The runner reads the grades from SREGym's API and
+sends them to Exo as one more turn in the incident's conversation, with the
+fault still live for inspection. Exo is asked to persist lessons, tools, and
+skills before the runner releases the hold and SREGym tears down. Submissions
+are already closed during review, so the grades cannot change.
+
+Reflection shows Exo the answer, so it refuses `--n-attempts` above 1.
+`--reflection-timeout` bounds the reflection turn (default 900s); SREGym's own
+hold deadline is two minutes longer. Time spent in review does not count
+against SREGym's agent timeout.
+
+```bash
+./eval.sh --suite sregym-lite --profile full --reflection
+```
 
 ## Outputs
 

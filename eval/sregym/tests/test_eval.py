@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,31 +15,49 @@ SPEC.loader.exec_module(sregym_eval)
 
 
 class EvalTests(unittest.TestCase):
-    def test_agent_registration_is_idempotent(self) -> None:
+    def test_sregym_patch_applies_once(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            registry = root / "agents.yaml"
-            registry.write_text("agents:\n  - name: codex\n")
-
-            sregym_eval.ensure_agent_registration(root)
-            sregym_eval.ensure_agent_registration(root)
-
-            self.assertEqual(registry.read_text().count("  - name: exo\n"), 1)
-
-    def test_provider_exemption_is_idempotent(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            source = root / "sregym/service/provider_endpoints.py"
-            source.parent.mkdir(parents=True)
-            source.write_text(f"    {sregym_eval.PASSIVE_AGENTS}\n        return ()\n")
-
-            sregym_eval.ensure_provider_exemption(root)
-            sregym_eval.ensure_provider_exemption(root)
-
-            self.assertEqual(
-                source.read_text(),
-                f"    {sregym_eval.PATCHED_PASSIVE_AGENTS}\n        return ()\n",
+            git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(root)]
+            subprocess.run([*git, "init", "-q"], check=True)
+            (root / "agents.yaml").write_text("agents: []\n")
+            subprocess.run([*git, "add", "."], check=True)
+            subprocess.run([*git, "commit", "-q", "-m", "base"], check=True)
+            (root / "agents.yaml").write_text("agents:\n  - name: exo\n")
+            patch = root / "exo.patch"
+            patch.write_text(
+                subprocess.run([*git, "diff"], check=True, capture_output=True, text=True).stdout
             )
+            subprocess.run([*git, "checkout", "--", "agents.yaml"], check=True)
+
+            sregym_eval.ensure_sregym_patch(root, patch)
+            sregym_eval.ensure_sregym_patch(root, patch)
+
+            self.assertEqual((root / "agents.yaml").read_text(), "agents:\n  - name: exo\n")
+
+    def test_real_patch_covers_every_sregym_change(self) -> None:
+        patch = sregym_eval.SREGYM_PATCH.read_text()
+        for path in (
+            "agents.yaml",
+            "sregym/service/provider_endpoints.py",
+            "sregym/conductor/conductor.py",
+            "sregym/conductor/conductor_api.py",
+            "main.py",
+        ):
+            self.assertIn(f"+++ b/{path}", patch)
+
+    def test_reflection_rejects_repeated_attempts(self) -> None:
+        with self.assertRaises(SystemExit):
+            sregym_eval.parse_args(["--reflection", "--n-attempts", "2"])
+        args = sregym_eval.parse_args(["--reflection"])
+        self.assertTrue(args.reflection)
+
+    def test_build_reflection_embeds_grader_feedback(self) -> None:
+        reflection = sregym_eval.build_reflection(
+            {"Diagnosis": {"success": False, "reasoning": "Blamed search"}}
+        )
+        self.assertIn("Blamed search", reflection)
+        self.assertIn("durable memory", reflection)
 
     def test_build_instruction_names_stages_and_namespaces(self) -> None:
         instruction = sregym_eval.build_instruction(

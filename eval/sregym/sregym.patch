@@ -1,0 +1,278 @@
+diff --git a/agents.yaml b/agents.yaml
+index 0bf96397..cded4d0d 100644
+--- a/agents.yaml
++++ b/agents.yaml
+@@ -113,3 +113,10 @@ agents:
+     install_script: null
+     agent_version: null
+     container_isolation: false
++
++  - name: exo
++    kickoff_command: 'python -c "import signal; signal.pause()"'
++    kickoff_workdir: .
++    kickoff_env: null
++    install_script: null
++    agent_version: null
+diff --git a/main.py b/main.py
+index c22423d6..f1999911 100644
+--- a/main.py
++++ b/main.py
+@@ -535,8 +535,15 @@ def driver_loop(
+ 
+                 timed_out = False
+                 agent_start_time = time.time()
++                # Review happens after grading, so it is not the agent's time.
++                review_seconds = 0.0
++                last_tick = agent_start_time
+                 while not abort_campaign_after_attempt and conductor.submission_stage != "done":
+-                    if time.time() - agent_start_time > agent_timeout:
++                    now = time.time()
++                    if conductor.submission_stage == "review":
++                        review_seconds += now - last_tick
++                    last_tick = now
++                    if now - agent_start_time - review_seconds > agent_timeout:
+                         timed_out = True
+                         console.log(f"⏰ Agent timeout ({agent_timeout}s) exceeded, killing agent")
+                         submission_work = conductor.close_submissions()
+diff --git a/sregym/conductor/conductor.py b/sregym/conductor/conductor.py
+index 25315ac3..6141f16e 100644
+--- a/sregym/conductor/conductor.py
++++ b/sregym/conductor/conductor.py
+@@ -4,6 +4,7 @@ import contextlib
+ import json
+ import logging
+ import math
++import os
+ import shlex
+ import shutil
+ import threading
+@@ -54,6 +55,9 @@ from sregym.service.telemetry.prometheus import Prometheus
+ # `--stages`' choices so the CLI and the conductor cannot disagree about what
+ # exists.
+ ALL_STAGES = ("diagnosis", "mitigation")
++# Seconds a graded attempt stays deployed for an external reviewer before
++# teardown. Unset keeps SREGym's normal immediate teardown.
++REVIEW_TIMEOUT_ENV = "SREGYM_REVIEW_TIMEOUT_SECONDS"
+ 
+ 
+ @dataclass
+@@ -126,6 +130,7 @@ class Conductor:
+         self._aborted_submission_generations: set[int] = set()
+         self._accepting_submissions = False
+         self._attempt_closed = True
++        self._review_release = threading.Event()
+ 
+         self.tasklist = None
+         self.logger = logging.getLogger("all.sregym.conductor")
+@@ -865,12 +870,45 @@ class Conductor:
+             # finishes. A concurrent submit observes ``tearing_down`` instead
+             # of a brief, invalid "idle mitigation" state.
+             try:
++                self._hold_for_review(generation)
+                 self._finish_problem(generation)
+             finally:
+                 with self._submission_lock:
+                     if generation == self._submission_generation:
+                         self._evaluating = False
+ 
++    def _hold_for_review(self, generation: int) -> None:
++        """Keep the graded environment deployed until a reviewer releases it.
++
++        Every stage is already graded, and ``review`` is not a submission
++        stage, so nothing done during review can change this attempt's results.
++        """
++        timeout = os.environ.get(REVIEW_TIMEOUT_ENV)
++        if not timeout:
++            return
++        with self._submission_lock:
++            if generation != self._submission_generation or generation in self._aborted_submission_generations:
++                return
++            self._review_release.clear()
++            self.submission_stage = "review"
++        self.logger.info("[STAGE] Holding graded environment for review")
++        with self._phase("review"):
++            released = self._review_release.wait(float(timeout))
++        if not released:
++            self.logger.warning(f"Review was not released within {timeout}s; tearing down")
++
++    def release_review(self) -> bool:
++        """End a review hold; return whether one was active."""
++        with self._submission_lock:
++            if self.submission_stage != "review":
++                return False
++            self._review_release.set()
++            return True
++
++    def results_snapshot(self) -> dict:
++        with self._submission_lock:
++            return dict(self.results)
++
+     async def submit(
+         self,
+         solution: str | None,
+@@ -1031,6 +1069,7 @@ class Conductor:
+             self._evaluating = False
+             self.submission_stage = "aborted"
+             self._submit_future = None
++            self._review_release.set()
+ 
+     async def wait_for_submission_evaluations(self, timeout: float | None) -> None:
+         """Wait for accepted stage requests and grading, but not teardown.
+@@ -1073,6 +1112,11 @@ class Conductor:
+             if stage in {"tearing_down", "done"}:
+                 return
+ 
++            # The driver only waits here once the agent is gone, and a review
++            # without its agent has nothing left to do.
++            if stage == "review":
++                self.release_review()
++
+             if future is None and not pending:
+                 return
+ 
+diff --git a/sregym/conductor/conductor_api.py b/sregym/conductor/conductor_api.py
+index 85a7b4be..2c3d543c 100644
+--- a/sregym/conductor/conductor_api.py
++++ b/sregym/conductor/conductor_api.py
+@@ -240,6 +240,28 @@ async def get_status():
+     return {"stage": stage}
+ 
+ 
++def _reviewing_conductor():
++    conductor = _conductor
++    if conductor is None:
++        raise HTTPException(status_code=400, detail="No problem has been started")
++    stage, _, _ = conductor.submission_state()
++    if stage != "review":
++        raise HTTPException(status_code=409, detail=f"No attempt is held for review; current stage is {stage!r}")
++    return conductor
++
++
++@app.get("/results")
++async def get_results():
++    """Return the graded results of an attempt held for review."""
++    return _reviewing_conductor().results_snapshot()
++
++
++@app.post("/release")
++async def release_review():
++    """Let an attempt held for review continue to teardown."""
++    return {"released": _reviewing_conductor().release_review()}
++
++
+ @app.get("/get_app")
+ async def get_app():
+     if _conductor is None:
+diff --git a/sregym/service/provider_endpoints.py b/sregym/service/provider_endpoints.py
+index eae3a8ca..a1810c9e 100644
+--- a/sregym/service/provider_endpoints.py
++++ b/sregym/service/provider_endpoints.py
+@@ -55,7 +55,7 @@ def provider_endpoint_rules(
+     agent = policy.agent_name.casefold()
+     model = (policy.model_id or "").strip()
+ 
+-    if agent in {"autosubmit", "debug"}:
++    if agent in {"autosubmit", "debug", "exo"}:
+         return ()
+     if agent == "codex":
+         custom_base = _configured_url(environment, "AGENT_API_BASE")
+diff --git a/tests/conductor/test_submission_lifecycle.py b/tests/conductor/test_submission_lifecycle.py
+index 7eb0dcc8..c8bb71e8 100644
+--- a/tests/conductor/test_submission_lifecycle.py
++++ b/tests/conductor/test_submission_lifecycle.py
+@@ -50,6 +50,7 @@ def _conductor(diagnosis_evaluation=None, mitigation_evaluation=None) -> Conduct
+     conductor._aborted_submission_generations = set()
+     conductor._accepting_submissions = True
+     conductor._attempt_closed = False
++    conductor._review_release = threading.Event()
+ 
+     def advance(self, start_index=0):
+         self.waiting_for_agent = False
+@@ -1017,3 +1018,87 @@ def test_teardown_failure_stays_incomplete_even_when_stage_results_exist():
+     assert conductor.finalize_attempt_status() == "incomplete"
+     assert conductor.results["incomplete_stage"] == "tearing_down"
+     assert conductor.results["missing_stages"] == ""
++
++
++def _reviewed_conductor(monkeypatch, cleanup_started: threading.Event) -> Conductor:
++    monkeypatch.setenv(conductor_module.REVIEW_TIMEOUT_ENV, "5")
++    conductor = _conductor(mitigation_evaluation=lambda _solution: {"success": False})
++    conductor.stage_sequence = conductor.stage_sequence[1:]
++    conductor.submission_stage = "mitigation"
++    conductor.problem = SimpleNamespace(
++        recover_fault=cleanup_started.set,
++        app=SimpleNamespace(cleanup=lambda: None),
++    )
++    return conductor
++
++
++async def _wait_for_stage(conductor: Conductor, stage: str) -> None:
++    for _ in range(200):
++        if conductor.submission_stage == stage:
++            return
++        await asyncio.sleep(0.01)
++    raise AssertionError(f"stage never became {stage!r}; is {conductor.submission_stage!r}")
++
++
++def test_graded_attempt_is_held_for_review_until_released(monkeypatch):
++    cleanup_started = threading.Event()
++    conductor = _reviewed_conductor(monkeypatch, cleanup_started)
++    monkeypatch.setattr(conductor_api, "_conductor", conductor)
++
++    async def run():
++        transport = httpx.ASGITransport(app=conductor_api.app)
++        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
++            early = await client.get("/results")
++            assert early.status_code == 409
++
++            mitigation = await client.post("/submit", json={"stage": "mitigation", "solution": ""})
++            assert mitigation.status_code == 200
++            await _wait_for_stage(conductor, "review")
++            assert not cleanup_started.is_set()
++
++            results = await client.get("/results")
++            assert results.json()["Mitigation"] == {"success": False}
++            resubmission = await client.post("/submit", json={"stage": "mitigation", "solution": ""})
++            assert resubmission.status_code == 409
++
++            released = await client.post("/release")
++            assert released.json() == {"released": True}
++            await conductor.wait_for_submission_work(timeout=2)
++
++    asyncio.run(run())
++
++    assert cleanup_started.is_set()
++    assert conductor.submission_stage == "done"
++    assert conductor.results["Mitigation"] == {"success": False}
++
++
++def test_agent_exit_ends_review(monkeypatch):
++    cleanup_started = threading.Event()
++    conductor = _reviewed_conductor(monkeypatch, cleanup_started)
++
++    async def run():
++        await conductor.submit("", expected_stage="mitigation")
++        await _wait_for_stage(conductor, "review")
++        conductor.close_submissions()
++        await conductor.wait_for_submission_evaluations(timeout=1)
++        await conductor.wait_for_submission_work(timeout=2)
++
++    asyncio.run(run())
++
++    assert cleanup_started.is_set()
++    assert conductor.submission_stage == "done"
++
++
++def test_attempt_is_not_held_without_a_review_timeout(monkeypatch):
++    cleanup_started = threading.Event()
++    conductor = _reviewed_conductor(monkeypatch, cleanup_started)
++    monkeypatch.delenv(conductor_module.REVIEW_TIMEOUT_ENV)
++
++    async def run():
++        await conductor.submit("", expected_stage="mitigation")
++        await conductor.wait_for_submission_work(timeout=2)
++
++    asyncio.run(run())
++
++    assert cleanup_started.is_set()
++    assert conductor.submission_stage == "done"

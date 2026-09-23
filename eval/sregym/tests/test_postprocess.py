@@ -117,10 +117,10 @@ class PostprocessTests(unittest.TestCase):
             trajectory = Trajectory.model_validate_json(
                 (run_dir / "trajectory.json").read_text()
             )
-            self.assertEqual(
-                (trial_dir / "agent/trajectory.json").read_text(),
-                (run_dir / "trajectory.json").read_text(),
-            )
+            harbor_copy = json.loads((trial_dir / "agent/trajectory.json").read_text())
+            self.assertEqual(harbor_copy["schema_version"], "ATIF-v1.8")
+            self.assertEqual(trajectory.schema_version, postprocess.SREGYM_ATIF_VERSION)
+            self.assertEqual(harbor_copy["steps"], trajectory.to_json_dict()["steps"])
             self.assertEqual(trajectory.steps[0].message, "Fix the incident.")
             self.assertEqual(
                 trajectory.steps[1].observation.results[0].content, "deny-all"

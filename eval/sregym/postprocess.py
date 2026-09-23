@@ -38,6 +38,7 @@ from exo_harbor.trajectory import (
 AGENT = "exo"
 DATASET = "sregym"
 RESULTS_FILE = f"{AGENT}_ALL_results.csv"
+SREGYM_ATIF_VERSION = "ATIF-v1.7"
 
 
 class ResultRow(BaseModel):
@@ -146,13 +147,14 @@ def export_trial(
         conversation=conversation,
         started_at=events[0].created_at,
     )
-    trajectory_json = json.dumps(trajectory.to_json_dict(), indent=2) + "\n"
-    # SREGym's own postprocess writes this file for the agents it knows.
-    (run_dir / "trajectory.json").write_text(trajectory_json)
-
+    document = trajectory.to_json_dict()
     trial_dir = job_dir / trial_name
     (trial_dir / "agent").mkdir(parents=True, exist_ok=True)
-    (trial_dir / "agent" / "trajectory.json").write_text(trajectory_json)
+    (trial_dir / "agent" / "trajectory.json").write_text(json.dumps(document, indent=2) + "\n")
+    # SREGym's own postprocess writes this file for the agents it knows. Its
+    # vendored ATIF model stops at v1.7; v1.8 only added audio content.
+    document["schema_version"] = SREGYM_ATIF_VERSION
+    (run_dir / "trajectory.json").write_text(json.dumps(document, indent=2) + "\n")
     (trial_dir / "verifier").mkdir(parents=True, exist_ok=True)
     (trial_dir / "verifier" / "test-stdout.txt").write_text(verdict(row))
     scores = rewards(row)
