@@ -43,6 +43,7 @@ class EvalTests(unittest.TestCase):
             "sregym/conductor/conductor.py",
             "sregym/conductor/conductor_api.py",
             "sregym/service/container_runner.py",
+            "sregym/agent_launcher.py",
             "main.py",
         ):
             self.assertIn(f"+++ b/{path}", patch)

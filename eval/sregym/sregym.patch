@@ -34,6 +34,28 @@ index c22423d6..f1999911 100644
                          timed_out = True
                          console.log(f"⏰ Agent timeout ({agent_timeout}s) exceeded, killing agent")
                          submission_work = conductor.close_submissions()
+diff --git a/sregym/agent_launcher.py b/sregym/agent_launcher.py
+index 7b21ee1d..d82a3f03 100644
+--- a/sregym/agent_launcher.py
++++ b/sregym/agent_launcher.py
+@@ -13,6 +13,7 @@ from pathlib import Path
+ from clients.harness.problem_id import HARNESS_ARTIFACT_ID_ENV, HARNESS_PROBLEM_ID_ENV
+ from sregym.service.container_runner import ContainerConfig, ContainerRunner, ExecInput
+ from sregym.service.internet_policy import InternetPolicy
++from sregym.service.provider_endpoints import CREDENTIAL_FREE_AGENTS
+ 
+ from .agent_registry import AgentRegistration
+ 
+@@ -71,6 +72,9 @@ class AgentLauncher:
+             )
+             if image is not None:
+                 config.image = image
++            if (self._internet_policy.agent_name or "").casefold() in CREDENTIAL_FREE_AGENTS:
++                config.forward_host_credentials = False
++                config.codex_auth = "none"
+             self._container_runner = ContainerRunner(config)
+             if force_build:
+                 self._container_runner.build_image()
 diff --git a/sregym/conductor/conductor.py b/sregym/conductor/conductor.py
 index 25315ac3..6141f16e 100644
 --- a/sregym/conductor/conductor.py
@@ -188,15 +210,28 @@ index 4fd0fe76..8131bd2b 100644
          if self.config.sregym_apps_path and self.config.sregym_app_subdirs:
              for subdir in self.config.sregym_app_subdirs:
 diff --git a/sregym/service/provider_endpoints.py b/sregym/service/provider_endpoints.py
-index eae3a8ca..a1810c9e 100644
+index eae3a8ca..470e22e1 100644
 --- a/sregym/service/provider_endpoints.py
 +++ b/sregym/service/provider_endpoints.py
-@@ -55,7 +55,7 @@ def provider_endpoint_rules(
+@@ -42,6 +42,12 @@ PROVIDERS = {
+ }
+ 
+ 
++# Agents that call no model provider from the container: SREGym's passive
++# agents, and external harnesses such as Exo that run their model on the host.
++# They get no provider egress and no forwarded credentials.
++CREDENTIAL_FREE_AGENTS = frozenset({"autosubmit", "debug", "exo"})
++
++
+ def provider_endpoint_rules(
+     policy: InternetPolicy,
+     environment: Mapping[str, str],
+@@ -55,7 +61,7 @@ def provider_endpoint_rules(
      agent = policy.agent_name.casefold()
      model = (policy.model_id or "").strip()
  
 -    if agent in {"autosubmit", "debug"}:
-+    if agent in {"autosubmit", "debug", "exo"}:
++    if agent in CREDENTIAL_FREE_AGENTS:
          return ()
      if agent == "codex":
          custom_base = _configured_url(environment, "AGENT_API_BASE")
@@ -301,10 +336,10 @@ index 7eb0dcc8..c8bb71e8 100644
 +    assert cleanup_started.is_set()
 +    assert conductor.submission_stage == "done"
 diff --git a/tests/service/test_container_hardening.py b/tests/service/test_container_hardening.py
-index 989559ab..806b490b 100644
+index 989559ab..3b804f92 100644
 --- a/tests/service/test_container_hardening.py
 +++ b/tests/service/test_container_hardening.py
-@@ -114,3 +114,19 @@ def test_hardening_cannot_change_after_the_runner_exists(monkeypatch):
+@@ -114,3 +114,39 @@ def test_hardening_cannot_change_after_the_runner_exists(monkeypatch):
  
      with pytest.raises(RuntimeError):
          launcher.set_container_hardening(False)
@@ -324,3 +359,23 @@ index 989559ab..806b490b 100644
 +    args = make_runner()._build_base_docker_args()
 +
 +    assert "/workspace/exo" not in " ".join(args)
++
++
++@pytest.mark.parametrize("agent, forwarded", [("exo", False), ("debug", False), ("codex", True)])
++def test_credential_free_agents_get_no_host_credentials(monkeypatch, agent, forwarded):
++    captured = {}
++
++    class StubRunner:
++        def __init__(self, config):
++            captured["config"] = config
++
++        def ensure_image_exists(self):
++            pass
++
++    monkeypatch.setattr(agent_launcher, "ContainerRunner", StubRunner)
++    launcher = agent_launcher.AgentLauncher()
++    launcher.set_internet_policy(InternetPolicy.from_mode("filtered", agent_name=agent, model_id="gpt-5"))
++    launcher.enable_container_isolation()
++
++    assert captured["config"].forward_host_credentials is forwarded
++    assert (captured["config"].codex_auth == "none") is not forwarded
