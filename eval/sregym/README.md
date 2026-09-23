@@ -6,9 +6,10 @@ Kubernetes incidents.
 The runner clones a pinned SREGym revision with submodules under
 `.local/sregym-evals/upstream/`, applies `sregym.patch`, and starts SREGym
 normally. The patch registers a passive `exo` agent, exempts it from provider
-egress rules (Exo calls its model from the host), lets the runner add bind
-mounts to the agent container, and adds an optional review hold used by
-`--reflection`.
+egress rules and from SREGym's credential forwarding (Exo calls its model from
+the host, so the agent container gets neither API keys nor Codex auth), lets
+the runner add bind mounts to the agent container, and adds an optional review
+hold used by `--reflection`.
 
 As in a regular `exo.sh` launch, this repository is mounted read-write at
 `/workspace/exo` inside the container Exo works in, so Exo can inspect and
