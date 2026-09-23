@@ -107,9 +107,21 @@ pub async fn run_task(
     mut task: ScheduledTaskRecord,
 ) -> Result<Vec<ScheduledTaskRunRecord>> {
     let plan = task.plan_missed_fires(now_ms())?;
+    let lease_id = task.lease.as_ref().map(|lease| lease.id.clone());
     let mut runs = Vec::with_capacity(plan.fire_slots.len());
     for slot_ms in &plan.fire_slots {
-        runs.push(fire_once(Arc::clone(&harness), store, &mut task, *slot_ms).await?);
+        let Some(run) = fire_once(
+            Arc::clone(&harness),
+            store,
+            &mut task,
+            *slot_ms,
+            lease_id.as_deref(),
+        )
+        .await?
+        else {
+            break;
+        };
+        runs.push(run);
         if !task.enabled {
             // The agent or conversation is gone; the rest of the backlog would
             // fail identically.
@@ -117,7 +129,11 @@ pub async fn run_task(
         }
     }
     task.resume_after_fires(&plan, now_ms());
-    store.put_task(&task).await?;
+    if let Some(lease_id) = lease_id {
+        let _ = store.put_task_if_lease(&task, &lease_id).await?;
+    } else {
+        let _ = store.put_task_if_present(&task).await?;
+    }
     Ok(runs)
 }
 
@@ -126,7 +142,8 @@ async fn fire_once(
     store: &SchedulerStore,
     task: &mut ScheduledTaskRecord,
     slot_ms: u64,
-) -> Result<ScheduledTaskRunRecord> {
+    lease_id: Option<&str>,
+) -> Result<Option<ScheduledTaskRunRecord>> {
     let started_at_ms = now_ms();
     let run_id = Uuid7::now().to_string();
     let run_result = run_task_inner(Arc::clone(&harness), store, task, &run_id, slot_ms).await;
@@ -180,8 +197,11 @@ async fn fire_once(
     }
     run.task_id = task.id.clone();
     store.put_run(&run).await?;
-    store.put_task(task).await?;
-    Ok(run)
+    let updated = match lease_id {
+        Some(lease_id) => store.put_task_if_lease(task, lease_id).await?,
+        None => store.put_task_if_present(task).await?,
+    };
+    Ok(updated.then_some(run))
 }
 
 fn is_missing_task_owner_error(error: &str) -> bool {
