@@ -78,6 +78,12 @@ class EvalTests(unittest.TestCase):
         self.assertNotIn("rebuild_and_restart_exo", memory_only)
         self.assertNotIn("skill", memory_only)
 
+    def test_resume_requires_the_run_directory(self) -> None:
+        with self.assertRaises(SystemExit):
+            sregym_eval.parse_args(["--resume", "results.csv"])
+        args = sregym_eval.parse_args(["--resume", "results.csv", "--run-dir", "run"])
+        self.assertEqual(args.run_dir, Path("run"))
+
     def test_exo_profile_defaults_to_practical(self) -> None:
         self.assertEqual(sregym_eval.parse_args([]).exo_profile, "practical")
         self.assertEqual(

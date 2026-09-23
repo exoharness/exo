@@ -56,6 +56,7 @@ class PolicyRepoTests(unittest.TestCase):
 
             lineage.commit("trial 1: shop (anon): diagnosis PASS, mitigation fail")
             lineage.commit("trial 2: nothing changed")
+            self.assertEqual(lineage.trial_count(), 2)
 
             log = policy.git(root / "policy", "log", "--format=%s")
             self.assertEqual(

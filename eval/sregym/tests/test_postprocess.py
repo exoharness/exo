@@ -132,6 +132,18 @@ class PostprocessTests(unittest.TestCase):
             self.assertEqual(job.stats.n_completed_trials, 1)
             self.assertIn("Mitigation: PASS", (trial_dir / "verifier/test-stdout.txt").read_text())
 
+    def test_resumed_suite_finds_runs_in_earlier_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            earlier = root / "results/0101_0000/exo/network_policy_block/run_1"
+            earlier.mkdir(parents=True)
+            (earlier / "exo-trajectory.json").write_text("{}")
+            later = root / "results/0101_0100"
+            later.mkdir()
+            row = postprocess.ResultRow(problem_id="network_policy_block", attempt=1, run_status="complete")
+
+            self.assertEqual(postprocess.run_directory(row, batch=later), earlier)
+
     def test_unpublished_runs_are_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

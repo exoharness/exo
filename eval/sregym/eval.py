@@ -103,6 +103,9 @@ def parse_args(arguments: list[str] | None = None) -> argparse.Namespace:
         # The graded cluster shows Exo the answer, which would contaminate a
         # later attempt at the same problem.
         parser.error("--reflection requires --n-attempts 1")
+    if args.resume and not args.run_dir:
+        # Resuming continues the same Exo agent, so it needs that run's directory.
+        parser.error("--resume requires --run-dir of the interrupted run")
     return args
 
 
@@ -607,7 +610,9 @@ def run_trials(
 ) -> None:
     handled: set[str] = set()
     stages = args.stages or ["diagnosis", "mitigation"]
-    timeout = args.turn_timeout or args.agent_timeout
+    # SREGym kills the agent at its own timeout, which normally ends the turn;
+    # this backstop only catches a turn that never notices.
+    timeout = args.turn_timeout or args.agent_timeout + 120
 
     while (container_id := wait_for_container(process, handled)) is not None:
         handled.add(container_id)
@@ -621,19 +626,27 @@ def run_trials(
         reflected = False
         results = None
         try:
-            client.send(conversation, instruction, timeout)
+            try:
+                client.send(conversation, instruction, timeout)
+            except (subprocess.TimeoutExpired, RuntimeError) as error:
+                # A trial that SREGym timed out or whose turn failed is still
+                # graded (or recorded incomplete) by SREGym; keep the suite going.
+                print(f"trial turn ended abnormally: {error}", file=sys.stderr, flush=True)
             if args.reflection:
                 results = wait_for_review(args.api_port, process)
                 if results is None:
                     print("SREGym ended the attempt without a review", flush=True)
                 else:
                     print("Reflecting on the graded incident", flush=True)
-                    client.send(
-                        conversation,
-                        build_reflection(results, self_modification=args.exo_profile == "practical"),
-                        args.reflection_timeout,
-                    )
-                    reflected = True
+                    try:
+                        client.send(
+                            conversation,
+                            build_reflection(results, self_modification=args.exo_profile == "practical"),
+                            args.reflection_timeout,
+                        )
+                        reflected = True
+                    except (subprocess.TimeoutExpired, RuntimeError) as error:
+                        print(f"reflection ended abnormally: {error}", file=sys.stderr, flush=True)
         finally:
             try:
                 if args.reflection:
@@ -651,7 +664,7 @@ def run_trials(
                 stop_container(container_id)
                 reclaim_ownership(client.repo)
                 policy.commit(
-                    f"trial {len(handled)}: {app['app_name']} ({artifact_id}): "
+                    f"trial {policy.trial_count() + 1}: {app['app_name']} ({artifact_id}): "
                     f"{grade_summary(results)}"
                 )
 
@@ -686,7 +699,12 @@ def main() -> int:
         ).returncode:
             raise ValueError("Docker is unavailable; run this through ./eval.sh")
 
-        run_dir.mkdir(parents=True, exist_ok=False)
+        resuming = args.resume is not None
+        if resuming:
+            if not (run_dir / "exo").is_dir():
+                raise ValueError(f"--run-dir is not an earlier run to resume: {run_dir}")
+        else:
+            run_dir.mkdir(parents=True, exist_ok=False)
         ensure_sregym_checkout(sregym_root, repo=repo)
         ensure_sregym_patch(sregym_root)
         run(["uv", "sync"], cwd=sregym_root)
@@ -702,20 +720,25 @@ def main() -> int:
         client = ExoClient(
             binary=exo_binary, root=run_dir / "exo", repo=repo, profile=args.exo_profile
         )
-        setup_model(
-            client,
-            model=args.model,
-            provider_model=args.provider_model or args.model,
-            api_key_env=args.api_key_env,
-            base_url=args.base_url,
-        )
-        client.ensure_agent(args.model)
-        # Every run starts with no inherited agent-built tools; the previous
-        # run's tools are in its own policy repository.
-        reclaim_ownership(repo)
-        clear_tools(repo)
         policy = PolicyRepo(run_dir / "policy", repo=repo, exo_root=client.root)
-        policy.init()
+        if resuming:
+            # The same agent continues with its memory, skills, and tools.
+            client.ensure_agent(args.model)
+            policy.commit(f"resumed from {args.resume.resolve()}")
+        else:
+            setup_model(
+                client,
+                model=args.model,
+                provider_model=args.provider_model or args.model,
+                api_key_env=args.api_key_env,
+                base_url=args.base_url,
+            )
+            client.ensure_agent(args.model)
+            # Every run starts with no inherited agent-built tools; the
+            # previous run's tools are in its own policy repository.
+            reclaim_ownership(repo)
+            clear_tools(repo)
+            policy.init()
 
         environment = {
             **os.environ,

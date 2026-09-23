@@ -112,7 +112,16 @@ def write_json(path: Path, model: BaseModel) -> None:
 
 
 def run_directory(row: ResultRow, *, batch: Path) -> Path:
-    return batch / AGENT / row.problem_id / f"run_{row.attempt}"
+    """The run's artifacts, which a resumed suite may have in an earlier batch."""
+    relative = Path(AGENT) / row.problem_id / f"run_{row.attempt}"
+    if (batch / relative / "exo-trajectory.json").is_file():
+        return batch / relative
+    earlier = sorted(
+        candidate
+        for candidate in batch.parent.glob(f"*/{relative}")
+        if (candidate / "exo-trajectory.json").is_file()
+    )
+    return earlier[-1] if earlier else batch / relative
 
 
 def export_trial(

@@ -118,6 +118,11 @@ class PolicyRepo:
         # one entry per incident.
         git(self.path, "commit", "-q", "--allow-empty", "-m", message)
 
+    def trial_count(self) -> int:
+        """Trials committed so far, so a resumed run keeps numbering."""
+        log = git(self.path, "log", "--format=%s")
+        return sum(line.startswith("trial ") for line in log.splitlines())
+
     def refresh(self) -> None:
         for name in ("source", "tools", "agent"):
             shutil.rmtree(self.path / name, ignore_errors=True)
