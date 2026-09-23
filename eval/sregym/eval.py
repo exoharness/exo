@@ -42,11 +42,15 @@ EXTRA_MOUNTS_ENV = "SREGYM_AGENT_EXTRA_MOUNTS"
 # Where Exo expects its own source tree; see exo/harness.ts and exo/SELF.md.
 EXO_REPO_MOUNT = "/workspace/exo"
 GUARDIAN_SCRIPT = "exo/scripts/exo-service-guardian"
-REFLECTION_INSTRUCTIONS = """The benchmark has graded your work on this incident. Review your work and the grader feedback below.
+EXO_PROFILES = ("practical", "memory-only")
+REFLECTION_OPENING = """The benchmark has graded your work on this incident. Review your work and the grader feedback below.
 
 The cluster is still deployed exactly as you left it, so inspect it to understand what actually happened and what you missed. The benchmark no longer accepts submissions for this incident.
 
-Determine what went well or wrong and extract general lessons that will help you handle future incidents. Future incidents will not be identical to this one, but they may be similar: different faults in the same or similar applications, or the same kind of fault somewhere else. Prefer lessons and checks that transfer across incidents over details specific to this one. Before ending this turn, persist any useful generalizable lesson in durable memory so later incident conversations can use it. If any routine appeared that may be reusable, create or improve a tool or skill for it. Also add tools that would make investigating similar incidents quicker or cheaper, for example commands you ran repeatedly, sweeps you should have run early, or checks that would have found this fault sooner. Your own source tree is mounted at /workspace/exo; start with exo/SELF.md. Inspect your own policy and implementation, and if a change there would make you better at this class of task, make it and activate it with rebuild_and_restart_exo so it applies to the next incident. Anything you only say in your reply is a report to the evaluator; it does not persist learning. If there is genuinely nothing worth retaining, say so explicitly.
+Determine what went well or wrong and extract general lessons that will help you handle future incidents. Future incidents will not be identical to this one, but they may be similar: different faults in the same or similar applications, or the same kind of fault somewhere else. Prefer lessons and checks that transfer across incidents over details specific to this one. Before ending this turn, persist any useful generalizable lesson in durable memory so later incident conversations can use it."""
+# Only self-modifying profiles have the tools these sentences refer to.
+REFLECTION_SELF_MODIFICATION = """ If any routine appeared that may be reusable, create or improve a tool or skill for it. Also add tools that would make investigating similar incidents quicker or cheaper, for example commands you ran repeatedly, sweeps you should have run early, or checks that would have found this fault sooner. Your own source tree is mounted at /workspace/exo; start with exo/SELF.md. Inspect your own policy and implementation, and if a change there would make you better at this class of task, make it and activate it with rebuild_and_restart_exo so it applies to the next incident."""
+REFLECTION_CLOSING = """ Anything you only say in your reply is a report to the evaluator; it does not persist learning. If there is genuinely nothing worth retaining, say so explicitly.
 
 Grader feedback:
 """
@@ -81,6 +85,7 @@ def parse_args(arguments: list[str] | None = None) -> argparse.Namespace:
         "--container-hardening", choices=("on", "off"), default="on"
     )
     parser.add_argument("--noise", action="store_true")
+    parser.add_argument("--exo-profile", choices=EXO_PROFILES, default="practical")
     parser.add_argument("--reflection", action="store_true")
     parser.add_argument("--reflection-timeout", type=int, default=900)
     parser.add_argument("--baseline", type=int)
@@ -175,10 +180,11 @@ def ensure_sregym_patch(sregym_root: Path, patch: Path = SREGYM_PATCH) -> None:
 
 
 class ExoClient:
-    def __init__(self, *, binary: Path, root: Path, repo: Path) -> None:
+    def __init__(self, *, binary: Path, root: Path, repo: Path, profile: str) -> None:
         self.binary = binary
         self.root = root
         self.repo = repo
+        self.profile = profile
 
     def command(self, *arguments: str) -> list[str]:
         return [
@@ -194,7 +200,7 @@ class ExoClient:
         result = subprocess.run(
             self.command(*arguments),
             cwd=self.repo,
-            env={**os.environ, "EXO_ROOT": str(self.root), "EXO_PROFILE": "practical"},
+            env={**os.environ, "EXO_ROOT": str(self.root), "EXO_PROFILE": self.profile},
             text=True,
             capture_output=True,
             timeout=timeout,
@@ -401,8 +407,14 @@ def release_review(port: int) -> None:
         pass
 
 
-def build_reflection(results: dict[str, Any]) -> str:
-    return REFLECTION_INSTRUCTIONS + json.dumps(results, indent=2, default=str) + "\n"
+def build_reflection(results: dict[str, Any], *, self_modification: bool) -> str:
+    return (
+        REFLECTION_OPENING
+        + (REFLECTION_SELF_MODIFICATION if self_modification else "")
+        + REFLECTION_CLOSING
+        + json.dumps(results, indent=2, default=str)
+        + "\n"
+    )
 
 
 def wait_for_app(port: int, process: subprocess.Popen[bytes]) -> dict[str, Any]:
@@ -617,7 +629,9 @@ def run_trials(
                 else:
                     print("Reflecting on the graded incident", flush=True)
                     client.send(
-                        conversation, build_reflection(results), args.reflection_timeout
+                        conversation,
+                        build_reflection(results, self_modification=args.exo_profile == "practical"),
+                        args.reflection_timeout,
                     )
                     reflected = True
         finally:
@@ -685,7 +699,9 @@ def main() -> int:
             run(["cargo", "build", "-p", "exo"], cwd=repo)
             run(["pnpm", "install", "--frozen-lockfile"], cwd=repo)
 
-        client = ExoClient(binary=exo_binary, root=run_dir / "exo", repo=repo)
+        client = ExoClient(
+            binary=exo_binary, root=run_dir / "exo", repo=repo, profile=args.exo_profile
+        )
         setup_model(
             client,
             model=args.model,
@@ -707,8 +723,14 @@ def main() -> int:
             # there the way `exo.sh` mounts it into Exo's own sandbox. An
             # empty anonymous volume covers .local: it holds the SREGym
             # checkout with every fault's code and earlier runs' grades.
+            # Without self-modification the tree is read-only, since Exo's
+            # TypeScript loads fresh every turn and a shell edit would
+            # otherwise change its policy without any rebuild.
             EXTRA_MOUNTS_ENV: json.dumps(
-                [f"{repo}:{EXO_REPO_MOUNT}:rw", f"{EXO_REPO_MOUNT}/.local"]
+                [
+                    f"{repo}:{EXO_REPO_MOUNT}:{'rw' if args.exo_profile == 'practical' else 'ro'}",
+                    f"{EXO_REPO_MOUNT}/.local",
+                ]
             ),
             "API_PORT": str(args.api_port),
             "MCP_SERVER_PORT": str(args.mcp_port),

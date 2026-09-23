@@ -65,13 +65,24 @@ class EvalTests(unittest.TestCase):
         self.assertEqual(sregym_eval.grade_summary(None), "ungraded")
 
     def test_build_reflection_embeds_grader_feedback(self) -> None:
-        reflection = sregym_eval.build_reflection(
-            {"Diagnosis": {"success": False, "reasoning": "Blamed search"}}
-        )
+        feedback = {"Diagnosis": {"success": False, "reasoning": "Blamed search"}}
+        reflection = sregym_eval.build_reflection(feedback, self_modification=True)
         self.assertIn("Blamed search", reflection)
         self.assertIn("durable memory", reflection)
         self.assertIn(sregym_eval.EXO_REPO_MOUNT, reflection)
         self.assertIn("rebuild_and_restart_exo", reflection)
+
+        memory_only = sregym_eval.build_reflection(feedback, self_modification=False)
+        self.assertIn("Blamed search", memory_only)
+        self.assertIn("durable memory", memory_only)
+        self.assertNotIn("rebuild_and_restart_exo", memory_only)
+        self.assertNotIn("skill", memory_only)
+
+    def test_exo_profile_defaults_to_practical(self) -> None:
+        self.assertEqual(sregym_eval.parse_args([]).exo_profile, "practical")
+        self.assertEqual(
+            sregym_eval.parse_args(["--exo-profile", "memory-only"]).exo_profile, "memory-only"
+        )
 
     def test_build_instruction_names_stages_and_namespaces(self) -> None:
         instruction = sregym_eval.build_instruction(

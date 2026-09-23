@@ -4,6 +4,7 @@ import { registerGuardianTools } from "../tools/guardian-tools";
 
 export const bootstrapProfile: ExoProfile = {
   name: "bootstrap",
+  selfModification: true,
   builtInToolNames() {
     return ["shell", "inspect_tools", "manage_tool"];
   },

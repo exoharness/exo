@@ -57,6 +57,15 @@ Run the leaderboard-compatible 21-problem suite:
 Use `--provider-model` when Exo's local model name differs from the provider
 model ID. `--judge-model` independently selects the SREGym diagnosis judge.
 
+## Control arm without self-modification
+
+`--exo-profile memory-only` runs Exo's `memory-only` profile: memory stays
+writable and installed skills stay usable, but there is no `install_skill`,
+`manage_tool`, `install_agent_tool`, or `rebuild_and_restart_exo`, and the
+source tree is mounted read-only. The reflection prompt drops its sentences
+about tools, skills, and code changes. Compare it against the default
+`practical` profile to measure what self-modification adds.
+
 ## Reflection
 
 With `--reflection`, SREGym holds each graded incident's cluster instead of
