@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 import tempfile
@@ -83,6 +84,31 @@ class EvalTests(unittest.TestCase):
             sregym_eval.parse_args(["--resume", "results.csv"])
         args = sregym_eval.parse_args(["--resume", "results.csv", "--run-dir", "run"])
         self.assertEqual(args.run_dir, Path("run"))
+
+    def test_run_manifest_records_arguments_and_appends_on_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repo = root / "repo"
+            repo.mkdir()
+            git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(repo)]
+            (repo / "f").write_text("x")
+            subprocess.run([*git, "init", "-q"], check=True)
+            subprocess.run([*git, "add", "."], check=True)
+            subprocess.run([*git, "commit", "-q", "-m", "base"], check=True)
+            run_dir = root / "run"
+            run_dir.mkdir()
+
+            args = sregym_eval.parse_args(["--exo-profile", "memory-only", "--reflection"])
+            sregym_eval.write_run_manifest(run_dir, args=args, repo=repo, command=["uv", "run"])
+            sregym_eval.write_run_manifest(run_dir, args=args, repo=repo, command=["uv", "run", "--resume"])
+
+            entries = json.loads((run_dir / "run.json").read_text())
+            self.assertEqual(len(entries), 2)
+            self.assertEqual(entries[0]["arguments"]["exo_profile"], "memory-only")
+            self.assertTrue(entries[0]["arguments"]["reflection"])
+            self.assertEqual(entries[0]["sregym_ref"], sregym_eval.SREGYM_REF)
+            self.assertIn("durable memory", entries[0]["reflection_instructions"]["opening"])
+            self.assertEqual(entries[1]["sregym_command"][-1], "--resume")
 
     def test_exo_profile_defaults_to_practical(self) -> None:
         self.assertEqual(sregym_eval.parse_args([]).exo_profile, "practical")

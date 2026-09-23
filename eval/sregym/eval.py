@@ -568,6 +568,30 @@ def write_artifacts(
     )
 
 
+def write_run_manifest(run_dir: Path, *, args: argparse.Namespace, repo: Path, command: list[str]) -> None:
+    """Record how the run was started, so results can be traced to their setup."""
+    manifest = {
+        "started_at": dt.datetime.now(dt.UTC).isoformat(),
+        "arguments": {
+            key: (str(value) if isinstance(value, Path) else value)
+            for key, value in vars(args).items()
+        },
+        "sregym_ref": SREGYM_REF,
+        "sregym_command": command,
+        "exo_commit": run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True).stdout.strip(),
+        "reflection_instructions": {
+            "opening": REFLECTION_OPENING,
+            "self_modification": REFLECTION_SELF_MODIFICATION,
+            "closing": REFLECTION_CLOSING,
+        },
+    }
+    manifests = run_dir / "run.json"
+    # A resumed run appends its own entry, keeping the original.
+    entries = json.loads(manifests.read_text()) if manifests.exists() else []
+    entries.append(manifest)
+    manifests.write_text(json.dumps(entries, indent=2) + "\n")
+
+
 def stop_guardian_services(repo: Path, *, exo_root: Path) -> None:
     """Stop the scheduler and adapters a rebuild_and_restart_exo call started."""
     if not (exo_root / "exo-service-guardian-actions.log").exists():
@@ -705,6 +729,7 @@ def main() -> int:
                 raise ValueError(f"--run-dir is not an earlier run to resume: {run_dir}")
         else:
             run_dir.mkdir(parents=True, exist_ok=False)
+        write_run_manifest(run_dir, args=args, repo=repo, command=command)
         ensure_sregym_checkout(sregym_root, repo=repo)
         ensure_sregym_patch(sregym_root)
         run(["uv", "sync"], cwd=sregym_root)
