@@ -132,6 +132,22 @@ class PostprocessTests(unittest.TestCase):
             self.assertEqual(job.stats.n_completed_trials, 1)
             self.assertIn("Mitigation: PASS", (trial_dir / "verifier/test-stdout.txt").read_text())
 
+    def test_unpublished_runs_are_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            batch = root / "results/0101_0000"
+            batch.mkdir(parents=True)
+            with (batch / postprocess.RESULTS_FILE).open("w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["problem_id", "attempt", "run_status"])
+                writer.writeheader()
+                writer.writerow({"problem_id": "held_back", "attempt": "1", "run_status": "complete"})
+
+            job_dir = postprocess.export_batch(batch, jobs_dir=root / "jobs", job_name="job")
+
+            job = JobResult.model_validate_json((job_dir / "result.json").read_text())
+            self.assertEqual(job.n_total_trials, 0)
+            self.assertFalse((job_dir / "held_back__run_1").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

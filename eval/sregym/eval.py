@@ -35,11 +35,15 @@ MUTATION_TOOLS = {
 }
 SREGYM_PATCH = Path(__file__).with_name("sregym.patch")
 REVIEW_TIMEOUT_ENV = "SREGYM_REVIEW_TIMEOUT_SECONDS"
+EXTRA_MOUNTS_ENV = "SREGYM_AGENT_EXTRA_MOUNTS"
+# Where Exo expects its own source tree; see exo/harness.ts and exo/SELF.md.
+EXO_REPO_MOUNT = "/workspace/exo"
+GUARDIAN_SCRIPT = "exo/scripts/exo-service-guardian"
 REFLECTION_INSTRUCTIONS = """The benchmark has graded your work on this incident. Review your work and the grader feedback below.
 
 The cluster is still deployed exactly as you left it, so inspect it to understand what actually happened and what you missed. The benchmark no longer accepts submissions for this incident.
 
-Determine what went well or wrong and extract general lessons that will help you handle future incidents. Future incidents will not be identical to this one, but they may be similar: different faults in the same or similar applications, or the same kind of fault somewhere else. Prefer lessons and checks that transfer across incidents over details specific to this one. Before ending this turn, persist any useful generalizable lesson in durable memory so later incident conversations can use it. If any routine appeared that may be reusable, create or improve a tool or skill for it. Also add tools that would make investigating similar incidents quicker or cheaper, for example commands you ran repeatedly, sweeps you should have run early, or checks that would have found this fault sooner. If there is any mechanism in your own policy or implementation that could be improved for this class of task, change it. Anything you only say in your reply is a report to the evaluator; it does not persist learning. If there is genuinely nothing worth retaining, say so explicitly.
+Determine what went well or wrong and extract general lessons that will help you handle future incidents. Future incidents will not be identical to this one, but they may be similar: different faults in the same or similar applications, or the same kind of fault somewhere else. Prefer lessons and checks that transfer across incidents over details specific to this one. Before ending this turn, persist any useful generalizable lesson in durable memory so later incident conversations can use it. If any routine appeared that may be reusable, create or improve a tool or skill for it. Also add tools that would make investigating similar incidents quicker or cheaper, for example commands you ran repeatedly, sweeps you should have run early, or checks that would have found this fault sooner. Your own source tree is mounted at /workspace/exo; start with exo/SELF.md. Inspect your own policy and implementation, and if a change there would make you better at this class of task, make it and activate it with rebuild_and_restart_exo so it applies to the next incident. Anything you only say in your reply is a report to the evaluator; it does not persist learning. If there is genuinely nothing worth retaining, say so explicitly.
 
 Grader feedback:
 """
@@ -214,8 +218,15 @@ class ExoClient:
         raise RuntimeError(result.stderr.strip())
 
     def ensure_agent(self, model: str) -> None:
-        if self.exists("agent", "show", AGENT_SLUG):
-            return
+        if not self.exists("agent", "show", AGENT_SLUG):
+            self.create_agent(model)
+        # Mirror `exo.sh`: Exo's own sandbox sees its source tree too. The
+        # mount is deduplicated, so this is safe to repeat.
+        self.execute(
+            "agent", "mount", "add", AGENT_SLUG, str(self.repo), EXO_REPO_MOUNT, "--rw"
+        )
+
+    def create_agent(self, model: str) -> None:
         self.execute(
             "agent",
             "create",
@@ -539,6 +550,19 @@ def write_artifacts(
     )
 
 
+def stop_guardian_services(repo: Path, *, exo_root: Path) -> None:
+    """Stop the scheduler and adapters a rebuild_and_restart_exo call started."""
+    if not (exo_root / "exo-service-guardian-actions.log").exists():
+        return
+    subprocess.run(
+        [str(repo / GUARDIAN_SCRIPT), "stop-services"],
+        cwd=repo,
+        env={**os.environ, "EXO_ROOT": str(exo_root)},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def stop_container(container_id: str) -> None:
     subprocess.run(
         ["docker", "stop", "--time", "3", container_id],
@@ -651,6 +675,13 @@ def main() -> int:
 
         environment = {
             **os.environ,
+            # Exo runs in SREGym's agent container, so mount its source tree
+            # there the way `exo.sh` mounts it into Exo's own sandbox. An
+            # empty anonymous volume covers .local: it holds the SREGym
+            # checkout with every fault's code and earlier runs' grades.
+            EXTRA_MOUNTS_ENV: json.dumps(
+                [f"{repo}:{EXO_REPO_MOUNT}:rw", f"{EXO_REPO_MOUNT}/.local"]
+            ),
             "API_PORT": str(args.api_port),
             "MCP_SERVER_PORT": str(args.mcp_port),
             "K8S_PROXY_PORT": str(args.k8s_proxy_port),
@@ -683,6 +714,8 @@ def main() -> int:
                 process.kill()
                 process.wait()
             raise
+        finally:
+            stop_guardian_services(repo, exo_root=client.root)
         if return_code != 0:
             raise subprocess.CalledProcessError(return_code, command)
 

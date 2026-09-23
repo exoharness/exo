@@ -6,8 +6,18 @@ Kubernetes incidents.
 The runner clones a pinned SREGym revision with submodules under
 `.local/sregym-evals/upstream/`, applies `sregym.patch`, and starts SREGym
 normally. The patch registers a passive `exo` agent, exempts it from provider
-egress rules (Exo calls its model from the host), and adds an optional review
-hold used by `--reflection`. For each incident, Exo attaches to SREGym's isolated
+egress rules (Exo calls its model from the host), lets the runner add bind
+mounts to the agent container, and adds an optional review hold used by
+`--reflection`.
+
+As in a regular `exo.sh` launch, this repository is mounted read-write at
+`/workspace/exo` inside the container Exo works in, so Exo can inspect and
+edit its own code. `rebuild_and_restart_exo` runs the service guardian on the
+host with `EXO_ROOT` set to the run's Exo state; a successful build replaces
+`target/debug/exo`, which the next turn picks up, and a failed build leaves
+the previous binary in place. The runner stops any guardian-started scheduler
+and adapters when the evaluation ends. Files Exo writes through the mount are
+owned by root on the host. For each incident, Exo attaches to SREGym's isolated
 agent container. SREGym still owns the cluster, fault injection, network policy,
 agent container, grading, timeout, and cleanup.
 

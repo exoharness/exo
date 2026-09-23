@@ -42,6 +42,7 @@ class EvalTests(unittest.TestCase):
             "sregym/service/provider_endpoints.py",
             "sregym/conductor/conductor.py",
             "sregym/conductor/conductor_api.py",
+            "sregym/service/container_runner.py",
             "main.py",
         ):
             self.assertIn(f"+++ b/{path}", patch)
@@ -58,6 +59,8 @@ class EvalTests(unittest.TestCase):
         )
         self.assertIn("Blamed search", reflection)
         self.assertIn("durable memory", reflection)
+        self.assertIn(sregym_eval.EXO_REPO_MOUNT, reflection)
+        self.assertIn("rebuild_and_restart_exo", reflection)
 
     def test_build_instruction_names_stages_and_namespaces(self) -> None:
         instruction = sregym_eval.build_instruction(

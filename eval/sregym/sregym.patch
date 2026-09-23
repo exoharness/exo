@@ -163,6 +163,30 @@ index 85a7b4be..2c3d543c 100644
  @app.get("/get_app")
  async def get_app():
      if _conductor is None:
+diff --git a/sregym/service/container_runner.py b/sregym/service/container_runner.py
+index 4fd0fe76..8131bd2b 100644
+--- a/sregym/service/container_runner.py
++++ b/sregym/service/container_runner.py
+@@ -32,6 +32,7 @@ HARDENING_FLAGS = (
+     "--cap-add=DAC_OVERRIDE",
+     "--security-opt=no-new-privileges",
+ )
++EXTRA_MOUNTS_ENV = "SREGYM_AGENT_EXTRA_MOUNTS"
+ AGENT_TOOLS_CONTAINER_PATH = "/opt/agent-tools"
+ CONTAINER_PATH = f"{AGENT_TOOLS_CONTAINER_PATH}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ 
+@@ -563,6 +564,11 @@ class ContainerRunner:
+             self.config.logs_path.mkdir(parents=True, exist_ok=True)
+             args.extend(["-v", f"{self.config.logs_path.resolve()}:/logs"])
+ 
++        # Extra bind mounts for an external harness, as a JSON list of docker
++        # `-v` specs. A self-modifying agent mounts its own source tree here.
++        for mount in json.loads(os.environ.get(EXTRA_MOUNTS_ENV) or "[]"):
++            args.extend(["-v", mount])
++
+         # Mount only the needed SREGym-applications subdirectories (read-only)
+         if self.config.sregym_apps_path and self.config.sregym_app_subdirs:
+             for subdir in self.config.sregym_app_subdirs:
 diff --git a/sregym/service/provider_endpoints.py b/sregym/service/provider_endpoints.py
 index eae3a8ca..a1810c9e 100644
 --- a/sregym/service/provider_endpoints.py
@@ -276,3 +300,27 @@ index 7eb0dcc8..c8bb71e8 100644
 +
 +    assert cleanup_started.is_set()
 +    assert conductor.submission_stage == "done"
+diff --git a/tests/service/test_container_hardening.py b/tests/service/test_container_hardening.py
+index 989559ab..806b490b 100644
+--- a/tests/service/test_container_hardening.py
++++ b/tests/service/test_container_hardening.py
+@@ -114,3 +114,19 @@ def test_hardening_cannot_change_after_the_runner_exists(monkeypatch):
+ 
+     with pytest.raises(RuntimeError):
+         launcher.set_container_hardening(False)
++
++
++def test_extra_mounts_come_from_the_environment(monkeypatch):
++    monkeypatch.setenv("SREGYM_AGENT_EXTRA_MOUNTS", '["/srv/exo:/workspace/exo:rw"]')
++
++    args = make_runner()._build_base_docker_args()
++
++    assert args[args.index("/srv/exo:/workspace/exo:rw") - 1] == "-v"
++
++
++def test_no_extra_mounts_without_the_environment(monkeypatch):
++    monkeypatch.delenv("SREGYM_AGENT_EXTRA_MOUNTS", raising=False)
++
++    args = make_runner()._build_base_docker_args()
++
++    assert "/workspace/exo" not in " ".join(args)

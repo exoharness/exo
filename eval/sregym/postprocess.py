@@ -111,10 +111,14 @@ def write_json(path: Path, model: BaseModel) -> None:
     path.write_text(model.model_dump_json(indent=2) + "\n")
 
 
+def run_directory(row: ResultRow, *, batch: Path) -> Path:
+    return batch / AGENT / row.problem_id / f"run_{row.attempt}"
+
+
 def export_trial(
     row: ResultRow, *, batch: Path, job_dir: Path, job_id: uuid.UUID
 ) -> TrialResult:
-    run_dir = batch / AGENT / row.problem_id / f"run_{row.attempt}"
+    run_dir = run_directory(row, batch=batch)
     page = ConversationEvents.model_validate_json(
         (run_dir / "exo-trajectory.json").read_text()
     )
@@ -199,10 +203,14 @@ def export_batch(batch: Path, *, jobs_dir: Path, job_name: str) -> Path:
     rows = read_rows(batch)
     job_dir = jobs_dir / job_name
     job_id = uuid.uuid4()
-    results = [
-        export_trial(row, batch=batch, job_dir=job_dir, job_id=job_id)
-        for row in rows
-    ]
+    results = []
+    for row in rows:
+        # SREGym keeps a run in staging when finalization fails, for example
+        # when an artifact names the anonymized problem.
+        if not (run_directory(row, batch=batch) / "exo-trajectory.json").is_file():
+            print(f"skipping {row.problem_id} run {row.attempt}: SREGym did not publish it", file=sys.stderr)
+            continue
+        results.append(export_trial(row, batch=batch, job_dir=job_dir, job_id=job_id))
     agents = list({result.config.agent.model_name: result.config.agent for result in results}.values())
     write_json(
         job_dir / "config.json",
