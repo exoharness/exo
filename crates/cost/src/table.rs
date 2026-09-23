@@ -93,12 +93,14 @@ impl PricingTable {
         let cached = tokens.prompt_cached.unwrap_or(0).max(0) as f64;
         let created = tokens.prompt_cache_creation.unwrap_or(0).max(0) as f64;
 
-        // Anthropic-family `prompt_tokens` excludes cached (bill additively);
-        // everyone else includes it (subtract before billing fresh input).
+        // Anthropic-family `prompt_tokens` excludes cached and cache-creation
+        // tokens (bill additively); everyone else includes both in the prompt
+        // count, so subtract them before billing fresh input or they are
+        // charged twice.
         let fresh = if is_additive(entry.litellm_provider.as_deref()) {
             prompt
         } else {
-            (prompt - cached).max(0.0)
+            (prompt - cached - created).max(0.0)
         };
         Some(fresh * input + cached * cache_read + created * cache_write + completion * output)
     }
@@ -213,6 +215,19 @@ mod tests {
         approx(
             table()
                 .compute_cost_usd("gpt-4o-mini", counts(2_000, 1_000, 500, 0))
+                .unwrap(),
+            0.0008625,
+        );
+    }
+
+    #[test]
+    fn openai_inclusive_does_not_bill_cache_creation_twice() {
+        // prompt=2000 includes 500 cached and 300 cache-creation tokens ->
+        // 1200 fresh + 300 created at the cache-write rate (defaults to
+        // input), which must equal the 1500-fresh bill above.
+        approx(
+            table()
+                .compute_cost_usd("gpt-4o-mini", counts(2_000, 1_000, 500, 300))
                 .unwrap(),
             0.0008625,
         );

@@ -17,7 +17,10 @@ run with `--n-concurrent` above 1.
 Use `--harness=exo` (the default) for Exo's tools and memory,
 `--harness=basic` for a shell-only control, or `--harness=pi` to drive the
 Pi coding agent through Exo. Pi runs inside the task container, so that arm
-installs Node and pi there at the start of each trial.
+installs Node and pi there at the start of each trial. Node is copied in from
+a host cache (`.local/cache/`) rather than fetched with apt, because some
+benchmark images are built on Debian releases whose package archives no longer
+resolve; apt is only tried, best effort, for git and ripgrep.
 
 ## How a trial runs in Harbor's container
 

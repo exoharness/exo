@@ -57,17 +57,40 @@ class PiHarnessTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_pi_installs_into_the_container_as_root(self) -> None:
         agent = self.build("pi")
+        # First exec probes the architecture, the second runs the install.
         environment = SimpleNamespace(
             session_id="session-1",
-            exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="0.1.0")),
+            exec=AsyncMock(side_effect=[
+                SimpleNamespace(return_code=0, stdout="x86_64\n"),
+                SimpleNamespace(return_code=0, stdout="0.1.0"),
+            ]),
+            upload_file=AsyncMock(),
+        )
+        tarball = Path("/cache/node-v22.15.0-linux-x64.tar.gz")
+        with patch(
+            "exo_harbor.agent.get_harbor_docker_container_id", return_value="abc123"
+        ), patch("exo_harbor.agent.node_tarball", return_value=tarball) as fetch:
+            await agent.setup(environment)
+        fetch.assert_called_once_with("x64")
+        # Node is copied in rather than fetched with apt, which some task images lack.
+        environment.upload_file.assert_awaited_once_with(tarball, "/tmp/exo-node.tar.gz")
+        install = environment.exec.await_args_list[-1].kwargs
+        self.assertEqual(install["user"], "root")
+        self.assertIn("tar -xzf /tmp/exo-node.tar.gz", install["command"])
+        self.assertIn("pi --version", install["command"])
+
+    async def test_unknown_architecture_is_rejected(self) -> None:
+        agent = self.build("pi")
+        environment = SimpleNamespace(
+            session_id="session-1",
+            exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="riscv64\n")),
+            upload_file=AsyncMock(),
         )
         with patch(
             "exo_harbor.agent.get_harbor_docker_container_id", return_value="abc123"
-        ):
+        ), self.assertRaises(RuntimeError):
             await agent.setup(environment)
-        environment.exec.assert_awaited_once()
-        self.assertEqual(environment.exec.await_args.kwargs["user"], "root")
-        self.assertIn("pi --version", environment.exec.await_args.kwargs["command"])
+        environment.upload_file.assert_not_awaited()
 
 
 class SetupTest(unittest.IsolatedAsyncioTestCase):
