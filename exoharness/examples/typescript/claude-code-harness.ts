@@ -48,7 +48,8 @@ import {
 } from "@exo/model-runtime/shared";
 
 const DEFAULT_CLAUDE_CODE_SANDBOX_EXECUTABLE = "/usr/local/bin/claude-code";
-const CLAUDE_RESULT_GRACE_MS = 5_000;
+const ANTHROPIC_API_HOST = "api.anthropic.com";
+const CLAUDE_RESULT_GRACE_MS = 30_000;
 const CLAUDE_MAX_API_RETRIES = 2;
 const CLAUDE_STDERR_PREVIEW_CHARS = 4_000;
 const CLAUDE_STARTUP_TIMEOUT_MS = 20_000;
@@ -178,11 +179,25 @@ async function consumeClaudeQuery(
     }
   };
 
+  // A finished session reports a `result` within about a second of its last
+  // text, so a long silence after text-only output means the SDK stream is
+  // hung, and the turn is closed with the text it has. The model narrates
+  // between tool calls, so the timer only counts silence: any later message,
+  // stream deltas included, cancels it.
   const scheduleGraceClose = () => {
     if (state.result || graceTimer) {
       return;
     }
     graceTimer = setTimeout(() => {
+      void appendCustomEvent(
+        context.exoharness.current.turn,
+        "claude_query_closed_after_text",
+        {
+          metadata: turnMetadata(context),
+          grace_ms: CLAUDE_RESULT_GRACE_MS,
+          reason: "no SDK message followed the final assistant text",
+        },
+      );
       claudeQuery.close();
     }, CLAUDE_RESULT_GRACE_MS);
     graceTimer.unref?.();
@@ -192,6 +207,7 @@ async function consumeClaudeQuery(
     for await (const message of claudeQuery) {
       sawSdkMessage = true;
       clearTimeout(startupTimer);
+      clearGraceTimer();
       await handleClaudeMessage(context, turnParent, state, message);
       const apiRetryError = claudeApiRetryLimitError(message);
       if (apiRetryError) {
@@ -289,6 +305,11 @@ function claudeOptions(
     cwd: sandboxCwd(context),
     persistSession: false,
     includePartialMessages: true,
+    // Nobody is there to answer a permission prompt: Claude Code runs headless
+    // inside the exoharness sandbox, which is the safety boundary here, and in
+    // its default mode every edit and most shell commands are denied outright.
+    permissionMode: "bypassPermissions",
+    allowDangerouslySkipPermissions: true,
     env: claudeSandboxBaseEnv(modelBinding),
     pathToClaudeCodeExecutable: claudeSandboxExecutable(),
     spawnClaudeCodeProcess: (options) =>
@@ -715,7 +736,7 @@ function claudeSandboxExecutable(): string {
   return DEFAULT_CLAUDE_CODE_SANDBOX_EXECUTABLE;
 }
 
-function claudeSandboxBaseEnv(
+export function claudeSandboxBaseEnv(
   modelBinding: ResolvedLlmBinding,
 ): Record<string, string> {
   const env = pickEnv((key) => {
@@ -729,8 +750,54 @@ function claudeSandboxBaseEnv(
   if (modelBinding.apiKey) {
     env.ANTHROPIC_API_KEY = modelBinding.apiKey;
   }
-  if (modelBinding.baseUrl) {
-    env.ANTHROPIC_BASE_URL = modelBinding.baseUrl;
+  const gateway = claudeGatewayBaseUrl(modelBinding);
+  if (gateway === null) {
+    if (modelBinding.baseUrl) {
+      env.ANTHROPIC_BASE_URL = modelBinding.baseUrl;
+    }
+    return env;
+  }
+  return { ...env, ...claudeGatewayEnv(modelBinding, gateway) };
+}
+
+// Claude Code talks the Anthropic Messages API and nothing else, so a
+// non-Anthropic model reaches it through a gateway that speaks that API:
+// OpenRouter (`https://openrouter.ai/api`), a LiteLLM proxy, Ollama, and so
+// on. Such a binding is one whose base URL points somewhere other than
+// Anthropic. Claude Code appends `/v1/messages` itself, so an OpenAI-style
+// base URL ending in `/v1` (the form exo's other harnesses take for the same
+// gateway) has that segment removed rather than requiring a second binding.
+export function claudeGatewayBaseUrl(
+  modelBinding: ResolvedLlmBinding,
+): string | null {
+  if (!modelBinding.baseUrl) {
+    return null;
+  }
+  const url = new URL(modelBinding.baseUrl);
+  if (url.hostname === ANTHROPIC_API_HOST) {
+    return null;
+  }
+  url.pathname = url.pathname.replace(/\/+$/, "").replace(/\/v1$/, "");
+  return url.toString().replace(/\/+$/, "");
+}
+
+// Gateways generally take a bearer token, and Claude Code's background calls
+// (subagents, summaries, and the like) default to Claude model ids the gateway
+// cannot serve, so every model slot is pinned to the bound model.
+function claudeGatewayEnv(
+  modelBinding: ResolvedLlmBinding,
+  gateway: string,
+): Record<string, string> {
+  const env: Record<string, string> = {
+    ANTHROPIC_BASE_URL: gateway,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: modelBinding.model,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: modelBinding.model,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: modelBinding.model,
+    CLAUDE_CODE_SUBAGENT_MODEL: modelBinding.model,
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+  };
+  if (modelBinding.apiKey) {
+    env.ANTHROPIC_AUTH_TOKEN = modelBinding.apiKey;
   }
   return env;
 }
@@ -748,5 +815,8 @@ function claudeSandboxEnv(
   });
   selected.HOME ??= "/home/exo";
   selected.CLAUDE_CONFIG_DIR ??= "/home/exo/.claude";
+  // Sandbox processes usually run as root, and Claude Code refuses to skip
+  // permissions as root unless told it is inside a container.
+  selected.IS_SANDBOX ??= "1";
   return selected;
 }

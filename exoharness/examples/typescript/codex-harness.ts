@@ -26,6 +26,7 @@ import {
 import { responsesMessagesToLingua } from "@braintrust/lingua";
 import {
   errorMessage,
+  isOpenRouterBinding,
   ResponsesRuntime,
   tracedUnderParent,
   type TraceParent,
@@ -127,7 +128,7 @@ class CodexWarmSession {
     let session: CodexWarmSession | null = null;
     const pendingProtocol: CodexProtocolLogEntry[] = [];
     const process = await scope.context.startSandboxProcess({
-      command: codexSandboxCommand(scope.context),
+      command: codexSandboxCommand(scope.context, modelBinding),
       env: codexSandboxEnv(modelBinding),
       reuseKey: sessionKey,
     });
@@ -220,7 +221,7 @@ async function runCodexTurn(
   const protocolLog = new CodexProtocolEventBuffer(context);
   const scope: CodexWarmTurnScope = { context, protocolLog, turnParent };
   const sessionKey = codexWarmSessionKey(context, modelBinding);
-  const sandboxRuntime = codexSandboxRuntimeKey(context);
+  const sandboxRuntime = codexSandboxRuntimeKey(context, modelBinding);
   const { resource: session, reused: appServerReused } = await traceCodexTask(
     turnParent,
     "codex_app_server_ready",
@@ -505,7 +506,7 @@ async function startCodexThread(
   const developerInstructions = codexDeveloperInstructions(context);
   const request: JsonObject = {
     model: modelBinding.model,
-    modelProvider: "openai",
+    modelProvider: codexModelProvider(modelBinding),
     cwd: codexAppServerCwd(context),
     approvalPolicy: "on-request",
     sandbox: "read-only",
@@ -1068,17 +1069,60 @@ function codexEffectiveNetworking(context: TurnContext): boolean {
   return context.agentConfig.sandbox.enableNetworking;
 }
 
-function codexSandboxCommand(context: TurnContext): string[] {
+function codexSandboxCommand(
+  context: TurnContext,
+  modelBinding: ResolvedLlmBinding,
+): string[] {
   const shell = context.conversationConfig.shellProgram ?? "/bin/bash";
+  const overrides = codexProviderOverrides(modelBinding)
+    .map((argument) => shellQuote(argument))
+    .join(" ");
   const command = [
     "set -e;",
     'mkdir -p "${HOME:-/tmp/exo-home}" "${CODEX_HOME:-/tmp/exo-codex-home}" >/dev/null 2>/tmp/codex-setup.stderr;',
     'if [ -n "${OPENAI_API_KEY:-}" ] && [ ! -f "${CODEX_HOME:-/tmp/exo-codex-home}/auth.json" ]; then',
     'printf "%s" "$OPENAI_API_KEY" | codex login --with-api-key >/dev/null 2>/tmp/codex-login.stderr;',
     "fi;",
-    "exec codex app-server --listen stdio:// 2>/tmp/codex-app-server.stderr",
+    `exec codex ${overrides} app-server --listen stdio:// 2>/tmp/codex-app-server.stderr`,
   ].join(" ");
   return [shell, "-lc", command];
+}
+
+const CODEX_BINDING_PROVIDER = "exo";
+
+// thread/start names the provider explicitly, so it has to match the
+// override below; Codex's built-in provider otherwise.
+export function codexModelProvider(modelBinding: ResolvedLlmBinding): string {
+  return modelBinding.baseUrl ? CODEX_BINDING_PROVIDER : "openai";
+}
+
+// Codex ignores OPENAI_BASE_URL. A binding with its own base URL (an
+// OpenAI-compatible gateway, or OpenRouter) is a model provider in Codex's
+// config, passed to app-server as `-c` overrides. OpenRouter has no Responses
+// API, so it gets Chat Completions, as exo's other runtimes give it.
+export function codexProviderOverrides(
+  modelBinding: ResolvedLlmBinding,
+): string[] {
+  if (!modelBinding.baseUrl) {
+    return [];
+  }
+  const provider = `model_providers.${CODEX_BINDING_PROVIDER}`;
+  const wireApi = isOpenRouterBinding(modelBinding) ? "chat" : "responses";
+  const settings: Array<[string, string]> = [
+    ["model_provider", CODEX_BINDING_PROVIDER],
+    [`${provider}.name`, "exo model binding"],
+    [`${provider}.base_url`, modelBinding.baseUrl],
+    [`${provider}.env_key`, "OPENAI_API_KEY"],
+    [`${provider}.wire_api`, wireApi],
+  ];
+  return settings.flatMap(([key, value]) => [
+    "-c",
+    `${key}=${JSON.stringify(value)}`,
+  ]);
+}
+
+function shellQuote(argument: string): string {
+  return `'${argument.replace(/'/g, `'\\''`)}'`;
 }
 
 function codexSandboxEnv(
@@ -1142,7 +1186,10 @@ function codexEffectiveSandboxImage(context: TurnContext): string | null {
   );
 }
 
-function codexSandboxRuntimeKey(context: TurnContext): JsonValue {
+function codexSandboxRuntimeKey(
+  context: TurnContext,
+  modelBinding: ResolvedLlmBinding,
+): JsonValue {
   return {
     provider: codexEffectiveSandboxProvider(context),
     image: codexEffectiveSandboxImage(context),
@@ -1155,7 +1202,7 @@ function codexSandboxRuntimeKey(context: TurnContext): JsonValue {
       mode: mount.mode,
       internal: mount.internal ?? false,
     })),
-    command: codexSandboxCommand(context),
+    command: codexSandboxCommand(context, modelBinding),
     external_sandbox: useCodexExternalSandbox(),
   };
 }
@@ -1170,7 +1217,7 @@ function codexWarmSessionKey(
     model_binding: modelBinding.name,
     model: modelBinding.model,
     base_url: modelBinding.baseUrl ?? null,
-    sandbox_runtime: codexSandboxRuntimeKey(context),
+    sandbox_runtime: codexSandboxRuntimeKey(context, modelBinding),
   });
 }
 

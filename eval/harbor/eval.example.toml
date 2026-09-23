@@ -9,5 +9,16 @@ n_attempts = 1
 n_concurrent = 1
 
 # Each task has its own conversation; agent memory and tools persist across tasks.
-# "basic" uses the shell-only executor as a control; "exo" enables Exo tools.
+# "basic" uses the shell-only executor as a control; "exo" enables Exo tools;
+# "pi" and "claude-code" run those coding agents inside the task container.
 harness = "exo"
+
+# A vendor CLI on the other vendor's model. Without base_url the eval runs a
+# local translating gateway in front of the provider named by api_key_env:
+# harness = "claude-code"
+# model = "gpt-5.5"
+# api_key_env = "OPENAI_API_KEY"
+# or
+# harness = "codex"
+# model = "claude-sonnet-4-6"
+# api_key_env = "ANTHROPIC_API_KEY"

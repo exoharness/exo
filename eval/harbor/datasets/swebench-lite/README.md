@@ -10,6 +10,19 @@ here from the HuggingFace dataset and the prebuilt SWE-bench images:
 ./generate.py --instance-id django__django-11099 # one task; repeatable
 ```
 
+The agent phase has no network by default. Agents that call their model from
+inside the task container (the pi, claude-code and codex harnesses) need their
+API host opened, and the claude-code and codex gateway path needs the Docker
+host's bridge address as well; `--allow-host` is repeatable:
+
+```bash
+./generate.py --limit 20 --allow-host api.openai.com --allow-host api.anthropic.com \
+  --allow-host "$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')"
+```
+
+The script also writes `task_order.json`, so every eval over the directory runs
+the same tasks in the same order.
+
 It is a self-contained `uv run` script: uv fetches the pinned `swebench`
 package, which supplies each repository's test command and the per-instance
 image name. Each task is rendered from `task-template/`:

@@ -17,7 +17,7 @@ from harbor.models.trajectories.observation_result import ObservationResult
 from harbor.models.trajectories.step import Step
 from harbor.models.trajectories.tool_call import ToolCall
 from harbor.models.trajectories.trajectory import Trajectory
-from pydantic import BaseModel, Field, JsonValue, field_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 from exo_harbor import conventions
 from exo_harbor.exo import ExoClient
@@ -100,26 +100,112 @@ class ToolResultValue(BaseModel):
     value: JsonValue = None
 
 
-class AgentToolResultValue(BaseModel):
-    """A result relayed from a coding agent running inside the sandbox.
+class PiToolResultValue(BaseModel):
+    """The pi harness records `{is_error, result}`, `result` being whatever the
+    agent's tool returned, usually MCP-style `{"content": [{"type": "text", ...}]}`."""
 
-    The pi harness records `{is_error, result}` where `result` is whatever the
-    agent's tool returned, usually MCP-style `{"content": [{"type": "text", ...}]}`.
-    """
+    model_config = ConfigDict(extra="forbid")
 
     is_error: bool
     result: JsonValue = None
 
+    def ok(self) -> bool:
+        return not self.is_error
+
     def text(self) -> str:
-        if isinstance(self.result, dict) and isinstance(self.result.get("content"), list):
-            parts = [
-                part["text"]
-                for part in self.result["content"]
-                if isinstance(part, dict) and isinstance(part.get("text"), str)
-            ]
-            if parts:
-                return "\n".join(parts)
-        return json.dumps(self.result, indent=2)
+        return content_blocks_text(self.result)
+
+
+class ClaudeToolResultValue(BaseModel):
+    """The claude-code harness records `{content, is_error}`, `content` being
+    the tool's text or its content blocks."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    content: JsonValue = None
+    is_error: bool
+
+    def ok(self) -> bool:
+        return not self.is_error
+
+    def text(self) -> str:
+        return content_blocks_text(self.content)
+
+
+class CodexCommandResultValue(BaseModel):
+    """The codex harness records a shell command as
+    `{status, exit_code, output, duration_ms}`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: str | None
+    exit_code: int | None = None
+    output: str | None = None
+    duration_ms: int | None = None
+
+    def ok(self) -> bool:
+        return self.status == "completed" and self.exit_code in (None, 0)
+
+    def text(self) -> str:
+        return self.output or ""
+
+
+class CodexItemResultValue(BaseModel):
+    """Any other Codex item: `{status, result}`, plus `error` for MCP calls."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: str | None
+    result: JsonValue = None
+    error: JsonValue = None
+
+    def ok(self) -> bool:
+        return self.status == "completed" and self.error is None
+
+    def text(self) -> str:
+        if self.error is not None:
+            return json.dumps(self.error, indent=2)
+        return content_blocks_text(self.result)
+
+
+class ToolErrorValue(BaseModel):
+    """A coding-agent tool call that failed before producing a result."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    error: str
+
+    def ok(self) -> bool:
+        return False
+
+    def text(self) -> str:
+        return self.error
+
+
+def content_blocks_text(value: JsonValue) -> str:
+    """Text of a tool result: a bare string, MCP-style `{"content": [...]}`,
+    or a list of content blocks; anything else as JSON."""
+    if isinstance(value, str):
+        return value
+    blocks = value.get("content") if isinstance(value, dict) else value
+    if isinstance(blocks, list):
+        parts = [
+            block["text"]
+            for block in blocks
+            if isinstance(block, dict) and isinstance(block.get("text"), str)
+        ]
+        if parts:
+            return "\n".join(parts)
+    return json.dumps(value, indent=2)
+
+
+AgentToolResultValue = (
+    PiToolResultValue
+    | ClaudeToolResultValue
+    | CodexCommandResultValue
+    | CodexItemResultValue
+    | ToolErrorValue
+)
 
 
 class ToolResultData(BaseModel):
@@ -290,11 +376,11 @@ def build_trajectory(
         step = calls.get(event.data.tool_call_id)
         if step is None:
             continue
-        if isinstance(result, AgentToolResultValue):
+        if not isinstance(result, ToolResultValue):
             observation = ObservationResult(
                 source_call_id=event.data.tool_call_id,
                 content=result.text(),
-                extra={"ok": not result.is_error},
+                extra={"ok": result.ok()},
             )
         else:
             observation = ObservationResult(
