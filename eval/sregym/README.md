@@ -101,6 +101,14 @@ eval/sregym/.venv/bin/python eval/sregym/postprocess.py \
   .local/sregym-evals/upstream/SREGym/results/<batch>
 ```
 
+Exo's agent-built tools live in this repository (`.exo/agent-tools`,
+`.exo/tools`, `.exo/tool-sources`), not under the run's Exo root, and code
+changes land in the working tree. Each run therefore snapshots that policy into
+`.local/sregym-evals/<run>/policy/before` and `policy/after`: the tool
+directories plus the source tree's `HEAD`, `git status`, tracked diff, and
+untracked files. Tools built by one run stay in place for the next unless you
+clear those directories.
+
 The run-scoped Exo state is retained under `.local/sregym-evals/<run>/exo`, so
 the exact memory, artifacts, conversations, and tool state can be inspected
 afterward. A new invocation starts with a fresh Exo agent by default.

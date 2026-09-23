@@ -39,6 +39,9 @@ EXTRA_MOUNTS_ENV = "SREGYM_AGENT_EXTRA_MOUNTS"
 # Where Exo expects its own source tree; see exo/harness.ts and exo/SELF.md.
 EXO_REPO_MOUNT = "/workspace/exo"
 GUARDIAN_SCRIPT = "exo/scripts/exo-service-guardian"
+# Agent-built tools live in the repository, not under EXO_ROOT, so each run
+# records them (and the source tree's state) before and after.
+POLICY_DIRECTORIES = (".exo/agent-tools", ".exo/tools", ".exo/tool-sources")
 REFLECTION_INSTRUCTIONS = """The benchmark has graded your work on this incident. Review your work and the grader feedback below.
 
 The cluster is still deployed exactly as you left it, so inspect it to understand what actually happened and what you missed. The benchmark no longer accepts submissions for this incident.
@@ -550,6 +553,32 @@ def write_artifacts(
     )
 
 
+def snapshot_policy(repo: Path, destination: Path) -> None:
+    """Copy Exo's mutable policy: agent-built tools and the source tree's state."""
+    destination.mkdir(parents=True, exist_ok=True)
+    for relative in POLICY_DIRECTORIES:
+        source = repo / relative
+        if source.is_dir():
+            shutil.copytree(source, destination / relative, dirs_exist_ok=True)
+    tree = destination / "source"
+    tree.mkdir(exist_ok=True)
+    git = ["git", "-C", str(repo)]
+    (tree / "HEAD").write_text(run([*git, "rev-parse", "HEAD"], cwd=repo, capture_output=True).stdout)
+    (tree / "status.txt").write_text(
+        run([*git, "status", "--porcelain"], cwd=repo, capture_output=True).stdout
+    )
+    (tree / "tracked.patch").write_text(
+        run([*git, "diff", "HEAD", "--binary"], cwd=repo, capture_output=True).stdout
+    )
+    untracked = run(
+        [*git, "ls-files", "--others", "--exclude-standard", "-z"], cwd=repo, capture_output=True
+    ).stdout
+    for relative in filter(None, untracked.split("\0")):
+        target = tree / "untracked" / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(repo / relative, target)
+
+
 def stop_guardian_services(repo: Path, *, exo_root: Path) -> None:
     """Stop the scheduler and adapters a rebuild_and_restart_exo call started."""
     if not (exo_root / "exo-service-guardian-actions.log").exists():
@@ -699,6 +728,7 @@ def main() -> int:
                 "another SREGym Exo agent container is already running: "
                 + ", ".join(existing_containers)
             )
+        snapshot_policy(repo, run_dir / "policy/before")
         print(f"Run directory: {run_dir}")
         print(f"SREGym checkout: {sregym_root} ({SREGYM_REF})")
         print(f"Command: {shlex.join(command)}", flush=True)
@@ -716,6 +746,7 @@ def main() -> int:
             raise
         finally:
             stop_guardian_services(repo, exo_root=client.root)
+            snapshot_policy(repo, run_dir / "policy/after")
         if return_code != 0:
             raise subprocess.CalledProcessError(return_code, command)
 
@@ -737,7 +768,7 @@ def main() -> int:
         )
         print("\n=== Results ===")
         print(result_files[-1])
-        print(f"Exo state and per-trial audit data: {run_dir}")
+        print(f"Exo state, policy snapshots, and per-trial audit data: {run_dir}")
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
         print(f"error: {error}", file=sys.stderr)
