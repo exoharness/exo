@@ -43,17 +43,20 @@ EXTRA_MOUNTS_ENV = "SREGYM_AGENT_EXTRA_MOUNTS"
 EXO_REPO_MOUNT = "/workspace/exo"
 GUARDIAN_SCRIPT = "exo/scripts/exo-service-guardian"
 EXO_PROFILES = ("practical", "memory-only")
-REFLECTION_OPENING = """The benchmark has graded your work on this incident. Review your work and the grader feedback below.
+REFLECTION_OPENING = """This incident has been graded; the results are below. The cluster is still deployed as you left it, so you can inspect it if you want to understand what happened. The benchmark no longer accepts submissions for this incident.
 
-The cluster is still deployed exactly as you left it, so inspect it to understand what actually happened and what you missed. The benchmark no longer accepts submissions for this incident.
-
-Determine what went well or wrong and extract general lessons that will help you handle future incidents. Future incidents will not be identical to this one, but they may be similar: different faults in the same or similar applications, or the same kind of fault somewhere else. Prefer lessons and checks that transfer across incidents over details specific to this one. Before ending this turn, persist any useful generalizable lesson in durable memory so later incident conversations can use it."""
+If anything from this incident would help you get future incidents right, or figure them out faster or more cheaply, """
 # Only self-modifying profiles have the tools these sentences refer to.
-REFLECTION_SELF_MODIFICATION = """ If any routine appeared that may be reusable, create or improve a tool or skill for it. Also add tools that would make investigating similar incidents quicker or cheaper, for example commands you ran repeatedly, sweeps you should have run early, or checks that would have found this fault sooner. Your own source tree is mounted at /workspace/exo; start with exo/SELF.md. Inspect your own policy and implementation, and if a change there would make you better at this class of task, make it and activate it with rebuild_and_restart_exo so it applies to the next incident."""
-REFLECTION_CLOSING = """ Anything you only say in your reply is a report to the evaluator; it does not persist learning. If there is genuinely nothing worth retaining, say so explicitly.
+REFLECTION_SELF_MODIFICATION = """act on it now: remember it, build a tool, add a skill, or change your own policy or implementation (code changes take effect after rebuild_and_restart_exo). Only durable changes carry forward; what you say in this reply does not."""
+REFLECTION_MEMORY_ONLY = """remember it now. Only what you store carries forward; what you say in this reply does not."""
+REFLECTION_CLOSING = """ If nothing is worth keeping, say so and stop.
 
 Grader feedback:
 """
+# Task-start text: the harness prompt lists these abilities, but nothing else
+# tells the model they are in scope for the task or how to weigh them.
+SELF_MODIFICATION_BRIEF = f"""As you work, you may modify yourself to help you accomplish this task and the ones after it more efficiently (quickly, cheaply). You may inspect your own code at `{EXO_REPO_MOUNT}` (start with `exo/SELF.md`) and change it, then activate the change with rebuild_and_restart_exo; write tools with install_agent_tool; create skills with install_skill; and store durable facts with remember. Do so where what you have observed in the course of your work suggests it would help. Anything you build or remember persists across incidents; new tools are callable on your next model round, while code changes take effect from your next turn. Your top goal is to get the right answer. Doing it quicker and more cheaply is a secondary goal, never at the cost of correctness."""
+MEMORY_ONLY_BRIEF = """As you work, you may store durable facts with remember to help you with this task and the ones after it; anything you remember persists across incidents. Your top goal is to get the right answer. Doing it quicker and more cheaply is a secondary goal, never at the cost of correctness."""
 
 
 def parse_args(arguments: list[str] | None = None) -> argparse.Namespace:
@@ -413,7 +416,7 @@ def release_review(port: int) -> None:
 def build_reflection(results: dict[str, Any], *, self_modification: bool) -> str:
     return (
         REFLECTION_OPENING
-        + (REFLECTION_SELF_MODIFICATION if self_modification else "")
+        + (REFLECTION_SELF_MODIFICATION if self_modification else REFLECTION_MEMORY_ONLY)
         + REFLECTION_CLOSING
         + json.dumps(results, indent=2, default=str)
         + "\n"
@@ -482,7 +485,9 @@ def inspect_container(container_id: str) -> tuple[str, Path]:
     return artifact_id, logs
 
 
-def build_instruction(app: dict[str, Any], *, api_port: int, stages: list[str]) -> str:
+def build_instruction(
+    app: dict[str, Any], *, api_port: int, stages: list[str], self_modification: bool
+) -> str:
     namespaces = ", ".join(app.get("namespaces") or [app["namespace"]])
     endpoint = f"http://host.docker.internal:{api_port}/submit"
     stage_instructions: list[str] = []
@@ -510,6 +515,8 @@ Work autonomously. Do not ask for confirmation. Use kubectl and the available Li
 {os.linesep.join(stage_instructions)}
 
 Diagnosis is graded for the faulty component and root cause. Mitigation is graded from live system health and whether the root cause was fixed rather than masked. The benchmark API may block a mitigation submission briefly while diagnosis grading finishes; wait for its response.
+
+{SELF_MODIFICATION_BRIEF if self_modification else MEMORY_ONLY_BRIEF}
 """
 
 
@@ -579,9 +586,14 @@ def write_run_manifest(run_dir: Path, *, args: argparse.Namespace, repo: Path, c
         "sregym_ref": SREGYM_REF,
         "sregym_command": command,
         "exo_commit": run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True).stdout.strip(),
+        "task_brief": {
+            "self_modification": SELF_MODIFICATION_BRIEF,
+            "memory_only": MEMORY_ONLY_BRIEF,
+        },
         "reflection_instructions": {
             "opening": REFLECTION_OPENING,
             "self_modification": REFLECTION_SELF_MODIFICATION,
+            "memory_only": REFLECTION_MEMORY_ONLY,
             "closing": REFLECTION_CLOSING,
         },
     }
@@ -643,7 +655,12 @@ def run_trials(
         artifact_id, logs = inspect_container(container_id)
         conversation = f"trial-{slug(artifact_id)}-{container_id[:8]}"
         app = wait_for_app(args.api_port, process)
-        instruction = build_instruction(app, api_port=args.api_port, stages=stages)
+        instruction = build_instruction(
+            app,
+            api_port=args.api_port,
+            stages=stages,
+            self_modification=args.exo_profile == "practical",
+        )
         print(f"\n=== Exo trial {artifact_id} ({container_id[:12]}) ===", flush=True)
         client.ensure_conversation(conversation)
         client.attach(conversation, container_id)

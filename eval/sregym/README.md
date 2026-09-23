@@ -68,12 +68,23 @@ about tools, skills, and code changes. Compare it against the default
 
 ## Reflection
 
+Each task prompt ends with a short brief telling Exo it may modify itself
+(inspect and change its code, build tools, add skills, remember facts; on
+`memory-only`, remember only) where its own observations suggest it would
+help, that the right answer comes first and speed and cost second, and that
+what it builds persists across incidents.
+
 With `--reflection`, SREGym holds each graded incident's cluster instead of
 tearing it down at once. The runner reads the grades from SREGym's API and
 sends them to Exo as one more turn in the incident's conversation, with the
-fault still live for inspection. Exo is asked to persist lessons, tools, and
-skills before the runner releases the hold and SREGym tears down. Submissions
-are already closed during review, so the grades cannot change.
+fault still live for inspection. The reflection prompt is deliberately light:
+it presents the grades, notes the environment is still up, and says to act
+only if something would help get future incidents right or solve them faster
+or more cheaply, and to say so if nothing is worth keeping. An earlier, more
+directive wording produced a new tool and skill after nearly every incident.
+The runner releases the hold afterwards and SREGym tears down. Submissions are
+already closed during review, so the grades cannot change. The prompt text a
+run used is recorded in its `run.json`.
 
 Reflection shows Exo the answer, so it refuses `--n-attempts` above 1.
 `--reflection-timeout` bounds the reflection turn (default 900s); SREGym's own

@@ -69,13 +69,13 @@ class EvalTests(unittest.TestCase):
         feedback = {"Diagnosis": {"success": False, "reasoning": "Blamed search"}}
         reflection = sregym_eval.build_reflection(feedback, self_modification=True)
         self.assertIn("Blamed search", reflection)
-        self.assertIn("durable memory", reflection)
-        self.assertIn(sregym_eval.EXO_REPO_MOUNT, reflection)
+        self.assertIn("faster or more cheaply", reflection)
         self.assertIn("rebuild_and_restart_exo", reflection)
+        self.assertIn("If nothing is worth keeping, say so and stop.", reflection)
 
         memory_only = sregym_eval.build_reflection(feedback, self_modification=False)
         self.assertIn("Blamed search", memory_only)
-        self.assertIn("durable memory", memory_only)
+        self.assertIn("remember it now", memory_only)
         self.assertNotIn("rebuild_and_restart_exo", memory_only)
         self.assertNotIn("skill", memory_only)
 
@@ -107,7 +107,8 @@ class EvalTests(unittest.TestCase):
             self.assertEqual(entries[0]["arguments"]["exo_profile"], "memory-only")
             self.assertTrue(entries[0]["arguments"]["reflection"])
             self.assertEqual(entries[0]["sregym_ref"], sregym_eval.SREGYM_REF)
-            self.assertIn("durable memory", entries[0]["reflection_instructions"]["opening"])
+            self.assertIn("faster or more cheaply", entries[0]["reflection_instructions"]["opening"])
+            self.assertIn("top goal", entries[0]["task_brief"]["self_modification"])
             self.assertEqual(entries[1]["sregym_command"][-1], "--resume")
 
     def test_exo_profile_defaults_to_practical(self) -> None:
@@ -126,12 +127,25 @@ class EvalTests(unittest.TestCase):
             },
             api_port=8123,
             stages=["diagnosis", "mitigation"],
+            self_modification=True,
         )
 
         self.assertIn("shop, telemetry", instruction)
         self.assertIn("host.docker.internal:8123/submit", instruction)
         self.assertIn('\"stage\":\"diagnosis\"', instruction)
         self.assertIn('\"stage\":\"mitigation\"', instruction)
+        self.assertIn("rebuild_and_restart_exo", instruction)
+        self.assertIn("top goal is to get the right answer", instruction)
+
+        memory_only = sregym_eval.build_instruction(
+            {"app_name": "shop", "namespace": "default", "descriptions": ""},
+            api_port=8123,
+            stages=["diagnosis"],
+            self_modification=False,
+        )
+        self.assertIn("remember", memory_only)
+        self.assertNotIn("rebuild_and_restart_exo", memory_only)
+        self.assertNotIn("install_skill", memory_only)
 
     def test_improvement_actions_extracts_only_mutations(self) -> None:
         events = {
