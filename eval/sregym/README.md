@@ -101,13 +101,21 @@ eval/sregym/.venv/bin/python eval/sregym/postprocess.py \
   .local/sregym-evals/upstream/SREGym/results/<batch>
 ```
 
-Exo's agent-built tools live in this repository (`.exo/agent-tools`,
-`.exo/tools`, `.exo/tool-sources`), not under the run's Exo root, and code
-changes land in the working tree. Each run therefore snapshots that policy into
-`.local/sregym-evals/<run>/policy/before` and `policy/after`: the tool
-directories plus the source tree's `HEAD`, `git status`, tracked diff, and
-untracked files. Tools built by one run stay in place for the next unless you
-clear those directories.
+Exo's policy has three homes: this source tree (which Exo edits through the
+`/workspace/exo` mount), agent-built tools under `.exo/agent-tools`,
+`.exo/tools`, and `.exo/tool-sources` in that tree, and memory and skills
+stored as versioned artifacts in the run's Exo root. Each run keeps a git
+repository at `.local/sregym-evals/<run>/policy` that brings them together:
+`source/` (tracked and untracked files), `tools/`, and `agent/` (the latest
+memory and skill artifacts). Its first commit is the policy as the run began;
+every graded incident adds a commit named after the trial and its grades, and
+the run ends with a final commit, so `git log -p` in that directory shows what
+each reflection changed.
+
+A run starts with no inherited tools: the runner removes the `.exo` tool
+directories first (the previous run's copies live in its policy repository).
+Files the agent container wrote as root are reclaimed with a throwaway
+`alpine` container before they are removed or copied.
 
 The run-scoped Exo state is retained under `.local/sregym-evals/<run>/exo`, so
 the exact memory, artifacts, conversations, and tool state can be inspected

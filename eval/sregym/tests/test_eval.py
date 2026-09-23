@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import importlib.util
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "eval.py"
+MODULE_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(MODULE_DIR))
+MODULE_PATH = MODULE_DIR / "eval.py"
 SPEC = importlib.util.spec_from_file_location("sregym_eval", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 sregym_eval = importlib.util.module_from_spec(SPEC)
@@ -35,33 +38,6 @@ class EvalTests(unittest.TestCase):
 
             self.assertEqual((root / "agents.yaml").read_text(), "agents:\n  - name: exo\n")
 
-    def test_snapshot_policy_records_tools_and_source_state(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            repo = Path(temporary_directory) / "repo"
-            repo.mkdir()
-            git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(repo)]
-            (repo / "harness.ts").write_text("export const policy = 1;\n")
-            (repo / ".gitignore").write_text(".exo/\n")
-            subprocess.run([*git, "init", "-q"], check=True)
-            subprocess.run([*git, "add", "."], check=True)
-            subprocess.run([*git, "commit", "-q", "-m", "base"], check=True)
-            head = subprocess.run([*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout
-            (repo / "harness.ts").write_text("export const policy = 2;\n")
-            (repo / "new-tool.ts").write_text("export const tool = true;\n")
-            (repo / ".exo/agent-tools").mkdir(parents=True)
-            (repo / ".exo/agent-tools/k8s-scan.ts").write_text("scan\n")
-
-            destination = Path(temporary_directory) / "run/policy/after"
-            sregym_eval.snapshot_policy(repo, destination)
-
-            self.assertEqual((destination / ".exo/agent-tools/k8s-scan.ts").read_text(), "scan\n")
-            self.assertEqual((destination / "source/HEAD").read_text(), head)
-            self.assertIn("-export const policy = 1;", (destination / "source/tracked.patch").read_text())
-            self.assertEqual(
-                (destination / "source/untracked/new-tool.ts").read_text(), "export const tool = true;\n"
-            )
-            self.assertIn("?? new-tool.ts", (destination / "source/status.txt").read_text())
-
     def test_real_patch_covers_every_sregym_change(self) -> None:
         patch = sregym_eval.SREGYM_PATCH.read_text()
         for path in (
@@ -80,6 +56,13 @@ class EvalTests(unittest.TestCase):
             sregym_eval.parse_args(["--reflection", "--n-attempts", "2"])
         args = sregym_eval.parse_args(["--reflection"])
         self.assertTrue(args.reflection)
+
+    def test_grade_summary_reads_stage_outcomes(self) -> None:
+        summary = sregym_eval.grade_summary(
+            {"Diagnosis": {"success": True}, "Mitigation": {"success": False}, "TTL": 3.0}
+        )
+        self.assertEqual(summary, "diagnosis PASS, mitigation fail")
+        self.assertEqual(sregym_eval.grade_summary(None), "ungraded")
 
     def test_build_reflection_embeds_grader_feedback(self) -> None:
         reflection = sregym_eval.build_reflection(
