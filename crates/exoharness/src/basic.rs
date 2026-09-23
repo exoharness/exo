@@ -4910,6 +4910,15 @@ struct LocalEgressResolver {
 #[cfg(feature = "firecracker")]
 #[async_trait]
 impl crate::egress::EgressCredentialResolver for LocalEgressResolver {
+    async fn authorize(
+        &self,
+        _identity: &crate::egress::EgressIdentity,
+        _destination: &crate::egress::EgressDestination,
+        _credential_bindings: &[String],
+    ) -> Result<()> {
+        Ok(())
+    }
+
     async fn resolve(
         &self,
         identity: &crate::egress::EgressIdentity,
@@ -5098,6 +5107,7 @@ mod egress_resolution_tests {
         let first_id = first.put_secret(secret("first")).await?;
         second.put_secret(secret("second")).await?;
         let destination = EgressDestination {
+            scheme: "https".into(),
             host: "api.test".into(),
             port: 443,
             method: hyper::Method::GET,

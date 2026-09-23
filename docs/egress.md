@@ -82,6 +82,13 @@ Binding names are scoped references, not storage IDs. Two threads can both
 request `notion` and resolve different secrets. Implement `EgressCredentialResolver`:
 
 ```rust
+async fn authorize(
+    &self,
+    identity: &EgressIdentity,
+    destination: &EgressDestination,
+    credential_bindings: &[String],
+) -> anyhow::Result<()>;
+
 async fn resolve(
     &self,
     identity: &EgressIdentity,
@@ -93,10 +100,12 @@ async fn resolve(
 The caller selects bindings in `request.spec.policy.credentials`. Each use is
 resolved again, so rotation and revocation take effect without replacing the
 sandbox. Identity includes the sandbox ID and agent/thread scope; destination
-includes the host, port, method, and normalized path/query. A vault adapter can
+includes the scheme, host, port, method, and normalized path/query. `authorize`
+runs on that rewritten destination before DNS resolution or forwarding, even
+without a credential placeholder. A vault adapter can
 pin a binding to a vault/secret reference per thread and enforce its stored
 destination restrictions. The local CLI resolver assumes a single user owns the
-secret store; hosted resolvers must supply their own authorization. Resolver
+secret store; request-level callers supply their own authorization. Resolver
 failures are sanitized before returning them to the guest.
 
 ```rust
@@ -167,13 +176,19 @@ the listeners inside the Lima bridge. Low-level callers that already own their
 proxy can pass endpoints to
 `FirecrackerSandboxBackend::acquire_request(FirecrackerRequest)`.
 
-A hosted backend can implement `ManagedSandboxBackend::acquire` itself: choose
-the sandbox node, establish an authenticated relay to the credential service,
-install routing, and only then return a handle. No proxy hooks are required on
-the shared sandbox traits. The credential service can run inside Loop while
-the node relays opaque streams. Relay authorization must bind the stream to the
-sandbox allocation and its generation; raw source-IP binding is only suitable
-before NAT on a trusted local host. The production relay is not implemented here.
+## Request-level forwarding
+
+With the `firecracker` feature, `EgressEngine::forward_http_request` takes an
+HTTP request plus sandbox identity, URL and method rules, and a resolver. It
+starts no listener and keeps no sandbox session. The caller validates its
+capability; Exo strips the named capability header before forwarding.
+
+Rules map an inbound URL prefix to an upstream prefix, keeping the suffix and
+query. Firecracker selects its destination from Host, SNI, and its host policy.
+Both use the same forwarding code. The HTTP resolver authorizes the rewritten
+destination before credential substitution and public-address resolution.
+Requests are limited to 8 MiB, responses stream, upstream TLS is verified, and
+redirects are not followed.
 
 ## Other backends
 
@@ -233,10 +248,16 @@ selected binding and forwards only requests the resolver authorizes.
 
 ## Tests
 
-With the [Firecracker artifacts](../support/firecracker/README.md) installed:
+Run the request engine and listener unit tests:
 
 ```bash
-cargo test -p exoharness --features firecracker --lib
+cargo test -p exoharness --features firecracker --lib egress::tests::
+```
+
+With the [Firecracker artifacts](../support/firecracker/README.md) installed,
+run the VM smoke tests:
+
+```bash
 bash support/firecracker/egress-smoke.sh
 bash support/firecracker/managed-egress-smoke.sh
 ```
