@@ -46,7 +46,6 @@ SKIP_BUILD="${EXO_SKIP_BUILD:-false}"
 TEMPLATE="${EXO_TEMPLATE:-canonical}"
 PROFILE="${EXO_PROFILE:-practical}"
 PROVIDER_EXPLICIT=false
-declare -a CONTROL_PIDS=()
 SETUP_ADAPTER="${EXO_SETUP_ADAPTER:-}"
 declare -a SETUP_ADAPTERS=()
 if [[ -n "$SETUP_ADAPTER" ]]; then
@@ -65,6 +64,7 @@ usage() {
 Usage:
   ./exo.sh [options]
   ./exo.sh list
+  ./exo.sh logs
   ./exo.sh delall all
   ./exo.sh fresh
   ./exo.sh stop-all
@@ -76,12 +76,13 @@ Usage:
 
 Default behavior starts the canonical stack: it creates or reuses an Exo
 agent and conversation with a Docker sandbox, repo self-map mount, ExoChat
-setup, guardian config, and control logs, starts the local scheduler and
+setup and guardian config, starts the local scheduler and
 adapter loops, then starts a REPL. It reads .env by default if present.
 Choose a different template with --template.
 
 Subcommands:
   list             List agents and conversations
+  logs             Follow scheduler and adapter logs in this terminal
   delall all       Delete all agents and conversations
   fresh            Rebuild, delete all state, and start a clean REPL
   stop-all         Stop the scheduler and adapter runners, preserving .exo state
@@ -111,7 +112,7 @@ Options:
   --module <path>              Exo TypeScript harness module
   --template <name>            Launch template (default: canonical):
                                  canonical  Docker sandbox, repo self-map mount, ExoChat
-                                            setup, control logs, and guardian config
+                                            setup and guardian restart supervision
                                  dev        Same as canonical but with IRC+Discord
                                             instead of ExoChat
                                  minimal    No Docker defaults, adapter setup prompts,
@@ -132,7 +133,7 @@ Options:
   --no-adapters                Do not start the local adapter runner
   --adapters                   Start the local adapter runner
   --adapter-limit <n>          Max adapters supervised by the runner (default: 50)
-  --control                    Show live scheduler and adapter logs beside the REPL
+  --control                    Restart the REPL after guardian rebuild requests
   --setup-profile              Prompt once and write the ignored local profile prompt
   --local-prompt-file <path>    Local profile prompt path (default: .exo/exo-profile.md)
   --setup <adapter>            Send adapters/<adapter>/setup-prompt.md.
@@ -873,8 +874,6 @@ run_repl() {
   ensure_self_repo_mount
   ensure_agent_cli_mount
   configure_guardian_for_current_launch
-  local scheduler_log_start_line
-  scheduler_log_start_line="$(scheduler_log_line_count)"
   ensure_scheduler
   local adapter_log_start_line
   adapter_log_start_line="$(adapter_log_line_count)"
@@ -884,7 +883,7 @@ run_repl() {
   show_signal_qr_if_needed "$adapter_log_start_line"
   show_whatsapp_qr_if_needed "$adapter_log_start_line"
   if [[ "$CONTROL" == true ]]; then
-    run_control_repl "$scheduler_log_start_line" "$adapter_log_start_line"
+    run_control_repl
   else
     EXO_GLOBAL_ARGS=()
     append_exo_global_args
@@ -904,42 +903,27 @@ adapter_log_line_count() {
   fi
 }
 
-scheduler_log_line_count() {
-  local log_file
-  log_file="$(scheduler_log_file)"
-  if [[ -f "$log_file" ]]; then
-    wc -l <"$log_file" | tr -d '[:space:]'
-  else
-    echo 0
-  fi
+follow_service_logs() {
+  mkdir -p "$ROOT_DIR/.exo"
+  touch "$(scheduler_log_file)" "$(adapters_log_file)"
+  exec tail -n 20 -F "$(scheduler_log_file)" "$(adapters_log_file)"
 }
 
 run_control_repl() {
-  local scheduler_start_line="$1"
-  local adapter_start_line="$2"
-  local repl_pid=""
   local restart_watcher_pid=""
 
-  cleanup_control_logs() {
-    local pid
-    for pid in "${CONTROL_PIDS[@]:-}"; do
-      kill "$pid" >/dev/null 2>&1 || true
-    done
+  cleanup_control_repl() {
     if [[ -n "${restart_watcher_pid:-}" ]]; then
       kill "$restart_watcher_pid" >/dev/null 2>&1 || true
     fi
     kill_repl_children "$$"
   }
-  trap cleanup_control_logs EXIT INT TERM
+  trap cleanup_control_repl EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 
-  echo "Control console enabled. Streaming scheduler and adapter logs beside the REPL."
+  printf 'Service logs: run %q logs in another terminal.\n' "$ROOT_DIR/exo.sh"
   echo "The control wrapper will restart the REPL child when $(repl_restart_file) appears."
-  if [[ "$START_SCHEDULER" == true ]]; then
-    start_control_log_tail "scheduler" "$(scheduler_log_file)" "$scheduler_start_line"
-  fi
-  if [[ "$START_ADAPTERS" == true ]]; then
-    start_control_log_tail "adapters" "$(adapters_log_file)" "$adapter_start_line"
-  fi
 
   EXO_GLOBAL_ARGS=()
   append_exo_global_args
@@ -995,26 +979,11 @@ watch_repl_restart_request() {
   marker="$(repl_restart_file)"
   while true; do
     if [[ -f "$marker" ]]; then
-      echo "Guardian requested REPL child restart; stopping current child..."
       kill_repl_children "$control_pid"
       return
     fi
     sleep 2
   done
-}
-
-start_control_log_tail() {
-  local label="$1"
-  local log_file="$2"
-  local start_line="$3"
-  local tail_start=$((start_line + 1))
-
-  mkdir -p "$(dirname "$log_file")"
-  touch "$log_file"
-  echo "[$label] tailing $log_file"
-  tail -n +"$tail_start" -F "$log_file" 2>/dev/null \
-    | awk -v label="$label" '{ print "[" label "] " $0; fflush(); }' &
-  CONTROL_PIDS+=("$!")
 }
 
 startup_prompt_file() {
@@ -1237,6 +1206,11 @@ while [[ $# -gt 0 ]]; do
       shift
       [[ $# -eq 0 ]] || die "list does not accept additional arguments"
       COMMAND="list"
+      ;;
+    logs)
+      shift
+      [[ $# -eq 0 ]] || die "logs does not accept additional arguments"
+      COMMAND="logs"
       ;;
     delall|delete-all)
       shift
@@ -1508,6 +1482,9 @@ case "$COMMAND" in
     ;;
   list)
     list_agents_and_conversations
+    ;;
+  logs)
+    follow_service_logs
     ;;
   delall)
     delete_all_agents_and_conversations

@@ -66,8 +66,11 @@ const socket = makeWASocket({
 
 socket.ev.on("creds.update", saveCreds);
 
+let lastQr: string | undefined;
 socket.ev.on("connection.update", (update) => {
-  if (update.qr && linkMethod === "qr") {
+  // Baileys can repeat an update; rotated codes must still reach the pairing log.
+  if (update.qr && linkMethod === "qr" && update.qr !== lastQr) {
+    lastQr = update.qr;
     qrcodeTerminal.generate(update.qr, { small: true }, (qr) => {
       process.stderr.write(
         `\n[whatsapp-adapter] Scan this QR with WhatsApp:\n${qr}\n`,
@@ -80,6 +83,7 @@ socket.ev.on("connection.update", (update) => {
     });
   }
   if (update.connection === "open") {
+    lastQr = undefined;
     writeWorkerEvent({
       type: "connected",
       subject: socket.user?.id ?? null,
