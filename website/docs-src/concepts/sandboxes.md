@@ -19,6 +19,7 @@ plus arbitrary command execution inside them.
 | `local-process` | Local | No isolation — commands run on the host |
 | `daytona` | Remote | [daytona.io](https://www.daytona.io) |
 | `e2b` | Remote | [e2b.dev](https://e2b.dev) |
+| `runta` | Remote | [Runta](https://runta.com) |
 | `sprites` | Remote | [sprites.dev](https://sprites.dev) |
 | `vercel` | Remote | [Vercel Sandbox](https://vercel.com/docs/vercel-sandbox) |
 | `aws-agentcore` | Remote | [Amazon Bedrock AgentCore](https://aws.amazon.com/bedrock/agentcore/) |
@@ -38,6 +39,31 @@ exo provider configure --provider <name> --secret <name>
 
 Remote backends run the sandbox on hosted infrastructure instead of your
 machine, so it keeps running even when your local process stops.
+
+### Runta
+
+Store your Runta token and configure the provider:
+
+```bash
+exo secret set runta --env RUNTA_TOKEN
+exo provider configure --provider runta --secret runta
+exo agent create --model <model> --provider runta "My Agent"
+```
+
+Runta uses the platform's default Runtime Image unless you set
+`--default-image <runtime-image-id>` when configuring the provider. These are
+Runta Runtime Image ids, not Docker image names. Use `--api-url` to select a
+Runta API endpoint other than `https://api.runta.com`.
+
+Exo maps CPU and memory settings to Runta resource requests. Stopping pauses
+the runtime, preserving memory and disk for the next start. An idle timeout
+configures automatic suspension and wakeup. Snapshots are Runta checkpoints;
+restoring creates a separate runtime and requires access to the original
+checkpoint in the same Runta account.
+
+Host bind mounts, durable filesystem mounts, external attachments, and Exo's
+restricted-network and credential-injection policies are not supported by this
+backend. Commands run with Runta's default egress policy.
 
 ## Scope
 

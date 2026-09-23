@@ -289,4 +289,29 @@ mod tests {
         assert_eq!(spec.default_workdir, "/workspace/exo");
         assert_eq!(spec.file_system_mounts, vec![mount]);
     }
+    #[test]
+    fn runta_agent_uses_provider_default_image() {
+        let mut sandbox = test_sandbox_config(None);
+        sandbox.provider = SandboxProvider::Runta;
+        let mut config = test_agent_config(sandbox);
+        assert!(agent_sandbox_spec(&config).image.is_empty());
+        config.sandbox.image = Some("custom-runtime-image".into());
+        assert_eq!(agent_sandbox_spec(&config).image, "custom-runtime-image");
+    }
+    #[test]
+    fn runta_conversation_override_uses_provider_default_image() {
+        let agent = test_agent_config(test_sandbox_config(None));
+        let mut conversation = crate::ConversationConfig {
+            sandbox_provider: Some(SandboxProvider::Runta),
+            ..Default::default()
+        };
+        let spec = crate::conversation_sandbox::conversation_sandbox_spec(&agent, &conversation);
+        assert!(spec.image.is_empty());
+        assert_eq!(spec.provider, SandboxProvider::Runta);
+        conversation.sandbox_image = Some("custom-runtime-image".into());
+        assert_eq!(
+            crate::conversation_sandbox::conversation_sandbox_spec(&agent, &conversation).image,
+            "custom-runtime-image"
+        );
+    }
 }

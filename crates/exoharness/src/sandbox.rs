@@ -161,6 +161,8 @@ impl SnapshotFormat {
     pub const DaytonaRef: Self = Self::from_static("daytona-ref");
     /// Reference to an E2B snapshot template id.
     pub const E2bRef: Self = Self::from_static("e2b-ref");
+    /// Reference to a Runta checkpoint id.
+    pub const RuntaRef: Self = Self::from_static("runta-ref");
     /// Reference to a Sprites checkpoint id.
     pub const SpritesRef: Self = Self::from_static("sprites-ref");
     /// Reference to a `.smolmachine` pack on the local disk.

@@ -38,7 +38,7 @@ use executor::{
     FileSystemMount, FileSystemMountMode, FirecrackerBackendSpec, ForkConversationRequest,
     HOST_EVENT_REBUILD_AND_RESTART, HTTP_EXOHARNESS_TRACING_TARGET, Harness, HarnessAgent,
     HarnessConversation, HttpExoHarness, LocalSandboxExoHarness, NewAgentRequest, PutSecretRequest,
-    RlmHarness, RunInSandboxRequest, SANDBOX_MAIN_MOUNT_DIR, SandboxAttachment,
+    RlmHarness, RunInSandboxRequest, RuntaBackendSpec, SANDBOX_MAIN_MOUNT_DIR, SandboxAttachment,
     SandboxBackendRegistration, SandboxProcess, SandboxProvider, SandboxProviderConfig,
     SandboxResourceShape, SandboxScope, Secret, SecretBackendChoice, SpritesBackendSpec,
     ToolRequest, ToolRuntime, TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, VercelBackendSpec,
@@ -412,6 +412,8 @@ enum SandboxProviderArg {
     Daytona,
     #[value(name = "e2b")]
     E2b,
+    #[value(name = "runta")]
+    Runta,
     #[value(name = "sprites")]
     Sprites,
     Vercel,
@@ -431,6 +433,7 @@ impl From<SandboxProviderArg> for SandboxProvider {
         match value {
             SandboxProviderArg::Daytona => Self::Daytona,
             SandboxProviderArg::E2b => Self::E2b,
+            SandboxProviderArg::Runta => Self::Runta,
             SandboxProviderArg::Sprites => Self::Sprites,
             SandboxProviderArg::Vercel => Self::Vercel,
             SandboxProviderArg::AwsAgentCore => Self::AwsAgentCore,
@@ -515,6 +518,7 @@ fn default_sandbox_backends(
         SandboxBackendRegistration::local_process(),
         SandboxBackendRegistration::daytona(DaytonaBackendSpec::default()),
         SandboxBackendRegistration::e2b(E2bBackendSpec::default()),
+        SandboxBackendRegistration::runta(RuntaBackendSpec::default()),
         SandboxBackendRegistration::sprites(SpritesBackendSpec::default()),
         SandboxBackendRegistration::vercel(VercelBackendSpec::with_conventional_secrets()),
         SandboxBackendRegistration::aws_agentcore(),
@@ -2563,6 +2567,19 @@ async fn main() -> Result<()> {
                             api_key_secret_id: secret_id,
                             api_url,
                             default_image: default_image.unwrap_or_else(default_e2b_template),
+                        }
+                    }
+                    SandboxProviderArg::Runta => {
+                        let secret =
+                            secret.ok_or_else(|| anyhow!("--secret is required for runta"))?;
+                        let secret_id =
+                            find_secret_id(harness.exoharness_handle().as_ref(), &secret)
+                                .await?
+                                .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
+                        SandboxProviderConfig::Runta {
+                            token_secret_id: secret_id,
+                            api_url,
+                            default_image: default_image.unwrap_or_default(),
                         }
                     }
                     SandboxProviderArg::Sprites => {

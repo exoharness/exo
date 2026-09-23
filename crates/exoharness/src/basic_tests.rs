@@ -63,6 +63,7 @@ fn sandbox_backend_registration_resolves_builtin_providers() {
         SandboxProvider::E2b,
         SandboxProvider::Firecracker,
         SandboxProvider::LocalProcess,
+        SandboxProvider::Runta,
         SandboxProvider::Sprites,
         SandboxProvider::Vercel,
     ] {
@@ -2932,4 +2933,46 @@ async fn local_process_sandbox_rejects_disabled_networking() {
             .to_string()
             .contains("policy.networking.disabled")
     );
+}
+
+#[tokio::test]
+async fn runta_sandbox_binding_resolves_secret_by_id() {
+    let tempdir = TempDir::new().unwrap();
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
+        .await
+        .unwrap();
+    assert!(
+        harness
+            .runta_config_from_binding_for_test()
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let secret_id = harness
+        .put_secret(PutSecretRequest {
+            name: "my-runta-token".into(),
+            secret: Secret::Key {
+                value: "token-123".into(),
+            },
+        })
+        .await
+        .unwrap();
+    harness
+        .put_binding(Binding::Sandbox {
+            name: "runta".into(),
+            config: SandboxProviderConfig::Runta {
+                token_secret_id: secret_id,
+                api_url: Some("https://api.example.test".into()),
+                default_image: "my-runtime-image".into(),
+            },
+        })
+        .await
+        .unwrap();
+    let config = harness
+        .runta_config_from_binding_for_test()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(config.token, "token-123");
+    assert_eq!(config.api_url, "https://api.example.test");
 }
