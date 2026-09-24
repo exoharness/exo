@@ -181,7 +181,7 @@ policy, then the server default. Without one of those policies, MCP tools use
 ```yaml
 permission_policy: { type: always_allow }
 tool_policies:
-  shell: { type: always_ask }
+  pi.bash: { type: always_ask }
 mcp_servers:
   - type: url
     name: notion
@@ -191,7 +191,8 @@ mcp_servers:
       notion-search: { type: always_allow }
 ```
 
-Top-level tool names use the exposed name, such as `shell`, `claude.Bash`, or `exo_mcp__notion__notion-search`. Entries under an MCP server use
+Top-level tool names use the exposed name, such as `shell`, `pi.bash`,
+`claude.Bash`, or `exo_mcp__notion__notion-search`. Entries under an MCP server use
 its original tool names. Use `allowed_tools` or `blocked_tools` to disable tools.
 
 For saved managed agents, definition permissions override thread permissions. Each
@@ -207,13 +208,13 @@ to the same session; changing a policy to `always_ask` does not revoke an existi
 allowance. Local and HTTP providers use the same flow, and inline chat reconnects
 to a saved HTTP turn's pending approval.
 
-Policies cover basic/RLM tools, registered TypeScript tools, MCP
+Policies cover basic/RLM tools, registered TypeScript tools, Pi native tools, MCP
 tools, and Claude Code's native `PreToolUse` hook. Custom TypeScript harnesses that
 execute their own tools must declare `nativeToolApprovals: true`, validate their
 active tool inventory with `validateToolPolicies`, and call `context.authorizeTool`
 before execution. `context.executeTool` already enforces the policy. Harness
 implementations remain trusted code.
-Codex, Cursor, and Pi currently reject native `always_ask` policies that their Exo
+Codex and Cursor currently reject native `always_ask` policies that their Exo
 adapters cannot enforce. Codex supports policies on its runtime MCP tools; its
 native shell does not support approval policies in this adapter. Keep its agent
 default `always_allow` and apply MCP tool overrides.
@@ -227,7 +228,7 @@ name; each new thread gets its own sandbox:
 exo environment create pi-local --file exoharness/examples/environments/pi-local.yaml
 exo environment list
 exo environment get pi-local
-exo chat --agent-file exoharness/examples/managed-agents/support-analyst.md \
+exo chat --agent-file exoharness/examples/managed-agents/pi-assistant.md \
   --environment pi-local
 ```
 
@@ -254,6 +255,30 @@ rejected. `exo environment delete NAME` removes only the definition. Explicit
 host mounts can share data between sandboxes; ordinary sandbox files are private
 to their thread. Persistence after a backend terminates a sandbox still follows
 that backend's existing lifecycle and durable-file-system support.
+
+## Pi
+
+```sh
+container build -t exo-pi-sandbox:latest exoharness/containers/pi-sandbox
+exo secret create openai --env OPENAI_API_KEY
+exo model create gpt-5-mini --secret openai
+exo chat --agent-file exoharness/examples/managed-agents/pi-assistant.md \
+  --environment-file exoharness/examples/environments/pi-local.yaml
+```
+
+Pi runs inside the sandbox using its RPC mode. The Exo extension forwards native
+tool approval requests and declared MCP calls to the runtime. Assistant text
+streams live, and each model step contributes token and cost usage. Saved threads
+replay Exo history and reuse their environment's sandbox files.
+
+The image pins Pi 0.85.1. The live test exercises local and HTTP managed agents:
+
+```sh
+cargo test -p exo --test container_live pi_managed_local_and_http -- --ignored --nocapture
+```
+
+It requires Apple container, the Pi image, and `OPENAI_API_KEY`. Model credentials
+enter the sandbox process environment.
 
 ## Vaults
 

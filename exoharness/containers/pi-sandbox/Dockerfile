@@ -1,6 +1,6 @@
 FROM node:22-bookworm-slim
 
-ARG PI_PACKAGE=@earendil-works/pi-coding-agent
+ARG PI_PACKAGE=@earendil-works/pi-coding-agent@0.85.1
 
 ENV HOME=/home/exo
 ENV PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin

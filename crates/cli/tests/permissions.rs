@@ -125,11 +125,6 @@ async fn unsupported_native_approvals_fail_before_model_execution() -> Result<()
                 "cannot enforce always_ask",
             ),
             (
-                "pi",
-                "permission_policy: {type: always_ask}",
-                "cannot enforce always_ask",
-            ),
-            (
                 "codex",
                 "tool_policies:\n  shell: {type: always_ask}",
                 "unknown tool in tool_policies: shell",

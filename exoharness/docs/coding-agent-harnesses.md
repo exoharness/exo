@@ -137,6 +137,8 @@ Create the agent and start a conversation:
 
 ## Pi
 
+Pi sandbox images must define `HOME` as a writable directory for session and tool files.
+
 Register a model Pi supports. Pi reads the provider key from the sandbox
 environment, so the same variable has to be set where exo runs:
 
