@@ -21,7 +21,7 @@ installs Node and pi there at the start of each trial.
 
 ## How a trial runs in Harbor's container
 
-Harbor builds and owns the task container. The agent looks the container up by its Compose labels and attaches it to the trial's conversation with `exo conversation sandbox attach`. The executor runs every turn of a conversation in its attached sandbox, so nothing else is needed to make the task run there. Harbor removes the container after grading; Exo only borrows it and never stops or deletes it.
+Harbor builds and owns the task container. The agent looks the container up by its Compose labels and attaches it to the trial's conversation with `exo thread sandbox attach`. The executor runs every turn of a conversation in its attached sandbox, so nothing else is needed to make the task run there. Harbor removes the container after grading; Exo only borrows it and never stops or deletes it.
 
 ## Running
 

@@ -309,15 +309,15 @@ round, and the RAM state, refreshing once a second.
 Then, in another terminal (from the repo root), create the agent and play:
 
 ```bash
-exo secret set openai --env OPENAI_API_KEY          # once
-exo model register gpt-5.5 --secret openai          # once
+exo secret create openai --env OPENAI_API_KEY          # once
+exo model create gpt-5.5 --secret openai          # once
 
 exo --harness typescript agent create "Gameboy" \
   --module exoharness/examples/gameboy-agent/agent/harness.ts \
   --model gpt-5.5 --max-tool-round-trips 20         # once
-exo conversation create gameboy "Play Pokemon"      # once
+exo thread create gameboy "Play Pokemon"      # once
 
-exo conversation send gameboy play-pokemon \
+exo thread send gameboy play-pokemon \
   "Play Pokemon Red. Get through the intro and pick a starter."
 ```
 
@@ -328,7 +328,7 @@ prior summaries are already in history. To just let it play, iterate:
 
 ```bash
 for i in $(seq 1 25); do
-  exo conversation send gameboy play-pokemon \
+  exo thread send gameboy play-pokemon \
     "Continue playing. Make real progress; end with a one-line summary."
 done
 ```

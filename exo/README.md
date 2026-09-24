@@ -93,7 +93,7 @@ path is:
 
    ```bash
    export DISCORD_BOT_TOKEN="..."
-   ./target/debug/exo secret set discord-bot-token --env DISCORD_BOT_TOKEN
+   ./target/debug/exo secret create discord-bot-token --env DISCORD_BOT_TOKEN
    ```
 
 5. Create or confirm the adapter:
@@ -179,7 +179,7 @@ Detached restart output is written to
 When `./exo.sh --control` is running, it also acts
 as the foreground REPL supervisor. Guardian builds write
 `.exo/exo-control.restart`; the control wrapper sees that marker, restarts only
-the child `exo repl`, and keeps your terminal open.
+the child `exo chat`, and keeps your terminal open.
 
 ## Setting up the identity
 
@@ -370,7 +370,7 @@ If you want a conversation to have its own sandbox, use `sandboxScope: "conversa
 
 ```bash
 ./exo.sh --conversation isolated-dev --sandbox-scope conversation
-exo --harness exo conversation update exo-agent isolated-dev --sandbox-scope conversation
+exo --harness exo thread update exo-agent isolated-dev --sandbox-scope conversation
 ```
 
 Scheduled tasks also default to `sandboxMode: "agent"`. A task can explicitly use

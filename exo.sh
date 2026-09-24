@@ -34,7 +34,7 @@ NETWORKING="${EXO_NETWORKING:-enabled}"
 SHELL_PROGRAM="${EXO_SHELL_PROGRAM:-/bin/bash}"
 SANDBOX_SCOPE="${EXO_SANDBOX_SCOPE:-}"
 SCHEDULER_INTERVAL_SECONDS="${EXO_SCHEDULER_INTERVAL_SECONDS:-10}"
-COMMAND="repl"
+COMMAND="chat"
 USE_SANDBOX=true
 PULL_SANDBOX=false
 START_SCHEDULER="${EXO_START_SCHEDULER:-true}"
@@ -321,9 +321,9 @@ register_model() {
   ensure_exo_bin
   local upstream="${UPSTREAM_MODEL:-$MODEL}"
   echo "Storing secret $SECRET_NAME from \$$SECRET_ENV..."
-  exo secret set "$SECRET_NAME" --env "$SECRET_ENV"
+  exo secret create "$SECRET_NAME" --env "$SECRET_ENV"
   echo "Registering model $MODEL -> $upstream..."
-  local args=(model register "$MODEL" --model "$upstream" --secret "$SECRET_NAME")
+  local args=(model create "$MODEL" --model "$upstream" --secret "$SECRET_NAME")
   if [[ -n "$MODEL_BASE_URL" ]]; then
     args+=(--base-url "$MODEL_BASE_URL")
   fi
@@ -564,11 +564,11 @@ setup_agent() {
 }
 
 agent_exists() {
-  exo agent show "$AGENT" >/dev/null 2>&1
+  exo agent get "$AGENT" >/dev/null 2>&1
 }
 
 conversation_exists() {
-  exo conversation show "$AGENT" "$CONVERSATION" >/dev/null 2>&1
+  exo thread get "$AGENT" "$CONVERSATION" >/dev/null 2>&1
 }
 
 ensure_agent() {
@@ -644,7 +644,7 @@ ensure_self_repo_mount() {
 
   # Agent-level mounts apply to the shared agent sandbox for every
   # conversation, so adapter conversations see the repo too.
-  exo agent mount add "$AGENT" "$ROOT_DIR" "$SELF_REPO_MOUNT_PATH" --rw >/dev/null
+  exo agent mount create "$AGENT" "$ROOT_DIR" "$SELF_REPO_MOUNT_PATH" --rw >/dev/null
 }
 
 ensure_agent_cli_mount() {
@@ -661,7 +661,7 @@ ensure_agent_cli_mount() {
     die "agent-cli mount path must be absolute: $AGENT_CLI_MOUNT_PATH"
   fi
 
-  exo agent mount add "$AGENT" "$AGENT_CLI_MOUNT_ROOT" "$AGENT_CLI_MOUNT_PATH" --rw >/dev/null
+  exo agent mount create "$AGENT" "$AGENT_CLI_MOUNT_ROOT" "$AGENT_CLI_MOUNT_PATH" --rw >/dev/null
 }
 
 list_agents_and_conversations() {
@@ -677,7 +677,7 @@ list_agents_and_conversations() {
   while IFS= read -r agent; do
     [[ -z "$agent" ]] && continue
     echo
-    exo agent show "$agent" | awk '
+    exo agent get "$agent" | awk '
       /^slug:/ { slug=$2 }
       /^name:/ { name=substr($0, 7) }
       END {
@@ -690,7 +690,7 @@ list_agents_and_conversations() {
         }
       }
     '
-    exo conversation list "$agent" | awk 'NR == 1 { next } { printf "  %s - %s\n", $1, $3 }'
+    exo thread list "$agent" | awk 'NR == 1 { next } { printf "  %s - %s\n", $1, $3 }'
   done <<<"$agents"
 }
 
@@ -755,11 +755,11 @@ delete_all_agents_and_conversations() {
     [[ -z "$agent" ]] && continue
 
     local conversations
-    conversations="$(exo conversation list "$agent" | awk 'NR > 1 { print $1 }')"
+    conversations="$(exo thread list "$agent" | awk 'NR > 1 { print $1 }')"
     while IFS= read -r conversation; do
       [[ -z "$conversation" ]] && continue
       echo "Deleting conversation $agent/$conversation..."
-      exo conversation delete "$agent" "$conversation" >/dev/null
+      exo thread delete "$agent" "$conversation" >/dev/null
     done <<<"$conversations"
 
     echo "Deleting agent $agent..."
@@ -888,9 +888,9 @@ run_repl() {
   else
     EXO_GLOBAL_ARGS=()
     append_exo_global_args
-    exec "$EXO_BIN" "${EXO_GLOBAL_ARGS[@]}" repl \
+    exec "$EXO_BIN" "${EXO_GLOBAL_ARGS[@]}" chat \
       --agent "$AGENT" \
-      --conversation "$CONVERSATION"
+      --thread "$CONVERSATION"
   fi
 }
 
@@ -949,9 +949,9 @@ run_control_repl() {
     restart_watcher_pid="$!"
 
     local repl_exit
-    if "$EXO_BIN" "${EXO_GLOBAL_ARGS[@]}" repl \
+    if "$EXO_BIN" "${EXO_GLOBAL_ARGS[@]}" chat \
       --agent "$AGENT" \
-      --conversation "$CONVERSATION"; then
+      --thread "$CONVERSATION"; then
       repl_exit=0
     else
       repl_exit=$?
@@ -985,7 +985,7 @@ kill_repl_children() {
 find_repl_children() {
   local control_pid="$1"
   ps ax -o pid= -o ppid= -o command= | awk -v ppid="$control_pid" -v exo="$EXO_BIN" '
-    $2 == ppid && index($0, exo) > 0 && index($0, " repl") > 0 { print $1 }
+    $2 == ppid && index($0, exo) > 0 && index($0, " chat") > 0 { print $1 }
   '
 }
 
@@ -1071,7 +1071,7 @@ send_adapter_setup_prompt() {
     die "startup prompt is empty: $file"
   fi
   echo "Sending startup prompt from: $file"
-  exo conversation send "$AGENT" "$CONVERSATION" "$prompt"
+  exo thread send "$AGENT" "$CONVERSATION" "$prompt"
 }
 
 send_prompt_from_files() {
@@ -1088,7 +1088,7 @@ send_prompt_from_files() {
   fi
 
   echo "Sending startup prompt from: ${files[*]}"
-  exo conversation send "$AGENT" "$CONVERSATION" "$prompt"
+  exo thread send "$AGENT" "$CONVERSATION" "$prompt"
 }
 
 show_whatsapp_qr_if_needed() {
@@ -1503,7 +1503,7 @@ export EXO_SELF_MAP="$SELF_MAP_PATH"
 export EXO_PROFILE="$PROFILE"
 
 case "$COMMAND" in
-  repl)
+  chat)
     run_repl
     ;;
   list)

@@ -32,7 +32,7 @@ Export the token locally and store it as an Exo secret:
 
 ```bash
 export DISCORD_BOT_TOKEN="..."
-exo secret set discord-bot-token --env DISCORD_BOT_TOKEN
+exo secret create discord-bot-token --env DISCORD_BOT_TOKEN
 ```
 
 The setup prompt below expects the secret name to be `discord-bot-token`.
@@ -120,7 +120,7 @@ Extra requirements vs. the text-only adapter:
 3. Bind the OpenAI key as a secret (defaults to the id `openai`):
 
    ```bash
-   exo secret set openai --env OPENAI_API_KEY
+   exo secret create openai --env OPENAI_API_KEY
    ```
 
 Create the adapter with voice on:

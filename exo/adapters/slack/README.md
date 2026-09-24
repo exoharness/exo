@@ -61,21 +61,21 @@ Active thread profiles do not make Exo reply to every delivered message. They on
 6. Store it locally:
 
    ```bash
-   exo secret set slack-signing-secret --value '<signing-secret>'
+   exo secret create slack-signing-secret --value '<signing-secret>'
    ```
 
 7. Open **OAuth & Permissions**, click **Install to Workspace**, approve the install, and copy the **Bot User OAuth Token** starting with `xoxb-`.
 8. Store it locally:
 
    ```bash
-   exo secret set slack-bot-token --value 'xoxb-...'
+   exo secret create slack-bot-token --value 'xoxb-...'
    ```
 
 #### 2. Store the Secrets in Exo
 
 ```bash
-exo secret set slack-signing-secret --value '<signing-secret>'
-exo secret set slack-bot-token --value 'xoxb-...'
+exo secret create slack-signing-secret --value '<signing-secret>'
+exo secret create slack-bot-token --value 'xoxb-...'
 ```
 
 #### 3. Create the Exo Adapter

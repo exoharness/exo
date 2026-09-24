@@ -51,6 +51,9 @@ For a more complete description of the architectural philosophy read
 
 <!-- ![Exo playinb pokemon go](docs/images/exo_playing.gif) -->
 
+Write and run a custom agent from a Markdown file with `exo chat --agent-file`.
+See [managed agents](exoharness/docs/managed-agents.md) for setup, saved agents, and thread resume.
+
 ## Quick Start
 
 Exo was designed to be incredibly simple to use. With just a few commands you

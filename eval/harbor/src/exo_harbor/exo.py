@@ -15,7 +15,7 @@ EXO_HARNESS = "exo"
 BASIC_HARNESS = "basic"
 PI_HARNESS = "pi"
 
-# `exo conversation sandbox attach` reports the new sandbox in prose:
+# `exo thread sandbox attach` reports the new sandbox in prose:
 # "attached Docker container as sandbox <id> for <conversation>".
 ATTACHED_SANDBOX_ID = re.compile(r"as sandbox (\S+) for ")
 
@@ -32,7 +32,7 @@ class ExoClient:
     harness: str = EXO_HARNESS
 
     async def ensure_agent(self, model: str) -> None:
-        if await self._exists("agent", "show", conventions.AGENT_SLUG):
+        if await self._exists("agent", "get", conventions.AGENT_SLUG):
             return
         arguments = [
             "agent",
@@ -62,11 +62,11 @@ class ExoClient:
 
     async def ensure_conversation(self, slug: str) -> None:
         if await self._exists(
-            "conversation", "show", conventions.AGENT_SLUG, slug
+            "thread", "get", conventions.AGENT_SLUG, slug
         ):
             return
         await self._run(
-            "conversation",
+            "thread",
             "create",
             conventions.AGENT_SLUG,
             slug,
@@ -90,7 +90,7 @@ class ExoClient:
         from the conversation's configuration.
         """
         arguments = [
-            "conversation",
+            "thread",
             "sandbox",
             "attach",
             conventions.AGENT_SLUG,
@@ -119,7 +119,7 @@ class ExoClient:
         killed, which aborts the turn, but convo state remains.
         """
         return await self._run(
-            "conversation",
+            "thread",
             "send",
             conventions.AGENT_SLUG,
             conversation,
@@ -137,7 +137,7 @@ class ExoClient:
     ) -> str:
         """Return canonical conversation events as JSON."""
         arguments = [
-            "conversation",
+            "thread",
             "events",
             conventions.AGENT_SLUG,
             conversation,
