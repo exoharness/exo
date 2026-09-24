@@ -70,6 +70,7 @@ class EvalTests(unittest.TestCase):
         reflection = sregym_eval.build_reflection(feedback, self_modification=True)
         self.assertIn("Blamed search", reflection)
         self.assertIn("faster or more cheaply", reflection)
+        self.assertIn("list_conversation_events", reflection)
         self.assertIn("rebuild_and_restart_exo", reflection)
         self.assertIn("If nothing is worth keeping, say so and stop.", reflection)
 

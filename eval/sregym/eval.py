@@ -43,7 +43,7 @@ EXTRA_MOUNTS_ENV = "SREGYM_AGENT_EXTRA_MOUNTS"
 EXO_REPO_MOUNT = "/workspace/exo"
 GUARDIAN_SCRIPT = "exo/scripts/exo-service-guardian"
 EXO_PROFILES = ("practical", "memory-only")
-REFLECTION_OPENING = """This incident has been graded; the results are below. The cluster is still deployed as you left it, so you can inspect it if you want to understand what happened. The benchmark no longer accepts submissions for this incident.
+REFLECTION_OPENING = """This incident has been graded; the results are below. The cluster is still deployed as you left it, so you can inspect it if you want to understand what happened. The benchmark no longer accepts submissions for this incident. What the incident cost you is in your own event log: each messages event from list_conversation_events carries token counts and cost_usd for one model call.
 
 If anything from this incident would help you get future incidents right, or figure them out faster or more cheaply, """
 # Only self-modifying profiles have the tools these sentences refer to.
