@@ -201,3 +201,24 @@ pub(crate) async fn authorize(
     }
     bail!("event stream closed while waiting for tool approval")
 }
+
+pub(crate) async fn turn_caller(
+    thread: &dyn exoharness::ThreadHandle,
+    turn: exoharness::TurnId,
+) -> anyhow::Result<Option<String>> {
+    let events = thread
+        .get_events(Some(exoharness::EventQuery {
+            turn_id: Some(turn),
+            types: Some(vec![exoharness::EventKind::TURN_STARTED]),
+            limit: Some(1),
+            ..Default::default()
+        }))
+        .await?;
+    Ok(events
+        .events
+        .into_iter()
+        .find_map(|event| match event.data {
+            exoharness::EventData::TurnStarted { user_id } => user_id,
+            _ => None,
+        }))
+}

@@ -201,6 +201,10 @@ async fn conversation_sandbox_candidates(
         }
     }
     candidates.retain(|candidate| !inactive.contains(candidate.id()));
+    if conversation.caller().is_some() {
+        let owned = conversation.list_sandboxes().await?;
+        candidates.retain(|candidate| owned.iter().any(|sandbox| sandbox.id == candidate.id()));
+    }
     Ok(candidates)
 }
 

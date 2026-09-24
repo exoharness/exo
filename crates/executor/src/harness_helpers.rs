@@ -209,14 +209,28 @@ pub(crate) async fn resolve_model_binding(
         })?;
     let Binding::Llm {
         model,
-        base_url,
+        mut base_url,
         secret,
         ..
     } = binding_record.binding
     else {
         return Err(anyhow::anyhow!("binding is not a model: {name}"));
     };
+    anyhow::ensure!(
+        conversation.caller().is_none() || secret.is_some(),
+        "authenticated runs require a model credential from a selected vault; register the model with --secret"
+    );
     let api_key = match secret {
+        Some(reference) if conversation.caller().is_some() => {
+            let variable = if crate::harness_runtime::is_anthropic_model(&model) {
+                "ANTHROPIC_API_KEY"
+            } else {
+                "OPENAI_API_KEY"
+            };
+            let endpoint = exoharness::vault::model_endpoint(base_url.as_deref(), variable)?;
+            base_url = Some(endpoint.to_string());
+            Some(exoharness::vault::resolve_model_key(conversation, &reference, &endpoint).await?)
+        }
         Some(reference) => {
             let secret = exoharness::vault::require_vault(conversation, &reference.vault_id)
                 .await?

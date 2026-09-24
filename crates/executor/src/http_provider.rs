@@ -281,6 +281,56 @@ impl ExoHttpTransport for RuntimeTransport {
             Request::AgentWriteArtifact { agent_id, request } => Ok(Response::ArtifactVersion {
                 artifact: self.client.write_agent_artifact(agent_id, &request).await?,
             }),
+            Request::ListBindings => Ok(Response::Bindings {
+                bindings: self.client.list_models().await?,
+            }),
+            Request::PutBinding { binding } => Ok(Response::BindingId {
+                binding_id: self.client.put_model(&binding).await?,
+            }),
+            Request::GetBinding { binding_id } => Ok(Response::Binding {
+                binding: self
+                    .client
+                    .list_models()
+                    .await?
+                    .into_iter()
+                    .find(|r| r.id == binding_id)
+                    .map(|r| r.binding),
+            }),
+            Request::CreateVault { name } => Ok(Response::Vault {
+                vault: Some(self.client.create_vault(&name).await?),
+            }),
+            Request::DeleteVault { vault_id } => {
+                self.client.delete_vault(vault_id).await?;
+                Ok(Response::Unit)
+            }
+            Request::VaultPutSecret {
+                scope,
+                vault_id,
+                request,
+            } => Ok(Response::SecretId {
+                secret_id: self.client.put_secret(scope, vault_id, &request).await?,
+            }),
+            Request::VaultUpdateSecret {
+                scope,
+                vault_id,
+                secret_id,
+                secret,
+            } => Ok(Response::SecretMetadata {
+                metadata: self
+                    .client
+                    .update_secret(scope, vault_id, secret_id, &secret)
+                    .await?,
+            }),
+            Request::VaultDeleteSecret {
+                scope,
+                vault_id,
+                secret_id,
+            } => {
+                self.client
+                    .delete_secret(scope, vault_id, secret_id)
+                    .await?;
+                Ok(Response::Unit)
+            }
             Request::ListVaults { scope } => Ok(Response::Vaults {
                 vaults: self.client.list_vaults(scope).await?,
             }),

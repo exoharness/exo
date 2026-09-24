@@ -19,6 +19,10 @@ use crate::{
 
 #[async_trait]
 pub trait Provider: AgentBackend {
+    fn with_caller(&self, _caller: exoharness::access::Caller) -> Result<Arc<dyn Provider>> {
+        anyhow::bail!("this provider does not support caller-scoped execution")
+    }
+
     fn harness(&self) -> &dyn Harness<ProviderTurn>;
 
     async fn is_turn_active(
@@ -106,6 +110,14 @@ impl LocalProvider {
 
 #[async_trait]
 impl Provider for LocalProvider {
+    fn with_caller(&self, caller: exoharness::access::Caller) -> Result<Arc<dyn Provider>> {
+        let state = self.state.with_caller(caller)?;
+        let executor = self.executor.with_state(state.clone())?;
+        let mut provider = Self::new(state, executor).with_managed_agents(self.managed.clone());
+        provider.live_turns = self.live_turns.clone();
+        Ok(Arc::new(provider))
+    }
+
     async fn is_turn_active(
         &self,
         thread: &dyn ThreadHandle,
@@ -130,6 +142,24 @@ impl Provider for LocalProvider {
         body: &exo_managed_agents::http::protocol::ApprovalResponseBody,
     ) -> Result<exoharness::EventId> {
         use anyhow::Context;
+        if let Some(caller) = self.state.caller() {
+            let agent = self
+                .state
+                .get_agent(&agent)
+                .await?
+                .context("agent not found")?;
+            let thread = agent
+                .get_thread(&thread)
+                .await?
+                .context("thread not found")?;
+            anyhow::ensure!(
+                crate::permissions::turn_caller(thread.as_ref(), turn)
+                    .await?
+                    .as_deref()
+                    == Some(caller.principal.as_str()),
+                "only the caller who started this turn may approve it"
+            );
+        }
         let _guard = self.approval_responses.lock().await;
         anyhow::ensure!(
             self.harness

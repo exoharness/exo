@@ -243,7 +243,7 @@ async fn login_uses_discovery_pkce_scopes_and_persists_only_after_identity() -> 
         );
         let reopened = ProviderTokens::new(&f.profile, f.store.clone());
         assert_eq!(reopened.access_token().await?, "initial-token");
-        f.store.logout().await?;
+        f.store.logout(&f.profile).await?;
         assert!(f.store.read()?.is_none());
         assert!(
             reopened
@@ -384,7 +384,7 @@ async fn active_http_client_refreshes_rotates_and_rejects_account_switch_or_logo
             .to_string()
             .contains("different account")
     );
-    f.store.logout().await?;
+    f.store.logout(&f.profile).await?;
     assert!(
         client
             .identity()
@@ -427,7 +427,7 @@ async fn concurrent_refreshes_share_rotated_credentials_and_logout_wins() -> Res
         .await;
     let task = tokio::spawn(async move { first.access_token().await });
     refresh.wait_until_satisfied().await;
-    f.store.logout().await?;
+    f.store.logout(&f.profile).await?;
     assert_eq!(task.await??, "refreshed-token");
     assert!(f.store.read()?.is_none());
     assert!(second.access_token().await.is_err());
@@ -535,7 +535,7 @@ async fn native_keychain_roundtrip() -> Result<()> {
     store.write(credentials("exo-isolated-keychain-test"))?;
     let reopened = KeychainStore::new(&f.profile, f._temp.path())?;
     let result = reopened.read();
-    store.logout().await?;
+    store.logout(&f.profile).await?;
     assert_eq!(
         result?
             .unwrap()
@@ -556,6 +556,7 @@ async fn browser_login_allows_reads_and_rejects_concurrent_credential_changes() 
         f.login().await?;
         let tokens = ProviderTokens::new(&f.profile, f.store.clone());
         let store = f.store.clone();
+        let profile = f.profile.clone();
         let result = login_with(
             &f.profile,
             &f.store,
@@ -565,7 +566,7 @@ async fn browser_login_allows_reads_and_rejects_concurrent_credential_changes() 
                     "initial-token"
                 );
                 match action {
-                    "logout" => store.logout().await?,
+                    "logout" => store.logout(&profile).await?,
                     "rotation" => store.write(credentials("concurrent-token"))?,
                     _ => {}
                 }
@@ -665,6 +666,35 @@ async fn discovery_rejects_mismatched_metadata_and_cross_origin_redirects() -> R
             other.received_requests().await.unwrap().is_empty(),
             "{failure} redirected"
         );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn logout_revokes_before_removing_credentials_and_preserves_them_on_failure() -> Result<()> {
+    for status in [200, 503] {
+        let f = Fixture::new().await?;
+        f.login().await?;
+        let base = f.server.uri();
+        Mock::given(path("/.well-known/oauth-authorization-server"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "issuer": base, "authorization_endpoint": format!("{base}/authorize"),
+                "token_endpoint": format!("{base}/token"), "revocation_endpoint": format!("{base}/revoke"),
+                "response_types_supported": ["code"], "code_challenge_methods_supported": ["S256"],
+                "token_endpoint_auth_methods_supported": ["none"]
+            }))).with_priority(1).mount(&f.server).await;
+        Mock::given(method("POST"))
+            .and(path("/revoke"))
+            .and(body_string_contains("token=initial-refresh"))
+            .and(body_string_contains("client_id=exo-test"))
+            .and(body_string_contains("token_type_hint=refresh_token"))
+            .respond_with(ResponseTemplate::new(status))
+            .expect(1)
+            .mount(&f.server)
+            .await;
+        let result = f.store.logout(&f.profile).await;
+        assert_eq!(result.is_ok(), status == 200);
+        assert_eq!(f.store.read()?.is_none(), status == 200);
     }
     Ok(())
 }

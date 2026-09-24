@@ -344,7 +344,7 @@ turn; adapters run continuously and *wake* turns.
 
 ```text
 ./exo.sh
- ├── agent service / adapter runner   (`exo agent serve`)
+ ├── agent service / adapter runner   (`exo serve`)
  │    └── supervisor per enabled adapter
  │         └── worker process (JSONL stdin/stdout)
  ├── scheduler runner
@@ -408,7 +408,7 @@ sender, and reply instructions.
 
 ```bash
 # Started automatically by canonical ./exo.sh; or:
-exo agent serve --adapter-limit 50
+exo serve --adapter-limit 50
 
 # Adapter management is available through these agent tools:
 # create_adapter, list_adapters, disable_adapter, delete_adapter,

@@ -1,3 +1,4 @@
+pub mod access;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod basic;
 #[cfg(all(test, not(target_arch = "wasm32"), feature = "basic-backend"))]

@@ -34,6 +34,7 @@ pub mod managed_agents;
 mod mcp;
 pub mod permissions;
 mod provider;
+pub mod remote;
 mod rlm;
 #[cfg(test)]
 mod rlm_tests;

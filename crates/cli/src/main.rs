@@ -446,10 +446,7 @@ fn command_firecracker_args(command: &Commands) -> Option<&FirecrackerArgs> {
             command: SandboxCommands::Play(args),
             ..
         } => Some(&args.firecracker),
-        Commands::Agent {
-            command: AgentCommands::Serve(args),
-            ..
-        } => Some(&args.firecracker),
+        Commands::Serve { args, .. } => Some(&args.firecracker),
         _ => None,
     }
 }
@@ -539,6 +536,7 @@ macro_rules! runtime_accessor {
             match &$($mutable)? self.command {
                 Commands::Environment { runtime, .. }
                 | Commands::Vault { runtime, .. }
+                | Commands::Serve { runtime, .. }
                 | Commands::Agent { runtime, .. }
                 | Commands::Conversation { runtime, .. }
                 | Commands::Model { runtime, .. }
@@ -575,7 +573,14 @@ enum Commands {
     },
     #[command(hide = true)]
     FirecrackerBridge,
-    /// Create, run, and serve agents from Markdown specs.
+    /// Serve the local Exo provider over HTTP and supervise adapters.
+    Serve {
+        #[command(flatten)]
+        runtime: RuntimeArgs,
+        #[command(flatten)]
+        args: Box<serve::ServeArgs>,
+    },
+    /// Create and run agents from Markdown specs.
     Agent {
         #[command(flatten)]
         runtime: RuntimeArgs,
@@ -638,8 +643,6 @@ enum AgentCommands {
         #[arg(long)]
         tui: bool,
     },
-    /// Serve the managed-agent API and supervise configured adapters.
-    Serve(Box<serve::ServeArgs>),
     Mount {
         #[command(subcommand)]
         command: AgentMountCommands,
@@ -1208,12 +1211,17 @@ async fn run(mut cli: Cli) -> Result<()> {
     if let Commands::Provider { command } = &cli.command {
         return providers::run(command.as_ref(), &mut provider_store).await;
     }
+    let serving = matches!(cli.command, Commands::Serve { .. });
     let (agent, thread) = command_refs_mut(&mut cli.command);
-    let selected_provider = provider_store.selected(
-        cli.provider_profile.as_deref(),
-        agent.map(|v| v.as_str()),
-        thread.map(|v| v.as_str()),
-    )?;
+    let selected_provider = if serving && cli.provider_profile.is_none() {
+        None
+    } else {
+        provider_store.selected(
+            cli.provider_profile.as_deref(),
+            agent.map(|v| v.as_str()),
+            thread.map(|v| v.as_str()),
+        )?
+    };
     run_selected(cli, provider_store, selected_provider.as_ref())
         .await
         .map_err(|error| {
@@ -1366,11 +1374,11 @@ async fn run_selected(
                 run_chat_repl(Arc::clone(&harness), agent, conversation, thread.verbosity).await?;
             }
         }
-        Commands::Agent { command: AgentCommands::Serve(args), .. } => {
+        Commands::Serve { args, .. } => {
             serve::run(harness.clone(), &root, *args).await?;
         }
         Commands::Agent { command, .. } => match command {
-            AgentCommands::Run { .. } | AgentCommands::Serve(_) => unreachable!(),
+            AgentCommands::Run { .. } => unreachable!(),
             AgentCommands::List => {
                 let agents = harness.list_agents().await?;
                 print_table(
@@ -2633,7 +2641,6 @@ fn command_refs_mut(command: &mut Commands) -> (Option<&mut String>, Option<&mut
                 | AgentMountCommands::Delete { agent, .. } => (Some(agent), None),
             },
             AgentCommands::Run { thread, .. } => (thread.agent.as_mut(), thread.thread.as_mut()),
-            AgentCommands::Serve(args) => (args.agent.as_mut(), None),
             AgentCommands::List | AgentCommands::Create { .. } => (None, None),
         },
         Commands::Conversation { command, .. } => match command {
@@ -2721,6 +2728,7 @@ fn command_refs_mut(command: &mut Commands) -> (Option<&mut String>, Option<&mut
         | Commands::Provider { .. }
         | Commands::Environment { .. }
         | Commands::Vault { .. } => (None, None),
+        Commands::Serve { args, .. } => (args.agent.as_mut(), None),
     }
 }
 
@@ -3253,14 +3261,13 @@ mod command_tests {
             "sandbox-provider",
             "tools",
             "adapters",
-            "serve",
         ] {
             assert!(Cli::try_parse_from(["exo", command]).is_err());
         }
         for args in [
             vec!["agent", "create", "support", "--file", "agent.md"],
             vec!["agent", "update", "support", "--file", "agent.md"],
-            vec!["agent", "serve", "support"],
+            vec!["serve", "--agent", "support"],
             vec!["sandbox", "provider", "list"],
             vec![
                 "model", "create", "test", "--secret", "key", "--vault", "team",
@@ -3269,6 +3276,7 @@ mod command_tests {
             Cli::try_parse_from(["exo"].into_iter().chain(args)).unwrap();
         }
         for args in [
+            vec!["agent", "serve", "support"],
             vec!["agent", "create", "support", "--model", "test"],
             vec!["agent", "--exoharness-url", "http://localhost", "list"],
             vec![

@@ -12,7 +12,7 @@ use exoharness::{AgentHandle, ExoHarness, ThreadHandle};
 
 use crate::{AgentConfig, ConversationConfig, ConversationModelConfig, LocalProvider};
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct LocalAgentSetup {
     pub agent: Option<AgentConfig>,
     pub model: Option<String>,
@@ -30,6 +30,18 @@ impl AgentBackend for LocalProvider {
         agent: &Arc<dyn AgentHandle>,
         definition: &AgentDefinition,
     ) -> Result<()> {
+        if let Some(caller) = self.state.caller() {
+            let frontmatter = &definition.frontmatter;
+            if !matches!(
+                frontmatter.harness.as_str(),
+                "basic" | "rlm" | "codex" | "claude-code" | "cursor" | "cursor-sdk" | "pi"
+            ) || !frontmatter.tools.is_empty()
+                || frontmatter.tool_creation
+                || !frontmatter.adapters.is_empty()
+            {
+                caller.policy.check_operator(&caller.principal).await?;
+            }
+        }
         let mut config = match &self.managed.agent {
             Some(config) => config.clone(),
             None => self.executor.agent_config(definition)?,

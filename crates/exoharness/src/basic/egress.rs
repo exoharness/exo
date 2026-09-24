@@ -13,7 +13,8 @@ impl LocalEgressResolver {
         destination: &EgressDestination,
         rejected: Option<&str>,
     ) -> Result<String> {
-        let harness = BasicExoHarness {
+        let mut harness = BasicExoHarness {
+            caller: None,
             inner: self
                 .harness
                 .upgrade()
@@ -22,6 +23,16 @@ impl LocalEgressResolver {
         let owner_dir = harness.owner_dir(identity.scope);
         let sandbox = load_stored_sandbox(&harness, &owner_dir, &identity.sandbox_id).await?;
         anyhow::ensure!(sandbox.running, "sandbox is not running");
+        if let Some(policy) = harness.inner.access_policy.get() {
+            harness.caller = Some(crate::access::Caller {
+                principal: sandbox
+                    .principal
+                    .clone()
+                    .context("sandbox has no authenticated caller")?,
+                policy: policy.clone(),
+            });
+            harness.check(identity.scope).await?;
+        }
         let reference = sandbox
             .credentials
             .get(binding_name)
@@ -55,18 +66,7 @@ impl LocalEgressResolver {
                         || destination.path.starts_with(&format!("{path}/"))),
                 "request is outside the model endpoint"
             );
-            let vault =
-                crate::vault::model_credential_vault(&context, reference, &endpoint).await?;
-            return match vault
-                .get_secret(&reference.secret_id)
-                .await?
-                .context("sandbox model credential is unavailable")?
-            {
-                Secret::Key { value } => Ok(value),
-                Secret::Oauth { .. } => {
-                    bail!("sandbox model credentials currently require an API key")
-                }
-            };
+            return crate::vault::resolve_model_key(&context, reference, &endpoint).await;
         }
         crate::egress::vault::resolve_credential(&context, reference, destination, rejected).await
     }

@@ -86,12 +86,13 @@ pub(crate) async fn runtime(
         if matches!(
             cli.command,
             Commands::Agent {
-                command: AgentCommands::Run { .. } | AgentCommands::Serve(_),
+                command: AgentCommands::Run { .. },
                 ..
-            } | Commands::Conversation {
-                command: crate::ConversationCommands::Send { .. },
-                ..
-            }
+            } | Commands::Serve { .. }
+                | Commands::Conversation {
+                    command: crate::ConversationCommands::Send { .. },
+                    ..
+                }
         ) {
             cost::load(
                 cli.runtime().pricing_path.clone(),
@@ -168,6 +169,7 @@ pub(crate) fn validate_http_command(command: &crate::Commands) -> Result<()> {
             ..
         }
         | Commands::Environment { .. }
+        | Commands::Model { .. }
         | Commands::Vault { .. } => Ok(()),
         _ => bail!("this command is not supported by the managed-agent HTTP provider"),
     }

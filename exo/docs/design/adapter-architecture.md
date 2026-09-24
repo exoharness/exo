@@ -280,7 +280,7 @@ connection and sends when it is ready.
 The adapter runner is started by:
 
 ```bash
-./target/debug/exo agent serve --adapter-limit 50
+./target/debug/exo serve --adapter-limit 50
 ```
 
 `./exo.sh` starts this automatically unless `--no-adapters` is
