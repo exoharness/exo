@@ -178,6 +178,17 @@ pub trait AgentHandle: SandboxHandle + VaultContext {
 pub trait ThreadHandle: SandboxHandle + VaultContext {
     fn record(&self) -> &ThreadRecord;
 
+    async fn update_environment(
+        &self,
+        _environment: crate::EnvironmentDefinition,
+    ) -> Result<Arc<dyn ThreadHandle>> {
+        anyhow::bail!("this provider does not support updating thread environments")
+    }
+
+    async fn attach_vaults(&self, _vaults: Vec<VaultId>) -> Result<Arc<dyn ThreadHandle>> {
+        anyhow::bail!("this provider does not support attaching vaults to existing threads")
+    }
+
     async fn materialize_resources(
         &self,
         resources: Vec<crate::resources::PreparedResource>,

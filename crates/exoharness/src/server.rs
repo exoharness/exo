@@ -359,6 +359,40 @@ impl ExoHarnessServer {
                     binding: agent.get_binding(&binding_id).await?,
                 })
             }
+            Request::ConversationUpdateEnvironment {
+                agent_id,
+                conversation_id,
+                environment,
+            } => {
+                let conversation = self
+                    .require_conversation(agent_id, conversation_id)
+                    .await?
+                    .update_environment(environment)
+                    .await?;
+                Ok(Response::Conversation {
+                    conversation: Some(ConversationHandleInfo {
+                        agent_id,
+                        record: conversation.record().clone(),
+                    }),
+                })
+            }
+            Request::ConversationAttachVaults {
+                agent_id,
+                conversation_id,
+                vaults,
+            } => {
+                let conversation = self
+                    .require_conversation(agent_id, conversation_id)
+                    .await?
+                    .attach_vaults(vaults)
+                    .await?;
+                Ok(Response::Conversation {
+                    conversation: Some(ConversationHandleInfo {
+                        agent_id,
+                        record: conversation.record().clone(),
+                    }),
+                })
+            }
             Request::ConversationStartSession {
                 agent_id,
                 conversation_id,

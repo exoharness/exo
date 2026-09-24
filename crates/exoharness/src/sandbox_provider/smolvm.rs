@@ -460,8 +460,8 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
 
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
         request.spec.policy.validate_basic("smolvm")?;
-        reject_unsupported_spec(&request.spec)?;
         let image = self.prepare_image(&request.spec.image).await?;
+        reject_unsupported_spec(&request.spec, &image)?;
         match self.resolve_mode(&request).await {
             SmolvmExecutionMode::Warm => {
                 let machine = machine_name(request.sandbox_id.as_str());
@@ -517,7 +517,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
                 payload.format
             );
         }
-        reject_unsupported_spec(&request.spec)?;
+        reject_unsupported_spec(&request.spec, &request.spec.image)?;
         if self.resolve_mode(&request).await != SmolvmExecutionMode::Warm {
             bail!(
                 "smolvm snapshots require warm mode (one-shot VMs hold no state to restore); \
@@ -873,7 +873,7 @@ async fn is_file(path: &Path) -> bool {
 
 /// smolvm has no named durable filesystem; refuse rather than hand back a sandbox
 /// missing storage the caller asked for, as the Daytona backend does.
-fn reject_unsupported_spec(spec: &SandboxSpec) -> Result<()> {
+fn reject_unsupported_spec(spec: &SandboxSpec, image: &str) -> Result<()> {
     if !spec.durable_file_systems.is_empty() {
         let names: Vec<&str> = spec
             .durable_file_systems
@@ -889,8 +889,7 @@ fn reject_unsupported_spec(spec: &SandboxSpec) -> Result<()> {
     // smolvm resolves registry references over the machine's own network and
     // refuses this combination even for a cached image. Caught here so the caller
     // gets the two real remedies, not a failure deep in the CLI output.
-    if spec.policy.networking == SandboxNetworkPolicy::Disabled && !is_local_image_ref(&spec.image)
-    {
+    if spec.policy.networking == SandboxNetworkPolicy::Disabled && !is_local_image_ref(image) {
         bail!(
             "smolvm cannot use registry image '{}' in a network-disabled sandbox: \
              it resolves registry references over the machine's network, even for \
@@ -1142,7 +1141,9 @@ mod tests {
             mount_path: "/cache".into(),
             mode: crate::FileSystemMountMode::ReadWrite,
         }];
-        let err = reject_unsupported_spec(&spec).unwrap_err().to_string();
+        let err = reject_unsupported_spec(&spec, &spec.image)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("cache"), "error should name the fs: {err}");
     }
 
@@ -1152,17 +1153,19 @@ mod tests {
         let mut spec = test_request(None).spec;
         spec.image = "docker.io/library/ubuntu:24.04".into();
         spec.policy.networking = SandboxNetworkPolicy::Disabled;
-        let err = reject_unsupported_spec(&spec).unwrap_err().to_string();
+        let err = reject_unsupported_spec(&spec, &spec.image)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("network-disabled"), "unexpected error: {err}");
 
         // Fine once the sandbox is allowed network...
         spec.policy.networking = SandboxNetworkPolicy::Unrestricted;
-        assert!(reject_unsupported_spec(&spec).is_ok());
+        assert!(reject_unsupported_spec(&spec, &spec.image).is_ok());
 
         // ...and a local archive is fine while staying isolated.
         spec.policy.networking = SandboxNetworkPolicy::Disabled;
         spec.image = "/tmp/alpine.tar".into();
-        assert!(reject_unsupported_spec(&spec).is_ok());
+        assert!(reject_unsupported_spec(&spec, &spec.image).is_ok());
     }
 
     #[test]

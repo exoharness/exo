@@ -342,6 +342,11 @@ pub struct ForkThreadBody {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachThreadVaultsBody {
+    pub vaults: Vec<exoharness::vault::VaultId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadResult<T = ThreadRecord> {
     pub agent: AgentRecord,
     pub thread: T,

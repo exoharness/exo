@@ -126,6 +126,123 @@ async fn local_and_http_cli_workflows() -> Result<()> {
 }
 
 #[actix_web::test]
+async fn local_and_http_threads_accept_additional_vaults() -> Result<()> {
+    for provider in ["local", "remote"] {
+        let f = Fixture::with_sandbox(exoharness::SandboxProvider::Docker).await?;
+        for vault in ["personal", "team"] {
+            f.cli(&["vault", "create", vault]).await?;
+        }
+        f.cli(&["provider", "switch", provider]).await?;
+        f.cli(&[
+            "agent",
+            "create",
+            "saved",
+            "--file",
+            f.agent_file.to_str().unwrap(),
+        ])
+        .await?;
+        let state = f.runtime.exoharness_handle();
+        let agent = exo_managed_agents::find_agent(state.as_ref(), "saved").await?;
+        let original = agent
+            .new_thread(exoharness::NewThreadRequest {
+                slug: Some("original".into()),
+                ..Default::default()
+            })
+            .await?;
+        agent
+            .new_thread(exoharness::NewThreadRequest {
+                slug: Some("sibling".into()),
+                ..Default::default()
+            })
+            .await?;
+        let artifact = original
+            .write_artifact(exoharness::WriteArtifactRequest {
+                path: "work.txt".into(),
+                contents: b"saved work".to_vec(),
+            })
+            .await?;
+        let before = original.get_events(None).await?.events;
+        let rejected = f
+            .output(
+                &[
+                    "thread", "update", "saved", "original", "--vault", "personal", "--vault",
+                    "missing",
+                ],
+                None,
+                None,
+            )
+            .await?;
+        assert!(!rejected.status.success());
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("vault not found: missing"));
+        assert!(
+            exo_managed_agents::find_thread(agent.as_ref(), "original")
+                .await?
+                .record()
+                .vaults
+                .is_empty()
+        );
+        f.cli(&[
+            "thread", "update", "saved", "original", "--vault", "personal",
+        ])
+        .await?;
+        let resumed = success(
+            f.output(
+                &[
+                    "agent", "run", "--agent", "saved", "--thread", "original", "--vault", "team",
+                    "--vault", "personal", "--vault", "team",
+                ],
+                None,
+                Some("/quit\n"),
+            )
+            .await?,
+        )?;
+        assert!(resumed.contains("vault: personal"), "{resumed}");
+        assert!(resumed.contains("vault: team"), "{resumed}");
+        let again = success(
+            f.output(
+                &["agent", "run", "--agent", "saved", "--thread", "original"],
+                None,
+                Some("/quit\n"),
+            )
+            .await?,
+        )?;
+        assert!(
+            again.contains("vault: personal") && again.contains("vault: team"),
+            "{again}"
+        );
+        let saved = exo_managed_agents::find_thread(agent.as_ref(), "original").await?;
+        assert_eq!(saved.record().id, original.record().id);
+        assert_eq!(saved.record().vaults.len(), 2);
+        assert!(
+            exo_managed_agents::find_thread(agent.as_ref(), "sibling")
+                .await?
+                .record()
+                .vaults
+                .is_empty()
+        );
+        assert_eq!(
+            saved
+                .read_artifact(exoharness::ReadArtifactRequest {
+                    artifact_id: artifact.artifact_id,
+                    version: None,
+                })
+                .await?
+                .unwrap()
+                .contents,
+            b"saved work"
+        );
+        let after = saved.get_events(None).await?.events;
+        assert!(
+            before
+                .iter()
+                .all(|event| after.iter().any(|saved| saved.id == event.id))
+        );
+        f.stop().await?;
+    }
+    Ok(())
+}
+
+#[actix_web::test]
 async fn local_and_http_file_runs_sync_saved_agents_and_preserve_history() -> Result<()> {
     for provider in ["local", "remote"] {
         let f = Fixture::new().await?;
@@ -912,6 +1029,8 @@ export default defineHarness({{
             "remote-workspace",
             "--thread",
             thread_slug(&first)?,
+            "--vault",
+            "other",
             "--prompt",
             "again",
         ])

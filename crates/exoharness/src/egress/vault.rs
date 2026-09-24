@@ -19,6 +19,13 @@ pub async fn resolve_credential(
         .context("sandbox credential is unavailable")?;
     let origin = format!("https://{}:{}", destination.host, destination.port);
     let target = match metadata.target {
+        Some(SecretTarget::Http { origin })
+            if origin == "https://github.com"
+                && destination.host == "api.github.com"
+                && destination.port == 443 =>
+        {
+            SecretTarget::http(&origin)?
+        }
         Some(SecretTarget::Http { .. }) => SecretTarget::http(&origin)?,
         Some(SecretTarget::Mcp { .. }) => {
             SecretTarget::mcp(&format!("{origin}{}", destination.path))?

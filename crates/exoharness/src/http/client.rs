@@ -842,6 +842,43 @@ impl HttpConversationHandle {
 
 #[async_trait]
 impl ConversationHandle for HttpConversationHandle {
+    async fn update_environment(
+        &self,
+        environment: crate::EnvironmentDefinition,
+    ) -> Result<Arc<dyn ConversationHandle>> {
+        match self
+            .harness
+            .request(Request::ConversationUpdateEnvironment {
+                agent_id: self.agent_id,
+                conversation_id: self.record.id,
+                environment,
+            })
+            .await?
+        {
+            Response::Conversation {
+                conversation: Some(conversation),
+            } => Ok(Arc::new(Self::new(self.harness.clone(), conversation))),
+            response => unexpected_response(response, "conversation"),
+        }
+    }
+
+    async fn attach_vaults(&self, vaults: Vec<VaultId>) -> Result<Arc<dyn ConversationHandle>> {
+        match self
+            .harness
+            .request(Request::ConversationAttachVaults {
+                agent_id: self.agent_id,
+                conversation_id: self.record.id,
+                vaults,
+            })
+            .await?
+        {
+            Response::Conversation {
+                conversation: Some(conversation),
+            } => Ok(Arc::new(Self::new(self.harness.clone(), conversation))),
+            response => unexpected_response(response, "conversation"),
+        }
+    }
+
     fn record(&self) -> &ConversationRecord {
         &self.record
     }

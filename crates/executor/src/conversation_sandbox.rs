@@ -6,6 +6,7 @@ use exoharness::{
     ConversationHandle, CreateSandboxRequest, DEFAULT_SANDBOX_IMAGE, EventData, EventKind,
     EventQuery, EventQueryDirection, FileSystemMount, FileSystemMountMode, Result, SandboxProvider,
 };
+use futures::{StreamExt, TryStreamExt};
 use tokio::sync::Mutex as AsyncMutex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,10 +331,124 @@ async fn sandbox_policy(
     agent_config: &AgentConfig,
     config: &ConversationConfig,
 ) -> Result<Option<exoharness::EgressPolicy>> {
-    let configured = config
+    let mut configured = config
         .environment
         .as_ref()
         .and_then(|env| env.config.policy.clone());
+    if config.resources.iter().any(|resource| {
+        matches!(
+            resource.definition.source,
+            exoharness::resources::ResourceSource::GitRepository { .. }
+        )
+    }) {
+        configured.get_or_insert_with(|| {
+            if conversation_sandbox_spec(agent_config, config).enable_networking {
+                exoharness::SandboxNetworkPolicy::Unrestricted.into()
+            } else {
+                exoharness::SandboxNetworkPolicy::Disabled.into()
+            }
+        });
+    }
+    let credentials =
+        futures::stream::iter(config.resources.iter().cloned().map(|resource| async move {
+            let reference = match &resource.definition.source {
+                exoharness::resources::ResourceSource::GitRepository {
+                    credential: Some(name),
+                    ..
+                } => Some(
+                    exoharness::vault::find_secret(conversation, name)
+                        .await?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Git resource credential {name} is not in the selected vaults"
+                            )
+                        })?,
+                ),
+                _ => None,
+            };
+            Ok::<_, anyhow::Error>(reference)
+        }))
+        .buffered(8)
+        .try_collect::<Vec<_>>()
+        .await?;
+    for (resource, reference) in config.resources.iter().zip(credentials) {
+        let exoharness::resources::ResourceSource::GitRepository {
+            url: Some(url),
+            credential: Some(_),
+            ..
+        } = &resource.definition.source
+        else {
+            continue;
+        };
+        let endpoint = url::Url::parse(url)?;
+        anyhow::ensure!(
+            endpoint.scheme() == "https" && endpoint.port_or_known_default() == Some(443),
+            "sandbox Git credentials require HTTPS on port 443"
+        );
+        let host = endpoint
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("Git resource URL has no host"))?;
+        let reference = reference.expect("Git resource credential was resolved");
+        let policy = configured.as_mut().expect("Git resource policy");
+        anyhow::ensure!(
+            policy.networking_enabled(),
+            "Git credentials require sandbox networking"
+        );
+        if let exoharness::SandboxNetworkPolicy::Limited { allowed_hosts } = &policy.networking {
+            anyhow::ensure!(
+                allowed_hosts
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(host)),
+                "Git resource host {host} is not allowed by the environment network policy"
+            );
+        }
+        if host == "github.com" {
+            if let exoharness::SandboxNetworkPolicy::Limited { allowed_hosts } = &policy.networking
+            {
+                anyhow::ensure!(
+                    allowed_hosts
+                        .iter()
+                        .any(|host| host.eq_ignore_ascii_case("api.github.com")),
+                    "GitHub API access requires api.github.com in the environment network policy"
+                );
+            }
+            if let Some(existing) = policy
+                .credentials
+                .iter()
+                .find(|binding| binding.environment_variable == "GH_TOKEN")
+            {
+                anyhow::ensure!(
+                    existing.name == reference.secret_id.to_string(),
+                    "GitHub resources must share a credential for automatic GH_TOKEN selection"
+                );
+            } else {
+                policy
+                    .credentials
+                    .push(exoharness::EgressCredentialBinding {
+                        name: reference.secret_id.to_string(),
+                        model: None,
+                        environment_variable: "GH_TOKEN".into(),
+                        networking: exoharness::CredentialNetworkPolicy::Limited {
+                            allowed_hosts: vec!["api.github.com".into()],
+                        },
+                        injection_location: exoharness::CredentialInjectionLocation {
+                            header: true,
+                        },
+                    });
+            }
+        }
+        policy
+            .credentials
+            .push(exoharness::EgressCredentialBinding {
+                name: reference.secret_id.to_string(),
+                model: None,
+                environment_variable: resource.definition.git_credential_variable(),
+                networking: exoharness::CredentialNetworkPolicy::Limited {
+                    allowed_hosts: vec![host.to_owned()],
+                },
+                injection_location: exoharness::CredentialInjectionLocation { header: true },
+            });
+    }
     let module = agent_config
         .typescript
         .as_ref()
@@ -536,6 +651,170 @@ mod tests {
         CredentialInjectionLocation, CredentialNetworkPolicy, EgressCredentialBinding,
         EgressPolicy, SandboxModelBinding, SandboxNetworkPolicy, Uuid7,
     };
+
+    #[tokio::test]
+    async fn git_credentials_require_an_attached_vault_and_environment_access() -> Result<()> {
+        use exoharness::{ExoHarness, NewAgentRequest, NewThreadRequest, PutSecretRequest, Secret};
+        let temp = tempfile::tempdir()?;
+        let harness =
+            exoharness::BasicExoHarness::new(crate::test_support::local_test_config(temp.path()))
+                .await?;
+        let vault = harness.create_vault("personal").await?;
+        let secret = vault
+            .put_secret(PutSecretRequest {
+                name: "github-git".into(),
+                target: Some(exoharness::vault::SecretTarget::http("https://github.com")?),
+                secret: Secret::Key {
+                    value: "test-token".into(),
+                },
+            })
+            .await?;
+        let agent = harness
+            .new_agent(NewAgentRequest {
+                slug: "test".into(),
+                name: "test".into(),
+                vaults: vec![],
+            })
+            .await?;
+        let thread = agent.new_thread(NewThreadRequest::default()).await?;
+        let definition = exo_managed_agents::AgentDefinition::parse(
+            "---\nname: test\nharness: basic\nconfig:\n  model: test\n---\nUse tools.".into(),
+        )?;
+        let mut agent_config =
+            crate::managed_agents::agent_config(&definition, SandboxProvider::Docker, None, None)?;
+        agent_config.sandbox.enable_networking = true;
+        let resource = exoharness::resources::PreparedResource {
+            definition: exoharness::resources::ResourceDefinition {
+                name: "code".into(),
+                mount_path: "/workspace".into(),
+                mode: FileSystemMountMode::ReadWrite,
+                source: exoharness::resources::ResourceSource::GitRepository {
+                    path: None,
+                    url: Some("https://github.com/org/repo".into()),
+                    checkout: None,
+                    credential: Some("github-git".into()),
+                },
+            },
+            snapshot: None,
+        };
+        let mut config = ConversationConfig {
+            resources: vec![resource],
+            ..Default::default()
+        };
+        let error = sandbox_policy(thread.as_ref(), &agent_config, &config)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("not in the selected vaults"),
+            "{error}"
+        );
+        let thread = thread.attach_vaults(vec![vault.record().id]).await?;
+        let granted = sandbox_policy(thread.as_ref(), &agent_config, &config)
+            .await?
+            .unwrap();
+        assert_eq!(granted.credentials.len(), 2);
+        assert_eq!(granted.credentials[0].name, secret.to_string());
+        assert_eq!(granted.credentials[0].environment_variable, "GH_TOKEN");
+        assert_eq!(
+            granted.credentials[0].networking,
+            CredentialNetworkPolicy::Limited {
+                allowed_hosts: vec!["api.github.com".into()]
+            }
+        );
+        assert_eq!(granted.credentials[1].name, secret.to_string());
+        assert_eq!(
+            granted.credentials[1].environment_variable,
+            config.resources[0].definition.git_credential_variable()
+        );
+        assert_eq!(
+            granted.credentials[1].networking,
+            CredentialNetworkPolicy::Limited {
+                allowed_hosts: vec!["github.com".into()]
+            }
+        );
+        config.environment = Some(exoharness::EnvironmentDefinition {
+            name: "restricted".into(),
+            config: exoharness::CreateSandboxRequest {
+                provider: SandboxProvider::Docker,
+                image: "test".into(),
+                model: None,
+                name: None,
+                resources: None,
+                default_workdir: None,
+                file_system_mounts: None,
+                durable_file_systems: None,
+                policy: Some(
+                    SandboxNetworkPolicy::Limited {
+                        allowed_hosts: vec!["example.com".into()],
+                    }
+                    .into(),
+                ),
+                enable_networking: None,
+                idle_seconds: None,
+            },
+        });
+        assert!(
+            sandbox_policy(thread.as_ref(), &agent_config, &config)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("not allowed")
+        );
+        let policy = config
+            .environment
+            .as_mut()
+            .unwrap()
+            .config
+            .policy
+            .as_mut()
+            .unwrap();
+        policy.networking = SandboxNetworkPolicy::Limited {
+            allowed_hosts: vec!["github.com".into()],
+        };
+        assert!(
+            sandbox_policy(thread.as_ref(), &agent_config, &config)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("api.github.com")
+        );
+        config
+            .environment
+            .as_mut()
+            .unwrap()
+            .config
+            .policy
+            .as_mut()
+            .unwrap()
+            .networking = SandboxNetworkPolicy::Limited {
+            allowed_hosts: vec!["github.com".into(), "api.github.com".into()],
+        };
+        sandbox_policy(thread.as_ref(), &agent_config, &config).await?;
+        config.environment = None;
+        agent_config.sandbox.enable_networking = false;
+        assert!(
+            sandbox_policy(thread.as_ref(), &agent_config, &config)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("networking")
+        );
+        agent_config.sandbox.enable_networking = true;
+        let exoharness::resources::ResourceSource::GitRepository { credential, .. } =
+            &mut config.resources[0].definition.source
+        else {
+            unreachable!()
+        };
+        *credential = None;
+        let removed = sandbox_policy(thread.as_ref(), &agent_config, &config).await?;
+        assert!(removed.as_ref().unwrap().credentials.is_empty());
+        assert!(!matches_sandbox_policy(
+            Some(&granted),
+            removed.as_ref(),
+            None
+        ));
+        Ok(())
+    }
 
     #[test]
     fn saved_sandbox_must_match_the_environment_and_model_grant() {

@@ -537,17 +537,10 @@ impl Runtime {
         definition: &exo_managed_agents::AgentDefinition,
     ) -> Result<exoharness::ArtifactVersion> {
         let previous = exo_managed_agents::load_definition(agent.as_ref()).await?;
-        let previous_spec_mounts = previous
-            .as_ref()
-            .and_then(|definition| definition.frontmatter.sandbox.as_ref())
-            .map(|sandbox| sandbox.mounts.as_slice())
-            .unwrap_or_default();
-        let external_mounts: Vec<_> = crate::find_agent_config(agent.as_ref())
+        let external_mounts = crate::find_agent_config(agent.as_ref())
             .await?
-            .into_iter()
-            .flat_map(|config| config.sandbox.mounts)
-            .filter(|mount| !previous_spec_mounts.contains(mount))
-            .collect();
+            .map(|config| config.sandbox.mounts)
+            .unwrap_or_default();
         let version = agent
             .write_artifact(exoharness::WriteArtifactRequest {
                 path: exo_managed_agents::AGENT_DEFINITION_PATH.into(),

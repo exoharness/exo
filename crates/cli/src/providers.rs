@@ -125,6 +125,30 @@ pub(crate) fn validate_http_command(command: &crate::Commands) -> Result<()> {
             command: AgentCommands::Run { thread, .. },
             ..
         } => thread.validate_remote(),
+        Commands::Conversation {
+            command:
+                ConversationCommands::Update {
+                    sandbox_scope: None,
+                    model: None,
+                    max_output_tokens: None,
+                    clear_max_output_tokens: false,
+                    clear_model_override: false,
+                    sandbox_runtime:
+                        crate::ConversationSandboxRuntimeUpdateArgs {
+                            runtime:
+                                crate::ConversationSandboxRuntimeArgs {
+                                    sandbox_image: None,
+                                    sandbox_provider: None,
+                                    shell_program: None,
+                                },
+                            clear_shell_program: false,
+                            clear_sandbox_image: false,
+                            clear_sandbox_provider: false,
+                        },
+                    ..
+                },
+            ..
+        } => Ok(()),
         Commands::Agent {
             command:
                 AgentCommands::List

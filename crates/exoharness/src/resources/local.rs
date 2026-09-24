@@ -113,11 +113,23 @@ impl ResourceStore {
         let directory = self.thread_directory(agent, thread);
         let manifest = directory.join("resources.json");
         let instances: Vec<Instance> = if manifest.exists() {
-            let instances: Vec<Instance> = serde_json::from_slice(&fs::read(&manifest)?)?;
+            let mut instances: Vec<Instance> = serde_json::from_slice(&fs::read(&manifest)?)?;
             ensure!(
-                instances.iter().map(|i| &i.prepared).eq(resources.iter()),
+                instances.len() == resources.len()
+                    && instances
+                        .iter()
+                        .zip(&resources)
+                        .all(|(instance, resource)| instance.prepared.same_workspace(resource)),
                 "cannot change the resources of an existing thread"
             );
+            if instances.iter().map(|i| &i.prepared).ne(resources.iter()) {
+                for (instance, resource) in instances.iter_mut().zip(resources) {
+                    instance.prepared = resource;
+                }
+                let mut updated = tempfile::NamedTempFile::new_in(&directory)?;
+                serde_json::to_writer(updated.as_file_mut(), &instances)?;
+                updated.persist(&manifest)?;
+            }
             instances
         } else {
             let parent = directory.parent().context("thread resource parent")?;
@@ -210,14 +222,32 @@ impl ResourceStore {
                 !Path::new(&definition.mount_path).ends_with("*"),
                 "Git resource mount_path cannot end with '/*': Git treats it as a trust wildcard"
             );
-            let count = env
-                .get("GIT_CONFIG_COUNT")
-                .map_or(Ok(0), |value| value.parse::<usize>())
-                .context("invalid GIT_CONFIG_COUNT in sandbox environment")?;
-            let next = count.checked_add(1).context("GIT_CONFIG_COUNT overflow")?;
-            env.insert(format!("GIT_CONFIG_KEY_{count}"), "safe.directory".into());
-            env.insert(format!("GIT_CONFIG_VALUE_{count}"), definition.mount_path);
-            env.insert("GIT_CONFIG_COUNT".into(), next.to_string());
+            let mut settings = vec![("safe.directory".to_owned(), definition.mount_path.clone())];
+            if let ResourceSource::GitRepository {
+                url: Some(url),
+                credential: Some(_),
+                ..
+            } = &definition.source
+            {
+                let variable = definition.git_credential_variable();
+                settings.extend([
+                    (format!("credential.{url}.helper"), String::new()),
+                    (format!("credential.{url}.helper"), format!(
+                        "!f() {{ if [ \"$1\" = get ] && [ -n \"${{{variable}:-}}\" ]; then printf 'username=x-access-token\\npassword=%s\\n' \"${variable}\"; fi; }}; f"
+                    )),
+                    (format!("credential.{url}.useHttpPath"), "true".into()),
+                ]);
+            }
+            for (key, value) in settings {
+                let count = env
+                    .get("GIT_CONFIG_COUNT")
+                    .map_or(Ok(0), |value| value.parse::<usize>())
+                    .context("invalid GIT_CONFIG_COUNT in sandbox environment")?;
+                let next = count.checked_add(1).context("GIT_CONFIG_COUNT overflow")?;
+                env.insert(format!("GIT_CONFIG_KEY_{count}"), key);
+                env.insert(format!("GIT_CONFIG_VALUE_{count}"), value);
+                env.insert("GIT_CONFIG_COUNT".into(), next.to_string());
+            }
         }
         Ok(env)
     }

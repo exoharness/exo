@@ -31,7 +31,6 @@ pub struct AgentFrontmatter {
     pub name: String,
     pub harness: String,
     pub config: AgentModelConfig,
-    pub sandbox: Option<AgentSandboxConfig>,
     #[serde(default)]
     pub permission_policy: permissions::PermissionPolicy,
     #[serde(default)]
@@ -310,12 +309,18 @@ pub async fn open_thread(
         Some(reference) => find_thread(agent.as_ref(), reference).await?,
         None => agent.new_thread(new_thread).await?,
     };
-    if !created && environment.is_some() && thread.record().environment != environment {
-        bail!("cannot change the environment of a saved thread; start a new thread");
-    }
-    if !vaults.is_empty() && thread.record().vaults != vaults {
-        bail!("cannot switch vaults on an existing thread; start a new thread");
-    }
+    let thread = if let Some(environment) = environment
+        && thread.record().environment.as_ref() != Some(&environment)
+    {
+        thread.update_environment(environment).await?
+    } else {
+        thread
+    };
+    let thread = if vaults.iter().any(|id| !thread.record().vaults.contains(id)) {
+        thread.attach_vaults(vaults).await?
+    } else {
+        thread
+    };
     let configured = backend
         .configure_thread(agent.as_ref(), thread.as_ref(), created)
         .await;

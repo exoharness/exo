@@ -27,6 +27,7 @@ pub struct ThreadArgs {
     /// Override the model binding for this thread.
     #[arg(long)]
     pub model: Option<String>,
+    /// Attach a vault to the thread, including when resuming an existing thread.
     #[arg(long)]
     pub vault: Vec<String>,
     /// Use a saved environment from the selected provider.

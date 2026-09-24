@@ -8,10 +8,10 @@ use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use futures::stream::{self, BoxStream};
+use futures::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
@@ -2059,6 +2059,10 @@ impl<'a> BasicScopedSandboxHandle<'a> {
     async fn terminate_sandbox(&self, id: SandboxId) -> Result<()> {
         self.ensure_full_sandbox_scope("terminate_sandbox")?;
         let _guard = self.harness.inner.write_lock.lock().await;
+        self.terminate_sandbox_locked(id).await
+    }
+
+    async fn terminate_sandbox_locked(&self, id: SandboxId) -> Result<()> {
         let sandbox = self.load_sandbox(&id).await?;
         if sandbox.attachment.is_some() {
             bail!("attached sandboxes cannot be terminated");
@@ -2776,6 +2780,70 @@ struct BasicConversationHandle {
 
 #[async_trait]
 impl ConversationHandle for BasicConversationHandle {
+    async fn update_environment(
+        &self,
+        environment: crate::EnvironmentDefinition,
+    ) -> Result<Arc<dyn ConversationHandle>> {
+        environment.validate()?;
+        let _guard = self.harness.inner.write_lock.lock().await;
+        let mut record = self.load_record().await?;
+        if record.environment.as_ref() != Some(&environment) {
+            if self
+                .harness
+                .inner
+                .resources
+                .has_thread(self.agent_id, record.id)
+            {
+                anyhow::ensure!(
+                    self.harness
+                        .inner
+                        .resources
+                        .external_provider(self.agent_id, record.id)?
+                        .is_some()
+                        == (environment.config.provider == SandboxProvider::Firecracker),
+                    "cannot move a thread's existing resources between local and Firecracker storage"
+                );
+            }
+            let scope = self.sandbox_handle();
+            for sandbox in scope.list_sandboxes().await? {
+                scope.terminate_sandbox_locked(sandbox.id).await?;
+            }
+            record = self.load_record().await?;
+            record.environment = Some(environment);
+            self.harness
+                .inner
+                .storage
+                .put_json(self.conversation_dir().join("record.json"), &record)
+                .await?;
+        }
+        Ok(Arc::new(Self {
+            harness: self.harness.clone(),
+            agent_id: self.agent_id,
+            record,
+        }))
+    }
+
+    async fn attach_vaults(&self, vaults: Vec<VaultId>) -> Result<Arc<dyn ConversationHandle>> {
+        let _guard = self.harness.inner.write_lock.lock().await;
+        let mut record = self.load_record().await?;
+        require_vaults(&self.harness, &vaults).await?;
+        for vault in vaults {
+            if !record.vaults.contains(&vault) {
+                record.vaults.push(vault);
+            }
+        }
+        self.harness
+            .inner
+            .storage
+            .put_json(self.conversation_dir().join("record.json"), &record)
+            .await?;
+        Ok(Arc::new(Self {
+            harness: self.harness.clone(),
+            agent_id: self.agent_id,
+            record,
+        }))
+    }
+
     async fn materialize_resources(
         &self,
         resources: Vec<crate::resources::PreparedResource>,
@@ -2805,8 +2873,7 @@ impl ConversationHandle for BasicConversationHandle {
         } else {
             None
         };
-        let mut credentials = Vec::new();
-        for resource in &resources {
+        let credentials = stream::iter(resources.iter().cloned().map(|resource| async move {
             let credential = if !resume
                 && let crate::resources::ResourceSource::GitRepository {
                     url: Some(url),
@@ -2846,8 +2913,11 @@ impl ConversationHandle for BasicConversationHandle {
             } else {
                 None
             };
-            credentials.push(credential);
-        }
+            Ok::<_, anyhow::Error>(credential)
+        }))
+        .buffered(8)
+        .try_collect::<Vec<_>>()
+        .await?;
         let harness = self.harness.clone();
         let record = self.conversation_dir().join("record.json");
         tokio::spawn(async move {
@@ -2891,7 +2961,6 @@ impl ConversationHandle for BasicConversationHandle {
     fn record(&self) -> &ConversationRecord {
         &self.record
     }
-
     async fn start_session(&self) -> Result<SessionId> {
         let session_id = Uuid7::now();
         self.append_events_internal(

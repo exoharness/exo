@@ -286,11 +286,46 @@ async fn http_credentials_require_explicit_destination_authorization() -> Result
     let harness =
         BasicExoHarness::new(crate::test_support::local_test_config(directory.path())).await?;
     let global = global_vault(&harness).await?;
-    for (name, target) in [
-        ("model", None),
-        ("mcp", Some(SecretTarget::mcp("https://api.test/mcp")?)),
+    for (name, target, host, allowed) in [
+        ("model", None, "api.test", false),
+        (
+            "mcp",
+            Some(SecretTarget::mcp("https://api.test/mcp")?),
+            "api.test",
+            false,
+        ),
+        (
+            "github",
+            Some(SecretTarget::http("https://github.com")?),
+            "github.com",
+            true,
+        ),
+        (
+            "github",
+            Some(SecretTarget::http("https://github.com")?),
+            "api.github.com",
+            true,
+        ),
+        (
+            "github",
+            Some(SecretTarget::http("https://github.com")?),
+            "evil.github.com",
+            false,
+        ),
+        (
+            "github",
+            Some(SecretTarget::http("https://github.com")?),
+            "api.github.com.evil.test",
+            false,
+        ),
+        (
+            "other",
+            Some(SecretTarget::http("https://other.test")?),
+            "api.github.com",
+            false,
+        ),
     ] {
-        global
+        let secret = global
             .put_secret(PutSecretRequest {
                 name: name.into(),
                 target,
@@ -300,9 +335,25 @@ async fn http_credentials_require_explicit_destination_authorization() -> Result
             })
             .await?;
         let identity = bind(&harness, ResourceScope::Global, name).await?;
+        let resolved = resolver(&harness)
+            .resolve(&identity, name, &destination(host))
+            .await;
+        assert_eq!(resolved.is_ok(), allowed, "{name}: {host}");
+        if allowed {
+            assert_eq!(resolved?, "credential");
+            let mut wrong_port = destination(host);
+            wrong_port.port = 8443;
+            assert!(
+                resolver(&harness)
+                    .resolve(&identity, name, &wrong_port)
+                    .await
+                    .is_err()
+            );
+        }
+        global.delete_secret(&secret).await?;
         assert!(
             resolver(&harness)
-                .resolve(&identity, name, &destination("api.test"))
+                .resolve(&identity, name, &destination(host))
                 .await
                 .is_err()
         );
