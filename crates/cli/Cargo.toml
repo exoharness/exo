@@ -6,7 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [features]
-default = []
+default = ["smolvm"]
+smolvm = ["executor/smolvm"]
 aws-agentcore = ["executor/aws-agentcore"]
 firecracker = ["executor/firecracker"]
 

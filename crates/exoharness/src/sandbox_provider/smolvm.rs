@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use async_trait::async_trait;
 use bytes::Bytes;
 use semver::Version;
@@ -85,7 +85,8 @@ pub enum SmolvmExecutionMode {
 pub struct SmolvmBackendConfig {
     pub mode: SmolvmExecutionMode,
     /// `smolvm` itself. `None` falls back to `SMOLVM_BIN`, then bare `smolvm`
-    /// resolved through `PATH`.
+    /// resolved through `PATH`. With the `smolvm` feature, a missing default
+    /// binary is downloaded and cached on first use.
     pub binary: Option<PathBuf>,
     /// The binary handed to smolvm as `SMOLVM_BOOT_BINARY`. `None` derives one
     /// from `binary` on first use; see [`resolve_boot_binary`].
@@ -96,7 +97,8 @@ pub struct SmolvmBackendConfig {
 
 /// Backend driving the `smolvm` CLI.
 pub struct SmolvmSandboxBackend {
-    binary: PathBuf,
+    binary_override: Option<PathBuf>,
+    binary: OnceCell<PathBuf>,
     /// Configured boot binary, if the caller pinned one.
     boot_binary_override: Option<PathBuf>,
     /// Serves `_boot-vm`; arms the parent-death watchdog for ephemeral VMs.
@@ -129,15 +131,15 @@ impl SmolvmSandboxBackend {
     /// The env lookups below are the fallback for callers that build a backend
     /// without a config; anything routed through the CLI arrives on the struct.
     pub fn from_config(config: SmolvmBackendConfig) -> Self {
-        let binary = config
+        let binary_override = config
             .binary
-            .or_else(|| std::env::var_os(SMOLVM_BIN_ENV).map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_SMOLVM_BIN));
+            .or_else(|| std::env::var_os(SMOLVM_BIN_ENV).map(PathBuf::from));
         let boot_binary_override = config
             .boot_binary
             .or_else(|| std::env::var_os(SMOLVM_BOOT_BIN_ENV).map(PathBuf::from));
         Self {
-            binary,
+            binary_override,
+            binary: OnceCell::new(),
             boot_binary_override,
             boot_binary: OnceCell::new(),
             mode: config.mode,
@@ -150,13 +152,13 @@ impl SmolvmSandboxBackend {
 
     /// Resolved once and cached: every ephemeral `acquire` needs it, and the
     /// resolution touches the filesystem.
-    async fn boot_binary(&self) -> &Option<PathBuf> {
+    async fn boot_binary(&self) -> Result<&Option<PathBuf>> {
         self.boot_binary
-            .get_or_init(|| async {
-                match &self.boot_binary_override {
+            .get_or_try_init(|| async {
+                Ok(match &self.boot_binary_override {
                     Some(explicit) => Some(explicit.clone()),
-                    None => resolve_boot_binary(&self.binary).await,
-                }
+                    None => resolve_boot_binary(self.binary().await?).await,
+                })
             })
             .await
     }
@@ -166,9 +168,66 @@ impl SmolvmSandboxBackend {
         self.mode
     }
 
+    async fn binary(&self) -> Result<&PathBuf> {
+        self.binary
+            .get_or_try_init(|| async {
+                let binary = match &self.binary_override {
+                    Some(explicit) => explicit.clone(),
+                    None => match which_binary(Path::new(DEFAULT_SMOLVM_BIN)).await {
+                        Some(installed) => installed,
+                        None => {
+                            #[cfg(feature = "smolvm")]
+                            {
+                                tokio::task::spawn_blocking(|| {
+                                    // The SDK stages downloads by PID; serialize callers even
+                                    // if an acquire is cancelled while its blocking task runs.
+                                    static INSTALL_LOCK: Mutex<()> = Mutex::new(());
+                                    let _install = INSTALL_LOCK
+                                        .lock()
+                                        .expect("smolvm installation lock poisoned");
+                                    smolmachines::bootstrap::ensure_engine()
+                                        .context("provisioning the SmolVM runtime")
+                                })
+                                .await
+                                .context("SmolVM provisioning task failed")??
+                            }
+                            #[cfg(not(feature = "smolvm"))]
+                            {
+                                PathBuf::from(DEFAULT_SMOLVM_BIN)
+                            }
+                        }
+                    },
+                };
+                let output = Command::new(&binary)
+                    .arg("--version")
+                    .kill_on_drop(true)
+                    .output()
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "could not run {} --version. Install SmolVM with \
+                         `curl -sSL https://smolmachines.com/install.sh | bash`, \
+                         or configure its path with `exo sandbox provider create --sandbox smolvm \
+                         --smolvm-binary /path/to/smolvm`",
+                            binary.display()
+                        )
+                    })?;
+                ensure!(
+                    output.status.success(),
+                    "{} --version failed: {}",
+                    binary.display(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+                Ok(binary)
+            })
+            .await
+    }
+
     /// Probe the installed binary once and cache what it supports.
-    async fn capabilities(&self) -> &Capabilities {
-        self.capabilities
+    async fn capabilities(&self) -> Result<&Capabilities> {
+        self.binary().await?;
+        Ok(self
+            .capabilities
             .get_or_init(|| async {
                 Capabilities {
                     warm: self
@@ -178,23 +237,26 @@ impl SmolvmSandboxBackend {
                     labels: self.probe_flag("machine", "create", LABEL_FLAG).await,
                 }
             })
-            .await
+            .await)
     }
 
     /// An unreadable version counts as "no"; a missing binary then fails on the
     /// first real command, which reports it properly.
     pub async fn warm_supported(&self) -> bool {
-        self.capabilities().await.warm
+        self.capabilities().await.is_ok_and(|caps| caps.warm)
     }
 
     /// Whether the installed smolvm can label machines, which cross-process reaping needs.
     pub async fn labels_supported(&self) -> bool {
-        self.capabilities().await.labels
+        self.capabilities().await.is_ok_and(|caps| caps.labels)
     }
 
     /// Whether a subcommand advertises `flag` in its own `--help`.
     async fn probe_flag(&self, group: &str, subcommand: &str, flag: &str) -> bool {
-        let Ok(output) = Command::new(&self.binary)
+        let Ok(binary) = self.binary().await else {
+            return false;
+        };
+        let Ok(output) = Command::new(binary)
             .args([group, subcommand, "--help"])
             .output()
             .await
@@ -225,7 +287,7 @@ impl SmolvmSandboxBackend {
     }
 
     async fn probe_version(&self) -> Option<Version> {
-        let output = Command::new(&self.binary)
+        let output = Command::new(self.binary().await.ok()?)
             .arg("--version")
             .output()
             .await
@@ -241,8 +303,8 @@ impl SmolvmSandboxBackend {
         if let Some(cache) = &self.image_cache {
             let source = image.to_owned();
             let cache = cache.clone();
-            let binary = self.binary.clone();
-            let boot_binary = self.boot_binary().await.clone();
+            let binary = self.binary().await?.clone();
+            let boot_binary = self.boot_binary().await?.clone();
             if let Some(prepared) = tokio::task::spawn_blocking(move || {
                 image_cache::prepare(&binary, boot_binary.as_deref(), &cache, &source)
             })
@@ -265,7 +327,7 @@ impl SmolvmSandboxBackend {
         key: &str,
         image: &str,
     ) -> Result<()> {
-        let mut create = Command::new(&self.binary);
+        let mut create = Command::new(self.binary().await?);
         create.arg("machine").arg("create").arg("--name").arg(name);
         create.arg("--image").arg(image);
         self.stamp_labels(&mut create, key).await;
@@ -283,7 +345,7 @@ impl SmolvmSandboxBackend {
             }
         }
 
-        let mut start = Command::new(&self.binary);
+        let mut start = Command::new(self.binary().await?);
         start.arg("machine").arg("start").arg("--name").arg(name);
         let output = start.output().await.context("spawn smolvm machine start")?;
         if output.status.success() {
@@ -378,7 +440,7 @@ impl SmolvmSandboxBackend {
     /// `(name, owner pid)` for machines carrying this backend's labels. Reads
     /// `--json`: the table view truncates names and omits labels entirely.
     async fn labelled_machines(&self) -> Result<Vec<(String, String)>> {
-        let output = Command::new(&self.binary)
+        let output = Command::new(self.binary().await?)
             .args(["machine", "ls", "--json"])
             .output()
             .await
@@ -416,7 +478,7 @@ impl SmolvmSandboxBackend {
     /// pre-check: that view truncates names at 15 chars and ours are 20, so the
     /// match could never hit — and asking outright has no check-then-act race.
     async fn delete_machine_if_present(&self, name: &str) -> Result<()> {
-        let output = Command::new(&self.binary)
+        let output = Command::new(self.binary().await?)
             .args(["machine", "delete", "--name", name, "--force"])
             .output()
             .await
@@ -460,6 +522,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
 
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
         request.spec.policy.validate_basic("smolvm")?;
+        let binary = self.binary().await?;
         let image = self.prepare_image(&request.spec.image).await?;
         reject_unsupported_spec(&request.spec, &image)?;
         match self.resolve_mode(&request).await {
@@ -478,7 +541,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
                 }
                 Ok(crate::with_process_management(Arc::new(SmolvmWarmHandle {
                     id: format!("smolvm:{machine}"),
-                    binary: self.binary.clone(),
+                    binary: binary.clone(),
                     machine,
                     request,
                 })))
@@ -487,9 +550,9 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             _ => Ok(crate::with_process_management(Arc::new(
                 SmolvmOneShotHandle {
                     id: format!("smolvm-oneshot:{}", request.sandbox_id.as_str()),
-                    binary: self.binary.clone(),
+                    binary: binary.clone(),
                     image,
-                    boot_binary: self.boot_binary().await.clone(),
+                    boot_binary: self.boot_binary().await?.clone(),
                     request,
                 },
             ))),
@@ -518,6 +581,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             );
         }
         reject_unsupported_spec(&request.spec, &request.spec.image)?;
+        let binary = self.binary().await?;
         if self.resolve_mode(&request).await != SmolvmExecutionMode::Warm {
             bail!(
                 "smolvm snapshots require warm mode (one-shot VMs hold no state to restore); \
@@ -538,7 +602,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
         // Unconditional: delete already tolerates "not found".
         self.delete_machine_if_present(&machine).await?;
 
-        let mut create = Command::new(&self.binary);
+        let mut create = Command::new(binary);
         create
             .arg("machine")
             .arg("create")
@@ -552,7 +616,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
         configure_spec_args(&mut create, &request.spec);
         run_checked(create, "smolvm machine create --from").await?;
 
-        let mut start = Command::new(&self.binary);
+        let mut start = Command::new(binary);
         start
             .arg("machine")
             .arg("start")
@@ -562,7 +626,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
 
         Ok(crate::with_process_management(Arc::new(SmolvmWarmHandle {
             id: format!("smolvm:{machine}"),
-            binary: self.binary.clone(),
+            binary: binary.clone(),
             machine,
             request,
         })))
@@ -994,6 +1058,23 @@ mod tests {
     use crate::ResourceScope;
     use crate::sandbox::SandboxLifecycleConfig;
 
+    #[tokio::test]
+    async fn missing_binary_reports_macos_install_instructions() {
+        let backend = SmolvmSandboxBackend::from_config(SmolvmBackendConfig {
+            binary: Some(PathBuf::from("/nonexistent/exo-test-smolvm")),
+            ..Default::default()
+        });
+        let error = backend.binary().await.unwrap_err().to_string();
+        assert!(
+            error.contains("https://smolmachines.com/install.sh"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.contains("--smolvm-binary"),
+            "unexpected error: {error}"
+        );
+    }
+
     /// A configured boot binary is used as given. The point is what does *not*
     /// happen: no `PATH` walk, no `stat`, so a path that exists only on the host
     /// this config was written for still round-trips instead of being silently
@@ -1007,7 +1088,7 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(
-            backend.boot_binary().await.as_deref(),
+            backend.boot_binary().await.unwrap().as_deref(),
             Some(Path::new("/nowhere/smolvm-bin"))
         );
     }
@@ -1016,10 +1097,14 @@ mod tests {
     /// `acquire` asks for this every ephemeral run, and the answer costs a `PATH`
     /// walk plus a `canonicalize`.
     #[tokio::test]
+    #[cfg(unix)]
     async fn boot_binary_resolution_is_cached_after_the_first_ask() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("smolvm");
+        write_test_binary(&binary, "printf 'smolvm 1.17.0\\n'");
         let backend = SmolvmSandboxBackend::from_config(SmolvmBackendConfig {
             mode: SmolvmExecutionMode::OneShot,
-            binary: Some(PathBuf::from("/nowhere/smolvm")),
+            binary: Some(binary),
             boot_binary: None,
             ..Default::default()
         });
@@ -1030,13 +1115,129 @@ mod tests {
         // Not asserted against a fixed value: an inherited `SMOLVM_BOOT_BINARY`
         // legitimately changes the answer, and what is under test is that the
         // answer is computed once, not what it is.
-        let first = backend.boot_binary().await.clone();
+        let first = backend.boot_binary().await.unwrap().clone();
         assert!(backend.boot_binary.initialized());
         assert_eq!(
-            backend.boot_binary().await,
+            backend.boot_binary().await.unwrap(),
             &first,
             "the second ask must read the cell, not the filesystem"
         );
+    }
+
+    #[cfg(unix)]
+    fn write_test_binary(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn configured_binary_errors_are_retried_without_using_another_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("smolvm");
+        let backend = SmolvmSandboxBackend::from_config(SmolvmBackendConfig {
+            binary: Some(binary.clone()),
+            ..Default::default()
+        });
+        assert!(
+            backend
+                .binary()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains(&binary.display().to_string())
+        );
+        write_test_binary(&binary, "echo broken-runtime >&2; exit 7");
+        assert!(
+            backend
+                .binary()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("broken-runtime")
+        );
+        write_test_binary(&binary, "printf 'smolvm 1.17.0\\n'");
+        assert_eq!(backend.binary().await.unwrap(), &binary);
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(
+            target_os = "linux",
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        )
+    ))]
+    #[tokio::test]
+    async fn default_runtime_uses_sdk_cache_or_path() {
+        const CHILD_ROOT: &str = "EXO_SMOLVM_BOOTSTRAP_TEST_ROOT";
+        let Some(root) = std::env::var_os(CHILD_ROOT).map(PathBuf::from) else {
+            let dir = tempfile::tempdir().unwrap();
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "sandbox_provider::smolvm::tests::default_runtime_uses_sdk_cache_or_path",
+                    "--nocapture",
+                ])
+                .env(CHILD_ROOT, dir.path())
+                .env("PATH", dir.path().join("bin"))
+                .env_remove(SMOLVM_BIN_ENV)
+                .env_remove(SMOLVM_BOOT_BIN_ENV)
+                .env("SMOLMACHINES_CACHE_DIR", dir.path().join("cache"))
+                .env("SMOLMACHINES_ENGINE_VERSION", "1.17.0")
+                .env("SMOLMACHINES_NO_DOWNLOAD", "1")
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        };
+
+        let backend = SmolvmSandboxBackend::new();
+        assert!(!backend.warm_supported().await);
+        let error = format!("{:#}", backend.binary().await.unwrap_err());
+        #[cfg(feature = "smolvm")]
+        {
+            assert!(error.contains("downloads are disabled"), "{error}");
+            let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
+                ("macos", "aarch64") => "darwin-arm64",
+                ("linux", "aarch64") => "linux-arm64",
+                ("linux", "x86_64") => "linux-x86_64",
+                _ => unreachable!(),
+            };
+            let cached = root.join("cache").join(format!("smolvm-1.17.0-{platform}"));
+            let binary = cached.join("smolvm");
+            write_test_binary(&binary, "printf 'smolvm 1.17.0\\n'");
+            write_test_binary(&cached.join("smolvm-bin"), "exit 0");
+            assert_eq!(backend.binary().await.unwrap(), &binary);
+            assert!(backend.warm_supported().await);
+            assert_eq!(
+                backend.boot_binary().await.unwrap().as_ref().unwrap(),
+                &cached.join("smolvm-bin").canonicalize().unwrap()
+            );
+        }
+        #[cfg(not(feature = "smolvm"))]
+        assert!(
+            error.contains("https://smolmachines.com/install.sh"),
+            "{error}"
+        );
+
+        let installed = root.join("bin/smolvm");
+        write_test_binary(&installed, "printf 'smolvm 1.17.0\\n'");
+        let installed = installed.canonicalize().unwrap();
+        assert_eq!(
+            SmolvmSandboxBackend::new().binary().await.unwrap(),
+            &installed
+        );
+        #[cfg(not(feature = "smolvm"))]
+        assert_eq!(backend.binary().await.unwrap(), &installed);
     }
 
     #[test]
@@ -1120,9 +1321,10 @@ mod tests {
     /// Must not panic or hang; the first real command reports the failure.
     #[tokio::test]
     async fn auto_falls_back_to_one_shot_when_smolvm_is_absent() {
-        // SAFETY: single-threaded test process, set before any probe runs.
-        unsafe { std::env::set_var(SMOLVM_BIN_ENV, "/nonexistent/smolvm-does-not-exist") };
-        let backend = SmolvmSandboxBackend::new();
+        let backend = SmolvmSandboxBackend::from_config(SmolvmBackendConfig {
+            binary: Some(PathBuf::from("/nonexistent/smolvm-does-not-exist")),
+            ..Default::default()
+        });
         assert!(!backend.warm_supported().await);
         assert_eq!(
             backend
@@ -1130,7 +1332,6 @@ mod tests {
                 .await,
             SmolvmExecutionMode::OneShot
         );
-        unsafe { std::env::remove_var(SMOLVM_BIN_ENV) };
     }
 
     #[test]
