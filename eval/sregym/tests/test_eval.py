@@ -137,6 +137,7 @@ class EvalTests(unittest.TestCase):
         self.assertIn('\"stage\":\"mitigation\"', instruction)
         self.assertIn("rebuild_and_restart_exo", instruction)
         self.assertIn("top goal is to get the right answer", instruction)
+        self.assertIn("list_conversation_events", instruction)
 
         memory_only = sregym_eval.build_instruction(
             {"app_name": "shop", "namespace": "default", "descriptions": ""},
@@ -145,6 +146,7 @@ class EvalTests(unittest.TestCase):
             self_modification=False,
         )
         self.assertIn("remember", memory_only)
+        self.assertIn("list_conversation_events", memory_only)
         self.assertNotIn("rebuild_and_restart_exo", memory_only)
         self.assertNotIn("install_skill", memory_only)
 
