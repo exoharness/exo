@@ -37,6 +37,19 @@ impl AgentBackend for LocalProvider {
         config.instructions = vec![crate::harness_helpers::system_message(
             &definition.system_prompt(),
         )];
+        let mut resources = definition.frontmatter.resources.clone();
+        let base = definition
+            .path()
+            .and_then(Path::parent)
+            .unwrap_or(Path::new("."));
+        for resource in &mut resources {
+            anyhow::ensure!(
+                definition.path().is_some() || resource.local_path().is_none_or(Path::is_absolute),
+                "relative resource paths require a local agent file; use a Git URL or an absolute path on the provider"
+            );
+            resource.resolve_path(base)?;
+        }
+        config.resources = agent.prepare_resources(resources).await?;
         crate::harness_config::store_agent_config(agent.as_ref(), &config).await
     }
 
@@ -60,6 +73,7 @@ impl AgentBackend for LocalProvider {
         .await?;
         let mut config = if created {
             ConversationConfig {
+                resources: agent_config.resources.clone(),
                 sandbox_image: agent_config.sandbox.image.clone(),
                 sandbox_provider: Some(agent_config.sandbox.provider.clone()),
                 ..Default::default()
@@ -104,6 +118,35 @@ impl AgentBackend for LocalProvider {
                 .clone()
                 .unwrap_or_default();
             config.sandbox_scope = Some(crate::SandboxScope::Conversation);
+        }
+        if !config.resources.is_empty() {
+            anyhow::ensure!(
+                matches!(
+                    config.effective_sandbox_provider(&agent_config).as_str(),
+                    "apple_container" | "docker" | "local_process" | "firecracker" | "smolvm"
+                ),
+                "filesystem resources require Apple Container, Docker, Firecracker, SmolVM or local-process sandboxes"
+            );
+            for resource in &config.resources {
+                for mount_path in config
+                    .mounts
+                    .iter()
+                    .map(|m| &m.mount_path)
+                    .chain(config.durable_file_systems.iter().map(|m| &m.mount_path))
+                {
+                    exoharness::resources::validate_mount_overlap(
+                        &resource.definition.mount_path,
+                        mount_path,
+                    )?;
+                }
+            }
+            config.sandbox_scope = Some(crate::SandboxScope::Conversation);
+            config.resource_mounts = thread
+                .materialize_resources(
+                    config.resources.clone(),
+                    config.effective_sandbox_provider(&agent_config),
+                )
+                .await?;
         }
         let mcp_tools = self
             .executor

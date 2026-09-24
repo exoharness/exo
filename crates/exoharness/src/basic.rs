@@ -145,8 +145,16 @@ impl SandboxBackendRegistration {
             let resolver = Arc::new(LocalEgressResolver {
                 harness: Arc::downgrade(inner),
             });
-            let backend =
-                crate::egress::CredentialContainerBackend::new(provider.clone(), resolver);
+            let backend = if provider == SandboxProvider::Docker {
+                crate::CliContainerSandboxBackend::docker()
+            } else {
+                crate::CliContainerSandboxBackend::apple_container()
+            };
+            let backend = crate::egress::CredentialProxyBackend::new(
+                provider.clone(),
+                Arc::new(backend),
+                resolver,
+            );
             Box::pin(async move { Ok(Arc::new(backend) as Arc<dyn ManagedSandboxBackend>) })
         })
     }
@@ -196,11 +204,17 @@ impl SandboxBackendRegistration {
         // the same shape daytona/e2b use for their credentials. The result is
         // cached per provider by `sandbox_backend_for_provider`, so this runs
         // once per harness and not once per sandbox.
-        Self::from_factory(SandboxProvider::Smolvm, false, |inner| {
+        Self::from_factory(SandboxProvider::Smolvm, true, |inner| {
             Box::pin(async move {
                 let config = inner.smolvm_config_from_binding().await?;
-                Ok(Arc::new(crate::SmolvmSandboxBackend::from_config(config))
-                    as Arc<dyn ManagedSandboxBackend>)
+                let resolver = Arc::new(LocalEgressResolver {
+                    harness: Arc::downgrade(inner),
+                });
+                Ok(Arc::new(crate::egress::CredentialProxyBackend::new(
+                    SandboxProvider::Smolvm,
+                    Arc::new(crate::SmolvmSandboxBackend::from_config(config)),
+                    resolver,
+                )) as Arc<dyn ManagedSandboxBackend>)
             })
         })
     }
@@ -437,6 +451,8 @@ pub struct BasicExoHarness {
 }
 
 struct BasicExoHarnessInner {
+    cache_root: PathBuf,
+    resources: crate::resources::ResourceStore,
     storage: BasicObjectStore,
     write_lock: AsyncMutex<()>,
     subscribers: Mutex<HashMap<ConversationId, Vec<mpsc::UnboundedSender<Result<Event>>>>>,
@@ -727,6 +743,7 @@ impl BasicExoHarnessInner {
             mode: crate::SmolvmExecutionMode::default(),
             binary,
             boot_binary,
+            image_cache: Some(self.cache_root.join("smolvm/images")),
         })
     }
 
@@ -898,8 +915,7 @@ fn nonempty_env(name: &str) -> Option<String> {
 
 impl BasicExoHarness {
     /// In-memory state uses a fresh encryption key, ignoring `config.secret_backend`.
-    pub async fn in_memory(mut config: BasicExoHarnessConfig) -> Result<Self> {
-        config.secret_backend = SecretBackendChoice::Static(crate::secrets::random_master_key());
+    pub async fn in_memory(config: BasicExoHarnessConfig) -> Result<Self> {
         Self::new_with_storage(config, None, BasicObjectStore::in_memory(), true).await
     }
 
@@ -965,6 +981,19 @@ impl BasicExoHarness {
             cache.insert(sandbox_default.clone(), backend);
         }
 
+        let resource_master_key = match &secret_backend {
+            SecretBackendChoice::File { path } => Some(
+                path.clone()
+                    .map(Ok)
+                    .unwrap_or_else(crate::secrets::default_master_key_path)?,
+            ),
+            _ => None,
+        };
+        let secret_backend = if in_memory {
+            SecretBackendChoice::Static(crate::secrets::random_master_key())
+        } else {
+            secret_backend
+        };
         let secret_cipher =
             build_secret_cipher(secret_backend, root.to_string_lossy().to_string())?;
         let vaults = BasicVaultStore::new(
@@ -973,6 +1002,9 @@ impl BasicExoHarness {
         )?;
         Ok(Self {
             inner: Arc::new(BasicExoHarnessInner {
+                cache_root: root.join("cache"),
+                resources: crate::resources::ResourceStore::new(&root)?
+                    .excluding_master_key(resource_master_key)?,
                 vaults,
                 storage,
                 write_lock: AsyncMutex::new(()),
@@ -1194,6 +1226,9 @@ impl ExoHarness for BasicExoHarness {
             if !prepare_sandbox_scopes_for_deletion(self, &scopes).await? {
                 continue;
             }
+            for conversation_id in agent_conversation_ids(self, &agent_dir).await? {
+                remove_thread_resources(self, *id, conversation_id).await?;
+            }
             // Release the slug before the record (its source) disappears.
             if let Some(record) = self
                 .inner
@@ -1402,6 +1437,14 @@ where
 
 #[async_trait]
 impl AgentHandle for BasicAgentHandle {
+    async fn prepare_resources(
+        &self,
+        resources: Vec<crate::resources::ResourceDefinition>,
+    ) -> Result<Vec<crate::resources::PreparedResource>> {
+        let store = self.harness.inner.resources.clone();
+        tokio::task::spawn_blocking(move || store.prepare(resources)).await?
+    }
+
     fn record(&self) -> &AgentRecord {
         &self.record
     }
@@ -1573,6 +1616,7 @@ impl AgentHandle for BasicAgentHandle {
                 )
                 .await?;
             }
+            remove_thread_resources(&self.harness, self.record.id, *id).await?;
             self.harness
                 .inner
                 .storage
@@ -2368,7 +2412,11 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         let parts = sandbox_handle
             .start_process(&SandboxCommand {
                 argv: request.command.clone(),
-                env: request.env.clone(),
+                env: self.harness.inner.resources.command_env(
+                    self.owner,
+                    &sandbox.file_system_mounts,
+                    request.env,
+                )?,
                 display_argv: Some(request.command),
                 cwd: None,
                 timeout: None,
@@ -2728,6 +2776,118 @@ struct BasicConversationHandle {
 
 #[async_trait]
 impl ConversationHandle for BasicConversationHandle {
+    async fn materialize_resources(
+        &self,
+        resources: Vec<crate::resources::PreparedResource>,
+        provider: SandboxProvider,
+    ) -> Result<Vec<FileSystemMount>> {
+        if resources.is_empty() {
+            return Ok(Vec::new());
+        }
+        let store = self.harness.inner.resources.clone();
+        let agent = self.agent_id;
+        let thread = self.record.id;
+        let resume = store.has_thread(agent, thread);
+        let external = provider == SandboxProvider::Firecracker;
+        if resume {
+            anyhow::ensure!(
+                store.external_provider(agent, thread)?.is_some() == external,
+                "cannot move thread resources between Firecracker and directory-based sandboxes"
+            );
+        }
+        let backend = if external {
+            Some(
+                self.harness
+                    .inner
+                    .sandbox_backend_for_provider(provider)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let mut credentials = Vec::new();
+        for resource in &resources {
+            let credential = if !resume
+                && let crate::resources::ResourceSource::GitRepository {
+                    url: Some(url),
+                    credential,
+                    ..
+                } = &resource.definition.source
+            {
+                if let Some(name) = credential {
+                    let reference =
+                        crate::vault::find_secret(self, name)
+                            .await?
+                            .with_context(|| {
+                                format!(
+                                    "Git resource credential {name} is not in the selected vaults"
+                                )
+                            })?;
+                    let target = crate::vault::SecretTarget::http(
+                        &url::Url::parse(url)?.origin().ascii_serialization(),
+                    )?;
+                    let vault = crate::vault::require_vault(self, &reference.vault_id).await?;
+                    let resolved = vault.resolve_secret(&reference.secret_id, &target).await?;
+                    let Secret::Key { value } = resolved.secret else {
+                        bail!("Git resources require a static token");
+                    };
+                    Some(crate::resources::GitCredential {
+                        identity: format!("{}:{}", reference.vault_id, reference.secret_id),
+                        username: "x-access-token".into(),
+                        token: value,
+                    })
+                } else if external && cfg!(target_os = "macos") {
+                    let url = url.clone();
+                    tokio::task::spawn_blocking(move || crate::resources::host_git_credential(&url))
+                        .await??
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            credentials.push(credential);
+        }
+        let harness = self.harness.clone();
+        let record = self.conversation_dir().join("record.json");
+        tokio::spawn(async move {
+            let _guard = harness.inner.write_lock.lock().await;
+            harness
+                .inner
+                .storage
+                .get_json::<ConversationRecord>(record)
+                .await?;
+            let runtime = tokio::runtime::Handle::current();
+            tokio::task::spawn_blocking(move || {
+                let Some(backend) = backend else {
+                    return store.materialize(agent, thread, resources, credentials);
+                };
+                store.remember_external(agent, thread, None)?;
+                let materialize = |sources| {
+                    runtime.block_on(backend.materialize_resources(
+                        crate::resources::MaterializeResourcesRequest {
+                            agent,
+                            thread,
+                            resources: resources.clone(),
+                            archives: sources,
+                            credentials,
+                            resume,
+                        },
+                    ))
+                };
+                let mounts = if resume {
+                    materialize(Default::default())?
+                } else {
+                    store.with_image_sources(&resources, materialize)?
+                };
+                store.remember_external(agent, thread, Some(&resources))?;
+                Ok(mounts)
+            })
+            .await?
+        })
+        .await?
+    }
+
     fn record(&self) -> &ConversationRecord {
         &self.record
     }
@@ -2914,6 +3074,14 @@ impl ConversationHandle for BasicConversationHandle {
 
     async fn fork(&self, request: ForkConversationRequest) -> Result<Arc<dyn ConversationHandle>> {
         let _guard = self.harness.inner.write_lock.lock().await;
+        anyhow::ensure!(
+            !self
+                .harness
+                .inner
+                .resources
+                .has_thread(self.agent_id, self.record.id),
+            "forking a thread with filesystem resources is not supported yet; create a new thread"
+        );
         let agent = BasicAgentHandle {
             harness: self.harness.clone(),
             record: self
@@ -4119,7 +4287,11 @@ async fn prepare_sandbox_process(
     let parts = sandbox_handle
         .start_process(&SandboxCommand {
             argv: command.clone(),
-            env: request.env,
+            env: harness.inner.resources.command_env(
+                owner,
+                &sandbox.file_system_mounts,
+                request.env,
+            )?,
             display_argv: Some(command.clone()),
             cwd: cwd.clone(),
             timeout: None,
@@ -5103,4 +5275,21 @@ mod egress_resolution_tests {
         );
         Ok(())
     }
+}
+
+async fn remove_thread_resources(
+    harness: &BasicExoHarness,
+    agent: AgentId,
+    thread: ConversationId,
+) -> Result<()> {
+    let store = harness.inner.resources.clone();
+    if let Some(provider) = store.external_provider(agent, thread)? {
+        harness
+            .inner
+            .sandbox_backend_for_provider(provider)
+            .await?
+            .remove_thread_resources(agent, thread)
+            .await?;
+    }
+    tokio::task::spawn_blocking(move || store.remove_thread(agent, thread)).await?
 }

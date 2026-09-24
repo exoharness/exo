@@ -110,7 +110,7 @@ async fn configure(store: &mut Store, args: &[&str]) -> Result<()> {
     let crate::Commands::Provider { command } = cli.command else {
         unreachable!()
     };
-    run(&command, store).await
+    run(command.as_ref(), store).await
 }
 
 #[test]

@@ -9,6 +9,15 @@ exo provider login remote
 exo provider switch remote
 ```
 
+Run `exo provider` (or `exo provider get`) to see the current selection, its
+originating directory or global scope, and context. `exo provider list` also shows
+the selection above the saved profiles.
+
+`exo provider clear` clears the global selection. `exo provider clear --local`
+clears the override saved in the current directory; parent-directory selections
+still apply. Neither command deletes profiles, credentials, or pinned aliases.
+Without a saved selection, new commands use built-in local Exo.
+
 `create` and `update` save local configuration. `login` checks the connection and authenticates.
 
 Provider context is a string map sent as JSON in `X-Exo-Context`. Its keys are defined by the provider; Exo forwards these values without interpreting them.

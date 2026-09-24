@@ -37,10 +37,10 @@ use crate::{
     SandboxNetworkPolicy,
 };
 
-mod container;
-pub(crate) use container::CredentialContainerBackend;
 mod explicit;
 pub use explicit::{ExplicitProxy, ProxyAuthorizer, ProxySession, serve_connect_proxy};
+mod explicit_backend;
+pub(crate) use explicit_backend::CredentialProxyBackend;
 mod transport;
 pub mod vault;
 pub use transport::{EgressTransport, LocalEgressTransport};

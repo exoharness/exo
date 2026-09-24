@@ -2029,3 +2029,105 @@ async fn hosted_proxy_times_out_authorization_before_accepting_a_tunnel() -> Res
     server.await??;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires SmolVM and EXO_SMOLVM_TEST_IMAGE with curl and CA certificates"]
+async fn smolvm_explicit_proxy_live() -> Result<()> {
+    use crate::{
+        ManagedSandboxBackend, SandboxCommand, SandboxLifecycleConfig, SandboxRequest,
+        SandboxResourceShape, SandboxSpec, SmolvmExecutionMode, SmolvmSandboxBackend,
+    };
+    let image = std::env::var("EXO_SMOLVM_TEST_IMAGE")?;
+    let upstream = Upstream::start().await?;
+    let resolver = TestResolver::new();
+    let mut config = policy();
+    config.networking = SandboxNetworkPolicy::Unrestricted;
+    let state = State::new(
+        identity("smolvm-proxy"),
+        config,
+        Some(resolver.clone()),
+        Arc::new(upstream.config.clone()),
+    )?;
+    let proxy = explicit::ExplicitProxy::with_listener(
+        state,
+        TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?,
+        "host.smolvm.internal",
+    )
+    .await?;
+    let backend = SmolvmSandboxBackend::with_mode(SmolvmExecutionMode::Warm);
+    let request = SandboxRequest {
+        sandbox_id: format!("smolvm-proxy-{}", uuid::Uuid::new_v4()),
+        scope: Default::default(),
+        provider_state: None,
+        spec: SandboxSpec {
+            image,
+            resources: SandboxResourceShape::new(2, 1024),
+            mounts: Vec::new(),
+            durable_file_systems: Vec::new(),
+            policy: SandboxNetworkPolicy::Unrestricted.into(),
+            default_workdir: "/".into(),
+        },
+        lifecycle: SandboxLifecycleConfig {
+            idle_ttl: Some(Duration::from_secs(120)),
+        },
+    };
+    let result = async {
+        let handle = backend.acquire(request.clone()).await?;
+        let mut command = SandboxCommand {
+            argv: vec!["sh".into(), "-ec".into(), PREPARE_TRUST.into()],
+            env: HashMap::from([
+                ("EXO_EGRESS_CA_PATH".into(), proxy.ca_path.clone()),
+                (
+                    "EXO_EGRESS_CA_PEM".into(),
+                    format!("{}\n{}", proxy.ca_pem, upstream.config.ca_pem),
+                ),
+            ]),
+            display_argv: None,
+            cwd: None,
+            timeout: Some(Duration::from_secs(20)),
+        };
+        let output = handle.exec(&command).await?;
+        ensure!(output.ok, "trust setup: {}", output.stderr);
+        command.env = HashMap::from([("TEST_API_KEY".into(), "caller-supplied-secret".into())]);
+        command.argv[2] = r#"
+case "$TEST_API_KEY" in exo_egress_*) ;; *) exit 1;; esac
+case "$(env)" in *canary-v1*|*canary-v2*|*caller-supplied-secret*) exit 1;; esac
+curl -fsS --max-time 10 https://api.test/auth -H "Authorization: Bearer $TEST_API_KEY"
+"#
+        .into();
+        for (secret, expected) in [
+            ("canary-v1", "authenticated-v1"),
+            ("canary-v2", "authenticated-v2"),
+        ] {
+            *resolver.value.write().await = Some(secret.into());
+            let output = handle.exec(&proxy.command(&command)?).await?;
+            ensure!(
+                output.ok && output.stdout == expected,
+                "proxy request: {} {}",
+                output.stdout,
+                output.stderr
+            );
+        }
+        *resolver.value.write().await = None;
+        let output = handle.exec(&proxy.command(&command)?).await?;
+        ensure!(!output.ok, "revoked credential was still accepted");
+        command.argv[2] = "curl -fsS --max-time 10 https://public.test/auth".into();
+        let output = handle.exec(&proxy.command(&command)?).await?;
+        ensure!(
+            output.ok && output.stdout == "anonymous",
+            "anonymous HTTPS failed: {}",
+            output.stderr
+        );
+        proxy.close();
+        ensure!(
+            proxy.command(&command).is_err(),
+            "closed proxy still supplies commands"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    proxy.close();
+    let cleanup = backend.terminate(request).await;
+    result?;
+    cleanup
+}

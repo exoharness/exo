@@ -543,14 +543,15 @@ async fn smolvm_warm_mode_persists_guest_local_state() {
     let workspace = workspace_dir("warm");
     let backend = SmolvmSandboxBackend::with_mode(SmolvmExecutionMode::Warm);
 
+    let request = request(
+        image,
+        &workspace,
+        SandboxNetworkPolicy::Disabled,
+        "warm",
+        Some(Duration::from_secs(600)),
+    );
     let handle = backend
-        .acquire(request(
-            image,
-            &workspace,
-            SandboxNetworkPolicy::Disabled,
-            "warm",
-            Some(Duration::from_secs(600)),
-        ))
+        .acquire(request.clone())
         .await
         .expect("acquire warm smolvm sandbox");
 
@@ -573,8 +574,19 @@ async fn smolvm_warm_mode_persists_guest_local_state() {
         "guest-local state did not survive between execs — the machine was not reused"
     );
 
-    handle.stop().await.expect("stop warm sandbox");
-    cleanup(&handle).await;
+    backend
+        .terminate(request.clone())
+        .await
+        .expect("terminate warm sandbox");
+    backend
+        .terminate(request)
+        .await
+        .expect("termination is idempotent");
+    let output = handle
+        .exec(&command(&["true"]))
+        .await
+        .expect("execute after termination");
+    assert!(!output.ok, "a terminated machine must not execute commands");
 }
 
 /// Denied unless asked for, and enforced at the VM edge rather than by a rule.
@@ -626,4 +638,167 @@ async fn smolvm_network_is_denied_unless_requested() {
         !output.ok,
         "network reached the internet with SandboxNetworkPolicy::Disabled"
     );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "requires SmolVM and APFS disk images"]
+async fn smolvm_image_cache_is_shared_read_only_and_threads_are_private() -> anyhow::Result<()> {
+    use anyhow::ensure;
+    use exoharness::SmolvmBackendConfig;
+    use std::time::Instant;
+
+    let Some(image) = test_image() else {
+        return Ok(());
+    };
+    let _shared = vm_gate().await.read().await;
+    let cache = tempfile::tempdir()?;
+    let workspace = tempfile::tempdir()?;
+    let config = SmolvmBackendConfig {
+        mode: SmolvmExecutionMode::Warm,
+        image_cache: Some(cache.path().to_path_buf()),
+        ..Default::default()
+    };
+    let backend = SmolvmSandboxBackend::from_config(config.clone());
+    let preparer = SmolvmSandboxBackend::from_config(SmolvmBackendConfig {
+        mode: SmolvmExecutionMode::OneShot,
+        ..config.clone()
+    });
+    let first_request = request(
+        image,
+        workspace.path(),
+        SandboxNetworkPolicy::Disabled,
+        "cache-first",
+        Some(Duration::from_secs(600)),
+    );
+    let mut second_request = first_request.clone();
+    second_request.sandbox_id = "cache-second".into();
+    let mut third_request = first_request.clone();
+    third_request.sandbox_id = "cache-third".into();
+    let requests = [&first_request, &second_request, &third_request];
+
+    let result = async {
+        let started = Instant::now();
+        let (first, second) = tokio::join!(
+            preparer.acquire(first_request.clone()),
+            preparer.acquire(second_request.clone()),
+        );
+        let one_shot = first?;
+        second?;
+        println!("cold concurrent preparation: {:?}", started.elapsed());
+        let output = one_shot.exec(&command(&["uname", "-s"])).await?;
+        ensure!(
+            output.ok && output.stdout.trim() == "Linux",
+            "one-shot cached image: {}",
+            output.stderr
+        );
+        let first = backend.acquire(first_request.clone()).await?;
+        let second = backend.acquire(second_request.clone()).await?;
+        let write_command = command(&[
+            "sh",
+            "-ec",
+            concat!(
+                "test \"$(stat -c '%u:%g' /etc/passwd)\" = 0:0; ",
+                "echo private > /root/cache-marker"
+            ),
+        ]);
+        let write = first.exec(&write_command).await?;
+        ensure!(write.ok, "first VM: {}", write.stderr);
+        let read = second
+            .exec(&command(&["sh", "-ec", "test ! -e /root/cache-marker"]))
+            .await?;
+        ensure!(read.ok, "second VM saw first VM's write: {}", read.stderr);
+
+        let entries = std::fs::read_dir(cache.path())?
+            .map(|entry| entry.map(|e| e.path()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let prepared = entries
+            .iter()
+            .filter(|p| p.join("volume.sparseimage").is_file())
+            .collect::<Vec<_>>();
+        ensure!(
+            prepared.len() == 1,
+            "concurrent imports must share one prepared image"
+        );
+        ensure!(
+            !entries.iter().any(|p| p
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("prepare-")),
+            "unfinished preparation remains"
+        );
+        let root = prepared[0].join("mount/workspace");
+        #[derive(serde::Deserialize)]
+        struct ImageConfig {
+            config: ProcessConfig,
+        }
+        #[derive(serde::Deserialize)]
+        struct ProcessConfig {
+            #[serde(rename = "Env", default)]
+            env: Vec<String>,
+        }
+        let image_config: ImageConfig =
+            serde_json::from_slice(&std::fs::read(root.join("config.json"))?)?;
+        let env = second.exec(&command(&["env"])).await?;
+        ensure!(env.ok, "reading guest image environment: {}", env.stderr);
+        for expected in image_config.config.env {
+            ensure!(
+                env.stdout.lines().any(|line| line == expected),
+                "image environment was lost"
+            );
+        }
+        ensure!(
+            std::fs::write(root.join("0000_rootfs/root/host-marker"), b"unsafe")
+                .unwrap_err()
+                .kind()
+                == std::io::ErrorKind::ReadOnlyFilesystem,
+            "shared base must be mounted read-only"
+        );
+
+        backend.terminate(first_request.clone()).await?;
+        let restarted = SmolvmSandboxBackend::from_config(config);
+        let started = Instant::now();
+        let third = restarted.acquire(third_request.clone()).await?;
+        println!("cached acquire with fresh backend: {:?}", started.elapsed());
+        let read = third
+            .exec(&command(&[
+                "sh",
+                "-ec",
+                "test ! -e /root/cache-marker; uname -s",
+            ]))
+            .await?;
+        ensure!(
+            read.ok && read.stdout.trim() == "Linux",
+            "cached image failed: {}",
+            read.stderr
+        );
+        let read = second.exec(&command(&["true"])).await?;
+        ensure!(
+            read.ok,
+            "deleting another VM broke the shared image: {}",
+            read.stderr
+        );
+        anyhow::Ok(())
+    }
+    .await;
+
+    for request in requests {
+        backend.terminate(request.clone()).await?;
+    }
+    for entry in std::fs::read_dir(cache.path())? {
+        let mount = entry?.path().join("mount");
+        if mount.is_dir() {
+            let output = std::process::Command::new("hdiutil")
+                .arg("detach")
+                .arg(mount)
+                .output()?;
+            ensure!(
+                output.status.success(),
+                "detach test cache: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+    result
 }

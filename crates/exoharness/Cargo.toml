@@ -9,6 +9,8 @@ rust-version.workspace = true
 default = []
 http-client = ["dep:reqwest"]
 basic-backend = [
+  "dep:libc",
+  "dep:sha2",
   "dep:tokio-rustls",
   "dep:rcgen",
   "dep:hyper-util",

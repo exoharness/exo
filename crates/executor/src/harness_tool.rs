@@ -72,7 +72,7 @@ impl ToolRuntime for BasicToolRuntime {
         agent_config: &AgentConfig,
         config: &ConversationConfig,
     ) -> Result<()> {
-        if config.environment.is_some() {
+        if config.environment.is_some() || !config.resources.is_empty() {
             ensure_conversation_sandbox(conversation, agent_config, config, None).await?;
         }
         Ok(())

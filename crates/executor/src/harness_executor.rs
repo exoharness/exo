@@ -257,7 +257,7 @@ impl Runtime {
         let guard = conversation_send_lock(&thread.record().id.to_string())
             .lock_owned()
             .await;
-        let (agent_config, mut thread_config) = tokio::try_join!(
+        let (mut agent_config, mut thread_config) = tokio::try_join!(
             async {
                 if let Some(config) = config_override {
                     return Ok(config);
@@ -273,6 +273,29 @@ impl Runtime {
         )?;
         if let Some(definition) = exo_managed_agents::load_definition(agent.as_ref()).await? {
             thread_config.permissions = definition.permissions();
+        }
+        if !thread_config.resources.is_empty() {
+            thread_config.resource_mounts = thread
+                .materialize_resources(
+                    thread_config.resources.clone(),
+                    thread_config.effective_sandbox_provider(&agent_config),
+                )
+                .await?;
+            let mut locations = String::from("Filesystem resources for this thread:\n");
+            for resource in &thread_config.resources {
+                let resource = &resource.definition;
+                let mode = match resource.mode {
+                    exoharness::FileSystemMountMode::ReadOnly => "read-only",
+                    exoharness::FileSystemMountMode::ReadWrite => "read-write",
+                };
+                locations.push_str(&format!(
+                    "- {}: {:?} ({mode})\n",
+                    resource.name, resource.mount_path
+                ));
+            }
+            agent_config
+                .instructions
+                .push(crate::harness_helpers::system_message(&locations));
         }
         provider
             .executor
@@ -620,6 +643,7 @@ impl Runtime {
     pub async fn create_agent(&self, request: CreateAgentRequest) -> Result<Arc<dyn AgentHandle>> {
         let name = request.name.clone().unwrap_or_else(|| request.slug.clone());
         let config = AgentConfig {
+            resources: Vec::new(),
             instructions: Vec::new(),
             harness: request.harness,
             typescript: request.typescript,
@@ -695,19 +719,34 @@ impl Runtime {
             })
             .await?;
         let default_conversation_config = ConversationConfig::default();
+        let sandbox_provider = request
+            .sandbox_provider
+            .unwrap_or_else(|| agent_config.sandbox.provider.clone());
+        let resource_mounts = match conversation
+            .materialize_resources(agent_config.resources.clone(), sandbox_provider.clone())
+            .await
+        {
+            Ok(mounts) => mounts,
+            Err(error) => {
+                agent
+                    .delete_conversation(&conversation.record().id)
+                    .await
+                    .context("cleaning up thread after resource preparation failed")?;
+                return Err(error);
+            }
+        };
         let conversation_config = ConversationConfig {
+            resources: agent_config.resources.clone(),
+            resource_mounts,
             sandbox_image: request.sandbox_image.or(agent_config.sandbox.image),
-            sandbox_provider: Some(
-                request
-                    .sandbox_provider
-                    .unwrap_or(agent_config.sandbox.provider),
-            ),
+            sandbox_provider: Some(sandbox_provider),
             shell_program: request
                 .shell_program
                 .or(default_conversation_config.shell_program),
             mounts: default_conversation_config.mounts,
             durable_file_systems: default_conversation_config.durable_file_systems,
-            sandbox_scope: default_conversation_config.sandbox_scope,
+            sandbox_scope: (!agent_config.resources.is_empty())
+                .then_some(crate::SandboxScope::Conversation),
             permissions: default_conversation_config.permissions,
             environment: default_conversation_config.environment,
         };

@@ -1,0 +1,11 @@
+name: codex-firecracker
+config:
+  provider: firecracker
+  image: /var/lib/exo/firecracker/rootfs.ext4
+  default_workdir: /workspace
+  policy:
+    networking:
+      type: limited
+      allowed_hosts:
+        - api.openai.com
+  idle_seconds: 600

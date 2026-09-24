@@ -1,4 +1,28 @@
 use super::*;
+
+#[test]
+fn resource_declarations_validate_sources_and_mounts() -> Result<()> {
+    let source = SOURCE.replace("config:\n", "resources:\n  - name: code\n    type: git_repository\n    url: https://github.com/exoharness/exo\n    checkout: {type: branch, name: main}\n    credential: github\n    mount_path: /workspace\n  - name: data\n    type: directory\n    path: ./fixtures\n    mount_path: /data\n    mode: ro\nconfig:\n");
+    let definition = AgentDefinition::parse(source.clone())?;
+    assert_eq!(definition.frontmatter.resources.len(), 2);
+    for invalid in [
+        source.replace(
+            "https://github.com/exoharness/exo",
+            "https://secret@github.com/org/repo",
+        ),
+        source.replace("https://github.com/exoharness/exo", "file:///etc"),
+        source.replace("mount_path: /data", "mount_path: /workspace/data"),
+        source.replace("name: data", "name: ../data"),
+        source.replace("path: ./fixtures", "path: ./fixtures\n    typo: value"),
+        source.replace(
+            "type: git_repository",
+            "type: git_repository\n    path: ./repo",
+        ),
+    ] {
+        assert!(AgentDefinition::parse(invalid).is_err());
+    }
+    Ok(())
+}
 use exoharness::{
     BasicExoHarness, BasicExoHarnessConfig, SandboxBackendRegistration, SandboxProvider,
     SecretBackendChoice,

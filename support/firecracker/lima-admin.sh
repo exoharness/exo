@@ -38,6 +38,11 @@ limactl stop --tty=false "$instance"
 limactl start --tty=false "$instance"
 
 if [[ "$action" == clean ]]; then
+  limactl shell "$instance" -- sudo -n sh -eu -c '
+    if test -f "$1.xfs" && ! mountpoint -q "$1"; then
+      mount -o loop,noatime -- "$1.xfs" "$1"
+    fi
+  ' sh "$state_root"
   limactl shell "$instance" -- sudo -n rm -rf -- \
     "$state_root/cows" \
     "$state_root/jailer" \

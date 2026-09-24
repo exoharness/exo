@@ -3,7 +3,14 @@ use std::net::Ipv4Addr;
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GuestResourceMount {
+    pub device: String,
+    pub path: String,
+    pub read_only: bool,
+}
+
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 

@@ -333,6 +333,7 @@ fn capacity_scan_counts_processes_instead_of_manifests() {
         slot: 1,
         network_enabled: false,
         workspace_id: None,
+        resource_paths: Vec::new(),
         idle_ttl_seconds: Some(60),
         snapshot_template: None,
         snapshot_network_slot: None,
@@ -378,6 +379,7 @@ fn manifest_publish_does_not_replace_an_existing_machine() {
         slot: 1,
         network_enabled: false,
         workspace_id: None,
+        resource_paths: Vec::new(),
         idle_ttl_seconds: Some(60),
         snapshot_template: None,
         snapshot_network_slot: None,
@@ -408,6 +410,7 @@ fn persisted_lease_expires_machine_after_idle_ttl() {
         slot: 1,
         network_enabled: false,
         workspace_id: None,
+        resource_paths: Vec::new(),
         idle_ttl_seconds: Some(60),
         snapshot_template: None,
         snapshot_network_slot: None,
@@ -498,6 +501,7 @@ fn snapshot_gc_reaps_only_unreferenced_fork_templates() {
             slot: 1,
             network_enabled: false,
             workspace_id: None,
+            resource_paths: Vec::new(),
             idle_ttl_seconds: Some(60),
             snapshot_template: Some(SnapshotTemplateReference {
                 key: referenced_key.clone(),
@@ -563,6 +567,7 @@ fn snapshot_gc_does_not_delete_fork_between_capture_and_manifest_publish() {
             slot: 1,
             network_enabled: false,
             workspace_id: None,
+            resource_paths: Vec::new(),
             idle_ttl_seconds: Some(60),
             snapshot_template: Some(SnapshotTemplateReference {
                 key,
@@ -609,6 +614,7 @@ fn fork_snapshots_are_unique_per_target() {
         slot: 1,
         network_enabled: false,
         workspace_id: None,
+        resource_paths: Vec::new(),
         idle_ttl_seconds: Some(60),
         snapshot_template: Some(SnapshotTemplateReference {
             key: "a".repeat(64),
@@ -639,6 +645,7 @@ fn explicit_snapshots_are_unique_and_reusable() {
         slot: 7,
         network_enabled: true,
         workspace_id: None,
+        resource_paths: Vec::new(),
         idle_ttl_seconds: Some(60),
         snapshot_template: None,
         snapshot_network_slot: None,
@@ -817,6 +824,7 @@ async fn idle_reap_closes_egress_before_machine_cleanup_can_fail() -> Result<()>
         slot: 1,
         network_enabled: false,
         workspace_id: None,
+        resource_paths: Vec::new(),
         idle_ttl_seconds: Some(0),
         snapshot_template: None,
         snapshot_network_slot: None,
@@ -903,6 +911,7 @@ impl DurableStopFixture {
             slot: 1,
             network_enabled: false,
             workspace_id: Some("workspace".into()),
+            resource_paths: Vec::new(),
             idle_ttl_seconds: None,
             snapshot_template: None,
             snapshot_network_slot: None,
@@ -1170,5 +1179,259 @@ async fn terminate_cleans_up_when_the_guest_never_answers_sync() -> Result<()> {
             .exists()
     );
     assert!(fixture.backend.shared.warm_machines.lock().await.is_empty());
+    Ok(())
+}
+
+#[test]
+fn resource_disks_have_independent_guest_mounts_and_read_only_drives() -> Result<()> {
+    use base64::Engine;
+    let mut request = FirecrackerRequest {
+        sandbox: SandboxRequest {
+            sandbox_id: "resources".into(),
+            scope: crate::ResourceScope::Global,
+            provider_state: None,
+            lifecycle: Default::default(),
+            spec: SandboxSpec {
+                image: "/base.ext4".into(),
+                resources: None,
+                mounts: vec![
+                    crate::SandboxMount {
+                        host_path: "/state/resources/threads/code".into(),
+                        guest_path: "/workspace".into(),
+                        access: crate::SandboxMountAccess::ReadWrite,
+                        internal: true,
+                    },
+                    crate::SandboxMount {
+                        host_path: "/state/resources/threads/fixtures".into(),
+                        guest_path: "/fixtures with spaces".into(),
+                        access: crate::SandboxMountAccess::ReadOnly,
+                        internal: true,
+                    },
+                ],
+                durable_file_systems: vec![],
+                default_workdir: "/workspace".into(),
+                policy: SandboxNetworkPolicy::Disabled.into(),
+            },
+        },
+        egress_proxy: None,
+    };
+    request = prepare_request(request)?;
+    let record = MachineRecord {
+        machine_id: "fc-resources".into(),
+        spec_hash: "resources".into(),
+        runtime: test_runtime(),
+        resolved_image: "/base.ext4".into(),
+        slot: 1,
+        network_enabled: false,
+        workspace_id: None,
+        resource_paths: vec!["/workspace".into(), "/fixtures with spaces".into()],
+        idle_ttl_seconds: None,
+        snapshot_template: None,
+        snapshot_network_slot: None,
+    };
+    let configuration =
+        firecracker_vm_configuration(&FirecrackerConfig::default(), &request, &record)?;
+    assert!(
+        configuration
+            .boot_source
+            .boot_args
+            .contains(" exo_workdir=/workspace")
+    );
+    assert_eq!(configuration.drives.len(), 4);
+    assert!(!configuration.drives[2].is_read_only);
+    assert!(configuration.drives[3].is_read_only);
+    let encoded = configuration
+        .boot_source
+        .boot_args
+        .split_whitespace()
+        .find_map(|arg| arg.strip_prefix("exo_resource_mounts="))
+        .unwrap();
+    let mounts: Vec<exo_firecracker_protocol::GuestResourceMount> =
+        serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(encoded)?)?;
+    assert_eq!(mounts[0].device, "/dev/vdc");
+    assert_eq!(mounts[0].path, "/workspace");
+    assert_eq!(mounts[1].device, "/dev/vdd");
+    assert_eq!(mounts[1].path, "/fixtures with spaces");
+    assert!(mounts[1].read_only);
+    request.spec.mounts[1].guest_path = "/workspace/nested".into();
+    assert!(prepare_request(request.clone()).is_err());
+    request.spec.mounts.pop();
+    request.spec.mounts[0].internal = false;
+    assert!(prepare_request(request).is_err());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires root, KVM, TMPDIR on XFS, and FIRECRACKER_IMAGE"]
+async fn resource_disks_live_isolate_resume_and_enforce_read_only() -> Result<()> {
+    let temp = tempfile::Builder::new().prefix("r").tempdir()?;
+    let source = temp.path().join("source");
+    fs::create_dir(&source)?;
+    fs::write(source.join("file"), "baseline")?;
+    let image = std::env::var("FIRECRACKER_IMAGE")?;
+    let config = FirecrackerConfig {
+        state_root: temp.path().join("s"),
+        workspace_size_gib: 1,
+        allowed_local_images: vec![image.clone().into()],
+        ..Default::default()
+    };
+    let store = crate::resources::ResourceStore::image_store(&config.state_root, 1)?;
+    let native = crate::resources::ResourceStore::new(&temp.path().join("native"))?;
+    let resources = native.prepare(
+        [
+            ("code", "/workspace", FileSystemMountMode::ReadWrite),
+            ("reference", "/reference", FileSystemMountMode::ReadOnly),
+        ]
+        .into_iter()
+        .map(|(name, path, mode)| crate::resources::ResourceDefinition {
+            name: name.into(),
+            mount_path: path.into(),
+            mode,
+            source: crate::resources::ResourceSource::Directory {
+                path: source.clone(),
+            },
+        })
+        .collect(),
+    )?;
+    let backend = FirecrackerSandboxBackend::new(config).await?;
+    let agent = crate::Uuid7::now();
+    let threads = [crate::Uuid7::now(), crate::Uuid7::now()];
+    let request = |thread, mounts: Vec<crate::FileSystemMount>| SandboxRequest {
+        sandbox_id: format!("resource-{thread}"),
+        scope: crate::ResourceScope::Thread {
+            agent_id: agent,
+            thread_id: thread,
+        },
+        spec: SandboxSpec {
+            image: image.clone(),
+            resources: None,
+            mounts: mounts
+                .into_iter()
+                .map(|mount| crate::SandboxMount {
+                    host_path: mount.host_path.into(),
+                    guest_path: mount.mount_path,
+                    access: match mount.mode {
+                        FileSystemMountMode::ReadOnly => crate::SandboxMountAccess::ReadOnly,
+                        FileSystemMountMode::ReadWrite => crate::SandboxMountAccess::ReadWrite,
+                    },
+                    internal: true,
+                })
+                .collect(),
+            durable_file_systems: vec![],
+            default_workdir: "/workspace".into(),
+            policy: SandboxNetworkPolicy::Disabled.into(),
+        },
+        lifecycle: crate::SandboxLifecycleConfig {
+            idle_ttl: Some(Duration::from_secs(60)),
+        },
+        provider_state: None,
+    };
+    let command = |script: &str| SandboxCommand {
+        argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
+        env: Default::default(),
+        cwd: Some("/workspace".into()),
+        timeout: Some(Duration::from_secs(10)),
+        display_argv: None,
+    };
+    let materialize = |thread, resume| {
+        native.with_image_sources(&resources, |archives| {
+            store.materialize_images(crate::resources::MaterializeResourcesRequest {
+                agent,
+                thread,
+                resources: resources.clone(),
+                archives,
+                credentials: vec![None, None],
+                resume,
+            })
+        })
+    };
+    let result = async {
+        let first_mounts = materialize(threads[0], false)?;
+        let first_request = request(threads[0], first_mounts);
+        let first = backend.acquire(first_request.clone()).await?;
+        let output = first.exec(&command("printf private > file")).await?;
+        ensure!(output.ok, "write failed: {}", output.stderr);
+        let readonly = first
+            .exec(&command("printf forbidden > /reference/file"))
+            .await?;
+        ensure!(
+            !readonly.ok && readonly.stderr.contains("Read-only file system"),
+            "read-only disk was writable: {readonly:?}"
+        );
+        let second_mounts = materialize(threads[1], false)?;
+        let second = backend.acquire(request(threads[1], second_mounts)).await?;
+        let output = second.exec(&command("cat file /reference/file")).await?;
+        ensure!(
+            output.ok && output.stdout == "baselinebaseline",
+            "thread isolation failed: {output:?}"
+        );
+        first.stop().await?;
+        fs::remove_dir_all(&source)?;
+        let resumed_mounts = materialize(threads[0], true)?;
+        let resumed = backend.acquire(request(threads[0], resumed_mounts)).await?;
+        let output = resumed.exec(&command("cat file /reference/file")).await?;
+        ensure!(
+            output.ok && output.stdout == "privatebaseline",
+            "resource edits were lost after restart: {output:?}"
+        );
+        Ok(())
+    }
+    .await;
+    backend.terminate_all().await?;
+    for thread in threads {
+        backend.remove_thread_resources(agent, thread).await?;
+    }
+    result
+}
+
+#[test]
+fn resource_backing_disks_are_private_to_the_thread() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config = FirecrackerConfig {
+        state_root: temp.path().into(),
+        ..Default::default()
+    };
+    let agent_id = crate::Uuid7::now();
+    let thread_id = crate::Uuid7::now();
+    let scope = crate::ResourceScope::Thread {
+        agent_id,
+        thread_id,
+    };
+    let directory = temp
+        .path()
+        .join("resources/threads")
+        .join(agent_id.to_string())
+        .join(thread_id.to_string())
+        .join("code");
+    fs::create_dir_all(&directory)?;
+    let disk = directory.join("volume.ext4");
+    fs::write(&disk, [])?;
+    assert_eq!(
+        resource_disk(&config, scope, &directory)?,
+        disk.canonicalize()?
+    );
+    assert!(resource_disk(&config, crate::ResourceScope::Global, &directory).is_err());
+    assert!(resource_disk(&config, scope, temp.path()).is_err());
+    let other_thread = crate::Uuid7::now();
+    let other_directory = temp
+        .path()
+        .join("resources/threads")
+        .join(agent_id.to_string())
+        .join(other_thread.to_string());
+    fs::create_dir(&other_directory)?;
+    assert!(
+        resource_disk(
+            &config,
+            crate::ResourceScope::Thread {
+                agent_id,
+                thread_id: other_thread
+            },
+            &directory
+        )
+        .is_err()
+    );
+    fs::remove_file(&disk)?;
+    std::os::unix::fs::symlink(temp.path().join("outside"), &disk)?;
+    assert!(resource_disk(&config, scope, &directory).is_err());
     Ok(())
 }

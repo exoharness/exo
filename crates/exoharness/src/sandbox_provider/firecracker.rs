@@ -59,6 +59,10 @@ use super::firecracker_image::resolve_image;
 #[cfg(test)]
 use super::firecracker_image::validate_ext4_image;
 
+#[cfg(target_os = "linux")]
+#[path = "firecracker_lima_storage.rs"]
+pub(super) mod lima_storage;
+
 const GUEST_READY_TIMEOUT: Duration = Duration::from_secs(30);
 const PID_FILE_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -359,6 +363,8 @@ struct MachineRecord {
     slot: u32,
     network_enabled: bool,
     workspace_id: Option<String>,
+    #[serde(default)]
+    resource_paths: Vec<String>,
     // The lease mtime is refreshed on use; keeping the TTL in the immutable
     // manifest lets a later CLI process reap a VM without process-local state.
     idle_ttl_seconds: Option<u64>,
@@ -436,8 +442,8 @@ struct FirecrackerBootSource {
 
 #[derive(Serialize)]
 struct FirecrackerDrive {
-    drive_id: &'static str,
-    path_on_host: &'static str,
+    drive_id: String,
+    path_on_host: String,
     is_root_device: bool,
     is_read_only: bool,
     cache_type: &'static str,
@@ -1026,8 +1032,10 @@ impl FirecrackerSandboxBackend {
         if request.egress_proxy.is_some() {
             bail!(PROXIED_SNAPSHOT_UNSUPPORTED);
         }
-        if !request.spec.durable_file_systems.is_empty() {
-            bail!("Firecracker snapshotting does not support durable filesystems")
+        if !request.spec.durable_file_systems.is_empty() || !request.spec.mounts.is_empty() {
+            bail!(
+                "Firecracker snapshotting does not support durable filesystems or resource mounts"
+            )
         }
         validate_snapshot_key(&template_key)?;
 
@@ -1333,6 +1341,37 @@ impl FirecrackerSandboxBackend {
 
 #[async_trait]
 impl ManagedSandboxBackend for FirecrackerSandboxBackend {
+    async fn materialize_resources(
+        &self,
+        request: crate::resources::MaterializeResourcesRequest,
+    ) -> Result<Vec<crate::FileSystemMount>> {
+        let config = self.shared.config.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::resources::ResourceStore::image_store(
+                &config.state_root,
+                config.workspace_size_gib,
+            )?
+            .materialize_images(request)
+        })
+        .await?
+    }
+
+    async fn remove_thread_resources(
+        &self,
+        agent: crate::AgentId,
+        thread: crate::ThreadId,
+    ) -> Result<()> {
+        let config = self.shared.config.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::resources::ResourceStore::image_store(
+                &config.state_root,
+                config.workspace_size_gib,
+            )?
+            .remove_thread(agent, thread)
+        })
+        .await?
+    }
+
     fn is_local(&self) -> bool {
         true
     }
@@ -1810,7 +1849,7 @@ impl Shared {
         })
     }
 
-    async fn cleanup_stale_machine(&self, machine_id: &str) -> Result<()> {
+    async fn cleanup_stale_machine(self: &Arc<Self>, machine_id: &str) -> Result<()> {
         let starting = self
             .starting_machines
             .lock()
@@ -2000,6 +2039,12 @@ impl Shared {
         } else {
             None
         };
+        let resource_paths = request
+            .spec
+            .mounts
+            .iter()
+            .map(|m| m.guest_path.clone())
+            .collect();
         let idle_ttl_seconds = request.lifecycle.idle_ttl.map(|ttl| ttl.as_secs());
         let runtime = self
             .host_fingerprint
@@ -2028,6 +2073,7 @@ impl Shared {
                 slot,
                 network_enabled,
                 workspace_id,
+                resource_paths,
                 idle_ttl_seconds,
                 snapshot_template,
                 snapshot_network_slot,
@@ -2091,25 +2137,33 @@ impl Shared {
         mode: ShutdownMode,
     ) -> Result<()> {
         if let Some(record) = self.load_machine_record(machine_id).await?
-            && record.workspace_id.is_some()
+            && (record.workspace_id.is_some() || !record.resource_paths.is_empty())
             && process_running(&self.pid_path(machine_id))
         {
             // Firecracker's clean-shutdown API is x86-only. On every architecture,
             // sync the durable filesystem through the guest before terminating the
             // VMM so completed writes are not stranded in the guest page cache.
             // https://github.com/firecracker-microvm/firecracker/blob/main/docs/api_requests/actions.md#intel-and-amd-only-sendctrlaltdel
+            let mut paths = if matches!(mode, ShutdownMode::Stop) {
+                record.resource_paths.clone()
+            } else {
+                Vec::new()
+            };
+            if record.workspace_id.is_some() {
+                paths.push(workdir.to_owned());
+            }
             let machine = machine_from_record(&self.config, record);
-            if let Err(error) = GuestClient::new(Arc::clone(self), machine.vsock_path)
-                .sync_filesystem(workdir)
-                .await
-            {
-                match mode {
-                    ShutdownMode::Stop => {
-                        return Err(error)
-                            .context("syncing Firecracker durable filesystem before stop");
-                    }
-                    ShutdownMode::Terminate => {
-                        tracing::warn!(machine_id, %error, "durable filesystem sync failed; terminating Firecracker VM anyway");
+            let guest = GuestClient::new(Arc::clone(self), machine.vsock_path);
+            for path in paths {
+                if let Err(error) = guest.sync_filesystem(&path).await {
+                    match mode {
+                        ShutdownMode::Stop => {
+                            return Err(error)
+                                .context("syncing Firecracker durable filesystem before stop");
+                        }
+                        ShutdownMode::Terminate => {
+                            tracing::warn!(machine_id, %error, "durable filesystem sync failed; terminating Firecracker VM anyway");
+                        }
                     }
                 }
             }
@@ -2141,7 +2195,24 @@ impl Shared {
     }
 
     #[tracing::instrument(name = "firecracker.cleanup", skip_all)]
-    async fn cleanup_machine(&self, machine_id: &str, delete_rootfs: bool) -> Result<()> {
+    async fn cleanup_machine(
+        self: &Arc<Self>,
+        machine_id: &str,
+        delete_rootfs: bool,
+    ) -> Result<()> {
+        if let Some(record) = self.load_machine_record(machine_id).await?
+            && !record.resource_paths.is_empty()
+            && process_running(&self.pid_path(machine_id))
+        {
+            let paths = record.resource_paths.clone();
+            let machine = machine_from_record(&self.config, record);
+            let guest = GuestClient::new(Arc::clone(self), machine.vsock_path);
+            for path in paths {
+                if let Err(error) = guest.sync_filesystem(&path).await {
+                    tracing::warn!(machine_id, %error, "resource filesystem sync failed before Firecracker cleanup");
+                }
+            }
+        }
         self.close_egress(machine_id);
         if !valid_machine_id(machine_id) {
             bail!("invalid Firecracker machine id: {machine_id}");
@@ -2266,10 +2337,32 @@ fn prepare_request(mut request: FirecrackerRequest) -> Result<FirecrackerRequest
     if request.spec.image.trim().is_empty() {
         request.spec.image = super::default_firecracker_image();
     }
-    if !request.spec.mounts.is_empty() {
-        bail!(
-            "Firecracker does not support host bind mounts; use a durable block device or another provider"
+    ensure!(
+        request.spec.mounts.len() <= 20,
+        "Firecracker supports at most 20 resource mounts"
+    );
+    for (index, mount) in request.spec.mounts.iter().enumerate() {
+        ensure!(
+            mount.internal,
+            "Firecracker does not support host bind mounts; declare a filesystem resource instead"
         );
+        let path = Path::new(&mount.guest_path);
+        ensure!(
+            path.is_absolute()
+                && path != Path::new("/")
+                && path.components().all(|c| matches!(
+                    c,
+                    std::path::Component::RootDir | std::path::Component::Normal(_)
+                ))
+                && !mount.guest_path.contains('\0'),
+            "resource mount path must be absolute and normalized"
+        );
+        for other in &request.spec.mounts[..index] {
+            crate::resources::validate_mount_overlap(&mount.guest_path, &other.guest_path)?;
+        }
+        for other in &request.spec.durable_file_systems {
+            crate::resources::validate_mount_overlap(&mount.guest_path, &other.mount_path)?;
+        }
     }
     match request.spec.durable_file_systems.as_slice() {
         [] => {}
@@ -3641,7 +3734,29 @@ fn prepare_and_launch_blocking(
         chown(&jailed_workspace, Some(host_uid), Some(host_uid))?;
     }
 
-    let vm_config = firecracker_vm_configuration(config, request, record);
+    for (index, mount) in request.spec.mounts.iter().enumerate() {
+        let source = resource_disk(config, request.scope, &mount.host_path)?;
+        let lock = File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(source.with_extension("lock"))?;
+        lock.lock()?;
+        let target = root.join(format!("resource-{index}.ext4"));
+        if !target.try_exists()? {
+            ensure!(
+                fs::metadata(&source)?.nlink() == 1,
+                "resource disk is already attached to another sandbox"
+            );
+            fs::hard_link(&source, &target).context(
+                "linking resource disk into Firecracker jail; state and resources must share XFS",
+            )?;
+        }
+        chown(&target, Some(host_uid), Some(host_uid))?;
+        fs::set_permissions(&target, Permissions::from_mode(0o600))?;
+    }
+    let vm_config = firecracker_vm_configuration(config, request, record)?;
     let vm_config_path = root.join("vm-config.json");
     fs::write(&vm_config_path, serde_json::to_vec(&vm_config)?)?;
     chown(&vm_config_path, Some(host_uid), Some(host_uid))?;
@@ -3652,6 +3767,37 @@ fn prepare_and_launch_blocking(
     // setup requests.
     spawn_jailed_firecracker(config, record, &root, &["--config-file", "/vm-config.json"])?;
     Ok(GuestReadiness::Signal(ready_listener))
+}
+
+fn resource_disk(
+    config: &FirecrackerConfig,
+    scope: crate::ResourceScope,
+    directory: &Path,
+) -> Result<PathBuf> {
+    let crate::ResourceScope::Thread {
+        agent_id,
+        thread_id,
+    } = scope
+    else {
+        bail!("Firecracker resources require a thread-owned sandbox");
+    };
+    let resource_root = config
+        .state_root
+        .join("resources/threads")
+        .join(agent_id.to_string())
+        .join(thread_id.to_string())
+        .canonicalize()?;
+    let directory = directory.canonicalize()?;
+    ensure!(
+        directory.parent() == Some(resource_root.as_path()),
+        "Firecracker resources must belong to this thread"
+    );
+    let disk = directory.join("volume.ext4");
+    ensure!(
+        fs::symlink_metadata(&disk)?.is_file(),
+        "Firecracker resource disk must be a regular file"
+    );
+    Ok(disk)
 }
 
 #[tracing::instrument(name = "firecracker.launch_vmm", skip_all)]
@@ -3743,7 +3889,8 @@ fn firecracker_vm_configuration(
     config: &FirecrackerConfig,
     request: &FirecrackerRequest,
     record: &MachineRecord,
-) -> FirecrackerVmConfiguration {
+) -> Result<FirecrackerVmConfiguration> {
+    use base64::Engine;
     let network = record.network();
     // Disable the guest serial driver; VMM output is additionally discarded in
     // spawn_jailed_firecracker because upstream documents that a guest can
@@ -3757,22 +3904,24 @@ fn firecracker_vm_configuration(
             network.guest_ip, network.guest_gateway, config.dns_server
         ));
     }
+    boot_args.push_str(" exo_workdir=");
+    boot_args.push_str(&request.spec.default_workdir);
     if record.workspace_id.is_some() {
         boot_args.push_str(" exo_workspace=");
         boot_args.push_str(&request.spec.default_workdir);
     }
     let mut drives = vec![
         FirecrackerDrive {
-            drive_id: "rootfs",
-            path_on_host: "/rootfs.ext4",
+            drive_id: "rootfs".into(),
+            path_on_host: "/rootfs.ext4".into(),
             is_root_device: false,
             is_read_only: true,
             cache_type: "Unsafe",
             io_engine: "Sync",
         },
         FirecrackerDrive {
-            drive_id: "overlay",
-            path_on_host: "/overlay.ext4",
+            drive_id: "overlay".into(),
+            path_on_host: "/overlay.ext4".into(),
             is_root_device: false,
             is_read_only: false,
             cache_type: "Writeback",
@@ -3785,14 +3934,42 @@ fn firecracker_vm_configuration(
         // guest sync during stop, this makes the workspace a durability boundary.
         // https://github.com/firecracker-microvm/firecracker/blob/main/docs/api_requests/block-caching.md#writeback-mode
         drives.push(FirecrackerDrive {
-            drive_id: "workspace",
-            path_on_host: "/workspace.ext4",
+            drive_id: "workspace".into(),
+            path_on_host: "/workspace.ext4".into(),
             is_root_device: false,
             is_read_only: false,
             cache_type: "Writeback",
             io_engine: "Sync",
         });
     }
+    let mut resource_mounts = Vec::new();
+    for (index, mount) in request.spec.mounts.iter().enumerate() {
+        let read_only = mount.access == crate::SandboxMountAccess::ReadOnly;
+        resource_mounts.push(exo_firecracker_protocol::GuestResourceMount {
+            device: format!("/dev/vd{}", char::from(b'a' + drives.len() as u8)),
+            path: mount.guest_path.clone(),
+            read_only,
+        });
+        drives.push(FirecrackerDrive {
+            drive_id: format!("resource-{index}"),
+            path_on_host: format!("/resource-{index}.ext4"),
+            is_root_device: false,
+            is_read_only: read_only,
+            cache_type: "Writeback",
+            io_engine: "Sync",
+        });
+    }
+    if !resource_mounts.is_empty() {
+        boot_args.push_str(" exo_resource_mounts=");
+        boot_args.push_str(
+            &base64::engine::general_purpose::STANDARD
+                .encode(serde_json::to_vec(&resource_mounts)?),
+        );
+    }
+    ensure!(
+        boot_args.len() < 4096,
+        "Firecracker resource mount configuration exceeds the kernel command line limit"
+    );
     // The control channel is vsock rather than TCP: networking-disabled sandboxes
     // still support exec, and the guest agent is never reachable through egress.
     // https://github.com/firecracker-microvm/firecracker/blob/main/docs/vsock.md#setting-up-the-virtio-vsock-device
@@ -3813,7 +3990,7 @@ fn firecracker_vm_configuration(
     } else {
         Vec::new()
     };
-    FirecrackerVmConfiguration {
+    Ok(FirecrackerVmConfiguration {
         boot_source: FirecrackerBootSource {
             kernel_image_path: "/vmlinux",
             initrd_path: "/initramfs.cpio",
@@ -3845,7 +4022,7 @@ fn firecracker_vm_configuration(
                 },
             },
         },
-    }
+    })
 }
 
 fn validate_snapshot_key(key: &str) -> Result<()> {

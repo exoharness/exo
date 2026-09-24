@@ -12,6 +12,9 @@
 //! Snapshots are bytes-by-reference like E2B/Daytona: the payload is a manifest
 //! pointing at a `.smolmachine` pack on disk.
 
+#[cfg(target_os = "macos")]
+mod image_cache;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -87,6 +90,8 @@ pub struct SmolvmBackendConfig {
     /// The binary handed to smolvm as `SMOLVM_BOOT_BINARY`. `None` derives one
     /// from `binary` on first use; see [`resolve_boot_binary`].
     pub boot_binary: Option<PathBuf>,
+    /// Prepared local images, normally under the harness root. None skips caching.
+    pub image_cache: Option<PathBuf>,
 }
 
 /// Backend driving the `smolvm` CLI.
@@ -99,6 +104,8 @@ pub struct SmolvmSandboxBackend {
     /// `PATH` and stats candidates, and a constructor cannot await.
     boot_binary: OnceCell<Option<PathBuf>>,
     mode: SmolvmExecutionMode,
+    #[cfg(target_os = "macos")]
+    image_cache: Option<PathBuf>,
     /// Probed once: re-asking per `acquire` would spawn a process per sandbox.
     capabilities: OnceCell<Capabilities>,
     /// Last use of each warm machine this process created, for TTL reaping.
@@ -134,6 +141,8 @@ impl SmolvmSandboxBackend {
             boot_binary_override,
             boot_binary: OnceCell::new(),
             mode: config.mode,
+            #[cfg(target_os = "macos")]
+            image_cache: config.image_cache,
             capabilities: OnceCell::new(),
             warm_seen: Mutex::new(HashMap::new()),
         }
@@ -227,6 +236,24 @@ impl SmolvmSandboxBackend {
         parse_version(&String::from_utf8_lossy(&output.stdout))
     }
 
+    async fn prepare_image(&self, image: &str) -> Result<String> {
+        #[cfg(target_os = "macos")]
+        if let Some(cache) = &self.image_cache {
+            let source = image.to_owned();
+            let cache = cache.clone();
+            let binary = self.binary.clone();
+            let boot_binary = self.boot_binary().await.clone();
+            if let Some(prepared) = tokio::task::spawn_blocking(move || {
+                image_cache::prepare(&binary, boot_binary.as_deref(), &cache, &source)
+            })
+            .await??
+            {
+                return Ok(prepared.to_string_lossy().into_owned());
+            }
+        }
+        Ok(image.to_owned())
+    }
+
     /// Boot the machine backing `name`, creating it first when absent.
     ///
     /// Idempotent by *result*, not by pre-check: two `acquire`s for one key race,
@@ -236,10 +263,11 @@ impl SmolvmSandboxBackend {
         name: &str,
         spec: &SandboxSpec,
         key: &str,
+        image: &str,
     ) -> Result<()> {
         let mut create = Command::new(&self.binary);
         create.arg("machine").arg("create").arg("--name").arg(name);
-        create.arg("--image").arg(&spec.image);
+        create.arg("--image").arg(image);
         self.stamp_labels(&mut create, key).await;
         configure_spec_args(&mut create, spec);
         // Keepalive so the machine stays up between execs, as the Docker backend does.
@@ -420,14 +448,30 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
         &CONSUMABLE_SNAPSHOT_FORMATS
     }
 
+    async fn terminate(&self, request: SandboxRequest) -> Result<()> {
+        let machine = machine_name(&request.sandbox_id);
+        self.delete_machine_if_present(&machine).await?;
+        self.warm_seen
+            .lock()
+            .expect("smolvm machine registry poisoned")
+            .remove(&machine);
+        Ok(())
+    }
+
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
         request.spec.policy.validate_basic("smolvm")?;
         reject_unsupported_spec(&request.spec)?;
+        let image = self.prepare_image(&request.spec.image).await?;
         match self.resolve_mode(&request).await {
             SmolvmExecutionMode::Warm => {
                 let machine = machine_name(request.sandbox_id.as_str());
-                self.ensure_machine_started(&machine, &request.spec, request.sandbox_id.as_str())
-                    .await?;
+                self.ensure_machine_started(
+                    &machine,
+                    &request.spec,
+                    request.sandbox_id.as_str(),
+                    &image,
+                )
+                .await?;
                 self.reap_idle_machines(&request, &machine).await;
                 if self.labels_supported().await {
                     self.reap_abandoned_machines(&machine).await;
@@ -444,6 +488,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
                 SmolvmOneShotHandle {
                     id: format!("smolvm-oneshot:{}", request.sandbox_id.as_str()),
                     binary: self.binary.clone(),
+                    image,
                     boot_binary: self.boot_binary().await.clone(),
                     request,
                 },
@@ -527,6 +572,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
 /// Ephemeral-VM handle: one `smolvm machine run` per command.
 struct SmolvmOneShotHandle {
     id: String,
+    image: String,
     binary: PathBuf,
     boot_binary: Option<PathBuf>,
     request: SandboxRequest,
@@ -536,7 +582,7 @@ impl SmolvmOneShotHandle {
     fn build(&self, command: &SandboxCommand, cwd: &str) -> Command {
         let mut process = Command::new(&self.binary);
         process.arg("machine").arg("run");
-        process.arg("--image").arg(&self.request.spec.image);
+        process.arg("--image").arg(&self.image);
         configure_spec_args(&mut process, &self.request.spec);
         configure_command_args(&mut process, command, cwd);
         // Arms smolvm's parent-death watchdog so the VM dies with a SIGKILLed CLI
@@ -740,8 +786,11 @@ fn resolve_cwd(command: &SandboxCommand, spec: &SandboxSpec) -> String {
 
 /// Mounts and network policy, shared by the create/run paths.
 fn configure_spec_args(process: &mut Command, spec: &SandboxSpec) {
+    let resources = spec.resources.unwrap_or_default();
+    process.arg("--cpus").arg(resources.vcpu_count.to_string());
+    process.arg("--mem").arg(resources.memory_mib.to_string());
     if spec.policy.networking == SandboxNetworkPolicy::Unrestricted {
-        process.arg("--net");
+        process.args(["--net", "--net-backend", "virtio-net"]);
     }
     for mount in &spec.mounts {
         let mut value = format!("{}:{}", mount.host_path.display(), mount.guest_path);
@@ -956,6 +1005,7 @@ mod tests {
             mode: SmolvmExecutionMode::OneShot,
             binary: Some(PathBuf::from("/nowhere/smolvm")),
             boot_binary: Some(PathBuf::from("/nowhere/smolvm-bin")),
+            ..Default::default()
         });
         assert_eq!(
             backend.boot_binary().await.as_deref(),
@@ -972,6 +1022,7 @@ mod tests {
             mode: SmolvmExecutionMode::OneShot,
             binary: Some(PathBuf::from("/nowhere/smolvm")),
             boot_binary: None,
+            ..Default::default()
         });
         assert!(
             !backend.boot_binary.initialized(),
@@ -1161,10 +1212,10 @@ mod tests {
     }
 
     #[test]
-    fn read_only_mounts_get_the_ro_suffix() {
+    fn resource_shape_and_mounts_are_forwarded() {
         let spec = SandboxSpec {
             image: "alpine".into(),
-            resources: Default::default(),
+            resources: crate::SandboxResourceShape::new(3, 2048),
             mounts: vec![
                 crate::sandbox::SandboxMount {
                     host_path: PathBuf::from("/host/rw"),
@@ -1192,6 +1243,7 @@ mod tests {
             .map(|a| a.to_string_lossy().to_string())
             .collect();
 
+        assert_eq!(&rendered[..4], ["--cpus", "3", "--mem", "2048"]);
         assert!(rendered.contains(&"/host/rw:/guest/rw".to_string()));
         assert!(rendered.contains(&"/host/ro:/guest/ro:ro".to_string()));
         // Disabled is smolvm's default, so no flag is emitted.

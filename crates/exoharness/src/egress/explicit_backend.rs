@@ -13,12 +13,12 @@ use super::{
     explicit::ExplicitProxy,
 };
 use crate::{
-    CliContainerSandboxBackend, ManagedSandboxBackend, ManagedSandboxHandle, SandboxAttachment,
-    SandboxCommand, SandboxCommandOutput, SandboxNetworkPolicy, SandboxProcessParts,
-    SandboxProvider, SandboxRequest, SnapshotFormat, SnapshotPayload,
+    ManagedSandboxBackend, ManagedSandboxHandle, SandboxAttachment, SandboxCommand,
+    SandboxCommandOutput, SandboxNetworkPolicy, SandboxProcessParts, SandboxProvider,
+    SandboxRequest, SnapshotFormat, SnapshotPayload,
 };
 
-pub(crate) struct CredentialContainerBackend {
+pub(crate) struct CredentialProxyBackend {
     inner: Arc<dyn ManagedSandboxBackend>,
     provider: SandboxProvider,
     resolver: Arc<dyn EgressCredentialResolver>,
@@ -27,18 +27,14 @@ pub(crate) struct CredentialContainerBackend {
 
 type SandboxEntry = Arc<AsyncMutex<Option<Arc<CredentialSandbox>>>>;
 
-impl CredentialContainerBackend {
+impl CredentialProxyBackend {
     pub(crate) fn new(
         provider: SandboxProvider,
+        inner: Arc<dyn ManagedSandboxBackend>,
         resolver: Arc<dyn EgressCredentialResolver>,
     ) -> Self {
-        let inner = if provider == SandboxProvider::Docker {
-            CliContainerSandboxBackend::docker()
-        } else {
-            CliContainerSandboxBackend::apple_container()
-        };
         Self {
-            inner: Arc::new(inner),
+            inner,
             provider,
             resolver,
             sandboxes: Mutex::new(HashMap::new()),
@@ -65,6 +61,9 @@ impl CredentialContainerBackend {
     }
 
     async fn proxy_address(&self) -> Result<(Ipv4Addr, String)> {
+        if self.provider == SandboxProvider::Smolvm {
+            return Ok((Ipv4Addr::LOCALHOST, "host.smolvm.internal".into()));
+        }
         if self.provider == SandboxProvider::Docker && cfg!(target_os = "macos") {
             return Ok((Ipv4Addr::LOCALHOST, "host.docker.internal".into()));
         }
@@ -127,9 +126,9 @@ impl CredentialContainerBackend {
 }
 
 #[async_trait]
-impl ManagedSandboxBackend for CredentialContainerBackend {
+impl ManagedSandboxBackend for CredentialProxyBackend {
     fn is_local(&self) -> bool {
-        true
+        self.inner.is_local()
     }
     fn consumable_snapshot_formats(&self) -> &[SnapshotFormat] {
         self.inner.consumable_snapshot_formats()
@@ -171,9 +170,9 @@ impl ManagedSandboxBackend for CredentialContainerBackend {
                 Some(self.resolver.clone()),
                 Arc::new(PublicUpstreamResolver),
             )?;
-            let mut container_request = request.clone();
-            container_request.spec.policy.credentials.clear();
-            let inner = self.inner.acquire(container_request.clone()).await?;
+            let mut inner_request = request.clone();
+            inner_request.spec.policy.credentials.clear();
+            let inner = self.inner.acquire(inner_request.clone()).await?;
             let result = async {
                 let (bind_address, host) = self.proxy_address().await?;
                 let listener = tokio::net::TcpListener::bind((bind_address, 0)).await?;
@@ -190,7 +189,7 @@ impl ManagedSandboxBackend for CredentialContainerBackend {
             let sandbox = match result {
                 Ok(sandbox) => sandbox,
                 Err(error) => {
-                    if let Err(cleanup) = self.inner.terminate(container_request).await {
+                    if let Err(cleanup) = self.inner.terminate(inner_request).await {
                         tracing::warn!(%cleanup, "failed to clean up sandbox after proxy setup failed");
                     }
                     return Err(error);
@@ -235,7 +234,7 @@ impl ManagedSandboxBackend for CredentialContainerBackend {
     }
 }
 
-impl Drop for CredentialContainerBackend {
+impl Drop for CredentialProxyBackend {
     fn drop(&mut self) {
         for entry in self
             .sandboxes
@@ -295,6 +294,9 @@ impl CredentialSandbox {
 impl ManagedSandboxHandle for CredentialSandbox {
     fn id(&self) -> &str {
         self.inner.id()
+    }
+    fn provider_state(&self) -> Option<serde_json::Value> {
+        self.inner.provider_state()
     }
     fn effective_image(&self) -> Option<String> {
         self.inner.effective_image()

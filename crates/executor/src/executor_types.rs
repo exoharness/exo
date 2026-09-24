@@ -19,6 +19,8 @@ use crate::braintrust::BraintrustTracingConfig;
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct AgentConfig {
+    #[serde(default)]
+    pub resources: Vec<exoharness::resources::PreparedResource>,
     pub instructions: Vec<Message>,
     #[serde(default)]
     pub harness: AgentHarnessKind,
@@ -58,6 +60,10 @@ pub fn default_enable_agent_tool_creation() -> bool {
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct ConversationConfig {
     #[serde(default)]
+    pub resources: Vec<exoharness::resources::PreparedResource>,
+    #[serde(default)]
+    pub resource_mounts: Vec<FileSystemMount>,
+    #[serde(default)]
     pub environment: Option<exoharness::EnvironmentDefinition>,
     #[serde(default)]
     pub permissions: exo_managed_agents::permissions::PermissionPolicies,
@@ -96,6 +102,8 @@ impl fmt::Display for ConversationModelConfig {
 impl Default for ConversationConfig {
     fn default() -> Self {
         Self {
+            resources: Vec::new(),
+            resource_mounts: Vec::new(),
             permissions: Default::default(),
             environment: None,
             sandbox_image: None,
