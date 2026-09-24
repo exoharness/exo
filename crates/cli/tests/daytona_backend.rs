@@ -143,6 +143,55 @@ async fn acquire_creates_when_no_warm_match() {
         Some("docker.io/library/ubuntu:24.04"),
         "fresh acquire should pass the requested image as `snapshot`: {body:?}"
     );
+    assert!(
+        body.get("autoDeleteInterval").is_none(),
+        "warm sandboxes must remain available after stop: {body:?}"
+    );
+}
+
+#[tokio::test]
+async fn one_shot_sandbox_creates_fresh_and_deletes_on_stop() {
+    let server = MockServer::start().await;
+    let backend = backend_for_mock(&server);
+    Mock::given(method("POST"))
+        .and(path("/sandbox"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(sandbox_json("sb-one-shot", "started")),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+    mount_get_started(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/sandbox/sb-one-shot/stop"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut request = make_request("conv-one-shot", "sandbox-one-shot");
+    request.lifecycle.idle_ttl = None;
+    let first = backend.acquire(request.clone()).await.unwrap();
+    first.stop().await.unwrap();
+    backend.acquire(request).await.unwrap();
+
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.method.as_str() == "GET" && request.url.path() == "/sandbox"),
+        "one-shot sandboxes must not look up a prior sandbox by label"
+    );
+    for create in requests
+        .iter()
+        .filter(|request| request.method.as_str() == "POST" && request.url.path() == "/sandbox")
+    {
+        let body: Value = serde_json::from_slice(&create.body).unwrap();
+        assert_eq!(
+            body.get("autoDeleteInterval").and_then(Value::as_i64),
+            Some(0)
+        );
+    }
 }
 
 #[tokio::test]

@@ -173,6 +173,7 @@ impl DaytonaSandboxBackend {
             labels,
             env: HashMap::new(),
             auto_stop_interval: auto_stop_minutes,
+            auto_delete_interval: request.lifecycle.idle_ttl.is_none().then_some(0),
             network_block_all: matches!(
                 request.spec.policy.networking,
                 SandboxNetworkPolicy::Disabled
@@ -266,12 +267,15 @@ impl ManagedSandboxBackend for DaytonaSandboxBackend {
         reject_unsupported_mounts(&request)?;
         let spec_hash = sandbox_spec_hash(&request.spec);
 
-        // Reuse a matching sandbox if one exists (also how we recover across exo
-        // restarts); Daytona keeps its filesystem across stop.
-        let sandbox = match self
-            .find_sandbox_by_labels(request.sandbox_id.as_str(), &spec_hash)
-            .await?
-        {
+        // Only warm sandboxes keep their filesystem across stop and can be
+        // recovered by label after an exo restart.
+        let existing = if request.lifecycle.idle_ttl.is_some() {
+            self.find_sandbox_by_labels(request.sandbox_id.as_str(), &spec_hash)
+                .await?
+        } else {
+            None
+        };
+        let sandbox = match existing {
             // Replace a terminal/error sandbox; start only durably-stopped ones
             // (starting a running/mid-transition sandbox would race).
             Some(existing) if existing.is_reusable() => {
@@ -1390,6 +1394,8 @@ struct DaytonaCreateRequest {
     env: HashMap<String, String>,
     #[serde(rename = "autoStopInterval")]
     auto_stop_interval: u32,
+    #[serde(rename = "autoDeleteInterval", skip_serializing_if = "Option::is_none")]
+    auto_delete_interval: Option<u32>,
     #[serde(rename = "networkBlockAll")]
     network_block_all: bool,
 }
