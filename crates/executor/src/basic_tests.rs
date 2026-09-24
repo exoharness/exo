@@ -462,6 +462,9 @@ async fn send_stream_emits_chunks_and_persists_final_response() {
                     }
                 }
             }
+            ExecutionStreamEvent::ApprovalRequested { .. } => {
+                panic!("default policy should not prompt")
+            }
             ExecutionStreamEvent::ToolCall { .. } => {}
             ExecutionStreamEvent::ToolResult { .. } => {}
             ExecutionStreamEvent::Completed(_) => {

@@ -12,7 +12,7 @@ use exoharness::{
 use lingua::{Message, UniversalStreamChunk, UniversalUsage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio_stream::{Stream, wrappers::UnboundedReceiverStream};
+use tokio_stream::Stream;
 
 use crate::braintrust::BraintrustTracingConfig;
 
@@ -74,6 +74,8 @@ pub fn default_enable_agent_tool_creation() -> bool {
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct ConversationConfig {
     #[serde(default)]
+    pub permissions: exo_managed_agents::permissions::PermissionPolicies,
+    #[serde(default)]
     pub sandbox_image: Option<String>,
     #[serde(default)]
     pub sandbox_provider: Option<SandboxProvider>,
@@ -116,6 +118,7 @@ impl fmt::Display for ConversationModelConfig {
 impl Default for ConversationConfig {
     fn default() -> Self {
         Self {
+            permissions: Default::default(),
             sandbox_image: None,
             sandbox_provider: None,
             shell_program: Some("/bin/bash".to_string()),
@@ -163,6 +166,14 @@ pub trait ModelResponseStream: Send {
 
 #[async_trait]
 pub trait ToolRuntime: Send + Sync {
+    fn permission_policy(
+        &self,
+        policies: &exo_managed_agents::permissions::PermissionPolicies,
+        name: &str,
+    ) -> exo_managed_agents::permissions::PermissionPolicy {
+        policies.for_tool(name)
+    }
+
     fn definitions(&self) -> Vec<ToolDefinition> {
         Vec::new()
     }
@@ -248,17 +259,25 @@ pub struct SendResult {
 }
 
 pub struct ExecutionStreamHandle {
-    event_stream: UnboundedReceiverStream<Result<ExecutionStreamEvent>>,
+    event_stream: Pin<Box<dyn Stream<Item = Result<ExecutionStreamEvent>> + Send>>,
 }
 
 impl ExecutionStreamHandle {
-    pub fn new(event_stream: UnboundedReceiverStream<Result<ExecutionStreamEvent>>) -> Self {
-        Self { event_stream }
+    pub fn new(
+        event_stream: impl Stream<Item = Result<ExecutionStreamEvent>> + Send + 'static,
+    ) -> Self {
+        Self {
+            event_stream: Box::pin(event_stream),
+        }
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum ExecutionStreamEvent {
+    ApprovalRequested {
+        turn: exoharness::TurnRecord,
+        approval: crate::permissions::ApprovalRequest,
+    },
     FirstChunk {
         ttft: Duration,
     },

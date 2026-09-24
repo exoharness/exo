@@ -127,6 +127,95 @@ impl Runtime {
         }
     }
 
+    pub async fn approval_response(
+        &self,
+        agent: exoharness::AgentId,
+        thread: exoharness::ThreadId,
+        turn: exoharness::TurnId,
+        body: &exo_managed_agents::http::protocol::ApprovalResponseBody,
+    ) -> Result<exoharness::EventId> {
+        self.provider
+            .approval_response(agent, thread, turn, body)
+            .await
+    }
+
+    pub(crate) async fn is_turn_active(
+        &self,
+        thread: &dyn exoharness::ThreadHandle,
+        turn: exoharness::TurnId,
+    ) -> Result<bool> {
+        self.provider.is_turn_active(thread, turn).await
+    }
+
+    pub async fn reconnect_turn(
+        &self,
+        thread: &dyn exoharness::ThreadHandle,
+    ) -> Result<Option<(exoharness::TurnRecord, ExecutionStreamHandle)>> {
+        let latest = thread
+            .get_events(Some(exoharness::EventQuery {
+                direction: Some(exoharness::EventQueryDirection::Desc),
+                limit: Some(1),
+                types: Some(vec![
+                    exoharness::EventKind::TURN_STARTED,
+                    exoharness::EventKind::TURN_ENDED,
+                ]),
+                ..Default::default()
+            }))
+            .await?
+            .events
+            .into_iter()
+            .next();
+        let Some(event) = latest else {
+            return Ok(None);
+        };
+        if !matches!(event.data, exoharness::EventData::TurnStarted { .. }) {
+            return Ok(None);
+        }
+        let turn = exoharness::TurnRecord {
+            id: event.turn_id.context("turn event is missing a turn id")?,
+            session_id: event
+                .session_id
+                .context("turn event is missing a session id")?,
+        };
+        if !self.is_turn_active(thread, turn.id).await? {
+            return Ok(None);
+        }
+        let events = crate::permissions::approval_events(
+            thread,
+            exoharness::EventQuery {
+                turn_id: Some(turn.id),
+                session_id: Some(turn.session_id),
+                ..Default::default()
+            },
+        )
+        .await?;
+        if events
+            .iter()
+            .any(|event| matches!(event.data, exoharness::EventData::TurnEnded))
+        {
+            return Ok(None);
+        }
+        let after = events.last().map(|event| event.id).unwrap_or(event.id);
+        let pending = crate::permissions::pending_from_events(events)?;
+        let initial: Vec<_> = pending
+            .into_iter()
+            .map(|approval| {
+                Ok(ExecutionStreamEvent::ApprovalRequested {
+                    turn: turn.clone(),
+                    approval,
+                })
+            })
+            .collect();
+        let live = thread
+            .watch_events(std::ops::Bound::Excluded(after))
+            .await?;
+        let stream = crate::harness_events::turn_stream(live, turn.clone());
+        Ok(Some((
+            turn,
+            ExecutionStreamHandle::new(futures::stream::iter(initial).chain(stream)),
+        )))
+    }
+
     pub async fn start_turn(
         &self,
         agent: Arc<dyn AgentHandle>,
@@ -172,7 +261,7 @@ impl Runtime {
         let guard = conversation_send_lock(&thread.record().id.to_string())
             .lock_owned()
             .await;
-        let (agent_config, thread_config) = tokio::try_join!(
+        let (agent_config, mut thread_config) = tokio::try_join!(
             async {
                 if let Some(config) = config_override {
                     return Ok(config);
@@ -186,6 +275,9 @@ impl Runtime {
             },
             self.get_conversation_config(thread.as_ref()),
         )?;
+        if let Some(definition) = exo_managed_agents::load_definition(agent.as_ref()).await? {
+            thread_config.permissions = definition.permissions();
+        }
         provider
             .executor
             .prepare_conversation(
@@ -195,6 +287,8 @@ impl Runtime {
                 &thread_config,
             )
             .await?;
+        // Reconnect must not see the saved turn before it is registered as live.
+        let mut live_turns = provider.live_turns.write().await;
         let turn = thread
             .begin_turn(BeginTurnRequest {
                 session_id: request.session_id,
@@ -209,6 +303,10 @@ impl Runtime {
         let mut completion = self
             .events
             .register(Arc::clone(&thread), Arc::clone(&turn))?;
+        let live_turn = Arc::new(());
+        live_turns.retain(|_, turn| turn.strong_count() > 0);
+        live_turns.insert(key, Arc::downgrade(&live_turn));
+        drop(live_turns);
         let trace: Option<Arc<dyn TurnExecutionTrace>> = self
             .tracer
             .start_turn(
@@ -271,6 +369,7 @@ impl Runtime {
                 Err(error) => Err(anyhow!("harness stopped without completion: {error}")),
             };
             let latest_event_id = finalize_turn(turn.as_ref(), result).await;
+            drop(live_turn);
             if let Some(trace) = trace {
                 match &latest_event_id {
                     Ok(id) => trace.finish_success(Some(*id)).await,
@@ -576,6 +675,7 @@ impl Runtime {
             mounts: default_conversation_config.mounts,
             durable_file_systems: default_conversation_config.durable_file_systems,
             sandbox_scope: default_conversation_config.sandbox_scope,
+            permissions: default_conversation_config.permissions,
         };
         if let Err(error) = self
             .put_conversation_config(conversation.as_ref(), conversation_config)

@@ -348,6 +348,9 @@ async fn rlm_send_stream_suppresses_internal_control_text() {
         match event.expect("stream event should succeed") {
             ExecutionStreamEvent::FirstChunk { .. } => {}
             ExecutionStreamEvent::Chunk(_) => saw_chunk = true,
+            ExecutionStreamEvent::ApprovalRequested { .. } => {
+                panic!("default policy should not prompt")
+            }
             ExecutionStreamEvent::ToolCall { .. } => {}
             ExecutionStreamEvent::ToolResult { .. } => {}
             ExecutionStreamEvent::Completed(_) => {}

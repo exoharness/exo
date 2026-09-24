@@ -18,8 +18,6 @@ use std::{
     time::Duration,
 };
 use tempfile::TempDir;
-
-type RequestContext = (String, Option<HeaderValue>);
 use tokio::{io::AsyncWriteExt, process::Command};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -27,6 +25,8 @@ use wiremock::{
 };
 
 pub const SOURCE: &str = "---\nname: Workflow agent\nharness: basic\nconfig:\n  model: gpt-5-mini\n---\nReply to the user.\n";
+
+type RequestContext = (String, Option<HeaderValue>);
 
 pub struct Fixture {
     pub temp: TempDir,
@@ -36,6 +36,7 @@ pub struct Fixture {
     pub endpoint: String,
     pub runtime: Arc<Runtime>,
     pub server: actix_web::dev::ServerHandle,
+    #[allow(dead_code)]
     pub contexts: Arc<Mutex<Vec<RequestContext>>>,
 }
 

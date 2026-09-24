@@ -32,6 +32,7 @@ mod http_tests;
 mod local_sandbox;
 pub mod managed_agents;
 mod mcp;
+pub mod permissions;
 mod provider;
 mod rlm;
 #[cfg(test)]

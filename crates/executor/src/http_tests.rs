@@ -39,14 +39,26 @@ impl HarnessExecutor for ControlledExecutor {
     async fn execute_turn(
         &self,
         _: &dyn AgentHandle,
-        _: Arc<dyn ThreadHandle>,
+        thread: Arc<dyn ThreadHandle>,
         turn: Arc<dyn TurnHandle>,
         _: &AgentConfig,
-        _: &ConversationConfig,
+        config: &ConversationConfig,
         request: &SendRequest,
         stream: ExecutorStreamMode<'_>,
         _: Option<&dyn TurnExecutionTrace>,
     ) -> Result<()> {
+        crate::permissions::authorize(
+            thread.as_ref(),
+            turn.as_ref(),
+            config.permissions.for_tool("test_tool"),
+            &exoharness::ToolRequest {
+                function_name: "test_tool".into(),
+                namespace: None,
+                arguments: serde_json::from_value(serde_json::json!({"value": 42}))?,
+            },
+            stream,
+        )
+        .await?;
         self.0.acquire().await?.forget();
         if request.input.is_empty() {
             return Err(anyhow::anyhow!("test execution failure").context("dispatching test turn"));
@@ -320,6 +332,29 @@ async fn http_provider_auth_handles_and_exclusive_history_cursors() -> Result<()
             .to_string()
             .contains("404")
     );
+    for (agent_id, thread_id, status) in [
+        (exoharness::Uuid7::now(), id, "404"),
+        (f.agent_id, exoharness::Uuid7::now(), "404"),
+        (foreign_agent.record().id, id, "404"),
+        (f.agent_id, id, "400"),
+    ] {
+        let error = f
+            .client
+            .approval_response(
+                agent_id,
+                thread_id,
+                exoharness::Uuid7::now(),
+                &ApprovalResponseBody {
+                    session_id: exoharness::Uuid7::now(),
+                    approval_id: exoharness::Uuid7::now().to_string(),
+                    approved: true,
+                    allow_for_tool: false,
+                },
+            )
+            .await
+            .expect_err("approval response requires an active turn");
+        assert!(error.to_string().contains(status), "{error}");
+    }
     f.stop().await
 }
 
@@ -720,6 +755,339 @@ async fn temporary_provider_cleanup_waits_for_turn_finalization() -> Result<()> 
         .context("cancelled turn")?;
     assert_eq!(error.to_string(), "harness turn cancelled");
     assert!(runtime.list_agents().await?.is_empty());
+    f.stop().await
+}
+
+#[actix_web::test]
+async fn approval_decisions_cancellation_sessions_and_reconnect() -> Result<()> {
+    for remote in [false, true] {
+        let f = Fixture::new().await?;
+        let runtime = if remote {
+            Arc::new(Runtime::new(HttpProvider::new(f.client.clone()), None))
+        } else {
+            f.runtime.clone()
+        };
+        let agent = runtime
+            .exoharness_handle()
+            .get_agent(&f.agent_id)
+            .await?
+            .context("agent")?;
+        let thread = runtime
+            .open_managed_thread(&agent, None, Default::default())
+            .await?
+            .thread;
+        let local_agent = f
+            .runtime
+            .exoharness_handle()
+            .get_agent(&f.agent_id)
+            .await?
+            .context("agent")?;
+        let local_thread = local_agent
+            .get_thread(&thread.record().id)
+            .await?
+            .context("thread")?;
+        let mut config = f
+            .runtime
+            .get_conversation_config(local_thread.as_ref())
+            .await?;
+        config.permissions.permission_policy =
+            exo_managed_agents::permissions::PermissionPolicy::AlwaysAsk {};
+        f.runtime
+            .put_conversation_config(local_thread.as_ref(), config)
+            .await?;
+        let mut session = None;
+        for action in ["deny", "allow_session", "already_allowed", "cancel"] {
+            if action == "cancel" {
+                session = None;
+            }
+            f.release.add_permits(1);
+            let permits = f.release.available_permits();
+            let (turn, mut stream) = runtime
+                .start_turn(
+                    agent.clone(),
+                    thread.clone(),
+                    SendRequest {
+                        input: vec![crate::harness_helpers::user_message("perform tool")],
+                        session_id: session,
+                    },
+                    true,
+                    None,
+                )
+                .await?;
+            session = Some(turn.session_id);
+            if action != "already_allowed" {
+                let first = tokio::time::timeout(Duration::from_secs(5), stream.next())
+                    .await?
+                    .context("approval event")??;
+                let crate::ExecutionStreamEvent::ApprovalRequested { approval, .. } = first else {
+                    panic!("expected approval, got {first:?}")
+                };
+                assert_eq!(
+                    f.release.available_permits(),
+                    permits,
+                    "tool ran before approval"
+                );
+                if remote {
+                    drop(stream);
+                    let (_, resumed) = runtime
+                        .reconnect_turn(thread.as_ref())
+                        .await?
+                        .context("saved active turn")?;
+                    stream = resumed;
+                    let crate::ExecutionStreamEvent::ApprovalRequested {
+                        approval: replay, ..
+                    } = stream.next().await.context("pending approval")??
+                    else {
+                        panic!("pending approval was not replayed")
+                    };
+                    assert_eq!(approval.approval_id, replay.approval_id);
+                }
+                let mut body = ApprovalResponseBody {
+                    session_id: exoharness::Uuid7::now(),
+                    approval_id: approval.approval_id,
+                    approved: action != "deny",
+                    allow_for_tool: action == "allow_session",
+                };
+                assert!(
+                    runtime
+                        .approval_response(f.agent_id, thread.record().id, turn.id, &body)
+                        .await
+                        .is_err()
+                );
+                body.session_id = turn.session_id;
+                assert!(
+                    runtime
+                        .approval_response(
+                            f.agent_id,
+                            thread.record().id,
+                            exoharness::Uuid7::now(),
+                            &body
+                        )
+                        .await
+                        .is_err()
+                );
+                if action == "cancel" {
+                    runtime
+                        .cancel(HarnessTurnKey::new(thread.record().id, turn.id))
+                        .await?;
+                    assert!(
+                        runtime
+                            .approval_response(f.agent_id, thread.record().id, turn.id, &body)
+                            .await
+                            .is_err()
+                    );
+                } else {
+                    runtime
+                        .approval_response(f.agent_id, thread.record().id, turn.id, &body)
+                        .await?;
+                    assert!(
+                        runtime
+                            .approval_response(f.agent_id, thread.record().id, turn.id, &body)
+                            .await
+                            .is_err(),
+                        "duplicate approval accepted"
+                    );
+                }
+            }
+            let mut failed = false;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while let Some(event) = stream.next().await {
+                    match event {
+                        Ok(crate::ExecutionStreamEvent::ApprovalRequested { .. }) => {
+                            panic!("unexpected second approval")
+                        }
+                        Err(_) => failed = true,
+                        _ => {}
+                    }
+                }
+            })
+            .await?;
+            assert_eq!(failed, matches!(action, "deny" | "cancel"));
+            assert_eq!(
+                f.release.available_permits(),
+                permits - usize::from(matches!(action, "allow_session" | "already_allowed"))
+            );
+            assert!(runtime.reconnect_turn(thread.as_ref()).await?.is_none());
+        }
+        if remote {
+            runtime.shutdown().await?;
+        }
+        f.stop().await?;
+    }
+    Ok(())
+}
+
+#[actix_web::test]
+async fn saved_policy_changes_apply_to_existing_local_and_http_threads() -> Result<()> {
+    for remote in [false, true] {
+        let f = Fixture::new().await?;
+        let runtime = if remote {
+            Arc::new(Runtime::new(HttpProvider::new(f.client.clone()), None))
+        } else {
+            f.runtime.clone()
+        };
+        let agent = runtime
+            .get_agent(&f.agent_id.to_string())
+            .await?
+            .context("agent")?;
+        let local_agent = f
+            .runtime
+            .get_agent(&f.agent_id.to_string())
+            .await?
+            .context("local agent")?;
+        let thread = runtime
+            .open_managed_thread(&agent, None, Default::default())
+            .await?
+            .thread;
+        for ask in [false, true, false] {
+            let policy = if ask { "always_ask" } else { "always_allow" };
+            local_agent.write_artifact(exoharness::WriteArtifactRequest {
+                path: exo_managed_agents::AGENT_DEFINITION_PATH.into(),
+                contents: format!("---\nname: Policy test\nharness: basic\npermission_policy: {{type: {policy}}}\nconfig:\n  model: test-model\n---\nUse tools.").into_bytes(),
+            }).await?;
+            f.release.add_permits(1);
+            let (turn, mut stream) = runtime
+                .start_turn(
+                    agent.clone(),
+                    thread.clone(),
+                    SendRequest {
+                        input: vec![crate::harness_helpers::user_message("perform tool")],
+                        session_id: None,
+                    },
+                    true,
+                    None,
+                )
+                .await?;
+            let mut saw_approval = false;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while let Some(event) = stream.next().await {
+                    match event? {
+                        crate::ExecutionStreamEvent::ApprovalRequested { approval, .. } => {
+                            assert!(
+                                ask && !saw_approval,
+                                "unexpected approval after setting {policy}"
+                            );
+                            saw_approval = true;
+                            assert_eq!(
+                                f.release.available_permits(),
+                                1,
+                                "tool ran before approval"
+                            );
+                            runtime
+                                .approval_response(
+                                    f.agent_id,
+                                    thread.record().id,
+                                    turn.id,
+                                    &ApprovalResponseBody {
+                                        session_id: turn.session_id,
+                                        approval_id: approval.approval_id,
+                                        approved: true,
+                                        allow_for_tool: false,
+                                    },
+                                )
+                                .await?;
+                        }
+                        crate::ExecutionStreamEvent::Completed(_) => return Ok(()),
+                        _ => {}
+                    }
+                }
+                bail!("turn did not complete")
+            })
+            .await??;
+            assert_eq!(saw_approval, ask, "stale policy after setting {policy}");
+        }
+        if remote {
+            runtime.shutdown().await?;
+        }
+        f.stop().await?;
+    }
+    Ok(())
+}
+
+#[actix_web::test]
+async fn reconnect_skips_orphaned_turns_and_follows_live_turns() -> Result<()> {
+    let f = Fixture::new().await?;
+    let remote = Arc::new(Runtime::new(HttpProvider::new(f.client.clone()), None));
+    let local_agent = f
+        .runtime
+        .get_agent(&f.agent_id.to_string())
+        .await?
+        .context("agent")?;
+    for runtime in [&f.runtime, &remote] {
+        let agent = runtime
+            .get_agent(&f.agent_id.to_string())
+            .await?
+            .context("agent")?;
+        for pending in [false, true] {
+            let local_thread = local_agent.new_thread(Default::default()).await?;
+            let orphan = local_thread
+                .begin_turn(exoharness::BeginTurnRequest::default())
+                .await?;
+            if pending {
+                orphan
+                    .add_events(vec![EventData::Custom {
+                        event_type: crate::permissions::APPROVAL_REQUESTED.into(),
+                        payload: serde_json::to_value(crate::permissions::ApprovalRequest {
+                            approval_id: "orphaned-approval".into(),
+                            request: exoharness::ToolRequest {
+                                namespace: None,
+                                function_name: "test_tool".into(),
+                                arguments: Default::default(),
+                            },
+                        })?,
+                    }])
+                    .await?;
+            }
+            let thread = runtime
+                .get_conversation(agent.as_ref(), &local_thread.record().id.to_string())
+                .await?
+                .context("thread")?;
+            assert!(
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    runtime.reconnect_turn(thread.as_ref())
+                )
+                .await??
+                .is_none()
+            );
+            let (turn, original) = runtime
+                .start_turn(
+                    agent.clone(),
+                    thread.clone(),
+                    SendRequest {
+                        input: vec![crate::harness_helpers::user_message(
+                            "continue after restart",
+                        )],
+                        session_id: None,
+                    },
+                    true,
+                    None,
+                )
+                .await?;
+            let (reconnected, mut events) = tokio::time::timeout(
+                Duration::from_secs(5),
+                runtime.reconnect_turn(thread.as_ref()),
+            )
+            .await??
+            .context("live turn")?;
+            assert_eq!(reconnected.id, turn.id);
+            f.release.add_permits(1);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while let Some(event) = events.next().await {
+                    if let crate::ExecutionStreamEvent::Completed(result) = event? {
+                        assert_eq!(result.turn_id, turn.id);
+                        assert!(events.next().await.is_none());
+                        return Ok(());
+                    }
+                }
+                bail!("live reconnect did not finish")
+            })
+            .await??;
+            drop(original);
+            assert!(runtime.reconnect_turn(thread.as_ref()).await?.is_none());
+        }
+    }
+    remote.shutdown().await?;
     f.stop().await
 }
 

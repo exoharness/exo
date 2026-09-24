@@ -10,8 +10,7 @@ use exo_managed_agents::AgentBackend;
 use exo_managed_agents::http::{RuntimeClient, protocol::*};
 use exoharness::protocol::{ConversationHandleInfo, Request, Response};
 use exoharness::{
-    AgentId, EventData, EventId, EventStream, ExoHarness, ExoHttpTransport, HttpExoHarness,
-    ThreadId,
+    AgentId, EventId, EventStream, ExoHarness, ExoHttpTransport, HttpExoHarness, ThreadId,
 };
 use futures::StreamExt;
 use url::Url;
@@ -76,31 +75,36 @@ impl HttpProvider {
         }
         watchers.spawn(async move {
             let observed = async {
-                let mut stream = client.watch(agent_id, thread_id, &WatchQuery { after: result.thread.latest_event_id }).await?;
-                let mut failure = None;
+                let events = client
+                    .watch(
+                        agent_id,
+                        thread_id,
+                        &WatchQuery {
+                            after: result.thread.latest_event_id,
+                        },
+                    )
+                    .await?;
+                let stream = crate::harness_events::turn_stream(events, result.turn);
+                futures::pin_mut!(stream);
                 loop {
                     let event = tokio::select! {
                         () = sender.closed() => return Ok(()),
-                        event = stream.next() => event.context("runtime progress disconnected; retrieve thread history to determine the turn's status")??,
+                        event = stream.next() => event,
                     };
-                    if event.turn_id != Some(result.turn.id) { continue; }
-                    use crate::ExecutionStreamEvent as Output;
-                    let output = match event.data {
-                        EventData::LinguaStreamChunk { chunk } => Some(Output::Chunk(chunk)),
-                        EventData::ToolRequested { tool_call_id, request, .. } => Some(Output::ToolCall { tool_call_id, tool_name: request.function_name, arguments: request.arguments }),
-                        EventData::ToolResult { tool_call_id, result } => Some(Output::ToolResult { tool_call_id, result }),
-                        EventData::Error { message, .. } => { failure = Some(message); None },
-                        EventData::TurnEnded => {
-                            if let Some(message) = failure { bail!(message); }
-                            if sender.send(Ok(Output::Completed(crate::SendResult { session_id: result.turn.session_id, turn_id: result.turn.id, latest_event_id: event.id }))).is_err() { tracing::debug!("remote turn observer closed"); }
-                            return Ok(());
-                        }
-                        _ => None,
+                    let Some(event) = event else {
+                        return Ok(());
                     };
-                    if let Some(output) = output && sender.send(Ok(output)).is_err() { return Ok(()); }
+                    if sender.send(event).is_err() {
+                        return Ok(());
+                    }
                 }
-            }.await;
-            if let Err(error) = observed && sender.send(Err(error)).is_err() { tracing::debug!("remote turn observer closed"); }
+            }
+            .await;
+            if let Err(error) = observed
+                && sender.send(Err(error)).is_err()
+            {
+                tracing::debug!("remote turn observer closed");
+            }
         });
         Ok((
             record,
@@ -130,7 +134,43 @@ impl AgentBackend for HttpProvider {
     }
 }
 
+#[async_trait]
 impl Provider for HttpProvider {
+    async fn is_turn_active(
+        &self,
+        thread: &dyn exoharness::ThreadHandle,
+        turn: exoharness::TurnId,
+    ) -> Result<bool> {
+        let agent = *self
+            .transport
+            .threads
+            .lock()
+            .expect("HTTP threads poisoned")
+            .get(&thread.record().id)
+            .context("resolve the thread through this provider before reconnecting it")?;
+        Ok(self
+            .transport
+            .client
+            .turn_status(agent, thread.record().id, turn)
+            .await?
+            .active)
+    }
+
+    async fn approval_response(
+        &self,
+        agent: AgentId,
+        thread: ThreadId,
+        turn: exoharness::TurnId,
+        body: &ApprovalResponseBody,
+    ) -> Result<EventId> {
+        Ok(self
+            .transport
+            .client
+            .approval_response(agent, thread, turn, body)
+            .await?
+            .event_id)
+    }
+
     fn harness(&self) -> &dyn Harness<ProviderTurn> {
         self
     }
@@ -377,14 +417,6 @@ impl ExoHttpTransport for RuntimeTransport {
                 query,
             } => {
                 let query = query.unwrap_or_default();
-                if query.session_id.is_some()
-                    || query.turn_id.is_some()
-                    || query.types.as_ref().is_some_and(|types| types.len() != 1)
-                {
-                    bail!(
-                        "runtime HTTP history supports one event type and no session or turn filter"
-                    );
-                }
                 let result = self
                     .client
                     .events(
@@ -394,10 +426,15 @@ impl ExoHttpTransport for RuntimeTransport {
                             after: query.cursor,
                             limit: query.limit,
                             direction: query.direction,
-                            event_type: query
-                                .types
-                                .and_then(|types| types.into_iter().next())
-                                .map(|kind| kind.as_str().to_owned()),
+                            session_id: query.session_id,
+                            turn_id: query.turn_id,
+                            event_type: query.types.map(|types| {
+                                types
+                                    .iter()
+                                    .map(|kind| kind.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            }),
                         },
                     )
                     .await?;

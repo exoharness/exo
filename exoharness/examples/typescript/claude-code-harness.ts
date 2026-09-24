@@ -15,12 +15,14 @@ import {
   appendCustomEvent,
   assistantTextMessage,
   defineHarness,
+  validateToolPolicies,
   materializeConversationMessages,
   messageText,
   messagesEvent,
   messagesToTranscript,
   systemTextMessage,
   toJsonValue,
+  toJsonObject,
   turnMetadata,
   type JsonValue,
   type Message,
@@ -54,6 +56,7 @@ const CLAUDE_STDERR_PREVIEW_CHARS = 4_000;
 const CLAUDE_STARTUP_TIMEOUT_MS = 20_000;
 
 interface ClaudeTraceState {
+  toolPoliciesValidated: boolean;
   startedAt: number;
   finalText: string;
   systemPrompt: string | null;
@@ -67,6 +70,7 @@ interface ClaudeTraceState {
 }
 
 export default defineHarness({
+  nativeToolApprovals: true,
   async runTurn(context) {
     const modelBinding = await resolveLlmBinding(context);
     const runtime = ResponsesRuntime.fromModelBinding(
@@ -86,6 +90,7 @@ async function runClaudeCodeTurn(
 ): Promise<string | null> {
   const systemPrompt = claudeSystemPrompt(context);
   const state: ClaudeTraceState = {
+    toolPoliciesValidated: false,
     startedAt: Date.now(),
     finalText: "",
     systemPrompt,
@@ -121,7 +126,7 @@ async function runClaudeCodeTurn(
         await consumeClaudeQuery(
           query({
             prompt: claudePromptInput(claudePrompt(state.promptMessages)),
-            options: claudeOptions(context, state.systemPrompt, modelBinding),
+            options: claudeOptions(context, state, modelBinding),
           }),
           context,
           turnParent,
@@ -192,6 +197,13 @@ async function consumeClaudeQuery(
     for await (const message of claudeQuery) {
       sawSdkMessage = true;
       clearTimeout(startupTimer);
+      if (message.type === "system" && message.subtype === "init") {
+        validateToolPolicies(
+          context,
+          message.tools.map((name) => `claude.${name}`),
+        );
+        state.toolPoliciesValidated = true;
+      }
       await handleClaudeMessage(context, turnParent, state, message);
       const apiRetryError = claudeApiRetryLimitError(message);
       if (apiRetryError) {
@@ -281,7 +293,7 @@ async function traceClaudeLlmTurn(
 
 function claudeOptions(
   context: TurnContext,
-  systemPrompt: string | null,
+  state: ClaudeTraceState,
   modelBinding: ResolvedLlmBinding,
 ): Options {
   const options: Options = {
@@ -289,13 +301,49 @@ function claudeOptions(
     cwd: sandboxCwd(context),
     persistSession: false,
     includePartialMessages: true,
+    hooks: {
+      PreToolUse: [
+        {
+          hooks: [
+            async (input) => {
+              if (input.hook_event_name !== "PreToolUse") return {};
+              try {
+                if (!state.toolPoliciesValidated) {
+                  throw new Error(
+                    "Claude Code has not reported its tool inventory",
+                  );
+                }
+                await context.authorizeTool({
+                  functionName: `claude.${input.tool_name}`,
+                  arguments: toJsonObject(input.tool_input),
+                });
+                return {
+                  hookSpecificOutput: {
+                    hookEventName: "PreToolUse",
+                    permissionDecision: "allow",
+                  },
+                };
+              } catch (error) {
+                return {
+                  hookSpecificOutput: {
+                    hookEventName: "PreToolUse",
+                    permissionDecision: "deny",
+                    permissionDecisionReason: errorMessage(error),
+                  },
+                };
+              }
+            },
+          ],
+        },
+      ],
+    },
     env: claudeSandboxBaseEnv(modelBinding),
     pathToClaudeCodeExecutable: claudeSandboxExecutable(),
     spawnClaudeCodeProcess: (options) =>
       new SandboxClaudeCodeProcess(context, options),
   };
-  if (systemPrompt) {
-    return { ...options, systemPrompt };
+  if (state.systemPrompt) {
+    return { ...options, systemPrompt: state.systemPrompt };
   }
   return options;
 }

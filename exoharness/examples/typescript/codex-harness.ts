@@ -3,6 +3,7 @@ import {
   appendCustomEvent,
   assistantTextMessage,
   defineHarness,
+  validateToolPolicies,
   messageText,
   messagesEvent,
   stringifyValue,
@@ -44,8 +45,6 @@ import {
   pickEnv,
   resolveLlmBinding,
   sandboxCwd,
-  shellToolResultText,
-  shellToolSucceeded,
   stringOrNull,
   traceExoharnessToolCall,
   traceObservedToolCall,
@@ -69,8 +68,6 @@ const CODEX_VERSION = readFileSync(
 ).trim();
 const CODEX_SHELL_TOOL = "codex.shell";
 const CODEX_WEB_SEARCH_TOOL = "codex.web_search";
-const EXO_SHELL_TOOL = "shell";
-const EXO_SHELL_DYNAMIC_TOOL = "exo_shell";
 const CODEX_WARM_SESSION_EVENT = "codex_warm_session";
 
 interface CodexTurnTraceState {
@@ -198,7 +195,13 @@ class CodexWarmSession {
 const codexSessions = new WarmResourceCache<CodexWarmSession>();
 
 export default defineHarness({
+  nativeToolApprovals: false,
   async runTurn(context) {
+    validateToolPolicies(
+      context,
+      context.tools.map((tool) => tool.name),
+      false,
+    );
     await ensureTable();
     const modelBinding = await resolveLlmBinding(context);
     const runtime = ResponsesRuntime.fromModelBinding(
@@ -284,7 +287,7 @@ async function runCodexTurn(
           runtime: "codex_app_server",
           model: modelBinding.model,
           cwd: codexAppServerCwd(context),
-          external_sandbox: useCodexExternalSandbox(),
+          external_sandbox: true,
         },
         () => startCodexThread(session.server, context, modelBinding),
       ));
@@ -302,7 +305,7 @@ async function runCodexTurn(
         thread_id: threadId,
         model: modelBinding.model,
         input: turnInput,
-        external_sandbox: useCodexExternalSandbox(),
+        external_sandbox: true,
       },
       () =>
         session.server.request<JsonObject>("turn/start", {
@@ -627,10 +630,7 @@ async function handleCodexServerRequest(
   turnParent: TraceParent,
   request: CodexServerRequest,
 ): Promise<JsonValue | undefined> {
-  if (
-    useCodexExternalSandbox() &&
-    request.method === "item/commandExecution/requestApproval"
-  ) {
+  if (request.method === "item/commandExecution/requestApproval") {
     return { decision: "accept" };
   }
   if (request.method !== "item/tool/call") {
@@ -646,21 +646,17 @@ async function executeDynamicToolCall(
 ): Promise<JsonValue> {
   const callId = stringOrNull(params.callId) ?? "dynamic-tool-call";
   const toolName = stringOrNull(params.tool);
-  const isShell = toolName === EXO_SHELL_DYNAMIC_TOOL;
-  if (!isShell && !context.tools.some((tool) => tool.name === toolName)) {
+  if (!context.tools.some((tool) => tool.name === toolName)) {
     return dynamicToolErrorResponse(`unsupported dynamic tool: ${toolName}`);
   }
   const args = objectArgs(asRecord(params.arguments));
-  if (isShell && !stringOrNull(args.command)) {
-    return dynamicToolErrorResponse("exo_shell requires a command string");
-  }
   if (!toolName) {
     return dynamicToolErrorResponse("missing tool name");
   }
   const toolCall: PendingToolCall = {
     toolCallId: callId,
     request: {
-      functionName: isShell ? EXO_SHELL_TOOL : toolName,
+      functionName: toolName,
       arguments: args,
     },
   };
@@ -674,12 +670,7 @@ async function executeDynamicToolCall(
       "codex_dynamic_tool",
     );
     await appendEvents(context, [toolResultEvent(callId, result)]);
-    return dynamicToolResultResponse(
-      isShell ? shellToolResultText(result) : JSON.stringify(result),
-      {
-        success: isShell ? shellToolSucceeded(result) : true,
-      },
-    );
+    return dynamicToolResultResponse(JSON.stringify(result), { success: true });
   } catch (error) {
     const message = errorMessage(error);
     await appendEvents(context, [
@@ -928,52 +919,18 @@ function messagesToUserInput(messages: Message[]): JsonValue[] {
 }
 
 function buildCodexDynamicTools(context: TurnContext): JsonValue[] {
-  const tools = context.tools.map((tool) => ({
+  return context.tools.map((tool) => ({
     name: tool.name,
     description: tool.description,
     inputSchema: tool.parameters,
   }));
-  if (useCodexExternalSandbox()) {
-    return tools;
-  }
-  if (!context.conversationConfig.shellProgram) {
-    return tools;
-  }
-  return [
-    ...tools,
-    {
-      name: EXO_SHELL_DYNAMIC_TOOL,
-      description: `Run a shell command through the exoharness sandbox. Commands execute from ${sandboxCwd(context)}. Use this for command execution in exo conversations.`,
-      inputSchema: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          command: {
-            type: "string",
-            description: "Shell command to execute.",
-          },
-        },
-        required: ["command"],
-      },
-    },
-  ];
 }
 
 function codexNativeSandboxPolicy(): JsonValue {
-  if (useCodexExternalSandbox()) {
-    return {
-      type: "externalSandbox",
-      networkAccess: "restricted",
-    };
-  }
   return {
-    type: "readOnly",
-    networkAccess: false,
+    type: "externalSandbox",
+    networkAccess: "restricted",
   };
-}
-
-function useCodexExternalSandbox(): boolean {
-  return true;
 }
 
 async function requireCodexSandboxNetworking(
@@ -1095,7 +1052,7 @@ function codexSandboxRuntimeKey(context: TurnContext): JsonValue {
       internal: mount.internal ?? false,
     })),
     command: codexSandboxCommand(context),
-    external_sandbox: useCodexExternalSandbox(),
+    external_sandbox: true,
   };
 }
 

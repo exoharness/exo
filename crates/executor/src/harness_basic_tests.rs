@@ -1911,6 +1911,14 @@ async fn basic_and_rlm_models_receive_mcp_errors_and_can_continue() -> Result<()
         let thread = harness
             .create_conversation(agent.as_ref(), CreateConversationRequest::default())
             .await?;
+        let mut config = harness.get_conversation_config(thread.as_ref()).await?;
+        config.permissions.tool_policies.insert(
+            "exo_mcp__fixture__search".into(),
+            exo_managed_agents::permissions::PermissionPolicy::AlwaysAllow {},
+        );
+        harness
+            .put_conversation_config(thread.as_ref(), config)
+            .await?;
         harness
             .send(
                 agent,

@@ -19,6 +19,7 @@ use exoharness::{
     },
     server::ExoHarnessServer,
 };
+use futures::{StreamExt, stream::FuturesUnordered};
 use lingua::UniversalStreamChunk;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter, Lines};
@@ -214,8 +215,25 @@ where
         conversation_config: &ConversationConfig,
         turn: Arc<dyn TurnHandle>,
         request: RuntimeRequest,
+        stream_mode: ExecutorStreamMode<'_>,
     ) -> Result<RuntimeResponsePayload> {
+        if let RuntimeRequest::ExecuteTool { request } | RuntimeRequest::AuthorizeTool { request } =
+            &request
+        {
+            crate::permissions::authorize(
+                conversation,
+                turn.as_ref(),
+                self.tools
+                    .permission_policy(&conversation_config.permissions, &request.function_name),
+                request,
+                stream_mode,
+            )
+            .await?;
+        }
         match request {
+            RuntimeRequest::AuthorizeTool { .. } => Ok(RuntimeResponsePayload::ToolResult {
+                result: serde_json::Value::Null,
+            }),
             RuntimeRequest::ExecuteTool { request } => Ok(RuntimeResponsePayload::ToolResult {
                 result: self
                     .tools
@@ -419,9 +437,14 @@ impl TypeScriptRunnerProcess {
             },
         )?;
 
+        let mut tool_requests = FuturesUnordered::new();
         loop {
             tokio::select! {
                 biased;
+
+                Some(response) = tool_requests.next(), if !tool_requests.is_empty() => {
+                    send_host_message(&self.host_tx, response)?;
+                }
 
                 line = self.lines.next_line() => {
                     let Some(line) = line? else {
@@ -440,8 +463,22 @@ impl TypeScriptRunnerProcess {
                     match message {
                         GuestToHostMessage::RuntimeRequest { id, request } => {
                             let request_kind = request.kind();
-                            let response = self
-                                .execute_runtime_request(
+                            if matches!(request, RuntimeRequest::ExecuteTool { .. } | RuntimeRequest::AuthorizeTool { .. }) {
+                                let turn = Arc::clone(&turn);
+                                tool_requests.push(async move {
+                                    let response = executor.execute_runtime_request(
+                                        agent,
+                                        conversation,
+                                        agent_config,
+                                        conversation_config,
+                                        turn,
+                                        request,
+                                        stream_mode,
+                                    ).await;
+                                    runtime_response(id, request_kind, response)
+                                });
+                            } else {
+                                let response = self.execute_runtime_request(
                                     executor,
                                     agent,
                                     conversation,
@@ -449,26 +486,10 @@ impl TypeScriptRunnerProcess {
                                     conversation_config,
                                     Arc::clone(&turn),
                                     request,
-                                )
-                                .await;
-                            let response = match response {
-                                Ok(payload) => HostToGuestMessage::RuntimeResponse {
-                                    id,
-                                    ok: true,
-                                    payload: Some(payload),
-                                    error: None,
-                                },
-                                Err(error) => HostToGuestMessage::RuntimeResponse {
-                                    id,
-                                    ok: false,
-                                    payload: None,
-                                    error: Some(format_error_chain(
-                                        &error,
-                                        format_args!("typescript runtime request `{request_kind}` failed"),
-                                    )),
-                                },
-                            };
-                            send_host_message(&self.host_tx, response)?;
+                                    stream_mode,
+                                ).await;
+                                send_host_message(&self.host_tx, runtime_response(id, request_kind, response))?;
+                            }
                         }
                         GuestToHostMessage::ExoRequest { id, request } => {
                             let request_kind = request.kind();
@@ -526,12 +547,14 @@ impl TypeScriptRunnerProcess {
         conversation_config: &ConversationConfig,
         turn: Arc<dyn TurnHandle>,
         request: RuntimeRequest,
+        stream_mode: ExecutorStreamMode<'_>,
     ) -> Result<RuntimeResponsePayload>
     where
         T: ToolRuntime + 'static,
     {
         match request {
-            RuntimeRequest::ExecuteTool { request } => {
+            request @ (RuntimeRequest::ExecuteTool { .. }
+            | RuntimeRequest::AuthorizeTool { .. }) => {
                 executor
                     .execute_runtime_request(
                         agent,
@@ -539,7 +562,8 @@ impl TypeScriptRunnerProcess {
                         agent_config,
                         conversation_config,
                         Arc::clone(&turn),
-                        RuntimeRequest::ExecuteTool { request },
+                        request,
+                        stream_mode,
                     )
                     .await
             }
@@ -953,6 +977,30 @@ fn undecodable_message_response(line: &str, detail: String) -> Option<HostToGues
     }
 }
 
+fn runtime_response(
+    id: u64,
+    request_kind: &str,
+    response: Result<RuntimeResponsePayload>,
+) -> HostToGuestMessage {
+    match response {
+        Ok(payload) => HostToGuestMessage::RuntimeResponse {
+            id,
+            ok: true,
+            payload: Some(payload),
+            error: None,
+        },
+        Err(error) => HostToGuestMessage::RuntimeResponse {
+            id,
+            ok: false,
+            payload: None,
+            error: Some(format_error_chain(
+                &error,
+                format_args!("typescript runtime request `{request_kind}` failed"),
+            )),
+        },
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum GuestToHostMessage {
@@ -990,6 +1038,9 @@ struct TypeScriptInitPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum RuntimeRequest {
+    AuthorizeTool {
+        request: ToolRequest,
+    },
     ExecuteTool {
         request: ToolRequest,
     },
@@ -1013,6 +1064,7 @@ enum RuntimeRequest {
 impl RuntimeRequest {
     fn kind(&self) -> &'static str {
         match self {
+            Self::AuthorizeTool { .. } => "authorize_tool",
             Self::ExecuteTool { .. } => "execute_tool",
             Self::StartSandboxProcess { .. } => "start_sandbox_process",
             Self::WriteSandboxProcessStdin { .. } => "write_sandbox_process_stdin",
@@ -1275,6 +1327,102 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use super::*;
+
+    #[tokio::test]
+    async fn approvals_do_not_block_other_requests_output_or_runner_exit() -> Result<()> {
+        use crate::{BasicToolRuntime, test_support::local_test_config};
+        use exoharness::{BasicExoHarness, NewAgentRequest};
+
+        let temp = tempfile::TempDir::new()?;
+        let stop = temp.path().join("stop");
+        let module = temp.path().join("approvals.mjs");
+        std::fs::write(
+            &module,
+            format!(
+                r#"
+import {{ existsSync }} from "node:fs";
+export default {{
+  async runTurn(context) {{
+    const pending = [1, 2].map(() => context.authorizeTool({{
+      functionName: "shell", arguments: {{ command: "true" }}
+    }}));
+    await context.stream.text("waiting for approvals");
+    const timer = setInterval(() => {{
+      if (existsSync({})) process.exit(17);
+    }}, 10);
+    await Promise.all(pending);
+    clearInterval(timer);
+  }}
+}};
+"#,
+                serde_json::to_string(&stop)?
+            ),
+        )?;
+        let state =
+            Arc::new(BasicExoHarness::new(local_test_config(temp.path().join("state"))).await?);
+        let agent = state
+            .new_agent(NewAgentRequest {
+                slug: "approvals".into(),
+                name: "Approvals".into(),
+                vaults: vec![],
+            })
+            .await?;
+        let thread = agent.new_conversation(Default::default()).await?;
+        let turn = thread.begin_turn(Default::default()).await?;
+        let config: AgentConfig = serde_json::from_value(serde_json::json!({
+            "instructions": [],
+            "harness": "typescript",
+            "typescript": {"module_path": module},
+            "sandbox": {"provider": "local_process"},
+            "model": "gpt-5-mini"
+        }))?;
+        let mut conversation_config = ConversationConfig::default();
+        conversation_config.permissions.tool_policies.insert(
+            "shell".into(),
+            exo_managed_agents::permissions::PermissionPolicy::AlwaysAsk {},
+        );
+        let executor = TypeScriptExecutor::new(
+            state,
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+            HashMap::new(),
+            Arc::new(BasicToolRuntime),
+        );
+        let request = SendRequest {
+            input: vec![],
+            session_id: None,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let execution = executor.execute_turn(
+            agent.as_ref(),
+            thread.clone(),
+            turn,
+            &config,
+            &conversation_config,
+            &request,
+            ExecutorStreamMode::Enabled(&tx),
+            None,
+        );
+        tokio::pin!(execution);
+        let mut approvals = 0;
+        let mut streamed = false;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while approvals < 2 || !streamed {
+                tokio::select! {
+                    result = &mut execution => panic!("runner stopped before emitting both approvals and output: {result:?}"),
+                    event = rx.recv() => match event.context("stream closed")?? {
+                        ExecutionStreamEvent::ApprovalRequested { .. } => approvals += 1,
+                        ExecutionStreamEvent::Chunk(_) => streamed = true,
+                        _ => {}
+                    }
+                }
+            }
+            std::fs::write(&stop, "stop")?;
+            let error = execution.await.expect_err("runner exited with approvals pending");
+            assert!(format!("{error:#}").contains("17"), "{error:#}");
+            Ok::<_, anyhow::Error>(())
+        }).await??;
+        Ok(())
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn latest_sandbox_process_event_cursor_pages_to_latest_cursor() {

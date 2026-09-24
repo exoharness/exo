@@ -18,8 +18,15 @@ refreshes expiring tokens when it uses the MCP server. You can restart the CLI
 and run the same chat command without logging in again. Use `--no-browser` to
 open the printed authorization URL yourself.
 
-Ask it to find a page and summarize it with links to its sources. The example
-asks before writes; it does not enforce a read-only tool policy.
+Ask it to find a page and summarize it with links to its sources. MCP tools
+require approval by default: the CLI shows the tool and arguments, then asks
+whether to allow once, deny, or allow that tool for the session. This is separate
+from the model asking for confirmation in conversation. Built-in tools default
+to `always_allow`.
+
+To allow all calls to a trusted MCP server without prompting, add
+`permission_policy: {type: always_allow}` to that server's `mcp_servers` entry.
+Use `allowed_tools` or `blocked_tools` to restrict which tools are available.
 
 To reconnect an expired or revoked grant, or remove the local credential:
 

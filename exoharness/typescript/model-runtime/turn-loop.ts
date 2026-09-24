@@ -6,6 +6,7 @@ import {
   registerLegacyAgentToolsFromDirectoryIfExists,
   registerLibraryToolModulePath,
   turnMetadata,
+  validateToolPolicies,
   type BuiltInToolName,
   type EventData,
   type HarnessToolRegistry,
@@ -126,6 +127,7 @@ async function runResponsesTurnLoop(
     }
     for (const definition of context.tools) {
       tools.register({
+        authorization: "runtime",
         definition,
         source: "built_in",
         handler: {
@@ -137,6 +139,11 @@ async function runResponsesTurnLoop(
         },
       });
     }
+    const definitions = tools.definitions();
+    validateToolPolicies(
+      context,
+      definitions.map((tool) => tool.name),
+    );
     const messages = await materializePromptMessages(
       conversation,
       options.instructions
@@ -146,7 +153,7 @@ async function runResponsesTurnLoop(
     const request: NativeResponsesRequest = {
       model,
       messages,
-      tools: tools.definitions(),
+      tools: definitions,
       maxOutputTokens: context.agentConfig.maxOutputTokens,
       metadata: turnMetadata(context),
     };

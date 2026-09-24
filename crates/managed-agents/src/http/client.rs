@@ -312,6 +312,20 @@ impl RuntimeClient {
             .await
     }
 
+    pub async fn turn_status(
+        &self,
+        agent_id: AgentId,
+        thread_id: ThreadId,
+        turn_id: TurnId,
+    ) -> Result<TurnStatusResult> {
+        self.http
+            .json(self.http.request(
+                Method::GET,
+                &format!("{}/turn/{turn_id}", thread_path(agent_id, thread_id)),
+            )?)
+            .await
+    }
+
     pub async fn cancel_turn(
         &self,
         agent_id: AgentId,

@@ -5,6 +5,7 @@ import path from "node:path";
 
 import {
   buildShellToolDefinitions,
+  validateToolPolicies,
   createShellToolInstance,
   createToolRegistry,
   initializeTool,
@@ -1373,6 +1374,7 @@ function fakeTurnContext(
         },
       },
     },
+    authorizeTool: async () => {},
     executeTool: options.executeTool ?? (async () => null),
     async startSandboxProcess() {
       throw new Error("not implemented");
@@ -1406,3 +1408,71 @@ function fakeTurnContext(
     },
   } as unknown as TurnContext;
 }
+
+it("does not execute a TypeScript tool after its approval is denied", async () => {
+  const context = fakeTurnContext();
+  let executed = false;
+  context.authorizeTool = async () => {
+    throw new Error("tool denied");
+  };
+  const registry = createToolRegistry(context).register({
+    source: "library",
+    definition: {
+      name: "write",
+      description: "Write a file",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+    handler: {
+      async execute() {
+        executed = true;
+        return { ok: true };
+      },
+    },
+  });
+  const events = await registry.executePending([
+    { toolCallId: "denied", request: { functionName: "write", arguments: {} } },
+  ]);
+  expect(executed).toBe(false);
+  expect(JSON.stringify(events)).toContain("tool denied");
+});
+
+describe("tool policy validation", () => {
+  it("accepts runtime shell approvals when native approvals are unsupported", () => {
+    const context = fakeTurnContext({
+      conversationConfig: {
+        shellProgram: "/bin/sh",
+        mounts: [],
+        toolPolicies: { shell: { type: "always_ask" } },
+      },
+    });
+    expect(() => validateToolPolicies(context, ["shell"], false)).not.toThrow();
+    context.conversationConfig.permissionPolicy = { type: "always_ask" };
+    expect(() => validateToolPolicies(context, ["shell"], false)).toThrow(
+      "cannot enforce always_ask",
+    );
+  });
+
+  it("checks exact native and registered tool names", () => {
+    const context = fakeTurnContext({
+      conversationConfig: {
+        mounts: [],
+        toolPolicies: { Bash: { type: "always_ask" } },
+      },
+    });
+    expect(() => validateToolPolicies(context, ["claude.Bash"])).toThrow(
+      "unknown tool in tool_policies: Bash",
+    );
+    context.conversationConfig.toolPolicies = {
+      "claude.Bash": { type: "always_ask" },
+    };
+    expect(() => validateToolPolicies(context, ["claude.Bash"])).not.toThrow();
+    context.conversationConfig.toolPolicies = {
+      custom_tool: { type: "always_ask" },
+    };
+    expect(() => validateToolPolicies(context, ["custom_tool"])).not.toThrow();
+  });
+});

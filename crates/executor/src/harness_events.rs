@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use exoharness::{ConversationHandle, EventData, TurnHandle};
+use futures::StreamExt;
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
 
 use crate::harness::{
@@ -139,4 +140,76 @@ impl HarnessEventHandler for HarnessEvents {
             }
         }
     }
+}
+
+pub(crate) fn turn_stream(
+    events: exoharness::EventStream,
+    turn: exoharness::TurnRecord,
+) -> impl futures::Stream<Item = Result<crate::ExecutionStreamEvent>> + Send {
+    futures::stream::try_unfold(Some((events, None)), move |state| {
+        let turn = turn.clone();
+        async move {
+            let Some((mut events, mut failure)) = state else {
+                return Ok(None);
+            };
+            loop {
+                let event = events.next().await.context(
+                    "runtime progress disconnected; reconnect to retrieve saved history",
+                )??;
+                if event.turn_id != Some(turn.id) {
+                    continue;
+                }
+                use crate::ExecutionStreamEvent as Output;
+                let output = match event.data {
+                    EventData::Custom {
+                        event_type,
+                        payload,
+                    } if event_type == crate::permissions::APPROVAL_REQUESTED => {
+                        Some(Output::ApprovalRequested {
+                            turn: turn.clone(),
+                            approval: serde_json::from_value(payload)?,
+                        })
+                    }
+                    EventData::LinguaStreamChunk { chunk } => Some(Output::Chunk(chunk)),
+                    EventData::ToolRequested {
+                        tool_call_id,
+                        request,
+                        ..
+                    } => Some(Output::ToolCall {
+                        tool_call_id,
+                        tool_name: request.function_name,
+                        arguments: request.arguments,
+                    }),
+                    EventData::ToolResult {
+                        tool_call_id,
+                        result,
+                    } => Some(Output::ToolResult {
+                        tool_call_id,
+                        result,
+                    }),
+                    EventData::Error { message, .. } => {
+                        failure = Some(message);
+                        None
+                    }
+                    EventData::TurnEnded => {
+                        if let Some(message) = failure {
+                            bail!(message);
+                        }
+                        return Ok(Some((
+                            Output::Completed(crate::SendResult {
+                                session_id: turn.session_id,
+                                turn_id: turn.id,
+                                latest_event_id: event.id,
+                            }),
+                            None,
+                        )));
+                    }
+                    _ => None,
+                };
+                if let Some(output) = output {
+                    return Ok(Some((output, Some((events, failure)))));
+                }
+            }
+        }
+    })
 }

@@ -153,12 +153,16 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 web::post().to(submit_turn),
             )
             .route(
+                "/agent/{agent_id}/thread/{thread_id}/turn/{turn_id}",
+                web::get().to(turn_status),
+            )
+            .route(
                 "/agent/{agent_id}/thread/{thread_id}/turn/{turn_id}/cancel",
                 web::post().to(cancel_turn),
             )
             .route(
                 "/agent/{agent_id}/thread/{thread_id}/turn/{turn_id}/approval-response",
-                web::post().to(unsupported_interaction),
+                web::post().to(approval_response),
             )
             .route(
                 "/agent/{agent_id}/thread/{thread_id}/turn/{turn_id}/frontend-tool-result",
@@ -705,6 +709,20 @@ async fn submit_turn(
     Ok(HttpResponse::Accepted().json(result))
 }
 
+async fn turn_status(
+    service: web::Data<Arc<RuntimeHttpService>>,
+    path: web::Path<TurnPath>,
+) -> Result<web::Json<TurnStatusResult>, Error> {
+    let agent = service.agent(path.agent_id).await?;
+    let thread = service.thread(agent.as_ref(), path.thread_id).await?;
+    let active = service
+        .runtime_for(path.agent_id)
+        .is_turn_active(thread.as_ref(), path.turn_id)
+        .await
+        .map_err(ErrorInternalServerError)?;
+    Ok(web::Json(TurnStatusResult { active }))
+}
+
 async fn cancel_turn(
     service: web::Data<Arc<RuntimeHttpService>>,
     path: web::Path<TurnPath>,
@@ -722,9 +740,24 @@ async fn cancel_turn(
     }))
 }
 
+async fn approval_response(
+    service: web::Data<Arc<RuntimeHttpService>>,
+    path: web::Path<TurnPath>,
+    body: web::Json<ApprovalResponseBody>,
+) -> Result<web::Json<EventResult>, Error> {
+    let agent = service.agent(path.agent_id).await?;
+    service.thread(agent.as_ref(), path.thread_id).await?;
+    let event_id = service
+        .runtime_for(path.agent_id)
+        .approval_response(path.agent_id, path.thread_id, path.turn_id, &body)
+        .await
+        .map_err(ErrorBadRequest)?;
+    Ok(web::Json(EventResult { event_id }))
+}
+
 async fn unsupported_interaction() -> Result<HttpResponse, Error> {
     Err(ErrorNotImplemented(
-        "this runtime does not execute frontend tools or approval requests",
+        "this runtime does not execute frontend tools",
     ))
 }
 
@@ -741,10 +774,15 @@ async fn events(
             cursor: query.after,
             direction: Some(query.direction.unwrap_or(EventQueryDirection::Asc)),
             limit: Some(query.limit.unwrap_or(100)),
-            types: query
-                .event_type
-                .map(|name| vec![exoharness::EventKind::custom(name)]),
-            ..Default::default()
+            types: query.event_type.map(|names| {
+                names
+                    .split(',')
+                    .filter(|name| !name.is_empty())
+                    .map(|name| exoharness::EventKind::custom(name.to_owned()))
+                    .collect()
+            }),
+            session_id: query.session_id,
+            turn_id: query.turn_id,
         }))
         .await
         .map_err(ErrorBadRequest)?;

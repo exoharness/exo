@@ -144,7 +144,7 @@ when the CLI starts. All tools are available unless the server entry specifies
 `allowed_tools: []` exposes no tools. If both lists are set, blocked tools are
 removed from the allowed set. Unknown tool names are errors.
 
-Tools run without an approval prompt. Names are scoped to their
+Tool policies control approval prompts. Names are scoped to their
 server, such as `exo_mcp__deepwiki__read_wiki_structure`. Thread events also record
 the mapping to the original server and tool names.
 
@@ -152,6 +152,53 @@ Codex uses the pinned 0.153.4 app-server inside the sandbox. It resumes its nati
 thread after a restart when that state is available. Otherwise, it replays Exo's
 events with structured tool calls and results, compacting between batches instead
 of truncating history. The Markdown body supplies developer instructions while preserving Codex's built-in instructions.
+
+## Permission policies
+
+Built-in tools use their individual policy, then the agent default (`always_allow`).
+MCP tools use the top-level exposed-tool policy, then the server's individual-tool
+policy, then the server default. Without one of those policies, MCP tools use
+`always_ask`; the agent default does not apply to MCP tools:
+
+```yaml
+permission_policy: { type: always_allow }
+tool_policies:
+  shell: { type: always_ask }
+mcp_servers:
+  - type: url
+    name: notion
+    url: https://mcp.notion.com/mcp
+    permission_policy: { type: always_ask }
+    tool_policies:
+      notion-search: { type: always_allow }
+```
+
+Top-level tool names use the exposed name, such as `shell`, `claude.Bash`, or `exo_mcp__notion__notion-search`. Entries under an MCP server use
+its original tool names. Use `allowed_tools` or `blocked_tools` to disable tools.
+
+For saved managed agents, definition permissions override thread permissions. Each
+turn lists artifacts and reads the saved definition, so edits apply to the next
+turn on existing local and HTTP threads. Agents without a saved definition keep
+using their thread permissions.
+
+The CLI shows the tool and arguments before asking. Enter `y` to allow once,
+`n` to deny, or `a` to allow that tool for the current session. Denial becomes a
+tool error so the agent can continue; Ctrl+C cancels the turn. Requests and
+responses are saved in thread events. Session-wide allowances survive reconnecting
+to the same session; changing a policy to `always_ask` does not revoke an existing
+allowance. Local and HTTP providers use the same flow, and inline chat reconnects
+to a saved HTTP turn's pending approval.
+
+Policies cover basic/RLM tools, registered TypeScript tools, MCP
+tools, and Claude Code's native `PreToolUse` hook. Custom TypeScript harnesses that
+execute their own tools must declare `nativeToolApprovals: true`, validate their
+active tool inventory with `validateToolPolicies`, and call `context.authorizeTool`
+before execution. `context.executeTool` already enforces the policy. Harness
+implementations remain trusted code.
+Codex, Cursor, and Pi currently reject native `always_ask` policies that their Exo
+adapters cannot enforce. Codex supports policies on its runtime MCP tools; its
+native shell does not support approval policies in this adapter. Keep its agent
+default `always_allow` and apply MCP tool overrides.
 
 ## Vaults
 
@@ -271,6 +318,11 @@ HTTP `--agent-file` runs use isolated in-memory state. The CLI renews their
 reaped every 30 seconds after expiry; cleanup cancels their execution without
 stopping saved agents. Saved HTTP turns continue after the CLI disconnects;
 reopening their thread recovers durable history, not missed streaming previews.
+
+`GET /agent/{agent_id}/thread/{thread_id}/turn/{turn_id}` under the runtime base URL
+returns an `active` boolean, using the same bearer authentication and agent/thread
+validation as other runtime endpoints. Reconnection skips saved turns whose provider
+is no longer running them.
 
 The workflow tests launch the real CLI and OSS HTTP service with a local model
 fixture, so they need no external deployment or model credentials:

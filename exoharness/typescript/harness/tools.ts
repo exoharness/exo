@@ -30,6 +30,7 @@ export interface ToolInstance {
   definition: ToolDefinition;
   source: HarnessToolSource;
   handler: ToolHandler;
+  authorization?: "runtime";
 }
 
 export interface ToolInitializationContext {
@@ -122,6 +123,9 @@ export class HarnessToolRegistry {
         toolName: toolCall.request.functionName,
         arguments: toolCall.request.arguments,
       });
+    }
+    if (tool.authorization !== "runtime") {
+      await this.context.authorizeTool(toolCall.request);
     }
     const result = await tool.handler.execute(toolCall.request.arguments, {
       context: this.context,

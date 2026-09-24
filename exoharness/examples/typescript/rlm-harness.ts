@@ -15,6 +15,7 @@ import {
   toolResultMessage,
   turnMetadata,
   userTextMessage,
+  validateToolPolicies,
   type HistoryMessage,
   type JsonObject,
   type JsonValue,
@@ -81,7 +82,12 @@ type FinalDirective =
   | { type: "variable"; name: string };
 
 export default defineHarness({
+  nativeToolApprovals: true,
   async runTurn(context) {
+    validateToolPolicies(
+      context,
+      buildRlmToolDefinitions().map((tool) => tool.name),
+    );
     const modelBinding = await resolveLlmBinding(context);
     const runtime = ResponsesRuntime.fromModelBinding(
       context.agentConfig,
@@ -317,6 +323,7 @@ async function traceRlmToolCall(
     turnParent,
     async (span) => {
       try {
+        await context.authorizeTool(toolCall.request);
         const result = await executeRlmTool(
           runtime,
           context,

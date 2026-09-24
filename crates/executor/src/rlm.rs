@@ -180,26 +180,42 @@ where
                 )
                 .await?;
 
-                let tool_result = if external_names.contains(&tool_call.request.function_name) {
-                    self.tools
-                        .execute(
-                            agent,
-                            conversation,
-                            Some(turn),
+                let tool_result = async {
+                    crate::permissions::authorize(
+                        conversation,
+                        turn,
+                        self.tools.permission_policy(
+                            &conversation_config.permissions,
+                            &tool_call.request.function_name,
+                        ),
+                        &tool_call.request,
+                        event_tx
+                            .map(ExecutorStreamMode::Enabled)
+                            .unwrap_or(ExecutorStreamMode::Disabled),
+                    )
+                    .await?;
+                    if external_names.contains(&tool_call.request.function_name) {
+                        self.tools
+                            .execute(
+                                agent,
+                                conversation,
+                                Some(turn),
+                                agent_config,
+                                conversation_config,
+                                &tool_call.request,
+                            )
+                            .await
+                    } else {
+                        self.execute_tool_call(
+                            &mut js_state,
                             agent_config,
-                            conversation_config,
+                            &model_binding,
                             &tool_call.request,
                         )
                         .await
-                } else {
-                    self.execute_tool_call(
-                        &mut js_state,
-                        agent_config,
-                        &model_binding,
-                        &tool_call.request,
-                    )
-                    .await
-                };
+                    }
+                }
+                .await;
                 let result = match tool_result {
                     Ok(result) => {
                         if let Some(tool_trace) = tool_trace {
@@ -429,6 +445,12 @@ where
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
     ) -> Result<()> {
+        conversation_config.permissions.validate_tool_names(
+            build_rlm_tool_definitions()
+                .iter()
+                .chain(self.tools.definitions().iter())
+                .map(|tool| tool.name.as_str()),
+        )?;
         self.tools
             .prepare_conversation(agent, conversation, agent_config, conversation_config)
             .await
