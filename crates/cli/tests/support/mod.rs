@@ -95,8 +95,7 @@ impl Fixture {
         let endpoint = format!("http://{}/exo", listener.local_addr()?);
         let service = Arc::new(RuntimeHttpService::new(
             runtime.clone(),
-            "workflow-token",
-            config,
+            Some("workflow-token"),
         )?);
         let contexts = Arc::new(Mutex::new(Vec::new()));
         let recorded = contexts.clone();
@@ -127,8 +126,16 @@ impl Fixture {
             server,
             contexts,
         };
-        f.cli(&["secret", "create", "model-key", "--env", "SMOKE_API_KEY"])
-            .await?;
+        f.cli(&[
+            "vault",
+            "secret",
+            "create",
+            "global",
+            "model-key",
+            "--token-env",
+            "SMOKE_API_KEY",
+        ])
+        .await?;
         f.cli(&[
             "model",
             "create",

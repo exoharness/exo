@@ -13,11 +13,15 @@ use exoharness::{
     ReadArtifactRequest, SessionId, ThreadHandle, Uuid7, WriteArtifactRequest,
 };
 use mcp::McpServerDefinition;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// An empty latest artifact means no saved definition, allowing a rejected first
 /// upload to be rolled back without deleting artifact history.
 pub const AGENT_DEFINITION_PATH: &str = "managed-agents/agent.md";
+
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,18 +29,29 @@ pub struct AgentFrontmatter {
     pub name: String,
     pub harness: String,
     pub config: AgentModelConfig,
+    pub sandbox: Option<AgentSandboxConfig>,
     #[serde(default)]
     pub permission_policy: permissions::PermissionPolicy,
     #[serde(default)]
     pub tool_policies: std::collections::BTreeMap<String, permissions::PermissionPolicy>,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerDefinition>,
+    #[serde(default)]
+    pub tools: Vec<PathBuf>,
+    #[serde(default)]
+    pub tool_creation: bool,
+    #[serde(default)]
+    pub adapters: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentModelConfig {
+    pub braintrust: Option<BraintrustTracingConfig>,
+    pub module: Option<PathBuf>,
     pub model: String,
+    pub max_output_tokens: Option<i64>,
+    pub max_tool_round_trips: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -79,6 +94,18 @@ impl AgentDefinition {
             }
         }
         mcp::validate_servers(&frontmatter.mcp_servers)?;
+        for (index, name) in frontmatter.adapters.iter().enumerate() {
+            if name.is_empty()
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                bail!("adapter names may only contain letters, numbers, '-' and '_'");
+            }
+            if frontmatter.adapters[..index].contains(name) {
+                bail!("duplicate adapter: {name}");
+            }
+        }
         Ok(Self {
             frontmatter,
             instructions,
@@ -304,6 +331,44 @@ pub async fn open_thread(
         created,
         info: configured?,
     })
+}
+
+/// Agent-level defaults for conversation sandboxes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSandboxConfig {
+    /// Default scope for conversation that don't specify a `sandbox_scope`.
+    #[serde(default)]
+    pub scope: SandboxScope,
+    #[serde(default)]
+    pub image: Option<String>,
+    pub provider: exoharness::SandboxProvider,
+    /// Mounts for the agent-scoped sandbox. These apply to every conversation
+    /// that uses the shared agent sandbox.
+    #[serde(default)]
+    pub mounts: Vec<exoharness::FileSystemMount>,
+    #[serde(default = "default_true")]
+    pub enable_networking: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxScope {
+    Agent,
+    #[default]
+    Conversation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BraintrustTracingConfig {
+    pub org_name: Option<String>,
+    pub project: BraintrustProject,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
+pub enum BraintrustProject {
+    Name(String),
+    Id(String),
 }
 
 #[cfg(test)]

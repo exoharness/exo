@@ -47,7 +47,16 @@ async fn environments_are_sent_to_the_provider_and_frozen_per_thread() -> Result
         f.cli(&["agent", "create", "saved", "--file", agent_file])
             .await?;
         let output = f
-            .cli(&["run", "--agent", "saved", "--environment", "dev", "first"])
+            .cli(&[
+                "agent",
+                "run",
+                "--agent",
+                "saved",
+                "--environment",
+                "dev",
+                "--prompt",
+                "first",
+            ])
             .await?;
         let slug = thread_slug(&output)?;
         let agent =
@@ -78,6 +87,7 @@ async fn environments_are_sent_to_the_provider_and_frozen_per_thread() -> Result
         let rejected = f
             .output(
                 &[
+                    "agent",
                     "run",
                     "--agent",
                     "saved",
@@ -85,6 +95,7 @@ async fn environments_are_sent_to_the_provider_and_frozen_per_thread() -> Result
                     slug,
                     "--environment",
                     "dev",
+                    "--prompt",
                     "changed",
                 ],
                 None,
@@ -102,19 +113,23 @@ async fn environments_are_sent_to_the_provider_and_frozen_per_thread() -> Result
                 .lines()
                 .any(|line| line == "dev")
         );
-        f.cli(&["run", "--agent", "saved", "--thread", slug, "resumed"])
-            .await?;
+        f.cli(&[
+            "agent", "run", "--agent", "saved", "--thread", slug, "--prompt", "resumed",
+        ])
+        .await?;
         let thread = exo_managed_agents::find_thread(agent.as_ref(), slug).await?;
         let sandboxes = thread.list_sandboxes().await?;
         assert_eq!(sandboxes.len(), 1);
         assert_eq!(sandboxes[0].id, sandbox);
         let second = f
             .cli(&[
+                "agent",
                 "run",
                 "--agent",
                 "saved",
                 "--environment-file",
                 path,
+                "--prompt",
                 "new environment",
             ])
             .await?;
@@ -123,17 +138,19 @@ async fn environments_are_sent_to_the_provider_and_frozen_per_thread() -> Result
         assert_ne!(second.list_sandboxes().await?[0].id, sandbox);
         f.cli(&["environment", "create", "dev", "--file", path])
             .await?;
-        let temporary = f
+        let file_run = f
             .cli(&[
+                "agent",
                 "run",
                 "--agent-file",
                 agent_file,
                 "--environment",
                 "dev",
-                "temporary",
+                "--prompt",
+                "file run",
             ])
             .await?;
-        assert!(temporary.contains("Workflow reply."));
+        assert!(file_run.contains("Workflow reply."));
         let mut unsupported = environment.clone();
         unsupported.config.policy = Some(exoharness::EgressPolicy {
             networking: exoharness::SandboxNetworkPolicy::Limited {
@@ -146,11 +163,13 @@ async fn environments_are_sent_to_the_provider_and_frozen_per_thread() -> Result
         let rejected = f
             .output(
                 &[
+                    "agent",
                     "run",
                     "--agent",
                     "saved",
                     "--environment-file",
                     path,
+                    "--prompt",
                     "unsupported network",
                 ],
                 None,

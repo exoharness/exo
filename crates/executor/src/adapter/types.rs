@@ -10,6 +10,7 @@ use serde_json::Value;
 pub enum AdapterSource {
     #[serde(alias = "built_in")]
     Library,
+    Spec,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -38,6 +39,8 @@ pub struct AdapterConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerSecretEnvVar {
+    #[serde(default)]
+    pub vault: Option<String>,
     pub env: String,
     pub secret_id: String,
 }

@@ -94,17 +94,10 @@ fn configured_runtime(
 ) -> Result<Runtime> {
     let setup = executor::managed_agents::LocalAgentSetup {
         agent: definition
-            .map(|definition| {
-                local_agent_config(
-                    definition,
-                    &harness_selection(definition)?,
-                    args.model.as_deref(),
-                )
-            })
+            .map(|definition| local_agent_config(definition, &harness_selection(definition)?, None))
             .transpose()?,
         model: args.model.clone(),
         thread: args.local_config()?,
-        temporary: args.agent_file.is_some(),
     };
     Ok(Runtime::new(
         LocalProvider::basic(
@@ -141,29 +134,6 @@ fn thread_args(agent: &str) -> ThreadArgs {
         mounts: Vec::new(),
         verbosity: Verbosity::Minimal,
     }
-}
-
-async fn temporary_harness(saved: &Runtime) -> Result<Arc<Runtime>> {
-    let storage = BasicExoHarness::in_memory(
-        BasicExoHarnessConfig {
-            root: PathBuf::new(),
-            secret_backend: SecretBackendChoice::Static([0; 32]),
-            sandbox_default: SandboxProvider::LocalProcess,
-            sandbox_policy: None,
-            sandbox_backends: vec![SandboxBackendRegistration::local_process()],
-        },
-        Some(saved.exoharness_handle().as_ref()),
-    )
-    .await?;
-    Ok(Arc::new(Runtime::new(
-        LocalProvider::basic(
-            Arc::new(storage),
-            Arc::new(RecordingModel::default()),
-            Arc::new(BasicToolRuntime),
-            Arc::new(cost::PricingTable::empty()),
-        ),
-        None,
-    )))
 }
 
 #[tokio::test]
@@ -253,35 +223,30 @@ async fn saved_definition_and_turn_history_survive_reopening_without_source() ->
 }
 
 #[tokio::test]
-async fn file_runs_use_isolated_memory_and_mounts_stay_on_threads() -> Result<()> {
+async fn file_runs_reuse_saved_agents_and_mounts_stay_on_threads() -> Result<()> {
     let temp = TempDir::new()?;
     let runtime = harness(
         &temp.path().join("state"),
         Arc::new(RecordingModel::default()),
     )
     .await?;
-    let definition = AgentDefinition::parse(SOURCE.to_string())?;
+    let path = temp.path().join("agent.md");
+    std::fs::write(&path, SOURCE)?;
+    let definition = AgentDefinition::load(&path)?;
     let mut args = thread_args("unused");
     args.agent = None;
-    args.agent_file = Some(PathBuf::from("agent.md"));
+    args.agent_file = Some(path);
     args.mounts.push(
         crate::parse_sandbox_mount(&format!("{}:/workspace/tickets:ro", temp.path().display()))
             .unwrap(),
     );
-    let first_runtime = temporary_harness(runtime.as_ref()).await?;
-    let second_runtime = temporary_harness(runtime.as_ref()).await?;
     let (first, thread) =
-        open_configured_thread(first_runtime.as_ref(), Some(&definition), &args).await?;
-    let (second, _) =
-        open_configured_thread(second_runtime.as_ref(), Some(&definition), &args).await?;
-    assert_ne!(first.record().id, second.record().id);
-    assert!(runtime.list_agents().await?.is_empty());
-    assert!(
-        second_runtime
-            .get_agent(&first.record().id.to_string())
-            .await?
-            .is_none()
-    );
+        open_configured_thread(runtime.as_ref(), Some(&definition), &args).await?;
+    let (second, second_thread) =
+        open_configured_thread(runtime.as_ref(), Some(&definition), &args).await?;
+    assert_eq!(first.record().id, second.record().id);
+    assert_ne!(thread.record().id, second_thread.record().id);
+    assert_eq!(runtime.list_agents().await?.len(), 1);
     assert!(
         executor::load_agent_config(first.as_ref())
             .await?
@@ -299,11 +264,11 @@ async fn file_runs_use_isolated_memory_and_mounts_stay_on_threads() -> Result<()
     let mut resume = thread_args(&first.record().slug);
     resume.thread = Some("missing".to_string());
     assert!(
-        open_configured_thread(first_runtime.as_ref(), None, &resume)
+        open_configured_thread(runtime.as_ref(), None, &resume)
             .await
             .is_err()
     );
-    assert_eq!(managed::list_threads(first.as_ref()).await?.len(), 1);
+    assert_eq!(managed::list_threads(first.as_ref()).await?.len(), 2);
     Ok(())
 }
 
@@ -316,26 +281,34 @@ async fn unregistered_file_model_uses_registered_default_but_explicit_model_is_s
         Arc::new(RecordingModel::default()),
     )
     .await?;
-    let definition = AgentDefinition::parse(SOURCE.replace("gpt-5.4", "gpt-5.6-sol"))?;
+    let path = temp.path().join("agent.md");
+    std::fs::write(&path, SOURCE.replace("gpt-5.4", "gpt-5.6-sol"))?;
+    let definition = AgentDefinition::load(&path)?;
     let mut args = thread_args("unused");
     args.agent = None;
-    args.agent_file = Some(PathBuf::from("agent.md"));
+    args.agent_file = Some(path);
     let (agent, thread) =
         open_configured_thread(runtime.as_ref(), Some(&definition), &args).await?;
-    assert_eq!(executor::load_agent_config(&*agent).await?.model, "gpt-5.4");
-    assert!(
+    assert_eq!(
+        executor::load_agent_config(&*agent).await?.model,
+        "gpt-5.6-sol"
+    );
+    assert_eq!(
         executor::get_conversation_model_override(thread.as_ref())
             .await?
-            .is_none()
+            .context("registered fallback model")?
+            .model,
+        "gpt-5.4"
     );
     args.model = Some("gpt-5.4".to_string());
-    let temporary = temporary_harness(runtime.as_ref()).await?;
     let (_, explicit_thread) =
-        open_configured_thread(temporary.as_ref(), Some(&definition), &args).await?;
-    assert!(
+        open_configured_thread(runtime.as_ref(), Some(&definition), &args).await?;
+    assert_eq!(
         executor::get_conversation_model_override(explicit_thread.as_ref())
             .await?
-            .is_none()
+            .context("explicit model")?
+            .model,
+        "gpt-5.4"
     );
     args.model = Some("missing".to_string());
     assert!(
@@ -351,7 +324,7 @@ async fn unregistered_file_model_uses_registered_default_but_explicit_model_is_s
             .await
             .is_err()
     );
-    assert_eq!(managed::list_threads(agent.as_ref()).await?.len(), 1);
+    assert_eq!(managed::list_threads(agent.as_ref()).await?.len(), 2);
     Ok(())
 }
 
@@ -407,10 +380,35 @@ fn module_harness_paths_are_relative_to_the_agent_file() -> Result<()> {
         &source,
         SOURCE.replace("harness: basic", "harness: ./harness.ts"),
     )?;
+    std::fs::write(temp.path().join("harness.ts"), "export default {};")?;
+    std::fs::write(temp.path().join("tools.ts"), "export default {};")?;
+    std::fs::write(
+        &source,
+        SOURCE.replace(
+            "harness: basic",
+            "harness: ./harness.ts\ntools: [./tools.ts]\ntool_creation: true",
+        ),
+    )?;
     let definition = AgentDefinition::load(&source)?;
     assert!(
         matches!(harness_selection(&definition)?, HarnessSelection::TypeScriptModule(path)
         if path == temp.path().join("harness.ts"))
     );
+    let config = local_agent_config(&definition, &harness_selection(&definition)?, None)?;
+    assert!(config.enable_agent_tool_creation);
+    assert_eq!(
+        config.typescript.unwrap().tool_module_paths,
+        vec![
+            temp.path()
+                .join("tools.ts")
+                .canonicalize()?
+                .to_string_lossy()
+                .into_owned()
+        ]
+    );
+    let basic = AgentDefinition::parse(
+        SOURCE.replace("harness: basic", "harness: basic\ntools: [./tools.ts]"),
+    )?;
+    assert!(local_agent_config(&basic, &harness_selection(&basic)?, None).is_err());
     Ok(())
 }

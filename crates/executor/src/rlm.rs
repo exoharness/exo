@@ -427,13 +427,6 @@ impl<M> HarnessExecutor for RlmExecutor<M>
 where
     M: ModelClient + 'static,
 {
-    fn fork(&self, _state: Arc<dyn exoharness::ExoHarness>) -> Result<Arc<dyn HarnessExecutor>> {
-        Ok(Arc::new(Self {
-            model: self.model.clone(),
-            tools: self.tools.clone(),
-        }))
-    }
-
     fn name(&self) -> &'static str {
         "rlm"
     }

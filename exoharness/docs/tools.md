@@ -95,14 +95,8 @@ filesystem location in the host harness.
 `inspect_tools` is read-only. Its `list` and `get` operations inspect either
 tools active in the current round or tools installed in the workspace registry.
 
-The operator CLI is read-only:
-
-```text
-exo tools list
-exo tools get <id>
-```
-
-It does not install, replace, or remove tools.
+Declare tool modules in the agent spec with `tools: [./tools.ts]`.
+Use `exo agent get NAME` to inspect the saved definition and resolved module paths.
 
 ## Bootstrap surface
 

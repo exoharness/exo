@@ -68,12 +68,8 @@ subdirectories. For a tool created with sandbox `shell`, write under
 round.
 
 `inspect_tools` is read-only and supports `list` and `get` for active or
-installed tools. The operator CLI is also read-only:
-
-```text
-exo tools list
-exo tools get <id>
-```
+installed tools. Declare tool modules in the agent spec with `tools: [./tools.ts]`;
+`exo agent get NAME` shows the saved spec and resolved module paths.
 
 ## Bootstrap and profiles
 

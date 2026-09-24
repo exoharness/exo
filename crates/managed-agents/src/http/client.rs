@@ -9,7 +9,6 @@ use super::{protocol::*, sse};
 #[derive(Clone)]
 pub struct RuntimeClient {
     http: HttpClient,
-    temporary_state: bool,
 }
 
 impl RuntimeClient {
@@ -19,7 +18,6 @@ impl RuntimeClient {
         endpoint.set_path(&path);
         Ok(Self {
             http: HttpClient::new(endpoint)?,
-            temporary_state: false,
         })
     }
 
@@ -41,11 +39,6 @@ impl RuntimeClient {
         provider: std::sync::Arc<dyn exoharness::AccessTokenProvider>,
     ) -> Self {
         self.http = self.http.with_token_provider(provider);
-        self
-    }
-
-    pub fn with_temporary_state(mut self) -> Self {
-        self.temporary_state = true;
         self
     }
 
@@ -104,18 +97,7 @@ impl RuntimeClient {
         request: &exoharness::NewAgentRequest,
     ) -> Result<exoharness::AgentRecord> {
         self.http
-            .json(
-                self.http
-                    .request(
-                        Method::POST,
-                        if self.temporary_state {
-                            "agent/temporary"
-                        } else {
-                            "agent"
-                        },
-                    )?
-                    .json(request),
-            )
+            .json(self.http.request(Method::POST, "agent")?.json(request))
             .await
     }
 

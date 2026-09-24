@@ -191,7 +191,7 @@ impl SandboxBackendRegistration {
     /// is not macOS-only.
     pub fn smolvm() -> Self {
         // A factory, not a fixed backend: the binary paths are configured per
-        // binding (`exo sandbox-provider create --sandbox smolvm --smolvm-binary`),
+        // binding (`exo sandbox provider create --sandbox smolvm --smolvm-binary`),
         // so they have to be read when a request arrives rather than at startup —
         // the same shape daytona/e2b use for their credentials. The result is
         // cached per provider by `sandbox_backend_for_provider`, so this runs
@@ -268,7 +268,7 @@ impl SandboxBackendRegistration {
                 {
                     let config = _inner.aws_agentcore_config_from_binding().await?.ok_or_else(|| {
                         anyhow!(
-                            "aws-agentcore sandbox requested but no sandbox provider binding is configured; run `exo sandbox-provider create --sandbox aws-agentcore --runtime-arn <arn>`"
+                            "aws-agentcore sandbox requested but no sandbox provider binding is configured; run `exo sandbox provider create --sandbox aws-agentcore --runtime-arn <arn>`"
                         )
                     })?;
                     Ok(
@@ -448,8 +448,6 @@ struct BasicExoHarnessInner {
     running_processes: AsyncMutex<HashMap<SandboxProcessId, Arc<RunningSandboxProcess>>>,
     secret_cipher: SecretCipher,
     vaults: BasicVaultStore,
-    inherited_vaults: Vec<Arc<dyn VaultHandle>>,
-    inherited_global_vault: Option<Arc<dyn VaultHandle>>,
 }
 
 impl BasicExoHarnessInner {
@@ -665,10 +663,7 @@ impl BasicExoHarnessInner {
         &self,
         predicate: impl Fn(&SecretMetadata) -> bool,
     ) -> Result<Option<Secret>> {
-        let vault = match &self.inherited_global_vault {
-            Some(vault) => vault.clone(),
-            None => self.vaults.global_vault().await?,
-        };
+        let vault = self.vaults.global_vault().await?;
         let metadata = vault.list_secrets().await?.into_iter().find(predicate);
         match metadata {
             Some(metadata) => vault.get_secret(&metadata.id).await,
@@ -693,12 +688,6 @@ impl BasicExoHarnessInner {
             .vaults
             .get_vault(&reference.vault_id)
             .await?
-            .or_else(|| {
-                self.inherited_vaults
-                    .iter()
-                    .find(|v| v.record().id == reference.vault_id)
-                    .cloned()
-            })
             .context("sandbox credential vault is unavailable")?
             .get_secret(&reference.secret_id)
             .await?
@@ -908,41 +897,10 @@ fn nonempty_env(name: &str) -> Option<String> {
 }
 
 impl BasicExoHarness {
-    /// Temporary state always uses a fresh encryption key, ignoring `config.secret_backend`.
-    pub async fn in_memory(
-        mut config: BasicExoHarnessConfig,
-        globals: Option<&dyn ExoHarness>,
-    ) -> Result<Self> {
+    /// In-memory state uses a fresh encryption key, ignoring `config.secret_backend`.
+    pub async fn in_memory(mut config: BasicExoHarnessConfig) -> Result<Self> {
         config.secret_backend = SecretBackendChoice::Static(crate::secrets::random_master_key());
-        let mut harness =
-            Self::new_with_storage(config, None, BasicObjectStore::in_memory(), true).await?;
-        if let Some(globals) = globals {
-            let global_vault = global_vault(globals).await?;
-            let vaults = globals.list_vaults().await?;
-            let inner =
-                Arc::get_mut(&mut harness.inner).context("temporary harness is already shared")?;
-            inner.inherited_global_vault = Some(global_vault);
-            inner.inherited_vaults = vaults;
-            for environment in globals.list_environments().await? {
-                harness.put_environment(environment).await?;
-            }
-            let bindings = globals.list_bindings().await?;
-            futures::future::try_join_all(bindings.into_iter().map(|binding| {
-                let harness = &harness;
-                async move {
-                    harness
-                        .inner
-                        .storage
-                        .put_json(
-                            harness.bindings_dir().join(format!("{}.json", binding.id)),
-                            &StoredBinding { record: binding },
-                        )
-                        .await
-                }
-            }))
-            .await?;
-        }
-        Ok(harness)
+        Self::new_with_storage(config, None, BasicObjectStore::in_memory(), true).await
     }
 
     pub async fn new(config: BasicExoHarnessConfig) -> Result<Self> {
@@ -1016,8 +974,6 @@ impl BasicExoHarness {
         Ok(Self {
             inner: Arc::new(BasicExoHarnessInner {
                 vaults,
-                inherited_vaults: vec![],
-                inherited_global_vault: None,
                 storage,
                 write_lock: AsyncMutex::new(()),
                 subscribers: Mutex::new(HashMap::new()),
@@ -4840,39 +4796,6 @@ fn stored_binding(id: BindingId, binding: Binding) -> StoredBinding {
     }
 }
 
-#[cfg(test)]
-#[tokio::test]
-async fn in_memory_preserves_inherited_binding_ids_and_metadata() -> Result<()> {
-    let temp = tempfile::TempDir::new()?;
-    let config = crate::test_support::local_test_config(temp.path());
-    let source = BasicExoHarness::in_memory(config.clone(), None).await?;
-    let record = BindingRecord {
-        id: "97c9457a-dbd2-4ab2-8dd3-c1af0a93d14d".parse()?,
-        r#type: BindingType::Llm,
-        name: "model".into(),
-        created_at: Uuid7::now().timestamp().expect("uuid7 timestamp"),
-        binding: Binding::Llm {
-            name: "model".into(),
-            model: "gpt-5.6-sol".into(),
-            base_url: None,
-            secret: None,
-        },
-    };
-    source
-        .inner
-        .storage
-        .put_json(
-            source.bindings_dir().join(format!("{}.json", record.id)),
-            &StoredBinding {
-                record: record.clone(),
-            },
-        )
-        .await?;
-    let memory = BasicExoHarness::in_memory(config, Some(&source)).await?;
-    assert_eq!(memory.list_bindings().await?, vec![record]);
-    Ok(())
-}
-
 fn merge_binding_records(scopes: Vec<Vec<BindingRecord>>) -> Vec<BindingRecord> {
     let mut effective = HashMap::<String, BindingRecord>::new();
     for bindings in scopes {
@@ -5041,22 +4964,10 @@ impl BasicExoHarnessConfig {
 #[async_trait]
 impl VaultContext for BasicExoHarness {
     async fn list_vaults(&self) -> Result<Vec<Arc<dyn VaultHandle>>> {
-        if self.inner.inherited_global_vault.is_none() {
-            self.inner.vaults.global_vault().await?;
-        }
-        let mut vaults = self.inner.vaults.list_vaults().await?;
-        vaults.extend(self.inner.inherited_vaults.iter().cloned());
-        Ok(vaults)
+        self.inner.vaults.global_vault().await?;
+        self.inner.vaults.list_vaults().await
     }
     async fn get_vault(&self, id: &VaultId) -> Result<Option<Arc<dyn VaultHandle>>> {
-        if let Some(vault) = self
-            .inner
-            .inherited_vaults
-            .iter()
-            .find(|v| v.record().id == *id)
-        {
-            return Ok(Some(vault.clone()));
-        }
         self.inner.vaults.get_vault(id).await
     }
 }

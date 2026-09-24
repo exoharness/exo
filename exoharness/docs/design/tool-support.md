@@ -1031,14 +1031,23 @@ The conversation or agent must have networking enabled because IRC is an
 external network call:
 
 ```bash
-exo agent create --model gpt-5.4 --enable-networking "IRC Agent"
+cat > irc-agent.md <<'EOF'
+---
+name: "IRC Agent"
+harness: basic
+config:
+  model: gpt-5.4
+---
+Help the user with their task.
+EOF
+exo agent create irc-agent --file irc-agent.md
 ```
 
 If the IRC server requires a password or NickServ token, store it as a normal
 secret:
 
 ```bash
-exo secret create irc-password --env IRC_PASSWORD
+exo vault secret create global irc-password --token-env IRC_PASSWORD
 ```
 
 The exact CLI command may differ as the config surface evolves, but the storage

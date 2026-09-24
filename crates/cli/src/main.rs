@@ -1,5 +1,4 @@
-use exoharness::vault::{SecretReference, global_vault};
-mod adapters;
+use exoharness::vault::SecretReference;
 mod env;
 #[cfg(test)]
 mod env_tests;
@@ -14,7 +13,7 @@ mod providers;
 mod render;
 #[cfg(test)]
 mod secret_tests;
-mod tools;
+mod serve;
 mod tui;
 mod tui_app;
 mod turn_display;
@@ -24,7 +23,6 @@ use std::collections::HashMap;
 use std::io::{self, IsTerminal, Read, Write};
 #[cfg(feature = "firecracker")]
 use std::net::Ipv4Addr;
-use std::net::{SocketAddr, TcpListener};
 #[cfg(feature = "firecracker")]
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -32,27 +30,26 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
-use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use executor::{
-    AgentHandle, AgentHarnessKind, AttachSandboxRequest, BasicExoHarness, BasicExoHarnessConfig,
-    BasicToolRuntime, Binding, BraintrustProject, BraintrustTracingConfig, ConversationHandle,
-    ConversationModelConfig, CreateAgentRequest, CreateConversationRequest, CreateSandboxRequest,
+    AgentHandle, AgentHarnessKind, AttachSandboxRequest, BasicExoHarnessConfig, BasicToolRuntime,
+    Binding, BraintrustProject, BraintrustTracingConfig, ConversationHandle,
+    ConversationModelConfig, CreateConversationRequest, CreateSandboxRequest,
     DEFAULT_SANDBOX_MEMORY_MIB, DEFAULT_SANDBOX_VCPU_COUNT, DaytonaBackendSpec, DurableFileSystem,
-    E2bBackendSpec, EventKind, EventQuery, EventQueryDirection, ExoHarness,
-    ExoHarnessHttpServeOptions, FileSystemMount, FileSystemMountMode, FirecrackerBackendSpec,
-    ForkConversationRequest, HOST_EVENT_REBUILD_AND_RESTART, HTTP_EXOHARNESS_TRACING_TARGET,
-    HttpExoHarness, LocalSandboxExoHarness, NewAgentRequest, PutSecretRequest, RunInSandboxRequest,
-    Runtime, SANDBOX_MAIN_MOUNT_DIR, SandboxAttachment, SandboxBackendRegistration, SandboxProcess,
-    SandboxProvider, SandboxProviderConfig, SandboxResourceShape, SandboxScope, Secret,
-    SecretBackendChoice, SpritesBackendSpec, ToolRequest, ToolRuntime, TypeScriptHarnessConfig,
-    Uuid7, VercelBackendSpec, default_aws_agentcore_image, default_daytona_image,
-    default_docker_image, default_e2b_template, default_firecracker_image, default_vercel_image,
-    effective_sandbox_scope, finalize_rebuild_update_file, record_host_event,
-    send_conversation_wakeup, serve_exoharness_http_listener_with_options,
+    E2bBackendSpec, EventKind, EventQuery, EventQueryDirection, ExoHarness, FileSystemMount,
+    FileSystemMountMode, FirecrackerBackendSpec, ForkConversationRequest,
+    HOST_EVENT_REBUILD_AND_RESTART, NewAgentRequest, RunInSandboxRequest, Runtime,
+    SANDBOX_MAIN_MOUNT_DIR, SandboxAttachment, SandboxBackendRegistration, SandboxProcess,
+    SandboxProvider, SandboxProviderConfig, SandboxResourceShape, SandboxScope,
+    SecretBackendChoice, SpritesBackendSpec, ToolRequest, ToolRuntime, Uuid7, VercelBackendSpec,
+    default_aws_agentcore_image, default_daytona_image, default_docker_image, default_e2b_template,
+    default_firecracker_image, default_vercel_image, effective_sandbox_scope,
+    finalize_rebuild_update_file, record_host_event, send_conversation_wakeup,
 };
 use serde::Deserialize;
 use tabwriter::TabWriter;
 use tokio_util::compat::{FuturesAsyncReadCompatExt, FuturesAsyncWriteCompatExt};
+#[cfg(feature = "firecracker")]
 use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[cfg(feature = "firecracker")]
@@ -90,12 +87,12 @@ struct Cli {
 #[derive(Debug, Args)]
 struct RuntimeArgs {
     /// JSON, YAML, or TOML policy for sandbox hosts and credential substitution.
-    #[arg(long, global = true, conflicts_with = "exoharness_url")]
+    #[arg(long, global = true)]
     egress_policy: Option<PathBuf>,
 
     #[arg(long, global = true, default_value = ".exo")]
     root: PathBuf,
-    /// Executor runtime: basic, rlm, typescript, codex, claude-code, cursor, or a TypeScript module path.
+    /// Harness: basic, rlm, exo, typescript, codex, claude-code, cursor, pi, or a TypeScript module path.
     #[arg(long, global = true, value_name = "HARNESS")]
     harness: Option<HarnessSelection>,
     #[arg(long, global = true, value_enum, env = "EXO_SECRET_BACKEND")]
@@ -112,18 +109,6 @@ struct RuntimeArgs {
     braintrust_app_url: Option<String>,
     #[arg(long, global = true, env = "BRAINTRUST_API_URL", hide = true)]
     braintrust_api_url: Option<String>,
-    #[arg(long = "exoharness-url", global = true, env = "EXO_EXOHARNESS_URL")]
-    exoharness_url: Option<String>,
-    #[arg(
-        long = "bearer-env",
-        value_name = "ENV_VAR",
-        help = "Environment variable whose value is sent as the HTTP bearer token",
-        global = true,
-        env = "EXO_BEARER_ENV",
-        requires = "exoharness_url",
-        value_parser = parse_env_var_name
-    )]
-    bearer_env: Option<String>,
     /// Path to a LiteLLM price JSON for cost tracking (overrides fetch/cache).
     #[arg(long, global = true, env = "EXO_LITELLM_PRICES_PATH")]
     pricing_path: Option<PathBuf>,
@@ -328,13 +313,6 @@ impl HarnessSelection {
             Self::TypeScriptPreset(_) | Self::TypeScriptModule(_) => HarnessKind::TypeScript,
         }
     }
-
-    fn default_sandbox_image(&self) -> Option<&'static str> {
-        match self {
-            Self::TypeScriptPreset(preset) => preset.sandbox_image(),
-            Self::Kind(_) | Self::TypeScriptModule(_) => None,
-        }
-    }
 }
 
 impl FromStr for HarnessSelection {
@@ -468,7 +446,10 @@ fn command_firecracker_args(command: &Commands) -> Option<&FirecrackerArgs> {
             command: SandboxCommands::Play(args),
             ..
         } => Some(&args.firecracker),
-        Commands::Serve { firecracker, .. } => Some(firecracker),
+        Commands::Agent {
+            command: AgentCommands::Serve(args),
+            ..
+        } => Some(&args.firecracker),
         _ => None,
     }
 }
@@ -561,14 +542,8 @@ macro_rules! runtime_accessor {
                 | Commands::Agent { runtime, .. }
                 | Commands::Conversation { runtime, .. }
                 | Commands::Model { runtime, .. }
-                | Commands::SandboxProvider { runtime, .. }
                 | Commands::Sandbox { runtime, .. }
-                | Commands::Secret { runtime, .. }
-                | Commands::Chat { runtime, .. }
-                | Commands::Run { runtime, .. }
-                | Commands::Adapters { runtime, .. }
-                | Commands::Tools { runtime, .. }
-                | Commands::Serve { runtime, .. } => runtime,
+                => runtime,
                 Commands::Provider { .. } | Commands::FirecrackerBridge => {
                     unreachable!("command does not use runtime options")
                 }
@@ -591,6 +566,7 @@ enum Commands {
         #[command(subcommand)]
         command: environments::EnvironmentCommands,
     },
+    /// Manage vaults and their credentials, including MCP login.
     Vault {
         #[command(flatten)]
         runtime: RuntimeArgs,
@@ -599,14 +575,14 @@ enum Commands {
     },
     #[command(hide = true)]
     FirecrackerBridge,
-    /// Manage agents and their executor configuration.
+    /// Create, run, and serve agents from Markdown specs.
     Agent {
         #[command(flatten)]
         runtime: RuntimeArgs,
         #[command(subcommand)]
         command: AgentCommands,
     },
-    /// Manage saved threads, mounts, events, and one-shot sends.
+    /// Manage saved threads and their history.
     #[command(name = "thread", alias = "conversation")]
     Conversation {
         #[command(flatten)]
@@ -614,7 +590,7 @@ enum Commands {
         #[command(subcommand)]
         command: ConversationCommands,
     },
-    /// Register and list model bindings.
+    /// Configure model names, endpoints, and vault credentials.
     Model {
         #[command(flatten)]
         runtime: RuntimeArgs,
@@ -626,151 +602,44 @@ enum Commands {
         #[command(subcommand)]
         command: providers::ProviderCommands,
     },
-    /// Configure and list sandbox provider bindings.
-    SandboxProvider {
-        #[command(flatten)]
-        runtime: RuntimeArgs,
-        #[command(subcommand)]
-        command: ProviderCommands,
-    },
-    /// Manage sandboxes directly. Each command accepts --agent; omitted uses a shared owner.
+    /// Manage sandboxes and their provider bindings.
     Sandbox {
         #[command(flatten)]
         runtime: RuntimeArgs,
         #[command(subcommand)]
         command: SandboxCommands,
     },
-    /// Manage local stored secrets.
-    Secret {
-        #[command(flatten)]
-        runtime: RuntimeArgs,
-        #[command(subcommand)]
-        command: SecretCommands,
-    },
-    /// Chat with an agent defined in Markdown or a saved agent.
-    Chat {
-        #[command(flatten)]
-        runtime: RuntimeArgs,
-        #[command(flatten)]
-        thread: managed_agents::ThreadArgs,
-        /// Use the full-screen TUI instead of inline chat.
-        #[arg(long)]
-        tui: bool,
-    },
-    /// Run one prompt with an agent.
-    Run {
-        #[command(flatten)]
-        runtime: RuntimeArgs,
-        #[command(flatten)]
-        thread: managed_agents::ThreadArgs,
-        prompt: String,
-    },
-    Adapters {
-        #[command(flatten)]
-        runtime: RuntimeArgs,
-        #[command(subcommand)]
-        command: adapters::AdapterCommands,
-    },
-    /// Inspect locally installed tool modules.
-    Tools {
-        #[command(flatten)]
-        runtime: RuntimeArgs,
-        #[command(subcommand)]
-        command: tools::ToolCommands,
-    },
-    Serve {
-        #[command(flatten)]
-        runtime: RuntimeArgs,
-        #[arg(long, default_value = "127.0.0.1:4766")]
-        bind: SocketAddr,
-        #[arg(short, long, action = ArgAction::Count)]
-        verbose: u8,
-        #[cfg(feature = "firecracker")]
-        #[command(flatten, next_help_heading = "Firecracker backend options")]
-        firecracker: FirecrackerArgs,
-    },
 }
 
 #[derive(Debug, Subcommand)]
 enum AgentCommands {
     List,
+    /// Save an agent from a Markdown spec.
     Create {
         name: String,
-        /// Save an agent from Markdown frontmatter and instructions.
-        #[arg(long, conflicts_with_all = ["module", "tool_modules", "tool_creation", "sandbox_image", "sandbox_provider", "sandbox_scope", "networking", "max_output_tokens", "max_tool_round_trips", "braintrust_org", "braintrust_project", "braintrust_project_id"])]
-        file: Option<PathBuf>,
+        #[arg(long)]
+        file: PathBuf,
         #[arg(long)]
         slug: Option<String>,
-        #[arg(long)]
-        module: Option<PathBuf>,
-        #[arg(long = "tool-module")]
-        tool_modules: Vec<PathBuf>,
-        #[arg(long, value_enum)]
-        tool_creation: Option<EnabledDisabled>,
-        #[arg(long)]
-        sandbox_image: Option<String>,
-        #[arg(long = "sandbox", value_enum)]
-        sandbox_provider: Option<SandboxProviderArg>,
-        #[arg(long, value_enum)]
-        sandbox_scope: Option<SandboxScopeArg>,
-        #[arg(long, value_enum)]
-        networking: Option<EnabledDisabled>,
-        #[arg(long, required_unless_present = "file")]
-        model: Option<String>,
-        #[arg(long)]
-        max_output_tokens: Option<i64>,
-        #[arg(long)]
-        max_tool_round_trips: Option<u32>,
-        #[arg(long)]
-        braintrust_org: Option<String>,
-        #[arg(long)]
-        braintrust_project: Option<String>,
-        #[arg(long)]
-        braintrust_project_id: Option<String>,
     },
+    /// Replace a saved agent's spec.
     Update {
         agent: String,
-        #[arg(long, value_name = "HARNESS")]
-        set_harness: Option<HarnessSelection>,
         #[arg(long)]
-        module: Option<PathBuf>,
-        #[arg(long)]
-        clear_module: bool,
-        #[arg(long = "tool-module")]
-        tool_modules: Vec<PathBuf>,
-        #[arg(long)]
-        clear_tool_modules: bool,
-        #[arg(long, value_enum)]
-        tool_creation: Option<EnabledDisabled>,
-        #[arg(long)]
-        sandbox_image: Option<String>,
-        #[arg(long)]
-        clear_sandbox_image: bool,
-        #[arg(long = "sandbox", value_enum)]
-        sandbox_provider: Option<SandboxProviderArg>,
-        #[arg(long, value_enum)]
-        sandbox_scope: Option<SandboxScopeArg>,
-        #[arg(long, value_enum)]
-        networking: Option<EnabledDisabled>,
-        #[arg(long)]
-        model: Option<String>,
-        #[arg(long)]
-        max_output_tokens: Option<i64>,
-        #[arg(long)]
-        clear_max_output_tokens: bool,
-        #[arg(long)]
-        max_tool_round_trips: Option<u32>,
-        #[arg(long)]
-        clear_max_tool_round_trips: bool,
-        #[arg(long)]
-        clear_braintrust: bool,
-        #[arg(long)]
-        braintrust_org: Option<String>,
-        #[arg(long)]
-        braintrust_project: Option<String>,
-        #[arg(long)]
-        braintrust_project_id: Option<String>,
+        file: PathBuf,
     },
+    /// Run interactively, or execute one prompt with --prompt.
+    Run {
+        #[command(flatten)]
+        thread: managed_agents::ThreadArgs,
+        #[arg(long, conflicts_with = "tui")]
+        prompt: Option<String>,
+        /// Use the full-screen TUI.
+        #[arg(long)]
+        tui: bool,
+    },
+    /// Serve the managed-agent API and supervise configured adapters.
+    Serve(Box<serve::ServeArgs>),
     Mount {
         #[command(subcommand)]
         command: AgentMountCommands,
@@ -928,6 +797,11 @@ enum ConversationSandboxCommands {
 
 #[derive(Debug, Subcommand)]
 enum SandboxCommands {
+    /// Configure sandbox backends and their vault credentials.
+    Provider {
+        #[command(subcommand)]
+        command: ProviderCommands,
+    },
     /// Create and start a sandbox.
     #[command(alias = "start")]
     Create(Box<SandboxStartArgs>),
@@ -1063,19 +937,6 @@ struct SandboxPlayArgs {
 }
 
 #[derive(Debug, Subcommand)]
-enum SecretCommands {
-    List,
-    #[command(alias = "set")]
-    Create {
-        name: String,
-        #[arg(long, value_parser = parse_env_var_name)]
-        env: Option<String>,
-        #[arg(long)]
-        value: Option<String>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
 enum ModelCommands {
     List,
     #[command(alias = "register")]
@@ -1085,6 +946,8 @@ enum ModelCommands {
         model: Option<String>,
         #[arg(long)]
         secret: String,
+        #[arg(long, default_value = "global")]
+        vault: String,
         #[arg(long)]
         base_url: Option<String>,
     },
@@ -1109,6 +972,9 @@ struct ProviderConfigureArgs {
     /// Secret (by name) holding the provider's API key/token. Required for remote providers.
     #[arg(long)]
     secret: Option<String>,
+    /// Vault containing the backend credential.
+    #[arg(long, default_value = "global")]
+    vault: String,
     /// Region/target. Daytona: us | eu | experimental.
     #[arg(long)]
     region: Option<String>,
@@ -1287,7 +1153,7 @@ impl std::fmt::Debug for CliError {
 async fn main() -> Result<(), CliError> {
     let cli = Cli::parse();
     let verbose = matches!(&cli.command,
-        Commands::Chat { thread, .. } | Commands::Run { thread, .. }
+        Commands::Agent { command: AgentCommands::Run { thread, .. }, .. }
         if thread.verbosity == Verbosity::Full
     );
     run(cli).await.map_err(|error| CliError { error, verbose })
@@ -1318,20 +1184,12 @@ async fn run(mut cli: Cli) -> Result<()> {
     if let Commands::Provider { command } = &cli.command {
         return providers::run(command, &mut provider_store).await;
     }
-    let selected_provider =
-        if matches!(cli.command, Commands::Tools { .. } | Commands::Serve { .. }) {
-            if cli.provider_profile.is_some() {
-                bail!("this command does not use a managed-agent provider");
-            }
-            None
-        } else {
-            let (agent, thread) = command_refs_mut(&mut cli.command);
-            provider_store.selected(
-                cli.provider_profile.as_deref(),
-                agent.map(|value| value.as_str()),
-                thread.map(|value| value.as_str()),
-            )?
-        };
+    let (agent, thread) = command_refs_mut(&mut cli.command);
+    let selected_provider = provider_store.selected(
+        cli.provider_profile.as_deref(),
+        agent.map(|v| v.as_str()),
+        thread.map(|v| v.as_str()),
+    )?;
     run_selected(cli, provider_store, selected_provider.as_ref())
         .await
         .map_err(|error| {
@@ -1397,17 +1255,11 @@ async fn run_selected(
             } | Commands::Model {
                 command: ModelCommands::List,
                 ..
-            } | Commands::SandboxProvider {
-                command: ProviderCommands::List,
-                ..
             } | Commands::Sandbox {
-                command: SandboxCommands::List { .. },
-                ..
-            } | Commands::Secret {
-                command: SecretCommands::List,
-                ..
-            } | Commands::Adapters {
-                command: adapters::AdapterCommands::List { .. },
+                command: SandboxCommands::List { .. }
+                    | SandboxCommands::Provider {
+                        command: ProviderCommands::List
+                    },
                 ..
             }
         ) {
@@ -1437,33 +1289,15 @@ async fn run_selected(
         cli.runtime().env_file.as_deref(),
     )?;
     let definition = managed_agents::load_definition(&cli.command)?;
-    let temporary = matches!(&cli.command,
-        Commands::Chat { thread, .. } | Commands::Run { thread, .. }
-        if thread.agent_file.is_some()
-    );
     if http_client.is_none() && cli.runtime().harness.is_none() {
         cli.runtime_mut().harness = definition
             .as_ref()
             .map(managed_agents::harness_selection)
             .transpose()?;
     }
-    if let Commands::Tools { command, .. } = &cli.command {
-        tools::handle_tool_command(&cli.runtime().root, command)?;
-        return Ok(());
-    }
-    if let Some(config) = serve_config(&cli.command) {
-        serve_exoharness_http(&build_exo_config(&cli)?, config).await?;
-        return Ok(());
-    }
 
     let harness = providers::runtime(&cli, http_client, definition.as_ref(), &env).await?;
     let env_vars = env.into_vars();
-    let harness_selection = cli.runtime().harness.clone();
-    let harness_kind = harness_selection
-        .as_ref()
-        .map(HarnessSelection::harness_kind)
-        .unwrap_or(HarnessKind::Basic);
-    let default_sandbox_provider = default_local_sandbox_provider();
     let root = cli.runtime().root.clone();
     let result: Result<()> = async {
     match cli.command {
@@ -1471,26 +1305,18 @@ async fn run_selected(
         Commands::FirecrackerBridge => {
             unreachable!("Firecracker bridge returns before harness startup")
         }
-        Commands::Tools { .. } | Commands::Provider { .. } => {
+        Commands::Provider { .. } => {
             unreachable!("management commands return before harness startup")
         }
         Commands::Vault { command, .. } => vaults::run(harness.exoharness_handle().as_ref(), &command, &env_vars).await?,
-        Commands::Adapters { command, .. } => {
-            adapters::handle_adapter_command(&root, Arc::clone(&harness), command).await?;
-        }
-        command @ (Commands::Chat { .. } | Commands::Run { .. }) => {
-            let (thread, tui, prompt) = match &command {
-                Commands::Chat { thread, tui, .. } => (thread, *tui, None),
-                Commands::Run { thread, prompt, .. } => (thread, false, Some(prompt.as_str())),
-                _ => unreachable!(),
-            };
+        Commands::Agent { command: AgentCommands::Run { thread, tui, prompt }, .. } => {
             let (agent, conversation) = managed_agents::open_thread(
                 harness.as_ref(),
                 definition.as_ref(),
-                thread,
+                &thread,
             )
             .await?;
-            if !temporary && let Some(provider) = &selected_provider {
+            if let Some(provider) = &selected_provider {
                 provider_store.pin_thread(
                     conversation.record().slug.clone(),
                     provider.selection,
@@ -1502,7 +1328,7 @@ async fn run_selected(
             let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
             if let Some(prompt) = prompt {
                 tui::run_prompt(
-                    Arc::clone(&harness), agent, conversation, thread.verbosity, prompt,
+                    Arc::clone(&harness), agent, conversation, thread.verbosity, &prompt,
                 ).await?;
             } else if tui && interactive {
                 tui_app::run_chat_tui(
@@ -1516,7 +1342,11 @@ async fn run_selected(
                 run_chat_repl(Arc::clone(&harness), agent, conversation, thread.verbosity).await?;
             }
         }
+        Commands::Agent { command: AgentCommands::Serve(args), .. } => {
+            serve::run(harness.clone(), &root, *args).await?;
+        }
         Commands::Agent { command, .. } => match command {
+            AgentCommands::Run { .. } | AgentCommands::Serve(_) => unreachable!(),
             AgentCommands::List => {
                 let agents = harness.list_agents().await?;
                 print_table(
@@ -1528,333 +1358,22 @@ async fn run_selected(
                         .collect(),
                 )?;
             }
-            AgentCommands::Create {
-                name,
-                file: _,
-                slug,
-                module,
-                tool_modules,
-                tool_creation,
-                sandbox_image,
-                sandbox_provider,
-                sandbox_scope,
-                networking,
-                model,
-                max_output_tokens,
-                max_tool_round_trips,
-                braintrust_org,
-                braintrust_project,
-                braintrust_project_id,
-            } => {
+            AgentCommands::Create { name, file: _, slug } => {
                 let slug = slug.unwrap_or_else(|| slugify(&name));
-                if slug.is_empty() {
-                    bail!("agent slug resolved to an empty value");
+                anyhow::ensure!(!slug.is_empty(), "agent slug resolved to an empty value");
+                let definition = definition.as_ref().context("agent spec is required")?;
+                if selected_provider.is_some() {
+                    provider_store.ensure_agent_alias_available(&slug)?;
                 }
-                if sandbox_image
-                    .as_ref()
-                    .is_some_and(|image| image.trim().is_empty())
-                {
-                    bail!("sandbox image must not be empty");
+                let agent = harness.create_managed_agent(definition, &slug).await?;
+                if let Some(provider) = &selected_provider {
+                    provider_store.pin_agent(agent.record().slug.clone(), provider.selection, &provider.account, agent.record().id)?;
                 }
-                if let Some(definition) = definition.as_ref() {
-                    if selected_provider.is_some() {
-                        provider_store.ensure_agent_alias_available(&slug)?;
-                    }
-                    let agent = harness.create_managed_agent(definition, &slug).await?;
-                    if let Some(provider) = &selected_provider {
-                        provider_store.pin_agent(
-                            agent.record().slug.clone(), provider.selection,
-                            &provider.account,
-                            agent.record().id,
-                        )?;
-                    }
-                    println!(
-                        "created agent {} ({})",
-                        agent.record().slug,
-                        agent.record().id
-                    );
-                    return Ok(());
-                }
-                let model = model.ok_or_else(|| anyhow!("--model is required without --file"))?;
-                let agent_harness_kind = to_agent_harness_kind(harness_kind);
-                let typescript = build_typescript_harness_config(
-                    harness_selection.as_ref(),
-                    module.as_deref(),
-                    &tool_modules,
-                )?;
-                let sandbox_image = sandbox_image.or_else(|| {
-                    harness_selection
-                        .as_ref()
-                        .and_then(HarnessSelection::default_sandbox_image)
-                        .map(str::to_string)
-                });
-                let enable_networking = networking.map(EnabledDisabled::enabled).unwrap_or(true);
-                let agent = harness
-                    .create_agent(CreateAgentRequest {
-                        slug,
-                        name: Some(name),
-                        harness: agent_harness_kind,
-                        typescript,
-                        enable_agent_tool_creation: tool_creation
-                            .map(EnabledDisabled::enabled)
-                            .unwrap_or(false),
-                        sandbox_image,
-                        sandbox_provider: sandbox_provider
-                            .map(SandboxProvider::from)
-                            .unwrap_or(default_sandbox_provider),
-                        sandbox_scope: sandbox_scope.map(SandboxScope::from),
-                        enable_networking,
-                        model,
-                        max_output_tokens,
-                        max_tool_round_trips,
-                        braintrust: build_braintrust_tracing_config(
-                            braintrust_org,
-                            braintrust_project,
-                            braintrust_project_id,
-                        )?,
-                    })
-                    .await?;
-                println!(
-                    "created agent {} ({})",
-                    agent.record().slug,
-                    agent.record().id
-                );
+                println!("created agent {} ({})", agent.record().slug, agent.record().id);
             }
-            AgentCommands::Update {
-                agent,
-                set_harness,
-                module,
-                clear_module,
-                tool_modules,
-                clear_tool_modules,
-                tool_creation,
-                sandbox_image,
-                clear_sandbox_image,
-                sandbox_provider,
-                sandbox_scope,
-                networking,
-                model,
-                max_output_tokens,
-                clear_max_output_tokens,
-                max_tool_round_trips,
-                clear_max_tool_round_trips,
-                clear_braintrust,
-                braintrust_org,
-                braintrust_project,
-                braintrust_project_id,
-            } => {
-                if clear_module && module.is_some() {
-                    bail!("provide either --clear-module or --module, not both");
-                }
-                if clear_tool_modules && !tool_modules.is_empty() {
-                    bail!("provide either --clear-tool-modules or --tool-module, not both");
-                }
-                if clear_module && !tool_modules.is_empty() {
-                    bail!("provide either --clear-module or --tool-module, not both");
-                }
-                if clear_sandbox_image && sandbox_image.is_some() {
-                    bail!("provide either --clear-sandbox-image or --sandbox-image, not both");
-                }
-                if clear_max_output_tokens && max_output_tokens.is_some() {
-                    bail!(
-                        "provide either --clear-max-output-tokens or --max-output-tokens, not both"
-                    );
-                }
-                if clear_max_tool_round_trips && max_tool_round_trips.is_some() {
-                    bail!(
-                        "provide either --clear-max-tool-round-trips or --max-tool-round-trips, not both"
-                    );
-                }
-                if clear_braintrust
-                    && (braintrust_org.is_some()
-                        || braintrust_project.is_some()
-                        || braintrust_project_id.is_some())
-                {
-                    bail!(
-                        "provide either --clear-braintrust or Braintrust project flags, not both"
-                    );
-                }
+            AgentCommands::Update { agent, file: _ } => {
                 let agent = must_get_agent(harness.as_ref(), &agent).await?;
-                let mut config = executor::load_agent_config(&*agent).await?;
-                let mut changed = false;
-                if let Some(set_harness) = set_harness.as_ref() {
-                    if clear_module {
-                        bail!("provide either --set-harness or --clear-module, not both");
-                    }
-                    let new_harness = to_agent_harness_kind(set_harness.harness_kind());
-                    if config.harness != new_harness {
-                        config.harness = new_harness;
-                        changed = true;
-                    }
-                    let typescript = build_typescript_harness_config(
-                        Some(set_harness),
-                        module.as_deref(),
-                        &tool_modules,
-                    )?;
-                    if config.typescript != typescript {
-                        config.typescript = typescript;
-                        changed = true;
-                    }
-                }
-                if set_harness.is_some() {
-                    if clear_tool_modules {
-                        bail!("provide either --set-harness or --clear-tool-modules, not both");
-                    }
-                } else if clear_module {
-                    config.typescript = None;
-                    changed = true;
-                } else if let Some(module) = module.as_deref() {
-                    if !matches!(
-                        config.harness,
-                        AgentHarnessKind::TypeScript | AgentHarnessKind::Exo
-                    ) {
-                        bail!("--module is only valid with TypeScript or Exo agents");
-                    }
-                    let existing_tool_modules = config
-                        .typescript
-                        .as_ref()
-                        .map(|typescript| typescript.tool_module_paths.clone())
-                        .unwrap_or_default();
-                    let tool_module_paths = if tool_modules.is_empty() {
-                        existing_tool_modules
-                    } else {
-                        resolve_typescript_tool_module_paths(&tool_modules)?
-                    };
-                    let typescript = Some(resolve_typescript_harness_config(
-                        module,
-                        tool_module_paths,
-                    )?);
-                    if config.typescript != typescript {
-                        config.typescript = typescript;
-                        changed = true;
-                    }
-                } else if clear_tool_modules {
-                    if let Some(typescript) = config.typescript.as_mut()
-                        && !typescript.tool_module_paths.is_empty()
-                    {
-                        typescript.tool_module_paths.clear();
-                        changed = true;
-                    }
-                } else if !tool_modules.is_empty() {
-                    if !matches!(
-                        config.harness,
-                        AgentHarnessKind::TypeScript | AgentHarnessKind::Exo
-                    ) {
-                        bail!("--tool-module is only valid with TypeScript or Exo agents");
-                    }
-                    let Some(typescript) = config.typescript.as_mut() else {
-                        bail!("typescript agents require a module path; pass --module <path>");
-                    };
-                    let tool_module_paths = resolve_typescript_tool_module_paths(&tool_modules)?;
-                    if typescript.tool_module_paths != tool_module_paths {
-                        typescript.tool_module_paths = tool_module_paths;
-                        changed = true;
-                    }
-                }
-                if let Some(tool_creation) = tool_creation {
-                    let enable_agent_tool_creation = tool_creation.enabled();
-                    if config.enable_agent_tool_creation != enable_agent_tool_creation {
-                        config.enable_agent_tool_creation = enable_agent_tool_creation;
-                        changed = true;
-                    }
-                }
-                if clear_sandbox_image {
-                    config.sandbox.image = None;
-                    changed = true;
-                } else if let Some(sandbox_image) = sandbox_image {
-                    if sandbox_image.trim().is_empty() {
-                        bail!("sandbox image must not be empty");
-                    }
-                    config.sandbox.image = Some(sandbox_image);
-                    changed = true;
-                }
-
-                if let Some(sandbox_provider) = sandbox_provider {
-                    let sandbox_provider = SandboxProvider::from(sandbox_provider);
-                    if config.sandbox.provider != sandbox_provider {
-                        config.sandbox.provider = sandbox_provider;
-                        changed = true;
-                    }
-                }
-
-                if let Some(sandbox_scope) = sandbox_scope {
-                    let sandbox_scope = SandboxScope::from(sandbox_scope);
-                    if config.sandbox.scope != sandbox_scope {
-                        config.sandbox.scope = sandbox_scope;
-                        changed = true;
-                    }
-                }
-
-                if let Some(networking) = networking {
-                    let enable_networking = networking.enabled();
-                    if config.sandbox.enable_networking != enable_networking {
-                        config.sandbox.enable_networking = enable_networking;
-                        changed = true;
-                    }
-                }
-
-                if let Some(model) = model {
-                    if model.trim().is_empty() {
-                        bail!("model must not be empty");
-                    }
-                    if config.model != model {
-                        config.model = model;
-                        changed = true;
-                    }
-                }
-                if clear_max_output_tokens {
-                    if config.max_output_tokens.is_some() {
-                        config.max_output_tokens = None;
-                        changed = true;
-                    }
-                } else if let Some(max_output_tokens) = max_output_tokens
-                    && config.max_output_tokens != Some(max_output_tokens)
-                {
-                    config.max_output_tokens = Some(max_output_tokens);
-                    changed = true;
-                }
-                if clear_max_tool_round_trips {
-                    if config.max_tool_round_trips.is_some() {
-                        config.max_tool_round_trips = None;
-                        changed = true;
-                    }
-                } else if let Some(max_tool_round_trips) = max_tool_round_trips
-                    && config.max_tool_round_trips != Some(max_tool_round_trips)
-                {
-                    config.max_tool_round_trips = Some(max_tool_round_trips);
-                    changed = true;
-                }
-
-                if clear_braintrust {
-                    config.braintrust = None;
-                    changed = true;
-                } else {
-                    let updated_braintrust = build_braintrust_tracing_config(
-                        braintrust_org,
-                        braintrust_project,
-                        braintrust_project_id,
-                    )?;
-                    if updated_braintrust.is_none() && !changed {
-                        bail!(
-                            "no changes provided; pass --set-harness, --module, --tool-module, --clear-tool-modules, --tool-creation, --sandbox-image, --networking, model flags, --clear-braintrust, or Braintrust project flags"
-                        );
-                    }
-                    if updated_braintrust.is_some() {
-                        config.braintrust = updated_braintrust;
-                        changed = true;
-                    }
-                }
-                if !changed {
-                    bail!("no changes provided");
-                }
-                if matches!(
-                    config.harness,
-                    AgentHarnessKind::TypeScript | AgentHarnessKind::Exo
-                ) && config.typescript.is_none()
-                {
-                    bail!("TypeScript and Exo agents require a module path; pass --module <path>");
-                }
-                harness.put_agent_config(&*agent, config).await?;
+                harness.update_managed_agent(&agent, definition.as_ref().context("agent spec is required")?).await?;
                 println!("updated agent {}", agent.record().slug);
             }
             AgentCommands::Mount { command } => match command {
@@ -2526,44 +2045,6 @@ async fn run_selected(
                 }
             }
         },
-        Commands::Sandbox { command, .. } => {
-            handle_sandbox_command(harness.as_ref(), command).await?;
-        }
-        Commands::Secret { command, .. } => match command {
-            SecretCommands::List => {
-                let secrets = global_vault(harness.exoharness_handle().as_ref()).await?.list_secrets().await?;
-                print_table(
-                    &["SECRET", "TYPE", "CREATED_AT"],
-                    secrets
-                        .into_iter()
-                        .map(|secret| {
-                            vec![
-                                secret.name,
-                                format!("{:?}", secret.r#type),
-                                secret.created_at.to_string(),
-                            ]
-                        })
-                        .collect(),
-                )?;
-            }
-            SecretCommands::Create { name, env, value } => {
-                let value = match (env, value) {
-                    (Some(env), None) => secret_value_from_env_arg(&env, &env_vars)?,
-                    (None, Some(value)) => value,
-                    (Some(_), Some(_)) => {
-                        bail!("provide either --env or --value, not both");
-                    }
-                    (None, None) => bail!("provide --env or --value"),
-                };
-                let id = global_vault(harness.exoharness_handle().as_ref()).await?.put_secret(PutSecretRequest {
-    target: None,
-                        name: name.clone(),
-                        secret: Secret::Key { value },
-                    })
-                    .await?;
-                println!("created secret {} ({})", name, id);
-            }
-        },
         Commands::Model { command, .. } => match command {
             ModelCommands::List => {
                 let models = list_model_bindings(harness.exoharness_handle().as_ref()).await?;
@@ -2586,9 +2067,10 @@ async fn run_selected(
                 name,
                 model,
                 secret,
+                vault,
                 base_url,
             } => {
-                let secret_id = find_secret_id(harness.exoharness_handle().as_ref(), &secret)
+                let secret_id = find_secret_id(harness.exoharness_handle().as_ref(), &vault, &secret)
                     .await?
                     .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
                 let upstream_model = model.unwrap_or_else(|| name.clone());
@@ -2604,7 +2086,7 @@ async fn run_selected(
                 println!("created model {} ({})", name, id);
             }
         },
-        Commands::SandboxProvider { command, .. } => match command {
+        Commands::Sandbox { command: SandboxCommands::Provider { command }, .. } => match command {
             ProviderCommands::List => {
                 for record in harness.exoharness_handle().list_bindings().await? {
                     if let Binding::Sandbox { name, config } = record.binding {
@@ -2617,6 +2099,7 @@ async fn run_selected(
                     provider,
                     name,
                     secret,
+                    vault,
                     region,
                     organization_id,
                     project_id,
@@ -2642,7 +2125,7 @@ async fn run_selected(
                         let secret =
                             secret.ok_or_else(|| anyhow!("--secret is required for daytona"))?;
                         let secret_id =
-                            find_secret_id(harness.exoharness_handle().as_ref(), &secret)
+                            find_secret_id(harness.exoharness_handle().as_ref(), &vault, &secret)
                                 .await?
                                 .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
                         SandboxProviderConfig::Daytona {
@@ -2657,7 +2140,7 @@ async fn run_selected(
                         let secret =
                             secret.ok_or_else(|| anyhow!("--secret is required for vercel"))?;
                         let secret_id =
-                            find_secret_id(harness.exoharness_handle().as_ref(), &secret)
+                            find_secret_id(harness.exoharness_handle().as_ref(), &vault, &secret)
                                 .await?
                                 .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
                         let team_id = organization_id
@@ -2709,7 +2192,7 @@ async fn run_selected(
                         let secret =
                             secret.ok_or_else(|| anyhow!("--secret is required for e2b"))?;
                         let secret_id =
-                            find_secret_id(harness.exoharness_handle().as_ref(), &secret)
+                            find_secret_id(harness.exoharness_handle().as_ref(), &vault, &secret)
                                 .await?
                                 .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
                         SandboxProviderConfig::E2b {
@@ -2722,7 +2205,7 @@ async fn run_selected(
                         let secret =
                             secret.ok_or_else(|| anyhow!("--secret is required for sprites"))?;
                         let secret_id =
-                            find_secret_id(harness.exoharness_handle().as_ref(), &secret)
+                            find_secret_id(harness.exoharness_handle().as_ref(), &vault, &secret)
                                 .await?
                                 .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
                         SandboxProviderConfig::Sprites {
@@ -2745,8 +2228,8 @@ async fn run_selected(
                 println!("configured sandbox provider {binding_name} ({id})");
             }
         },
-        Commands::Serve { .. } => {
-            unreachable!("serve commands are handled before harness instantiation")
+        Commands::Sandbox { command, .. } => {
+            handle_sandbox_command(harness.as_ref(), command).await?;
         }
     }
 
@@ -2759,6 +2242,9 @@ async fn run_selected(
 
 async fn handle_sandbox_command(harness: &Runtime, command: SandboxCommands) -> Result<()> {
     match command {
+        SandboxCommands::Provider { .. } => {
+            unreachable!("provider commands are handled separately")
+        }
         SandboxCommands::Create(args) => {
             let SandboxStartArgs {
                 owner,
@@ -3105,6 +2591,8 @@ fn command_refs_mut(command: &mut Commands) -> (Option<&mut String>, Option<&mut
                 | AgentMountCommands::Create { agent, .. }
                 | AgentMountCommands::Delete { agent, .. } => (Some(agent), None),
             },
+            AgentCommands::Run { thread, .. } => (thread.agent.as_mut(), thread.thread.as_mut()),
+            AgentCommands::Serve(args) => (args.agent.as_mut(), None),
             AgentCommands::List | AgentCommands::Create { .. } => (None, None),
         },
         Commands::Conversation { command, .. } => match command {
@@ -3174,11 +2662,9 @@ fn command_refs_mut(command: &mut Commands) -> (Option<&mut String>, Option<&mut
             },
             ConversationCommands::CompleteRebuildUpdate { .. } => (None, None),
         },
-        Commands::Chat { thread, .. } | Commands::Run { thread, .. } => {
-            (thread.agent.as_mut(), thread.thread.as_mut())
-        }
         Commands::Sandbox { command, .. } => {
             let owner = match command {
+                SandboxCommands::Provider { .. } => return (None, None),
                 SandboxCommands::Create(args) => &mut args.owner,
                 SandboxCommands::Play(args) => &mut args.owner,
                 SandboxCommands::List { owner, .. }
@@ -3189,14 +2675,9 @@ fn command_refs_mut(command: &mut Commands) -> (Option<&mut String>, Option<&mut
             };
             (owner.agent.as_mut(), None)
         }
-        Commands::Secret { .. }
-        | Commands::FirecrackerBridge
+        Commands::FirecrackerBridge
         | Commands::Model { .. }
         | Commands::Provider { .. }
-        | Commands::SandboxProvider { .. }
-        | Commands::Adapters { .. }
-        | Commands::Tools { .. }
-        | Commands::Serve { .. }
         | Commands::Environment { .. }
         | Commands::Vault { .. } => (None, None),
     }
@@ -3212,101 +2693,6 @@ fn init_firecracker_bridge_tracing() {
     match tracing_subscriber::registry().with(layer).try_init() {
         Ok(()) | Err(_) => {}
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ServeConfig {
-    bind: SocketAddr,
-    verbosity: u8,
-}
-
-fn serve_config(command: &Commands) -> Option<ServeConfig> {
-    match command {
-        Commands::Serve { bind, verbose, .. } => Some(ServeConfig {
-            bind: *bind,
-            verbosity: *verbose,
-        }),
-        _ => None,
-    }
-}
-
-async fn serve_exoharness_http(
-    exo_config: &BasicExoHarnessConfig,
-    config: ServeConfig,
-) -> Result<()> {
-    init_serve_tracing(config.verbosity);
-    if !config.bind.ip().is_loopback() {
-        anyhow::bail!(
-            "exo serve only binds loopback addresses; got {}",
-            config.bind
-        );
-    }
-    let exoharness = Arc::new(BasicExoHarness::new(exo_config.clone()).await?);
-    let listener = TcpListener::bind(config.bind)?;
-    let addr = listener.local_addr()?;
-    tracing::info!(
-        target: HTTP_EXOHARNESS_TRACING_TARGET,
-        %addr,
-        "serving exoharness HTTP"
-    );
-    serve_exoharness_http_listener_with_options(
-        listener,
-        exoharness,
-        ExoHarnessHttpServeOptions {
-            verbosity: config.verbosity,
-        },
-    )
-    .await?;
-    Ok(())
-}
-
-fn init_serve_tracing(verbosity: u8) {
-    if verbosity == 0 {
-        return;
-    }
-    let level = if verbosity > 1 {
-        tracing_subscriber::filter::LevelFilter::DEBUG
-    } else {
-        tracing_subscriber::filter::LevelFilter::INFO
-    };
-    let filter = tracing_subscriber::filter::Targets::new()
-        .with_target(HTTP_EXOHARNESS_TRACING_TARGET, level);
-    let layer = tracing_subscriber::fmt::layer()
-        .with_target(false)
-        .without_time()
-        .with_writer(std::io::stderr)
-        .with_filter(filter);
-    match tracing_subscriber::registry().with(layer).try_init() {
-        Ok(()) | Err(_) => {}
-    }
-}
-
-async fn instantiate_exoharness(
-    exo_config: &BasicExoHarnessConfig,
-    http_url: Option<&str>,
-    bearer_token: Option<String>,
-    route_local_sandboxes: bool,
-) -> Result<Arc<dyn ExoHarness>> {
-    if let Some(http_url) = http_url {
-        let harness = HttpExoHarness::new(http_url, bearer_token)?;
-        let remote: Arc<dyn ExoHarness> = Arc::new(harness);
-        if !route_local_sandboxes {
-            return Ok(remote);
-        }
-        let local_sandbox_providers = exo_config
-            .sandbox_backends
-            .iter()
-            .filter(|backend| backend.is_local())
-            .map(SandboxBackendRegistration::provider)
-            .collect::<Vec<_>>();
-        let local: Arc<dyn ExoHarness> = Arc::new(BasicExoHarness::new(exo_config.clone()).await?);
-        return Ok(Arc::new(LocalSandboxExoHarness::new_with_local_providers(
-            remote,
-            local,
-            local_sandbox_providers,
-        )));
-    }
-    Ok(Arc::new(BasicExoHarness::new(exo_config.clone()).await?))
 }
 
 fn to_agent_harness_kind(kind: HarnessKind) -> AgentHarnessKind {
@@ -3329,55 +2715,6 @@ fn format_harness_kind(kind: AgentHarnessKind) -> &'static str {
 
 fn format_sandbox_provider(provider: &SandboxProvider) -> &str {
     provider.as_str()
-}
-
-fn build_typescript_harness_config(
-    selection: Option<&HarnessSelection>,
-    module: Option<&Path>,
-    tool_modules: &[PathBuf],
-) -> Result<Option<TypeScriptHarnessConfig>> {
-    let harness_kind = selection
-        .map(HarnessSelection::harness_kind)
-        .unwrap_or(HarnessKind::Basic);
-    if !matches!(harness_kind, HarnessKind::TypeScript | HarnessKind::Exo)
-        && !tool_modules.is_empty()
-    {
-        bail!("--tool-module is only valid with --harness typescript or exo");
-    }
-    match (selection, harness_kind, module) {
-        (Some(HarnessSelection::TypeScriptPreset(_)), _, Some(_))
-        | (Some(HarnessSelection::TypeScriptModule(_)), _, Some(_)) => Err(anyhow!(
-            "--module cannot be combined with a TypeScript module selected by --harness"
-        )),
-        (Some(HarnessSelection::TypeScriptPreset(preset)), _, None) => {
-            Ok(Some(resolve_typescript_harness_config(
-                &Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../..")
-                    .join(preset.module_path()),
-                resolve_typescript_tool_module_paths(tool_modules)?,
-            )?))
-        }
-        (Some(HarnessSelection::TypeScriptModule(module)), _, None) => {
-            Ok(Some(resolve_typescript_harness_config(
-                module,
-                resolve_typescript_tool_module_paths(tool_modules)?,
-            )?))
-        }
-        (_, HarnessKind::TypeScript | HarnessKind::Exo, Some(module)) => {
-            Ok(Some(resolve_typescript_harness_config(
-                module,
-                resolve_typescript_tool_module_paths(tool_modules)?,
-            )?))
-        }
-        (_, HarnessKind::TypeScript, None) => Err(anyhow!(
-            "typescript agents require --module <path>, or use --harness codex, --harness claude-code, --harness cursor, or --harness <module.ts>"
-        )),
-        (_, HarnessKind::Exo, None) => Err(anyhow!("exo agents require --module <path>")),
-        (_, _, Some(_)) => Err(anyhow!(
-            "--module is only valid with --harness typescript or exo"
-        )),
-        (_, _, None) => Ok(None),
-    }
 }
 
 async fn ensure_agent_matches_harness_selection(
@@ -3408,43 +2745,32 @@ async fn ensure_agent_matches_harness_selection(
         );
     }
 
-    let expected_typescript = match selection {
-        HarnessSelection::TypeScriptPreset(_) | HarnessSelection::TypeScriptModule(_) => {
-            build_typescript_harness_config(Some(selection), None, &[])?
-        }
+    let module = match selection {
+        HarnessSelection::TypeScriptPreset(preset) => Some(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(preset.module_path()),
+        ),
+        HarnessSelection::TypeScriptModule(module) => Some(module.clone()),
         HarnessSelection::Kind(_) => None,
     };
-    if let Some(expected_typescript) = expected_typescript {
-        let Some(actual_typescript) = config.typescript.as_ref() else {
-            bail!(
-                "agent {} is missing TypeScript module {}",
-                agent.record().slug,
-                expected_typescript.module_path
-            );
-        };
-        if actual_typescript.module_path != expected_typescript.module_path {
-            bail!(
-                "agent {} uses TypeScript module {}; --harness {} resolved to {}",
-                agent.record().slug,
-                actual_typescript.module_path,
-                format_harness_selection(selection),
-                expected_typescript.module_path
-            );
-        }
+    if let Some(module) = module {
+        let expected = module.canonicalize()?.to_string_lossy().into_owned();
+        let actual = config
+            .typescript
+            .as_ref()
+            .context("agent has no TypeScript module")?;
+        anyhow::ensure!(
+            actual.module_path == expected,
+            "agent {} uses TypeScript module {}; --harness {} resolved to {}",
+            agent.record().slug,
+            actual.module_path,
+            format_harness_selection(selection),
+            expected
+        );
     }
 
     Ok(())
-}
-
-fn resolve_typescript_harness_config(
-    module_path: &Path,
-    tool_module_paths: Vec<String>,
-) -> Result<TypeScriptHarnessConfig> {
-    let module_path = std::fs::canonicalize(module_path)?;
-    Ok(TypeScriptHarnessConfig {
-        module_path: module_path.to_string_lossy().into_owned(),
-        tool_module_paths,
-    })
 }
 
 fn looks_like_typescript_module_path(value: &str) -> bool {
@@ -3472,16 +2798,6 @@ fn format_harness_selection(selection: &HarnessSelection) -> String {
         },
         HarnessSelection::TypeScriptModule(path) => path.display().to_string(),
     }
-}
-
-fn resolve_typescript_tool_module_paths(paths: &[PathBuf]) -> Result<Vec<String>> {
-    paths
-        .iter()
-        .map(|path| {
-            let path = std::fs::canonicalize(path)?;
-            Ok(path.to_string_lossy().into_owned())
-        })
-        .collect()
 }
 
 fn print_table(headers: &[&str], rows: Vec<Vec<String>>) -> Result<()> {
@@ -3513,7 +2829,17 @@ struct RegisteredModel {
 }
 
 async fn list_model_bindings(exoharness: &dyn ExoHarness) -> Result<Vec<RegisteredModel>> {
-    let secrets = global_vault(exoharness).await?.list_secrets().await?;
+    let mut secrets = HashMap::new();
+    for vault in exoharness.list_vaults().await? {
+        let vault_name = vault.record().name.clone();
+        let vault_id = vault.record().id;
+        for secret in vault.list_secrets().await? {
+            secrets.insert(
+                (vault_id, secret.id),
+                format!("{vault_name}/{}", secret.name),
+            );
+        }
+    }
     let mut models = Vec::new();
     for metadata in exoharness.list_bindings().await? {
         let Binding::Llm {
@@ -3525,11 +2851,11 @@ async fn list_model_bindings(exoharness: &dyn ExoHarness) -> Result<Vec<Register
         else {
             continue;
         };
-        let secret_name = secret.and_then(|reference| {
+        let secret_name = secret.map(|reference| {
             secrets
-                .iter()
-                .find(|secret| secret.id == reference.secret_id)
-                .map(|secret| secret.name.clone())
+                .get(&(reference.vault_id, reference.secret_id))
+                .cloned()
+                .unwrap_or_else(|| "<missing vault or secret>".to_string())
         });
         models.push(RegisteredModel {
             name,
@@ -3554,9 +2880,10 @@ async fn list_model_bindings(exoharness: &dyn ExoHarness) -> Result<Vec<Register
 
 async fn find_secret_id(
     exoharness: &dyn ExoHarness,
+    vault: &str,
     name: &str,
 ) -> Result<Option<SecretReference>> {
-    let vault = global_vault(exoharness).await?;
+    let vault = exo_managed_agents::vaults::find_vault(exoharness, vault).await?;
     Ok(vault
         .list_secrets()
         .await?
@@ -3567,27 +2894,6 @@ async fn find_secret_id(
             vault_id: vault.record().id,
             secret_id: secret.id,
         }))
-}
-
-fn build_braintrust_tracing_config(
-    org_name: Option<String>,
-    project_name: Option<String>,
-    project_id: Option<String>,
-) -> Result<Option<BraintrustTracingConfig>> {
-    match (project_name, project_id) {
-        (Some(_), Some(_)) => Err(anyhow!(
-            "provide either --braintrust-project or --braintrust-project-id, not both"
-        )),
-        (Some(project_name), None) => Ok(Some(BraintrustTracingConfig {
-            org_name,
-            project: BraintrustProject::Name(project_name),
-        })),
-        (None, Some(project_id)) => Ok(Some(BraintrustTracingConfig {
-            org_name,
-            project: BraintrustProject::Id(project_id),
-        })),
-        (None, None) => Ok(None),
-    }
 }
 
 fn format_braintrust_tracing_config(config: Option<&BraintrustTracingConfig>) -> String {
@@ -3791,7 +3097,7 @@ async fn run_sandbox_shell_command(
 }
 
 fn chat_command(agent_slug: &str, conversation_slug: &str) -> String {
-    format!("exo chat --agent {agent_slug} --thread {conversation_slug}")
+    format!("exo agent run --agent {agent_slug} --thread {conversation_slug}")
 }
 
 fn sandbox_scope_name(scope: SandboxScope) -> &'static str {
@@ -3821,13 +3127,6 @@ fn slugify(input: &str) -> String {
     }
 
     slug
-}
-
-pub(crate) fn secret_value_from_env_arg(
-    env: &str,
-    loaded_env: &HashMap<String, String>,
-) -> Result<String> {
-    env_value_from_arg("--env", env, loaded_env)
 }
 
 fn parse_env_var_name(value: &str) -> std::result::Result<String, String> {
@@ -3889,251 +3188,83 @@ fn generate_fun_slug() -> String {
 
 pub(crate) fn generate_fun_slug_from_uuid(uuid: Uuid7) -> String {
     let bytes = uuid.0.as_bytes();
-    let word_a = SLUG_WORDS_A[(bytes[0] as usize) % SLUG_WORDS_A.len()];
-    let word_b = SLUG_WORDS_B[(bytes[1] as usize) % SLUG_WORDS_B.len()];
-    let suffix = format!("{:02x}{:02x}", bytes[14], bytes[15]);
+    let word_a = SLUG_WORDS_A[(bytes[10] as usize) % SLUG_WORDS_A.len()];
+    let word_b = SLUG_WORDS_B[(bytes[11] as usize) % SLUG_WORDS_B.len()];
+    let suffix = format!(
+        "{:02x}{:02x}{:02x}{:02x}",
+        bytes[12], bytes[13], bytes[14], bytes[15]
+    );
     format!("{word_a}-{word_b}-{suffix}")
 }
 
 #[cfg(test)]
-mod create_tests {
-    use super::chat_command;
+mod command_tests {
+    use super::*;
 
     #[test]
-    fn chat_command_uses_agent_and_conversation_slugs() {
-        assert_eq!(
-            chat_command("rlm", "aster-lantern-47db"),
-            "exo chat --agent rlm --thread aster-lantern-47db"
-        );
-    }
-
-    #[test]
-    fn chat_command_accepts_preset_harness_after_subcommand() {
-        use clap::Parser;
-        let cli =
-            super::Cli::try_parse_from(["exo", "chat", "--agent", "codex", "--harness", "codex"])
-                .expect("chat parses with a preset harness");
-        assert!(matches!(
-            &cli.runtime().harness,
-            Some(super::HarnessSelection::TypeScriptPreset(
-                super::TypeScriptHarnessPreset::Codex
-            ))
-        ));
-    }
-
-    #[test]
-    fn agent_update_accepts_preset_set_harness() {
-        use clap::Parser;
-        let cli = super::Cli::try_parse_from([
-            "exo",
-            "agent",
-            "update",
-            "teleport2",
-            "--set-harness",
-            "codex",
-        ])
-        .expect("agent update parses with a preset harness");
-        assert!(matches!(
-            cli.command,
-            super::Commands::Agent {
-                command: super::AgentCommands::Update {
-                    set_harness: Some(super::HarnessSelection::TypeScriptPreset(
-                        super::TypeScriptHarnessPreset::Codex
-                    )),
-                    ..
-                },
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn chat_command_accepts_preset_harness_and_conversation() {
-        use clap::Parser;
-        let cli = super::Cli::try_parse_from([
-            "exo",
+    fn command_tree_is_consistent() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+        for command in [
             "chat",
-            "--agent",
-            "codex",
-            "--harness",
-            "codex",
-            "--thread",
-            "existing",
-        ])
-        .expect("chat parses with a preset harness and conversation");
-        assert!(matches!(
-            cli.command,
-            super::Commands::Chat { thread, .. }
-                if thread.agent.as_deref() == Some("codex") && thread.thread.as_deref() == Some("existing")
-        ));
-    }
-
-    #[test]
-    fn chat_command_accepts_module_path_harness_after_subcommand() {
-        use clap::Parser;
-        let cli = super::Cli::try_parse_from([
-            "exo",
-            "chat",
-            "--agent",
-            "custom",
-            "--harness",
-            "./my-harness.ts",
-        ])
-        .expect("chat parses with a TypeScript module path");
-        assert!(matches!(
-            &cli.runtime().harness,
-            Some(super::HarnessSelection::TypeScriptModule(path))
-                if path.as_path() == std::path::Path::new("./my-harness.ts")
-        ));
-    }
-
-    #[test]
-    fn conversation_send_command_parses() {
-        use clap::Parser;
-        let cli = super::Cli::try_parse_from(["exo", "thread", "send", "agent", "conv", "hello"])
-            .expect("conversation send parses");
-        assert!(matches!(
-            cli.command,
-            super::Commands::Conversation {
-                command: super::ConversationCommands::Send {
-                    agent,
-                    conversation,
-                    prompt,
-                },
-                ..
-            } if agent == "agent" && conversation == "conv" && prompt == "hello"
-        ));
-    }
-
-    #[test]
-    fn conversation_sandbox_run_command_parses() {
-        use clap::Parser;
-        let cli = super::Cli::try_parse_from([
-            "exo",
-            "thread",
-            "sandbox",
             "run",
-            "agent",
-            "conv",
-            "pwd && git status",
-        ])
-        .expect("conversation sandbox run parses");
-        assert!(matches!(
-            cli.command,
-            super::Commands::Conversation {
-                command: super::ConversationCommands::Sandbox {
-                    command: super::ConversationSandboxCommands::Run {
-                        agent,
-                        conversation,
-                        command,
-                    },
-                },
-                ..
-            } if agent == "agent" && conversation == "conv" && command == "pwd && git status"
-        ));
+            "secret",
+            "sandbox-provider",
+            "tools",
+            "adapters",
+            "serve",
+        ] {
+            assert!(Cli::try_parse_from(["exo", command]).is_err());
+        }
+        for args in [
+            vec!["agent", "create", "support", "--file", "agent.md"],
+            vec!["agent", "update", "support", "--file", "agent.md"],
+            vec!["agent", "serve", "support"],
+            vec!["sandbox", "provider", "list"],
+            vec![
+                "model", "create", "test", "--secret", "key", "--vault", "team",
+            ],
+        ] {
+            Cli::try_parse_from(["exo"].into_iter().chain(args)).unwrap();
+        }
+        for args in [
+            vec!["agent", "create", "support", "--model", "test"],
+            vec!["agent", "--exoharness-url", "http://localhost", "list"],
+            vec![
+                "agent", "run", "--agent", "support", "--tui", "--prompt", "hi",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(["exo"].into_iter().chain(args)).is_err());
+        }
     }
 
     #[test]
-    fn conversation_sandbox_attach_command_parses() {
-        use clap::Parser;
-        let cli = super::Cli::try_parse_from([
-            "exo",
-            "thread",
-            "sandbox",
-            "attach",
-            "agent",
-            "conv",
-            "--sandbox",
-            "docker",
-            "--external-id",
-            "harbor-task",
-            "--default-workdir",
-            "/task",
-        ])
-        .expect("conversation sandbox attach parses");
-        assert!(matches!(
-            cli.command,
-            super::Commands::Conversation {
-                command: super::ConversationCommands::Sandbox {
-                    command: super::ConversationSandboxCommands::Attach {
-                        agent,
-                        conversation,
-                        provider: super::SandboxProviderArg::Docker,
-                        external_id,
-                        default_workdir: Some(default_workdir),
-                    },
-                },
-                ..
-            } if agent == "agent"
-                && conversation == "conv"
-                && external_id == "harbor-task"
-                && default_workdir == "/task"
-        ));
-    }
-
-    #[test]
-    fn exoharness_http_options_parse() {
-        use clap::Parser;
-        let cli = super::Cli::try_parse_from([
-            "exo",
-            "agent",
-            "--exoharness-url",
-            "http://localhost:8000/exo/v1/projects/project-id",
-            "--bearer-env",
-            "BRAINTRUST_API_KEY",
-            "list",
-        ])
-        .expect("HTTP exoharness options parse");
-        assert_eq!(
-            cli.runtime().exoharness_url.as_deref(),
-            Some("http://localhost:8000/exo/v1/projects/project-id")
-        );
-        assert_eq!(
-            cli.runtime().bearer_env.as_deref(),
-            Some("BRAINTRUST_API_KEY")
-        );
-    }
-
-    #[test]
-    fn bearer_env_requires_exoharness_url() {
-        use clap::Parser;
-        let error = super::Cli::try_parse_from([
-            "exo",
-            "agent",
-            "--bearer-env",
-            "BRAINTRUST_API_KEY",
-            "list",
-        ])
-        .expect_err("bearer env should require an exoharness URL");
-        assert_eq!(
-            error.kind(),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
-    }
-
-    #[test]
-    fn sandbox_provider_local_process_parses() {
-        use clap::Parser;
-        let cli = super::Cli::try_parse_from([
-            "exo",
-            "agent",
-            "create",
-            "test",
-            "--sandbox",
-            "local-process",
-            "--model",
-            "test-model",
-        ])
-        .expect("local-process sandbox provider parses");
-        assert!(matches!(
-            cli.command,
-            super::Commands::Agent {
-                command: super::AgentCommands::Create {
-                    sandbox_provider: Some(super::SandboxProviderArg::LocalProcess),
-                    ..
-                },
-                ..
+    fn interactive_and_one_shot_runs_share_thread_selection() {
+        for prompt in [None, Some("hello")] {
+            let mut args = vec![
+                "exo",
+                "agent",
+                "run",
+                "--agent",
+                "support",
+                "--thread",
+                "saved",
+                "--harness",
+                "codex",
+            ];
+            if let Some(prompt) = prompt {
+                args.extend(["--prompt", prompt]);
             }
-        ));
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(cli.command,
+                Commands::Agent { command: AgentCommands::Run { thread, prompt: actual, .. }, .. }
+                if thread.agent.as_deref() == Some("support") && thread.thread.as_deref() == Some("saved")
+                    && actual.as_deref() == prompt
+            ));
+        }
+        assert_eq!(
+            chat_command("support", "saved"),
+            "exo agent run --agent support --thread saved"
+        );
     }
 }

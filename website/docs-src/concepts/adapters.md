@@ -103,7 +103,7 @@ The general recipe:
 
    ```bash
    export DISCORD_BOT_TOKEN="..."
-   exo secret create discord-bot-token --env DISCORD_BOT_TOKEN
+   exo vault secret create global discord-bot-token --token-env DISCORD_BOT_TOKEN
    ```
 
 2. **Create the adapter.** Ask the agent to create it, or use the shipped

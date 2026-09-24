@@ -6,6 +6,21 @@ use exoharness::{
 
 const SOURCE: &str = "---\nname: support-analyst\nharness: codex\nconfig:\n  model: gpt-5.6-sol\n---\n\nInvestigate tickets.\n\n---\nCite each ticket.\n";
 
+#[test]
+fn sandbox_networking_defaults_to_enabled() -> Result<()> {
+    let definition = AgentDefinition::parse(
+        SOURCE.replace("config:\n", "sandbox:\n  provider: docker\nconfig:\n"),
+    )?;
+    assert!(
+        definition
+            .frontmatter
+            .sandbox
+            .context("sandbox")?
+            .enable_networking
+    );
+    Ok(())
+}
+
 struct TestMcpResolver(&'static str);
 
 #[async_trait]
@@ -151,16 +166,13 @@ fn parses_frontmatter_and_preserves_the_original_document() -> Result<()> {
 
 async fn storage() -> Result<Arc<dyn ExoHarness>> {
     Ok(Arc::new(
-        BasicExoHarness::in_memory(
-            BasicExoHarnessConfig {
-                root: PathBuf::new(),
-                secret_backend: SecretBackendChoice::Static([0; 32]),
-                sandbox_default: SandboxProvider::LocalProcess,
-                sandbox_policy: None,
-                sandbox_backends: vec![SandboxBackendRegistration::local_process()],
-            },
-            None,
-        )
+        BasicExoHarness::in_memory(BasicExoHarnessConfig {
+            root: PathBuf::new(),
+            secret_backend: SecretBackendChoice::Static([0; 32]),
+            sandbox_default: SandboxProvider::LocalProcess,
+            sandbox_policy: None,
+            sandbox_backends: vec![SandboxBackendRegistration::local_process()],
+        })
         .await?,
     ))
 }

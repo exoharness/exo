@@ -174,7 +174,7 @@ The snapshot's existence is also recorded in the conversation event log as
 
 ## CLI surface
 
-Inside the chat REPL (`exo chat --agent <agent> --thread <conv>`):
+Inside the chat REPL (`exo agent run --agent <agent> --thread <conv>`):
 
 ```
 /snapshot           capture the conversation's currently-running sandbox;

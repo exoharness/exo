@@ -321,7 +321,7 @@ register_model() {
   ensure_exo_bin
   local upstream="${UPSTREAM_MODEL:-$MODEL}"
   echo "Storing secret $SECRET_NAME from \$$SECRET_ENV..."
-  exo secret create "$SECRET_NAME" --env "$SECRET_ENV"
+  exo vault secret create global "$SECRET_NAME" --token-env "$SECRET_ENV"
   echo "Registering model $MODEL -> $upstream..."
   local args=(model create "$MODEL" --model "$upstream" --secret "$SECRET_NAME")
   if [[ -n "$MODEL_BASE_URL" ]]; then
@@ -388,10 +388,6 @@ adapters_pid_file() {
   echo "$ROOT_DIR/.exo/exo-adapters.pid"
 }
 
-adapters_lock_file() {
-  echo "$ROOT_DIR/.exo/exo-adapters.lock"
-}
-
 adapters_restart_file() {
   echo "$ROOT_DIR/.exo/exo-adapters.restart"
 }
@@ -438,7 +434,7 @@ adapters_process_running() {
     return 1
   fi
   command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-  [[ "$command_line" == *"adapters run"* ]]
+  [[ "$command_line" == *"agent "*"serve"* ]]
 }
 
 adapter_source_newer_than() {
@@ -491,10 +487,10 @@ ensure_adapters() {
   echo "Starting adapter runner..."
   EXO_GLOBAL_ARGS=()
   append_exo_global_args
-  nohup "$EXO_BIN" adapters "${EXO_GLOBAL_ARGS[@]}" --harness "$HARNESS" \
-    run \
-      --limit "$ADAPTER_LIMIT" \
-      --lock-file "$(adapters_lock_file)" \
+  nohup "$EXO_BIN" agent "${EXO_GLOBAL_ARGS[@]}" --harness "$HARNESS" \
+    serve "$AGENT" \
+      --adapters-only \
+      --adapter-limit "$ADAPTER_LIMIT" \
       --drain-marker "$(adapters_restart_file)" \
       --reboot-notice "$(reboot_notice_file)" \
     >>"$log_file" 2>&1 &
@@ -577,21 +573,18 @@ ensure_agent() {
   fi
 
   echo "Creating agent $AGENT..."
-  local args=(
-    agent --harness "$HARNESS" create "$AGENT_NAME"
-    --slug "$AGENT"
-    --module "$MODULE"
-    --model "$MODEL"
-  )
-  if [[ "$USE_SANDBOX" == true ]]; then
-    args+=(--sandbox-image "$SANDBOX_IMAGE" --networking "$NETWORKING")
-    if [[ -n "$PROVIDER" ]]; then
-      args+=(--sandbox "$PROVIDER")
-    fi
-    # The exo agent shares one sandbox across all of its conversations.
-    args+=(--sandbox-scope "${SANDBOX_SCOPE:-agent}")
-  fi
-  exo "${args[@]}"
+  mkdir -p "$ROOT_DIR/.exo"
+  local spec="$ROOT_DIR/.exo/launch-agent.md"
+  python3 - "$spec" "$AGENT_NAME" "$HARNESS" "$MODULE" "$MODEL" "$USE_SANDBOX" "$SANDBOX_IMAGE" "$PROVIDER" "${SANDBOX_SCOPE:-agent}" "$NETWORKING" <<'PYTHON'
+import json, pathlib, sys
+path, name, harness, module, model, sandbox, image, provider, scope, networking = sys.argv[1:]
+config = {"name": name, "harness": harness, "config": {"model": model, "module": str(pathlib.Path(module).resolve())}}
+if sandbox == "true":
+    provider = {"apple-container": "apple_container", "local-process": "local_process"}.get(provider, provider)
+    config["sandbox"] = {"image": image, "provider": provider or "docker", "scope": scope, "enable_networking": networking == "enabled"}
+pathlib.Path(path).write_text("---\n" + json.dumps(config) + "\n---\nFollow the Exo harness instructions.\n")
+PYTHON
+  exo agent create "$AGENT_NAME" --slug "$AGENT" --file "$spec"
 }
 
 ensure_conversation() {
@@ -718,7 +711,7 @@ stop_adapters() {
       terminate_process_tree "$pid"
     fi
   fi
-  pkill -f "exo .*adapters run" >/dev/null 2>&1 || true
+  pkill -f "exo .*agent .*serve" >/dev/null 2>&1 || true
   pkill -f "tsx exo/adapters/.*/worker.ts" >/dev/null 2>&1 || true
   rm -f "$pid_file"
 }
@@ -887,7 +880,7 @@ run_repl() {
   else
     EXO_GLOBAL_ARGS=()
     append_exo_global_args
-    exec "$EXO_BIN" chat "${EXO_GLOBAL_ARGS[@]}" \
+    exec "$EXO_BIN" agent "${EXO_GLOBAL_ARGS[@]}" run \
       --agent "$AGENT" \
       --thread "$CONVERSATION"
   fi
@@ -948,7 +941,7 @@ run_control_repl() {
     restart_watcher_pid="$!"
 
     local repl_exit
-    if "$EXO_BIN" chat "${EXO_GLOBAL_ARGS[@]}" \
+    if "$EXO_BIN" agent "${EXO_GLOBAL_ARGS[@]}" run \
       --agent "$AGENT" \
       --thread "$CONVERSATION"; then
       repl_exit=0
@@ -984,7 +977,7 @@ kill_repl_children() {
 find_repl_children() {
   local control_pid="$1"
   ps ax -o pid= -o ppid= -o command= | awk -v ppid="$control_pid" -v exo="$EXO_BIN" '
-    $2 == ppid && index($0, exo) > 0 && index($0, " chat") > 0 { print $1 }
+    $2 == ppid && index($0, exo) > 0 && index($0, " run") > 0 { print $1 }
   '
 }
 

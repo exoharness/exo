@@ -87,22 +87,9 @@ The first HTTP transport is unary only. Durable writes and reads should stay req
 
 Executor/model streaming is outside this transport.
 
-## Local basic server
+## Managed-agent CLI service
 
-The CLI can run the local `BasicExoHarness` behind this HTTP transport:
-
-```bash
-exo serve --bind 127.0.0.1:4766
-```
-
-Use `-v` or `-vv` to enable stderr tracing output for each exoharness request and response kind:
-
-```bash
-exo serve -v --bind 127.0.0.1:4766
-```
-
-Another CLI process can use that server instead of opening the local basic backend directly:
-
-```bash
-exo agent --exoharness-url http://127.0.0.1:4766 list
-```
+`exo agent serve` exposes the managed-agent runtime API used by `RuntimeClient`,
+not this lower-level transport. See [Serve over HTTP](managed-agents.md#serve-over-http)
+for setup and agent scoping. Embedders can still use the
+ExoHarness HTTP library directly.

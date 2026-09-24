@@ -135,7 +135,7 @@ inside the conversation before touching host services:
   being activated. The restart is deferred briefly so the current turn can
   finish before services stop.
 - In control mode, service guardian builds write `.exo/exo-control.restart`;
-  the `./exo.sh --control` wrapper restarts only the child `exo chat` and
+  the `./exo.sh --control` wrapper restarts only the child `exo agent run` and
   keeps the user's terminal open.
 - Service restarts drain gracefully: the guardian writes
   `.exo/exo-adapters.restart` / `.exo/exo-scheduler.restart`, the

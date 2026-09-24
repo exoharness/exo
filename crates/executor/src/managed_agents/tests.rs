@@ -9,8 +9,25 @@ use tempfile::TempDir;
 
 const SOURCE: &str = "---\nname: support-analyst\nharness: basic\nconfig:\n  model: gpt-5.4\n---\n\nInvestigate support tickets.\n";
 
+#[test]
+fn explicit_sandbox_keeps_the_harness_preset_image() -> Result<()> {
+    let definition = AgentDefinition::parse(
+        SOURCE
+            .replace("harness: basic", "harness: codex")
+            .replace("config:\n", "sandbox:\n  provider: docker\nconfig:\n"),
+    )?;
+    let config =
+        super::config::agent_config(&definition, SandboxProvider::LocalProcess, None, None)?;
+    assert_eq!(
+        config.sandbox.image.as_deref(),
+        Some("exo-codex-sandbox:latest")
+    );
+    assert!(config.sandbox.enable_networking);
+    Ok(())
+}
+
 async fn state(config: &BasicExoHarnessConfig) -> Result<Arc<dyn ExoHarness>> {
-    let state = Arc::new(BasicExoHarness::in_memory(config.clone(), None).await?);
+    let state = Arc::new(BasicExoHarness::in_memory(config.clone()).await?);
     state
         .put_binding(Binding::Llm {
             name: "gpt-5.4".into(),
@@ -20,6 +37,38 @@ async fn state(config: &BasicExoHarnessConfig) -> Result<Arc<dyn ExoHarness>> {
         })
         .await?;
     Ok(state)
+}
+
+#[tokio::test]
+async fn updating_a_definition_preserves_mounts_added_outside_the_spec() -> Result<()> {
+    let temp = TempDir::new()?;
+    let config = crate::test_support::local_test_config(temp.path().join("state"));
+    let store = state(&config).await?;
+    let runtime = runtime(store, &config, Default::default())?;
+    let definition = AgentDefinition::parse(SOURCE.into())?;
+    let agent = runtime.create_managed_agent(&definition, "support").await?;
+    let mount = FileSystemMount {
+        host_path: temp.path().to_string_lossy().into_owned(),
+        mount_path: "/workspace".into(),
+        mode: FileSystemMountMode::ReadOnly,
+        internal: None,
+    };
+    let mut config = runtime.get_agent_config(agent.as_ref()).await?;
+    config.sandbox.mounts.push(mount.clone());
+    runtime.put_agent_config(agent.as_ref(), config).await?;
+
+    let updated = AgentDefinition::parse(SOURCE.replace("Investigate", "Triage"))?;
+    runtime.update_managed_agent(&agent, &updated).await?;
+
+    assert_eq!(
+        runtime
+            .get_agent_config(agent.as_ref())
+            .await?
+            .sandbox
+            .mounts,
+        vec![mount]
+    );
+    runtime.shutdown().await
 }
 
 fn runtime(

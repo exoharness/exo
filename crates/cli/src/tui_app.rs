@@ -1438,7 +1438,7 @@ mod tests {
             sandbox_policy: None,
             sandbox_backends: vec![SandboxBackendRegistration::local_process()],
         };
-        let state = Arc::new(BasicExoHarness::in_memory(config.clone(), None).await?);
+        let state = Arc::new(BasicExoHarness::in_memory(config.clone()).await?);
         let agent = state
             .new_agent(NewAgentRequest {
                 slug: "approvals".into(),

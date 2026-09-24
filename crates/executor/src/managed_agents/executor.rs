@@ -136,18 +136,17 @@ impl HarnessExecutor for ManagedExecutor {
         &self,
         definition: &exo_managed_agents::AgentDefinition,
     ) -> Result<AgentConfig> {
-        config::agent_config(definition, self.config.sandbox_default.clone(), None, None)
-    }
-
-    fn fork(&self, state: Arc<dyn ExoHarness>) -> Result<Arc<dyn HarnessExecutor>> {
-        Ok(Arc::new(Self {
-            state,
-            config: self.config.clone(),
-            env: self.env.clone(),
-            pricing: self.pricing.clone(),
-            workspace: self.workspace.clone(),
-            threads: Mutex::default(),
-        }))
+        let config =
+            config::agent_config(definition, self.config.sandbox_default.clone(), None, None)?;
+        ensure!(
+            self.config
+                .sandbox_backends
+                .iter()
+                .any(|backend| backend.provider() == config.sandbox.provider),
+            "sandbox provider {:?} in the agent spec is not supported by this harness",
+            config.sandbox.provider
+        );
+        Ok(config)
     }
 
     async fn configure_managed_thread(

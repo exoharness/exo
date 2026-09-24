@@ -106,7 +106,7 @@ async fn cli_reports_http_usage_across_restarts_and_paginated_history() -> Resul
         sandbox_policy: None,
         sandbox_backends: vec![SandboxBackendRegistration::local_process()],
     };
-    let state = Arc::new(BasicExoHarness::in_memory(config.clone(), None).await?);
+    let state = Arc::new(BasicExoHarness::in_memory(config.clone()).await?);
     state
         .put_binding(Binding::Llm {
             name: "metered-model".into(),
@@ -156,8 +156,7 @@ async fn cli_reports_http_usage_across_restarts_and_paginated_history() -> Resul
         listener,
         Arc::new(RuntimeHttpService::new(
             runtime.clone(),
-            "usage-test-token",
-            config,
+            Some("usage-test-token"),
         )?),
     )?;
     let handle = server.handle();
@@ -182,11 +181,13 @@ async fn cli_reports_http_usage_across_restarts_and_paginated_history() -> Resul
         &[
             "--provider",
             "oss",
+            "agent",
             "run",
             "--agent",
             &agent_id,
             "--thread",
             &thread_id,
+            "--prompt",
             "priced",
         ],
     )
@@ -248,11 +249,13 @@ async fn cli_reports_http_usage_across_restarts_and_paginated_history() -> Resul
             &[
                 "--provider",
                 "oss",
+                "agent",
                 "run",
                 "--agent",
                 &agent_id,
                 "--thread",
                 &thread_id,
+                "--prompt",
                 input,
             ],
         )

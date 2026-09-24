@@ -44,7 +44,16 @@ bindings, and secrets.
 ### Create
 
 ```bash
-exo agent create "My Agent" --model gpt-5.6-terra
+cat > my-agent.md <<'EOF'
+---
+name: "My Agent"
+harness: basic
+config:
+  model: gpt-5.6-terra
+---
+Help the user with their task.
+EOF
+exo agent create my-agent --file my-agent.md
 # or via the canonical launcher, which creates exo-agent for you:
 ./exo.sh
 ```
@@ -63,9 +72,7 @@ touches it.
 ### Update
 
 ```bash
-exo agent update <agent> --model <name>
-exo agent update <agent> --networking enabled
-exo agent update <agent> --sandbox-image ubuntu:24.04
+exo agent update <agent> --file agent.md
 ```
 
 Updates rewrite the agent config artifact on disk. **In-process caches may
@@ -337,7 +344,7 @@ turn; adapters run continuously and *wake* turns.
 
 ```text
 ./exo.sh
- ├── adapter runner   (`exo … adapters run --watch`)
+ ├── agent service / adapter runner   (`exo agent serve`)
  │    └── supervisor per enabled adapter
  │         └── worker process (JSONL stdin/stdout)
  ├── scheduler runner
@@ -401,11 +408,11 @@ sender, and reply instructions.
 
 ```bash
 # Started automatically by canonical ./exo.sh; or:
-exo adapters --harness exo run --watch --limit 50
+exo agent serve --adapter-limit 50
 
-exo adapters list
-# agent tools: create_adapter, list_adapters, disable_adapter,
-#              delete_adapter, send_adapter_message
+# Adapter management is available through these agent tools:
+# create_adapter, list_adapters, disable_adapter, delete_adapter,
+# send_adapter_message
 ```
 
 Health signals: `last_connected_at_ms`, `last_error` on each record;

@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -39,6 +38,7 @@ const REBOOT_NOTICE_MAX_AGE: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Debug, Clone)]
 pub struct AdapterRunOptions {
+    pub shutdown: tokio_util::sync::CancellationToken,
     pub limit: usize,
     /// When this file appears, the runner claims it (removes the file), stops
     /// starting new work, lets in-flight wakeup turns finish, and exits so a
@@ -53,6 +53,7 @@ pub struct AdapterRunOptions {
 impl Default for AdapterRunOptions {
     fn default() -> Self {
         Self {
+            shutdown: Default::default(),
             limit: 10,
             drain_marker: None,
             reboot_notice: None,
@@ -75,7 +76,7 @@ pub async fn run_adapters_watch(
     options: AdapterRunOptions,
 ) -> Result<()> {
     let running = Arc::new(Mutex::new(HashSet::<String>::new()));
-    let drain = Arc::new(AtomicBool::new(false));
+    let drain = options.shutdown.clone();
     let mut supervisors = JoinSet::new();
     if let Some(notice) = claim_reboot_notice(options.reboot_notice.as_deref()) {
         // The wakeup turn can take minutes; run it in the background so the
@@ -107,9 +108,9 @@ pub async fn run_adapters_watch(
         });
     }
     loop {
-        if claim_drain_marker(options.drain_marker.as_deref()) {
+        if options.shutdown.is_cancelled() || claim_drain_marker(options.drain_marker.as_deref()) {
             tracing::info!("adapter runner drain requested; waiting for in-flight work");
-            drain.store(true, Ordering::SeqCst);
+            drain.cancel();
             record_host_event_for_adapter_conversations(
                 harness.as_ref(),
                 &store,
@@ -131,7 +132,7 @@ pub async fn run_adapters_watch(
             let harness = Arc::clone(&harness);
             let store = store.clone();
             let running = Arc::clone(&running);
-            let drain = Arc::clone(&drain);
+            let drain = drain.clone();
             supervisors.spawn(async move {
                 let adapter_id = adapter.id.clone();
                 supervise_adapter(harness, store, adapter, drain).await;
@@ -144,7 +145,10 @@ pub async fn run_adapters_watch(
         // Reap finished supervision tasks so the JoinSet does not grow
         // unboundedly while the runner stays up.
         while supervisors.try_join_next().is_some() {}
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        tokio::select! {
+            _ = options.shutdown.cancelled() => {},
+            _ = tokio::time::sleep(Duration::from_secs(10)) => {},
+        }
     }
     while supervisors.join_next().await.is_some() {}
     tracing::info!("adapter runner drained; exiting for restart");
@@ -294,11 +298,11 @@ async fn supervise_adapter(
     harness: Arc<Runtime>,
     store: AdapterStore,
     adapter: AdapterRecord,
-    drain: Arc<AtomicBool>,
+    drain: tokio_util::sync::CancellationToken,
 ) {
     let mut restart_delay = INITIAL_RESTART_DELAY;
     loop {
-        if drain.load(Ordering::SeqCst) {
+        if drain.is_cancelled() {
             break;
         }
         match store.get_adapter(&adapter.id).await {
@@ -319,13 +323,8 @@ async fn supervise_adapter(
             }
         }
         let started_at = Instant::now();
-        if let Err(error) = run_adapter_loop(
-            Arc::clone(&harness),
-            &store,
-            adapter.clone(),
-            Arc::clone(&drain),
-        )
-        .await
+        if let Err(error) =
+            run_adapter_loop(Arc::clone(&harness), &store, adapter.clone(), drain.clone()).await
         {
             if started_at.elapsed() >= STABLE_RUN_THRESHOLD {
                 restart_delay = INITIAL_RESTART_DELAY;
@@ -357,12 +356,18 @@ async fn supervise_adapter(
                     "failed to record adapter error"
                 );
             }
-            tokio::time::sleep(restart_delay).await;
+            tokio::select! {
+                _ = drain.cancelled() => break,
+                _ = tokio::time::sleep(restart_delay) => {},
+            }
             restart_delay = (restart_delay * 2).min(MAX_RESTART_DELAY);
             continue;
         }
         restart_delay = INITIAL_RESTART_DELAY;
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::select! {
+            _ = drain.cancelled() => break,
+            _ = tokio::time::sleep(Duration::from_secs(5)) => {},
+        }
     }
 }
 
@@ -420,13 +425,13 @@ async fn run_adapter_loop(
     harness: Arc<Runtime>,
     store: &AdapterStore,
     adapter: AdapterRecord,
-    drain: Arc<AtomicBool>,
+    drain: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     let agent = require_agent(harness.as_ref(), &adapter).await?;
     let conversation = require_conversation(agent.as_ref(), &adapter).await?;
     store.requeue_inflight_messages(&adapter.id).await?;
     let config = adapter.config.clone();
-    let secret_env = worker_secret_env(agent.as_ref(), &config).await?;
+    let secret_env = worker_secret_env(harness.exoharness_handle().as_ref(), &config).await?;
     let outbound_notifier = register_adapter_outbound_notifier(&adapter.id);
     let event_runtime = Arc::clone(&harness);
     let event_store = store.clone();
@@ -483,9 +488,9 @@ async fn run_adapter_loop(
         move || {
             let store = stop_store.clone();
             let adapter_id = stop_adapter_id.clone();
-            let drain = Arc::clone(&drain);
+            let drain = drain.clone();
             async move {
-                if drain.load(Ordering::SeqCst) {
+                if drain.is_cancelled() {
                     return Ok(true);
                 }
                 Ok(store
@@ -1053,13 +1058,17 @@ async fn require_conversation(
 }
 
 async fn worker_secret_env(
-    agent: &dyn AgentHandle,
+    agent: &dyn exoharness::vault::VaultContext,
     config: &AdapterConfig,
 ) -> Result<Vec<(String, String)>> {
-    let vault = exoharness::vault::global_vault(agent).await?;
-    let secrets = vault.list_secrets().await?;
     let mut env = Vec::new();
     for secret_env in &config.secret_env {
+        let vault = exo_managed_agents::vaults::find_vault(
+            agent,
+            secret_env.vault.as_deref().unwrap_or("global"),
+        )
+        .await?;
+        let secrets = vault.list_secrets().await?;
         let id = secret_env.secret_id.parse::<exoharness::SecretId>().ok();
         let metadata = secrets
             .iter()
@@ -1123,6 +1132,7 @@ mod tests {
                 initialization: serde_json::Value::Null,
                 state_dir: None,
                 secret_env: vec![WorkerSecretEnvVar {
+                    vault: None,
                     env: "TOKEN".into(),
                     secret_id: reference,
                 }],
@@ -1132,6 +1142,21 @@ mod tests {
                 vec![("TOKEN".into(), "runtime-token".into())]
             );
         }
+        let config = AdapterConfig {
+            adapter_type: "test".into(),
+            worker_command: vec![],
+            initialization: serde_json::Value::Null,
+            state_dir: None,
+            secret_env: vec![WorkerSecretEnvVar {
+                env: "TOKEN".into(),
+                secret_id: "adapter".into(),
+                vault: Some("user".into()),
+            }],
+        };
+        assert_eq!(
+            worker_secret_env(&harness, &config).await?,
+            vec![("TOKEN".into(), "shadow-token".into())]
+        );
         Ok(())
     }
 

@@ -53,7 +53,7 @@ callable on the next model round.
 - `manage_tool` is the only write surface: `install` and `remove`.
 - `inspect_tools` is read-only: `list` and `get` over either the tools active
   in the current round or the tools installed in the registry.
-- The operator CLI is read-only: `exo tools list` and `exo tools get <id>`.
+- Declare tool modules in the agent spec and inspect it with `exo agent get NAME`.
 
 Local source paths are resolved on the host relative to the workspace root.
 Because the agent's shell runs in a sandbox where the workspace is mounted at
@@ -155,8 +155,7 @@ Use word_stats to analyze the following paragraph: <paragraph>
 - Ask the agent to call `inspect_tools` with source `installed` to confirm the
   registry entry, or source `active` to confirm the tool is registered this
   round.
-- From a terminal, `exo tools list` and `exo tools get tool:local/word-stats`
-  show the same installation state read-only.
+- Use `exo agent get NAME` to inspect the saved spec and configured tool modules.
 - Install failures come back directly in the `manage_tool` result: schema
   violations, name collisions, path problems, and module load errors are
   reported with the reason. Nothing is partially installed on failure.

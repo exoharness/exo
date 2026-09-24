@@ -13,16 +13,14 @@ primitives the setup script drives.
 ## 1. Store a secret
 
 ```bash
-exo secret create openai --env OPENAI_API_KEY
+exo vault secret create global openai --token-env OPENAI_API_KEY
 ```
 
 This stores your API key in exo's secret store (file-backed by default,
 Apple Keychain also supported via `--secret-backend`).
 
 ::: info
-  `--env` takes the variable *name* literally and reads it at use time. Use
-  `--value "$OPENAI_API_KEY"` if you intentionally want the shell to expand
-  the value and store it.
+  `--token-env` takes the environment variable name; the CLI reads its value.
 :::
 
 ## 2. Register a model
@@ -38,15 +36,26 @@ endpoint. Model names starting with `claude` use the Anthropic API.
 ## 3. Create an agent and chat
 
 ```bash
-exo agent create assistant --model gpt-5.5
-exo chat --agent assistant
+cat > assistant.md <<'EOF'
+---
+name: "assistant"
+harness: basic
+config:
+  model: gpt-5.5
+---
+Help the user with their task.
+EOF
+exo agent create assistant --file assistant.md
+exo agent run --agent assistant
 ```
 
-Each `exo chat --agent assistant` invocation starts a new saved thread.
-Use `--agent-file agent.md` instead to run a Markdown agent with temporary state.
+Each `exo agent run --agent assistant` invocation starts a new saved thread.
+Use `--agent-file agent.md` to create or update a saved agent from a Markdown file
+and start a saved thread. Rerunning the same file reuses the agent; add
+`--thread <slug>` to resume a thread.
 See [A Sandboxed Conversation](./sandboxed-conversation) to configure a sandbox.
 
-Chat runs inline, keeping your terminal scrollback available. Use `exo chat --agent assistant --tui`
+Chat runs inline, keeping your terminal scrollback available. Use `exo agent run --agent assistant --tui`
 to opt into the full-screen interface.
 
 While a turn runs, a spinner shows whether the agent is waiting for the model,
@@ -68,7 +77,7 @@ Because all conversation state is durable and owned by the exoharness, you
 can quit the REPL and resume the same conversation later:
 
 ```bash
-exo chat --agent assistant --thread <slug>
+exo agent run --agent assistant --thread <slug>
 ```
 
 Use `exo thread list assistant` to find the slug, and

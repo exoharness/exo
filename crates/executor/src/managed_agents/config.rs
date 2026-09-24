@@ -60,11 +60,35 @@ pub fn agent_config(
         "pi" => Some(TypeScriptHarnessPreset::Pi),
         _ => None,
     };
-    let (kind, module) = match harness {
+    let (kind, mut module) = match harness {
         "basic" => (AgentHarnessKind::Basic, None),
         "rlm" => (AgentHarnessKind::Rlm, None),
         "typescript" | "exo" => {
-            bail!("{harness} agents require a TypeScript module path or a named harness preset")
+            let path = definition
+                .frontmatter
+                .config
+                .module
+                .as_ref()
+                .with_context(|| format!("{harness} agents require config.module"))?;
+            let path = definition
+                .path()
+                .and_then(Path::parent)
+                .unwrap_or(Path::new("."))
+                .join(path);
+            let path = path
+                .canonicalize()
+                .with_context(|| format!("resolving harness module {}", path.display()))?;
+            (
+                if harness == "exo" {
+                    AgentHarnessKind::Exo
+                } else {
+                    AgentHarnessKind::TypeScript
+                },
+                Some(TypeScriptHarnessConfig {
+                    module_path: path.to_string_lossy().into_owned(),
+                    tool_module_paths: vec![],
+                }),
+            )
         }
         _ => {
             let module = if let Some(preset) = preset {
@@ -104,29 +128,63 @@ pub fn agent_config(
             )
         }
     };
+    if !definition.frontmatter.tools.is_empty() {
+        let module = module
+            .as_mut()
+            .context("tool modules require a TypeScript harness")?;
+        let base = definition
+            .path()
+            .and_then(Path::parent)
+            .unwrap_or(Path::new("."));
+        module.tool_module_paths = definition
+            .frontmatter
+            .tools
+            .iter()
+            .map(|path| {
+                let path = base.join(path);
+                Ok(path
+                    .canonicalize()
+                    .with_context(|| {
+                        format!("resolving tool module {} on this provider", path.display())
+                    })?
+                    .to_string_lossy()
+                    .into_owned())
+            })
+            .collect::<Result<_>>()?;
+    }
     let model = model.unwrap_or(&definition.frontmatter.config.model);
     if model.trim().is_empty() {
         bail!("model must not be empty");
     }
-    Ok(AgentConfig {
-        harness: kind,
-        typescript: module,
-        enable_agent_tool_creation: false,
-        instructions: vec![crate::harness_helpers::system_message(
-            &definition.system_prompt(),
-        )],
-        sandbox: AgentSandboxConfig {
-            image: preset
-                .and_then(TypeScriptHarnessPreset::sandbox_image)
-                .map(str::to_string),
+    let preset_image = preset
+        .and_then(TypeScriptHarnessPreset::sandbox_image)
+        .map(str::to_string);
+    let sandbox = match definition.frontmatter.sandbox.clone() {
+        Some(mut sandbox) => {
+            if sandbox.image.is_none() {
+                sandbox.image = preset_image;
+            }
+            sandbox
+        }
+        None => AgentSandboxConfig {
+            image: preset_image,
             provider: sandbox,
             scope: Default::default(),
             mounts: vec![],
             enable_networking: true,
         },
+    };
+    Ok(AgentConfig {
+        harness: kind,
+        typescript: module,
+        enable_agent_tool_creation: definition.frontmatter.tool_creation,
+        instructions: vec![crate::harness_helpers::system_message(
+            &definition.system_prompt(),
+        )],
+        sandbox,
         model: model.into(),
-        max_output_tokens: None,
-        max_tool_round_trips: None,
-        braintrust: None,
+        max_output_tokens: definition.frontmatter.config.max_output_tokens,
+        max_tool_round_trips: definition.frontmatter.config.max_tool_round_trips,
+        braintrust: definition.frontmatter.config.braintrust.clone(),
     })
 }

@@ -28,25 +28,18 @@ pub struct HttpProvider {
 
 impl HttpProvider {
     pub fn new(client: RuntimeClient) -> Self {
-        Self::with_options(client, None, None, false)
+        Self::with_options(client, None, None)
     }
 
     pub fn with_options(
         client: RuntimeClient,
         model: Option<String>,
         harness: Option<String>,
-        temporary: bool,
     ) -> Self {
         let transport = Arc::new(RuntimeTransport {
-            client: if temporary {
-                client.with_temporary_state()
-            } else {
-                client
-            },
+            client,
             model,
             harness,
-            temporary,
-            leases: Arc::default(),
             threads: Arc::default(),
         });
         Self {
@@ -187,17 +180,7 @@ impl Harness<ProviderTurn> for HttpProvider {
             .lock()
             .expect("HTTP watchers poisoned")
             .abort_all();
-        let leases =
-            std::mem::take(&mut *self.transport.leases.lock().expect("HTTP leases poisoned"));
-        let mut result = Ok(());
-        for (id, lease) in leases {
-            lease.abort();
-            if let Err(error) = self.transport.client.delete_agent(id).await {
-                result = Err(error
-                    .context("temporary agent cleanup failed; it will expire when its lease ends"));
-            }
-        }
-        result
+        Ok(())
     }
 
     async fn submit(&self, command: HarnessCommand<ProviderTurn>) -> Result<()> {
@@ -243,8 +226,6 @@ struct RuntimeTransport {
     client: RuntimeClient,
     model: Option<String>,
     harness: Option<String>,
-    temporary: bool,
-    leases: Arc<Mutex<HashMap<AgentId, tokio_util::task::AbortOnDropHandle<()>>>>,
     threads: Arc<Mutex<HashMap<ThreadId, AgentId>>>,
 }
 
@@ -285,38 +266,12 @@ impl ExoHttpTransport for RuntimeTransport {
             Request::GetAgent { agent_id } => Ok(Response::Agent {
                 agent: self.client.get_agent(agent_id).await?,
             }),
-            Request::NewAgent { request } => {
-                let agent = self.client.create_agent(&request).await?;
-                if self.temporary {
-                    let client = self.client.clone();
-                    let id = agent.id;
-                    let lease = tokio::spawn(async move {
-                        loop {
-                            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                            if let Err(error) = client.get_agent(id).await {
-                                tracing::warn!(%error, "temporary run lease renewal failed; retrying");
-                            }
-                        }
-                    });
-                    self.leases
-                        .lock()
-                        .expect("HTTP leases poisoned")
-                        .insert(id, tokio_util::task::AbortOnDropHandle::new(lease));
-                }
-                Ok(Response::Agent { agent: Some(agent) })
-            }
-            Request::DeleteAgent { agent_id } => {
-                let value = self.client.delete_agent(agent_id).await?;
-                if let Some(lease) = self
-                    .leases
-                    .lock()
-                    .expect("HTTP leases poisoned")
-                    .remove(&agent_id)
-                {
-                    lease.abort();
-                }
-                Ok(Response::Bool { value })
-            }
+            Request::NewAgent { request } => Ok(Response::Agent {
+                agent: Some(self.client.create_agent(&request).await?),
+            }),
+            Request::DeleteAgent { agent_id } => Ok(Response::Bool {
+                value: self.client.delete_agent(agent_id).await?,
+            }),
             Request::AgentListArtifacts { agent_id } => Ok(Response::ArtifactVersions {
                 artifacts: self.client.list_agent_artifacts(agent_id).await?,
             }),

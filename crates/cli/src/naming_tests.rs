@@ -10,7 +10,7 @@ fn generated_conversation_slug_has_expected_shape() {
 
     let slug = generate_fun_slug_from_uuid(uuid);
 
-    assert_eq!(slug, "aster-lantern-8878");
+    assert_eq!(slug, "north-anchor-70b08878");
 }
 
 #[test]
@@ -26,4 +26,14 @@ fn generated_conversation_slug_is_lowercase_and_hyphenated() {
             .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
     );
     assert_eq!(slug.split('-').count(), 3);
+}
+
+#[test]
+fn generated_slugs_distinguish_same_time_and_short_suffix() {
+    let original = "019da9fe-67ea-7b62-9d70-3e6070b08878".parse().unwrap();
+    let different_words = "019da9fe-67ea-7b62-9d70-3f6170b08878".parse().unwrap();
+    let different_suffix = "019da9fe-67ea-7b62-9d70-3e6071b18878".parse().unwrap();
+    let slug = generate_fun_slug_from_uuid(original);
+    assert_ne!(slug, generate_fun_slug_from_uuid(different_words));
+    assert_ne!(slug, generate_fun_slug_from_uuid(different_suffix));
 }

@@ -490,16 +490,13 @@ mod vault_tests {
 
     #[tokio::test]
     async fn model_auth_uses_the_runtime_vault_even_when_user_secret_names_match() -> Result<()> {
-        let harness = BasicExoHarness::in_memory(
-            BasicExoHarnessConfig {
-                root: Default::default(),
-                secret_backend: SecretBackendChoice::Static([1; 32]),
-                sandbox_default: SandboxProvider::LocalProcess,
-                sandbox_policy: None,
-                sandbox_backends: vec![SandboxBackendRegistration::local_process()],
-            },
-            None,
-        )
+        let harness = BasicExoHarness::in_memory(BasicExoHarnessConfig {
+            root: Default::default(),
+            secret_backend: SecretBackendChoice::Static([1; 32]),
+            sandbox_default: SandboxProvider::LocalProcess,
+            sandbox_policy: None,
+            sandbox_backends: vec![SandboxBackendRegistration::local_process()],
+        })
         .await?;
         let runtime = exoharness::vault::global_vault(&harness).await?;
         let user = harness.create_vault("alice").await?;

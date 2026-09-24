@@ -50,12 +50,20 @@ mkdir -p roms && cp /path/to/pokemon-red.gb roms/
 **2. Create the agent and play** (from the repo root, in another terminal):
 
 ```bash
-exo secret create openai --env OPENAI_API_KEY
+exo vault secret create global openai --token-env OPENAI_API_KEY
 exo model create gpt-5.5 --secret openai
 
-exo agent --harness typescript create "Gameboy" \
-  --module exoharness/examples/gameboy-agent/agent/harness.ts \
-  --model gpt-5.5 --max-tool-round-trips 20
+cat > gameboy.md <<'EOF'
+---
+name: "Gameboy"
+harness: exoharness/examples/gameboy-agent/agent/harness.ts
+config:
+  model: gpt-5.5
+  max_tool_round_trips: 20
+---
+Help the user with their task.
+EOF
+exo agent create gameboy --file gameboy.md
 exo thread create gameboy "Play Pokemon"
 exo thread send gameboy play "Play Pokemon Red. Get through the intro and pick a starter."
 ```

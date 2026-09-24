@@ -1,5 +1,3 @@
-mod temporary;
-
 use std::{net::TcpListener, ops::Bound, sync::Arc};
 
 use actix_web::{
@@ -31,45 +29,52 @@ use crate::{
 
 pub struct RuntimeHttpService {
     runtime: Arc<Runtime>,
-    config: exoharness::BasicExoHarnessConfig,
-    temporary: temporary::TemporaryAgents,
-    authorization: HeaderValue,
+    agent_id: Option<AgentId>,
+    authorization: Option<HeaderValue>,
     progress: broadcast::Sender<Event>,
     definition_updates: tokio::sync::Mutex<()>,
 }
 
 impl RuntimeHttpService {
-    pub fn new(
-        runtime: Arc<Runtime>,
-        token: &str,
-        config: exoharness::BasicExoHarnessConfig,
-    ) -> Result<Self> {
-        if token.trim().is_empty() {
-            bail!("runtime HTTP service requires a bearer token");
+    pub fn new(runtime: Arc<Runtime>, token: Option<&str>) -> Result<Self> {
+        if token.is_some_and(|token| token.trim().is_empty()) {
+            bail!("runtime HTTP service bearer token must not be empty");
         }
         Ok(Self {
             runtime,
-            config,
-            temporary: temporary::TemporaryAgents::new(),
-            authorization: HeaderValue::from_str(&format!("Bearer {token}"))?,
+            agent_id: None,
+            authorization: token
+                .map(|token| HeaderValue::from_str(&format!("Bearer {token}")))
+                .transpose()?,
             progress: broadcast::channel(1024).0,
             definition_updates: Default::default(),
         })
     }
 
+    pub fn for_agent(mut self, agent_id: AgentId) -> Self {
+        self.agent_id = Some(agent_id);
+        self
+    }
+
+    fn require_full_provider(&self) -> Result<(), Error> {
+        if self.agent_id.is_some() {
+            return Err(actix_web::error::ErrorForbidden(
+                "this service serves one saved agent",
+            ));
+        }
+        Ok(())
+    }
+
     async fn agent(&self, id: AgentId) -> Result<Arc<dyn AgentHandle>, Error> {
-        self.runtime_for(id)
+        if self.agent_id.is_some_and(|agent_id| agent_id != id) {
+            return Err(ErrorNotFound("agent not found"));
+        }
+        self.runtime
             .exoharness_handle()
             .get_agent(&id)
             .await
             .map_err(ErrorInternalServerError)?
             .ok_or_else(|| ErrorNotFound("agent not found"))
-    }
-
-    fn runtime_for(&self, id: AgentId) -> Arc<Runtime> {
-        self.temporary
-            .get(id)
-            .unwrap_or_else(|| self.runtime.clone())
     }
 
     async fn thread(
@@ -120,7 +125,6 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             )
             .route("/agent", web::get().to(list_agents))
             .route("/agent", web::post().to(create_agent))
-            .route("/agent/temporary", web::post().to(temporary::create_agent))
             .route("/agent/{agent_id}", web::get().to(get_agent))
             .route("/agent/{agent_id}", web::delete().to(delete_agent))
             .route("/agent/{agent_id}/artifact", web::get().to(list_artifacts))
@@ -189,7 +193,9 @@ async fn authorize(
     let service = req
         .app_data::<web::Data<Arc<RuntimeHttpService>>>()
         .ok_or_else(|| ErrorInternalServerError("runtime service not configured"))?;
-    if req.headers().get(AUTHORIZATION) != Some(&service.authorization) {
+    if let Some(authorization) = &service.authorization
+        && req.headers().get(AUTHORIZATION) != Some(authorization)
+    {
         return Err(ErrorUnauthorized("runtime bearer token required"));
     }
     next.call(req).await
@@ -220,6 +226,7 @@ async fn list_agents(
         .list_agents()
         .await
         .map_err(ErrorInternalServerError)?;
+    agents.retain(|agent| service.agent_id.is_none_or(|id| agent.id == id));
     if let Some(slug) = &query.slug {
         agents.retain(|agent| &agent.slug == slug);
     }
@@ -243,7 +250,7 @@ async fn scoped_vaults(
     service: &RuntimeHttpService,
     path: &VaultPath,
 ) -> Result<Vec<Arc<dyn exoharness::vault::VaultHandle>>, Error> {
-    if let Some(id) = path.agent_id {
+    if let Some(id) = path.agent_id.or(service.agent_id) {
         let agent = service.agent(id).await?;
         if let Some(thread_id) = path.thread_id {
             return service
@@ -279,6 +286,7 @@ async fn put_environment(
     service: web::Data<Arc<RuntimeHttpService>>,
     body: web::Json<exoharness::EnvironmentDefinition>,
 ) -> Result<web::Json<bool>, Error> {
+    service.require_full_provider()?;
     service
         .runtime
         .exoharness_handle()
@@ -291,6 +299,7 @@ async fn delete_environment(
     service: web::Data<Arc<RuntimeHttpService>>,
     name: web::Path<String>,
 ) -> Result<web::Json<bool>, Error> {
+    service.require_full_provider()?;
     Ok(web::Json(
         service
             .runtime
@@ -332,6 +341,7 @@ async fn create_agent(
     service: web::Data<Arc<RuntimeHttpService>>,
     body: web::Json<exoharness::NewAgentRequest>,
 ) -> Result<web::Json<exoharness::AgentRecord>, Error> {
+    service.require_full_provider()?;
     let agent = service
         .runtime
         .exoharness_handle()
@@ -345,9 +355,15 @@ async fn get_agent(
     service: web::Data<Arc<RuntimeHttpService>>,
     path: web::Path<AgentPath>,
 ) -> Result<web::Json<Option<exoharness::AgentRecord>>, Error> {
+    if service
+        .agent_id
+        .is_some_and(|agent_id| agent_id != path.agent_id)
+    {
+        return Err(ErrorNotFound("agent not found"));
+    }
     Ok(web::Json(
         service
-            .runtime_for(path.agent_id)
+            .runtime
             .exoharness_handle()
             .get_agent(&path.agent_id)
             .await
@@ -360,13 +376,7 @@ async fn delete_agent(
     service: web::Data<Arc<RuntimeHttpService>>,
     path: web::Path<AgentPath>,
 ) -> Result<web::Json<bool>, Error> {
-    if let Some(runtime) = service.temporary.remove(path.agent_id) {
-        temporary::shutdown(runtime)
-            .await
-            .map_err(ErrorInternalServerError)?
-            .map_err(ErrorBadRequest)?;
-        return Ok(web::Json(true));
-    }
+    service.require_full_provider()?;
     Ok(web::Json(
         service
             .runtime
@@ -449,30 +459,13 @@ async fn write_artifact(
     )
     .map_err(ErrorBadRequest)?;
     let _guard = service.definition_updates.lock().await;
-    let previous = exo_managed_agents::load_definition(agent.as_ref())
-        .await
-        .map_err(ErrorBadRequest)?;
-    let version = agent
-        .write_artifact(request)
-        .await
-        .map_err(ErrorBadRequest)?;
-    if let Err(error) = service
-        .runtime_for(path.agent_id)
-        .configure_managed_agent(&agent, &definition)
-        .await
-    {
-        agent
-            .write_artifact(exoharness::WriteArtifactRequest {
-                path: exo_managed_agents::AGENT_DEFINITION_PATH.into(),
-                contents: previous.map(|definition| definition.source().as_bytes().to_vec()).unwrap_or_default(),
-            })
+    Ok(web::Json(
+        service
+            .runtime
+            .update_managed_agent(&agent, &definition)
             .await
-            .map_err(|rollback| ErrorInternalServerError(format!(
-                "updating agent configuration failed: {error:#}; restoring previous definition failed: {rollback:#}"
-            )))?;
-        return Err(ErrorBadRequest(format!("{error:#}")));
-    }
-    Ok(web::Json(version))
+            .map_err(ErrorBadRequest)?,
+    ))
 }
 
 async fn get_thread(
@@ -572,13 +565,13 @@ async fn create_thread(
     }
     let agent = service.agent(path.agent_id).await?;
     let config = service
-        .runtime_for(path.agent_id)
+        .runtime
         .get_agent_config(agent.as_ref())
         .await
         .map_err(ErrorBadRequest)?;
     check_harness(agent.as_ref(), &config, body.harness.as_deref()).await?;
     let thread = service
-        .runtime_for(path.agent_id)
+        .runtime
         .open_managed_thread(
             &agent,
             None,
@@ -670,7 +663,7 @@ async fn submit_turn(
     let agent = service.agent(path.agent_id).await?;
     let thread = service.thread(agent.as_ref(), path.thread_id).await?;
     let mut config = service
-        .runtime_for(path.agent_id)
+        .runtime
         .get_agent_config(agent.as_ref())
         .await
         .map_err(ErrorBadRequest)?;
@@ -689,7 +682,7 @@ async fn submit_turn(
         config.instructions = vec![crate::harness_helpers::system_message(&prompt)];
     }
     let harness = harness_name(&config).to_owned();
-    let runtime = service.runtime_for(path.agent_id);
+    let runtime = service.runtime.clone();
     let progress = service.progress.clone();
     let (receipt, received) = oneshot::channel();
     tokio::spawn(async move {
@@ -758,7 +751,7 @@ async fn turn_status(
     let agent = service.agent(path.agent_id).await?;
     let thread = service.thread(agent.as_ref(), path.thread_id).await?;
     let active = service
-        .runtime_for(path.agent_id)
+        .runtime
         .is_turn_active(thread.as_ref(), path.turn_id)
         .await
         .map_err(ErrorInternalServerError)?;
@@ -772,7 +765,7 @@ async fn cancel_turn(
     let agent = service.agent(path.agent_id).await?;
     service.thread(agent.as_ref(), path.thread_id).await?;
     let canceled_active_turn = service
-        .runtime_for(path.agent_id)
+        .runtime
         .cancel_turn(HarnessTurnKey::new(path.thread_id, path.turn_id))
         .await
         .map_err(ErrorBadRequest)?;
@@ -790,7 +783,7 @@ async fn approval_response(
     let agent = service.agent(path.agent_id).await?;
     service.thread(agent.as_ref(), path.thread_id).await?;
     let event_id = service
-        .runtime_for(path.agent_id)
+        .runtime
         .approval_response(path.agent_id, path.thread_id, path.turn_id, &body)
         .await
         .map_err(ErrorBadRequest)?;

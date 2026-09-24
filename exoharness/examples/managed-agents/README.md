@@ -8,7 +8,7 @@ Run from the Exo repo using the local provider:
 exo vault create personal
 exo vault secret create personal notion \
   --mcp-server-url https://mcp.notion.com/mcp
-exo chat --agent-file exoharness/examples/managed-agents/notion-analyst.md \
+exo agent run --agent-file exoharness/examples/managed-agents/notion-analyst.md \
   --vault personal
 ```
 
@@ -63,8 +63,8 @@ you supply `--scope` when configuring the provider.
 Credentials are saved in the OS credential store after the runtime confirms
 your account. Expiring tokens refresh before HTTP requests, including during an
 existing chat. Logout removes the saved credentials; existing clients must log
-in again. Headless clients can use `--api-key-env` when configuring a provider.
-The OSS runtime's built-in bearer authentication uses that API-key path.
+in again. Headless clients can use `--api-key-env` when configuring a provider that requires
+bearer authentication.
 
 Provider login authenticates the CLI to a runtime. Use vault credentials for
 external MCP servers, as in the Notion example above.

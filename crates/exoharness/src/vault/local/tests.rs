@@ -208,37 +208,6 @@ async fn metadata_tampering_cannot_redirect_secrets() -> Result<()> {
 }
 
 #[tokio::test]
-async fn temporary_harness_shares_vault_references_and_observes_rotation() -> Result<()> {
-    let temp = TempDir::new()?;
-    let config = local_test_config(temp.path());
-    let source = BasicExoHarness::new(config.clone()).await?;
-    let vault = crate::vault::global_vault(&source)
-        .await
-        .expect("runtime vault");
-    let id = vault.put_secret(request("provider", "first", None)).await?;
-    let unused = temp.path().join("unused");
-    let memory = BasicExoHarness::in_memory(local_test_config(&unused), Some(&source)).await?;
-    assert_eq!(
-        crate::vault::global_vault(&memory)
-            .await
-            .expect("runtime vault")
-            .record(),
-        vault.record()
-    );
-    vault.update_secret(&id, key("second")).await?;
-    assert_eq!(
-        crate::vault::global_vault(&memory)
-            .await
-            .expect("runtime vault")
-            .get_secret(&id)
-            .await?,
-        Some(key("second"))
-    );
-    assert!(!unused.exists());
-    Ok(())
-}
-
-#[tokio::test]
 async fn legacy_secrets_move_into_global_vault_with_stable_ids() -> Result<()> {
     let temp = TempDir::new()?;
     let config = local_test_config(temp.path());

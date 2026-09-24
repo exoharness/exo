@@ -26,7 +26,7 @@ Context supplied to `switch` belongs to that selection and does not modify the p
 
 Saved agent and thread aliases retain their provider, account, endpoint, and context. Changing a default or a profile's context does not move existing aliases. Changing the provider's endpoint or account rejects affected aliases until the original connection is restored.
 
-Runtime options follow the runtime command, for example `exo chat --root .exo --harness codex --agent-file agent.md`. Provider management commands do not accept harness, sandbox, pricing, or local runtime options. `--scope` on provider create/update selects OAuth scopes.
+Runtime options follow the runtime command, for example `exo agent run --root .exo --harness codex --agent-file agent.md`. Provider management commands do not accept harness, sandbox, pricing, or local runtime options. `--scope` on provider create/update selects OAuth scopes.
 
 The managed-agent HTTP API currently supports listing vaults and secret metadata; vault creation/deletion and secret writes require local Exo.
 

@@ -15,8 +15,7 @@ They live in the exoharness secret store (file-backed by default, Apple
 Keychain supported):
 
 ```bash
-exo secret create openai --env OPENAI_API_KEY   # reads the variable name literally
-exo secret create openai --value "$OPENAI_API_KEY"  # stores the expanded value
+exo vault secret create global openai --token-env OPENAI_API_KEY   # reads the variable name literally
 ```
 
 ## Bindings
@@ -27,7 +26,7 @@ Bindings are **non-secret configuration that refer to secrets**:
 - an *LLM binding* defines a provider/model plus optional credentials
   (`exo model create`),
 - a *sandbox binding* defines a sandbox provider plus its credentials
-  (`exo sandbox-provider create`),
+  (`exo sandbox provider create`),
 - an *MCP binding* defines a server URL plus optional credentials.
 
 ## Scoping
