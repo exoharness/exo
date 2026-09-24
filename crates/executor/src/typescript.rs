@@ -40,7 +40,6 @@ pub struct TypeScriptExecutor<T> {
     root: Arc<dyn ExoHarness>,
     workspace_root: PathBuf,
     env: Arc<HashMap<String, String>>,
-    env_remove: Arc<Vec<String>>,
     tools: Arc<T>,
     runners: Arc<Mutex<HashMap<String, Arc<Mutex<TypeScriptRunnerProcess>>>>>,
 }
@@ -56,7 +55,6 @@ impl<T> TypeScriptExecutor<T> {
             root,
             workspace_root,
             env: Arc::new(env),
-            env_remove: Arc::default(),
             tools,
             runners: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -69,7 +67,6 @@ impl<T> Clone for TypeScriptExecutor<T> {
             root: Arc::clone(&self.root),
             workspace_root: self.workspace_root.clone(),
             env: Arc::clone(&self.env),
-            env_remove: Arc::clone(&self.env_remove),
             tools: Arc::clone(&self.tools),
             runners: Arc::clone(&self.runners),
         }
@@ -206,7 +203,6 @@ where
         let runner = Arc::new(Mutex::new(TypeScriptRunnerProcess::start(
             &self.workspace_root,
             self.env.as_ref(),
-            &self.env_remove,
             module_path,
             thread,
         )?));
@@ -319,7 +315,6 @@ impl TypeScriptRunnerProcess {
     fn start(
         workspace_root: &Path,
         env: &HashMap<String, String>,
-        env_remove: &[String],
         module_path: &str,
         thread: Arc<dyn ConversationHandle>,
     ) -> Result<Self> {
@@ -337,9 +332,6 @@ impl TypeScriptRunnerProcess {
 
         let mut command = Command::new("node");
         command.envs(env);
-        for name in env_remove {
-            command.env_remove(name);
-        }
         let mut child = command
             .arg("--import")
             .arg("tsx")
@@ -913,18 +905,16 @@ impl<T> TypeScriptHarness<T> {
         runtime_config: Option<BraintrustRuntimeConfig>,
         env: HashMap<String, String>,
         tools: Arc<T>,
-        env_remove: Vec<String>,
     ) -> Result<Self>
     where
         T: ToolRuntime + 'static,
     {
-        let mut executor = TypeScriptExecutor::new(
+        let executor = TypeScriptExecutor::new(
             Arc::clone(&exoharness),
             typescript_workspace_root()?,
             env,
             tools,
         );
-        executor.env_remove = Arc::new(env_remove);
         Ok(Self {
             inner: SharedHarness::new(
                 exoharness,
@@ -964,7 +954,6 @@ impl TypeScriptHarness<ExoToolRuntime> {
             runtime_config,
             env,
             Arc::new(ExoToolRuntime::from_root(root)?),
-            Vec::new(),
         )
     }
 }

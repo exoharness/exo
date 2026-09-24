@@ -225,8 +225,11 @@ async fn usage_record_is_persisted_with_computed_cost() {
         pricing,
     );
 
-    let secret_id = exoharness
+    let secret_id = exoharness::vault::global_vault(exoharness.as_ref())
+        .await
+        .expect("runtime vault")
         .put_secret(PutSecretRequest {
+            target: None,
             name: "cost-test-key".to_string(),
             secret: Secret::Key {
                 value: "test-key".to_string(),
@@ -239,7 +242,14 @@ async fn usage_record_is_persisted_with_computed_cost() {
             name: "claude-sonnet-4-6".to_string(),
             model: "claude-sonnet-4-6".to_string(),
             base_url: None,
-            secret_id: Some(secret_id),
+            secret: Some(exoharness::vault::SecretReference {
+                vault_id: exoharness::vault::global_vault(exoharness.as_ref())
+                    .await
+                    .unwrap()
+                    .record()
+                    .id,
+                secret_id,
+            }),
         })
         .await
         .expect("binding should register");
@@ -372,8 +382,11 @@ async fn usage_record_with_anthropic_cache_hits() {
         pricing,
     );
 
-    let secret_id = exoharness
+    let secret_id = exoharness::vault::global_vault(exoharness.as_ref())
+        .await
+        .expect("runtime vault")
         .put_secret(PutSecretRequest {
+            target: None,
             name: "anthropic-cache-key".to_string(),
             secret: Secret::Key {
                 value: "test-key".to_string(),
@@ -386,7 +399,14 @@ async fn usage_record_with_anthropic_cache_hits() {
             name: "claude-sonnet-4-6".to_string(),
             model: "claude-sonnet-4-6".to_string(),
             base_url: None,
-            secret_id: Some(secret_id),
+            secret: Some(exoharness::vault::SecretReference {
+                vault_id: exoharness::vault::global_vault(exoharness.as_ref())
+                    .await
+                    .unwrap()
+                    .record()
+                    .id,
+                secret_id,
+            }),
         })
         .await
         .expect("binding should register");
@@ -494,8 +514,11 @@ async fn usage_record_with_openai_inclusive_accounting() {
         pricing,
     );
 
-    let secret_id = exoharness
+    let secret_id = exoharness::vault::global_vault(exoharness.as_ref())
+        .await
+        .expect("runtime vault")
         .put_secret(PutSecretRequest {
+            target: None,
             name: "openai-cache-key".to_string(),
             secret: Secret::Key {
                 value: "test-key".to_string(),
@@ -508,7 +531,14 @@ async fn usage_record_with_openai_inclusive_accounting() {
             name: "gpt-4o-mini".to_string(),
             model: "gpt-4o-mini".to_string(),
             base_url: None,
-            secret_id: Some(secret_id),
+            secret: Some(exoharness::vault::SecretReference {
+                vault_id: exoharness::vault::global_vault(exoharness.as_ref())
+                    .await
+                    .unwrap()
+                    .record()
+                    .id,
+                secret_id,
+            }),
         })
         .await
         .expect("binding should register");
@@ -1480,8 +1510,11 @@ fn shell_command_arguments(command: &str) -> Map<String, Value> {
 }
 
 async fn register_test_models(exoharness: &dyn ExoHarness) {
-    let secret_id = exoharness
+    let secret_id = exoharness::vault::global_vault(exoharness)
+        .await
+        .expect("runtime vault")
         .put_secret(PutSecretRequest {
+            target: None,
             name: "test-openai".to_string(),
             secret: Secret::Key {
                 value: "test-key".to_string(),
@@ -1496,7 +1529,14 @@ async fn register_test_models(exoharness: &dyn ExoHarness) {
                 name: model.to_string(),
                 model: model.to_string(),
                 base_url: None,
-                secret_id: Some(secret_id),
+                secret: Some(exoharness::vault::SecretReference {
+                    vault_id: exoharness::vault::global_vault(exoharness)
+                        .await
+                        .unwrap()
+                        .record()
+                        .id,
+                    secret_id,
+                }),
             })
             .await
             .expect("test model should register");

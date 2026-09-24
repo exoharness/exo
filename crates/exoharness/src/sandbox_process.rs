@@ -451,7 +451,7 @@ mod tests {
         let backend = LocalProcessSandboxBackend::new();
         let request = SandboxRequest {
             sandbox_id: Uuid7::now().to_string(),
-            scope: None,
+            scope: crate::ResourceScope::Global,
             spec: SandboxSpec {
                 image: String::new(),
                 resources: Default::default(),

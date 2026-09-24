@@ -12,8 +12,10 @@ anyhow.workspace = true
 async-trait.workspace = true
 exoharness = { path = "../exoharness" }
 serde.workspace = true
+serde_json.workspace = true
 serde_yaml_ng.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 exoharness = { path = "../exoharness", features = ["basic-backend"] }
 tokio.workspace = true

@@ -1,3 +1,4 @@
+use exoharness::vault::{VaultContext, VaultHandle, VaultId};
 use std::collections::{HashMap, HashSet};
 use std::ops::Bound;
 use std::sync::Arc;
@@ -11,12 +12,11 @@ use exoharness::{
     ConversationId, CreateSandboxRequest, Event, EventData, EventId, EventKind, EventStream,
     ExoHarness, ForkConversationRequest, ForkSandboxRequest, GetEventsResult,
     ListConversationsRequest, ListConversationsResult, NewAgentRequest, NewConversationRequest,
-    PutSecretRequest, ReadArtifactRequest, RestoreSandboxRequest, Result, RunInSandboxRequest,
-    SandboxAttachment, SandboxHandle, SandboxId, SandboxProcess, SandboxProcessEventQuery,
-    SandboxProcessRecord, SandboxProcessStatus, SandboxProvider, SandboxRecord, Secret, SecretId,
-    SecretMetadata, SnapshotHandle, SnapshotId, StartSandboxProcessRequest, StartSandboxRequest,
-    TurnHandle, TurnRecord, Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest,
-    WriteSandboxProcessInputRequest,
+    ReadArtifactRequest, RestoreSandboxRequest, Result, RunInSandboxRequest, SandboxAttachment,
+    SandboxHandle, SandboxId, SandboxProcess, SandboxProcessEventQuery, SandboxProcessRecord,
+    SandboxProcessStatus, SandboxProvider, SandboxRecord, SnapshotHandle, SnapshotId,
+    StartSandboxProcessRequest, StartSandboxRequest, TurnHandle, TurnRecord, Uuid7,
+    WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -210,16 +210,11 @@ impl ExoHarness for LocalSandboxExoHarness {
         self.state.remote.get_binding(id).await
     }
 
-    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
-        self.state.remote.list_secrets().await
+    async fn create_vault(&self, name: &str) -> Result<Arc<dyn VaultHandle>> {
+        self.state.remote.create_vault(name).await
     }
-
-    async fn put_secret(&self, request: PutSecretRequest) -> Result<SecretId> {
-        self.state.remote.put_secret(request).await
-    }
-
-    async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>> {
-        self.state.remote.get_secret(id).await
+    async fn delete_vault(&self, id: &VaultId) -> Result<()> {
+        self.state.remote.delete_vault(id).await
     }
 }
 
@@ -257,6 +252,7 @@ async fn local_agent_for(
             state
                 .local
                 .new_agent(NewAgentRequest {
+                    vaults: vec![],
                     slug,
                     name: format!("Local agent sandbox for {remote_slug}"),
                 })
@@ -350,18 +346,6 @@ impl AgentHandle for LocalSandboxAgent {
 
     async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>> {
         self.remote.get_binding(id).await
-    }
-
-    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
-        self.remote.list_secrets().await
-    }
-
-    async fn put_secret(&self, request: PutSecretRequest) -> Result<SecretId> {
-        self.remote.put_secret(request).await
-    }
-
-    async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>> {
-        self.remote.get_secret(id).await
     }
 
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion> {
@@ -622,6 +606,7 @@ async fn local_conversation_for(
             state
                 .local
                 .new_agent(NewAgentRequest {
+                    vaults: vec![],
                     slug: LOCAL_SANDBOX_AGENT_SLUG.to_string(),
                     name: "Local sandbox".to_string(),
                 })
@@ -641,6 +626,7 @@ async fn local_conversation_for(
         None => {
             local_agent
                 .new_conversation(NewConversationRequest {
+                    vaults: vec![],
                     slug: Some(slug),
                     name: Some(format!("Local sandbox for {remote_slug}")),
                 })
@@ -959,18 +945,6 @@ impl ConversationHandle for LocalSandboxConversation {
 
     async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>> {
         self.remote.get_binding(id).await
-    }
-
-    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
-        self.remote.list_secrets().await
-    }
-
-    async fn put_secret(&self, request: PutSecretRequest) -> Result<SecretId> {
-        self.remote.put_secret(request).await
-    }
-
-    async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>> {
-        self.remote.get_secret(id).await
     }
 }
 
@@ -1346,6 +1320,36 @@ impl TurnHandle for LocalSandboxTurnHandle {
     }
 }
 
+#[async_trait]
+impl VaultContext for LocalSandboxExoHarness {
+    async fn list_vaults(&self) -> Result<Vec<Arc<dyn VaultHandle>>> {
+        self.state.remote.list_vaults().await
+    }
+    async fn get_vault(&self, id: &VaultId) -> Result<Option<Arc<dyn VaultHandle>>> {
+        self.state.remote.get_vault(id).await
+    }
+}
+
+#[async_trait]
+impl VaultContext for LocalSandboxAgent {
+    async fn list_vaults(&self) -> Result<Vec<Arc<dyn VaultHandle>>> {
+        self.remote.list_vaults().await
+    }
+    async fn get_vault(&self, id: &VaultId) -> Result<Option<Arc<dyn VaultHandle>>> {
+        self.remote.get_vault(id).await
+    }
+}
+
+#[async_trait]
+impl VaultContext for LocalSandboxConversation {
+    async fn list_vaults(&self) -> Result<Vec<Arc<dyn VaultHandle>>> {
+        self.remote.list_vaults().await
+    }
+    async fn get_vault(&self, id: &VaultId) -> Result<Option<Arc<dyn VaultHandle>>> {
+        self.remote.get_vault(id).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1376,6 +1380,7 @@ mod tests {
 
         let agent = wrapper
             .new_agent(NewAgentRequest {
+                vaults: vec![],
                 slug: "demo".to_string(),
                 name: "Demo".to_string(),
             })
@@ -1383,6 +1388,7 @@ mod tests {
             .expect("agent should be created");
         let conversation = agent
             .new_conversation(NewConversationRequest {
+                vaults: vec![],
                 slug: Some("session".to_string()),
                 name: Some("Session".to_string()),
             })

@@ -141,6 +141,7 @@ where
         let agent = self
             .exoharness
             .new_agent(NewAgentRequest {
+                vaults: vec![],
                 slug: request.slug,
                 name,
             })
@@ -227,6 +228,7 @@ where
         let conversation = self
             .agent
             .new_conversation(NewConversationRequest {
+                vaults: request.vaults,
                 slug: request.slug,
                 name: request.name,
             })

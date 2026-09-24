@@ -1,4 +1,5 @@
 pub mod mcp;
+pub mod vaults;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -154,6 +155,7 @@ pub async fn create_agent(
     let agent = backend
         .exoharness()
         .new_agent(NewAgentRequest {
+            vaults: vec![],
             slug: slug.to_string(),
             name: definition.frontmatter.name.clone(),
         })
@@ -260,11 +262,15 @@ pub async fn open_thread(
     reference: Option<&str>,
     new_thread: NewThreadRequest,
 ) -> Result<OpenedThread> {
+    let vaults = new_thread.vaults.clone();
     let created = reference.is_none();
     let thread = match reference {
         Some(reference) => find_thread(agent.as_ref(), reference).await?,
         None => agent.new_thread(new_thread).await?,
     };
+    if !vaults.is_empty() && thread.record().vaults != vaults {
+        bail!("cannot switch vaults on an existing thread; start a new thread");
+    }
     let configured = backend
         .configure_thread(agent.as_ref(), thread.as_ref(), created)
         .await;

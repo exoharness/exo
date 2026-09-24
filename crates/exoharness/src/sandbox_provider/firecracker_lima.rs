@@ -1640,7 +1640,7 @@ mod egress_cleanup_tests {
             };
             let request = SandboxRequest {
                 sandbox_id: "failed-egress-setup".into(),
-                scope: None,
+                scope: crate::ResourceScope::Global,
                 provider_state: None,
                 spec: crate::SandboxSpec {
                     image: "test".into(),
@@ -1818,7 +1818,7 @@ mod egress_cleanup_tests {
         });
         let request = SandboxRequest {
             sandbox_id: "stop-test".into(),
-            scope: None,
+            scope: crate::ResourceScope::Global,
             provider_state: None,
             spec: crate::SandboxSpec {
                 image: "test".into(),

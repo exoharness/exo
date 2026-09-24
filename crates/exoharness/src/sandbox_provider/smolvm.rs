@@ -943,7 +943,7 @@ async fn run_checked(mut process: Command, what: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SandboxScope;
+    use crate::ResourceScope;
     use crate::sandbox::SandboxLifecycleConfig;
 
     /// A configured boot binary is used as given. The point is what does *not*
@@ -1024,9 +1024,9 @@ mod tests {
     fn test_request(idle_ttl: Option<Duration>) -> SandboxRequest {
         SandboxRequest {
             sandbox_id: "s".into(),
-            scope: Some(SandboxScope::Agent {
-                agent_id: "a".into(),
-            }),
+            scope: ResourceScope::Agent {
+                agent_id: crate::Uuid7::now(),
+            },
             spec: SandboxSpec {
                 image: "alpine".into(),
                 resources: Default::default(),
@@ -1146,12 +1146,12 @@ mod tests {
     fn machine_name_uses_sandbox_id_without_owner_scope() {
         let mut request = test_request(None);
         let name = machine_name(&request.sandbox_id);
-        request.scope = Some(SandboxScope::Thread {
-            agent_id: "agent-1".into(),
-            thread_id: "thread".into(),
-        });
+        request.scope = ResourceScope::Thread {
+            agent_id: crate::Uuid7::now(),
+            thread_id: crate::Uuid7::now(),
+        };
         assert_eq!(name, machine_name(&request.sandbox_id));
-        request.scope = None;
+        request.scope = ResourceScope::Global;
         assert_eq!(name, machine_name(&request.sandbox_id));
         request.sandbox_id = "sandbox-2".into();
         assert_ne!(name, machine_name(&request.sandbox_id));

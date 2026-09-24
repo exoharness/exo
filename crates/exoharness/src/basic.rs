@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{self, Display, Formatter};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
@@ -22,7 +22,7 @@ use crate::sandbox::{
     BoxSandboxTcpStream, CliContainerSandboxBackend, LocalProcessSandboxBackend,
     ManagedSandboxBackend, ManagedSandboxHandle, SANDBOX_MAIN_MOUNT_DIR, SandboxCommand,
     SandboxLifecycleConfig, SandboxMount, SandboxMountAccess, SandboxNetworkPolicy, SandboxRequest,
-    SandboxScope, SandboxSpec, SnapshotFormat, SnapshotPayload, sandbox_spec_hash,
+    SandboxSpec, SnapshotFormat, SnapshotPayload, sandbox_spec_hash,
 };
 #[cfg(feature = "apple-keychain")]
 use crate::secrets::AppleKeychainSecretKeyProvider;
@@ -31,6 +31,10 @@ use crate::secrets::{
     StaticSecretKeyProvider, default_master_key_path,
 };
 use crate::storage::BasicObjectStore;
+use crate::vault::{
+    BasicVaultStore, SecretReference, VaultContext, VaultHandle, VaultId, compose_vaults,
+    global_vault, require_vaults,
+};
 use crate::{
     AddEventsRequest, AddEventsResult, AgentHandle, AgentId, AgentRecord, Artifact,
     ArtifactVersion, AttachSandboxRequest, BeginTurnRequest, Binding, BindingId, BindingRecord,
@@ -39,15 +43,26 @@ use crate::{
     CreateSandboxRequest, DurableFileSystem, Event, EventData, EventId, EventKind, EventQuery,
     EventQueryDirection, EventStream, ExoHarness, FileSystemMount, ForkConversationRequest,
     ForkSandboxRequest, GetEventsResult, GetSandboxProcessEventsResult, ListConversationsRequest,
-    ListConversationsResult, NewAgentRequest, NewConversationRequest, PutSecretRequest,
-    ReadArtifactRequest, RestoreSandboxRequest, Result, RunInSandboxRequest, SandboxAttachment,
+    ListConversationsResult, NewAgentRequest, NewConversationRequest, ReadArtifactRequest,
+    ResourceScope, RestoreSandboxRequest, Result, RunInSandboxRequest, SandboxAttachment,
     SandboxHandle, SandboxId, SandboxProcess, SandboxProcessEvent, SandboxProcessEventQuery,
     SandboxProcessId, SandboxProcessMode, SandboxProcessParts, SandboxProcessRecord,
     SandboxProcessStatus, SandboxProcessStdin, SandboxProvider, SandboxProviderConfig,
-    SandboxRecord, Secret, SecretId, SecretMetadata, SecretType, SessionId, SnapshotHandle,
-    SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnHandle, TurnId, TurnRecord,
-    Uuid7, WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
+    SandboxRecord, Secret, SecretId, SecretMetadata, SessionId, SnapshotHandle, SnapshotId,
+    StartSandboxProcessRequest, StartSandboxRequest, TurnHandle, TurnId, TurnRecord, Uuid7,
+    WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
+
+#[path = "basic/migration.rs"]
+mod migration;
+#[path = "basic/vault_context.rs"]
+mod vault_context;
+use vault_context::ScopedVaultContext;
+#[cfg(feature = "firecracker")]
+#[path = "basic/egress.rs"]
+mod egress;
+#[cfg(feature = "firecracker")]
+use egress::LocalEgressResolver;
 
 const SANDBOX_PROVIDER_STATE_EVENT: &str = "sandbox_provider_state";
 
@@ -71,7 +86,7 @@ pub enum SecretBackendChoice {
 
 type SandboxBackendFactory = Arc<
     dyn for<'a> Fn(
-            &'a BasicExoHarnessInner,
+            &'a Arc<BasicExoHarnessInner>,
         ) -> BoxFuture<'a, Result<Arc<dyn ManagedSandboxBackend>>>
         + Send
         + Sync,
@@ -141,8 +156,7 @@ impl SandboxBackendRegistration {
             move |inner| {
                 let spec = spec.clone();
                 let resolver = Arc::new(LocalEgressResolver {
-                    storage: inner.storage.clone(),
-                    cipher: inner.secret_cipher.clone(),
+                    harness: Arc::downgrade(inner),
                 });
                 Box::pin(crate::firecracker_backend_with_credentials(
                     spec.config,
@@ -280,7 +294,7 @@ impl SandboxBackendRegistration {
     fn from_factory<F>(provider: SandboxProvider, is_local: bool, factory: F) -> Self
     where
         F: for<'a> Fn(
-                &'a BasicExoHarnessInner,
+                &'a Arc<BasicExoHarnessInner>,
             ) -> BoxFuture<'a, Result<Arc<dyn ManagedSandboxBackend>>>
             + Send
             + Sync
@@ -430,11 +444,14 @@ struct BasicExoHarnessInner {
     running_sandboxes: AsyncMutex<HashMap<SandboxId, Arc<dyn ManagedSandboxHandle>>>,
     running_processes: AsyncMutex<HashMap<SandboxProcessId, Arc<RunningSandboxProcess>>>,
     secret_cipher: SecretCipher,
+    vaults: BasicVaultStore,
+    inherited_vaults: Vec<Arc<dyn VaultHandle>>,
+    inherited_global_vault: Option<Arc<dyn VaultHandle>>,
 }
 
 impl BasicExoHarnessInner {
     async fn sandbox_backend_for_provider(
-        &self,
+        self: &Arc<Self>,
         provider: SandboxProvider,
     ) -> Result<Arc<dyn ManagedSandboxBackend>> {
         if let Some(backend) = self.sandbox_backends.lock().await.get(&provider) {
@@ -508,30 +525,31 @@ impl BasicExoHarnessInner {
 
     async fn e2b_config_from_binding(&self) -> Result<Option<crate::E2bConfig>> {
         let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
-        let Some((api_key_secret_id, api_url, default_image)) = bindings
-            .into_iter()
-            .rev()
-            .find_map(|record| match record.binding {
-                Binding::Sandbox {
-                    config:
-                        SandboxProviderConfig::E2b {
-                            api_key_secret_id,
-                            api_url,
-                            default_image,
-                        },
-                    ..
-                } => Some((api_key_secret_id, api_url, default_image)),
-                _ => None,
-            })
+        let Some((api_key_secret, api_url, default_image)) =
+            bindings
+                .into_iter()
+                .rev()
+                .find_map(|record| match record.binding {
+                    Binding::Sandbox {
+                        config:
+                            SandboxProviderConfig::E2b {
+                                api_key_secret,
+                                api_url,
+                                default_image,
+                            },
+                        ..
+                    } => Some((api_key_secret, api_url, default_image)),
+                    _ => None,
+                })
         else {
             return Ok(None);
         };
         let api_key = self
-            .secret_key_by_id(api_key_secret_id)
+            .secret_key_by_id(&api_key_secret)
             .await?
             .ok_or_else(|| {
                 anyhow!(
-                    "e2b sandbox binding references secret id {api_key_secret_id}, which is not set"
+                    "e2b sandbox binding references secret id {api_key_secret:?}, which is not set"
                 )
             })?;
         Ok(Some(crate::E2bConfig {
@@ -565,34 +583,31 @@ impl BasicExoHarnessInner {
 
     async fn sprites_config_from_binding(&self) -> Result<Option<crate::SpritesConfig>> {
         let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
-        let Some((token_secret_id, api_url, url_auth, organization, labels)) = bindings
+        let Some((token_secret, api_url, url_auth, organization, labels)) = bindings
             .into_iter()
             .rev()
             .find_map(|record| match record.binding {
                 Binding::Sandbox {
                     config:
                         SandboxProviderConfig::Sprites {
-                            token_secret_id,
+                            token_secret,
                             api_url,
                             url_auth,
                             organization,
                             labels,
                         },
                     ..
-                } => Some((token_secret_id, api_url, url_auth, organization, labels)),
+                } => Some((token_secret, api_url, url_auth, organization, labels)),
                 _ => None,
             })
         else {
             return Ok(None);
         };
-        let token = self
-            .secret_key_by_id(token_secret_id)
-            .await?
-            .ok_or_else(|| {
-                anyhow!(
-                    "sprites sandbox binding references secret id {token_secret_id}, which is not set"
-                )
-            })?;
+        let token = self.secret_key_by_id(&token_secret).await?.ok_or_else(|| {
+            anyhow!(
+                "sprites sandbox binding references secret id {token_secret:?}, which is not set"
+            )
+        })?;
         Ok(Some(crate::SpritesConfig {
             token,
             api_url: api_url.unwrap_or_else(|| crate::DEFAULT_SPRITES_API_URL.to_string()),
@@ -645,21 +660,22 @@ impl BasicExoHarnessInner {
     /// Decrypt the first stored secret matching `predicate`, if any.
     async fn find_secret_by(
         &self,
-        predicate: impl Fn(&StoredSecret) -> bool,
+        predicate: impl Fn(&SecretMetadata) -> bool,
     ) -> Result<Option<Secret>> {
-        let stored = self
-            .storage
-            .list_json_matching_suffix::<StoredSecret>(Path::new("secrets"), ".json")
-            .await?;
-        match stored.into_iter().find(|s| predicate(s)) {
-            Some(record) => Ok(Some(self.secret_cipher.decrypt_secret(&record.secret)?)),
+        let vault = match &self.inherited_global_vault {
+            Some(vault) => vault.clone(),
+            None => self.vaults.global_vault().await?,
+        };
+        let metadata = vault.list_secrets().await?.into_iter().find(predicate);
+        match metadata {
+            Some(metadata) => vault.get_secret(&metadata.id).await,
             None => Ok(None),
         }
     }
 
     /// Decrypt the `Key`-typed secret stored under `name`, if it exists.
     async fn secret_key(&self, name: &str) -> Result<Option<String>> {
-        match self.find_secret_by(|s| s.metadata.name == name).await? {
+        match self.find_secret_by(|s| s.name == name).await? {
             Some(Secret::Key { value }) => Ok(Some(value)),
             Some(Secret::Oauth { .. }) => {
                 bail!("secret {name:?} is an OAuth secret; expected an API key")
@@ -669,12 +685,23 @@ impl BasicExoHarnessInner {
     }
 
     /// Decrypt the `Key`-typed secret with the given id, if it exists.
-    async fn secret_key_by_id(&self, id: SecretId) -> Result<Option<String>> {
-        match self.find_secret_by(|s| s.metadata.id == id).await? {
+    async fn secret_key_by_id(&self, reference: &SecretReference) -> Result<Option<String>> {
+        match self
+            .vaults
+            .get_vault(&reference.vault_id)
+            .await?
+            .or_else(|| {
+                self.inherited_vaults
+                    .iter()
+                    .find(|v| v.record().id == reference.vault_id)
+                    .cloned()
+            })
+            .context("sandbox credential vault is unavailable")?
+            .get_secret(&reference.secret_id)
+            .await?
+        {
             Some(Secret::Key { value }) => Ok(Some(value)),
-            Some(Secret::Oauth { .. }) => {
-                bail!("secret {id} is an OAuth secret; expected an API key")
-            }
+            Some(Secret::Oauth { .. }) => bail!("sandbox credential must be an API key"),
             None => Ok(None),
         }
     }
@@ -713,32 +740,32 @@ impl BasicExoHarnessInner {
 
     async fn daytona_config_from_binding(&self) -> Result<Option<crate::DaytonaConfig>> {
         let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
-        let Some((api_key_secret_id, region, organization_id, api_url)) = bindings
+        let Some((api_key_secret, region, organization_id, api_url)) = bindings
             .into_iter()
             .rev()
             .find_map(|record| match record.binding {
                 Binding::Sandbox {
                     config:
                         SandboxProviderConfig::Daytona {
-                            api_key_secret_id,
+                            api_key_secret,
                             region,
                             organization_id,
                             api_url,
                             ..
                         },
                     ..
-                } => Some((api_key_secret_id, region, organization_id, api_url)),
+                } => Some((api_key_secret, region, organization_id, api_url)),
                 _ => None,
             })
         else {
             return Ok(None);
         };
         let api_key = self
-            .secret_key_by_id(api_key_secret_id)
+            .secret_key_by_id(&api_key_secret)
             .await?
             .ok_or_else(|| {
                 anyhow!(
-                    "daytona sandbox binding references secret id {api_key_secret_id}, \
+                    "daytona sandbox binding references secret id {api_key_secret:?}, \
                  which is not set"
                 )
             })?;
@@ -753,32 +780,32 @@ impl BasicExoHarnessInner {
 
     async fn vercel_config_from_binding(&self) -> Result<Option<crate::VercelConfig>> {
         let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
-        let Some((api_token_secret_id, team_id, project_id, api_url)) = bindings
+        let Some((api_token_secret, team_id, project_id, api_url)) = bindings
             .into_iter()
             .rev()
             .find_map(|record| match record.binding {
                 Binding::Sandbox {
                     config:
                         SandboxProviderConfig::Vercel {
-                            api_token_secret_id,
+                            api_token_secret,
                             team_id,
                             project_id,
                             api_url,
                             ..
                         },
                     ..
-                } => Some((api_token_secret_id, team_id, project_id, api_url)),
+                } => Some((api_token_secret, team_id, project_id, api_url)),
                 _ => None,
             })
         else {
             return Ok(None);
         };
         let api_token = self
-            .secret_key_by_id(api_token_secret_id)
+            .secret_key_by_id(&api_token_secret)
             .await?
             .ok_or_else(|| {
                 anyhow!(
-                    "vercel sandbox binding references secret id {api_token_secret_id}, \
+                    "vercel sandbox binding references secret id {api_token_secret:?}, \
                  which is not set"
                 )
             })?;
@@ -884,42 +911,30 @@ impl BasicExoHarness {
         globals: Option<&dyn ExoHarness>,
     ) -> Result<Self> {
         config.secret_backend = SecretBackendChoice::Static(crate::secrets::random_master_key());
-        let harness = Self::new_with_storage(config, None, BasicObjectStore::in_memory()).await?;
+        let mut harness =
+            Self::new_with_storage(config, None, BasicObjectStore::in_memory(), true).await?;
         if let Some(globals) = globals {
-            let (bindings, secrets) =
-                tokio::try_join!(globals.list_bindings(), globals.list_secrets())?;
-            for binding in bindings {
-                harness
-                    .inner
-                    .storage
-                    .put_json(
-                        harness.bindings_dir().join(format!("{}.json", binding.id)),
-                        &StoredBinding { record: binding },
-                    )
-                    .await?;
-            }
-            for metadata in secrets {
-                let secret = globals.get_secret(&metadata.id).await?.ok_or_else(|| {
-                    anyhow!(
-                        "secret {} disappeared while opening temporary state",
-                        metadata.id
-                    )
-                })?;
-                let record = StoredSecret {
-                    secret: harness.inner.secret_cipher.encrypt_secret(&secret)?,
-                    metadata,
-                };
-                harness
-                    .inner
-                    .storage
-                    .put_json(
-                        harness
-                            .secrets_dir()
-                            .join(format!("{}.json", record.metadata.id)),
-                        &record,
-                    )
-                    .await?;
-            }
+            let global_vault = global_vault(globals).await?;
+            let vaults = globals.list_vaults().await?;
+            let inner =
+                Arc::get_mut(&mut harness.inner).context("temporary harness is already shared")?;
+            inner.inherited_global_vault = Some(global_vault);
+            inner.inherited_vaults = vaults;
+            let bindings = globals.list_bindings().await?;
+            futures::future::try_join_all(bindings.into_iter().map(|binding| {
+                let harness = &harness;
+                async move {
+                    harness
+                        .inner
+                        .storage
+                        .put_json(
+                            harness.bindings_dir().join(format!("{}.json", binding.id)),
+                            &StoredBinding { record: binding },
+                        )
+                        .await
+                }
+            }))
+            .await?;
         }
         Ok(harness)
     }
@@ -949,14 +964,18 @@ impl BasicExoHarness {
         config: BasicExoHarnessConfig,
         seed: Option<Arc<dyn ManagedSandboxBackend>>,
     ) -> Result<Self> {
+        let root = config.root.clone();
         let storage = BasicObjectStore::local_filesystem(&config.root).await?;
-        Self::new_with_storage(config, seed, storage).await
+        let harness = Self::new_with_storage(config, seed, storage, false).await?;
+        harness.migrate_legacy_secrets(root).await?;
+        Ok(harness)
     }
 
     async fn new_with_storage(
         config: BasicExoHarnessConfig,
         seed: Option<Arc<dyn ManagedSandboxBackend>>,
         storage: BasicObjectStore,
+        in_memory: bool,
     ) -> Result<Self> {
         let BasicExoHarnessConfig {
             root,
@@ -984,8 +1003,15 @@ impl BasicExoHarness {
 
         let secret_cipher =
             build_secret_cipher(secret_backend, root.to_string_lossy().to_string())?;
+        let vaults = BasicVaultStore::new(
+            (!in_memory).then(|| root.join("vaults")),
+            secret_cipher.clone(),
+        )?;
         Ok(Self {
             inner: Arc::new(BasicExoHarnessInner {
+                vaults,
+                inherited_vaults: vec![],
+                inherited_global_vault: None,
                 storage,
                 write_lock: AsyncMutex::new(()),
                 subscribers: Mutex::new(HashMap::new()),
@@ -1001,6 +1027,21 @@ impl BasicExoHarness {
 
     fn agents_dir(&self) -> PathBuf {
         PathBuf::from("agents")
+    }
+
+    fn owner_dir(&self, scope: ResourceScope) -> PathBuf {
+        match scope {
+            ResourceScope::Global => PathBuf::new(),
+            ResourceScope::Agent { agent_id } => self.agents_dir().join(agent_id.to_string()),
+            ResourceScope::Thread {
+                agent_id,
+                thread_id,
+            } => self
+                .agents_dir()
+                .join(agent_id.to_string())
+                .join("conversations")
+                .join(thread_id.to_string()),
+        }
     }
 
     /// Slug-uniqueness index: one marker file per slug, so the per-create
@@ -1028,10 +1069,6 @@ impl BasicExoHarness {
 
     fn bindings_dir(&self) -> PathBuf {
         PathBuf::from("bindings")
-    }
-
-    fn secrets_dir(&self) -> PathBuf {
-        PathBuf::from("secrets")
     }
 
     async fn list_agent_records(&self) -> Result<Vec<AgentRecord>> {
@@ -1096,7 +1133,9 @@ impl ExoHarness for BasicExoHarness {
             bail!("agent slug already exists: {}", request.slug);
         }
 
+        require_vaults(self, &request.vaults).await?;
         let record = AgentRecord {
+            vaults: request.vaults,
             id: Uuid7::now(),
             slug: request.slug,
             name: request.name,
@@ -1129,14 +1168,10 @@ impl ExoHarness for BasicExoHarness {
         for _ in 0..5 {
             terminate_running_sandboxes(&BasicScopedSandboxHandle::agent(self, *id)).await?;
             for conversation_id in agent_conversation_ids(self, &agent_dir).await? {
-                let conversation_dir = agent_dir
-                    .join("conversations")
-                    .join(conversation_id.to_string());
                 terminate_running_sandboxes(&BasicScopedSandboxHandle::conversation(
                     self,
                     *id,
                     conversation_id,
-                    conversation_dir,
                 ))
                 .await?;
             }
@@ -1149,14 +1184,10 @@ impl ExoHarness for BasicExoHarness {
             // sweep above would otherwise slip past the check.
             let mut scopes = vec![BasicScopedSandboxHandle::agent(self, *id)];
             for conversation_id in agent_conversation_ids(self, &agent_dir).await? {
-                let conversation_dir = agent_dir
-                    .join("conversations")
-                    .join(conversation_id.to_string());
                 scopes.push(BasicScopedSandboxHandle::conversation(
                     self,
                     *id,
                     conversation_id,
-                    conversation_dir,
                 ));
             }
             if !prepare_sandbox_scopes_for_deletion(self, &scopes).await? {
@@ -1210,42 +1241,31 @@ impl ExoHarness for BasicExoHarness {
             .map(|record| record.record.binding))
     }
 
-    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
-        list_secret_metadata(&self.inner.storage, &self.secrets_dir()).await
+    async fn create_vault(&self, name: &str) -> Result<Arc<dyn VaultHandle>> {
+        self.inner.vaults.create_vault(name).await
     }
-
-    async fn put_secret(&self, request: PutSecretRequest) -> Result<SecretId> {
+    async fn delete_vault(&self, id: &VaultId) -> Result<()> {
         let _guard = self.inner.write_lock.lock().await;
-        let id = Uuid7::now();
-        let record = StoredSecret {
-            metadata: SecretMetadata {
-                id,
-                r#type: secret_type(&request.secret),
-                name: request.name,
-                created_at: id.timestamp().expect("uuid7 timestamp"),
-            },
-            secret: self.inner.secret_cipher.encrypt_secret(&request.secret)?,
-        };
-        self.inner
-            .storage
-            .put_json(self.secrets_dir().join(format!("{id}.json")), &record)
-            .await?;
-        Ok(id)
-    }
-
-    async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>> {
-        let path = self.secrets_dir().join(format!("{id}.json"));
-        let Some(record) = self
-            .inner
-            .storage
-            .get_json_if_exists::<StoredSecret>(&path)
-            .await?
-        else {
-            return Ok(None);
-        };
-        Ok(Some(
-            self.inner.secret_cipher.decrypt_secret(&record.secret)?,
-        ))
+        for agent in self.list_agents().await? {
+            anyhow::ensure!(
+                !agent.record().vaults.contains(id),
+                "vault is attached to agent {}",
+                agent.record().slug
+            );
+            for thread in agent
+                .list_conversations(ListConversationsRequest::default())
+                .await?
+                .conversations
+            {
+                anyhow::ensure!(
+                    !thread.record().vaults.contains(id),
+                    "vault is attached to thread {} of agent {}",
+                    thread.record().slug,
+                    agent.record().slug
+                );
+            }
+        }
+        self.inner.vaults.delete_vault(id).await
     }
 }
 
@@ -1449,7 +1469,9 @@ impl AgentHandle for BasicAgentHandle {
             }
             None => derive_unique_slug("conversation", &existing),
         };
+        require_vaults(&self.harness, &request.vaults).await?;
         let record = ConversationRecord {
+            vaults: request.vaults,
             id: Uuid7::now(),
             slug: slug.clone(),
             name: request.name.unwrap_or_else(|| slug_to_name(&slug)),
@@ -1496,12 +1518,8 @@ impl AgentHandle for BasicAgentHandle {
             return Ok(false);
         }
 
-        let sandbox_handle = BasicScopedSandboxHandle::conversation(
-            &self.harness,
-            self.record.id,
-            *id,
-            conversation_dir.clone(),
-        );
+        let sandbox_handle =
+            BasicScopedSandboxHandle::conversation(&self.harness, self.record.id, *id);
         // Sandbox creation persists its record under the write lock, so the
         // only way to guarantee no VM outlives its conversation record is to
         // observe "no running sandboxes" while holding that lock and delete
@@ -1593,56 +1611,6 @@ impl AgentHandle for BasicAgentHandle {
         self.harness.get_binding(id).await
     }
 
-    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
-        Ok(merge_secret_metadata(vec![
-            list_secret_metadata(&self.harness.inner.storage, &self.harness.secrets_dir()).await?,
-            list_secret_metadata(&self.harness.inner.storage, &self.secrets_dir()).await?,
-        ]))
-    }
-
-    async fn put_secret(&self, request: PutSecretRequest) -> Result<SecretId> {
-        let _guard = self.harness.inner.write_lock.lock().await;
-        let id = Uuid7::now();
-        let record = StoredSecret {
-            metadata: SecretMetadata {
-                id,
-                r#type: secret_type(&request.secret),
-                name: request.name,
-                created_at: id.timestamp().expect("uuid7 timestamp"),
-            },
-            secret: self
-                .harness
-                .inner
-                .secret_cipher
-                .encrypt_secret(&request.secret)?,
-        };
-        self.harness
-            .inner
-            .storage
-            .put_json(self.secrets_dir().join(format!("{id}.json")), &record)
-            .await?;
-        Ok(id)
-    }
-
-    async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>> {
-        let path = self.secrets_dir().join(format!("{id}.json"));
-        let Some(record) = self
-            .harness
-            .inner
-            .storage
-            .get_json_if_exists::<StoredSecret>(&path)
-            .await?
-        else {
-            return self.harness.get_secret(id).await;
-        };
-        Ok(Some(
-            self.harness
-                .inner
-                .secret_cipher
-                .decrypt_secret(&record.secret)?,
-        ))
-    }
-
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion> {
         let _guard = self.harness.inner.write_lock.lock().await;
         write_artifact_version(&self.harness.inner, &self.artifacts_dir(), request).await
@@ -1697,10 +1665,6 @@ impl BasicAgentHandle {
 
     fn bindings_dir(&self) -> PathBuf {
         self.agent_dir().join("bindings")
-    }
-
-    fn secrets_dir(&self) -> PathBuf {
-        self.agent_dir().join("secrets")
     }
 
     fn artifacts_dir(&self) -> PathBuf {
@@ -1770,15 +1734,6 @@ fn paginate_conversation_records(
         conversations: page,
         next_cursor,
     })
-}
-
-#[derive(Debug, Clone, Copy)]
-enum SandboxOwner {
-    Agent(AgentId),
-    Conversation {
-        agent_id: AgentId,
-        thread_id: ConversationId,
-    },
 }
 
 // Deletion helpers shared by delete_agent and delete_conversation: an owner's
@@ -1864,7 +1819,7 @@ async fn agent_conversation_ids(
 struct BasicScopedSandboxHandle<'a> {
     harness: &'a BasicExoHarness,
     owner_dir: PathBuf,
-    owner: SandboxOwner,
+    owner: ResourceScope,
     event_sink: BasicSandboxEventSink<'a>,
 }
 
@@ -1885,8 +1840,8 @@ impl<'a> BasicScopedSandboxHandle<'a> {
     fn agent(harness: &'a BasicExoHarness, agent_id: AgentId) -> Self {
         Self {
             harness,
-            owner_dir: harness.agents_dir().join(agent_id.to_string()),
-            owner: SandboxOwner::Agent(agent_id),
+            owner_dir: harness.owner_dir(ResourceScope::Agent { agent_id }),
+            owner: ResourceScope::Agent { agent_id },
             event_sink: BasicSandboxEventSink::None,
         }
     }
@@ -1895,15 +1850,15 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         harness: &'a BasicExoHarness,
         agent_id: AgentId,
         conversation_id: ConversationId,
-        conversation_dir: PathBuf,
     ) -> Self {
+        let owner = ResourceScope::Thread {
+            agent_id,
+            thread_id: conversation_id,
+        };
         Self {
             harness,
-            owner_dir: conversation_dir,
-            owner: SandboxOwner::Conversation {
-                agent_id,
-                thread_id: conversation_id,
-            },
+            owner_dir: harness.owner_dir(owner),
+            owner,
             event_sink: BasicSandboxEventSink::Conversation { conversation_id },
         }
     }
@@ -1920,7 +1875,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         Self {
             harness,
             owner_dir: conversation_dir,
-            owner: SandboxOwner::Conversation {
+            owner: ResourceScope::Thread {
                 agent_id,
                 thread_id: conversation_id,
             },
@@ -1956,7 +1911,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         if request.name.is_none() {
             return self.create_new_sandbox(request).await;
         }
-        let prepared = prepare_sandbox_request(self.harness, request).await?;
+        let prepared = prepare_sandbox_request(self.harness, self.owner, request).await?;
         let _guard = self.harness.inner.write_lock.lock().await;
         if let Some((sandbox_id, sandbox)) = self.find_matching_sandbox(&prepared).await? {
             let (_handle, provider_state_event) = active_sandbox_handle_locked(
@@ -1984,7 +1939,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         if !source.running {
             bail!("source sandbox is not running: {}", request.source_id);
         }
-        let prepared = prepare_sandbox_request(self.harness, request.sandbox).await?;
+        let prepared = prepare_sandbox_request(self.harness, self.owner, request.sandbox).await?;
         if prepared.provider != source.provider {
             bail!(
                 "source provider {} does not match target provider {}",
@@ -2018,7 +1973,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         self.ensure_full_sandbox_scope("restore_sandbox")?;
         let payload =
             load_snapshot_payload(self.harness, &self.owner_dir, request.snapshot_id).await?;
-        let prepared = prepare_sandbox_request(self.harness, request.sandbox).await?;
+        let prepared = prepare_sandbox_request(self.harness, self.owner, request.sandbox).await?;
         let sandbox_id = format!("sandbox-{}", Uuid7::now());
         let mut sandbox = prepared.stored_sandbox(sandbox_id.clone());
         sandbox.latest_snapshot_id = Some(request.snapshot_id);
@@ -2102,6 +2057,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         let sandbox_id = format!("sandbox-{}", Uuid7::now());
         let provider = request.attachment.provider();
         let sandbox = StoredSandbox {
+            credentials: BTreeMap::new(),
             id: sandbox_id.clone(),
             name: None,
             provider,
@@ -2425,7 +2381,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
     }
 
     async fn create_new_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
-        let prepared = prepare_sandbox_request(self.harness, request).await?;
+        let prepared = prepare_sandbox_request(self.harness, self.owner, request).await?;
         let sandbox_id = format!("sandbox-{}", Uuid7::now());
         let sandbox = prepared.stored_sandbox(sandbox_id.clone());
         let (sandbox_handle, provider_state_event) = create_sandbox_handle(
@@ -2638,6 +2594,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
                 || file_system_mounts != request.file_system_mounts
                 || durable_file_systems != request.durable_file_systems
                 || sandbox.policy() != request.policy
+                || sandbox.credentials != request.credentials
                 || idle_seconds != request.idle_seconds
             {
                 bail!("sandbox name {name:?} already exists with a different configuration");
@@ -2982,6 +2939,7 @@ impl ConversationHandle for BasicConversationHandle {
             events.retain(|event| event.id <= limit);
         }
         let record = ConversationRecord {
+            vaults: self.record.vaults.clone(),
             id: Uuid7::now(),
             slug: slug.clone(),
             name: request.name.unwrap_or_else(|| slug_to_name(&slug)),
@@ -2992,11 +2950,6 @@ impl ConversationHandle for BasicConversationHandle {
             .inner
             .storage
             .copy_prefix(self.bindings_dir(), conversation_dir.join("bindings"))
-            .await?;
-        self.harness
-            .inner
-            .storage
-            .copy_prefix(self.secrets_dir(), conversation_dir.join("secrets"))
             .await?;
         self.harness
             .inner
@@ -3162,86 +3115,11 @@ impl ConversationHandle for BasicConversationHandle {
         }
         self.harness.get_binding(id).await
     }
-
-    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
-        Ok(merge_secret_metadata(vec![
-            list_secret_metadata(&self.harness.inner.storage, &self.harness.secrets_dir()).await?,
-            list_secret_metadata(
-                &self.harness.inner.storage,
-                &agent_secrets_dir(&self.harness, self.agent_id),
-            )
-            .await?,
-            list_secret_metadata(&self.harness.inner.storage, &self.secrets_dir()).await?,
-        ]))
-    }
-
-    async fn put_secret(&self, request: PutSecretRequest) -> Result<SecretId> {
-        let _guard = self.harness.inner.write_lock.lock().await;
-        let id = Uuid7::now();
-        let record = StoredSecret {
-            metadata: SecretMetadata {
-                id,
-                r#type: secret_type(&request.secret),
-                name: request.name,
-                created_at: id.timestamp().expect("uuid7 timestamp"),
-            },
-            secret: self
-                .harness
-                .inner
-                .secret_cipher
-                .encrypt_secret(&request.secret)?,
-        };
-        self.harness
-            .inner
-            .storage
-            .put_json(self.secrets_dir().join(format!("{id}.json")), &record)
-            .await?;
-        Ok(id)
-    }
-
-    async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>> {
-        let local_path = self.secrets_dir().join(format!("{id}.json"));
-        if let Some(record) = self
-            .harness
-            .inner
-            .storage
-            .get_json_if_exists::<StoredSecret>(&local_path)
-            .await?
-        {
-            return Ok(Some(
-                self.harness
-                    .inner
-                    .secret_cipher
-                    .decrypt_secret(&record.secret)?,
-            ));
-        }
-        let agent_path = agent_secrets_dir(&self.harness, self.agent_id).join(format!("{id}.json"));
-        let Some(record) = self
-            .harness
-            .inner
-            .storage
-            .get_json_if_exists::<StoredSecret>(&agent_path)
-            .await?
-        else {
-            return self.harness.get_secret(id).await;
-        };
-        Ok(Some(
-            self.harness
-                .inner
-                .secret_cipher
-                .decrypt_secret(&record.secret)?,
-        ))
-    }
 }
 
 impl BasicSandboxScope for BasicConversationHandle {
     fn sandbox_handle(&self) -> BasicScopedSandboxHandle<'_> {
-        BasicScopedSandboxHandle::conversation(
-            &self.harness,
-            self.agent_id,
-            self.record.id,
-            self.conversation_dir(),
-        )
+        BasicScopedSandboxHandle::conversation(&self.harness, self.agent_id, self.record.id)
     }
 }
 
@@ -3253,9 +3131,10 @@ impl BasicConversationHandle {
     }
 
     fn conversation_dir(&self) -> PathBuf {
-        self.agent_dir()
-            .join("conversations")
-            .join(self.record.id.to_string())
+        self.harness.owner_dir(ResourceScope::Thread {
+            agent_id: self.agent_id,
+            thread_id: self.record.id,
+        })
     }
 
     fn events_dir(&self) -> PathBuf {
@@ -3264,10 +3143,6 @@ impl BasicConversationHandle {
 
     fn bindings_dir(&self) -> PathBuf {
         self.conversation_dir().join("bindings")
-    }
-
-    fn secrets_dir(&self) -> PathBuf {
-        self.conversation_dir().join("secrets")
     }
 
     fn artifacts_dir(&self) -> PathBuf {
@@ -3376,7 +3251,7 @@ async fn snapshot_sandbox_side_effect(
 async fn start_sandbox_side_effect(
     harness: &BasicExoHarness,
     owner_dir: &Path,
-    owner: SandboxOwner,
+    owner: ResourceScope,
     request: StartSandboxRequest,
 ) -> Result<EventData> {
     let payload = load_snapshot_payload(harness, owner_dir, request.snapshot_id).await?;
@@ -3560,6 +3435,7 @@ async fn load_stored_sandbox(
 
 async fn prepare_sandbox_request(
     harness: &BasicExoHarness,
+    scope: ResourceScope,
     request: CreateSandboxRequest,
 ) -> Result<PreparedSandboxRequest> {
     let image = if !request.image.trim().is_empty() {
@@ -3584,7 +3460,21 @@ async fn prepare_sandbox_request(
                 SandboxNetworkPolicy::Disabled.into()
             }
         });
+    let context = ScopedVaultContext { harness, scope };
+    let credentials = futures::future::try_join_all(policy.credentials.iter().map(|binding| {
+        let context = &context;
+        async move {
+            let reference = crate::vault::find_secret(context, &binding.name)
+                .await?
+                .with_context(|| format!("egress credential not found: {}", binding.name))?;
+            Ok::<_, anyhow::Error>((binding.name.clone(), reference))
+        }
+    }))
+    .await?
+    .into_iter()
+    .collect();
     Ok(PreparedSandboxRequest {
+        credentials,
         name: request.name,
         provider: request.provider,
         image,
@@ -3627,6 +3517,7 @@ async fn find_matching_stored_sandbox(
             || sandbox.file_system_mounts != request.file_system_mounts
             || sandbox.durable_file_systems != request.durable_file_systems
             || sandbox.policy() != request.policy
+            || sandbox.credentials != request.credentials
             || sandbox.idle_seconds != request.idle_seconds
         {
             bail!("sandbox name {name:?} already exists with a different configuration");
@@ -3639,7 +3530,7 @@ async fn find_matching_stored_sandbox(
 async fn active_sandbox_handle(
     harness: &BasicExoHarness,
     owner_dir: &Path,
-    owner: SandboxOwner,
+    owner: ResourceScope,
     sandbox_id: &SandboxId,
     sandbox: &StoredSandbox,
 ) -> Result<(Arc<dyn ManagedSandboxHandle>, Option<EventData>)> {
@@ -3685,7 +3576,7 @@ async fn active_sandbox_handle(
 async fn active_sandbox_handle_locked(
     harness: &BasicExoHarness,
     owner_dir: &Path,
-    owner: SandboxOwner,
+    owner: ResourceScope,
     sandbox_id: &SandboxId,
     sandbox: &StoredSandbox,
 ) -> Result<(Arc<dyn ManagedSandboxHandle>, Option<EventData>)> {
@@ -3714,7 +3605,7 @@ async fn active_sandbox_handle_locked(
 async fn create_sandbox_handle(
     harness: &BasicExoHarness,
     owner_dir: &Path,
-    owner: SandboxOwner,
+    owner: ResourceScope,
     sandbox_id: &SandboxId,
     sandbox: &StoredSandbox,
 ) -> Result<(Arc<dyn ManagedSandboxHandle>, Option<EventData>)> {
@@ -3748,14 +3639,15 @@ async fn create_sandbox_handle(
 }
 
 fn sandbox_provider_state_key(
-    owner: SandboxOwner,
+    owner: ResourceScope,
     sandbox_id: &SandboxId,
     sandbox: &StoredSandbox,
 ) -> String {
     let request = sandbox_request(owner, sandbox_id, sandbox, None);
     let owner_key = match owner {
-        SandboxOwner::Agent(agent_id) => format!("agent:{agent_id}"),
-        SandboxOwner::Conversation { thread_id, .. } => format!("thread:{thread_id}"),
+        ResourceScope::Global => "global".to_owned(),
+        ResourceScope::Agent { agent_id } => format!("agent:{agent_id}"),
+        ResourceScope::Thread { thread_id, .. } => format!("thread:{thread_id}"),
     };
     format!(
         "{owner_key}:{sandbox_id}\n{}",
@@ -3766,12 +3658,12 @@ fn sandbox_provider_state_key(
 async fn load_sandbox_provider_state(
     harness: &BasicExoHarness,
     owner_dir: &Path,
-    owner: SandboxOwner,
+    owner: ResourceScope,
     sandbox_id: &SandboxId,
     provider: SandboxProvider,
     state_key: &str,
 ) -> Result<Option<Value>> {
-    let SandboxOwner::Conversation { .. } = owner else {
+    let ResourceScope::Thread { .. } = owner else {
         return Ok(None);
     };
     let mut events = load_events(&harness.inner.storage, &owner_dir.join("events"))
@@ -4034,6 +3926,8 @@ struct StoredSandbox {
     durable_file_systems: Vec<DurableFileSystem>,
     #[serde(flatten)]
     network: StoredSandboxPolicy,
+    #[serde(default)]
+    credentials: BTreeMap<String, SecretReference>,
     idle_seconds: u64,
     running: bool,
     latest_snapshot_id: Option<SnapshotId>,
@@ -4084,6 +3978,7 @@ struct PreparedSandboxRequest {
     file_system_mounts: Vec<FileSystemMount>,
     durable_file_systems: Vec<DurableFileSystem>,
     policy: crate::EgressPolicy,
+    credentials: BTreeMap<String, SecretReference>,
     idle_seconds: u64,
 }
 
@@ -4102,6 +3997,7 @@ impl PreparedSandboxRequest {
             network: StoredSandboxPolicy::Policy {
                 policy: self.policy.clone(),
             },
+            credentials: self.credentials.clone(),
             idle_seconds: self.idle_seconds,
             running: true,
             latest_snapshot_id: None,
@@ -4123,7 +4019,7 @@ struct PendingSandboxProcess {
 async fn prepare_sandbox_process(
     harness: &BasicExoHarness,
     owner_dir: &Path,
-    owner: SandboxOwner,
+    owner: ResourceScope,
     event_log: Option<SandboxProcessEventLog>,
     request: StartSandboxProcessRequest,
 ) -> Result<PendingSandboxProcess> {
@@ -4550,25 +4446,14 @@ impl SandboxProcess for LiveSandboxProcess {
 }
 
 fn sandbox_request(
-    owner: SandboxOwner,
+    owner: ResourceScope,
     sandbox_id: &str,
     sandbox: &StoredSandbox,
     provider_state: Option<Value>,
 ) -> SandboxRequest {
     SandboxRequest {
         sandbox_id: sandbox_id.to_string(),
-        scope: Some(match owner {
-            SandboxOwner::Agent(agent_id) => SandboxScope::Agent {
-                agent_id: agent_id.to_string(),
-            },
-            SandboxOwner::Conversation {
-                agent_id,
-                thread_id,
-            } => SandboxScope::Thread {
-                agent_id: agent_id.to_string(),
-                thread_id: thread_id.to_string(),
-            },
-        }),
+        scope: owner,
         spec: SandboxSpec {
             image: sandbox.image.clone(),
             resources: sandbox.resources,
@@ -4839,20 +4724,6 @@ fn stored_binding(id: BindingId, binding: Binding) -> StoredBinding {
     }
 }
 
-async fn list_secret_metadata(
-    storage: &BasicObjectStore,
-    secrets_dir: &Path,
-) -> Result<Vec<SecretMetadata>> {
-    let mut secrets = storage
-        .list_json_matching_suffix::<StoredSecret>(secrets_dir, ".json")
-        .await?
-        .into_iter()
-        .map(|secret| secret.metadata)
-        .collect::<Vec<_>>();
-    secrets.sort_by_key(|metadata| metadata.id);
-    Ok(secrets)
-}
-
 #[cfg(test)]
 #[tokio::test]
 async fn in_memory_preserves_inherited_binding_ids_and_metadata() -> Result<()> {
@@ -4868,7 +4739,7 @@ async fn in_memory_preserves_inherited_binding_ids_and_metadata() -> Result<()> 
             name: "model".into(),
             model: "gpt-5.6-sol".into(),
             base_url: None,
-            secret_id: None,
+            secret: None,
         },
     };
     source
@@ -4898,18 +4769,6 @@ fn merge_binding_records(scopes: Vec<Vec<BindingRecord>>) -> Vec<BindingRecord> 
     bindings
 }
 
-fn merge_secret_metadata(scopes: Vec<Vec<SecretMetadata>>) -> Vec<SecretMetadata> {
-    let mut effective = HashMap::<String, SecretMetadata>::new();
-    for secrets in scopes {
-        for secret in secrets {
-            effective.insert(secret.name.clone(), secret);
-        }
-    }
-    let mut secrets = effective.into_values().collect::<Vec<_>>();
-    secrets.sort_by_key(|metadata| metadata.id);
-    secrets
-}
-
 fn binding_type(binding: &Binding) -> BindingType {
     match binding {
         Binding::Env { .. } => BindingType::Env,
@@ -4925,13 +4784,6 @@ fn binding_name(binding: &Binding) -> &str {
         | Binding::Mcp { name, .. }
         | Binding::Llm { name, .. }
         | Binding::Sandbox { name, .. } => name,
-    }
-}
-
-fn secret_type(secret: &Secret) -> SecretType {
-    match secret {
-        Secret::Key { .. } => SecretType::Key,
-        Secret::Oauth { .. } => SecretType::Oauth,
     }
 }
 
@@ -4960,14 +4812,7 @@ fn agent_bindings_dir(harness: &BasicExoHarness, agent_id: AgentId) -> PathBuf {
         .join("bindings")
 }
 
-fn agent_secrets_dir(harness: &BasicExoHarness, agent_id: AgentId) -> PathBuf {
-    harness
-        .agents_dir()
-        .join(agent_id.to_string())
-        .join("secrets")
-}
-
-fn build_secret_cipher(
+pub(crate) fn build_secret_cipher(
     choice: SecretBackendChoice,
     keychain_account: String,
 ) -> Result<SecretCipher> {
@@ -4989,90 +4834,6 @@ fn build_secret_cipher(
         SecretBackendChoice::Static(key) => Arc::new(StaticSecretKeyProvider::new(key)),
     };
     Ok(SecretCipher::new(provider))
-}
-
-#[cfg(feature = "firecracker")]
-struct LocalEgressResolver {
-    storage: BasicObjectStore,
-    cipher: SecretCipher,
-}
-
-#[cfg(feature = "firecracker")]
-#[async_trait]
-impl crate::egress::EgressCredentialResolver for LocalEgressResolver {
-    async fn resolve(
-        &self,
-        identity: &crate::egress::EgressIdentity,
-        binding_name: &str,
-        _destination: &crate::egress::EgressDestination,
-    ) -> Result<String> {
-        for directory in self.secret_directories(identity).await? {
-            let stored = self
-                .storage
-                .list_json_matching_suffix::<StoredSecret>(&directory, ".json")
-                .await?;
-            let mut matches = stored.into_iter().filter(|s| {
-                s.metadata.name == binding_name || s.metadata.id.to_string() == binding_name
-            });
-            let Some(record) = matches.next() else {
-                continue;
-            };
-            anyhow::ensure!(
-                matches.next().is_none(),
-                "egress credential reference is ambiguous; use its id"
-            );
-            return match self.cipher.decrypt_secret(&record.secret)? {
-                Secret::Key { value } => Ok(value),
-                Secret::Oauth { .. } => bail!("egress credential must be an API key"),
-            };
-        }
-        bail!("egress credential not found")
-    }
-}
-
-#[cfg(feature = "firecracker")]
-impl LocalEgressResolver {
-    async fn secret_directories(
-        &self,
-        identity: &crate::egress::EgressIdentity,
-    ) -> Result<Vec<PathBuf>> {
-        let mut directories = Vec::new();
-        let agent_dir = match &identity.scope {
-            Some(SandboxScope::Agent { agent_id }) => {
-                let agent_id: AgentId =
-                    agent_id.parse().context("invalid egress agent identity")?;
-                Some(PathBuf::from("agents").join(agent_id.to_string()))
-            }
-            Some(SandboxScope::Thread {
-                agent_id,
-                thread_id,
-            }) => {
-                let agent_id: AgentId =
-                    agent_id.parse().context("invalid egress agent identity")?;
-                let thread_id: ConversationId = thread_id
-                    .parse()
-                    .context("invalid egress thread identity")?;
-                let agent_dir = PathBuf::from("agents").join(agent_id.to_string());
-                let thread_dir = agent_dir.join("conversations").join(thread_id.to_string());
-                self.storage
-                    .get_json::<ConversationRecord>(thread_dir.join("record.json"))
-                    .await
-                    .context("egress thread not found")?;
-                directories.push(thread_dir.join("secrets"));
-                Some(agent_dir)
-            }
-            None => None,
-        };
-        if let Some(agent_dir) = agent_dir {
-            self.storage
-                .get_json::<AgentRecord>(agent_dir.join("record.json"))
-                .await
-                .context("egress agent not found")?;
-            directories.push(agent_dir.join("secrets"));
-        }
-        directories.push(PathBuf::from("secrets"));
-        Ok(directories)
-    }
 }
 
 #[cfg(test)]
@@ -5117,6 +4878,120 @@ mod snapshot_manifest_tests {
     }
 }
 
+impl BasicExoHarnessConfig {
+    pub fn validate_secret_mount(&self, host_path: &Path) -> Result<()> {
+        let host_path = host_path.canonicalize()?;
+        let mut protected = vec![self.root.join("vaults")];
+        if let SecretBackendChoice::File { path } = &self.secret_backend {
+            protected.push(
+                path.clone()
+                    .map(Ok)
+                    .unwrap_or_else(crate::secrets::default_master_key_path)?,
+            );
+        }
+        for path in protected {
+            let path = std::path::absolute(path)?;
+            let mut ancestor = path.as_path();
+            let mut canonical = loop {
+                match ancestor.canonicalize() {
+                    Ok(canonical) => break canonical,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        ancestor = ancestor
+                            .parent()
+                            .context("protected path has no existing ancestor")?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            };
+            for component in path.strip_prefix(ancestor)?.components() {
+                match component {
+                    std::path::Component::ParentDir => {
+                        canonical.pop();
+                    }
+                    component => canonical.push(component),
+                }
+            }
+            if canonical.starts_with(&host_path) || host_path.starts_with(&canonical) {
+                bail!(
+                    "sandbox mount {} exposes vault storage or its master key",
+                    host_path.display()
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl VaultContext for BasicExoHarness {
+    async fn list_vaults(&self) -> Result<Vec<Arc<dyn VaultHandle>>> {
+        if self.inner.inherited_global_vault.is_none() {
+            self.inner.vaults.global_vault().await?;
+        }
+        let mut vaults = self.inner.vaults.list_vaults().await?;
+        vaults.extend(self.inner.inherited_vaults.iter().cloned());
+        Ok(vaults)
+    }
+    async fn get_vault(&self, id: &VaultId) -> Result<Option<Arc<dyn VaultHandle>>> {
+        if let Some(vault) = self
+            .inner
+            .inherited_vaults
+            .iter()
+            .find(|v| v.record().id == *id)
+        {
+            return Ok(Some(vault.clone()));
+        }
+        self.inner.vaults.get_vault(id).await
+    }
+}
+
+#[async_trait]
+impl VaultContext for BasicAgentHandle {
+    async fn get_vault(&self, id: &VaultId) -> Result<Option<Arc<dyn VaultHandle>>> {
+        if self.record.vaults.contains(id) {
+            return self.harness.get_vault(id).await;
+        }
+        let global = global_vault(&self.harness).await?;
+        Ok((global.record().id == *id).then_some(global))
+    }
+    async fn list_vaults(&self) -> Result<Vec<Arc<dyn VaultHandle>>> {
+        compose_vaults(
+            &self.harness,
+            vec![global_vault(&self.harness).await?],
+            &self.record.vaults,
+        )
+        .await
+    }
+}
+
+#[async_trait]
+impl VaultContext for BasicConversationHandle {
+    async fn get_vault(&self, id: &VaultId) -> Result<Option<Arc<dyn VaultHandle>>> {
+        if self.record.vaults.contains(id) {
+            return self.harness.get_vault(id).await;
+        }
+        self.harness
+            .get_agent(&self.agent_id)
+            .await?
+            .context("agent is unavailable")?
+            .get_vault(id)
+            .await
+    }
+    async fn list_vaults(&self) -> Result<Vec<Arc<dyn VaultHandle>>> {
+        let agent = self
+            .harness
+            .get_agent(&self.agent_id)
+            .await?
+            .context("agent is unavailable")?;
+        compose_vaults(
+            &self.harness,
+            agent.list_vaults().await?,
+            &self.record.vaults,
+        )
+        .await
+    }
+}
+
 #[cfg(test)]
 mod stored_policy_tests {
     use super::*;
@@ -5154,140 +5029,6 @@ mod stored_policy_tests {
 #[cfg(all(test, feature = "firecracker"))]
 mod egress_resolution_tests {
     use super::*;
-    use crate::egress::{EgressCredentialResolver, EgressDestination, EgressIdentity};
-
-    #[tokio::test]
-    async fn local_credentials_follow_scope_and_reject_other_threads() -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        let harness =
-            BasicExoHarness::new(crate::test_support::local_test_config(directory.path())).await?;
-        let resolver = LocalEgressResolver {
-            storage: harness.inner.storage.clone(),
-            cipher: harness.inner.secret_cipher.clone(),
-        };
-        let secret = |value: &str| PutSecretRequest {
-            name: "token".into(),
-            secret: Secret::Key {
-                value: value.into(),
-            },
-        };
-        let global_id = harness.put_secret(secret("global")).await?;
-        let agent = harness
-            .new_agent(NewAgentRequest {
-                slug: "agent".into(),
-                name: "agent".into(),
-            })
-            .await?;
-        agent.put_secret(secret("agent")).await?;
-        let first = agent
-            .new_conversation(NewConversationRequest::default())
-            .await?;
-        let second = agent
-            .new_conversation(NewConversationRequest::default())
-            .await?;
-        let first_id = first.put_secret(secret("first")).await?;
-        second.put_secret(secret("second")).await?;
-        let destination = EgressDestination {
-            host: "api.test".into(),
-            port: 443,
-            method: hyper::Method::GET,
-            path: "/".into(),
-        };
-        for (scope, expected) in [
-            (None, "global"),
-            (
-                Some(SandboxScope::Agent {
-                    agent_id: agent.record().id.to_string(),
-                }),
-                "agent",
-            ),
-            (
-                Some(SandboxScope::Thread {
-                    agent_id: agent.record().id.to_string(),
-                    thread_id: first.record().id.to_string(),
-                }),
-                "first",
-            ),
-            (
-                Some(SandboxScope::Thread {
-                    agent_id: agent.record().id.to_string(),
-                    thread_id: second.record().id.to_string(),
-                }),
-                "second",
-            ),
-        ] {
-            let identity = EgressIdentity {
-                sandbox_id: "test".into(),
-                scope,
-            };
-            assert_eq!(
-                resolver.resolve(&identity, "token", &destination).await?,
-                expected
-            );
-        }
-        let second_identity = EgressIdentity {
-            sandbox_id: "second".into(),
-            scope: Some(SandboxScope::Thread {
-                agent_id: agent.record().id.to_string(),
-                thread_id: second.record().id.to_string(),
-            }),
-        };
-        assert!(
-            resolver
-                .resolve(&second_identity, &first_id.to_string(), &destination)
-                .await
-                .is_err()
-        );
-        assert_eq!(
-            resolver
-                .resolve(&second_identity, &global_id.to_string(), &destination)
-                .await?,
-            "global"
-        );
-        let inherited = agent
-            .new_conversation(NewConversationRequest::default())
-            .await?;
-        let mut identity = EgressIdentity {
-            sandbox_id: "test".into(),
-            scope: Some(SandboxScope::Thread {
-                agent_id: agent.record().id.to_string(),
-                thread_id: inherited.record().id.to_string(),
-            }),
-        };
-        assert_eq!(
-            resolver.resolve(&identity, "token", &destination).await?,
-            "agent"
-        );
-        let other_agent = harness
-            .new_agent(NewAgentRequest {
-                slug: "other".into(),
-                name: "other".into(),
-            })
-            .await?;
-        identity.scope = Some(SandboxScope::Thread {
-            agent_id: other_agent.record().id.to_string(),
-            thread_id: first.record().id.to_string(),
-        });
-        assert!(
-            resolver
-                .resolve(&identity, "token", &destination)
-                .await
-                .is_err()
-        );
-        for thread_id in [Uuid7::now().to_string(), "../../secrets".into()] {
-            identity.scope = Some(SandboxScope::Thread {
-                agent_id: agent.record().id.to_string(),
-                thread_id,
-            });
-            assert!(
-                resolver
-                    .resolve(&identity, "token", &destination)
-                    .await
-                    .is_err()
-            );
-        }
-        Ok(())
-    }
 
     #[tokio::test]
     async fn policy_overrides_the_legacy_networking_flag() -> Result<()> {
@@ -5312,7 +5053,7 @@ mod egress_resolution_tests {
             idle_seconds: None,
         };
         assert_eq!(
-            prepare_sandbox_request(&harness, request.clone())
+            prepare_sandbox_request(&harness, ResourceScope::Global, request.clone())
                 .await?
                 .policy,
             limited
@@ -5320,6 +5061,7 @@ mod egress_resolution_tests {
         assert_eq!(
             prepare_sandbox_request(
                 &harness,
+                ResourceScope::Global,
                 CreateSandboxRequest {
                     policy: Some(SandboxNetworkPolicy::Disabled.into()),
                     enable_networking: Some(true),

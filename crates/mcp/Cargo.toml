@@ -15,7 +15,7 @@ reqwest = { version = "0.13.2", default-features = false, features = [
   "json",
   "stream",
 ] }
-rmcp = { version = "3.2.0", default-features = false, features = [
+rmcp = { workspace = true, features = [
   "client",
   "auth",
   "transport-streamable-http-client-reqwest",

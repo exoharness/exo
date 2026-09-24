@@ -53,20 +53,20 @@ export type Binding =
       type: "env";
       name: string;
       envVar: string;
-      secretId: string;
+      secret: SecretReference;
     }
   | {
       type: "mcp";
       name: string;
       serverUrl: string;
-      secretId?: string | null;
+      secret?: SecretReference | null;
     }
   | {
       type: "llm";
       name: string;
       model: string;
       baseUrl?: string | null;
-      secretId?: string | null;
+      secret?: SecretReference | null;
     };
 
 export interface BindingRecord {
@@ -86,9 +86,57 @@ export type Secret =
       type: "oauth";
       accessToken: string;
       refreshToken?: string | null;
+      expiresAt?: number | null;
+      refresh?: {
+        tokenEndpoint: string;
+        clientId: string;
+        resource: string | null;
+        scopes: string[];
+      } | null;
     };
 
+export interface VaultRecord {
+  id: string;
+  name: string;
+  createdAt: string;
+}
+
+export type SecretTarget =
+  | { type: "mcp"; serverUrl: string }
+  | { type: "http"; origin: string };
+
+export interface SecretReference {
+  vaultId: string;
+  secretId: string;
+}
+
+export interface ResolvedSecret {
+  revision: number;
+  secret: Secret;
+}
+
+export interface VaultContext {
+  listVaults(): Promise<Vault[]>;
+  getVault(id: string): Promise<Vault | null>;
+}
+
+export interface Vault {
+  readonly record: VaultRecord;
+  listSecrets(): Promise<SecretMetadata[]>;
+  putSecret(request: {
+    name: string;
+    secret: Secret;
+    target?: SecretTarget;
+  }): Promise<string>;
+  getSecret(id: string): Promise<Secret | null>;
+  resolveSecret(id: string, target: SecretTarget): Promise<ResolvedSecret>;
+  updateSecret(id: string, secret: Secret): Promise<SecretMetadata>;
+  deleteSecret(id: string): Promise<void>;
+}
+
 export interface SecretMetadata {
+  target?: SecretTarget | null;
+  revision: number;
   id: string;
   type: "key" | "oauth";
   name: string;
@@ -157,12 +205,14 @@ export interface SendRequest {
 }
 
 export interface AgentRecord {
+  vaults: string[];
   id: string;
   slug: string;
   name: string;
 }
 
 export interface ConversationRecord {
+  vaults: string[];
   id: string;
   slug: string;
   name: string;
@@ -214,6 +264,7 @@ export interface AddEventsResult {
 }
 
 export interface NewConversationRequest {
+  vaults?: string[];
   slug?: string | null;
   name?: string | null;
 }
@@ -242,7 +293,7 @@ export interface HistoryMessage {
   content: string;
 }
 
-export interface Agent {
+export interface Agent extends VaultContext {
   readonly record: AgentRecord;
   listConversations(): Promise<Conversation[]>;
   getConversation(id: string): Promise<Conversation | null>;
@@ -275,20 +326,22 @@ export interface Agent {
   }): Promise<ArtifactVersion>;
   listBindings(): Promise<BindingRecord[]>;
   getBinding(id: string): Promise<Binding | null>;
-  listSecrets(): Promise<SecretMetadata[]>;
-  getSecret(id: string): Promise<Secret | null>;
 }
 
-export interface ExoHarness {
+export interface ExoHarness extends VaultContext {
   readonly current: ExoHarnessCurrent;
   listAgents(): Promise<Agent[]>;
   getAgent(id: string): Promise<Agent | null>;
-  newAgent(request: { slug: string; name: string }): Promise<Agent>;
+  newAgent(request: {
+    slug: string;
+    name: string;
+    vaults?: string[];
+  }): Promise<Agent>;
   deleteAgent(id: string): Promise<boolean>;
   listBindings(): Promise<BindingRecord[]>;
   getBinding(id: string): Promise<Binding | null>;
-  listSecrets(): Promise<SecretMetadata[]>;
-  getSecret(id: string): Promise<Secret | null>;
+  createVault(name: string): Promise<Vault>;
+  deleteVault(id: string): Promise<void>;
 }
 
 export interface ExoHarnessCurrent {
@@ -297,7 +350,7 @@ export interface ExoHarnessCurrent {
   readonly turn: Turn;
 }
 
-export interface Conversation {
+export interface Conversation extends VaultContext {
   readonly agentId: string;
   readonly record: ConversationRecord;
   startSession(): Promise<string>;
@@ -333,8 +386,6 @@ export interface Conversation {
   }): Promise<ArtifactVersion>;
   listBindings(): Promise<BindingRecord[]>;
   getBinding(id: string): Promise<Binding | null>;
-  listSecrets(): Promise<SecretMetadata[]>;
-  getSecret(id: string): Promise<Secret | null>;
 }
 
 export interface Turn {

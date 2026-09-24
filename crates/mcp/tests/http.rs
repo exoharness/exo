@@ -185,7 +185,13 @@ impl Fixture {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/mcp", listener.local_addr().unwrap());
         let app = Router::new()
-            .route("/mcp", post(rpc).delete(|| async { StatusCode::OK }))
+            .route(
+                "/mcp",
+                post(rpc).delete(|State(state): State<ServerState>| async move {
+                    state.requests.lock().unwrap().push("delete".into());
+                    StatusCode::OK
+                }),
+            )
             .with_state(state.clone());
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -210,15 +216,12 @@ impl Drop for Fixture {
 }
 
 fn credentials(servers: &[McpServerConfig]) -> McpCredentials {
-    McpCredentials::from_env(
-        servers,
-        &servers
+    McpCredentials::from(
+        servers
             .iter()
-            .map(|s| format!("{}=FIXTURE_TOKEN", s.name))
-            .collect::<Vec<_>>(),
-        |_| Some("fixture-token".into()),
+            .map(|s| (s.name.clone(), "fixture-token".into()))
+            .collect::<std::collections::HashMap<_, _>>(),
     )
-    .unwrap()
 }
 
 #[tokio::test]
@@ -315,20 +318,11 @@ async fn preserves_tool_errors_and_reports_protocol_and_auth_errors() {
 }
 
 #[tokio::test]
-async fn rejects_unknown_tools_and_missing_session_credentials() {
+async fn rejects_unknown_tools() {
     let fixture = Fixture::start(false).await;
     let mut config = fixture.config("fixture");
     config.allowed_tools = Some(vec!["missing".into()]);
     let servers = [config];
-    assert!(
-        McpCredentials::from_env(&servers, &["fixture=MISSING_TOKEN".into()], |_| None).is_err()
-    );
-    assert!(
-        McpCredentials::from_env(&servers, &["unknown=FIXTURE_TOKEN".into()], |_| Some(
-            "fixture-token".into()
-        ))
-        .is_err()
-    );
     let result = McpToolSet::connect(&servers, credentials(&servers)).await;
     assert!(format!("{:#}", result.err().unwrap()).contains("no tool named missing"));
 }
@@ -609,4 +603,31 @@ async fn redirects_never_forward_credentials() {
     );
     assert!(destination.state.requests.lock().unwrap().is_empty());
     task.abort();
+}
+
+#[tokio::test]
+async fn oauth_probe_preserves_challenges_and_closes_anonymous_sessions() -> anyhow::Result<()> {
+    let protected = Fixture::start(false).await;
+    assert_eq!(
+        exo_mcp::probe_auth_challenge(&protected.url)
+            .await?
+            .as_deref(),
+        Some("Bearer")
+    );
+    let public = Fixture::with_state(ServerState {
+        anonymous: true,
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(exo_mcp::probe_auth_challenge(&public.url).await?, None);
+    assert!(
+        public
+            .state
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request == "delete")
+    );
+    Ok(())
 }

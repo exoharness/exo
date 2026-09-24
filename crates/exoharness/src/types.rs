@@ -17,10 +17,34 @@ use lingua::{Message, universal::UniversalStreamChunk};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::vault::{SecretReference, SecretTarget, VaultContext, VaultHandle, VaultId};
 use crate::{Result, Uuid7};
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResourceScope {
+    #[default]
+    Global,
+    Agent {
+        agent_id: AgentId,
+    },
+    Thread {
+        agent_id: AgentId,
+        thread_id: ThreadId,
+    },
+}
+
+impl ResourceScope {
+    pub fn agent_id(self) -> Option<AgentId> {
+        match self {
+            Self::Global => None,
+            Self::Agent { agent_id } | Self::Thread { agent_id, .. } => Some(agent_id),
+        }
+    }
+}
+
 #[async_trait]
-pub trait ExoHarness: Send + Sync {
+pub trait ExoHarness: VaultContext {
     async fn list_agents(&self) -> Result<Vec<Arc<dyn AgentHandle>>>;
     async fn get_agent(&self, id: &AgentId) -> Result<Option<Arc<dyn AgentHandle>>>;
     async fn new_agent(&self, request: NewAgentRequest) -> Result<Arc<dyn AgentHandle>>;
@@ -30,9 +54,8 @@ pub trait ExoHarness: Send + Sync {
     async fn put_binding(&self, binding: Binding) -> Result<BindingId>;
     async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>>;
 
-    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>>;
-    async fn put_secret(&self, request: PutSecretRequest) -> Result<SecretId>;
-    async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>>;
+    async fn create_vault(&self, name: &str) -> Result<Arc<dyn VaultHandle>>;
+    async fn delete_vault(&self, id: &VaultId) -> Result<()>;
 }
 
 #[async_trait]
@@ -94,7 +117,7 @@ pub trait SandboxHandle: SnapshotHandle {
 }
 
 #[async_trait]
-pub trait AgentHandle: SandboxHandle {
+pub trait AgentHandle: SandboxHandle + VaultContext {
     fn record(&self) -> &AgentRecord;
 
     async fn list_threads(
@@ -131,17 +154,13 @@ pub trait AgentHandle: SandboxHandle {
     async fn put_binding(&self, binding: Binding) -> Result<BindingId>;
     async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>>;
 
-    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>>;
-    async fn put_secret(&self, request: PutSecretRequest) -> Result<SecretId>;
-    async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>>;
-
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion>;
     async fn read_artifact(&self, request: ReadArtifactRequest) -> Result<Option<Artifact>>;
     async fn list_artifacts(&self) -> Result<Vec<ArtifactVersion>>;
 }
 
 #[async_trait]
-pub trait ThreadHandle: SandboxHandle {
+pub trait ThreadHandle: SandboxHandle + VaultContext {
     fn record(&self) -> &ThreadRecord;
 
     async fn start_session(&self) -> Result<SessionId>;
@@ -165,10 +184,6 @@ pub trait ThreadHandle: SandboxHandle {
     async fn list_bindings(&self) -> Result<Vec<BindingRecord>>;
     async fn put_binding(&self, binding: Binding) -> Result<BindingId>;
     async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>>;
-
-    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>>;
-    async fn put_secret(&self, request: PutSecretRequest) -> Result<SecretId>;
-    async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>>;
 }
 
 /// Compatibility name for [`ThreadHandle`].
@@ -188,12 +203,16 @@ pub struct AgentRecord {
     pub id: AgentId,
     pub slug: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vaults: Vec<VaultId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NewAgentRequest {
     pub slug: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vaults: Vec<VaultId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -202,10 +221,14 @@ pub struct ThreadRecord {
     pub slug: String,
     pub name: String,
     pub latest_event_id: Option<EventId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vaults: Vec<VaultId>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NewThreadRequest {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vaults: Vec<VaultId>,
     pub slug: Option<String>,
     pub name: Option<String>,
 }
@@ -1084,8 +1107,15 @@ pub enum BindingType {
     Sandbox,
 }
 
+// Vault encryption authenticates the serialized metadata. Preserve the bytes for
+// existing records when changing fields, field order, or serde attributes, or
+// migrate their ciphertext; otherwise saved secrets become undecryptable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SecretMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<SecretTarget>,
+    #[serde(default = "initial_secret_revision")]
+    pub revision: u64,
     pub id: SecretId,
     pub r#type: SecretType,
     pub name: String,
@@ -1094,6 +1124,8 @@ pub struct SecretMetadata {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PutSecretRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<SecretTarget>,
     pub name: String,
     pub secret: Secret,
 }
@@ -1106,23 +1138,23 @@ pub enum SecretType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Binding {
     Env {
         name: String,
         env_var: String,
-        secret_id: SecretId,
+        secret: SecretReference,
     },
     Mcp {
         name: String,
         server_url: String,
-        secret_id: Option<SecretId>,
+        secret: Option<SecretReference>,
     },
     Llm {
         name: String,
         model: String,
         base_url: Option<String>,
-        secret_id: Option<SecretId>,
+        secret: Option<SecretReference>,
     },
     /// How to reach a remote sandbox provider.
     Sandbox {
@@ -1133,7 +1165,7 @@ pub enum Binding {
 
 /// Per-provider sandbox config for a `Binding::Sandbox`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "provider", rename_all = "lowercase")]
+#[serde(tag = "provider", rename_all = "lowercase", deny_unknown_fields)]
 pub enum SandboxProviderConfig {
     Docker {
         #[serde(default = "crate::sandbox_provider::default_docker_image")]
@@ -1157,8 +1189,8 @@ pub enum SandboxProviderConfig {
         default_image: String,
     },
     Daytona {
-        /// Secret-store id of the API key.
-        api_key_secret_id: SecretId,
+        /// Vault secret reference for the API key.
+        api_key_secret: SecretReference,
         /// Daytona `target` region (e.g. `us` / `eu`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         region: Option<String>,
@@ -1170,8 +1202,8 @@ pub enum SandboxProviderConfig {
         default_image: String,
     },
     Vercel {
-        /// Secret-store id of the Vercel API/access token.
-        api_token_secret_id: SecretId,
+        /// Vault secret reference for the Vercel API/access token.
+        api_token_secret: SecretReference,
         team_id: String,
         project_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1180,14 +1212,14 @@ pub enum SandboxProviderConfig {
         default_image: String,
     },
     E2b {
-        api_key_secret_id: SecretId,
+        api_key_secret: SecretReference,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         api_url: Option<String>,
         #[serde(default = "default_e2b_template")]
         default_image: String,
     },
     Sprites {
-        token_secret_id: SecretId,
+        token_secret: SecretReference,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         api_url: Option<String>,
         /// Sprite HTTP URL auth mode: `sprite` (default) or `public`.
@@ -1263,6 +1295,10 @@ pub enum Secret {
     Oauth {
         access_token: String,
         refresh_token: Option<String>,
+        #[serde(default)]
+        expires_at: Option<u64>,
+        #[serde(default)]
+        refresh: Option<crate::vault::OAuthRefresh>,
     },
 }
 
@@ -1294,6 +1330,10 @@ crate::impl_has_uuid7_id!(TurnRecord, id);
 crate::impl_has_uuid7_id!(Event, id);
 crate::impl_has_uuid7_id!(BindingRecord, id);
 crate::impl_has_uuid7_id!(SecretMetadata, id);
+
+fn initial_secret_revision() -> u64 {
+    1
+}
 
 #[cfg(test)]
 mod tests {

@@ -212,22 +212,30 @@ impl StreamableHttpClient for CredentialClient {
     }
 }
 
-pub(super) fn authentication_context(error: impl Into<anyhow::Error>) -> anyhow::Error {
-    let error = error.into();
+fn client_error(error: &anyhow::Error) -> Option<&ClientError> {
     let transport = match error.downcast_ref::<rmcp::service::ClientInitializeError>() {
-        Some(rmcp::service::ClientInitializeError::TransportError { error, .. }) => Some(error),
+        Some(rmcp::service::ClientInitializeError::TransportError { error, .. }) => error,
         _ => match error.downcast_ref::<rmcp::service::ServiceError>() {
-            Some(rmcp::service::ServiceError::TransportSend(error)) => Some(error),
-            _ => None,
+            Some(rmcp::service::ServiceError::TransportSend(error)) => error,
+            _ => return None,
         },
     };
-    let authentication = transport.and_then(|transport| {
-        let TransportError::Client(client) = transport.error.downcast_ref::<TransportError>()?
-        else {
-            return None;
-        };
-        client.authentication.clone()
-    });
+    match transport.error.downcast_ref::<TransportError>()? {
+        TransportError::Client(client) => Some(client),
+        _ => None,
+    }
+}
+
+pub(super) fn auth_challenge(error: &anyhow::Error) -> Option<&str> {
+    client_error(error)?
+        .error
+        .downcast_ref::<HttpError>()?
+        .auth_challenge()
+}
+
+pub(super) fn authentication_context(error: impl Into<anyhow::Error>) -> anyhow::Error {
+    let error = error.into();
+    let authentication = client_error(&error).and_then(|client| client.authentication.clone());
     match authentication {
         Some(authentication) => error.context(authentication),
         None => error,

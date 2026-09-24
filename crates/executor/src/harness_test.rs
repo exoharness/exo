@@ -106,12 +106,14 @@ impl Fixture {
             BasicExoHarness::new(crate::test_support::local_test_config(temp.path())).await?;
         let agent = storage
             .new_agent(NewAgentRequest {
+                vaults: vec![],
                 slug: "test".to_string(),
                 name: "Test".to_string(),
             })
             .await?;
         let thread = agent
             .new_thread(NewThreadRequest {
+                vaults: vec![],
                 slug: Some("test".to_string()),
                 name: Some("Test".to_string()),
             })

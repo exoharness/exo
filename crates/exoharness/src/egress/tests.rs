@@ -68,7 +68,7 @@ impl EgressCredentialResolver for TestResolver {
         self.uses.write().await.push((
             identity.sandbox_id.clone(),
             match &identity.scope {
-                Some(crate::SandboxScope::Thread { thread_id, .. }) => thread_id.clone(),
+                crate::ResourceScope::Thread { thread_id, .. } => thread_id.to_string(),
                 _ => bail!("expected thread identity"),
             },
             destination.host.clone(),
@@ -140,6 +140,16 @@ impl Upstream {
                         connections.spawn(async move {
                             let stream = tls.accept(stream).await?;
                             let service = service_fn(|request: Request<Incoming>| async move {
+                                if matches!(request.uri().path(), "/refresh" | "/reject" | "/forbidden") {
+                                    let path = request.uri().path().to_owned();
+                                    let valid = request.headers().get("authorization").and_then(|h| h.to_str().ok()) == Some("Bearer canary-v2");
+                                    let session = request.headers().get("mcp-session-id").cloned();
+                                    let body = request.into_body().collect().await.unwrap().to_bytes();
+                                    let mut response = Response::new(Full::new(body).boxed());
+                                    *response.status_mut() = if path == "/forbidden" { StatusCode::FORBIDDEN } else if path == "/reject" || !valid { StatusCode::UNAUTHORIZED } else { StatusCode::OK };
+                                    if let Some(session) = session { response.headers_mut().insert("mcp-session-id", session); }
+                                    return Ok::<_, Infallible>(response);
+                                }
                                 let authorization = request.headers().get("authorization")
                                     .or_else(|| request.headers().get("x-api-key"))
                                     .and_then(|h| h.to_str().ok());
@@ -263,11 +273,11 @@ impl ThreadResolver {
         &self,
         identity: &EgressIdentity,
     ) -> Result<&[(EgressCredentialBinding, String)]> {
-        let Some(crate::SandboxScope::Thread { thread_id, .. }) = &identity.scope else {
+        let crate::ResourceScope::Thread { thread_id, .. } = &identity.scope else {
             bail!("thread scope is required");
         };
         self.credentials
-            .get(thread_id)
+            .get(&thread_id.to_string())
             .map(Vec::as_slice)
             .context("thread is not authorized")
     }
@@ -300,14 +310,14 @@ async fn threads_select_different_bindings_and_resolve_the_same_name_independent
     let resolver = Arc::new(ThreadResolver {
         credentials: HashMap::from([
             (
-                "thread-one".into(),
+                thread_id("one").to_string(),
                 vec![(binding.clone(), "canary-v1".into())],
             ),
             (
-                "thread-two".into(),
+                thread_id("two").to_string(),
                 vec![(binding, "canary-v2".into()), (extra, "canary-v1".into())],
             ),
-            ("thread-empty".into(), vec![]),
+            (thread_id("empty").to_string(), vec![]),
         ]),
     });
     let upstream = Upstream::start().await?;
@@ -379,13 +389,19 @@ async fn threads_select_different_bindings_and_resolve_the_same_name_independent
     Ok(())
 }
 
+fn thread_id(name: &str) -> crate::Uuid7 {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(name);
+    crate::Uuid7(uuid::Uuid::from_bytes(digest[..16].try_into().unwrap()))
+}
+
 fn identity(sandbox_id: &str) -> EgressIdentity {
     EgressIdentity {
         sandbox_id: sandbox_id.into(),
-        scope: Some(crate::SandboxScope::Thread {
-            agent_id: "agent-1".into(),
-            thread_id: format!("thread-{sandbox_id}"),
-        }),
+        scope: crate::ResourceScope::Thread {
+            agent_id: thread_id("agent"),
+            thread_id: thread_id(sandbox_id),
+        },
     }
 }
 
@@ -649,7 +665,7 @@ async fn proxy_resolves_current_credentials_for_each_request() -> Result<()> {
             .await
             .iter()
             .all(|(sandbox, thread, host)| sandbox == "one"
-                && thread == "thread-one"
+                && thread == &thread_id("one").to_string()
                 && host == "api.test")
     );
     proxy.shutdown().await?;
@@ -997,7 +1013,7 @@ async fn firecracker_transparent_egress_live() -> Result<()> {
         .await?;
     let request = |id: &str| SandboxRequest {
         sandbox_id: id.into(),
-        scope: None,
+        scope: crate::ResourceScope::Global,
         provider_state: None,
         spec: SandboxSpec {
             image: crate::default_firecracker_image(),
@@ -1101,8 +1117,8 @@ print('PASS transparent Python and curl HTTPS, anonymous host, wrong host/SNI, D
 #[ignore = "requires Firecracker artifacts; macOS also requires EXO_EGRESS_BRIDGE_BINARY in Lima"]
 async fn managed_firecracker_egress_live() -> Result<()> {
     use crate::{
-        ManagedSandboxBackend, SandboxCommand, SandboxLifecycleConfig, SandboxRequest,
-        SandboxResourceShape, SandboxScope, SandboxSpec,
+        ManagedSandboxBackend, ResourceScope, SandboxCommand, SandboxLifecycleConfig,
+        SandboxRequest, SandboxResourceShape, SandboxSpec,
     };
     use tokio_util::compat::FuturesAsyncReadCompatExt;
     let mut config = crate::FirecrackerConfig::default();
@@ -1141,10 +1157,10 @@ async fn managed_firecracker_egress_live() -> Result<()> {
     let backend = make_backend();
     let request = SandboxRequest {
         sandbox_id: "managed-egress-live".into(),
-        scope: Some(SandboxScope::Thread {
-            agent_id: "agent-1".into(),
-            thread_id: "managed-live".into(),
-        }),
+        scope: ResourceScope::Thread {
+            agent_id: crate::Uuid7::now(),
+            thread_id: crate::Uuid7::now(),
+        },
         provider_state: None,
         spec: SandboxSpec {
             image: crate::default_firecracker_image(),
@@ -1458,6 +1474,66 @@ async fn quiet_response_stream_survives_past_the_request_io_timeout() -> Result<
     assert_eq!(response.chunk().await?.unwrap(), "last\n");
     assert!(response.chunk().await?.is_none());
     proxy.shutdown().await
+}
+
+struct RefreshResolver {
+    value: std::sync::Mutex<String>,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl EgressCredentialResolver for RefreshResolver {
+    async fn resolve(&self, _: &EgressIdentity, _: &str, _: &EgressDestination) -> Result<String> {
+        Ok(self.value.lock().unwrap().clone())
+    }
+    async fn refresh(
+        &self,
+        _: &EgressIdentity,
+        _: &str,
+        _: &EgressDestination,
+        rejected: &str,
+    ) -> Result<Option<String>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let mut value = self.value.lock().unwrap();
+        if *value == rejected {
+            *value = "canary-v2".into();
+        }
+        Ok((value.as_str() != rejected).then(|| value.clone()))
+    }
+}
+
+#[tokio::test]
+async fn oauth_retries_once_with_the_original_mcp_body_and_session() -> Result<()> {
+    let upstream = Upstream::start().await?;
+    for (path, status, refreshes) in [
+        ("refresh", StatusCode::OK, 1),
+        ("reject", StatusCode::UNAUTHORIZED, 1),
+        ("forbidden", StatusCode::FORBIDDEN, 0),
+    ] {
+        let resolver = Arc::new(RefreshResolver {
+            value: std::sync::Mutex::new("canary-v1".into()),
+            calls: AtomicUsize::new(0),
+        });
+        let proxy = upstream.proxy(host_ip()?, path, resolver.clone()).await?;
+        proxy.bind_source(host_ip()?).await?;
+        let body = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"fetch"}}"#;
+        let response = client(&proxy)?
+            .post(format!("https://api.test/{path}"))
+            .header(
+                "authorization",
+                format!("Bearer {}", proxy.environment()["TEST_API_KEY"]),
+            )
+            .header("mcp-session-id", "native-session")
+            .body(body)
+            .send()
+            .await?;
+        assert_eq!(response.status(), status);
+        assert_eq!(response.headers()["mcp-session-id"], "native-session");
+        assert_eq!(response.text().await?, body);
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), refreshes);
+        proxy.shutdown().await?;
+    }
+    Ok(())
 }
 
 #[tokio::test]

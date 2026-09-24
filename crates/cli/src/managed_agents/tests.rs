@@ -47,22 +47,13 @@ impl ModelClient for RecordingModel {
 }
 
 async fn harness(root: &Path, model: Arc<RecordingModel>) -> Result<Arc<dyn Harness>> {
-    let storage = Arc::new(
-        BasicExoHarness::new(BasicExoHarnessConfig {
-            root: root.to_path_buf(),
-            secret_backend: SecretBackendChoice::Static([7; 32]),
-            sandbox_default: SandboxProvider::LocalProcess,
-            sandbox_policy: None,
-            sandbox_backends: vec![SandboxBackendRegistration::local_process()],
-        })
-        .await?,
-    );
+    let storage = Arc::new(BasicExoHarness::new(config(root)).await?);
     storage
         .put_binding(Binding::Llm {
             name: "gpt-5.4".to_string(),
             model: "gpt-5.4".to_string(),
             base_url: None,
-            secret_id: None,
+            secret: None,
         })
         .await?;
     Ok(Arc::new(BasicHarness::new(
@@ -72,13 +63,23 @@ async fn harness(root: &Path, model: Arc<RecordingModel>) -> Result<Arc<dyn Harn
     )))
 }
 
+fn config(root: &Path) -> BasicExoHarnessConfig {
+    BasicExoHarnessConfig {
+        root: root.to_path_buf(),
+        secret_backend: SecretBackendChoice::Static([7; 32]),
+        sandbox_default: SandboxProvider::LocalProcess,
+        sandbox_policy: None,
+        sandbox_backends: vec![SandboxBackendRegistration::local_process()],
+    }
+}
+
 fn thread_args(agent: &str) -> ThreadArgs {
     ThreadArgs {
         agent_file: None,
         agent: Some(agent.to_string()),
         thread: None,
         model: None,
-        mcp_token_env: Vec::new(),
+        vault: vec![],
         provider: Some(SandboxProviderArg::LocalProcess),
         sandbox_image: None,
         mounts: Vec::new(),
@@ -139,7 +140,8 @@ async fn saved_definition_and_turn_history_survive_reopening_without_source() ->
         None,
         None,
         &thread_args("support"),
-        &McpToolSet::default(),
+        &PreparedMcp::default(),
+        &config(&temp.path().join("state")),
     )
     .await?;
     let thread_slug = thread.record().slug.clone();
@@ -160,8 +162,15 @@ async fn saved_definition_and_turn_history_survive_reopening_without_source() ->
     let runtime = harness(&storage_root, Arc::clone(&model)).await?;
     let mut args = thread_args("support");
     args.thread = Some(thread_slug);
-    let (agent, thread) =
-        open_thread(runtime.as_ref(), None, None, &args, &McpToolSet::default()).await?;
+    let (agent, thread) = open_thread(
+        runtime.as_ref(),
+        None,
+        None,
+        &args,
+        &PreparedMcp::default(),
+        &config(&temp.path().join("state")),
+    )
+    .await?;
     assert_eq!(agent.list_conversations().await?.len(), 1);
     thread
         .send(SendRequest {
@@ -208,7 +217,8 @@ async fn file_runs_use_isolated_memory_and_mounts_stay_on_threads() -> Result<()
         Some(&definition),
         None,
         &args,
-        &McpToolSet::default(),
+        &PreparedMcp::default(),
+        &config(&temp.path().join("state")),
     )
     .await?;
     let (second, _) = open_thread(
@@ -216,7 +226,8 @@ async fn file_runs_use_isolated_memory_and_mounts_stay_on_threads() -> Result<()
         Some(&definition),
         None,
         &args,
-        &McpToolSet::default(),
+        &PreparedMcp::default(),
+        &config(&temp.path().join("state")),
     )
     .await?;
     assert_ne!(first.record().id, second.record().id);
@@ -237,7 +248,8 @@ async fn file_runs_use_isolated_memory_and_mounts_stay_on_threads() -> Result<()
             None,
             None,
             &resume,
-            &McpToolSet::default()
+            &PreparedMcp::default(),
+            &config(&temp.path().join("state"))
         )
         .await
         .is_err()
@@ -264,7 +276,8 @@ async fn unregistered_file_model_uses_registered_default_but_explicit_model_is_s
         Some(&definition),
         None,
         &args,
-        &McpToolSet::default(),
+        &PreparedMcp::default(),
+        &config(&temp.path().join("state")),
     )
     .await?;
     assert_eq!(agent.config().await?.model, "gpt-5.4");
@@ -276,7 +289,8 @@ async fn unregistered_file_model_uses_registered_default_but_explicit_model_is_s
         Some(&definition),
         None,
         &args,
-        &McpToolSet::default(),
+        &PreparedMcp::default(),
+        &config(&temp.path().join("state")),
     )
     .await?;
     assert!(explicit_thread.model_override().await?.is_none());
@@ -287,12 +301,163 @@ async fn unregistered_file_model_uses_registered_default_but_explicit_model_is_s
             Some(&definition),
             None,
             &args,
-            &McpToolSet::default()
+            &PreparedMcp::default(),
+            &config(&temp.path().join("state"))
         )
         .await
         .is_err()
     );
     assert_eq!(runtime.list_agents().await?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn vault_selection_survives_resume_and_rejects_unsafe_config_changes() -> Result<()> {
+    let temp = TempDir::new()?;
+    let runtime = harness(
+        &temp.path().join("state"),
+        Arc::new(RecordingModel::default()),
+    )
+    .await?;
+    let definition = AgentDefinition::parse(SOURCE.to_owned())?;
+    create_agent(
+        runtime.as_ref(),
+        &definition,
+        "support",
+        Some(&HarnessSelection::Kind(crate::HarnessKind::Basic)),
+        None,
+    )
+    .await?;
+    let mut global_args = thread_args("support");
+    global_args.provider = Some(SandboxProviderArg::Docker);
+    global_args.mounts.push(
+        crate::parse_sandbox_mount(&format!("{}:/workspace", temp.path().display())).unwrap(),
+    );
+    let error = open_thread(
+        runtime.as_ref(),
+        None,
+        None,
+        &global_args,
+        &PreparedMcp::default(),
+        &config(&temp.path().join("state")),
+    )
+    .await
+    .err()
+    .context("expected protected mount rejection")?;
+    assert!(error.to_string().contains("exposes vault storage"));
+    assert!(
+        crate::must_get_agent(runtime.as_ref(), "support")
+            .await?
+            .list_conversations()
+            .await?
+            .is_empty()
+    );
+    let store = runtime.exoharness_handle();
+    let vault = store.create_vault("alice").await?;
+    store.create_vault("bob").await?;
+    let mut args = thread_args("support");
+    args.vault = vec!["alice".into()];
+    args.provider = Some(SandboxProviderArg::Docker);
+    let mut command = Commands::Chat {
+        thread: args,
+        tui: false,
+    };
+    let prepared = connect_mcp(runtime.exoharness_handle().as_ref(), None, &mut command).await?;
+    let Commands::Chat { thread: args, .. } = command else {
+        unreachable!()
+    };
+    let (_, thread) = open_thread(
+        runtime.as_ref(),
+        None,
+        None,
+        &args,
+        &prepared,
+        &config(&temp.path().join("state")),
+    )
+    .await?;
+    assert_eq!(
+        managed::vaults::load_selection(thread.exoharness_handle().as_ref())
+            .await?
+            .unwrap()
+            .vaults
+            .last()
+            .unwrap()
+            .id,
+        vault.record().id
+    );
+    let mut args = thread_args("support");
+    args.thread = Some(thread.record().id.to_string());
+    args.provider = None;
+    let mut command = Commands::Chat {
+        thread: args,
+        tui: false,
+    };
+    let prepared = connect_mcp(runtime.exoharness_handle().as_ref(), None, &mut command).await?;
+    assert_eq!(
+        prepared
+            .selection
+            .as_ref()
+            .unwrap()
+            .vaults
+            .last()
+            .unwrap()
+            .id,
+        vault.record().id
+    );
+    let Commands::Chat {
+        thread: mut args, ..
+    } = command
+    else {
+        unreachable!()
+    };
+    args.provider = Some(SandboxProviderArg::LocalProcess);
+    assert!(
+        open_thread(
+            runtime.as_ref(),
+            None,
+            None,
+            &args,
+            &prepared,
+            &config(&temp.path().join("state"))
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        thread.config().await?.sandbox_provider,
+        Some(SandboxProvider::Docker)
+    );
+    args.provider = None;
+    args.mounts = vec![FileSystemMount {
+        host_path: temp.path().to_string_lossy().into_owned(),
+        mount_path: "/workspace/host".into(),
+        mode: executor::FileSystemMountMode::ReadOnly,
+        internal: None,
+    }];
+    assert!(
+        open_thread(
+            runtime.as_ref(),
+            None,
+            None,
+            &args,
+            &prepared,
+            &config(&temp.path().join("state"))
+        )
+        .await
+        .is_err()
+    );
+    assert!(thread.config().await?.mounts.is_empty());
+    args.mounts.clear();
+    args.vault = vec!["bob".into()];
+    let mut command = Commands::Chat {
+        thread: args,
+        tui: false,
+    };
+    assert!(
+        connect_mcp(runtime.exoharness_handle().as_ref(), None, &mut command,)
+            .await
+            .is_err()
+    );
     Ok(())
 }
 

@@ -280,16 +280,19 @@ async function resolveBraveKey(context: TurnContext): Promise<string | null> {
 async function lookUpBraveKey(context: TurnContext): Promise<string | null> {
   try {
     // getSecret takes the secret's UUID, so resolve the name via listSecrets.
-    const secrets = await context.exoharness.listSecrets();
-    const match = secrets.find((secret) => secret.name === BRAVE_SECRET_ID);
-    if (match !== undefined) {
-      const secret = await context.exoharness.getSecret(match.id);
-      if (
-        secret !== null &&
-        secret.type === "key" &&
-        secret.value.trim() !== ""
-      ) {
-        return secret.value.trim();
+    const vaults = await context.exoharness.current.conversation.listVaults();
+    for (const vault of vaults.reverse()) {
+      const secrets = await vault.listSecrets();
+      const match = secrets.find((secret) => secret.name === BRAVE_SECRET_ID);
+      if (match !== undefined) {
+        const secret = await vault?.getSecret(match.id);
+        if (
+          secret != null &&
+          secret.type === "key" &&
+          secret.value.trim() !== ""
+        ) {
+          return secret.value.trim();
+        }
       }
     }
   } catch {

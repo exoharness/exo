@@ -51,6 +51,7 @@ async fn daytona_snapshot_and_rewind_round_trip() {
 
     let agent = harness
         .new_agent(NewAgentRequest {
+            vaults: vec![],
             slug: "daysnap".into(),
             name: "daysnap".into(),
         })
@@ -58,6 +59,7 @@ async fn daytona_snapshot_and_rewind_round_trip() {
         .expect("agent");
     let conv = agent
         .new_conversation(NewConversationRequest {
+            vaults: vec![],
             slug: Some("daysnap-conv".into()),
             name: Some("daysnap".into()),
         })
@@ -134,8 +136,11 @@ async fn daytona_snapshot_and_rewind_round_trip() {
 }
 
 async fn seed_secret(harness: &BasicExoHarness, name: &str, value: &str) {
-    harness
+    exoharness::vault::global_vault(harness)
+        .await
+        .expect("runtime vault")
         .put_secret(PutSecretRequest {
+            target: None,
             name: name.into(),
             secret: Secret::Key {
                 value: value.into(),

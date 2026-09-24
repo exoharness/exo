@@ -66,6 +66,7 @@ async fn teleport_docker_sandbox_to_daytona_keeps_files() {
 
     let agent = harness
         .new_agent(NewAgentRequest {
+            vaults: vec![],
             slug: "teleport".into(),
             name: "teleport".into(),
         })
@@ -73,6 +74,7 @@ async fn teleport_docker_sandbox_to_daytona_keeps_files() {
         .expect("agent");
     let conv = agent
         .new_conversation(NewConversationRequest {
+            vaults: vec![],
             slug: Some("teleport-conv".into()),
             name: Some("teleport".into()),
         })
@@ -192,8 +194,11 @@ async fn teleport_docker_sandbox_to_daytona_keeps_files() {
 }
 
 async fn seed_secret(harness: &BasicExoHarness, name: &str, value: &str) {
-    harness
+    exoharness::vault::global_vault(harness)
+        .await
+        .expect("runtime vault")
         .put_secret(PutSecretRequest {
+            target: None,
             name: name.into(),
             secret: Secret::Key {
                 value: value.into(),

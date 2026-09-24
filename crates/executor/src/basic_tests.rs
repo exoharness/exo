@@ -1,3 +1,6 @@
+use exoharness::vault::{
+    ResolvedSecret, SecretTarget, VaultContext, VaultHandle, VaultId, VaultRecord,
+};
 use std::collections::VecDeque;
 use std::ops::Bound;
 use std::sync::{Arc, Mutex};
@@ -630,12 +633,14 @@ impl FakeExoHarness {
         Self {
             state: Arc::new(Mutex::new(FakeState {
                 agent: AgentRecord {
+                    vaults: vec![],
                     id: agent_id,
                     slug: "agent".to_string(),
                     name: "Agent".to_string(),
                 },
                 conversation: FakeConversationState {
                     record: ConversationRecord {
+                        vaults: vec![],
                         id: conversation_id,
                         slug: "conversation".to_string(),
                         name: "Conversation".to_string(),
@@ -689,18 +694,11 @@ impl ExoHarness for FakeExoHarness {
         Ok(Some(test_model_binding()))
     }
 
-    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
-        Ok(vec![test_secret_metadata()])
-    }
-
-    async fn put_secret(&self, _secret: PutSecretRequest) -> Result<exoharness::SecretId> {
+    async fn create_vault(&self, _name: &str) -> Result<Arc<dyn VaultHandle>> {
         Err(anyhow!("not implemented"))
     }
-
-    async fn get_secret(&self, _id: &exoharness::SecretId) -> Result<Option<Secret>> {
-        Ok(Some(Secret::Key {
-            value: "test-key".to_string(),
-        }))
+    async fn delete_vault(&self, _id: &VaultId) -> Result<()> {
+        Err(anyhow!("not implemented"))
     }
 }
 
@@ -764,20 +762,6 @@ impl AgentHandle for FakeAgentHandle {
 
     async fn get_binding(&self, _id: &exoharness::BindingId) -> Result<Option<Binding>> {
         Ok(Some(test_model_binding()))
-    }
-
-    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
-        Ok(vec![test_secret_metadata()])
-    }
-
-    async fn put_secret(&self, _secret: PutSecretRequest) -> Result<exoharness::SecretId> {
-        Err(anyhow!("not implemented"))
-    }
-
-    async fn get_secret(&self, _id: &exoharness::SecretId) -> Result<Option<Secret>> {
-        Ok(Some(Secret::Key {
-            value: "test-key".to_string(),
-        }))
     }
 
     async fn write_artifact(&self, _request: WriteArtifactRequest) -> Result<ArtifactVersion> {
@@ -1073,20 +1057,6 @@ impl ConversationHandle for FakeConversationHandle {
     async fn get_binding(&self, _id: &exoharness::BindingId) -> Result<Option<Binding>> {
         Ok(Some(test_model_binding()))
     }
-
-    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
-        Ok(vec![test_secret_metadata()])
-    }
-
-    async fn put_secret(&self, _secret: PutSecretRequest) -> Result<exoharness::SecretId> {
-        Err(anyhow!("not implemented"))
-    }
-
-    async fn get_secret(&self, _id: &exoharness::SecretId) -> Result<Option<Secret>> {
-        Ok(Some(Secret::Key {
-            value: "test-key".to_string(),
-        }))
-    }
 }
 
 #[async_trait]
@@ -1318,13 +1288,18 @@ fn test_model_binding() -> Binding {
         name: "test-model".to_string(),
         model: "test-model".to_string(),
         base_url: None,
-        secret_id: Some(Uuid7::now()),
+        secret: Some(exoharness::vault::SecretReference {
+            vault_id: Uuid7::now(),
+            secret_id: Uuid7::now(),
+        }),
     }
 }
 
 fn test_secret_metadata() -> SecretMetadata {
     let id = Uuid7::now();
     SecretMetadata {
+        target: None,
+        revision: 1,
         id,
         r#type: SecretType::Key,
         name: "test-secret".to_string(),
@@ -1349,5 +1324,83 @@ fn default_agent_config() -> AgentConfig {
         max_output_tokens: None,
         max_tool_round_trips: Some(4),
         braintrust: None,
+    }
+}
+
+struct FakeVault {
+    record: VaultRecord,
+}
+fn fake_vault() -> Arc<dyn VaultHandle> {
+    let metadata = test_secret_metadata();
+    Arc::new(FakeVault {
+        record: VaultRecord {
+            id: metadata.id,
+            name: "runtime".into(),
+            created_at: metadata.created_at,
+        },
+    })
+}
+#[async_trait]
+impl VaultHandle for FakeVault {
+    fn record(&self) -> &VaultRecord {
+        &self.record
+    }
+    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
+        Ok(vec![test_secret_metadata()])
+    }
+    async fn put_secret(&self, _request: PutSecretRequest) -> Result<exoharness::SecretId> {
+        Err(anyhow!("not implemented"))
+    }
+    async fn get_secret(&self, _id: &exoharness::SecretId) -> Result<Option<Secret>> {
+        Ok(Some(Secret::Key {
+            value: "test-key".into(),
+        }))
+    }
+    async fn update_secret(
+        &self,
+        _id: &exoharness::SecretId,
+        _secret: Secret,
+    ) -> Result<SecretMetadata> {
+        Err(anyhow!("not implemented"))
+    }
+    async fn delete_secret(&self, _id: &exoharness::SecretId) -> Result<()> {
+        Err(anyhow!("not implemented"))
+    }
+    async fn resolve_secret(
+        &self,
+        _id: &exoharness::SecretId,
+        _target: &SecretTarget,
+    ) -> Result<ResolvedSecret> {
+        Err(anyhow!("not implemented"))
+    }
+}
+
+#[async_trait]
+impl VaultContext for FakeExoHarness {
+    async fn list_vaults(&self) -> Result<Vec<Arc<dyn VaultHandle>>> {
+        Ok(vec![fake_vault()])
+    }
+    async fn get_vault(&self, _id: &VaultId) -> Result<Option<Arc<dyn VaultHandle>>> {
+        Ok(Some(fake_vault()))
+    }
+}
+
+#[async_trait]
+impl VaultContext for FakeAgentHandle {
+    async fn list_vaults(&self) -> Result<Vec<Arc<dyn VaultHandle>>> {
+        Ok(vec![fake_vault()])
+    }
+    async fn get_vault(&self, _id: &VaultId) -> Result<Option<Arc<dyn VaultHandle>>> {
+        Ok(Some(fake_vault()))
+    }
+}
+
+#[async_trait]
+impl VaultContext for FakeConversationHandle {
+    async fn list_vaults(&self) -> Result<Vec<Arc<dyn VaultHandle>>> {
+        Ok(vec![fake_vault()])
+    }
+    async fn get_vault(&self, _id: &VaultId) -> Result<Option<Arc<dyn VaultHandle>>> {
+        Ok(Some(fake_vault()))
     }
 }

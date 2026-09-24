@@ -39,7 +39,8 @@ as `egress.json` (the flag also accepts `.yaml`, `.yml`, and `.toml`):
 ```
 
 ```bash
-exo secret create notion --env NOTION_API_KEY
+exo vault secret create global notion \
+  --http-origin https://api.notion.com --token-env NOTION_API_KEY
 exo --egress-policy egress.json sandbox play \
   --provider firecracker --networking enabled --idle-seconds 300
 ```
@@ -56,12 +57,25 @@ The client supplies `Bearer ` or other surrounding syntax. The proxy replaces
 only the placeholder. `Authorization`, `x-api-key`, and other ordinary headers
 work; routing and framing headers cannot contain placeholders.
 
-The CLI interprets binding names as names or IDs in the local encrypted secret
-store. Names resolve in the nearest scope: thread, then agent, then global. IDs
-must belong to one of those scopes. Missing, ambiguous, or non-key secrets fail
-the request. The same flag works with `exo chat` and a managed Firecracker
-sandbox. Tell the agent which variables it can use; the runtime currently
-injects the environment without adding a credential inventory to its prompt.
+The CLI selects binding names or IDs from the sandbox's accessible vaults:
+thread attachments, then agent attachments, then the global vault. Named vaults
+must be attached before their secrets can be selected. The selected vault and
+secret IDs are saved with the sandbox. Rotation takes effect on the next request;
+removing a secret or vault fails the request, even if another vault has a secret
+with the same name. Recreating a secret requires a new sandbox selection.
+
+HTTP credentials authorize one exact HTTPS origin, including its port. The
+`--http-origin` grant allows header substitution on requests to that origin;
+MCP credentials and keys without a destination do not grant HTTP access.
+Sandbox and credential host policies still apply. The same policy flag
+works with `exo chat` and a managed Firecracker sandbox. Tell the agent which
+variables it can use; the runtime currently injects the environment without
+adding a credential inventory to its prompt.
+
+For a managed agent, use `exo chat --agent-file agent.md --provider firecracker
+--vault alice --egress-policy egress.json` to attach a named vault to the thread.
+`--agent-file` keeps the agent, thread, and sandbox selection temporary while
+credential rotation still reads the live vault.
 
 ## Policy and credentials
 
@@ -90,13 +104,15 @@ async fn resolve(
 ```
 
 The caller selects bindings in `request.spec.policy.credentials`. Each use is
-resolved again, so rotation and revocation take effect without replacing the
-sandbox. Identity includes the sandbox ID and agent/thread scope; destination
-includes the host, port, method, and normalized path/query. A vault adapter can
-pin a binding to a vault/secret reference per thread and enforce its stored
-destination restrictions. The local CLI resolver assumes a single user owns the
-secret store; hosted resolvers must supply their own authorization. Resolver
-failures are sanitized before returning them to the guest.
+resolved again, so rotation and revocation take effect without replacing the sandbox. Identity
+includes the sandbox ID and `ResourceScope`; destination includes the host,
+port, method, and normalized path/query. The local resolver loads the saved
+vault/secret reference and checks the current scope before each use.
+`egress::vault::resolve_credential` resolves that reference through `VaultHandle`
+with an HTTP target. Hosted resolvers can use the same helper with their
+authenticated vault context. The local CLI assumes one user owns its vault
+catalog. Resolver failures are sanitized
+before returning them to the guest.
 
 ```rust
 let backend = firecracker_backend_with_credentials(config, lima, resolver).await?;

@@ -517,8 +517,8 @@ struct AgentCoreExecResponse {
 mod tests {
     use super::*;
     use crate::{
-        DurableFileSystem, FileSystemMountMode, SandboxLifecycleConfig, SandboxNetworkPolicy,
-        SandboxScope, SandboxSpec,
+        DurableFileSystem, FileSystemMountMode, ResourceScope, SandboxLifecycleConfig,
+        SandboxNetworkPolicy, SandboxSpec,
     };
 
     #[test]
@@ -561,10 +561,10 @@ mod tests {
     fn durable_request(mount_path: &str, mode: FileSystemMountMode) -> SandboxRequest {
         SandboxRequest {
             sandbox_id: "sandbox".to_string(),
-            scope: Some(SandboxScope::Thread {
-                agent_id: "agent-1".into(),
-                thread_id: "thread".to_string(),
-            }),
+            scope: ResourceScope::Thread {
+                agent_id: crate::Uuid7::now(),
+                thread_id: "00000000-0000-7000-8000-000000000001".parse().unwrap(),
+            },
             spec: SandboxSpec {
                 image: "agentcore".to_string(),
                 resources: Default::default(),

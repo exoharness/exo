@@ -22,20 +22,8 @@ use tokio::time;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use uuid::Uuid;
 
-use crate::{DurableFileSystem, SandboxAttachment, SandboxId};
+use crate::{DurableFileSystem, ResourceScope, SandboxAttachment, SandboxId};
 pub use crate::{EgressPolicy, SandboxNetworkPolicy};
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum SandboxScope {
-    Agent {
-        agent_id: String,
-    },
-    Thread {
-        agent_id: String,
-        #[serde(alias = "conversation_id")]
-        thread_id: String,
-    },
-}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxLifecycleConfig {
@@ -106,8 +94,8 @@ pub struct SandboxSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxRequest {
     pub sandbox_id: SandboxId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope: Option<SandboxScope>,
+    #[serde(default)]
+    pub scope: ResourceScope,
     pub spec: SandboxSpec,
     pub lifecycle: SandboxLifecycleConfig,
     pub provider_state: Option<Value>,
@@ -2432,22 +2420,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn thread_scope_uses_thread_id_and_reads_conversation_id() {
-        let scope = SandboxScope::Thread {
-            agent_id: "agent-1".into(),
-            thread_id: "thread-1".to_string(),
+    fn thread_resource_scope_round_trips() {
+        let scope = ResourceScope::Thread {
+            agent_id: crate::Uuid7::now(),
+            thread_id: crate::Uuid7::now(),
         };
         assert_eq!(
-            serde_json::to_value(&scope).unwrap(),
-            serde_json::json!({
-                "Thread": { "agent_id": "agent-1", "thread_id": "thread-1" }
-            })
-        );
-        assert_eq!(
-            serde_json::from_value::<SandboxScope>(serde_json::json!({
-                "Thread": { "agent_id": "agent-1", "conversation_id": "thread-1" }
-            }))
-            .unwrap(),
+            serde_json::from_slice::<ResourceScope>(&serde_json::to_vec(&scope).unwrap()).unwrap(),
             scope
         );
     }
@@ -2468,9 +2447,9 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(request.sandbox_id, "sandbox-1");
-        assert_eq!(request.scope, None);
+        assert_eq!(request.scope, ResourceScope::Global);
         let mut serialized = serde_json::to_value(&request).unwrap();
-        assert!(serialized.get("scope").is_none());
+        assert_eq!(serialized["scope"], serde_json::json!({"type": "global"}));
         serialized.as_object_mut().unwrap().remove("sandbox_id");
         assert!(serde_json::from_value::<SandboxRequest>(serialized).is_err());
     }
@@ -2587,10 +2566,10 @@ mod tests {
 
         let request = SandboxRequest {
             sandbox_id: "sandbox".to_string(),
-            scope: Some(SandboxScope::Thread {
-                agent_id: "agent-1".into(),
-                thread_id: "thread".to_string(),
-            }),
+            scope: ResourceScope::Thread {
+                agent_id: crate::Uuid7::now(),
+                thread_id: "00000000-0000-7000-8000-000000000001".parse().unwrap(),
+            },
             spec: SandboxSpec {
                 image: "docker.io/library/ubuntu:24.04".to_string(),
                 resources: Default::default(),
@@ -2668,10 +2647,10 @@ mod tests {
         };
         let request = SandboxRequest {
             sandbox_id: "sandbox".to_string(),
-            scope: Some(SandboxScope::Thread {
-                agent_id: "agent-1".into(),
-                thread_id: "thread".to_string(),
-            }),
+            scope: ResourceScope::Thread {
+                agent_id: crate::Uuid7::now(),
+                thread_id: "00000000-0000-7000-8000-000000000001".parse().unwrap(),
+            },
             spec: SandboxSpec {
                 image: "docker.io/library/ubuntu:24.04".to_string(),
                 resources: Default::default(),
@@ -2762,10 +2741,10 @@ esac
         };
         let request = SandboxRequest {
             sandbox_id: "sandbox".to_string(),
-            scope: Some(SandboxScope::Thread {
-                agent_id: "agent-1".into(),
-                thread_id: "thread".to_string(),
-            }),
+            scope: ResourceScope::Thread {
+                agent_id: crate::Uuid7::now(),
+                thread_id: "00000000-0000-7000-8000-000000000001".parse().unwrap(),
+            },
             spec: SandboxSpec {
                 image: "docker.io/library/ubuntu:24.04".to_string(),
                 resources: Default::default(),
@@ -2875,10 +2854,10 @@ esac
         };
         let request = SandboxRequest {
             sandbox_id: "sandbox".to_string(),
-            scope: Some(SandboxScope::Thread {
-                agent_id: "agent-1".into(),
-                thread_id: "thread".to_string(),
-            }),
+            scope: ResourceScope::Thread {
+                agent_id: crate::Uuid7::now(),
+                thread_id: "00000000-0000-7000-8000-000000000001".parse().unwrap(),
+            },
             spec: SandboxSpec {
                 image: "task-image".to_string(),
                 resources: Default::default(),

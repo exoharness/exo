@@ -212,7 +212,7 @@ impl<H: ManagedSandboxHandle + 'static> EgressRuntime<H> {
         let state = State::new(
             EgressIdentity {
                 sandbox_id: request.sandbox_id.clone(),
-                scope: request.scope.clone(),
+                scope: request.scope,
             },
             request.spec.policy.clone(),
             self.resolver.clone(),
@@ -374,7 +374,7 @@ mod tests {
     fn request(id: &str) -> SandboxRequest {
         SandboxRequest {
             sandbox_id: id.into(),
-            scope: None,
+            scope: crate::ResourceScope::Global,
             provider_state: None,
             spec: SandboxSpec {
                 image: "test".into(),
