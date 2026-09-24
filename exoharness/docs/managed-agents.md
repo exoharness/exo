@@ -20,6 +20,24 @@ write your report to a file.
 instructions. Unsupported fields are rejected so a typo or an unimplemented
 feature doesn't silently change how the agent runs.
 
+## Command names
+
+Resource commands use `create`, `list`, `get`, `update`, and `delete` where supported:
+
+| Resource                                     | Commands                                    |
+| -------------------------------------------- | ------------------------------------------- |
+| `agent`, `thread`, `provider`, `environment` | `create`, `list`, `get`, `update`, `delete` |
+| `vault`                                      | `create`, `list`, `get`, `delete`           |
+| `vault secret`                               | `create`, `list`, `get`, `update`, `delete` |
+| `sandbox`, `agent mount`, `thread mount`     | `create`, `list`, `delete`                  |
+| `model`, `secret`, `sandbox-provider`        | `create`, `list`                            |
+
+Use `exo thread list AGENT` to list saved chats and `exo chat --agent AGENT --thread THREAD`
+to resume one. `exo sandbox stop` retains a sandbox record; `exo sandbox delete` destroys
+it and deletes the record. `sandbox list` shows running sandboxes; add `--all` to include
+stopped ones. Runtime-specific scope belongs in the provider URL. Exo preserves its path
+and query parameters without interpreting them.
+
 ## Setup
 
 From this checkout:
@@ -199,6 +217,43 @@ Codex, Cursor, and Pi currently reject native `always_ask` policies that their E
 adapters cannot enforce. Codex supports policies on its runtime MCP tools; its
 native shell does not support approval policies in this adapter. Keep its agent
 default `always_allow` and apply MCP tool overrides.
+
+## Environments
+
+An environment is a saved sandbox definition. Select one by file or provider-local
+name; each new thread gets its own sandbox:
+
+```sh
+exo environment create pi-local --file exoharness/examples/environments/pi-local.yaml
+exo environment list
+exo environment get pi-local
+exo chat --agent-file exoharness/examples/managed-agents/support-analyst.md \
+  --environment pi-local
+```
+
+The example uses Apple container. Change `config.provider` to `docker` on Linux.
+Definitions forward the existing sandbox settings: `provider`, `image`,
+`resources`, `default_workdir`, `file_system_mounts`, `durable_file_systems`, `policy`,
+`enable_networking`, and `idle_seconds`. `policy.networking` takes precedence over
+`enable_networking`. Unsupported network policies are rejected by the backend.
+Omitting `resources` preserves the container backend's defaults; Firecracker uses
+its default VM size. Local-process execution has no container resource or filesystem isolation.
+
+Use `--environment-file path.yaml` without saving a definition. An HTTP provider
+receives the definition's contents and provisions it on its host. Mount paths in
+that spec must be absolute paths on the runtime host. The CLI's `--mount` option
+can add local mounts at thread creation; it is rejected for HTTP providers.
+The OSS HTTP bearer grants runtime-owner access, including saving environments,
+mounting host paths, and local-process execution. Give it only to trusted runtime
+operators.
+
+`exo environment update NAME --file path.yaml` changes the saved definition for
+new threads. Existing threads retain their resolved environment and sandbox.
+Resume with `--agent NAME --thread THREAD`; changing that thread's environment is
+rejected. `exo environment delete NAME` removes only the definition. Explicit
+host mounts can share data between sandboxes; ordinary sandbox files are private
+to their thread. Persistence after a backend terminates a sandbox still follows
+that backend's existing lifecycle and durable-file-system support.
 
 ## Vaults
 

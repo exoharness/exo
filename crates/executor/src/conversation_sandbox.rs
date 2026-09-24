@@ -23,7 +23,7 @@ pub(crate) struct ConversationSandboxInfo {
 impl ConversationSandboxInfo {
     pub(crate) fn matches_spec(&self, spec: &ConversationSandboxSpec) -> bool {
         self.provider == spec.provider
-            && self.image == spec.image
+            && (spec.image.is_empty() || self.image == spec.image)
             && self.default_workdir == spec.default_workdir
             && self.file_system_mounts == spec.file_system_mounts
             && self.durable_file_systems == spec.durable_file_systems
@@ -47,6 +47,7 @@ pub(crate) async fn ensure_conversation_sandbox(
     conversation: &dyn ConversationHandle,
     agent_config: &AgentConfig,
     config: &ConversationConfig,
+    healthcheck_program: Option<&str>,
 ) -> Result<String> {
     let sandbox_lock = conversation_sandbox_lock(&conversation.record().id.to_string());
     let _guard = sandbox_lock.lock().await;
@@ -62,6 +63,18 @@ pub(crate) async fn ensure_conversation_sandbox(
         match candidate {
             ConversationSandboxCandidate::Attached { id } => return Ok(id),
             ConversationSandboxCandidate::Created(sandbox) if sandbox.matches_spec(&spec) => {
+                if let Some(program) = healthcheck_program {
+                    let healthcheck = conversation
+                        .run_in_sandbox(exoharness::RunInSandboxRequest {
+                            id: sandbox.id.clone(),
+                            command: vec![program.to_owned(), "-lc".to_owned(), "true".to_owned()],
+                            env: Default::default(),
+                        })
+                        .await;
+                    if healthcheck.is_err() {
+                        continue;
+                    }
+                }
                 return Ok(sandbox.id);
             }
             ConversationSandboxCandidate::Created(_) => {}
@@ -176,14 +189,23 @@ pub(crate) async fn create_conversation_sandbox(
     let spec = conversation_sandbox_spec(agent_config, config);
     conversation
         .create_sandbox(CreateSandboxRequest {
-            name: None,
+            name: config
+                .environment
+                .as_ref()
+                .and_then(|env| env.config.name.clone()),
             provider: spec.provider,
             image: spec.image,
-            resources: Default::default(),
+            resources: config
+                .environment
+                .as_ref()
+                .and_then(|env| env.config.resources),
             default_workdir: Some(spec.default_workdir),
             file_system_mounts: Some(spec.file_system_mounts),
             durable_file_systems: Some(spec.durable_file_systems),
-            policy: None,
+            policy: config
+                .environment
+                .as_ref()
+                .and_then(|env| env.config.policy.clone()),
             enable_networking: Some(spec.enable_networking),
             idle_seconds: Some(spec.idle_seconds),
         })
@@ -231,27 +253,39 @@ pub(crate) fn conversation_sandbox_spec(
     agent_config: &AgentConfig,
     config: &ConversationConfig,
 ) -> ConversationSandboxSpec {
+    let environment = config.environment.as_ref().map(|env| &env.config);
     ConversationSandboxSpec {
         provider: config.effective_sandbox_provider(agent_config),
         image: config
             .effective_sandbox_image(agent_config)
             .map(str::to_string)
-            .unwrap_or_else(|| DEFAULT_SANDBOX_IMAGE.to_string()),
-        default_workdir: config
-            .mounts
-            .first()
-            .map(|mount| mount.mount_path.clone())
+            .unwrap_or_default(),
+        default_workdir: environment
+            .and_then(|env| env.default_workdir.clone())
             .or_else(|| {
                 config
-                    .durable_file_systems
+                    .mounts
                     .first()
-                    .map(|file_system| file_system.mount_path.clone())
+                    .map(|mount| mount.mount_path.clone())
+                    .or_else(|| {
+                        config
+                            .durable_file_systems
+                            .first()
+                            .map(|file_system| file_system.mount_path.clone())
+                    })
             })
             .unwrap_or_else(|| "/".to_string()),
         file_system_mounts: normalize_mounts(&config.mounts),
         durable_file_systems: config.durable_file_systems.clone(),
-        enable_networking: agent_config.sandbox.enable_networking,
-        idle_seconds: 300,
+        enable_networking: environment
+            .and_then(|env| {
+                env.policy
+                    .as_ref()
+                    .map(|policy| policy.networking_enabled())
+                    .or(env.enable_networking)
+            })
+            .unwrap_or(agent_config.sandbox.enable_networking),
+        idle_seconds: environment.and_then(|env| env.idle_seconds).unwrap_or(300),
     }
 }
 

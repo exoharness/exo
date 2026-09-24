@@ -386,6 +386,7 @@ async fn resolve_task_sandbox(
                 conversation.as_ref(),
                 agent_config,
                 conversation_config,
+                None,
             )
             .await?,
             conversation,

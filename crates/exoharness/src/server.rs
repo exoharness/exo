@@ -194,6 +194,16 @@ impl ExoHarnessServer {
             Request::DeleteAgent { agent_id } => Ok(Response::Bool {
                 value: self.root.delete_agent(&agent_id).await?,
             }),
+            Request::ListEnvironments => Ok(Response::Environments {
+                environments: self.root.list_environments().await?,
+            }),
+            Request::PutEnvironment { environment } => {
+                self.root.put_environment(environment).await?;
+                Ok(Response::Bool { value: true })
+            }
+            Request::DeleteEnvironment { name } => Ok(Response::Bool {
+                value: self.root.delete_environment(&name).await?,
+            }),
             Request::ListBindings => Ok(Response::Bindings {
                 bindings: self.root.list_bindings().await?,
             }),

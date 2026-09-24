@@ -63,6 +63,7 @@ async fn filesystem_snapshot_and_rewind_round_trip() {
         .expect("new_agent");
     let conversation = agent
         .new_conversation(NewConversationRequest {
+            environment: None,
             vaults: vec![],
             slug: Some("snap-test-conv".into()),
             name: Some("snap-test conversation".into()),

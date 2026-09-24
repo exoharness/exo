@@ -1017,7 +1017,7 @@ async fn firecracker_transparent_egress_live() -> Result<()> {
         provider_state: None,
         spec: SandboxSpec {
             image: crate::default_firecracker_image(),
-            resources: SandboxResourceShape::new(1, 512).unwrap(),
+            resources: SandboxResourceShape::new(1, 512),
             mounts: vec![],
             durable_file_systems: vec![],
             policy: policy(),
@@ -1164,7 +1164,7 @@ async fn managed_firecracker_egress_live() -> Result<()> {
         provider_state: None,
         spec: SandboxSpec {
             image: crate::default_firecracker_image(),
-            resources: SandboxResourceShape::new(1, 512).unwrap(),
+            resources: SandboxResourceShape::new(1, 512),
             mounts: vec![],
             durable_file_systems: vec![],
             policy: policy(),

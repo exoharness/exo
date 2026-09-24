@@ -1080,7 +1080,7 @@ async fn read_sandbox_file(
         }
         SandboxScope::Conversation => {
             let sandbox_id =
-                ensure_conversation_sandbox(conversation, agent_config, config).await?;
+                ensure_conversation_sandbox(conversation, agent_config, config, None).await?;
             read_sandbox_file_bytes(conversation, sandbox_id, sandbox_path).await
         }
     }
@@ -1404,6 +1404,7 @@ mod tests {
             .unwrap();
         let conversation = agent
             .new_conversation(NewConversationRequest {
+                environment: None,
                 vaults: vec![],
                 slug: Some("conversation".to_string()),
                 name: Some("Conversation".to_string()),
@@ -1684,6 +1685,7 @@ mod tests {
             .unwrap();
         let conversation = agent
             .new_conversation(NewConversationRequest {
+                environment: None,
                 vaults: vec![],
                 slug: Some("conversation".to_string()),
                 name: Some("Conversation".to_string()),
@@ -1788,6 +1790,7 @@ mod tests {
             .unwrap();
         let conversation = agent
             .new_conversation(NewConversationRequest {
+                environment: None,
                 vaults: vec![],
                 slug: Some("conversation".to_string()),
                 name: Some("Conversation".to_string()),
@@ -1839,6 +1842,7 @@ mod tests {
             .unwrap();
         let conversation = agent
             .new_conversation(NewConversationRequest {
+                environment: None,
                 vaults: vec![],
                 slug: Some("conversation".to_string()),
                 name: Some("Conversation".to_string()),

@@ -27,6 +27,7 @@ pub async fn supports_thread_api_and_conversation_compatibility(harness: Arc<dyn
         .expect("agent should be created");
     let thread: Arc<dyn ThreadHandle> = agent
         .new_thread(NewThreadRequest {
+            environment: None,
             vaults: vec![],
             slug: Some(unique_slug("thread")),
             name: Some("Thread".to_string()),
@@ -79,6 +80,7 @@ pub async fn supports_thread_api_and_conversation_compatibility(harness: Arc<dyn
 
     let conversation = agent
         .new_conversation(NewConversationRequest {
+            environment: None,
             vaults: vec![],
             slug: Some(unique_slug("conversation")),
             name: Some("Conversation".to_string()),
@@ -129,6 +131,7 @@ pub async fn supports_agent_and_conversation_crud(harness: Arc<dyn ExoHarness>) 
         .expect("agent should be created");
     let conversation = agent
         .new_conversation(NewConversationRequest {
+            environment: None,
             vaults: vec![],
             slug: Some(conversation_slug),
             name: Some("Conversation".to_string()),
@@ -205,6 +208,7 @@ pub async fn list_conversations_returns_recent_first_and_paginates(harness: Arc<
         .expect("agent should be created");
     let first = agent
         .new_conversation(NewConversationRequest {
+            environment: None,
             vaults: vec![],
             slug: Some(unique_slug("first")),
             name: Some("First".to_string()),
@@ -214,6 +218,7 @@ pub async fn list_conversations_returns_recent_first_and_paginates(harness: Arc<
     tokio::time::sleep(Duration::from_millis(2)).await;
     let second = agent
         .new_conversation(NewConversationRequest {
+            environment: None,
             vaults: vec![],
             slug: Some(unique_slug("second")),
             name: Some("Second".to_string()),
@@ -223,6 +228,7 @@ pub async fn list_conversations_returns_recent_first_and_paginates(harness: Arc<
     tokio::time::sleep(Duration::from_millis(2)).await;
     let third = agent
         .new_conversation(NewConversationRequest {
+            environment: None,
             vaults: vec![],
             slug: Some(unique_slug("third")),
             name: Some("Third".to_string()),
@@ -410,6 +416,7 @@ pub async fn conversation_scope_overrides_agent_scope_and_fork_copies_bindings(
         .expect("agent");
     let conversation = agent
         .new_conversation(NewConversationRequest {
+            environment: None,
             vaults: vec![],
             slug: Some(unique_slug("base")),
             name: Some("Base".to_string()),

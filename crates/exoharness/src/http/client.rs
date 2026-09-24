@@ -118,6 +118,33 @@ impl ExoHttpTransport for RpcTransport {
 
 #[async_trait]
 impl ExoHarness for HttpExoHarness {
+    async fn list_environments(&self) -> Result<Vec<crate::EnvironmentDefinition>> {
+        match self.request(Request::ListEnvironments).await? {
+            Response::Environments { environments } => Ok(environments),
+            response => unexpected_response(response, "environments"),
+        }
+    }
+    async fn put_environment(&self, environment: crate::EnvironmentDefinition) -> Result<()> {
+        match self
+            .request(Request::PutEnvironment { environment })
+            .await?
+        {
+            Response::Bool { value: true } => Ok(()),
+            response => unexpected_response(response, "bool"),
+        }
+    }
+    async fn delete_environment(&self, name: &str) -> Result<bool> {
+        match self
+            .request(Request::DeleteEnvironment {
+                name: name.to_owned(),
+            })
+            .await?
+        {
+            Response::Bool { value } => Ok(value),
+            response => unexpected_response(response, "bool"),
+        }
+    }
+
     async fn list_agents(&self) -> Result<Vec<Arc<dyn AgentHandle>>> {
         match self.request(Request::ListAgents).await? {
             Response::Agents { agents } => Ok(agents

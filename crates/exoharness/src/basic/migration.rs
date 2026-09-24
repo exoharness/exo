@@ -358,6 +358,7 @@ mod tests {
             .put_json(
                 format!("{thread_path}/record.json"),
                 &ConversationRecord {
+                    environment: None,
                     id: thread_id,
                     name: "thread".into(),
                     slug: "thread".into(),

@@ -999,7 +999,7 @@ impl FirecrackerSandboxBackend {
 
     async fn resolve_request(&self, request: FirecrackerRequest) -> Result<FirecrackerRequest> {
         let mut request = prepare_request(request)?;
-        validate_resource_shape(request.spec.resources)?;
+        validate_resource_shape(request.spec.resources.unwrap_or_default())?;
         let image = resolve_image(
             &self.shared.config.state_root,
             &request.spec.image,
@@ -1043,7 +1043,7 @@ impl FirecrackerSandboxBackend {
         if source.runtime
             != shared
                 .host_fingerprint
-                .for_resources(request.spec.resources)
+                .for_resources(request.spec.resources.unwrap_or_default())
         {
             bail!("Firecracker snapshot source runtime does not match the configured runtime")
         }
@@ -1138,7 +1138,7 @@ impl FirecrackerSandboxBackend {
                 != self
                     .shared
                     .host_fingerprint
-                    .for_resources(request.spec.resources)
+                    .for_resources(request.spec.resources.unwrap_or_default())
             {
                 bail!("Firecracker snapshot runtime does not match the configured runtime")
             }
@@ -1838,7 +1838,9 @@ impl Shared {
         machine_id: &str,
         spec_hash: &str,
     ) -> Result<Machine> {
-        let runtime = self.host_fingerprint.for_resources(request.spec.resources);
+        let runtime = self
+            .host_fingerprint
+            .for_resources(request.spec.resources.unwrap_or_default());
         let existing = self.load_machine_record(machine_id).await?;
         let reusing_existing_machine = existing
             .as_ref()
@@ -1999,7 +2001,9 @@ impl Shared {
             None
         };
         let idle_ttl_seconds = request.lifecycle.idle_ttl.map(|ttl| ttl.as_secs());
-        let runtime = self.host_fingerprint.for_resources(request.spec.resources);
+        let runtime = self
+            .host_fingerprint
+            .for_resources(request.spec.resources.unwrap_or_default());
         tokio::task::spawn_blocking(move || {
             let (slot, snapshot_template, snapshot_network_slot) = match snapshot {
                 Some(snapshot) => {

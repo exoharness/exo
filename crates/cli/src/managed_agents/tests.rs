@@ -129,6 +129,8 @@ async fn open_configured_thread(
 
 fn thread_args(agent: &str) -> ThreadArgs {
     ThreadArgs {
+        environment: None,
+        environment_file: None,
         agent_file: None,
         agent: Some(agent.to_string()),
         thread: None,

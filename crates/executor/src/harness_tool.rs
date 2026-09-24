@@ -20,10 +20,9 @@ use crate::{AgentConfig, ConversationConfig, ToolRuntime};
 use crate::{SandboxScope, effective_sandbox_scope};
 use async_trait::async_trait;
 use exoharness::{
-    AgentHandle, Artifact, ArtifactVersion, ConversationHandle, CreateSandboxRequest, EventData,
-    FileSystemMount, FileSystemMountMode, ReadArtifactRequest, Result, RunInSandboxRequest,
-    SandboxProcess, SandboxProvider, SnapshotId, StartSandboxRequest, ToolRequest, ToolResult,
-    TurnHandle, WriteArtifactRequest,
+    AgentHandle, Artifact, ArtifactVersion, ConversationHandle, EventData, ReadArtifactRequest,
+    Result, RunInSandboxRequest, SandboxProcess, SnapshotId, StartSandboxRequest, ToolRequest,
+    ToolResult, TurnHandle, WriteArtifactRequest,
 };
 use futures::io::AsyncReadExt;
 use serde::{Deserialize, Serialize};
@@ -69,10 +68,13 @@ impl ToolRuntime for BasicToolRuntime {
     async fn prepare_conversation(
         &self,
         _agent: &dyn AgentHandle,
-        _conversation: &dyn ConversationHandle,
-        _agent_config: &AgentConfig,
-        _config: &ConversationConfig,
+        conversation: &dyn ConversationHandle,
+        agent_config: &AgentConfig,
+        config: &ConversationConfig,
     ) -> Result<()> {
+        if config.environment.is_some() {
+            ensure_conversation_sandbox(conversation, agent_config, config, None).await?;
+        }
         Ok(())
     }
 
@@ -112,7 +114,7 @@ impl ToolRuntime for ExoToolRuntime {
                 ensure_agent_sandbox(agent, agent_config).await?;
             }
             SandboxScope::Conversation => {
-                ensure_conversation_sandbox(conversation, agent_config, config).await?;
+                ensure_conversation_sandbox(conversation, agent_config, config, None).await?;
             }
         }
         Ok(())
@@ -605,7 +607,7 @@ async fn execute_snapshot_sandbox_tool(
         }
         SandboxControlScope::Conversation => {
             let sandbox_id =
-                ensure_conversation_sandbox(conversation, agent_config, config).await?;
+                ensure_conversation_sandbox(conversation, agent_config, config, None).await?;
             let snapshot_id = turn.snapshot_sandbox(sandbox_id.clone()).await?;
             record_sandbox_snapshot(
                 agent,
@@ -675,7 +677,7 @@ async fn execute_rewind_sandbox_tool(
         SandboxControlScope::Conversation => {
             let spec = conversation_sandbox_spec(agent_config, config);
             let sandbox_id =
-                ensure_conversation_sandbox(conversation, agent_config, config).await?;
+                ensure_conversation_sandbox(conversation, agent_config, config, None).await?;
             turn.start_sandbox(StartSandboxRequest {
                 id: sandbox_id.clone(),
                 snapshot_id,
@@ -959,120 +961,13 @@ pub(crate) async fn ensure_shell_sandbox(
     agent_config: &AgentConfig,
     config: &ConversationConfig,
 ) -> Result<String> {
-    if let Some(sandbox_id) = attached_conversation_sandbox(conversation).await? {
-        return Ok(sandbox_id);
-    }
-    let desired_default_workdir = config
-        .mounts
-        .first()
-        .map(|mount| mount.mount_path.clone())
-        .or_else(|| {
-            config
-                .durable_file_systems
-                .first()
-                .map(|file_system| file_system.mount_path.clone())
-        })
-        .unwrap_or_else(|| "/".to_string());
-    let desired_mounts = normalize_mounts(&config.mounts);
-    let desired_durable_file_systems = config.durable_file_systems.clone();
-    let desired_provider = config.effective_sandbox_provider(agent_config);
-    // Empty means "unspecified"; the harness fills the provider's default.
-    let requested_image = config.effective_sandbox_image(agent_config);
-    let desired_image = requested_image.map(str::to_string).unwrap_or_default();
-    let desired_enable_networking = agent_config.sandbox.enable_networking;
-
-    if let Some(sandbox) = latest_shell_sandbox(conversation, &desired_provider).await? {
-        // When no image was requested, the stored sandbox holds the provider's
-        // resolved default — don't treat that as a mismatch.
-        let image_matches = requested_image.is_none_or(|img| sandbox.image == img);
-        let config_matches = image_matches
-            && sandbox.default_workdir == desired_default_workdir
-            && sandbox.file_system_mounts == desired_mounts
-            && sandbox.durable_file_systems == desired_durable_file_systems
-            && sandbox.enable_networking == desired_enable_networking
-            && sandbox.idle_seconds == 300;
-
-        if config_matches {
-            let Some(program) = &config.shell_program else {
-                return Ok(sandbox.id);
-            };
-
-            let healthcheck = conversation
-                .run_in_sandbox(RunInSandboxRequest {
-                    id: sandbox.id.clone(),
-                    command: vec![program.clone(), "-lc".to_string(), "true".to_string()],
-                    env: Default::default(),
-                })
-                .await;
-            if healthcheck.is_ok() {
-                return Ok(sandbox.id);
-            }
-        }
-    }
-
-    conversation
-        .create_sandbox(CreateSandboxRequest {
-            name: None,
-            provider: desired_provider,
-            image: desired_image,
-            resources: Default::default(),
-            default_workdir: Some(desired_default_workdir),
-            file_system_mounts: Some(desired_mounts),
-            durable_file_systems: Some(desired_durable_file_systems),
-            policy: None,
-            enable_networking: Some(desired_enable_networking),
-            idle_seconds: Some(300),
-        })
-        .await
-}
-
-fn normalize_mounts(mounts: &[FileSystemMount]) -> Vec<FileSystemMount> {
-    mounts
-        .iter()
-        .map(|mount| FileSystemMount {
-            host_path: mount.host_path.clone(),
-            mount_path: mount.mount_path.clone(),
-            mode: match mount.mode {
-                FileSystemMountMode::ReadOnly => FileSystemMountMode::ReadOnly,
-                FileSystemMountMode::ReadWrite => FileSystemMountMode::ReadWrite,
-            },
-            internal: Some(mount.internal.unwrap_or(false)),
-        })
-        .collect()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ShellSandboxInfo {
-    id: String,
-    image: String,
-    default_workdir: String,
-    file_system_mounts: Vec<FileSystemMount>,
-    durable_file_systems: Vec<exoharness::DurableFileSystem>,
-    enable_networking: bool,
-    idle_seconds: u64,
-}
-
-async fn latest_shell_sandbox(
-    conversation: &dyn ConversationHandle,
-    desired_provider: &SandboxProvider,
-) -> Result<Option<ShellSandboxInfo>> {
-    let Some(sandbox) = conversation_sandboxes(conversation)
-        .await?
-        .into_iter()
-        .rev()
-        .find(|sandbox| &sandbox.provider == desired_provider)
-    else {
-        return Ok(None);
-    };
-    Ok(Some(ShellSandboxInfo {
-        id: sandbox.id,
-        image: sandbox.image,
-        default_workdir: sandbox.default_workdir,
-        file_system_mounts: sandbox.file_system_mounts,
-        durable_file_systems: sandbox.durable_file_systems,
-        enable_networking: sandbox.enable_networking,
-        idle_seconds: sandbox.idle_seconds,
-    }))
+    ensure_conversation_sandbox(
+        conversation,
+        agent_config,
+        config,
+        config.shell_program.as_deref(),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -1099,6 +994,7 @@ mod tests {
             .unwrap();
         let conversation = agent
             .new_conversation(NewConversationRequest {
+                environment: None,
                 vaults: vec![],
                 slug: Some("conversation".to_string()),
                 name: Some("Conversation".to_string()),

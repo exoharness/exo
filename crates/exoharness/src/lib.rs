@@ -10,7 +10,9 @@ mod basic_tests;
 pub mod contract_tests;
 #[cfg(all(not(target_arch = "wasm32"), feature = "egress"))]
 pub mod egress;
+mod environment;
 mod error;
+pub use environment::EnvironmentDefinition;
 pub mod harness;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod http;

@@ -109,6 +109,7 @@ impl Fixture {
             .await?;
         let thread = agent
             .new_thread(NewThreadRequest {
+                environment: None,
                 vaults: vec![],
                 slug: Some("test".to_string()),
                 name: Some("Test".to_string()),

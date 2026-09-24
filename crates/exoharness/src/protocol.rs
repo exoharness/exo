@@ -64,6 +64,13 @@ pub enum ServerMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
+    ListEnvironments,
+    PutEnvironment {
+        environment: crate::EnvironmentDefinition,
+    },
+    DeleteEnvironment {
+        name: String,
+    },
     ListVaults {
         #[serde(default)]
         scope: ResourceScope,
@@ -344,6 +351,9 @@ impl Request {
             Self::GetAgent { .. } => "get_agent",
             Self::NewAgent { .. } => "new_agent",
             Self::DeleteAgent { .. } => "delete_agent",
+            Self::ListEnvironments => "list_environments",
+            Self::PutEnvironment { .. } => "put_environment",
+            Self::DeleteEnvironment { .. } => "delete_environment",
             Self::ListBindings => "list_bindings",
             Self::PutBinding { .. } => "put_binding",
             Self::GetBinding { .. } => "get_binding",
@@ -396,6 +406,9 @@ impl Request {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
+    Environments {
+        environments: Vec<crate::EnvironmentDefinition>,
+    },
     Vault {
         vault: Option<VaultRecord>,
     },
@@ -496,6 +509,7 @@ pub enum Response {
 impl Response {
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::Environments { .. } => "environments",
             Self::Vault { .. } => "vault",
             Self::Vaults { .. } => "vaults",
             Self::SecretMetadata { .. } => "secret_metadata",

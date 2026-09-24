@@ -920,6 +920,9 @@ impl BasicExoHarness {
                 Arc::get_mut(&mut harness.inner).context("temporary harness is already shared")?;
             inner.inherited_global_vault = Some(global_vault);
             inner.inherited_vaults = vaults;
+            for environment in globals.list_environments().await? {
+                harness.put_environment(environment).await?;
+            }
             let bindings = globals.list_bindings().await?;
             futures::future::try_join_all(bindings.into_iter().map(|binding| {
                 let harness = &harness;
@@ -1091,6 +1094,45 @@ impl BasicExoHarness {
 
 #[async_trait]
 impl ExoHarness for BasicExoHarness {
+    async fn list_environments(&self) -> Result<Vec<crate::EnvironmentDefinition>> {
+        let mut definitions: Vec<crate::EnvironmentDefinition> = self
+            .inner
+            .storage
+            .list_json_matching_suffix(Path::new("environments"), ".json")
+            .await?;
+        definitions.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(definitions)
+    }
+
+    async fn put_environment(&self, environment: crate::EnvironmentDefinition) -> Result<()> {
+        environment.validate()?;
+        let _guard = self.inner.write_lock.lock().await;
+        self.inner
+            .storage
+            .put_json(
+                Path::new("environments").join(format!("{}.json", environment.name)),
+                &environment,
+            )
+            .await
+    }
+
+    async fn delete_environment(&self, name: &str) -> Result<bool> {
+        crate::EnvironmentDefinition::validate_name(name)?;
+        let _guard = self.inner.write_lock.lock().await;
+        let path = Path::new("environments").join(format!("{name}.json"));
+        if self
+            .inner
+            .storage
+            .get_json_if_exists::<crate::EnvironmentDefinition>(&path)
+            .await?
+            .is_none()
+        {
+            return Ok(false);
+        }
+        self.inner.storage.delete_key_if_exists(path).await?;
+        Ok(true)
+    }
+
     async fn list_agents(&self) -> Result<Vec<Arc<dyn AgentHandle>>> {
         let mut handles: Vec<Arc<dyn AgentHandle>> = Vec::new();
         for record in self.list_agent_records().await? {
@@ -1469,8 +1511,12 @@ impl AgentHandle for BasicAgentHandle {
             }
             None => derive_unique_slug("conversation", &existing),
         };
+        if let Some(environment) = &request.environment {
+            environment.validate()?;
+        }
         require_vaults(&self.harness, &request.vaults).await?;
         let record = ConversationRecord {
+            environment: request.environment,
             vaults: request.vaults,
             id: Uuid7::now(),
             slug: slug.clone(),
@@ -2939,6 +2985,7 @@ impl ConversationHandle for BasicConversationHandle {
             events.retain(|event| event.id <= limit);
         }
         let record = ConversationRecord {
+            environment: self.record.environment.clone(),
             vaults: self.record.vaults.clone(),
             id: Uuid7::now(),
             slug: slug.clone(),
@@ -3912,8 +3959,8 @@ struct StoredSandbox {
     name: Option<String>,
     provider: SandboxProvider,
     image: String,
-    #[serde(default)]
-    resources: crate::SandboxResourceShape,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resources: Option<crate::SandboxResourceShape>,
     /// The image originally requested at creation, kept when a snapshot
     /// restore rewrites `image` to the restored tag. Named-sandbox matching
     /// compares against this so config-derived requests still resolve to the
@@ -3973,7 +4020,7 @@ struct PreparedSandboxRequest {
     name: Option<String>,
     provider: SandboxProvider,
     image: String,
-    resources: crate::SandboxResourceShape,
+    resources: Option<crate::SandboxResourceShape>,
     default_workdir: Option<String>,
     file_system_mounts: Vec<FileSystemMount>,
     durable_file_systems: Vec<DurableFileSystem>,

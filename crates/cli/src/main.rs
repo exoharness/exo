@@ -3,6 +3,7 @@ mod adapters;
 mod env;
 #[cfg(test)]
 mod env_tests;
+mod environments;
 mod managed_agents;
 #[cfg(test)]
 mod mount_tests;
@@ -551,7 +552,8 @@ macro_rules! runtime_accessor {
     ($name:ident $(, $mutable:tt)?) => {
         fn $name(&$($mutable)? self) -> &$($mutable)? RuntimeArgs {
             match &$($mutable)? self.command {
-                Commands::Vault { runtime, .. }
+                Commands::Environment { runtime, .. }
+                | Commands::Vault { runtime, .. }
                 | Commands::Agent { runtime, .. }
                 | Commands::Conversation { runtime, .. }
                 | Commands::Model { runtime, .. }
@@ -578,6 +580,13 @@ impl Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Manage reusable sandbox environments.
+    Environment {
+        #[command(flatten)]
+        runtime: RuntimeArgs,
+        #[command(subcommand)]
+        command: environments::EnvironmentCommands,
+    },
     Vault {
         #[command(flatten)]
         runtime: RuntimeArgs,
@@ -1003,18 +1012,16 @@ struct SandboxCreateArgs {
     #[arg(
         long,
         alias = "firecracker-vcpu-count",
-        env = "EXO_FIRECRACKER_VCPU_COUNT",
-        default_value_t = DEFAULT_SANDBOX_VCPU_COUNT
+        env = "EXO_FIRECRACKER_VCPU_COUNT"
     )]
-    vcpu_count: u8,
+    vcpu_count: Option<u8>,
     /// Memory requested for the sandbox, in MiB.
     #[arg(
         long,
         alias = "firecracker-memory-mib",
-        env = "EXO_FIRECRACKER_MEMORY_MIB",
-        default_value_t = DEFAULT_SANDBOX_MEMORY_MIB
+        env = "EXO_FIRECRACKER_MEMORY_MIB"
     )]
-    memory_mib: u32,
+    memory_mib: Option<u32>,
     #[arg(long)]
     workdir: Option<String>,
     #[arg(long, value_enum)]
@@ -1356,7 +1363,11 @@ async fn run_selected(
         };
         if !matches!(
             cli.command,
-            Commands::Agent {
+            Commands::Environment {
+                command: environments::EnvironmentCommands::List
+                    | environments::EnvironmentCommands::Get { .. },
+                ..
+            } | Commands::Agent {
                 command: AgentCommands::List
                     | AgentCommands::Get { .. }
                     | AgentCommands::Mount {
@@ -1452,6 +1463,7 @@ async fn run_selected(
     let root = cli.runtime().root.clone();
     let result: Result<()> = async {
     match cli.command {
+        Commands::Environment { command, .. } => environments::run(harness.exoharness_handle().as_ref(), command).await?,
         Commands::FirecrackerBridge => {
             unreachable!("Firecracker bridge returns before harness startup")
         }
@@ -2989,8 +3001,17 @@ async fn start_sandbox(
             name,
             provider: provider.into(),
             image,
-            resources: SandboxResourceShape::new(vcpu_count, memory_mib)
-                .context("sandbox vCPU count and memory must be positive")?,
+            resources: if vcpu_count.is_some() || memory_mib.is_some() {
+                Some(
+                    SandboxResourceShape::new(
+                        vcpu_count.unwrap_or(DEFAULT_SANDBOX_VCPU_COUNT),
+                        memory_mib.unwrap_or(DEFAULT_SANDBOX_MEMORY_MIB),
+                    )
+                    .context("sandbox vCPU count and memory must be positive")?,
+                )
+            } else {
+                None
+            },
             default_workdir: workdir,
             file_system_mounts: (!mounts.is_empty()).then_some(mounts),
             durable_file_systems: (!durable_file_systems.is_empty())
@@ -3171,6 +3192,7 @@ fn command_refs_mut(command: &mut Commands) -> (Option<&mut String>, Option<&mut
         | Commands::Adapters { .. }
         | Commands::Tools { .. }
         | Commands::Serve { .. }
+        | Commands::Environment { .. }
         | Commands::Vault { .. } => (None, None),
     }
 }

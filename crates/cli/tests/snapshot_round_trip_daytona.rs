@@ -59,6 +59,7 @@ async fn daytona_snapshot_and_rewind_round_trip() {
         .expect("agent");
     let conv = agent
         .new_conversation(NewConversationRequest {
+            environment: None,
             vaults: vec![],
             slug: Some("daysnap-conv".into()),
             name: Some("daysnap".into()),

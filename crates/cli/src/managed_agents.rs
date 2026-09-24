@@ -28,6 +28,12 @@ pub struct ThreadArgs {
     pub model: Option<String>,
     #[arg(long)]
     pub vault: Vec<String>,
+    /// Use a saved environment from the selected provider.
+    #[arg(long, conflicts_with_all = ["environment_file", "provider", "sandbox_image"])]
+    pub environment: Option<String>,
+    /// Send an environment definition to the selected provider.
+    #[arg(long, conflicts_with_all = ["environment", "provider", "sandbox_image"])]
+    pub environment_file: Option<PathBuf>,
     #[arg(long = "sandbox", value_enum)]
     provider: Option<SandboxProviderArg>,
     #[arg(long)]
@@ -41,6 +47,9 @@ pub struct ThreadArgs {
 
 impl ThreadArgs {
     pub(crate) fn local_config(&self) -> Result<ConversationConfig> {
+        if self.environment.is_some() || self.environment_file.is_some() {
+            return Ok(ConversationConfig::default());
+        }
         let mut mounts = self.mounts.clone();
         for mount in &mut mounts {
             mount.host_path = crate::canonicalize_directory(Path::new(&mount.host_path))?
@@ -149,12 +158,33 @@ pub async fn open_thread(
             .map(|reference| managed::vaults::find_vault(root.as_ref(), reference)),
     )
     .await?;
+    let mut environment = match (&args.environment_file, &args.environment) {
+        (Some(path), _) => Some(crate::environments::load(path)?),
+        (_, Some(name)) => Some(crate::environments::find(root.as_ref(), name).await?),
+        _ => None,
+    };
+    if let Some(environment) = &mut environment {
+        for mount in &args.mounts {
+            let mounts = environment
+                .config
+                .file_system_mounts
+                .get_or_insert_default();
+            let mut mount = mount.clone();
+            mount.host_path = crate::canonicalize_directory(Path::new(&mount.host_path))?
+                .to_string_lossy()
+                .into_owned();
+            mounts.retain(|other| other.mount_path != mount.mount_path);
+            mounts.push(mount);
+        }
+        environment.validate()?;
+    }
     let slug = crate::generate_fun_slug();
     let opened = runtime
         .open_managed_thread(
             &agent,
             args.thread.as_deref(),
             NewThreadRequest {
+                environment,
                 vaults: vaults.iter().map(|vault| vault.record().id).collect(),
                 slug: Some(slug.clone()),
                 name: Some(slug),

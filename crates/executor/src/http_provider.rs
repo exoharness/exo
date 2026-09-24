@@ -270,6 +270,15 @@ impl ExoHttpTransport for RuntimeTransport {
 
     async fn request(&self, request: Request) -> Result<Response> {
         match request {
+            Request::ListEnvironments => Ok(Response::Environments {
+                environments: self.client.list_environments().await?,
+            }),
+            Request::PutEnvironment { environment } => Ok(Response::Bool {
+                value: self.client.put_environment(&environment).await?,
+            }),
+            Request::DeleteEnvironment { name } => Ok(Response::Bool {
+                value: self.client.delete_environment(&name).await?,
+            }),
             Request::ListAgents => Ok(Response::Agents {
                 agents: self.client.list_agents(None).await?.agents,
             }),
@@ -370,6 +379,7 @@ impl ExoHttpTransport for RuntimeTransport {
                     .create_thread(
                         agent_id,
                         &CreateThreadBody {
+                            environment: request.environment,
                             vaults: request.vaults,
                             thread_slug: request.slug,
                             thread_name: request.name,

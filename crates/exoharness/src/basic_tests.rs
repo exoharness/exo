@@ -1403,6 +1403,7 @@ async fn agent_scoped_sandbox_is_shared_without_conversation_ownership() {
         .expect("agent");
     let first_conversation = agent
         .new_conversation(NewConversationRequest {
+            environment: None,
             vaults: vec![],
             slug: Some("first".to_string()),
             name: Some("First".to_string()),
@@ -1411,6 +1412,7 @@ async fn agent_scoped_sandbox_is_shared_without_conversation_ownership() {
         .expect("first conversation");
     let second_conversation = agent
         .new_conversation(NewConversationRequest {
+            environment: None,
             vaults: vec![],
             slug: Some("second".to_string()),
             name: Some("Second".to_string()),

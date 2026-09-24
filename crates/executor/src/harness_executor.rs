@@ -656,6 +656,7 @@ impl Runtime {
         let agent_config = self.get_agent_config(agent).await?;
         let conversation = agent
             .new_conversation(NewConversationRequest {
+                environment: None,
                 vaults: request.vaults,
                 slug: request.slug,
                 name: request.name,
@@ -676,6 +677,7 @@ impl Runtime {
             durable_file_systems: default_conversation_config.durable_file_systems,
             sandbox_scope: default_conversation_config.sandbox_scope,
             permissions: default_conversation_config.permissions,
+            environment: default_conversation_config.environment,
         };
         if let Err(error) = self
             .put_conversation_config(conversation.as_ref(), conversation_config)
