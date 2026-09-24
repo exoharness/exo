@@ -41,8 +41,8 @@ as `egress.json` (the flag also accepts `.yaml`, `.yml`, and `.toml`):
 ```bash
 exo vault secret create global notion \
   --http-origin https://api.notion.com --token-env NOTION_API_KEY
-exo --egress-policy egress.json sandbox play \
-  --provider firecracker --networking enabled --idle-seconds 300
+exo sandbox --egress-policy egress.json play \
+  --sandbox firecracker --networking enabled --idle-seconds 300
 ```
 
 Inside the sandbox:
@@ -72,7 +72,7 @@ works with `exo chat` and a managed Firecracker sandbox. Tell the agent which
 variables it can use; the runtime currently injects the environment without
 adding a credential inventory to its prompt.
 
-For a managed agent, use `exo chat --agent-file agent.md --provider firecracker
+For a managed agent, use `exo chat --agent-file agent.md --sandbox firecracker
 --vault alice --egress-policy egress.json` to attach a named vault to the thread.
 `--agent-file` keeps the agent, thread, and sandbox selection temporary while
 credential rotation still reads the live vault.

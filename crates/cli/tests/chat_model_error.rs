@@ -20,13 +20,15 @@ fn exo_bin() -> PathBuf {
 
 fn run_exo(args: &[&str], root: &str, xdg: &str) -> std::process::Output {
     let output = Command::new(exo_bin())
+        .arg(args[0])
         .args(["--root", root])
         .args(["--secret-backend", "file"])
         .arg("--master-key-path")
         .arg(PathBuf::from(root).join("master.key"))
         .arg("--pricing-path")
         .arg(PathBuf::from(root).join("prices.json"))
-        .args(args)
+        .args(&args[1..])
+        .env("EXO_CONFIG_DIR", xdg)
         .env("XDG_CONFIG_HOME", xdg)
         .env("OPENAI_API_KEY", "sk-test-key")
         .output()
@@ -88,7 +90,7 @@ async fn chat_survives_model_call_failure() {
             "test-agent",
             "--model",
             "gpt-test",
-            "--provider",
+            "--sandbox",
             "local-process",
             "Chat Error Test Agent",
         ],
@@ -97,13 +99,15 @@ async fn chat_survives_model_call_failure() {
     );
 
     let mut chat = Command::new(exo_bin())
+        .arg("chat")
         .args(["--root", &root])
         .args(["--secret-backend", "file"])
         .arg("--master-key-path")
         .arg(PathBuf::from(&root).join("master.key"))
         .arg("--pricing-path")
         .arg(PathBuf::from(&root).join("prices.json"))
-        .args(["chat", "--agent", "test-agent"])
+        .args(["--agent", "test-agent"])
+        .env("EXO_CONFIG_DIR", &xdg)
         .env("XDG_CONFIG_HOME", &xdg)
         .env("OPENAI_API_KEY", "sk-test-key")
         .stdin(Stdio::piped())

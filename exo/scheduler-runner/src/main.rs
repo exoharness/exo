@@ -5,12 +5,12 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
 use executor::{
-    BasicExoHarness, BasicExoHarnessConfig, BraintrustRuntimeConfig, ExoToolRuntime, Harness,
-    SandboxBackendRegistration, SandboxProvider, SchedulerRunOptions, SchedulerStore,
-    SecretBackendChoice, TypeScriptHarness, redeliver_pending_wakes, run_due_tasks,
+    BasicExoHarness, BasicExoHarnessConfig, BraintrustRuntimeConfig, ExoToolRuntime, LocalProvider,
+    Runtime, SandboxBackendRegistration, SandboxProvider, SchedulerRunOptions, SchedulerStore,
+    SecretBackendChoice, redeliver_pending_wakes, run_due_tasks,
 };
 
 #[derive(Debug, Parser)]
@@ -171,7 +171,7 @@ async fn exo_harness(
     root: &Path,
     runtime_config: Option<BraintrustRuntimeConfig>,
     env: HashMap<String, String>,
-) -> Result<Arc<dyn Harness>> {
+) -> Result<Arc<Runtime>> {
     let exo_config = BasicExoHarnessConfig {
         root: root.join("exoharness"),
         secret_backend: default_secret_backend(),
@@ -183,14 +183,16 @@ async fn exo_harness(
             SandboxBackendRegistration::local_process(),
         ],
     };
-    Ok(Arc::new(
-        TypeScriptHarness::<ExoToolRuntime>::exo_from_exoharness(
-            root,
-            Arc::new(BasicExoHarness::new(exo_config).await?),
-            runtime_config,
-            env,
-        )?,
-    ))
+    let state = Arc::new(BasicExoHarness::new(exo_config).await?);
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .context("failed to resolve Exo installation for scheduler")?;
+    let tools = Arc::new(ExoToolRuntime::from_root(root)?);
+    Ok(Arc::new(Runtime::new(
+        LocalProvider::typescript(state, workspace, env, tools),
+        runtime_config,
+    )))
 }
 
 #[cfg(target_os = "macos")]

@@ -15,11 +15,14 @@ name = "exo"
 path = "src/main.rs"
 
 [dependencies]
+tempfile = "3.23.0"
 actix-web.workspace = true
 reqwest.workspace = true
 url.workspace = true
 rmcp = { workspace = true, features = ["auth", "reqwest"] }
 oauth2.workspace = true
+keyring = "4.0.0-rc.3"
+keyring-core = "0.7.2"
 futures.workspace = true
 async-trait.workspace = true
 exo-managed-agents = { path = "../managed-agents" }
@@ -52,5 +55,4 @@ exoharness = { path = "../exoharness", features = [
   "contract-tests",
 ] }
 futures.workspace = true
-tempfile = "3.23.0"
 wiremock = "0.6"

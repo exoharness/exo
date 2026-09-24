@@ -68,7 +68,7 @@ container build \
 Create the agent and start a conversation:
 
 ```bash
-./target/debug/exo --harness codex agent create "TS Codex" \
+./target/debug/exo agent --harness codex create "TS Codex" \
   --model gpt-5.5
 
 ./target/debug/exo thread create ts-codex
@@ -97,7 +97,7 @@ container build \
 Create the agent and start a conversation:
 
 ```bash
-./target/debug/exo --harness claude-code agent create "TS Claude Code" \
+./target/debug/exo agent --harness claude-code create "TS Claude Code" \
   --model claude-sonnet-4-6
 
 ./target/debug/exo thread create ts-claude-code
@@ -127,7 +127,7 @@ container build \
 Create the agent and start a conversation:
 
 ```bash
-./target/debug/exo --harness cursor agent create "TS Cursor" \
+./target/debug/exo agent --harness cursor create "TS Cursor" \
   --model auto
 
 ./target/debug/exo thread create ts-cursor
@@ -157,7 +157,7 @@ container build \
 Create the agent and start a conversation:
 
 ```bash
-./target/debug/exo --harness pi agent create "TS Pi" \
+./target/debug/exo agent --harness pi create "TS Pi" \
   --model gpt-5.5
 
 ./target/debug/exo thread create ts-pi

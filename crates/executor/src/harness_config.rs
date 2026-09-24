@@ -12,9 +12,13 @@ pub(crate) const AGENT_CONFIG_ARTIFACT_PATH: &str = "config/executor.json";
 pub(crate) const CONVERSATION_CONFIG_ARTIFACT_PATH: &str = "config/executor.json";
 
 pub async fn load_agent_config(agent: &dyn AgentHandle) -> Result<AgentConfig> {
-    read_json_artifact_from_agent(agent, AGENT_CONFIG_ARTIFACT_PATH)
+    find_agent_config(agent)
         .await?
         .ok_or_else(|| anyhow!("missing agent config artifact at {AGENT_CONFIG_ARTIFACT_PATH}"))
+}
+
+pub async fn find_agent_config(agent: &dyn AgentHandle) -> Result<Option<AgentConfig>> {
+    read_json_artifact_from_agent(agent, AGENT_CONFIG_ARTIFACT_PATH).await
 }
 
 pub async fn store_agent_config(agent: &dyn AgentHandle, config: &AgentConfig) -> Result<()> {

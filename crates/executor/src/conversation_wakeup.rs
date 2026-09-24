@@ -9,29 +9,38 @@ use lingua::Message;
 use lingua::universal::UserContent;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::{HarnessConversation, SendRequest, SendResult};
+use crate::{AgentHandle, ConversationHandle, Runtime, SendRequest, SendResult};
 
 pub async fn send_conversation_wakeup(
-    conversation: &dyn HarnessConversation,
+    harness: &Runtime,
+    agent: &Arc<dyn AgentHandle>,
+    conversation: &Arc<dyn ConversationHandle>,
     prompt: String,
 ) -> Result<SendResult> {
-    send_conversation_wakeup_content(conversation, UserContent::String(prompt)).await
+    send_conversation_wakeup_content(harness, agent, conversation, UserContent::String(prompt))
+        .await
 }
 
 /// Wakeup variant for multimodal content, e.g. adapter messages that carry
 /// inbound images for the model to analyze.
 pub async fn send_conversation_wakeup_content(
-    conversation: &dyn HarnessConversation,
+    harness: &Runtime,
+    agent: &Arc<dyn AgentHandle>,
+    conversation: &Arc<dyn ConversationHandle>,
     content: UserContent,
 ) -> Result<SendResult> {
     let _file_guard = WakeupFileLock::acquire(&conversation.record().id.to_string()).await?;
-    let result = conversation
-        .send(SendRequest {
-            input: vec![Message::User { content }],
-            session_id: None,
-        })
+    let result = harness
+        .send(
+            Arc::clone(agent),
+            Arc::clone(conversation),
+            SendRequest {
+                input: vec![Message::User { content }],
+                session_id: None,
+            },
+        )
         .await?;
-    conversation.close_session(result.session_id).await?;
+    conversation.end_session(result.session_id).await?;
     Ok(result)
 }
 

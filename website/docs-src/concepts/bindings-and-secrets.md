@@ -27,7 +27,7 @@ Bindings are **non-secret configuration that refer to secrets**:
 - an *LLM binding* defines a provider/model plus optional credentials
   (`exo model create`),
 - a *sandbox binding* defines a sandbox provider plus its credentials
-  (`exo provider create`),
+  (`exo sandbox-provider create`),
 - an *MCP binding* defines a server URL plus optional credentials.
 
 ## Scoping

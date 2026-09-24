@@ -83,7 +83,10 @@ async fn send_appends_user_and_assistant_messages() {
         Arc::clone(&turn),
         &default_agent_config(),
         &ConversationConfig::default(),
-        &(),
+        &crate::SendRequest {
+            input: Vec::new(),
+            session_id: None,
+        },
         ExecutorStreamMode::Disabled,
         None,
     )
@@ -188,7 +191,10 @@ async fn send_executes_tool_round_trip() {
         Arc::clone(&turn),
         &agent_config,
         &conversation_config,
-        &(),
+        &crate::SendRequest {
+            input: Vec::new(),
+            session_id: None,
+        },
         ExecutorStreamMode::Disabled,
         None,
     )
@@ -308,7 +314,10 @@ async fn send_records_tool_result_when_tool_execution_fails() {
             mounts: Vec::new(),
             ..Default::default()
         },
-        &(),
+        &crate::SendRequest {
+            input: Vec::new(),
+            session_id: None,
+        },
         ExecutorStreamMode::Disabled,
         None,
     )
@@ -416,7 +425,10 @@ async fn send_stream_emits_chunks_and_persists_final_response() {
         Arc::clone(&turn),
         &default_agent_config(),
         &ConversationConfig::default(),
-        &(),
+        &crate::SendRequest {
+            input: Vec::new(),
+            session_id: None,
+        },
         ExecutorStreamMode::Enabled(&event_tx),
         None,
     )

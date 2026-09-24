@@ -1113,7 +1113,7 @@ impl ManagedSandboxHandle for WarmSandboxHandle {
             // know to choose Docker for snapshot-using flows.
             ContainerCliFlavor::AppleContainer => bail!(
                 "snapshot is not yet implemented for the apple-container backend; \
-                 use --provider docker for snapshot-using flows"
+                 use --sandbox docker for snapshot-using flows"
             ),
         }
     }
@@ -2198,11 +2198,11 @@ fn schedule_cleanup_named_container(container_bin: PathBuf, cli: ContainerCliFla
 fn missing_container_cli_message(cli: ContainerCliFlavor, container_bin: &Path) -> String {
     match cli {
         ContainerCliFlavor::AppleContainer => format!(
-            "apple-container sandbox backend requires the `{}` CLI; install Apple container CLI or use `--provider local-process`",
+            "apple-container sandbox backend requires the `{}` CLI; install Apple container CLI or use `--sandbox local-process`",
             container_bin.display()
         ),
         ContainerCliFlavor::Docker => format!(
-            "docker sandbox backend requires the `{}` CLI; install Docker or use `--provider local-process`",
+            "docker sandbox backend requires the `{}` CLI; install Docker or use `--sandbox local-process`",
             container_bin.display()
         ),
     }
@@ -2804,7 +2804,7 @@ esac
         let message = format!("{error:#}");
         assert!(message.contains("apple-container sandbox backend requires"));
         assert!(message.contains("install Apple container CLI"));
-        assert!(message.contains("--provider local-process"));
+        assert!(message.contains("--sandbox local-process"));
     }
 
     #[cfg(unix)]

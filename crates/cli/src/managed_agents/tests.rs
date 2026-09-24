@@ -2,11 +2,12 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use executor::{
-    BasicExoHarness, BasicExoHarnessConfig, BasicHarness, BasicToolRuntime, Binding, ExoHarness,
-    ModelClient, ModelRequest, ModelResponse, ModelResponseStream, SandboxBackendRegistration,
-    SandboxProvider, SecretBackendChoice, SendRequest,
+    BasicExoHarness, BasicExoHarnessConfig, BasicToolRuntime, Binding, ExoHarness, LocalProvider,
+    ModelClient, ModelRequest, ModelResponse, ModelResponseStream, Runtime,
+    SandboxBackendRegistration, SandboxProvider, SecretBackendChoice, SendRequest,
 };
 use exoharness::ReadArtifactRequest;
+use lingua::Message;
 use lingua::universal::{AssistantContent, UserContent};
 use tempfile::TempDir;
 
@@ -46,8 +47,8 @@ impl ModelClient for RecordingModel {
     }
 }
 
-async fn harness(root: &Path, model: Arc<RecordingModel>) -> Result<Arc<dyn Harness>> {
-    let storage = Arc::new(BasicExoHarness::new(config(root)).await?);
+async fn harness(root: &Path, model: Arc<RecordingModel>) -> Result<Arc<Runtime>> {
+    let storage = Arc::new(BasicExoHarness::new(storage_config(root)).await?);
     storage
         .put_binding(Binding::Llm {
             name: "gpt-5.4".to_string(),
@@ -56,14 +57,27 @@ async fn harness(root: &Path, model: Arc<RecordingModel>) -> Result<Arc<dyn Harn
             secret: None,
         })
         .await?;
-    Ok(Arc::new(BasicHarness::new(
-        storage,
-        model,
-        Arc::new(BasicToolRuntime),
+    let definition = AgentDefinition::parse(SOURCE.to_string())?;
+    Ok(Arc::new(Runtime::new(
+        LocalProvider::basic(
+            storage,
+            model,
+            Arc::new(BasicToolRuntime),
+            Arc::new(cost::PricingTable::empty()),
+        )
+        .with_managed_agents(executor::managed_agents::LocalAgentSetup {
+            agent: Some(local_agent_config(
+                &definition,
+                &harness_selection(&definition)?,
+                None,
+            )?),
+            ..Default::default()
+        }),
+        None,
     )))
 }
 
-fn config(root: &Path) -> BasicExoHarnessConfig {
+fn storage_config(root: &Path) -> BasicExoHarnessConfig {
     BasicExoHarnessConfig {
         root: root.to_path_buf(),
         secret_backend: SecretBackendChoice::Static([7; 32]),
@@ -71,6 +85,46 @@ fn config(root: &Path) -> BasicExoHarnessConfig {
         sandbox_policy: None,
         sandbox_backends: vec![SandboxBackendRegistration::local_process()],
     }
+}
+
+fn configured_runtime(
+    runtime: &Runtime,
+    definition: Option<&AgentDefinition>,
+    args: &ThreadArgs,
+) -> Result<Runtime> {
+    let setup = executor::managed_agents::LocalAgentSetup {
+        agent: definition
+            .map(|definition| {
+                local_agent_config(
+                    definition,
+                    &harness_selection(definition)?,
+                    args.model.as_deref(),
+                )
+            })
+            .transpose()?,
+        model: args.model.clone(),
+        thread: args.local_config()?,
+        temporary: args.agent_file.is_some(),
+    };
+    Ok(Runtime::new(
+        LocalProvider::basic(
+            runtime.exoharness_handle(),
+            Arc::new(RecordingModel::default()),
+            Arc::new(BasicToolRuntime),
+            Arc::new(cost::PricingTable::empty()),
+        )
+        .with_managed_agents(setup),
+        None,
+    ))
+}
+
+async fn open_configured_thread(
+    runtime: &Runtime,
+    definition: Option<&AgentDefinition>,
+    args: &ThreadArgs,
+) -> Result<(Arc<dyn AgentHandle>, Arc<dyn ConversationHandle>)> {
+    let runtime = configured_runtime(runtime, definition, args)?;
+    super::open_thread(&runtime, definition, args).await
 }
 
 fn thread_args(agent: &str) -> ThreadArgs {
@@ -87,7 +141,7 @@ fn thread_args(agent: &str) -> ThreadArgs {
     }
 }
 
-async fn temporary_harness(saved: &dyn Harness) -> Result<Arc<dyn Harness>> {
+async fn temporary_harness(saved: &Runtime) -> Result<Arc<Runtime>> {
     let storage = BasicExoHarness::in_memory(
         BasicExoHarnessConfig {
             root: PathBuf::new(),
@@ -99,10 +153,14 @@ async fn temporary_harness(saved: &dyn Harness) -> Result<Arc<dyn Harness>> {
         Some(saved.exoharness_handle().as_ref()),
     )
     .await?;
-    Ok(Arc::new(BasicHarness::new(
-        Arc::new(storage),
-        Arc::new(RecordingModel::default()),
-        Arc::new(BasicToolRuntime),
+    Ok(Arc::new(Runtime::new(
+        LocalProvider::basic(
+            Arc::new(storage),
+            Arc::new(RecordingModel::default()),
+            Arc::new(BasicToolRuntime),
+            Arc::new(cost::PricingTable::empty()),
+        ),
+        None,
     )))
 }
 
@@ -115,19 +173,19 @@ async fn saved_definition_and_turn_history_survive_reopening_without_source() ->
     let model = Arc::new(RecordingModel::default());
     let storage_root = temp.path().join("state");
     let runtime = harness(&storage_root, Arc::clone(&model)).await?;
-    let saved = create_agent(runtime.as_ref(), &definition, "support", None, None).await?;
+    let saved = runtime.create_managed_agent(&definition, "support").await?;
     assert!(
-        create_agent(runtime.as_ref(), &definition, "support", None, None)
+        runtime
+            .create_managed_agent(&definition, "support")
             .await
             .is_err()
     );
-    let artifacts = saved.exoharness_handle().list_artifacts().await?;
+    let artifacts = saved.list_artifacts().await?;
     let artifact = artifacts
         .iter()
         .find(|artifact| artifact.path == "managed-agents/agent.md")
         .unwrap();
     let markdown = saved
-        .exoharness_handle()
         .read_artifact(ReadArtifactRequest {
             artifact_id: artifact.artifact_id,
             version: Some(artifact.version),
@@ -135,23 +193,20 @@ async fn saved_definition_and_turn_history_survive_reopening_without_source() ->
         .await?
         .unwrap();
     assert_eq!(markdown.contents, SOURCE.as_bytes());
-    let (agent, thread) = open_thread(
-        runtime.as_ref(),
-        None,
-        None,
-        &thread_args("support"),
-        &PreparedMcp::default(),
-        &config(&temp.path().join("state")),
-    )
-    .await?;
+    let (agent, thread) =
+        open_configured_thread(runtime.as_ref(), None, &thread_args("support")).await?;
     let thread_slug = thread.record().slug.clone();
-    thread
-        .send(SendRequest {
-            input: vec![Message::User {
-                content: UserContent::String("Remember ticket 42.".to_string()),
-            }],
-            session_id: None,
-        })
+    runtime
+        .send(
+            Arc::clone(&agent),
+            Arc::clone(&thread),
+            SendRequest {
+                input: vec![Message::User {
+                    content: UserContent::String("Remember ticket 42.".to_string()),
+                }],
+                session_id: None,
+            },
+        )
         .await?;
     drop(thread);
     drop(agent);
@@ -162,25 +217,26 @@ async fn saved_definition_and_turn_history_survive_reopening_without_source() ->
     let runtime = harness(&storage_root, Arc::clone(&model)).await?;
     let mut args = thread_args("support");
     args.thread = Some(thread_slug);
-    let (agent, thread) = open_thread(
-        runtime.as_ref(),
-        None,
-        None,
-        &args,
-        &PreparedMcp::default(),
-        &config(&temp.path().join("state")),
-    )
-    .await?;
-    assert_eq!(agent.list_conversations().await?.len(), 1);
-    thread
-        .send(SendRequest {
-            input: vec![Message::User {
-                content: UserContent::String("Which ticket?".to_string()),
-            }],
-            session_id: None,
-        })
+    let (agent, thread) = open_configured_thread(runtime.as_ref(), None, &args).await?;
+    assert_eq!(managed::list_threads(agent.as_ref()).await?.len(), 1);
+    runtime
+        .send(
+            Arc::clone(&agent),
+            Arc::clone(&thread),
+            SendRequest {
+                input: vec![Message::User {
+                    content: UserContent::String("Which ticket?".to_string()),
+                }],
+                session_id: None,
+            },
+        )
         .await?;
-    assert_eq!(thread.messages().await?.len(), 4);
+    assert_eq!(
+        executor::materialize_conversation_messages(&*thread)
+            .await?
+            .len(),
+        4
+    );
     let requests = model.requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
     for request in requests.iter() {
@@ -212,24 +268,10 @@ async fn file_runs_use_isolated_memory_and_mounts_stay_on_threads() -> Result<()
     );
     let first_runtime = temporary_harness(runtime.as_ref()).await?;
     let second_runtime = temporary_harness(runtime.as_ref()).await?;
-    let (first, thread) = open_thread(
-        first_runtime.as_ref(),
-        Some(&definition),
-        None,
-        &args,
-        &PreparedMcp::default(),
-        &config(&temp.path().join("state")),
-    )
-    .await?;
-    let (second, _) = open_thread(
-        second_runtime.as_ref(),
-        Some(&definition),
-        None,
-        &args,
-        &PreparedMcp::default(),
-        &config(&temp.path().join("state")),
-    )
-    .await?;
+    let (first, thread) =
+        open_configured_thread(first_runtime.as_ref(), Some(&definition), &args).await?;
+    let (second, _) =
+        open_configured_thread(second_runtime.as_ref(), Some(&definition), &args).await?;
     assert_ne!(first.record().id, second.record().id);
     assert!(runtime.list_agents().await?.is_empty());
     assert!(
@@ -238,23 +280,28 @@ async fn file_runs_use_isolated_memory_and_mounts_stay_on_threads() -> Result<()
             .await?
             .is_none()
     );
-    assert!(first.config().await?.sandbox.mounts.is_empty());
-    assert_eq!(thread.config().await?.mounts.len(), 1);
+    assert!(
+        executor::load_agent_config(first.as_ref())
+            .await?
+            .sandbox
+            .mounts
+            .is_empty()
+    );
+    assert_eq!(
+        executor::load_conversation_config(&*thread)
+            .await?
+            .mounts
+            .len(),
+        1
+    );
     let mut resume = thread_args(&first.record().slug);
     resume.thread = Some("missing".to_string());
     assert!(
-        open_thread(
-            first_runtime.as_ref(),
-            None,
-            None,
-            &resume,
-            &PreparedMcp::default(),
-            &config(&temp.path().join("state"))
-        )
-        .await
-        .is_err()
+        open_configured_thread(first_runtime.as_ref(), None, &resume)
+            .await
+            .is_err()
     );
-    assert_eq!(first.list_conversations().await?.len(), 1);
+    assert_eq!(managed::list_threads(first.as_ref()).await?.len(), 1);
     Ok(())
 }
 
@@ -271,193 +318,82 @@ async fn unregistered_file_model_uses_registered_default_but_explicit_model_is_s
     let mut args = thread_args("unused");
     args.agent = None;
     args.agent_file = Some(PathBuf::from("agent.md"));
-    let (agent, thread) = open_thread(
-        runtime.as_ref(),
-        Some(&definition),
-        None,
-        &args,
-        &PreparedMcp::default(),
-        &config(&temp.path().join("state")),
-    )
-    .await?;
-    assert_eq!(agent.config().await?.model, "gpt-5.4");
-    assert!(thread.model_override().await?.is_none());
+    let (agent, thread) =
+        open_configured_thread(runtime.as_ref(), Some(&definition), &args).await?;
+    assert_eq!(executor::load_agent_config(&*agent).await?.model, "gpt-5.4");
+    assert!(
+        executor::get_conversation_model_override(thread.as_ref())
+            .await?
+            .is_none()
+    );
     args.model = Some("gpt-5.4".to_string());
     let temporary = temporary_harness(runtime.as_ref()).await?;
-    let (_, explicit_thread) = open_thread(
-        temporary.as_ref(),
-        Some(&definition),
-        None,
-        &args,
-        &PreparedMcp::default(),
-        &config(&temp.path().join("state")),
-    )
-    .await?;
-    assert!(explicit_thread.model_override().await?.is_none());
+    let (_, explicit_thread) =
+        open_configured_thread(temporary.as_ref(), Some(&definition), &args).await?;
+    assert!(
+        executor::get_conversation_model_override(explicit_thread.as_ref())
+            .await?
+            .is_none()
+    );
     args.model = Some("missing".to_string());
     assert!(
-        open_thread(
-            runtime.as_ref(),
-            Some(&definition),
-            None,
-            &args,
-            &PreparedMcp::default(),
-            &config(&temp.path().join("state"))
-        )
-        .await
-        .is_err()
+        open_configured_thread(runtime.as_ref(), Some(&definition), &args)
+            .await
+            .is_err()
     );
     assert_eq!(runtime.list_agents().await?.len(), 1);
+    args.agent_file = None;
+    args.agent = Some(agent.record().id.to_string());
+    assert!(
+        open_configured_thread(runtime.as_ref(), None, &args)
+            .await
+            .is_err()
+    );
+    assert_eq!(managed::list_threads(agent.as_ref()).await?.len(), 1);
     Ok(())
 }
 
 #[tokio::test]
-async fn vault_selection_survives_resume_and_rejects_unsafe_config_changes() -> Result<()> {
-    let temp = TempDir::new()?;
-    let runtime = harness(
-        &temp.path().join("state"),
-        Arc::new(RecordingModel::default()),
-    )
-    .await?;
-    let definition = AgentDefinition::parse(SOURCE.to_owned())?;
-    create_agent(
-        runtime.as_ref(),
-        &definition,
-        "support",
-        Some(&HarnessSelection::Kind(crate::HarnessKind::Basic)),
-        None,
-    )
-    .await?;
-    let mut global_args = thread_args("support");
-    global_args.provider = Some(SandboxProviderArg::Docker);
-    global_args.mounts.push(
-        crate::parse_sandbox_mount(&format!("{}:/workspace", temp.path().display())).unwrap(),
-    );
-    let error = open_thread(
-        runtime.as_ref(),
-        None,
-        None,
-        &global_args,
-        &PreparedMcp::default(),
-        &config(&temp.path().join("state")),
-    )
-    .await
-    .err()
-    .context("expected protected mount rejection")?;
-    assert!(error.to_string().contains("exposes vault storage"));
-    assert!(
-        crate::must_get_agent(runtime.as_ref(), "support")
-            .await?
-            .list_conversations()
-            .await?
-            .is_empty()
-    );
-    let store = runtime.exoharness_handle();
-    let vault = store.create_vault("alice").await?;
-    store.create_vault("bob").await?;
-    let mut args = thread_args("support");
-    args.vault = vec!["alice".into()];
-    args.provider = Some(SandboxProviderArg::Docker);
-    let mut command = Commands::Chat {
-        thread: args,
-        tui: false,
-    };
-    let prepared = connect_mcp(runtime.exoharness_handle().as_ref(), None, &mut command).await?;
-    let Commands::Chat { thread: args, .. } = command else {
-        unreachable!()
-    };
-    let (_, thread) = open_thread(
-        runtime.as_ref(),
-        None,
-        None,
-        &args,
-        &prepared,
-        &config(&temp.path().join("state")),
-    )
-    .await?;
-    assert_eq!(
-        managed::vaults::load_selection(thread.exoharness_handle().as_ref())
-            .await?
-            .unwrap()
-            .vaults
-            .last()
-            .unwrap()
-            .id,
-        vault.record().id
-    );
-    let mut args = thread_args("support");
-    args.thread = Some(thread.record().id.to_string());
-    args.provider = None;
-    let mut command = Commands::Chat {
-        thread: args,
-        tui: false,
-    };
-    let prepared = connect_mcp(runtime.exoharness_handle().as_ref(), None, &mut command).await?;
-    assert_eq!(
-        prepared
-            .selection
-            .as_ref()
-            .unwrap()
-            .vaults
-            .last()
-            .unwrap()
-            .id,
-        vault.record().id
-    );
-    let Commands::Chat {
-        thread: mut args, ..
-    } = command
-    else {
-        unreachable!()
-    };
-    args.provider = Some(SandboxProviderArg::LocalProcess);
-    assert!(
-        open_thread(
-            runtime.as_ref(),
-            None,
-            None,
-            &args,
-            &prepared,
-            &config(&temp.path().join("state"))
+async fn mcp_authentication_errors_are_concise_unless_verbose() -> Result<()> {
+    use exo_mcp::{McpCredentials, McpServerConfig, McpToolSet};
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(401).insert_header("www-authenticate", "Bearer"))
+        .mount(&server)
+        .await;
+    for supplied in [false, true] {
+        let credentials: std::collections::HashMap<String, String> = if supplied {
+            [("github".into(), "invalid-token".into())].into()
+        } else {
+            Default::default()
+        };
+        let error = McpToolSet::connect(
+            &[McpServerConfig {
+                name: "github".into(),
+                url: server.uri(),
+                allowed_tools: None,
+                blocked_tools: vec![],
+            }],
+            McpCredentials::from(credentials),
         )
         .await
-        .is_err()
-    );
-    assert_eq!(
-        thread.config().await?.sandbox_provider,
-        Some(SandboxProvider::Docker)
-    );
-    args.provider = None;
-    args.mounts = vec![FileSystemMount {
-        host_path: temp.path().to_string_lossy().into_owned(),
-        mount_path: "/workspace/host".into(),
-        mode: executor::FileSystemMountMode::ReadOnly,
-        internal: None,
-    }];
-    assert!(
-        open_thread(
-            runtime.as_ref(),
-            None,
-            None,
-            &args,
-            &prepared,
-            &config(&temp.path().join("state"))
-        )
-        .await
-        .is_err()
-    );
-    assert!(thread.config().await?.mounts.is_empty());
-    args.mounts.clear();
-    args.vault = vec!["bob".into()];
-    let mut command = Commands::Chat {
-        thread: args,
-        tui: false,
-    };
-    assert!(
-        connect_mcp(runtime.exoharness_handle().as_ref(), None, &mut command,)
-            .await
-            .is_err()
-    );
+        .err()
+        .context("unauthorized MCP must fail")?;
+        let mut report = crate::CliError {
+            error,
+            verbose: true,
+        };
+        assert!(format!("{report:?}").contains("Caused by:"));
+        report.verbose = false;
+        let expected = if supplied {
+            "connecting MCP server github. The server rejected the token. Check its validity and permissions."
+        } else {
+            "connecting MCP server github. Add a secret for this MCP server URL to a selected vault, or attach the vault containing it, then start a new thread."
+        };
+        assert_eq!(format!("{report:?}"), expected);
+    }
     Ok(())
 }
 

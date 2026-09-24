@@ -1,4 +1,4 @@
-# Managed-agent examples
+# Managed-agent provider examples
 
 ## Connect an agent to Notion through a vault
 
@@ -34,3 +34,30 @@ add `--token-env VARIABLE_NAME` to `secret create` or `secret update`.
 
 Vault credentials match MCP servers by URL, including the path, trailing slash, and query. The secret's name and
 the agent's MCP name can differ.
+
+## Log in to an OAuth runtime
+
+For an Exo-compatible runtime that advertises OAuth metadata, set
+`EXO_RUNTIME_URL` to its runtime API URL, then run:
+
+```sh
+exo provider create remote --url "$EXO_RUNTIME_URL"
+exo provider login remote
+exo --provider remote agent list
+exo provider logout remote
+```
+
+Login opens a browser and uses a localhost callback with PKCE. Use
+`exo provider login remote --no-browser` to open the printed URL yourself.
+If the authorization server requires a registered client, supply its client ID
+with `provider create --client-id`. Scopes are discovered from the server unless
+you supply `--scope` when configuring the provider.
+
+Credentials are saved in the OS credential store after the runtime confirms
+your account. Expiring tokens refresh before HTTP requests, including during an
+existing chat. Logout removes the saved credentials; existing clients must log
+in again. Headless clients can use `--api-key-env` when configuring a provider.
+The OSS runtime's built-in bearer authentication uses that API-key path.
+
+Provider login authenticates the CLI to a runtime. Use vault credentials for
+external MCP servers, as in the Notion example above.

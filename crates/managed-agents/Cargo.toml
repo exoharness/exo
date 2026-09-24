@@ -10,10 +10,16 @@ futures.workspace = true
 exo-mcp = { path = "../mcp" }
 anyhow.workspace = true
 async-trait.workspace = true
-exoharness = { path = "../exoharness" }
+bytes.workspace = true
+exoharness = { path = "../exoharness", features = ["http-client"] }
+lingua.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml_ng.workspace = true
+tokio.workspace = true
+tokio-util = { workspace = true, features = ["io"] }
+url.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

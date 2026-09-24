@@ -118,7 +118,7 @@ Options:
                                             control console, or guardian config
   --profile <name>             Checked-in tool profile: practical (default) or bootstrap
   --sandbox-image <image>      Sandbox image (default: ubuntu:24.04)
-  --provider <provider>         Sandbox provider: daytona, apple-container, docker, smolvm, or local-process
+  --sandbox <provider>         Sandbox provider: daytona, apple-container, docker, smolvm, or local-process
   --self-repo-mount <path>      Sandbox path for this repo (default: /workspace/exo)
   --agent-cli-mount <host-dir>  Bind-mount this host directory read-write into the
                                 sandbox for the agent-cli adapter (default: none)
@@ -365,7 +365,7 @@ append_exo_global_args() {
 exo() {
   EXO_GLOBAL_ARGS=()
   append_exo_global_args
-  "$EXO_BIN" "${EXO_GLOBAL_ARGS[@]}" "$@"
+  "$EXO_BIN" "$1" "${EXO_GLOBAL_ARGS[@]}" "${@:2}"
 }
 
 scheduler_pid_file() {
@@ -491,8 +491,8 @@ ensure_adapters() {
   echo "Starting adapter runner..."
   EXO_GLOBAL_ARGS=()
   append_exo_global_args
-  nohup "$EXO_BIN" "${EXO_GLOBAL_ARGS[@]}" --harness "$HARNESS" \
-    adapters run \
+  nohup "$EXO_BIN" adapters "${EXO_GLOBAL_ARGS[@]}" --harness "$HARNESS" \
+    run \
       --limit "$ADAPTER_LIMIT" \
       --lock-file "$(adapters_lock_file)" \
       --drain-marker "$(adapters_restart_file)" \
@@ -578,8 +578,7 @@ ensure_agent() {
 
   echo "Creating agent $AGENT..."
   local args=(
-    --harness "$HARNESS"
-    agent create "$AGENT_NAME"
+    agent --harness "$HARNESS" create "$AGENT_NAME"
     --slug "$AGENT"
     --module "$MODULE"
     --model "$MODEL"
@@ -587,7 +586,7 @@ ensure_agent() {
   if [[ "$USE_SANDBOX" == true ]]; then
     args+=(--sandbox-image "$SANDBOX_IMAGE" --networking "$NETWORKING")
     if [[ -n "$PROVIDER" ]]; then
-      args+=(--provider "$PROVIDER")
+      args+=(--sandbox "$PROVIDER")
     fi
     # The exo agent shares one sandbox across all of its conversations.
     args+=(--sandbox-scope "${SANDBOX_SCOPE:-agent}")
@@ -603,7 +602,7 @@ ensure_conversation() {
         update_args+=(--sandbox-scope "$SANDBOX_SCOPE")
       fi
       if [[ -n "$PROVIDER" ]]; then
-        update_args+=(--provider "$PROVIDER")
+        update_args+=(--sandbox "$PROVIDER")
       fi
       exo "${update_args[@]}" >/dev/null
     fi
@@ -616,7 +615,7 @@ ensure_conversation() {
     args+=(--sandbox-scope "$SANDBOX_SCOPE")
   fi
   if [[ -n "$PROVIDER" ]]; then
-    args+=(--provider "$PROVIDER")
+    args+=(--sandbox "$PROVIDER")
   fi
   exo "${args[@]}"
   if [[ "$USE_SANDBOX" == true ]]; then
@@ -625,7 +624,7 @@ ensure_conversation() {
       update_args+=(--sandbox-scope "$SANDBOX_SCOPE")
     fi
     if [[ -n "$PROVIDER" ]]; then
-      update_args+=(--provider "$PROVIDER")
+      update_args+=(--sandbox "$PROVIDER")
     fi
     exo "${update_args[@]}" >/dev/null
   fi
@@ -888,7 +887,7 @@ run_repl() {
   else
     EXO_GLOBAL_ARGS=()
     append_exo_global_args
-    exec "$EXO_BIN" "${EXO_GLOBAL_ARGS[@]}" chat \
+    exec "$EXO_BIN" chat "${EXO_GLOBAL_ARGS[@]}" \
       --agent "$AGENT" \
       --thread "$CONVERSATION"
   fi
@@ -949,7 +948,7 @@ run_control_repl() {
     restart_watcher_pid="$!"
 
     local repl_exit
-    if "$EXO_BIN" "${EXO_GLOBAL_ARGS[@]}" chat \
+    if "$EXO_BIN" chat "${EXO_GLOBAL_ARGS[@]}" \
       --agent "$AGENT" \
       --thread "$CONVERSATION"; then
       repl_exit=0
@@ -1338,11 +1337,11 @@ while [[ $# -gt 0 ]]; do
       [[ -n "$SANDBOX_IMAGE" ]] || die "--sandbox-image requires a value"
       shift 2
       ;;
-    --provider)
+    --sandbox)
       PROVIDER="${2:-}"
       case "$PROVIDER" in
         daytona|apple-container|docker|smolvm|local-process) ;;
-        *) die "--provider must be daytona, apple-container, docker, smolvm, or local-process" ;;
+        *) die "--sandbox must be daytona, apple-container, docker, smolvm, or local-process" ;;
       esac
       PROVIDER_EXPLICIT=true
       shift 2

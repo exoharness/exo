@@ -13,13 +13,11 @@ mod execution_tracing;
 mod executor_types;
 pub mod harness;
 mod harness_adapter;
-mod harness_basic;
 #[cfg(test)]
 mod harness_basic_tests;
 mod harness_config;
 mod harness_events;
 mod harness_executor;
-mod harness_facade;
 mod harness_helpers;
 mod harness_js_repl;
 mod harness_runtime;
@@ -27,8 +25,14 @@ mod harness_runtime;
 mod harness_test;
 mod harness_tool;
 mod harness_types;
+mod http_provider;
+pub mod http_service;
+#[cfg(test)]
+mod http_tests;
 mod local_sandbox;
+pub mod managed_agents;
 mod mcp;
+mod provider;
 mod rlm;
 #[cfg(test)]
 mod rlm_tests;
@@ -82,16 +86,19 @@ pub use exoharness::{
     DEFAULT_VCPU_COUNT, DEFAULT_WORKSPACE_SIZE_GIB, FirecrackerConfig, FirecrackerLimaConfig,
     run_firecracker_bridge,
 };
-pub use harness_basic::BasicHarness;
-pub use harness_config::load_agent_config;
+pub use harness_config::{find_agent_config, load_agent_config, load_conversation_config};
+pub use harness_executor::Runtime;
+pub use harness_helpers::{
+    get_conversation_model_override, materialize_conversation_messages,
+    put_conversation_model_override,
+};
 pub use harness_runtime::RouterModelClient;
 pub use harness_tool::{BasicToolRuntime, ExoToolRuntime};
-pub use harness_types::{
-    CreateAgentRequest, CreateConversationRequest, Harness, HarnessAgent, HarnessConversation,
-};
+pub use harness_types::{CreateAgentRequest, CreateConversationRequest};
+pub use http_provider::HttpProvider;
 pub use local_sandbox::LocalSandboxExoHarness;
 pub use mcp::McpToolRuntime;
-pub use rlm::RlmHarness;
+pub use provider::{LocalProvider, Provider, ProviderTurn};
 pub use scheduler_runtime::{
     SchedulerRunOptions, redeliver_pending_wakes, run_due_tasks, run_task,
 };
@@ -101,7 +108,6 @@ pub use scheduler_types::{
     MissedPolicy, NewScheduledTask, ScheduledFireRecord, ScheduledTaskRecord,
     ScheduledTaskRunRecord, now_ms,
 };
-pub use typescript::TypeScriptHarness;
 
 pub(crate) use basic::BasicExecutor;
 

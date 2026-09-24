@@ -39,7 +39,7 @@ async fn http_harness() -> HttpHarnessFixture {
     let addr = listener.local_addr().expect("local addr");
     let server = actix_web::rt::spawn(serve_exoharness_http_listener(listener, Arc::new(basic)));
     let harness: Arc<dyn ExoHarness> =
-        Arc::new(HttpExoHarness::new(format!("http://{addr}")).expect("http harness"));
+        Arc::new(HttpExoHarness::new(format!("http://{addr}"), None).expect("http harness"));
 
     HttpHarnessFixture {
         harness,
@@ -60,7 +60,7 @@ async fn http_harness_with_sandbox_backend(
     let addr = listener.local_addr().expect("local addr");
     let server = actix_web::rt::spawn(serve_exoharness_http_listener(listener, Arc::new(basic)));
     let harness: Arc<dyn ExoHarness> =
-        Arc::new(HttpExoHarness::new(format!("http://{addr}")).expect("http harness"));
+        Arc::new(HttpExoHarness::new(format!("http://{addr}"), None).expect("http harness"));
 
     HttpHarnessFixture {
         harness,
@@ -589,16 +589,14 @@ impl ManagedSandboxHandle for SnapshotTestSandboxHandle {
 fn hosted_harness_from_env() -> Arc<dyn ExoHarness> {
     let url = std::env::var("EXO_CONTRACT_TEST_URL")
         .expect("EXO_CONTRACT_TEST_URL must point at an ExoHarness HTTP endpoint");
-    let mut harness = HttpExoHarness::new(url).expect("hosted http harness");
-    if let Ok(token) = std::env::var("EXO_CONTRACT_TEST_BEARER") {
-        harness = harness.with_bearer_token(token);
-    } else if let Ok(env_name) = std::env::var("EXO_CONTRACT_TEST_BEARER_ENV") {
-        let token = std::env::var(&env_name).unwrap_or_else(|_| {
-            panic!("EXO_CONTRACT_TEST_BEARER_ENV references unset environment variable {env_name}")
-        });
-        harness = harness.with_bearer_token(token);
-    }
-    Arc::new(harness)
+    let token = std::env::var("EXO_CONTRACT_TEST_BEARER").ok().or_else(|| {
+        std::env::var("EXO_CONTRACT_TEST_BEARER_ENV").ok().map(|env_name| {
+            std::env::var(&env_name).unwrap_or_else(|_| {
+                panic!("EXO_CONTRACT_TEST_BEARER_ENV references unset environment variable {env_name}")
+            })
+        })
+    });
+    Arc::new(HttpExoHarness::new(url, token).expect("hosted http harness"))
 }
 
 #[actix_web::test]

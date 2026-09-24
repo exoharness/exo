@@ -12,7 +12,7 @@ own a sandbox.
 ## Create an agent and conversation
 
 ```bash
-exo agent create --model gpt-5.5 --provider docker "Sandbox Example"
+exo agent create --model gpt-5.5 --sandbox docker "Sandbox Example"
 exo thread create sandbox-example "Local Dev"
 exo chat --agent sandbox-example --thread local-dev
 ```
@@ -22,7 +22,7 @@ shell tool.
 
 ## Choosing a sandbox backend
 
-Local providers are selected with `--provider`:
+Local providers are selected with `--sandbox`:
 
 | Backend | Isolation | Notes |
 |:--------|:----------|:------|
@@ -40,7 +40,7 @@ configured as *provider bindings*:
 
 ```bash
 exo secret create daytona --env DAYTONA_API_KEY
-exo provider create --provider daytona --secret daytona
+exo sandbox-provider create --sandbox daytona --secret daytona
 ```
 
 ## Sandbox scope and image

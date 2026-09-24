@@ -312,7 +312,7 @@ Then, in another terminal (from the repo root), create the agent and play:
 exo secret create openai --env OPENAI_API_KEY          # once
 exo model create gpt-5.5 --secret openai          # once
 
-exo --harness typescript agent create "Gameboy" \
+exo agent --harness typescript create "Gameboy" \
   --module exoharness/examples/gameboy-agent/agent/harness.ts \
   --model gpt-5.5 --max-tool-round-trips 20         # once
 exo thread create gameboy "Play Pokemon"      # once

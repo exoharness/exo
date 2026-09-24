@@ -42,12 +42,23 @@ where
 pub(crate) async fn finalize_turn(turn: &dyn TurnHandle, result: Result<()>) -> Result<EventId> {
     match result {
         Ok(()) => turn.finish().await,
-        Err(error) => match turn.finish().await {
-            Ok(_) => Err(error),
-            Err(finish_error) => {
-                Err(error.context(format!("also failed to finish turn: {finish_error}")))
+        Err(error) => {
+            if let Err(persist_error) = turn
+                .add_events(vec![exoharness::EventData::Error {
+                    message: format!("{error:#}"),
+                    metadata: None,
+                }])
+                .await
+            {
+                return Err(error.context(format!("failed to persist turn error: {persist_error}")));
             }
-        },
+            match turn.finish().await {
+                Ok(_) => Err(error),
+                Err(finish_error) => {
+                    Err(error.context(format!("also failed to finish turn: {finish_error}")))
+                }
+            }
+        }
     }
 }
 

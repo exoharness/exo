@@ -224,7 +224,7 @@ export default defineHarness({
 ## Run it
 
 ```bash
-exo --harness typescript agent create "Coder" \
+exo agent --harness typescript create "Coder" \
   --module exoharness/examples/typescript/coding-agent-harness.ts \
   --model gpt-5.5 \
   --sandbox-image python:3.12-slim

@@ -14,18 +14,18 @@ use crate::harness::{
 use crate::harness_executor::{ExecutorStreamMode, HarnessExecutor};
 use crate::{AgentConfig, ConversationConfig, ExecutionStreamEvent};
 
-pub(crate) struct ExecutorTurn<P> {
+pub(crate) struct ExecutorTurn {
     pub agent: Arc<dyn AgentHandle>,
     pub thread: Arc<dyn ConversationHandle>,
     pub turn: Arc<dyn TurnHandle>,
     pub agent_config: AgentConfig,
     pub thread_config: ConversationConfig,
-    pub prepared: P,
+    pub request: crate::SendRequest,
     pub stream: Option<mpsc::UnboundedSender<Result<ExecutionStreamEvent>>>,
-    pub trace: Option<Arc<dyn TurnExecutionTrace>>,
+    pub(crate) trace: Option<Arc<dyn TurnExecutionTrace>>,
 }
 
-impl<P> ExecutorTurn<P> {
+impl ExecutorTurn {
     fn key(&self) -> HarnessTurnKey {
         HarnessTurnKey {
             thread_id: self.thread.record().id,
@@ -40,15 +40,15 @@ struct ActiveTurns {
     turns: HashMap<HarnessTurnKey, Option<oneshot::Sender<()>>>,
 }
 
-pub(crate) struct ExecutorHarness<E> {
-    executor: E,
+pub(crate) struct ExecutorHarness {
+    executor: Arc<dyn HarnessExecutor>,
     events: OnceLock<HarnessEventSink>,
     active: Arc<Mutex<ActiveTurns>>,
     idle: Arc<Notify>,
 }
 
-impl<E> ExecutorHarness<E> {
-    pub(crate) fn new(executor: E) -> Self {
+impl ExecutorHarness {
+    pub(crate) fn new(executor: Arc<dyn HarnessExecutor>) -> Self {
         Self {
             executor,
             events: OnceLock::new(),
@@ -59,7 +59,7 @@ impl<E> ExecutorHarness<E> {
 }
 
 #[async_trait]
-impl<E: HarnessExecutor> Harness<ExecutorTurn<E::Prepared>> for ExecutorHarness<E> {
+impl Harness<ExecutorTurn> for ExecutorHarness {
     fn name(&self) -> &'static str {
         self.executor.name()
     }
@@ -100,7 +100,7 @@ impl<E: HarnessExecutor> Harness<ExecutorTurn<E::Prepared>> for ExecutorHarness<
         self.executor.shutdown().await
     }
 
-    async fn submit(&self, command: HarnessCommand<ExecutorTurn<E::Prepared>>) -> Result<()> {
+    async fn submit(&self, command: HarnessCommand<ExecutorTurn>) -> Result<()> {
         let events = self
             .events
             .get()
@@ -140,7 +140,7 @@ impl<E: HarnessExecutor> Harness<ExecutorTurn<E::Prepared>> for ExecutorHarness<
                 Arc::clone(&work.turn),
                 &work.agent_config,
                 &work.thread_config,
-                &work.prepared,
+                &work.request,
                 work.stream
                     .as_ref()
                     .map(ExecutorStreamMode::Enabled)

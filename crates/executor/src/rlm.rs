@@ -4,13 +4,13 @@ use std::time::Instant;
 use async_trait::async_trait;
 
 use crate::{
-    AgentConfig, BasicToolRuntime, BraintrustRuntimeConfig, ConversationConfig,
-    ExecutionStreamEvent, ModelClient, ModelRequest, ModelResponse, ToolDefinition, ToolRuntime,
+    AgentConfig, ConversationConfig, ExecutionStreamEvent, ModelClient, ModelRequest,
+    ModelResponse, ToolDefinition, ToolRuntime,
 };
 use anyhow::{Context as AnyhowContext, anyhow, bail};
 use exoharness::{
-    AgentHandle, ConversationHandle, EventData, EventId, ExoHarness, FileSystemMountMode, Result,
-    ToolCallId, ToolRequest, ToolResult, TurnHandle,
+    AgentHandle, ConversationHandle, EventData, EventId, FileSystemMountMode, Result, ToolCallId,
+    ToolRequest, ToolResult, TurnHandle,
 };
 use lingua::Message;
 use lingua::universal::{ToolContentPart, ToolResultContentPart};
@@ -19,8 +19,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use crate::execution_tracing::{LlmExecutionTrace, TurnExecutionTrace};
-use crate::harness_executor::{ExecutorHarnessRuntime, ExecutorStreamMode, HarnessExecutor};
-use crate::harness_facade::{SharedHarness, SharedHarnessBacked};
+use crate::harness_executor::{ExecutorStreamMode, HarnessExecutor};
 use crate::harness_helpers::{
     ResolvedModelBinding, assistant_message, assistant_messages_text,
     materialize_conversation_messages, messages_to_history_messages, messages_to_transcript,
@@ -34,26 +33,8 @@ const RLM_RESULT_PREVIEW_CHARS: usize = 12_000;
 const RLM_CONTEXT_PREVIEW_CHARS: usize = 400;
 
 pub struct RlmExecutor<M> {
-    model: Arc<M>,
-    tools: Arc<dyn ToolRuntime>,
-}
-
-impl<M> Clone for RlmExecutor<M> {
-    fn clone(&self) -> Self {
-        Self {
-            model: Arc::clone(&self.model),
-            tools: Arc::clone(&self.tools),
-        }
-    }
-}
-
-impl<M> RlmExecutor<M> {
-    pub fn new(model: Arc<M>) -> Self {
-        Self {
-            model,
-            tools: Arc::new(BasicToolRuntime),
-        }
-    }
+    pub(crate) model: Arc<M>,
+    pub(crate) tools: Arc<dyn ToolRuntime>,
 }
 
 impl<M> RlmExecutor<M>
@@ -430,7 +411,12 @@ impl<M> HarnessExecutor for RlmExecutor<M>
 where
     M: ModelClient + 'static,
 {
-    type Prepared = String;
+    fn fork(&self, _state: Arc<dyn exoharness::ExoHarness>) -> Result<Arc<dyn HarnessExecutor>> {
+        Ok(Arc::new(Self {
+            model: self.model.clone(),
+            tools: self.tools.clone(),
+        }))
+    }
 
     fn name(&self) -> &'static str {
         "rlm"
@@ -448,10 +434,6 @@ where
             .await
     }
 
-    fn prepare_request(&self, request: &crate::SendRequest) -> Result<Self::Prepared> {
-        Ok(messages_to_transcript(&request.input))
-    }
-
     async fn execute_turn(
         &self,
         agent: &dyn AgentHandle,
@@ -459,7 +441,7 @@ where
         turn: Arc<dyn TurnHandle>,
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
-        prepared: &Self::Prepared,
+        request: &crate::SendRequest,
         stream_mode: ExecutorStreamMode<'_>,
         turn_trace: Option<&dyn TurnExecutionTrace>,
     ) -> Result<()> {
@@ -469,7 +451,7 @@ where
             turn.as_ref(),
             agent_config,
             conversation_config,
-            prepared,
+            &messages_to_transcript(&request.input),
             turn_trace,
             match stream_mode {
                 ExecutorStreamMode::Disabled => None,
@@ -795,48 +777,4 @@ fn clamp_preview(value: &str, max_chars: usize) -> String {
         return value.to_string();
     }
     value.chars().take(max_chars).collect()
-}
-
-pub struct RlmHarness<M> {
-    inner: SharedHarness<ExecutorHarnessRuntime<RlmExecutor<M>>>,
-}
-
-impl<M> RlmHarness<M> {
-    pub fn with_runtime_config(
-        exoharness: Arc<dyn ExoHarness>,
-        model: Arc<M>,
-        tools: Arc<dyn ToolRuntime>,
-        runtime_config: Option<BraintrustRuntimeConfig>,
-    ) -> Self
-    where
-        M: ModelClient + 'static,
-    {
-        Self {
-            inner: SharedHarness::new(
-                exoharness,
-                ExecutorHarnessRuntime::new(RlmExecutor { model, tools }, runtime_config),
-            ),
-        }
-    }
-
-    pub fn new(exoharness: Arc<dyn ExoHarness>, model: Arc<M>) -> Self
-    where
-        M: ModelClient + 'static,
-    {
-        let runtime = ExecutorHarnessRuntime::new(RlmExecutor::new(model), None);
-        Self {
-            inner: SharedHarness::new(exoharness, runtime),
-        }
-    }
-}
-
-impl<M> SharedHarnessBacked for RlmHarness<M>
-where
-    M: ModelClient + 'static,
-{
-    type Runtime = ExecutorHarnessRuntime<RlmExecutor<M>>;
-
-    fn shared_harness(&self) -> &SharedHarness<Self::Runtime> {
-        &self.inner
-    }
 }

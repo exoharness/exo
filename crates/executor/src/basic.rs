@@ -32,6 +32,7 @@ pub struct BasicExecutor<M, T> {
 }
 
 impl<M, T> BasicExecutor<M, T> {
+    #[cfg(test)]
     pub fn new(model: Arc<M>, tools: Arc<T>) -> Self {
         Self::with_pricing(model, tools, Arc::new(PricingTable::empty()))
     }
@@ -43,17 +44,6 @@ impl<M, T> BasicExecutor<M, T> {
             tools,
             history_cache: Arc::new(RwLock::new(HashMap::new())),
             pricing,
-        }
-    }
-}
-
-impl<M, T> Clone for BasicExecutor<M, T> {
-    fn clone(&self) -> Self {
-        Self {
-            model: Arc::clone(&self.model),
-            tools: Arc::clone(&self.tools),
-            history_cache: Arc::clone(&self.history_cache),
-            pricing: Arc::clone(&self.pricing),
         }
     }
 }
@@ -370,7 +360,13 @@ where
     M: ModelClient + 'static,
     T: ToolRuntime + 'static,
 {
-    type Prepared = ();
+    fn fork(&self, _state: Arc<dyn exoharness::ExoHarness>) -> Result<Arc<dyn HarnessExecutor>> {
+        Ok(Arc::new(Self::with_pricing(
+            self.model.clone(),
+            self.tools.clone(),
+            self.pricing.clone(),
+        )))
+    }
 
     fn name(&self) -> &'static str {
         "basic"
@@ -388,10 +384,6 @@ where
             .await
     }
 
-    fn prepare_request(&self, _request: &SendRequest) -> Result<Self::Prepared> {
-        Ok(())
-    }
-
     async fn execute_turn(
         &self,
         agent: &dyn AgentHandle,
@@ -399,7 +391,7 @@ where
         turn: Arc<dyn TurnHandle>,
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
-        _prepared: &Self::Prepared,
+        _request: &SendRequest,
         stream_mode: ExecutorStreamMode<'_>,
         turn_trace: Option<&dyn TurnExecutionTrace>,
     ) -> Result<()> {

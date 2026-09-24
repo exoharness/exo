@@ -53,7 +53,7 @@ mkdir -p roms && cp /path/to/pokemon-red.gb roms/
 exo secret create openai --env OPENAI_API_KEY
 exo model create gpt-5.5 --secret openai
 
-exo --harness typescript agent create "Gameboy" \
+exo agent --harness typescript create "Gameboy" \
   --module exoharness/examples/gameboy-agent/agent/harness.ts \
   --model gpt-5.5 --max-tool-round-trips 20
 exo thread create gameboy "Play Pokemon"

@@ -188,7 +188,7 @@ impl SandboxBackendRegistration {
     /// is not macOS-only.
     pub fn smolvm() -> Self {
         // A factory, not a fixed backend: the binary paths are configured per
-        // binding (`exo provider configure --provider smolvm --smolvm-binary`),
+        // binding (`exo sandbox-provider create --sandbox smolvm --smolvm-binary`),
         // so they have to be read when a request arrives rather than at startup —
         // the same shape daytona/e2b use for their credentials. The result is
         // cached per provider by `sandbox_backend_for_provider`, so this runs
@@ -265,7 +265,7 @@ impl SandboxBackendRegistration {
                 {
                     let config = _inner.aws_agentcore_config_from_binding().await?.ok_or_else(|| {
                         anyhow!(
-                            "aws-agentcore sandbox requested but no sandbox provider binding is configured; run `exo provider create --provider aws-agentcore --runtime-arn <arn>`"
+                            "aws-agentcore sandbox requested but no sandbox provider binding is configured; run `exo sandbox-provider create --sandbox aws-agentcore --runtime-arn <arn>`"
                         )
                     })?;
                     Ok(

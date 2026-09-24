@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use clap::Subcommand;
-use executor::{AdapterRunOptions, AdapterStore, Harness, run_adapters_watch};
+use executor::{AdapterRunOptions, AdapterStore, Runtime, run_adapters_watch};
 use tabwriter::TabWriter;
 
 #[derive(Debug, Subcommand)]
@@ -35,7 +35,7 @@ pub enum AdapterCommands {
 
 pub async fn handle_adapter_command(
     root: &Path,
-    harness: Arc<dyn Harness>,
+    harness: Arc<Runtime>,
     command: AdapterCommands,
 ) -> Result<()> {
     let store = AdapterStore::new(root.join("adapters"));

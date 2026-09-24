@@ -25,7 +25,7 @@ use crate::conversation_events::{
     record_host_event,
 };
 use crate::conversation_wakeup::{send_conversation_wakeup, send_conversation_wakeup_content};
-use crate::{CreateConversationRequest, Harness, HarnessAgent, HarnessConversation};
+use crate::{CreateConversationRequest, Runtime};
 
 const INITIAL_RESTART_DELAY: Duration = Duration::from_secs(5);
 const MAX_RESTART_DELAY: Duration = Duration::from_secs(300);
@@ -70,7 +70,7 @@ pub struct RebootNotice {
 }
 
 pub async fn run_adapters_watch(
-    harness: Arc<dyn Harness>,
+    harness: Arc<Runtime>,
     store: AdapterStore,
     options: AdapterRunOptions,
 ) -> Result<()> {
@@ -197,7 +197,7 @@ fn claim_reboot_notice(notice_path: Option<&std::path::Path>) -> Option<RebootNo
 /// conversation rather than propagated: a missing conversation must not block
 /// the event from reaching the others.
 async fn record_host_event_for_adapter_conversations(
-    harness: &dyn Harness,
+    harness: &Runtime,
     store: &AdapterStore,
     event_type: &str,
     payload: serde_json::Value,
@@ -217,12 +217,7 @@ async fn record_host_event_for_adapter_conversations(
         let result = async {
             let agent = require_agent(harness, adapter).await?;
             let conversation = require_conversation(agent.as_ref(), adapter).await?;
-            record_host_event(
-                conversation.exoharness_handle().as_ref(),
-                event_type,
-                payload.clone(),
-            )
-            .await
+            record_host_event(conversation.as_ref(), event_type, payload.clone()).await
         }
         .await;
         if let Err(error) = result {
@@ -237,7 +232,7 @@ async fn record_host_event_for_adapter_conversations(
 }
 
 async fn announce_reboot(
-    harness: Arc<dyn Harness>,
+    harness: Arc<Runtime>,
     store: AdapterStore,
     notice: RebootNotice,
 ) -> Result<()> {
@@ -263,7 +258,7 @@ async fn announce_reboot(
         // Record the reboot in the canonical event log before the wakeup turn
         // so the immutable history exists even if the announcement turn fails.
         if let Err(error) = record_host_event(
-            conversation.exoharness_handle().as_ref(),
+            conversation.as_ref(),
             HOST_EVENT_REBOOT,
             serde_json::json!({
                 "reason": notice.reason,
@@ -279,7 +274,7 @@ async fn announce_reboot(
             );
         }
         send_conversation_wakeup(
-            conversation.as_ref(),
+            harness.as_ref(), &agent, &conversation,
             format!(
                 "Host services were restarted (reason: {reason}, requested at {requested_at}) and the adapter runner is back up. Adapter workers for {adapter_names} are reconnecting now. If you announced this reboot externally, or external users should know you are back, announce your return with send_adapter_message on the relevant adapters and targets; outbound messages queue durably and deliver once the adapter reconnects. If no announcement is appropriate, do nothing.",
             ),
@@ -296,7 +291,7 @@ async fn announce_reboot(
 }
 
 async fn supervise_adapter(
-    harness: Arc<dyn Harness>,
+    harness: Arc<Runtime>,
     store: AdapterStore,
     adapter: AdapterRecord,
     drain: Arc<AtomicBool>,
@@ -422,7 +417,7 @@ pub async fn send_adapter_message_with_handles(
 }
 
 async fn run_adapter_loop(
-    harness: Arc<dyn Harness>,
+    harness: Arc<Runtime>,
     store: &AdapterStore,
     adapter: AdapterRecord,
     drain: Arc<AtomicBool>,
@@ -431,8 +426,9 @@ async fn run_adapter_loop(
     let conversation = require_conversation(agent.as_ref(), &adapter).await?;
     store.requeue_inflight_messages(&adapter.id).await?;
     let config = adapter.config.clone();
-    let secret_env = worker_secret_env(agent.exoharness_handle().as_ref(), &config).await?;
+    let secret_env = worker_secret_env(agent.as_ref(), &config).await?;
     let outbound_notifier = register_adapter_outbound_notifier(&adapter.id);
+    let event_runtime = Arc::clone(&harness);
     let event_store = store.clone();
     let event_adapter = adapter.clone();
     let event_agent = std::sync::Arc::clone(&agent);
@@ -448,6 +444,7 @@ async fn run_adapter_loop(
         secret_env,
         Arc::clone(&outbound_notifier.notify),
         move |event| {
+            let harness = Arc::clone(&event_runtime);
             let store = event_store.clone();
             let adapter = event_adapter.clone();
             let agent = std::sync::Arc::clone(&event_agent);
@@ -455,8 +452,9 @@ async fn run_adapter_loop(
             let config = event_config.clone();
             async move {
                 handle_worker_event(
+                    harness.as_ref(),
                     &store,
-                    agent.as_ref(),
+                    &agent,
                     conversation,
                     &adapter,
                     &config,
@@ -547,9 +545,10 @@ fn adapter_outbound_notifiers() -> &'static Mutex<HashMap<String, Weak<Notify>>>
 }
 
 async fn handle_worker_event(
+    harness: &Runtime,
     store: &AdapterStore,
-    agent: &dyn HarnessAgent,
-    root_conversation: Arc<dyn HarnessConversation>,
+    agent: &Arc<dyn AgentHandle>,
+    root_conversation: Arc<dyn ConversationHandle>,
     adapter: &AdapterRecord,
     config: &AdapterConfig,
     event: WorkerEvent,
@@ -576,8 +575,9 @@ async fn handle_worker_event(
             attachments,
         } => {
             let conversation = resolve_message_conversation(
+                harness,
                 store,
-                agent,
+                agent.as_ref(),
                 root_conversation,
                 adapter,
                 config,
@@ -586,8 +586,10 @@ async fn handle_worker_event(
             )
             .await?;
             handle_worker_message(
+                harness,
+                agent,
                 store,
-                conversation.as_ref(),
+                &conversation,
                 adapter,
                 config,
                 target,
@@ -679,19 +681,23 @@ async fn handle_worker_event(
 }
 
 async fn resolve_message_conversation(
+    harness: &Runtime,
     store: &AdapterStore,
-    agent: &dyn HarnessAgent,
-    root_conversation: Arc<dyn HarnessConversation>,
+    agent: &dyn AgentHandle,
+    root_conversation: Arc<dyn ConversationHandle>,
     adapter: &AdapterRecord,
     config: &AdapterConfig,
     target: &str,
     _metadata: &serde_json::Value,
-) -> Result<Arc<dyn HarnessConversation>> {
+) -> Result<Arc<dyn ConversationHandle>> {
     if !uses_target_conversation_scope(config) {
         return Ok(root_conversation);
     }
     if let Some(record) = store.get_target_conversation(&adapter.id, target).await? {
-        if let Some(conversation) = agent.get_conversation(&record.conversation_id).await? {
+        if let Some(conversation) = harness
+            .get_conversation(agent, &record.conversation_id)
+            .await?
+        {
             return Ok(conversation);
         }
         tracing::warn!(
@@ -704,17 +710,20 @@ async fn resolve_message_conversation(
 
     let slug = target_conversation_slug(adapter, target);
     let name = format!("{} target {}", adapter.name, target);
-    let conversation = match agent
-        .create_conversation(CreateConversationRequest {
-            slug: Some(slug.clone()),
-            name: Some(name),
-            ..Default::default()
-        })
+    let conversation = match harness
+        .create_conversation(
+            agent,
+            CreateConversationRequest {
+                slug: Some(slug.clone()),
+                name: Some(name),
+                ..Default::default()
+            },
+        )
         .await
     {
         Ok(conversation) => conversation,
         Err(error) => {
-            if let Some(conversation) = agent.get_conversation(&slug).await? {
+            if let Some(conversation) = harness.get_conversation(agent, &slug).await? {
                 conversation
             } else {
                 return Err(error).with_context(|| {
@@ -769,8 +778,10 @@ const MAX_INBOUND_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_worker_message(
+    harness: &Runtime,
+    agent: &Arc<dyn AgentHandle>,
     store: &AdapterStore,
-    conversation: &dyn HarnessConversation,
+    conversation: &Arc<dyn ConversationHandle>,
     adapter: &AdapterRecord,
     config: &AdapterConfig,
     target: String,
@@ -831,7 +842,8 @@ async fn handle_worker_message(
         parts.extend(image_parts);
         UserContent::Array(parts)
     };
-    let wakeup_result = send_conversation_wakeup_content(conversation, content).await;
+    let wakeup_result =
+        send_conversation_wakeup_content(harness, agent, conversation, content).await;
     // A failed model turn must not tear down the worker: the external
     // connection is healthy and dropping it loses every queued message.
     // Record the failure and keep processing events.
@@ -986,7 +998,7 @@ fn compose_inbound_wakeup_prompt(
 
 async fn record_worker_lifecycle(
     store: &AdapterStore,
-    _conversation: &dyn HarnessConversation,
+    _conversation: &dyn ConversationHandle,
     adapter: &AdapterRecord,
     config: &AdapterConfig,
     event_type: &str,
@@ -1019,10 +1031,7 @@ async fn record_worker_lifecycle(
     Ok(())
 }
 
-async fn require_agent(
-    harness: &dyn Harness,
-    adapter: &AdapterRecord,
-) -> Result<Arc<dyn HarnessAgent>> {
+async fn require_agent(harness: &Runtime, adapter: &AdapterRecord) -> Result<Arc<dyn AgentHandle>> {
     harness
         .get_agent(&adapter.agent_id)
         .await?
@@ -1030,11 +1039,10 @@ async fn require_agent(
 }
 
 async fn require_conversation(
-    agent: &dyn HarnessAgent,
+    agent: &dyn AgentHandle,
     adapter: &AdapterRecord,
-) -> Result<Arc<dyn HarnessConversation>> {
-    agent
-        .get_conversation(&adapter.conversation_id)
+) -> Result<Arc<dyn ConversationHandle>> {
+    crate::harness_helpers::resolve_conversation_handle(agent, &adapter.conversation_id)
         .await?
         .ok_or_else(|| {
             anyhow!(
