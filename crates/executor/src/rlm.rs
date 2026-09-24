@@ -1,17 +1,16 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
 
 use crate::{
-    AgentConfig, BraintrustRuntimeConfig, ConversationConfig, ExecutionStreamEvent, ModelClient,
-    ModelRequest, ModelResponse, ToolDefinition,
+    AgentConfig, BasicToolRuntime, BraintrustRuntimeConfig, ConversationConfig,
+    ExecutionStreamEvent, ModelClient, ModelRequest, ModelResponse, ToolDefinition, ToolRuntime,
 };
 use anyhow::{Context as AnyhowContext, anyhow, bail};
 use exoharness::{
-    AgentHandle, BasicExoHarness, BasicExoHarnessConfig, ConversationHandle, EventData, EventId,
-    ExoHarness, FileSystemMountMode, Result, ToolCallId, ToolRequest, ToolResult, TurnHandle,
+    AgentHandle, ConversationHandle, EventData, EventId, ExoHarness, FileSystemMountMode, Result,
+    ToolCallId, ToolRequest, ToolResult, TurnHandle,
 };
 use lingua::Message;
 use lingua::universal::{ToolContentPart, ToolResultContentPart};
@@ -28,7 +27,6 @@ use crate::harness_helpers::{
     resolve_model_binding, system_message, to_lingua_value, user_message,
 };
 use crate::harness_js_repl::JsReplState;
-use crate::harness_runtime::RouterModelClient;
 use crate::shared::try_send_stream_event;
 
 const RLM_STDOUT_PREVIEW_CHARS: usize = 12_000;
@@ -37,19 +35,24 @@ const RLM_CONTEXT_PREVIEW_CHARS: usize = 400;
 
 pub struct RlmExecutor<M> {
     model: Arc<M>,
+    tools: Arc<dyn ToolRuntime>,
 }
 
 impl<M> Clone for RlmExecutor<M> {
     fn clone(&self) -> Self {
         Self {
             model: Arc::clone(&self.model),
+            tools: Arc::clone(&self.tools),
         }
     }
 }
 
 impl<M> RlmExecutor<M> {
     pub fn new(model: Arc<M>) -> Self {
-        Self { model }
+        Self {
+            model,
+            tools: Arc::new(BasicToolRuntime),
+        }
     }
 }
 
@@ -59,6 +62,7 @@ where
 {
     async fn run_turn_loop(
         &self,
+        agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
         turn: &dyn TurnHandle,
         agent_config: &AgentConfig,
@@ -104,12 +108,20 @@ where
                 bail!("RLM turn exceeded the configured round budget");
             }
 
+            let external_tools = self.tools.definitions();
+            let external_names: Vec<_> = external_tools
+                .iter()
+                .map(|tool| tool.name.clone())
+                .collect();
             let request = ModelRequest {
                 model: model_binding.model.clone(),
                 api_key: model_binding.api_key.clone(),
                 base_url: model_binding.base_url.clone(),
                 messages: history.clone(),
-                tools: build_rlm_tool_definitions(),
+                tools: build_rlm_tool_definitions()
+                    .into_iter()
+                    .chain(external_tools)
+                    .collect(),
                 max_output_tokens: agent_config.max_output_tokens,
             };
             let llm_trace = match turn_trace {
@@ -187,15 +199,27 @@ where
                 )
                 .await?;
 
-                let result = match self
-                    .execute_tool_call(
+                let tool_result = if external_names.contains(&tool_call.request.function_name) {
+                    self.tools
+                        .execute(
+                            agent,
+                            conversation,
+                            Some(turn),
+                            agent_config,
+                            conversation_config,
+                            &tool_call.request,
+                        )
+                        .await
+                } else {
+                    self.execute_tool_call(
                         &mut js_state,
                         agent_config,
                         &model_binding,
                         &tool_call.request,
                     )
                     .await
-                {
+                };
+                let result = match tool_result {
                     Ok(result) => {
                         if let Some(tool_trace) = tool_trace {
                             tool_trace.finish_success(&result).await;
@@ -412,13 +436,25 @@ where
         "rlm"
     }
 
+    async fn prepare_conversation(
+        &self,
+        agent: &dyn AgentHandle,
+        conversation: &dyn ConversationHandle,
+        agent_config: &AgentConfig,
+        conversation_config: &ConversationConfig,
+    ) -> Result<()> {
+        self.tools
+            .prepare_conversation(agent, conversation, agent_config, conversation_config)
+            .await
+    }
+
     fn prepare_request(&self, request: &crate::SendRequest) -> Result<Self::Prepared> {
         Ok(messages_to_transcript(&request.input))
     }
 
     async fn execute_turn(
         &self,
-        _agent: &dyn AgentHandle,
+        agent: &dyn AgentHandle,
         conversation: Arc<dyn ConversationHandle>,
         turn: Arc<dyn TurnHandle>,
         agent_config: &AgentConfig,
@@ -428,6 +464,7 @@ where
         turn_trace: Option<&dyn TurnExecutionTrace>,
     ) -> Result<()> {
         self.run_turn_loop(
+            agent,
             conversation.as_ref(),
             turn.as_ref(),
             agent_config,
@@ -691,6 +728,7 @@ The prompt string in `context` is the external environment. It is formatted as a
 fn build_rlm_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
+            strict: None,
             name: "repl_execute".to_string(),
             description: "Execute JavaScript in the persistent REPL namespace. The variable `context` is always available and persistent values should live on `globalThis`.".to_string(),
             parameters: json!({
@@ -706,6 +744,7 @@ fn build_rlm_tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            strict: None,
             name: "subquery".to_string(),
             description: "Ask a direct sub-LLM question over a prompt string and optionally store the result in a JavaScript variable.".to_string(),
             parameters: json!({
@@ -725,6 +764,7 @@ fn build_rlm_tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            strict: None,
             name: "subquery_variable".to_string(),
             description: "Ask a direct sub-LLM question using the string value of a JavaScript variable as external context, and optionally store the answer in another variable.".to_string(),
             parameters: json!({
@@ -762,6 +802,23 @@ pub struct RlmHarness<M> {
 }
 
 impl<M> RlmHarness<M> {
+    pub fn with_runtime_config(
+        exoharness: Arc<dyn ExoHarness>,
+        model: Arc<M>,
+        tools: Arc<dyn ToolRuntime>,
+        runtime_config: Option<BraintrustRuntimeConfig>,
+    ) -> Self
+    where
+        M: ModelClient + 'static,
+    {
+        Self {
+            inner: SharedHarness::new(
+                exoharness,
+                ExecutorHarnessRuntime::new(RlmExecutor { model, tools }, runtime_config),
+            ),
+        }
+    }
+
     pub fn new(exoharness: Arc<dyn ExoHarness>, model: Arc<M>) -> Self
     where
         M: ModelClient + 'static,
@@ -770,33 +827,6 @@ impl<M> RlmHarness<M> {
         Self {
             inner: SharedHarness::new(exoharness, runtime),
         }
-    }
-}
-
-impl RlmHarness<RouterModelClient> {
-    pub fn from_exoharness(
-        exoharness: Arc<dyn ExoHarness>,
-        runtime_config: Option<BraintrustRuntimeConfig>,
-        env: HashMap<String, String>,
-    ) -> Self {
-        let model = Arc::new(RouterModelClient::new(env));
-        let runtime = ExecutorHarnessRuntime::new(RlmExecutor::new(model), runtime_config);
-
-        Self {
-            inner: SharedHarness::new(exoharness, runtime),
-        }
-    }
-
-    pub async fn from_config(
-        exo_config: BasicExoHarnessConfig,
-        runtime_config: Option<BraintrustRuntimeConfig>,
-        env: HashMap<String, String>,
-    ) -> Result<Self> {
-        Ok(Self::from_exoharness(
-            Arc::new(BasicExoHarness::new(exo_config).await?),
-            runtime_config,
-            env,
-        ))
     }
 }
 

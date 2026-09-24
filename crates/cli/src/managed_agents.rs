@@ -1,4 +1,7 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+use exo_mcp::{McpCredentials, McpToolSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -28,6 +31,9 @@ pub struct ThreadArgs {
     /// Override the model binding for this thread.
     #[arg(long)]
     pub model: Option<String>,
+    /// Supply an MCP bearer token for this session from an environment variable.
+    #[arg(long, value_name = "SERVER=ENV_VAR")]
+    pub mcp_token_env: Vec<String>,
     #[arg(long = "provider", visible_alias = "sandbox", value_enum)]
     provider: Option<SandboxProviderArg>,
     #[arg(long)]
@@ -89,6 +95,40 @@ pub fn load_definition(command: &Commands) -> Result<Option<AgentDefinition>> {
     path.map(AgentDefinition::load).transpose()
 }
 
+pub async fn connect_mcp(
+    root: &dyn executor::ExoHarness,
+    definition: Option<&AgentDefinition>,
+    command: &mut Commands,
+    env: &HashMap<String, String>,
+) -> Result<Arc<McpToolSet>> {
+    let args = match command {
+        Commands::Chat { thread, .. } | Commands::Run { thread, .. } => thread,
+        _ => return Ok(Arc::default()),
+    };
+    let saved;
+    let definition = if let Some(definition) = definition {
+        Some(definition)
+    } else {
+        let reference = args
+            .agent
+            .as_deref()
+            .context("provide --agent-file or --agent")?;
+        let agent = managed::find_agent(root, reference).await?;
+        args.agent = Some(agent.record().id.to_string());
+        saved = managed::load_definition(agent.as_ref()).await?;
+        saved.as_ref()
+    };
+    let resolved = match definition {
+        Some(definition) => definition.resolve_mcp_servers(&()).await?,
+        None => Vec::new(),
+    };
+    let servers = resolved.as_slice();
+    let credentials = McpCredentials::from_env(servers, &args.mcp_token_env, |name| {
+        env.get(name).cloned().or_else(|| std::env::var(name).ok())
+    })?;
+    Ok(Arc::new(McpToolSet::connect(servers, credentials).await?))
+}
+
 pub async fn create_agent(
     harness: &dyn Harness,
     definition: &AgentDefinition,
@@ -136,6 +176,7 @@ pub async fn open_thread(
     definition: Option<&AgentDefinition>,
     selection: Option<&HarnessSelection>,
     args: &ThreadArgs,
+    mcp: &McpToolSet,
 ) -> Result<(Arc<dyn HarnessAgent>, Arc<dyn HarnessConversation>)> {
     let mut mounts = args.mounts.clone();
     for mount in &mut mounts {
@@ -254,6 +295,35 @@ pub async fn open_thread(
         conversation.record().id
     );
     println!("model: {model}");
+    if !mcp.tools().is_empty() {
+        println!("mcp: {} tools", mcp.tools().len());
+    }
+    let inventory = serde_json::to_value(mcp.tools())?;
+    let previous = conversation
+        .exoharness_handle()
+        .get_events(Some(exoharness::EventQuery {
+            direction: Some(exoharness::EventQueryDirection::Desc),
+            limit: Some(1),
+            types: Some(vec![exoharness::EventKind::custom("mcp_tools")]),
+            ..Default::default()
+        }))
+        .await?;
+    if (!mcp.tools().is_empty() || !previous.events.is_empty())
+        && !matches!(previous.events.first().map(|event| &event.data),
+            Some(executor::EventData::Custom { payload, .. }) if payload == &inventory)
+    {
+        conversation
+            .exoharness_handle()
+            .add_events(exoharness::AddEventsRequest {
+                session_id: None,
+                turn_id: None,
+                data: vec![executor::EventData::Custom {
+                    event_type: "mcp_tools".to_string(),
+                    payload: inventory,
+                }],
+            })
+            .await?;
+    }
     Ok((agent, conversation))
 }
 

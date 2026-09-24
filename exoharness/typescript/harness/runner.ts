@@ -33,6 +33,7 @@ import {
   type SendRequest,
   type Secret,
   type SecretMetadata,
+  type ToolDefinition,
   type ToolRequest,
   type ToolResult,
   type Turn,
@@ -197,6 +198,7 @@ interface RawEvent {
 }
 
 interface RawTypeScriptInitPayload {
+  tools: ToolDefinition[];
   agent: RawAgentRecord;
   conversation: RawConversationHandleInfo;
   turn: RawTurnHandleInfo;
@@ -1643,6 +1645,7 @@ function createTurnContext(
   });
 
   const context: TurnContext = {
+    tools: init.tools,
     agentConfig,
     conversationConfig,
     request,

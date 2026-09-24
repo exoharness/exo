@@ -103,6 +103,56 @@ Anthropic model binding and the Claude Code sandbox image. Custom TypeScript
 harness paths are resolved relative to the Markdown file. Those modules must
 remain installed; Exo saves the Markdown, not a bundle of code.
 
+## MCP
+
+Hosts can resolve MCP endpoints from their authenticated context:
+
+```yaml
+mcp_servers:
+  - type: provider
+    name: tickets
+```
+
+The host implements `exo_managed_agents::mcp::McpServerResolver` and calls
+`AgentDefinition::resolve_mcp_servers` before selecting credentials and connecting.
+The resolver receives each server's `name` and returns its MCP URL. The name also
+sets the local tool namespace, and filters stay in the agent definition. Resolved URLs
+receive the same validation as explicit URLs.
+Provider resolution does not supply credentials or authorize access to them.
+The standalone Exo CLI supports explicit URLs and rejects unconfigured providers.
+
+Add remote MCP servers to the agent file:
+
+```yaml
+mcp_servers:
+  - type: url
+    name: deepwiki
+    url: https://mcp.deepwiki.com/mcp
+```
+
+DeepWiki doesn't need credentials. Try the example:
+
+```bash
+exo run --agent-file exoharness/examples/managed-agents/repo-analyst.md \
+  "Use DeepWiki to explain how tokio-rs/tokio schedules tasks."
+```
+
+For authenticated servers, use `--mcp-token-env SERVER=ENV_VAR`, for example
+`exo chat --agent-file agent.md --mcp-token-env tickets=TICKETS_TOKEN`.
+Exo reads the named variable from `--env-file` or the shell environment. The token
+stays in the host MCP client for this CLI session; it is not saved in the agent
+or forwarded to the TypeScript harness process.
+
+The client uses Streamable HTTP, initializes each server, and discovers its tools
+when the CLI starts. All tools are available unless the server entry specifies
+`allowed_tools` or `blocked_tools`, using the original tool names. An empty
+`allowed_tools: []` exposes no tools. If both lists are set, blocked tools are
+removed from the allowed set. Unknown tool names are errors.
+
+Tools run without an approval prompt. Names are scoped to their
+server, such as `exo_mcp__deepwiki__read_wiki_structure`. Thread events also record
+the mapping to the original server and tool names.
+
 ## State
 
 State defaults to `.exo/exoharness` under the current directory. Use an absolute

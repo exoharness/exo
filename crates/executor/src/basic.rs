@@ -149,9 +149,10 @@ where
             let messages = self
                 .materialize_prompt_history(conversation, &agent_config.instructions)
                 .await?;
-            let request =
+            let mut request =
                 build_model_request(conversation, agent_config, conversation_config, messages)
                     .await?;
+            request.tools.extend(self.tools.definitions());
             let response = self
                 .complete_model_round(request, round as usize, stream_mode, turn_trace)
                 .await?;
@@ -335,7 +336,7 @@ where
                     (
                         json!({
                             "ok": false,
-                            "error": error.to_string(),
+                            "error": format!("{error:#}"),
                         }),
                         false,
                     )
@@ -676,6 +677,7 @@ fn build_tool_definitions(config: &ConversationConfig) -> Vec<ToolDefinition> {
 
     if let Some(program) = &config.shell_program {
         tools.push(ToolDefinition {
+            strict: None,
             name: "shell".to_string(),
             description: format!("Run a shell command using {program}."),
             parameters: json!({

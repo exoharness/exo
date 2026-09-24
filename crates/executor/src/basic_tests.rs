@@ -336,7 +336,7 @@ async fn send_records_tool_result_when_tool_execution_fails() {
                     && result
                         == &json!({
                             "ok": false,
-                            "error": "sandbox quota exceeded",
+                            "error": "executing tool: sandbox quota exceeded",
                         })
             }
             _ => false,
@@ -591,7 +591,7 @@ impl ToolRuntime for FailingToolRuntime {
         _config: &ConversationConfig,
         _request: &ToolRequest,
     ) -> Result<ToolResult> {
-        Err(anyhow!(self.message.clone()))
+        Err(anyhow!(self.message.clone()).context("executing tool"))
     }
 }
 

@@ -116,6 +116,7 @@ export interface FileSystemMount {
 }
 
 export interface ToolDefinition {
+  strict?: boolean;
   name: string;
   description: string;
   parameters: JsonValue;
@@ -359,6 +360,7 @@ export interface Turn {
 }
 
 export interface TurnContext {
+  readonly tools: ToolDefinition[];
   readonly agentConfig: AgentConfig;
   readonly conversationConfig: ConversationConfig;
   readonly request: SendRequest;

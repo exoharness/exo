@@ -646,21 +646,22 @@ async function executeDynamicToolCall(
 ): Promise<JsonValue> {
   const callId = stringOrNull(params.callId) ?? "dynamic-tool-call";
   const toolName = stringOrNull(params.tool);
-  if (toolName !== EXO_SHELL_DYNAMIC_TOOL) {
+  const isShell = toolName === EXO_SHELL_DYNAMIC_TOOL;
+  if (!isShell && !context.tools.some((tool) => tool.name === toolName)) {
     return dynamicToolErrorResponse(`unsupported dynamic tool: ${toolName}`);
   }
-
-  const args = asRecord(params.arguments);
-  const command = stringOrNull(args.command);
-  if (!command) {
+  const args = objectArgs(asRecord(params.arguments));
+  if (isShell && !stringOrNull(args.command)) {
     return dynamicToolErrorResponse("exo_shell requires a command string");
   }
-
+  if (!toolName) {
+    return dynamicToolErrorResponse("missing tool name");
+  }
   const toolCall: PendingToolCall = {
     toolCallId: callId,
     request: {
-      functionName: EXO_SHELL_TOOL,
-      arguments: objectArgs({ command }),
+      functionName: isShell ? EXO_SHELL_TOOL : toolName,
+      arguments: args,
     },
   };
   await appendEvents(context, [toolRequestedEvent(toolCall)]);
@@ -673,9 +674,12 @@ async function executeDynamicToolCall(
       "codex_dynamic_tool",
     );
     await appendEvents(context, [toolResultEvent(callId, result)]);
-    return dynamicToolResultResponse(shellToolResultText(result), {
-      success: shellToolSucceeded(result),
-    });
+    return dynamicToolResultResponse(
+      isShell ? shellToolResultText(result) : JSON.stringify(result),
+      {
+        success: isShell ? shellToolSucceeded(result) : true,
+      },
+    );
   } catch (error) {
     const message = errorMessage(error);
     await appendEvents(context, [
@@ -924,13 +928,19 @@ function messagesToUserInput(messages: Message[]): JsonValue[] {
 }
 
 function buildCodexDynamicTools(context: TurnContext): JsonValue[] {
+  const tools = context.tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    inputSchema: tool.parameters,
+  }));
   if (useCodexExternalSandbox()) {
-    return [];
+    return tools;
   }
   if (!context.conversationConfig.shellProgram) {
-    return [];
+    return tools;
   }
   return [
+    ...tools,
     {
       name: EXO_SHELL_DYNAMIC_TOOL,
       description: `Run a shell command through the exoharness sandbox. Commands execute from ${sandboxCwd(context)}. Use this for command execution in exo conversations.`,

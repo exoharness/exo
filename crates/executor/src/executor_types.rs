@@ -163,6 +163,10 @@ pub trait ModelResponseStream: Send {
 
 #[async_trait]
 pub trait ToolRuntime: Send + Sync {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        Vec::new()
+    }
+
     async fn prepare_conversation(
         &self,
         _agent: &dyn AgentHandle,
@@ -223,6 +227,8 @@ pub struct PendingToolCall {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolDefinition {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
     pub name: String,
     pub description: String,
     pub parameters: Value,

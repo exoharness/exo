@@ -1,0 +1,31 @@
+[package]
+name = "exo-mcp"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+anyhow.workspace = true
+futures.workspace = true
+# rmcp's HTTP client trait requires reqwest 0.13.
+reqwest = { version = "0.13.2", default-features = false, features = [
+  "rustls",
+  "json",
+  "stream",
+] }
+rmcp = { version = "3.2.0", default-features = false, features = [
+  "client",
+  "auth",
+  "transport-streamable-http-client-reqwest",
+] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+sse-stream = "0.2"
+tokio.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+axum = "0.8"

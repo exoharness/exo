@@ -8,13 +8,12 @@ use std::time::Duration;
 use anyhow::{Context as AnyhowContext, anyhow, bail};
 use async_trait::async_trait;
 use exoharness::{
-    AddEventsRequest, AgentHandle, AgentId, BasicExoHarness, BasicExoHarnessConfig,
-    CancelSandboxProcessRequest, CloseSandboxProcessInputRequest, ConversationHandle,
-    ConversationId, EventData, EventKind, EventQuery, EventQueryDirection, ExoHarness,
-    GetSandboxProcessEventsResult, Result, SandboxId, SandboxProcessEvent,
-    SandboxProcessEventQuery, SandboxProcessId, SandboxProcessLifecycle, SandboxProcessMode,
-    SandboxProcessStatus, SandboxProcessStdin, StartSandboxProcessRequest, ToolArguments,
-    ToolRequest, ToolResult, TurnHandle, WriteSandboxProcessInputRequest,
+    AddEventsRequest, AgentHandle, AgentId, CancelSandboxProcessRequest,
+    CloseSandboxProcessInputRequest, ConversationHandle, ConversationId, EventData, EventKind,
+    EventQuery, EventQueryDirection, ExoHarness, GetSandboxProcessEventsResult, Result, SandboxId,
+    SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessId, SandboxProcessLifecycle,
+    SandboxProcessMode, SandboxProcessStatus, SandboxProcessStdin, StartSandboxProcessRequest,
+    ToolArguments, ToolRequest, ToolResult, TurnHandle, WriteSandboxProcessInputRequest,
     protocol::{
         ConversationHandleInfo, Request as ExoRequest, Response as ExoResponse, TurnHandleInfo,
     },
@@ -30,7 +29,7 @@ use tokio::task::JoinHandle;
 use crate::execution_tracing::TurnExecutionTrace;
 use crate::harness_executor::{ExecutorHarnessRuntime, ExecutorStreamMode, HarnessExecutor};
 use crate::harness_facade::{SharedHarness, SharedHarnessBacked};
-use crate::harness_tool::{BasicToolRuntime, ExoToolRuntime, ensure_shell_sandbox};
+use crate::harness_tool::{ExoToolRuntime, ensure_shell_sandbox};
 use crate::shared::try_send_stream_event;
 use crate::{
     AgentConfig, BraintrustRuntimeConfig, ConversationConfig, ExecutionStreamEvent, SendRequest,
@@ -41,6 +40,7 @@ pub struct TypeScriptExecutor<T> {
     root: Arc<dyn ExoHarness>,
     workspace_root: PathBuf,
     env: Arc<HashMap<String, String>>,
+    env_remove: Arc<Vec<String>>,
     tools: Arc<T>,
     runners: Arc<Mutex<HashMap<String, Arc<Mutex<TypeScriptRunnerProcess>>>>>,
 }
@@ -56,6 +56,7 @@ impl<T> TypeScriptExecutor<T> {
             root,
             workspace_root,
             env: Arc::new(env),
+            env_remove: Arc::default(),
             tools,
             runners: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -68,6 +69,7 @@ impl<T> Clone for TypeScriptExecutor<T> {
             root: Arc::clone(&self.root),
             workspace_root: self.workspace_root.clone(),
             env: Arc::clone(&self.env),
+            env_remove: Arc::clone(&self.env_remove),
             tools: Arc::clone(&self.tools),
             runners: Arc::clone(&self.runners),
         }
@@ -204,6 +206,7 @@ where
         let runner = Arc::new(Mutex::new(TypeScriptRunnerProcess::start(
             &self.workspace_root,
             self.env.as_ref(),
+            &self.env_remove,
             module_path,
             thread,
         )?));
@@ -316,6 +319,7 @@ impl TypeScriptRunnerProcess {
     fn start(
         workspace_root: &Path,
         env: &HashMap<String, String>,
+        env_remove: &[String],
         module_path: &str,
         thread: Arc<dyn ConversationHandle>,
     ) -> Result<Self> {
@@ -331,13 +335,17 @@ impl TypeScriptRunnerProcess {
             );
         }
 
-        let mut child = Command::new("node")
+        let mut command = Command::new("node");
+        command.envs(env);
+        for name in env_remove {
+            command.env_remove(name);
+        }
+        let mut child = command
             .arg("--import")
             .arg("tsx")
             .arg(&runner_path)
             .arg(module_path)
             .current_dir(workspace_root)
-            .envs(env.iter())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -426,6 +434,7 @@ impl TypeScriptRunnerProcess {
                     conversation_config: conversation_config.clone(),
                     request: prepared.clone(),
                     streaming: matches!(stream_mode, ExecutorStreamMode::Enabled(_)),
+                    tools: executor.tools.definitions(),
                     braintrust_parent: turn_trace.and_then(TurnExecutionTrace::export_parent),
                 }),
             },
@@ -887,7 +896,7 @@ where
     }
 }
 
-fn typescript_workspace_root() -> Result<PathBuf> {
+pub(crate) fn typescript_workspace_root() -> Result<PathBuf> {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -899,6 +908,31 @@ pub struct TypeScriptHarness<T> {
 }
 
 impl<T> TypeScriptHarness<T> {
+    pub fn from_exoharness(
+        exoharness: Arc<dyn ExoHarness>,
+        runtime_config: Option<BraintrustRuntimeConfig>,
+        env: HashMap<String, String>,
+        tools: Arc<T>,
+        env_remove: Vec<String>,
+    ) -> Result<Self>
+    where
+        T: ToolRuntime + 'static,
+    {
+        let mut executor = TypeScriptExecutor::new(
+            Arc::clone(&exoharness),
+            typescript_workspace_root()?,
+            env,
+            tools,
+        );
+        executor.env_remove = Arc::new(env_remove);
+        Ok(Self {
+            inner: SharedHarness::new(
+                exoharness,
+                ExecutorHarnessRuntime::new(executor, runtime_config),
+            ),
+        })
+    }
+
     pub fn new(exoharness: Arc<dyn ExoHarness>, workspace_root: PathBuf, tools: Arc<T>) -> Self
     where
         T: ToolRuntime + 'static,
@@ -918,36 +952,6 @@ impl<T> TypeScriptHarness<T> {
     }
 }
 
-impl TypeScriptHarness<BasicToolRuntime> {
-    pub fn from_exoharness(
-        exoharness: Arc<dyn ExoHarness>,
-        runtime_config: Option<BraintrustRuntimeConfig>,
-        env: HashMap<String, String>,
-    ) -> Result<Self> {
-        let workspace_root = typescript_workspace_root()?;
-        let tools = Arc::new(BasicToolRuntime);
-        let runtime = ExecutorHarnessRuntime::new(
-            TypeScriptExecutor::new(Arc::clone(&exoharness), workspace_root, env, tools),
-            runtime_config,
-        );
-        Ok(Self {
-            inner: SharedHarness::new(exoharness, runtime),
-        })
-    }
-
-    pub async fn from_config(
-        exo_config: BasicExoHarnessConfig,
-        runtime_config: Option<BraintrustRuntimeConfig>,
-        env: HashMap<String, String>,
-    ) -> Result<Self> {
-        Self::from_exoharness(
-            Arc::new(BasicExoHarness::new(exo_config).await?),
-            runtime_config,
-            env,
-        )
-    }
-}
-
 impl TypeScriptHarness<ExoToolRuntime> {
     pub fn exo_from_exoharness(
         root: impl AsRef<Path>,
@@ -955,21 +959,13 @@ impl TypeScriptHarness<ExoToolRuntime> {
         runtime_config: Option<BraintrustRuntimeConfig>,
         env: HashMap<String, String>,
     ) -> Result<Self> {
-        let workspace_root = typescript_workspace_root()?;
-        let root = root.as_ref();
-        let adapter_worker_root = workspace_root.join("exo/adapters");
-        let tools = Arc::new(ExoToolRuntime::with_roots(
-            root.join("scheduled-tasks"),
-            root.join("adapters"),
-            adapter_worker_root,
-        ));
-        let runtime = ExecutorHarnessRuntime::new(
-            TypeScriptExecutor::new(Arc::clone(&exoharness), workspace_root, env, tools),
+        Self::from_exoharness(
+            exoharness,
             runtime_config,
-        );
-        Ok(Self {
-            inner: SharedHarness::new(exoharness, runtime),
-        })
+            env,
+            Arc::new(ExoToolRuntime::from_root(root)?),
+            Vec::new(),
+        )
     }
 }
 
@@ -1078,6 +1074,7 @@ enum GuestToHostMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TypeScriptInitPayload {
+    tools: Vec<crate::ToolDefinition>,
     agent: exoharness::AgentRecord,
     conversation: ConversationHandleInfo,
     turn: TurnHandleInfo,
