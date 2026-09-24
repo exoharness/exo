@@ -14,6 +14,7 @@ mod secret_tests;
 mod tools;
 mod tui;
 mod tui_app;
+mod turn_display;
 
 use std::collections::HashMap;
 use std::io::{self, IsTerminal, Read, Write};
@@ -628,9 +629,9 @@ enum Commands {
         /// How much tool detail to print: minimal, compact, or full.
         #[arg(long, value_enum, default_value_t = Verbosity::default())]
         verbosity: Verbosity,
-        /// Use the legacy line-mode repl instead of the full-screen TUI.
+        /// Use the full-screen TUI instead of inline chat.
         #[arg(long)]
-        legacy_tui: bool,
+        tui: bool,
     },
     Adapters {
         #[command(subcommand)]
@@ -1265,7 +1266,6 @@ async fn main() -> Result<()> {
     let pricing = Arc::new(cost::load(cli.pricing_path.clone(), cli.pricing_url.clone()).await);
     let harness = instantiate_harness(
         &cli.root,
-        &exo_config,
         exoharness,
         harness_kind,
         runtime_config.clone(),
@@ -1273,6 +1273,7 @@ async fn main() -> Result<()> {
         pricing,
     )
     .await?;
+    let result: Result<()> = async {
     match cli.command {
         Commands::FirecrackerBridge => {
             unreachable!("Firecracker bridge returns before harness startup")
@@ -1286,7 +1287,7 @@ async fn main() -> Result<()> {
             agent,
             conversation,
             verbosity,
-            legacy_tui,
+            tui,
         } => {
             let agent_slug =
                 agent.unwrap_or_else(|| default_repl_agent_slug(harness_selection.as_ref()));
@@ -1358,13 +1359,11 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // Non-interactive stdin/stdout (pipes, CI) can't host the
-            // full-screen TUI; fall back to line mode automatically.
             let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
-            if legacy_tui || !interactive {
-                run_chat_repl(Arc::clone(&agent), conversation, verbosity).await?;
-            } else {
+            if tui && interactive {
                 tui_app::run_chat_tui(Arc::clone(&agent), conversation, verbosity).await?;
+            } else {
+                run_chat_repl(Arc::clone(&agent), conversation, verbosity).await?;
             }
         }
         Commands::Agent { command } => match command {
@@ -2597,7 +2596,11 @@ async fn main() -> Result<()> {
         }
     }
 
-    harness.flush_tracing().await?;
+    Ok(())
+    }.await;
+    let shutdown = harness.shutdown().await;
+    result?;
+    shutdown?;
     Ok(())
 }
 
@@ -3126,7 +3129,6 @@ async fn instantiate_exoharness(
 
 async fn instantiate_harness(
     root: &Path,
-    exo_config: &BasicExoHarnessConfig,
     exoharness: Arc<dyn ExoHarness>,
     kind: HarnessKind,
     runtime_config: Option<BraintrustRuntimeConfig>,
@@ -3145,15 +3147,12 @@ async fn instantiate_harness(
             runtime_config,
             env_vars,
         )),
-        HarnessKind::Exo => Arc::new(
-            TypeScriptHarness::<ExoToolRuntime>::exo_from_root(
-                root,
-                exo_config.clone(),
-                runtime_config,
-                env_vars,
-            )
-            .await?,
-        ),
+        HarnessKind::Exo => Arc::new(TypeScriptHarness::<ExoToolRuntime>::exo_from_exoharness(
+            root,
+            exoharness,
+            runtime_config,
+            env_vars,
+        )?),
         HarnessKind::TypeScript => Arc::new(TypeScriptHarness::from_exoharness(
             exoharness,
             runtime_config,
@@ -3214,7 +3213,9 @@ fn build_typescript_harness_config(
         )),
         (Some(HarnessSelection::TypeScriptPreset(preset)), _, None) => {
             Ok(Some(resolve_typescript_harness_config(
-                preset.module_path(),
+                &Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .join(preset.module_path()),
                 resolve_typescript_tool_module_paths(tool_modules)?,
             )?))
         }
@@ -3835,7 +3836,7 @@ mod create_tests {
                 agent: None,
                 conversation: None,
                 verbosity: crate::render::Verbosity::Compact,
-                legacy_tui: false,
+                tui: false,
             }
         ));
     }

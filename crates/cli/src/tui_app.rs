@@ -761,6 +761,9 @@ impl TuiApp {
         let conversation = Arc::clone(&self.conversation);
         let session_id = self.session_id;
         tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let mut ttft = None;
+            let mut completed_turn = None;
             let request = SendRequest {
                 input: vec![Message::User {
                     content: UserContent::String(text),
@@ -771,7 +774,23 @@ impl TuiApp {
                 Ok(mut stream) => {
                     while let Some(event) = stream.next().await {
                         let app_event = match event {
-                            Ok(event) => AppEvent::Stream(event),
+                            Ok(event) => {
+                                match &event {
+                                    ExecutionStreamEvent::FirstChunk { .. } => {
+                                        ttft.get_or_insert_with(|| started.elapsed());
+                                    }
+                                    ExecutionStreamEvent::Chunk(chunk)
+                                        if !chunk_text(chunk).is_empty() =>
+                                    {
+                                        ttft.get_or_insert_with(|| started.elapsed());
+                                    }
+                                    ExecutionStreamEvent::Completed(result) => {
+                                        completed_turn = Some(result.turn_id)
+                                    }
+                                    _ => {}
+                                }
+                                AppEvent::Stream(event)
+                            }
                             Err(error) => AppEvent::StreamError(format!("{error:#}")),
                         };
                         if tx.send(app_event).is_err() {
@@ -781,6 +800,20 @@ impl TuiApp {
                 }
                 Err(error) => {
                     let _ = tx.send(AppEvent::StreamError(format!("{error:#}")));
+                }
+            }
+            let elapsed = started.elapsed();
+            if let Some(turn_id) = completed_turn {
+                let mut tracker = crate::turn_display::UsageTracker::default();
+                let summary = match tracker
+                    .refresh(conversation.exoharness_handle().as_ref(), Some(turn_id))
+                    .await
+                {
+                    Ok(usage) => usage.display(&tracker.total, ttft, elapsed),
+                    Err(error) => format!("usage summary failed: {error:#}"),
+                };
+                if tx.send(AppEvent::CommandOutput(vec![summary])).is_err() {
+                    return;
                 }
             }
             let _ = tx.send(AppEvent::StreamDone);

@@ -11,15 +11,20 @@ mod conversation_sandbox;
 mod conversation_wakeup;
 mod execution_tracing;
 mod executor_types;
+pub mod harness;
+mod harness_adapter;
 mod harness_basic;
 #[cfg(test)]
 mod harness_basic_tests;
 mod harness_config;
+mod harness_events;
 mod harness_executor;
 mod harness_facade;
 mod harness_helpers;
 mod harness_js_repl;
 mod harness_runtime;
+#[cfg(test)]
+mod harness_test;
 mod harness_tool;
 mod harness_types;
 mod local_sandbox;
@@ -63,10 +68,10 @@ pub use exoharness::{
     PutSecretRequest, RunInSandboxRequest, SANDBOX_MAIN_MOUNT_DIR, SandboxAttachment,
     SandboxBackendRegistration, SandboxId, SandboxProcess, SandboxProvider, SandboxProviderConfig,
     SandboxRecord, SandboxResourceShape, Secret, SecretBackendChoice, SecretMetadata, SessionId,
-    SnapshotId, SpritesBackendSpec, StartSandboxRequest, ToolRequest, Uuid7, VercelBackendSpec,
-    default_aws_agentcore_image, default_daytona_image, default_docker_image, default_e2b_template,
-    default_firecracker_image, default_vercel_image, serve_exoharness_http_listener,
-    serve_exoharness_http_listener_with_options,
+    SnapshotId, SpritesBackendSpec, StartSandboxRequest, ToolRequest, TurnId, UsageRecord, Uuid7,
+    VercelBackendSpec, default_aws_agentcore_image, default_daytona_image, default_docker_image,
+    default_e2b_template, default_firecracker_image, default_vercel_image,
+    serve_exoharness_http_listener, serve_exoharness_http_listener_with_options,
 };
 #[cfg(feature = "firecracker")]
 pub use exoharness::{

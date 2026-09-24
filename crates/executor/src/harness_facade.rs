@@ -8,7 +8,6 @@ use exoharness::{
 };
 use lingua::Message;
 
-use crate::conversation_wakeup::conversation_send_lock;
 use crate::harness_helpers::{
     get_conversation_model_override, materialize_conversation_messages,
     put_conversation_model_override, resolve_agent_handle, resolve_conversation_handle,
@@ -42,7 +41,7 @@ pub(crate) trait HarnessRuntime: Send + Sync + Clone + 'static {
         conversation: Arc<dyn ConversationHandle>,
         request: SendRequest,
     ) -> Result<ExecutionStreamHandle>;
-    async fn flush_tracing(&self) -> Result<()>;
+    async fn shutdown(&self) -> Result<()>;
 }
 
 pub(crate) trait SharedHarnessBacked: Send + Sync {
@@ -76,8 +75,8 @@ where
         self.shared_harness().delete_agent(agent_ref).await
     }
 
-    async fn flush_tracing(&self) -> Result<()> {
-        self.shared_harness().flush_tracing().await
+    async fn shutdown(&self) -> Result<()> {
+        self.shared_harness().runtime.shutdown().await
     }
 }
 
@@ -157,10 +156,6 @@ where
         };
         let deleted = self.exoharness.delete_agent(&agent.record().id).await?;
         Ok(deleted)
-    }
-
-    pub(crate) async fn flush_tracing(&self) -> Result<()> {
-        self.runtime.flush_tracing().await
     }
 
     fn wrap_agent(&self, agent: Arc<dyn AgentHandle>) -> Arc<dyn HarnessAgent> {
@@ -329,8 +324,6 @@ where
     }
 
     async fn send(&self, request: SendRequest) -> Result<SendResult> {
-        let send_lock = conversation_send_lock(&self.conversation.record().id.to_string());
-        let _guard = send_lock.lock().await;
         self.runtime
             .send(
                 Arc::clone(&self.agent),
@@ -341,16 +334,12 @@ where
     }
 
     async fn send_stream(&self, request: SendRequest) -> Result<ExecutionStreamHandle> {
-        let send_lock = conversation_send_lock(&self.conversation.record().id.to_string());
-        let send_guard = send_lock.lock_owned().await;
-        let stream = self
-            .runtime
+        self.runtime
             .send_stream(
                 Arc::clone(&self.agent),
                 Arc::clone(&self.conversation),
                 request,
             )
-            .await?;
-        Ok(stream.with_send_guard(send_guard))
+            .await
     }
 }

@@ -298,6 +298,11 @@ describe("materializeEventsToMessages", () => {
       }),
       { role: "user", content: "try again" },
     ]);
+    expect(
+      materializeEventsToMessages(
+        events.filter((event) => event.data.type !== "tool_requested"),
+      ),
+    ).toEqual(materializeEventsToMessages(events));
   });
 });
 

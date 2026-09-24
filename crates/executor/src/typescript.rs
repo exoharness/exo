@@ -81,6 +81,41 @@ where
 {
     type Prepared = SendRequest;
 
+    fn name(&self) -> &'static str {
+        "typescript"
+    }
+
+    async fn cancel_turn(
+        &self,
+        thread: &dyn ConversationHandle,
+        config: &AgentConfig,
+    ) -> Result<()> {
+        let module = config
+            .typescript
+            .as_ref()
+            .ok_or_else(|| anyhow!("missing TypeScript module"))?;
+        let key = format!("{}:{}", thread.record().id, module.module_path);
+        let runner = self.runners.lock().await.remove(&key);
+        if let Some(runner) = runner {
+            runner.lock().await.shutdown().await?;
+        }
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> Result<()> {
+        let runners = std::mem::take(&mut *self.runners.lock().await);
+        let results = futures::future::join_all(
+            runners
+                .into_values()
+                .map(|runner| async move { runner.lock().await.shutdown().await }),
+        )
+        .await;
+        for result in results {
+            result?;
+        }
+        Ok(())
+    }
+
     async fn prepare_conversation(
         &self,
         agent: &dyn AgentHandle,
@@ -100,7 +135,7 @@ where
     async fn execute_turn(
         &self,
         agent: &dyn AgentHandle,
-        conversation: &dyn ConversationHandle,
+        conversation: Arc<dyn ConversationHandle>,
         turn: Arc<dyn TurnHandle>,
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
@@ -117,7 +152,10 @@ where
             bail!("typescript harness module does not exist: {module_path}");
         }
 
-        let runner = self.runner(&module_path).await?;
+        let key = format!("{}:{}", conversation.record().id, module_path);
+        let runner = self
+            .runner(&key, &module_path, Arc::clone(&conversation))
+            .await?;
         let result = {
             let mut runner = runner.lock().await;
             runner
@@ -125,7 +163,7 @@ where
                     self,
                     TypeScriptTurn {
                         agent,
-                        conversation,
+                        conversation: conversation.as_ref(),
                         turn,
                         agent_config,
                         conversation_config,
@@ -138,7 +176,10 @@ where
         };
 
         if result.is_err() {
-            self.remove_runner(&module_path, &runner).await;
+            self.remove_runner(&key, &runner).await;
+            if let Err(error) = runner.lock().await.shutdown().await {
+                tracing::warn!(%error, "failed to stop TypeScript runner after a failed turn");
+            }
         }
 
         result
@@ -149,9 +190,14 @@ impl<T> TypeScriptExecutor<T>
 where
     T: ToolRuntime + 'static,
 {
-    async fn runner(&self, module_path: &str) -> Result<Arc<Mutex<TypeScriptRunnerProcess>>> {
+    async fn runner(
+        &self,
+        key: &str,
+        module_path: &str,
+        thread: Arc<dyn ConversationHandle>,
+    ) -> Result<Arc<Mutex<TypeScriptRunnerProcess>>> {
         let mut runners = self.runners.lock().await;
-        if let Some(runner) = runners.get(module_path) {
+        if let Some(runner) = runners.get(key) {
             return Ok(Arc::clone(runner));
         }
 
@@ -159,8 +205,9 @@ where
             &self.workspace_root,
             self.env.as_ref(),
             module_path,
+            thread,
         )?));
-        runners.insert(module_path.to_string(), Arc::clone(&runner));
+        runners.insert(key.to_string(), Arc::clone(&runner));
         Ok(runner)
     }
 
@@ -209,6 +256,7 @@ where
 const RUNNER_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 struct TypeScriptRunnerProcess {
+    thread: Arc<dyn ConversationHandle>,
     child: Child,
     host_tx: mpsc::UnboundedSender<HostToGuestMessage>,
     lines: Lines<BufReader<ChildStdout>>,
@@ -245,10 +293,31 @@ struct TypeScriptTurn<'a> {
 }
 
 impl TypeScriptRunnerProcess {
+    async fn shutdown(&mut self) -> Result<()> {
+        let child_result = self.child.kill().await;
+        let processes = std::mem::take(&mut self.sandbox_processes);
+        let results = futures::future::join_all(processes.into_values().map(|process| {
+            process.event_task.abort();
+            self.thread
+                .cancel_sandbox_process(CancelSandboxProcessRequest {
+                    sandbox_id: process.sandbox_id,
+                    process_id: process.process_id,
+                    signal: None,
+                })
+        }))
+        .await;
+        child_result?;
+        for result in results {
+            result?;
+        }
+        Ok(())
+    }
+
     fn start(
         workspace_root: &Path,
         env: &HashMap<String, String>,
         module_path: &str,
+        thread: Arc<dyn ConversationHandle>,
     ) -> Result<Self> {
         let runner_path = workspace_root
             .join("exoharness")
@@ -309,6 +378,7 @@ impl TypeScriptRunnerProcess {
 
         Ok(Self {
             child,
+            thread,
             host_tx,
             lines: BufReader::new(stdout).lines(),
             stderr_task: Some(stderr_task),
@@ -817,6 +887,13 @@ where
     }
 }
 
+fn typescript_workspace_root() -> Result<PathBuf> {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .context("failed to resolve Exo installation for TypeScript harness")
+}
+
 pub struct TypeScriptHarness<T> {
     inner: SharedHarness<ExecutorHarnessRuntime<TypeScriptExecutor<T>>>,
 }
@@ -847,8 +924,7 @@ impl TypeScriptHarness<BasicToolRuntime> {
         runtime_config: Option<BraintrustRuntimeConfig>,
         env: HashMap<String, String>,
     ) -> Result<Self> {
-        let workspace_root = std::env::current_dir()
-            .context("failed to resolve current directory for TypeScript harness")?;
+        let workspace_root = typescript_workspace_root()?;
         let tools = Arc::new(BasicToolRuntime);
         let runtime = ExecutorHarnessRuntime::new(
             TypeScriptExecutor::new(Arc::clone(&exoharness), workspace_root, env, tools),
@@ -873,16 +949,14 @@ impl TypeScriptHarness<BasicToolRuntime> {
 }
 
 impl TypeScriptHarness<ExoToolRuntime> {
-    pub async fn exo_from_root(
+    pub fn exo_from_exoharness(
         root: impl AsRef<Path>,
-        exo_config: BasicExoHarnessConfig,
+        exoharness: Arc<dyn ExoHarness>,
         runtime_config: Option<BraintrustRuntimeConfig>,
         env: HashMap<String, String>,
     ) -> Result<Self> {
-        let workspace_root = std::env::current_dir()
-            .context("failed to resolve current directory for Exo harness")?;
+        let workspace_root = typescript_workspace_root()?;
         let root = root.as_ref();
-        let exoharness: Arc<dyn ExoHarness> = Arc::new(BasicExoHarness::new(exo_config).await?);
         let adapter_worker_root = workspace_root.join("exo/adapters");
         let tools = Arc::new(ExoToolRuntime::with_roots(
             root.join("scheduled-tasks"),

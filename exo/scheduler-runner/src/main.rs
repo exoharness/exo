@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 use executor::{
-    BasicExoHarnessConfig, BraintrustRuntimeConfig, ExoToolRuntime, Harness,
+    BasicExoHarness, BasicExoHarnessConfig, BraintrustRuntimeConfig, ExoToolRuntime, Harness,
     SandboxBackendRegistration, SandboxProvider, SchedulerRunOptions, SchedulerStore,
     SecretBackendChoice, TypeScriptHarness, redeliver_pending_wakes, run_due_tasks,
 };
@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    harness.flush_tracing().await?;
+    harness.shutdown().await?;
     Ok(())
 }
 
@@ -184,8 +184,12 @@ async fn exo_harness(
         ],
     };
     Ok(Arc::new(
-        TypeScriptHarness::<ExoToolRuntime>::exo_from_root(root, exo_config, runtime_config, env)
-            .await?,
+        TypeScriptHarness::<ExoToolRuntime>::exo_from_exoharness(
+            root,
+            Arc::new(BasicExoHarness::new(exo_config).await?),
+            runtime_config,
+            env,
+        )?,
     ))
 }
 

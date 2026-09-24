@@ -8,8 +8,7 @@ use exoharness::{
 };
 use lingua::Message;
 use lingua::universal::{
-    AssistantContent, AssistantContentPart, ToolContentPart, ToolResultContentPart, UserContent,
-    UserContentPart,
+    AssistantContent, AssistantContentPart, ToolContentPart, UserContent, UserContentPart,
 };
 use serde::{Deserialize, Serialize};
 
@@ -80,53 +79,30 @@ pub(crate) async fn resolve_conversation_handle(
 pub(crate) async fn materialize_conversation_messages(
     conversation: &dyn ConversationHandle,
 ) -> Result<Vec<Message>> {
-    let events = conversation
-        .get_events(Some(EventQuery {
-            cursor: None,
-            direction: Some(EventQueryDirection::Asc),
-            limit: None,
-            session_id: None,
-            turn_id: None,
-            types: None,
-        }))
-        .await?
-        .events;
+    let mut events = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = conversation
+            .get_events(Some(EventQuery {
+                cursor,
+                direction: Some(EventQueryDirection::Asc),
+                limit: None,
+                ..Default::default()
+            }))
+            .await?;
+        if page.events.is_empty() {
+            break;
+        }
+        let next = page.events.last().map(|event| event.id);
+        anyhow::ensure!(next > cursor, "conversation history cursor did not advance");
+        cursor = next;
+        events.extend(page.events);
+    }
 
     let mut messages = Vec::new();
     let mut tool_call_names = HashMap::<ToolCallId, String>::new();
 
-    for event in events {
-        match event.data {
-            EventData::Messages {
-                messages: event_messages,
-                ..
-            } => messages.extend(event_messages),
-            EventData::ToolRequested {
-                tool_call_id,
-                request,
-                ..
-            } => {
-                tool_call_names.insert(tool_call_id, request.function_name);
-            }
-            EventData::ToolResult {
-                tool_call_id,
-                result,
-            } => {
-                let Some(tool_name) = tool_call_names.get(&tool_call_id) else {
-                    continue;
-                };
-                messages.push(Message::Tool {
-                    content: vec![ToolContentPart::ToolResult(ToolResultContentPart {
-                        tool_call_id,
-                        tool_name: tool_name.clone(),
-                        output: to_lingua_value(result),
-                        provider_options: None,
-                    })],
-                });
-            }
-            _ => {}
-        }
-    }
+    crate::basic::extend_message_history(&mut messages, &mut tool_call_names, &events);
 
     Ok(messages)
 }
@@ -397,6 +373,69 @@ mod tests {
     use serde_json::json;
 
     use super::to_lingua_value;
+
+    #[test]
+    fn materializes_embedded_and_standalone_calls_without_duplicates() {
+        use super::*;
+        let call = json!({"role": "assistant", "content": [{
+            "type": "tool_call", "tool_call_id": "call", "tool_name": "shell",
+            "arguments": {"type": "valid", "value": {}}
+        }]});
+        for (embedded, requested) in [(false, true), (true, true), (true, false)] {
+            for result in [false, true] {
+                let mut data = Vec::new();
+                if embedded {
+                    data.push(json!({"type": "messages", "messages": [call.clone()]}));
+                }
+                if requested {
+                    data.push(json!({"type": "tool_requested", "tool_call_id": "call",
+                        "request": {"function_name": "shell", "arguments": {}}}));
+                }
+                data.push(json!({"type": "messages", "messages": []}));
+                if result {
+                    data.push(
+                        json!({"type": "tool_result", "tool_call_id": "call", "result": "done"}),
+                    );
+                }
+                data.push(
+                    json!({"type": "messages", "messages": [{"role": "user", "content": "next"}]}),
+                );
+                let events: Vec<_> = data
+                    .into_iter()
+                    .map(|data| {
+                        let id = Uuid7::now();
+                        exoharness::Event {
+                            id,
+                            thread_id: id,
+                            session_id: None,
+                            turn_id: None,
+                            created_at: id.timestamp().unwrap(),
+                            data: serde_json::from_value(data).unwrap(),
+                        }
+                    })
+                    .collect();
+                let mut messages = Vec::new();
+                crate::basic::extend_message_history(&mut messages, &mut HashMap::new(), &events);
+                assert_eq!(messages.len(), 3);
+                assert!(matches!(messages[0], Message::Assistant { .. }));
+                let Message::Tool { content } = &messages[1] else {
+                    panic!("missing result")
+                };
+                let ToolContentPart::ToolResult(output) = &content[0];
+                assert_eq!(output.tool_call_id, "call");
+                assert_eq!(output.tool_name, "shell");
+                assert_eq!(
+                    output.output,
+                    to_lingua_value(if result {
+                        json!("done")
+                    } else {
+                        json!({"ok": false, "error": "tool execution did not complete before the previous turn ended"})
+                    })
+                );
+                assert!(matches!(messages[2], Message::User { .. }));
+            }
+        }
+    }
 
     #[test]
     fn converts_std_json_to_lingua_json_structurally() {

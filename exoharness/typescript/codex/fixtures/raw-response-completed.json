@@ -1,0 +1,32 @@
+{
+  "emittedAtMs": 1789801316501,
+  "method": "rawResponse/completed",
+  "params": {
+    "responseId": "response-1",
+    "threadId": "thread-1",
+    "turnId": "turn-1",
+    "usage": {
+      "cacheWriteInputTokens": 6797,
+      "cachedInputTokens": 0,
+      "inputTokens": 6800,
+      "outputTokens": 62,
+      "reasoningOutputTokens": 12,
+      "totalTokens": 6862
+    },
+    "usageMetadata": {
+      "amount": null,
+      "metadata": {
+        "input_tokens": 6800,
+        "input_tokens_details": {
+          "cache_write_tokens": 6797,
+          "cached_tokens": 0
+        },
+        "output_tokens": 62,
+        "output_tokens_details": {
+          "reasoning_tokens": 12
+        },
+        "total_tokens": 6862
+      }
+    }
+  }
+}
