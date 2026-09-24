@@ -225,9 +225,7 @@ export class WarmJsonlSandboxWorker<TRequest, TEvent> {
   }
 }
 
-export async function resolveLlmBinding(
-  context: TurnContext,
-): Promise<ResolvedLlmBinding> {
+async function registeredModelBinding(context: TurnContext) {
   const name = context.agentConfig.model;
   const metadata = (
     await context.exoharness.current.conversation.listBindings()
@@ -246,6 +244,20 @@ export async function resolveLlmBinding(
   if (!binding || binding.type !== "llm") {
     throw new Error(`registered model binding disappeared: ${name}`);
   }
+  return { name, binding };
+}
+
+export async function resolveSandboxLlmBinding(
+  context: TurnContext,
+): Promise<ResolvedLlmBinding> {
+  const { name, binding } = await registeredModelBinding(context);
+  return { name, model: binding.model, baseUrl: binding.baseUrl ?? null };
+}
+
+export async function resolveLlmBinding(
+  context: TurnContext,
+): Promise<ResolvedLlmBinding> {
+  const { name, binding } = await registeredModelBinding(context);
   let apiKey: string | undefined;
   if (binding.secret) {
     const vault = await context.exoharness.current.conversation.getVault(

@@ -1332,6 +1332,7 @@ function fakeTurnContext(
   let artifactIndex = 0;
   return {
     tools: [],
+    mcpServers: [],
     agentConfig: {
       instructions: [],
       harness: "typescript",

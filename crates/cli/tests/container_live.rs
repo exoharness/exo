@@ -82,10 +82,13 @@ async fn check_resources(sandbox: &str) -> Result<()> {
     Ok(())
 }
 
-async fn with_live_fixture(run: impl AsyncFn(&Fixture) -> Result<()>) -> Result<()> {
+async fn with_live_fixture(
+    backend: exoharness::SandboxProvider,
+    run: impl AsyncFn(&Fixture) -> Result<()>,
+) -> Result<()> {
     for provider in ["local", "remote"] {
-        eprintln!("Live workflow: {provider}");
-        let f = Fixture::with_sandbox(exoharness::SandboxProvider::AppleContainer).await?;
+        eprintln!("Live workflow: {backend}, {provider}");
+        let f = Fixture::with_sandbox(backend.clone()).await?;
         let result = async {
             f.cli(&["provider", "switch", provider]).await?;
             run(&f).await
@@ -119,9 +122,9 @@ async fn with_live_fixture(run: impl AsyncFn(&Fixture) -> Result<()>) -> Result<
 #[ignore = "requires OPENAI_API_KEY, Apple container, and exo-pi-sandbox:latest"]
 async fn pi_managed_local_and_http() -> Result<()> {
     let api_key = std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY is required")?;
-    with_live_fixture(async |f| {
-            success(f.command(&["secret", "create", "live-openai", "--env", "LIVE_OPENAI_API_KEY"]).env("LIVE_OPENAI_API_KEY", &api_key).output().await?)?;
-            f.cli(&["model", "create", "gpt-5-mini", "--secret", "live-openai"]).await?;
+    with_live_fixture(exoharness::SandboxProvider::AppleContainer, async |f| {
+            success(f.command(&["--provider", "local", "secret", "create", "live-openai", "--env", "LIVE_OPENAI_API_KEY"]).env("LIVE_OPENAI_API_KEY", &api_key).output().await?)?;
+            f.cli(&["--provider", "local", "model", "create", "gpt-5-mini", "--secret", "live-openai"]).await?;
             let mcp = MockServer::start().await;
             for verb in ["GET", "DELETE"] {
                 Mock::given(method(verb)).and(path("/mcp")).respond_with(ResponseTemplate::new(405)).mount(&mcp).await;
@@ -194,7 +197,7 @@ async fn pi_managed_local_and_http() -> Result<()> {
 #[actix_web::test]
 #[ignore = "requires Apple container and exo-pi-sandbox:latest"]
 async fn container_environments_local_and_http() -> Result<()> {
-    with_live_fixture(async |f| {
+    with_live_fixture(exoharness::SandboxProvider::AppleContainer, async |f| {
             let shared = f.temp.path().join("shared");
             std::fs::create_dir(&shared)?;
             for name in ["first", "second"] {
@@ -229,6 +232,239 @@ async fn container_environments_local_and_http() -> Result<()> {
                 ensure!(thread.list_sandboxes().await?[0].id == id, "resume replaced the sandbox");
                 ensure!(shell(thread.as_ref(), &id, "test -e /home/exo/private-proof").await? == 0, "resume lost sandbox files");
             }
+            Ok::<_, anyhow::Error>(())
+    }).await
+}
+
+#[actix_web::test]
+#[ignore = "requires OPENAI_API_KEY and the Codex image in Apple container and Docker"]
+async fn codex_credentials_stay_out_of_containers() -> Result<()> {
+    agent_credentials_stay_out_of_containers(
+        "codex",
+        "exo-codex-sandbox:latest",
+        "gpt-5-mini",
+        "OPENAI_API_KEY",
+    )
+    .await
+}
+
+#[actix_web::test]
+#[ignore = "requires ANTHROPIC_API_KEY and the Claude image in Apple container and Docker"]
+async fn claude_credentials_stay_out_of_containers() -> Result<()> {
+    agent_credentials_stay_out_of_containers(
+        "claude-code",
+        "exo-claude-code-sandbox:latest",
+        "claude-sonnet-4-6",
+        "ANTHROPIC_API_KEY",
+    )
+    .await
+}
+
+#[actix_web::test]
+#[ignore = "requires OPENAI_API_KEY and the Pi image in Apple container and Docker"]
+async fn pi_credentials_stay_out_of_containers() -> Result<()> {
+    agent_credentials_stay_out_of_containers(
+        "pi",
+        "exo-pi-sandbox:latest",
+        "gpt-5-mini",
+        "OPENAI_API_KEY",
+    )
+    .await
+}
+
+async fn agent_credentials_stay_out_of_containers(
+    harness: &str,
+    image: &str,
+    model: &str,
+    variable: &str,
+) -> Result<()> {
+    agent_credential_workflow(
+        &[
+            exoharness::SandboxProvider::AppleContainer,
+            exoharness::SandboxProvider::Docker,
+        ],
+        harness,
+        image,
+        model,
+        variable,
+    )
+    .await
+}
+
+#[cfg(feature = "firecracker")]
+#[actix_web::test]
+#[ignore = "requires OPENAI_API_KEY, Firecracker artifacts, and a rootfs containing Codex"]
+async fn firecracker_codex_credentials() -> Result<()> {
+    agent_credential_workflow(
+        &[exoharness::SandboxProvider::Firecracker],
+        "codex",
+        &exoharness::default_firecracker_image(),
+        "gpt-5-mini",
+        "OPENAI_API_KEY",
+    )
+    .await
+}
+
+#[cfg(feature = "firecracker")]
+#[actix_web::test]
+#[ignore = "requires ANTHROPIC_API_KEY, Firecracker artifacts, and a rootfs containing Claude Code"]
+async fn firecracker_claude_credentials() -> Result<()> {
+    agent_credential_workflow(
+        &[exoharness::SandboxProvider::Firecracker],
+        "claude-code",
+        &exoharness::default_firecracker_image(),
+        "claude-sonnet-4-6",
+        "ANTHROPIC_API_KEY",
+    )
+    .await
+}
+
+#[cfg(feature = "firecracker")]
+#[actix_web::test]
+#[ignore = "requires OPENAI_API_KEY, Firecracker artifacts, and a rootfs containing Pi"]
+async fn firecracker_pi_credentials() -> Result<()> {
+    agent_credential_workflow(
+        &[exoharness::SandboxProvider::Firecracker],
+        "pi",
+        &exoharness::default_firecracker_image(),
+        "gpt-5-mini",
+        "OPENAI_API_KEY",
+    )
+    .await
+}
+
+async fn agent_credential_workflow(
+    backends: &[exoharness::SandboxProvider],
+    harness: &str,
+    image: &str,
+    model: &str,
+    variable: &str,
+) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    let inspect = r#"
+const fs = require('node:fs');
+const crypto = require('node:crypto');
+const [variable, digest] = process.argv.slice(1);
+if (!process.env[variable]?.startsWith('exo_egress_')) throw Error('model credential was not replaced');
+function inspect(path) {
+  let data;
+  try { data = fs.readFileSync(path, 'utf8'); }
+  catch (e) { if (e.code === 'ENOENT' || e.code === 'ESRCH' || (e.code === 'EACCES' && path.startsWith('/proc/'))) return; throw e; }
+  for (const value of data.match(/[A-Za-z0-9_-]{32,}/g) ?? []) {
+    if (crypto.createHash('sha256').update(value).digest('hex') === digest) throw Error('raw credential found in ' + path);
+  }
+}
+function walk(path) {
+  if (!fs.existsSync(path)) return;
+  for (const entry of fs.readdirSync(path, { withFileTypes: true })) {
+    const child = path + '/' + entry.name;
+    if (entry.isDirectory()) walk(child);
+    else if (entry.isFile()) inspect(child);
+  }
+}
+for (const pid of fs.readdirSync('/proc').filter(name => /^\d+$/.test(name))) {
+  inspect('/proc/' + pid + '/environ');
+  inspect('/proc/' + pid + '/cmdline');
+}
+for (const dir of ['/tmp/exo-codex-home', '/home/exo/.codex', '/home/exo/.claude', '/home/exo/.pi']) walk(dir);
+"#;
+    let key = std::env::var(variable).with_context(|| format!("{variable} is required"))?;
+    let digest = format!("{:x}", Sha256::digest(key.as_bytes()));
+    for backend in backends {
+        eprintln!("Credential workflow: {backend}, {harness}");
+        let network = if *backend == exoharness::SandboxProvider::Firecracker {
+            let host = if variable == "ANTHROPIC_API_KEY" {
+                "api.anthropic.com"
+            } else {
+                "api.openai.com"
+            };
+            format!("{{type: limited, allowed_hosts: [{host}]}}")
+        } else {
+            "{type: unrestricted}".into()
+        };
+        with_live_fixture(backend.clone(), async |f| {
+                    success(f.command(&["--provider", "local", "secret", "create", "live-model", "--env", "LIVE_MODEL_KEY"]).env("LIVE_MODEL_KEY", &key).output().await?)?;
+                    f.cli(&["--provider", "local", "model", "create", model, "--secret", "live-model"]).await?;
+                    std::fs::write(&f.agent_file, format!("---\nname: credential-test\nharness: {harness}\nconfig:\n  model: {model}\n---\nFollow the user request.\n"))?;
+                    let environment = f.temp.path().join("environment.yaml");
+                    std::fs::write(&environment, format!("name: credential-test\nconfig:\n  provider: {backend}\n  image: {image}\n  default_workdir: /home/exo/workspace\n  resources: {{vcpu_count: 2, memory_mib: 2048}}\n  policy:\n    networking: {network}\n  idle_seconds: 600\n"))?;
+                    f.cli(&["agent", "create", "credential-test", "--file", f.agent_file.to_str().context("agent path")?]).await?;
+                    let first = live(f, &["run", "--agent", "credential-test", "--environment-file", environment.to_str().context("environment path")?, "Reply exactly CREDENTIAL-PROXY-READY without using tools."], "").await?;
+                    ensure!(first.contains("CREDENTIAL-PROXY-READY"), "agent response missing");
+                    ensure!(!first.contains("Reconnecting..."), "agent retried an unsupported transport");
+                    ensure!(!first.contains("tokens: unavailable"), "agent usage missing");
+                    let slug = thread_slug(&first)?;
+                    let resumed = live(f, &["run", "--agent", "credential-test", "--thread", slug, "Repeat your previous response exactly. Do not use tools."], "").await?;
+                    ensure!(resumed.contains("CREDENTIAL-PROXY-READY"), "saved thread did not resume");
+                    let agent = exo_managed_agents::find_agent(f.runtime.exoharness_handle().as_ref(), "credential-test").await?;
+                    let thread = exo_managed_agents::find_thread(agent.as_ref(), slug).await?;
+                    let sandbox = thread.list_sandboxes().await?[0].id.clone();
+                    let audit = thread.run_in_sandbox(exoharness::RunInSandboxRequest {
+                        id: sandbox,
+                        command: vec!["node".into(), "-e".into(), inspect.into(), variable.into(), digest.clone()],
+                        env: std::collections::HashMap::from([(variable.into(), "caller-supplied-value".into())]),
+                    }).await?;
+                    ensure!(audit.into_parts().wait.await? == 0, "credential containment audit failed");
+                    Ok::<_, anyhow::Error>(())
+        }).await?;
+    }
+    Ok(())
+}
+
+#[actix_web::test]
+#[ignore = "requires OPENAI_API_KEY, Apple container, and DeepWiki network access"]
+async fn codex_native_mcp_local_and_http() -> Result<()> {
+    native_mcp_workflow(
+        "codex",
+        "gpt-5.6-sol",
+        "OPENAI_API_KEY",
+        "exo-codex-sandbox:latest",
+    )
+    .await
+}
+
+#[actix_web::test]
+#[ignore = "requires ANTHROPIC_API_KEY, Apple container, and DeepWiki network access"]
+async fn claude_native_mcp_local_and_http() -> Result<()> {
+    native_mcp_workflow(
+        "claude-code",
+        "claude-sonnet-4-6",
+        "ANTHROPIC_API_KEY",
+        "exo-claude-code-sandbox:latest",
+    )
+    .await
+}
+
+async fn native_mcp_workflow(
+    harness: &str,
+    model: &str,
+    variable: &str,
+    image: &str,
+) -> Result<()> {
+    let key = std::env::var(variable).with_context(|| format!("{variable} is required"))?;
+    with_live_fixture(exoharness::SandboxProvider::AppleContainer, async |f| {
+            success(f.command(&["--provider", "local", "secret", "create", "native-key", "--env", "NATIVE_API_KEY"]).env("NATIVE_API_KEY", &key).output().await?)?;
+            f.cli(&["--provider", "local", "model", "create", model, "--secret", "native-key"]).await?;
+            std::fs::write(&f.agent_file, format!("---\nname: native-mcp\nharness: {harness}\nconfig:\n  model: {model}\nmcp_servers:\n  - type: url\n    name: wiki\n    url: https://mcp.deepwiki.com/mcp\n    allowed_tools: [read_wiki_structure]\n---\nUse the requested MCP tool. If permission is denied, stop; do not use another tool or retry.\n"))?;
+            let environment = f.temp.path().join("native.yaml");
+            std::fs::write(&environment, format!("name: native\nconfig:\n  provider: apple_container\n  image: {image}\n  default_workdir: /home/exo/workspace\n  resources: {{vcpu_count: 2, memory_mib: 2048}}\n  policy:\n    networking: {{type: unrestricted}}\n"))?;
+            f.cli(&["agent", "create", "native-mcp", "--file", f.agent_file.to_str().context("agent path")?]).await?;
+            let prompt = if harness == "codex" {
+                "Use Promise.all to call wiki read_wiki_structure twice in parallel, once for repoName openai/openai-python and once for repoName rust-lang/rust, then report the first section title from each result. Do not use shell, web search, or any other tools."
+            } else {
+                "Call wiki read_wiki_structure for repoName openai/openai-python once, then report the first section title. Do not use shell, web search, or any other tools."
+            };
+            let first = live(f, &["run", "--agent", "native-mcp", "--environment-file", environment.to_str().context("environment path")?, prompt], &"y\n".repeat(20)).await?;
+            ensure!(first.contains("Permission required: exo_mcp__wiki__read_wiki_structure"), "native MCP bypassed Harness approval");
+            ensure!(first.contains("← exo_mcp__wiki__read_wiki_structure ✓"), "native MCP did not succeed");
+            if harness == "codex" {
+                ensure!(first.matches("← exo_mcp__wiki__read_wiki_structure ✓").count() == 2, "parallel MCP calls did not both succeed");
+                ensure!(first.matches("Permission required: exo_mcp__wiki__read_wiki_structure").count() == 2, "each parallel MCP call must request approval");
+            }
+            let slug = thread_slug(&first)?;
+            let denied = live(f, &["run", "--agent", "native-mcp", "--thread", slug, prompt], &"n\n".repeat(20)).await?;
+            ensure!(denied.contains("Permission required: exo_mcp__wiki__read_wiki_structure"), "resumed native MCP bypassed approval");
+            ensure!(denied.contains("← exo_mcp__wiki__read_wiki_structure ✗"), "denied native MCP was reported as successful");
             Ok::<_, anyhow::Error>(())
     }).await
 }

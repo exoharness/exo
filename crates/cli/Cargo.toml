@@ -49,6 +49,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+sha2.workspace = true
 bytes.workspace = true
 exoharness = { path = "../exoharness", features = [
   "basic-backend",

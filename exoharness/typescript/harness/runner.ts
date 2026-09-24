@@ -42,6 +42,7 @@ import {
   type ToolResult,
   type Turn,
   type TurnContext,
+  type NativeMcpServer,
   type TurnRecord,
   type TypeScriptHarness,
   type PermissionPolicy,
@@ -238,6 +239,7 @@ interface RawEvent {
 }
 
 interface RawTypeScriptInitPayload {
+  mcp_servers: NativeMcpServer[];
   tools: ToolDefinition[];
   agent: RawAgentRecord;
   conversation: RawConversationHandleInfo;
@@ -1714,6 +1716,7 @@ function createTurnContext(
 
   const context: TurnContext = {
     tools: init.tools,
+    mcpServers: init.mcp_servers,
     agentConfig,
     conversationConfig,
     request,

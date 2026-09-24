@@ -406,7 +406,7 @@ impl ContainerCliFlavor {
     }
 }
 
-const DEFAULT_ENABLED_NETWORK_NAME: &str = "exo-default";
+pub(crate) const DEFAULT_ENABLED_NETWORK_NAME: &str = "exo-default";
 const WARM_SANDBOX_KEEPALIVE_ARGV: &[&str] = &["sleep", "infinity"];
 const WARM_SANDBOX_HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(3);
 const WARM_SANDBOX_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);

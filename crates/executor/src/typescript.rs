@@ -432,6 +432,7 @@ impl TypeScriptRunnerProcess {
                     request: prepared.clone(),
                     streaming: matches!(stream_mode, ExecutorStreamMode::Enabled(_)),
                     tools: executor.tools.definitions(),
+                    mcp_servers: executor.tools.mcp_servers(conversation).await?,
                     braintrust_parent: turn_trace.and_then(TurnExecutionTrace::export_parent),
                 }),
             },
@@ -1024,6 +1025,7 @@ enum GuestToHostMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TypeScriptInitPayload {
+    mcp_servers: Vec<crate::NativeMcpServer>,
     tools: Vec<crate::ToolDefinition>,
     agent: exoharness::AgentRecord,
     conversation: ConversationHandleInfo,

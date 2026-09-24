@@ -431,10 +431,14 @@ fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
         },
     };
     #[cfg(feature = "firecracker")]
-    let firecracker_spec = command_firecracker_args(&cli.command)
-        .map(FirecrackerArgs::backend_spec)
-        .transpose()?
-        .unwrap_or_default();
+    let firecracker_spec = match command_firecracker_args(&cli.command) {
+        Some(args) => args.backend_spec()?,
+        None => {
+            let matches = FirecrackerArgs::augment_args(clap::Command::new("exo"))
+                .try_get_matches_from(["exo"])?;
+            <FirecrackerArgs as clap::FromArgMatches>::from_arg_matches(&matches)?.backend_spec()?
+        }
+    };
     #[cfg(not(feature = "firecracker"))]
     let firecracker_spec = FirecrackerBackendSpec::default();
     let sandbox_backends = default_sandbox_backends(firecracker_spec);
@@ -2998,6 +3002,7 @@ async fn start_sandbox(
     let agent = sandbox_owner(harness, agent.as_deref()).await?;
     let sandbox_id = agent
         .create_sandbox(CreateSandboxRequest {
+            model: None,
             name,
             provider: provider.into(),
             image,

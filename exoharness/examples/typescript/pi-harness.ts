@@ -16,16 +16,9 @@ import {
 import {
   appendEvents,
   asRecord,
-  pickEnv,
-  resolveLlmBinding,
+  resolveSandboxLlmBinding,
   WarmJsonlSandboxWorker,
 } from "@exo/model-runtime/shared";
-
-const PROVIDER_KEY_VARIABLES: Record<string, string> = {
-  openai: "OPENAI_API_KEY",
-  anthropic: "ANTHROPIC_API_KEY",
-  google: "GEMINI_API_KEY",
-};
 
 const PI_EXTENSION = String.raw`
 import { readFileSync } from "node:fs";
@@ -121,23 +114,14 @@ export default defineHarness({
         (message) => message.role !== "system" && message.role !== "developer",
       ),
     );
-    const binding = await resolveLlmBinding(context);
+    const binding = await resolveSandboxLlmBinding(context);
     const slash = binding.model.indexOf("/");
     const provider = slash < 0 ? "openai" : binding.model.slice(0, slash);
     const model = slash < 0 ? binding.model : binding.model.slice(slash + 1);
     const env = {
-      ...pickEnv((key) => key.startsWith("PI_")),
       EXO_PI_PROVIDER: provider,
       ...(binding.baseUrl ? { EXO_PI_BASE_URL: binding.baseUrl } : {}),
-      ...(binding.apiKey
-        ? { [PROVIDER_KEY_VARIABLES[provider] ?? ""]: binding.apiKey }
-        : {}),
     };
-    if (binding.apiKey && !PROVIDER_KEY_VARIABLES[provider]) {
-      throw new Error(
-        `Pi API-key bindings are not configured for provider ${provider}`,
-      );
-    }
     const args = [
       "--mode",
       "rpc",

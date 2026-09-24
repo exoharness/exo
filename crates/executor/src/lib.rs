@@ -98,7 +98,7 @@ pub use harness_tool::{BasicToolRuntime, ExoToolRuntime};
 pub use harness_types::{CreateAgentRequest, CreateConversationRequest};
 pub use http_provider::HttpProvider;
 pub use local_sandbox::LocalSandboxExoHarness;
-pub use mcp::McpToolRuntime;
+pub use mcp::{McpToolRuntime, NativeMcpServer, NativeMcpTool};
 pub use provider::{LocalProvider, Provider, ProviderTurn};
 pub use scheduler_runtime::{
     SchedulerRunOptions, redeliver_pending_wakes, run_due_tasks, run_task,

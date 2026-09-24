@@ -19,10 +19,10 @@ use tokio::task::JoinHandle;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::sandbox::{
-    BoxSandboxTcpStream, CliContainerSandboxBackend, LocalProcessSandboxBackend,
-    ManagedSandboxBackend, ManagedSandboxHandle, SANDBOX_MAIN_MOUNT_DIR, SandboxCommand,
-    SandboxLifecycleConfig, SandboxMount, SandboxMountAccess, SandboxNetworkPolicy, SandboxRequest,
-    SandboxSpec, SnapshotFormat, SnapshotPayload, sandbox_spec_hash,
+    BoxSandboxTcpStream, LocalProcessSandboxBackend, ManagedSandboxBackend, ManagedSandboxHandle,
+    SANDBOX_MAIN_MOUNT_DIR, SandboxCommand, SandboxLifecycleConfig, SandboxMount,
+    SandboxMountAccess, SandboxNetworkPolicy, SandboxRequest, SandboxSpec, SnapshotFormat,
+    SnapshotPayload, sandbox_spec_hash,
 };
 #[cfg(feature = "apple-keychain")]
 use crate::secrets::AppleKeychainSecretKeyProvider;
@@ -58,10 +58,8 @@ mod migration;
 #[path = "basic/vault_context.rs"]
 mod vault_context;
 use vault_context::ScopedVaultContext;
-#[cfg(feature = "firecracker")]
 #[path = "basic/egress.rs"]
 mod egress;
-#[cfg(feature = "firecracker")]
 use egress::LocalEgressResolver;
 
 const SANDBOX_PROVIDER_STATE_EVENT: &str = "sandbox_provider_state";
@@ -135,17 +133,22 @@ impl SandboxBackendRegistration {
     }
 
     pub fn apple_container() -> Self {
-        Self::from_backend(
-            SandboxProvider::AppleContainer,
-            Arc::new(CliContainerSandboxBackend::apple_container()),
-        )
+        Self::credential_container(SandboxProvider::AppleContainer)
     }
 
     pub fn docker() -> Self {
-        Self::from_backend(
-            SandboxProvider::Docker,
-            Arc::new(CliContainerSandboxBackend::docker()),
-        )
+        Self::credential_container(SandboxProvider::Docker)
+    }
+
+    fn credential_container(provider: SandboxProvider) -> Self {
+        Self::from_factory(provider.clone(), true, move |inner| {
+            let resolver = Arc::new(LocalEgressResolver {
+                harness: Arc::downgrade(inner),
+            });
+            let backend =
+                crate::egress::CredentialContainerBackend::new(provider.clone(), resolver);
+            Box::pin(async move { Ok(Arc::new(backend) as Arc<dyn ManagedSandboxBackend>) })
+        })
     }
 
     #[cfg(feature = "firecracker")]
@@ -3497,7 +3500,7 @@ async fn prepare_sandbox_request(
         request.image.clone()
     };
 
-    let policy = request
+    let mut policy = request
         .policy
         .or_else(|| harness.inner.sandbox_policy.clone())
         .unwrap_or_else(|| {
@@ -3508,12 +3511,78 @@ async fn prepare_sandbox_request(
             }
         });
     let context = ScopedVaultContext { harness, scope };
+    if let Some(model) = request.model {
+        let binding = context.model_binding(&model.id).await?;
+        let endpoint =
+            crate::vault::model_endpoint(binding.base_url.as_deref(), &model.environment_variable)?;
+        let Some(reference) = binding.secret else {
+            bail!("sandbox model binding has no API key; register the model with --secret");
+        };
+        let host = endpoint
+            .host_str()
+            .context("model endpoint has no host")?
+            .to_owned();
+        if let SandboxNetworkPolicy::Limited { allowed_hosts } = &policy.networking {
+            anyhow::ensure!(
+                crate::types::canonical_egress_hosts(allowed_hosts)?.contains(&host),
+                "model endpoint {host} is not allowed by the environment network policy"
+            );
+        }
+        anyhow::ensure!(
+            policy.networking_enabled(),
+            "sandbox models require networking"
+        );
+        if let Some(existing) = policy
+            .credentials
+            .iter_mut()
+            .find(|binding| binding.environment_variable == model.environment_variable)
+        {
+            let selected = crate::vault::find_secret(&context, &existing.name).await?;
+            anyhow::ensure!(
+                existing.model == Some(model.id)
+                    || (existing.model.is_none() && selected.as_ref() == Some(&reference)),
+                "environment credential {} conflicts with the selected model",
+                model.environment_variable
+            );
+            let crate::CredentialNetworkPolicy::Limited { allowed_hosts } = &existing.networking;
+            anyhow::ensure!(
+                crate::types::canonical_egress_hosts(allowed_hosts)?.contains(&host)
+                    && existing.injection_location.header,
+                "environment credential does not permit the model endpoint"
+            );
+            existing.model = Some(model.id);
+        } else {
+            policy.credentials.push(crate::EgressCredentialBinding {
+                name: format!("model:{}", model.id),
+                model: Some(model.id),
+                environment_variable: model.environment_variable,
+                networking: crate::CredentialNetworkPolicy::Limited {
+                    allowed_hosts: vec![host],
+                },
+                injection_location: crate::CredentialInjectionLocation { header: true },
+            });
+        }
+    }
+
     let credentials = futures::future::try_join_all(policy.credentials.iter().map(|binding| {
         let context = &context;
         async move {
-            let reference = crate::vault::find_secret(context, &binding.name)
-                .await?
-                .with_context(|| format!("egress credential not found: {}", binding.name))?;
+            let reference = if let Some(model_id) = binding.model {
+                let model = context.model_binding(&model_id).await?;
+                let endpoint = crate::vault::model_endpoint(
+                    model.base_url.as_deref(),
+                    &binding.environment_variable,
+                )?;
+                let Some(reference) = model.secret else {
+                    bail!("sandbox model binding has no credential");
+                };
+                crate::vault::model_credential_vault(context, &reference, &endpoint).await?;
+                reference
+            } else {
+                crate::vault::find_secret(context, &binding.name)
+                    .await?
+                    .with_context(|| format!("egress credential not found: {}", binding.name))?
+            };
             Ok::<_, anyhow::Error>((binding.name.clone(), reference))
         }
     }))
@@ -4889,7 +4958,7 @@ mod snapshot_manifest_tests {
 
     #[test]
     fn snapshot_format_validation_uses_backend_capabilities() {
-        let docker = CliContainerSandboxBackend::docker();
+        let docker = crate::CliContainerSandboxBackend::docker();
         ensure_snapshot_format_supported(
             &docker,
             &SandboxProvider::Docker,
@@ -5088,6 +5157,7 @@ mod egress_resolution_tests {
         config.sandbox_policy = Some(limited.clone());
         let harness = BasicExoHarness::new(config).await?;
         let request = CreateSandboxRequest {
+            model: None,
             name: None,
             provider: SandboxProvider::LocalProcess,
             image: "".into(),

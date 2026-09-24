@@ -31,7 +31,7 @@ import {
 } from "@exo/harness";
 import {
   errorMessage,
-  ResponsesRuntime,
+  traceExecutorTurn,
   tracedUnderParent,
   type TraceParent,
 } from "@exo/model-runtime/responses";
@@ -41,19 +41,19 @@ import {
   appendAndTraceObservedToolEvents,
   asRecord,
   markFirstTextDelta,
-  pickEnv,
   pickEnvFrom,
   projectAnthropicMessageToolEvents,
-  resolveLlmBinding,
+  resolveSandboxLlmBinding,
   sandboxCwd,
   type ResolvedLlmBinding,
 } from "@exo/model-runtime/shared";
 
+import { claudeToolName } from "../../typescript/harness/native-mcp";
+
 const DEFAULT_CLAUDE_CODE_SANDBOX_EXECUTABLE = "/usr/local/bin/claude-code";
-const CLAUDE_RESULT_GRACE_MS = 5_000;
 const CLAUDE_MAX_API_RETRIES = 2;
 const CLAUDE_STDERR_PREVIEW_CHARS = 4_000;
-const CLAUDE_STARTUP_TIMEOUT_MS = 20_000;
+const CLAUDE_STARTUP_TIMEOUT_MS = 60_000;
 
 interface ClaudeTraceState {
   toolPoliciesValidated: boolean;
@@ -72,12 +72,8 @@ interface ClaudeTraceState {
 export default defineHarness({
   nativeToolApprovals: true,
   async runTurn(context) {
-    const modelBinding = await resolveLlmBinding(context);
-    const runtime = ResponsesRuntime.fromModelBinding(
-      context.agentConfig,
-      modelBinding,
-    );
-    await runtime.runTurn(context, (turnParent) =>
+    const modelBinding = await resolveSandboxLlmBinding(context);
+    await traceExecutorTurn(context, (turnParent) =>
       runClaudeCodeTurn(context, turnParent, modelBinding),
     );
   },
@@ -135,7 +131,7 @@ async function runClaudeCodeTurn(
       },
     );
 
-    await appendClaudeFinalMessage(context, state);
+    await appendClaudeFinalMessage(context, state, modelBinding.model);
 
     if (state.result?.type === "result" && state.result.is_error) {
       throw new Error(claudeResultError(state.result));
@@ -165,7 +161,6 @@ async function consumeClaudeQuery(
   turnParent: TraceParent,
   state: ClaudeTraceState,
 ): Promise<void> {
-  let graceTimer: ReturnType<typeof setTimeout> | null = null;
   let startupTimedOut = false;
   let sawSdkMessage = false;
   const startupTimer = setTimeout(() => {
@@ -176,23 +171,6 @@ async function consumeClaudeQuery(
   }, CLAUDE_STARTUP_TIMEOUT_MS);
   startupTimer.unref?.();
 
-  const clearGraceTimer = () => {
-    if (graceTimer) {
-      clearTimeout(graceTimer);
-      graceTimer = null;
-    }
-  };
-
-  const scheduleGraceClose = () => {
-    if (state.result || graceTimer) {
-      return;
-    }
-    graceTimer = setTimeout(() => {
-      claudeQuery.close();
-    }, CLAUDE_RESULT_GRACE_MS);
-    graceTimer.unref?.();
-  };
-
   try {
     for await (const message of claudeQuery) {
       sawSdkMessage = true;
@@ -200,7 +178,10 @@ async function consumeClaudeQuery(
       if (message.type === "system" && message.subtype === "init") {
         validateToolPolicies(
           context,
-          message.tools.map((name) => `claude.${name}`),
+          message.tools.map(
+            (name) =>
+              claudeToolName(context.mcpServers, name) ?? `claude.${name}`,
+          ),
         );
         state.toolPoliciesValidated = true;
       }
@@ -210,16 +191,8 @@ async function consumeClaudeQuery(
         throw new Error(apiRetryError);
       }
       if (message.type === "result") {
-        clearGraceTimer();
         claudeQuery.close();
         break;
-      }
-      if (
-        message.type === "assistant" &&
-        state.finalText &&
-        !claudeAssistantHasToolUse(message.message.content)
-      ) {
-        scheduleGraceClose();
       }
     }
     if (startupTimedOut && !state.result && !state.finalText) {
@@ -227,22 +200,11 @@ async function consumeClaudeQuery(
         `Claude Code produced no SDK messages within ${CLAUDE_STARTUP_TIMEOUT_MS}ms; check claude_process_stderr events for process startup failures.`,
       );
     }
-  } catch (error) {
-    if (!state.finalText) {
-      throw error;
+    if (!state.result) {
+      throw new Error("Claude Code ended without a result");
     }
-    await appendCustomEvent(
-      context.exoharness.current.turn,
-      "claude_query_closed_after_text",
-      {
-        metadata: turnMetadata(context),
-        error: errorMessage(error),
-        grace_ms: CLAUDE_RESULT_GRACE_MS,
-      },
-    );
   } finally {
     clearTimeout(startupTimer);
-    clearGraceTimer();
     claudeQuery.close();
   }
 }
@@ -301,6 +263,26 @@ function claudeOptions(
     cwd: sandboxCwd(context),
     persistSession: false,
     includePartialMessages: true,
+    strictMcpConfig: true,
+    disallowedTools: context.mcpServers.flatMap((server) =>
+      server.disabledTools.map((tool) => `mcp__${server.name}__${tool}`),
+    ),
+    mcpServers: Object.fromEntries(
+      context.mcpServers.map((server) => [
+        server.name,
+        {
+          type: "http",
+          url: server.url,
+          ...(server.environmentVariable
+            ? {
+                headers: {
+                  Authorization: "Bearer ${" + server.environmentVariable + "}",
+                },
+              }
+            : {}),
+        },
+      ]),
+    ),
     hooks: {
       PreToolUse: [
         {
@@ -313,8 +295,17 @@ function claudeOptions(
                     "Claude Code has not reported its tool inventory",
                   );
                 }
+                const functionName = claudeToolName(
+                  context.mcpServers,
+                  input.tool_name,
+                );
+                if (!functionName) {
+                  throw new Error(
+                    `MCP tool is not enabled: ${input.tool_name}`,
+                  );
+                }
                 await context.authorizeTool({
-                  functionName: `claude.${input.tool_name}`,
+                  functionName,
                   arguments: toJsonObject(input.tool_input),
                 });
                 return {
@@ -368,7 +359,8 @@ async function handleClaudeMessage(
       context,
       turnParent,
       projectAnthropicMessageToolEvents(message, {
-        toolNamePrefix: "claude.",
+        toolName: (name) =>
+          claudeToolName(context.mcpServers, name) ?? `claude.${name}`,
       }),
       state.observedToolCalls,
       "claude_observed_tool",
@@ -385,7 +377,8 @@ async function handleClaudeMessage(
       context,
       turnParent,
       projectAnthropicMessageToolEvents(message, {
-        toolNamePrefix: "claude.",
+        toolName: (name) =>
+          claudeToolName(context.mcpServers, name) ?? `claude.${name}`,
       }),
       state.observedToolCalls,
       "claude_observed_tool",
@@ -409,13 +402,30 @@ function shouldStoreClaudeSdkMessage(message: SDKMessage): boolean {
 async function appendClaudeFinalMessage(
   context: TurnContext,
   state: ClaudeTraceState,
+  model: string,
 ): Promise<void> {
-  if (!state.finalText || state.finalMessageStored) {
+  if ((!state.finalText && !state.result) || state.finalMessageStored) {
     return;
   }
   state.finalMessageStored = true;
+  const result = state.result;
+  const usage = result?.usage;
   await appendEvents(context, [
-    messagesEvent([assistantTextMessage(state.finalText)]),
+    messagesEvent(
+      state.finalText ? [assistantTextMessage(state.finalText)] : [],
+      undefined,
+      usage && result
+        ? {
+            model,
+            prompt_tokens: usage.input_tokens,
+            completion_tokens: usage.output_tokens,
+            prompt_cached_tokens: usage.cache_read_input_tokens ?? 0,
+            prompt_cache_creation_tokens:
+              usage.cache_creation_input_tokens ?? 0,
+            cost_usd: result.total_cost_usd,
+          }
+        : undefined,
+    ),
   ]);
 }
 
@@ -506,13 +516,6 @@ function claudeAssistantText(content: unknown): string {
       return "";
     })
     .join("");
-}
-
-function claudeAssistantHasToolUse(content: unknown): boolean {
-  return (
-    Array.isArray(content) &&
-    content.some((part) => asRecord(part).type === "tool_use")
-  );
 }
 
 function claudeTraceOutput(state: ClaudeTraceState): Record<string, unknown> {
@@ -766,17 +769,7 @@ function claudeSandboxExecutable(): string {
 function claudeSandboxBaseEnv(
   modelBinding: ResolvedLlmBinding,
 ): Record<string, string> {
-  const env = pickEnv((key) => {
-    return (
-      key.startsWith("CLAUDE_") ||
-      key === "BRAINTRUST_API_KEY" ||
-      key === "BRAINTRUST_APP_URL" ||
-      key === "BRAINTRUST_API_URL"
-    );
-  });
-  if (modelBinding.apiKey) {
-    env.ANTHROPIC_API_KEY = modelBinding.apiKey;
-  }
+  const env: Record<string, string> = {};
   if (modelBinding.baseUrl) {
     env.ANTHROPIC_BASE_URL = modelBinding.baseUrl;
   }
@@ -788,8 +781,8 @@ function claudeSandboxEnv(
 ): Record<string, string> {
   const selected = pickEnvFrom(env, (key) => {
     return (
-      key.startsWith("ANTHROPIC_") ||
-      key.startsWith("CLAUDE_") ||
+      key === "ANTHROPIC_BASE_URL" ||
+      key === "CLAUDE_CONFIG_DIR" ||
       key === "TRACEPARENT" ||
       key === "TRACESTATE"
     );

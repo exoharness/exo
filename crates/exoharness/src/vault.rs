@@ -224,3 +224,52 @@ pub async fn find_secret(
                 })
         }))
 }
+
+pub(crate) fn model_endpoint(
+    base_url: Option<&str>,
+    environment_variable: &str,
+) -> Result<url::Url> {
+    let default_url = match environment_variable {
+        "OPENAI_API_KEY" => "https://api.openai.com/v1",
+        "ANTHROPIC_API_KEY" => "https://api.anthropic.com",
+        "GEMINI_API_KEY" => "https://generativelanguage.googleapis.com",
+        _ => bail!("unsupported sandbox model credential variable: {environment_variable}"),
+    };
+    let url = url::Url::parse(base_url.unwrap_or(default_url))?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || url.port_or_known_default() != Some(443)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        bail!("sandbox model credentials require an HTTPS model endpoint on port 443");
+    }
+    Ok(url)
+}
+
+pub(crate) async fn model_credential_vault(
+    context: &dyn VaultContext,
+    reference: &SecretReference,
+    endpoint: &url::Url,
+) -> Result<Arc<dyn VaultHandle>> {
+    let vault = require_vault(context, &reference.vault_id).await?;
+    let metadata = vault
+        .list_secrets()
+        .await?
+        .into_iter()
+        .find(|secret| secret.id == reference.secret_id)
+        .context("sandbox model credential is unavailable")?;
+    anyhow::ensure!(
+        metadata.r#type == crate::SecretType::Key,
+        "sandbox model credentials currently require an API key"
+    );
+    if let Some(target) = metadata.target {
+        anyhow::ensure!(
+            target == SecretTarget::http(&endpoint.origin().ascii_serialization())?,
+            "model credential is not authorized for this endpoint"
+        );
+    }
+    Ok(vault)
+}
