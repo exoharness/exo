@@ -115,6 +115,16 @@ pub trait EgressCredentialResolver: Send + Sync {
         binding_name: &str,
         destination: &EgressDestination,
     ) -> Result<String>;
+
+    async fn resolve_with_request(
+        &self,
+        identity: &EgressIdentity,
+        binding_name: &str,
+        destination: &EgressDestination,
+        _body: &[u8],
+    ) -> Result<String> {
+        self.resolve(identity, binding_name, destination).await
+    }
 }
 
 // Owns one sandbox's TLS server, placeholders, and active proxy connections.
@@ -372,7 +382,7 @@ impl State {
 
     async fn forward(
         &self,
-        request: Request<Incoming>,
+        mut request: Request<Incoming>,
         sni: Option<&str>,
     ) -> Result<Response<ProxyBody>> {
         let (destination, url) = self.destination(&request, sni)?;
@@ -380,9 +390,16 @@ impl State {
         self.validate_credentials(&headers, &destination.host, sni.is_some())?;
         strip_hop_headers(&mut headers)?;
         let client = self.client(&destination.host, destination.port).await?;
-        self.substitute_credentials(&mut headers, &destination)
+        let body = tokio::time::timeout(
+            IO_TIMEOUT,
+            Limited::new(request.body_mut(), MAX_REQUEST_BODY).collect(),
+        )
+        .await?
+        .map_err(|_| anyhow!("invalid or oversized request body"))?
+        .to_bytes();
+        self.substitute_credentials(&mut headers, &destination, &body)
             .await?;
-        relay(request, headers, url, client).await
+        relay(request.method().clone(), body, headers, url, client).await
     }
 
     fn destination(
@@ -494,6 +511,7 @@ impl State {
         &self,
         headers: &mut HeaderMap,
         destination: &EgressDestination,
+        body: &[u8],
     ) -> Result<()> {
         for (header, header_value) in headers.iter_mut() {
             let basic = basic_credential_placeholder(header, header_value)?;
@@ -516,7 +534,12 @@ impl State {
                     self.resolver
                         .as_ref()
                         .context("credential resolver is unavailable")?
-                        .resolve(&self.identity, &binding.config.name, destination),
+                        .resolve_with_request(
+                            &self.identity,
+                            &binding.config.name,
+                            destination,
+                            body,
+                        ),
                 )
                 .await?
                 .map_err(|_| anyhow!("credential is unavailable or not authorized"))?;
@@ -596,21 +619,14 @@ fn contains_placeholder(value: &[u8]) -> bool {
 }
 
 async fn relay(
-    mut request: Request<Incoming>,
+    method: Method,
+    body: Bytes,
     mut headers: HeaderMap,
     url: reqwest::Url,
     client: reqwest::Client,
 ) -> Result<Response<ProxyBody>> {
     headers.remove(HOST);
     headers.remove("content-length");
-    let method = request.method().clone();
-    let body = tokio::time::timeout(
-        IO_TIMEOUT,
-        Limited::new(request.body_mut(), MAX_REQUEST_BODY).collect(),
-    )
-    .await?
-    .map_err(|_| anyhow!("invalid or oversized request body"))?
-    .to_bytes();
     let response = client
         .request(method, url)
         .headers(headers)

@@ -105,6 +105,19 @@ impl EgressCredentialResolver for GitResolver {
         );
         Ok("eC1hY2Nlc3MtdG9rZW46Y2FuYXJ5LXYx".into())
     }
+
+    async fn resolve_with_request(
+        &self,
+        identity: &EgressIdentity,
+        binding_name: &str,
+        destination: &EgressDestination,
+        body: &[u8],
+    ) -> Result<String> {
+        if destination.method == Method::POST && destination.path == GIT_RECEIVE_PACK_PATH {
+            ensure!(body == b"request", "unexpected Git push body");
+        }
+        self.resolve(identity, binding_name, destination).await
+    }
 }
 
 struct Upstream {
@@ -589,6 +602,14 @@ async fn proxy_supports_git_smart_http() -> Result<()> {
         .await?;
     assert_eq!(receive.status(), StatusCode::OK);
     assert_eq!(receive.text().await?, "receive-ok");
+
+    let rejected = proxy_client
+        .post(format!("https://api.test{GIT_RECEIVE_PACK_PATH}"))
+        .header("authorization", &authorization)
+        .body("different update")
+        .send()
+        .await?;
+    assert_eq!(rejected.status(), StatusCode::BAD_GATEWAY);
 
     assert_eq!(
         proxy_client
