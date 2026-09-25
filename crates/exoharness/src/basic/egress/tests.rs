@@ -27,6 +27,7 @@ use crate::{
 
 fn policy(name: &str) -> EgressPolicy {
     EgressPolicy {
+        allowed_tcp_ports: None,
         networking: SandboxNetworkPolicy::Limited {
             allowed_hosts: vec!["api.test".into()],
         },

@@ -46,6 +46,11 @@ pub trait EgressTransport: Send + Sync {
     }
 }
 
+#[async_trait]
+pub(crate) trait NetworkDns: Send + Sync {
+    async fn resolve(&self, source: Ipv4Addr, host: &str) -> Result<Vec<Ipv4Addr>>;
+}
+
 pub struct LocalEgressTransport {
     endpoints: SandboxEgressProxy,
     http: Socket<TcpListener>,
@@ -149,6 +154,14 @@ impl LocalEgressTransport {
         policy: &crate::SandboxNetworkPolicy,
         config: Option<crate::EgressListenConfig>,
     ) -> Result<Self> {
+        Self::for_policy_with_dns(policy, config, None).await
+    }
+
+    pub(crate) async fn for_policy_with_dns(
+        policy: &crate::SandboxNetworkPolicy,
+        config: Option<crate::EgressListenConfig>,
+        resolver: Option<Arc<dyn NetworkDns>>,
+    ) -> Result<Self> {
         let hosts = match policy {
             crate::SandboxNetworkPolicy::Limited { allowed_hosts } => {
                 Some(canonical_egress_hosts(allowed_hosts)?)
@@ -175,7 +188,7 @@ impl LocalEgressTransport {
                 }
             }
         };
-        Self::listen(config, hosts).await
+        Self::listen(config, hosts, resolver).await
     }
 
     #[cfg(test)]
@@ -189,6 +202,7 @@ impl LocalEgressTransport {
                 dns_port: 0,
             },
             Some(hosts.clone()),
+            None,
         )
         .await
     }
@@ -196,6 +210,7 @@ impl LocalEgressTransport {
     async fn listen(
         config: crate::EgressListenConfig,
         hosts: Option<HashSet<String>>,
+        resolver: Option<Arc<dyn NetworkDns>>,
     ) -> Result<Self> {
         let host_ip = config.advertised_address;
         let http = TcpListener::bind((config.bind_address, config.http_port)).await?;
@@ -215,6 +230,7 @@ impl LocalEgressTransport {
             dns.clone(),
             dns_tcp.clone(),
             hosts.clone(),
+            resolver,
             source.clone(),
             cancel.clone(),
         ));
@@ -309,6 +325,7 @@ async fn serve_dns(
     dns: Arc<Socket<UdpSocket>>,
     tcp: Arc<Socket<TcpListener>>,
     hosts: Option<HashSet<String>>,
+    resolver: Option<Arc<dyn NetworkDns>>,
     source: Arc<AtomicU32>,
     cancel: CancellationToken,
 ) {
@@ -332,11 +349,16 @@ async fn serve_dns(
                         break;
                     }
                 };
-                if !accepts_peer(&source, peer) { continue; }
-                if let Ok(answer) = dns_response(hosts.as_ref().as_ref(), &buffer[..size])
-                    && dns.send_to(&answer, peer).await.is_err() {
-                    tracing::debug!("egress DNS response failed");
-                }
+                if !accepts_peer(&source, peer) || tasks.len() >= MAX_DNS_TASKS { continue; }
+                let hosts = hosts.clone();
+                let resolver = resolver.clone();
+                let dns = dns.clone();
+                let query = buffer[..size].to_vec();
+                tasks.spawn(async move {
+                    let answer = network_dns_response(hosts.as_ref().as_ref(), resolver.as_deref(), peer.ip(), &query).await?;
+                    dns.send_to(&answer, peer).await?;
+                    Ok::<_, anyhow::Error>(())
+                });
             }
             incoming = tcp.accept() => {
                 let (mut stream, peer) = match incoming {
@@ -351,13 +373,14 @@ async fn serve_dns(
                 };
                 if !accepts_peer(&source, peer) || tasks.len() >= MAX_DNS_TASKS { continue; }
                 let hosts = hosts.clone();
+                let resolver = resolver.clone();
                 tasks.spawn(async move {
                     tokio::time::timeout(IO_TIMEOUT, async {
                         let size = stream.read_u16().await?;
                         ensure!(usize::from(size) <= DNS_BUFFER_SIZE, "DNS request too large");
                         let mut bytes = vec![0; size as usize];
                         stream.read_exact(&mut bytes).await?;
-                        let answer = dns_response(hosts.as_ref().as_ref(), &bytes)?;
+                        let answer = network_dns_response(hosts.as_ref().as_ref(), resolver.as_deref(), peer.ip(), &bytes).await?;
                         stream.write_u16(answer.len().try_into()?).await?;
                         stream.write_all(&answer).await?;
                         Ok::<_, anyhow::Error>(())
@@ -368,6 +391,41 @@ async fn serve_dns(
     }
     tasks.shutdown().await;
 }
+async fn network_dns_response(
+    hosts: Option<&HashSet<String>>,
+    resolver: Option<&dyn NetworkDns>,
+    source: IpAddr,
+    query: &[u8],
+) -> Result<Vec<u8>> {
+    let answer = dns_response(hosts, query)?;
+    let Some(resolver) = resolver else {
+        return Ok(answer);
+    };
+    let mut answer = Message::from_vec(&answer)?;
+    let Some(record) = answer.answers().first() else {
+        return Ok(answer.to_vec()?);
+    };
+    let name = record.name().clone();
+    let host = name.to_ascii().trim_end_matches('.').to_owned();
+    let IpAddr::V4(source) = source else {
+        anyhow::bail!("DNS requires an IPv4 source");
+    };
+    // Native forwarding needs real addresses. The backend admits them before
+    // the guest sees the answer, so a connection cannot race its firewall rule.
+    answer.answers_mut().clear();
+    match tokio::time::timeout(IO_TIMEOUT, resolver.resolve(source, &host)).await {
+        Ok(Ok(addresses)) if !addresses.is_empty() => {
+            for address in addresses {
+                answer.add_answer(Record::from_rdata(name.clone(), 60, RData::A(A(address))));
+            }
+        }
+        _ => {
+            answer.set_response_code(ResponseCode::ServFail);
+        }
+    }
+    Ok(answer.to_vec()?)
+}
+
 pub(super) fn dns_response(hosts: Option<&HashSet<String>>, bytes: &[u8]) -> Result<Vec<u8>> {
     let query = Message::from_vec(bytes)?;
     ensure!(

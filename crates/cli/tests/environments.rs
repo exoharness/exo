@@ -176,6 +176,7 @@ async fn environments_reconcile_saved_threads_locally_and_over_http() -> Result<
         assert!(file_run.contains("Workflow reply."));
         let mut unsupported = environment.clone();
         unsupported.config.policy = Some(exoharness::EgressPolicy {
+            allowed_tcp_ports: None,
             networking: exoharness::SandboxNetworkPolicy::Limited {
                 allowed_hosts: vec!["example.com".into()],
             },

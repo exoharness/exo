@@ -64,8 +64,13 @@ fn disabled_sandbox_network_rejects_unconfigured_egress() {
         ..Default::default()
     };
     let network = network_config(1);
-    let rules =
-        network_firewall_rules(&config, &network, &SandboxNetworkPolicy::Disabled, None).unwrap();
+    let rules = network_firewall_rules(
+        &config,
+        &network,
+        &SandboxNetworkPolicy::Disabled.into(),
+        None,
+    )
+    .unwrap();
 
     assert!(rules.contains("ip daddr 192.0.2.0/24 counter accept"));
     assert!(rules.contains(&format!(
@@ -82,9 +87,13 @@ fn disabled_sandbox_network_rejects_unconfigured_egress() {
 fn enabled_sandbox_network_accepts_public_egress() {
     let config = FirecrackerConfig::default();
     let network = network_config(1);
-    let rules =
-        network_firewall_rules(&config, &network, &SandboxNetworkPolicy::Unrestricted, None)
-            .unwrap();
+    let rules = network_firewall_rules(
+        &config,
+        &network,
+        &SandboxNetworkPolicy::Unrestricted.into(),
+        None,
+    )
+    .unwrap();
 
     assert!(rules.contains(&format!(
         "forward iifname {} counter accept\n",
@@ -127,7 +136,7 @@ fn proxy_transport_enforces_egress_independently_of_network_policy() {
     assert!(prepare_request(request(limited.clone(), None)).is_err());
     assert!(prepare_request(request(SandboxNetworkPolicy::Disabled, Some(proxy))).is_err());
     for policy in [limited, SandboxNetworkPolicy::Unrestricted] {
-        let rules = network_firewall_rules(&config, &network, &policy, Some(proxy)).unwrap();
+        let rules = network_firewall_rules(&config, &network, &policy.into(), Some(proxy)).unwrap();
         assert!(rules.contains("tcp dport 443 counter dnat ip to 192.0.2.10:18443"));
         assert!(rules.contains(&format!(
             "forward iifname {} counter reject",

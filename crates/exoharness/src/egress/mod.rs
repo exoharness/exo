@@ -41,6 +41,7 @@ mod explicit;
 pub use explicit::{ExplicitProxy, ProxyAuthorizer, ProxySession, serve_connect_proxy};
 mod transport;
 pub mod vault;
+pub(crate) use transport::NetworkDns;
 pub use transport::{EgressTransport, LocalEgressTransport};
 mod sandbox;
 pub(crate) use sandbox::{EgressRuntime, SandboxEgress, SandboxProxy};
@@ -53,7 +54,7 @@ const HTTP_BUFFER_SIZE: usize = 32 * 1024;
 const MAX_CONNECTIONS: usize = 128;
 
 pub(crate) struct ResolvedUpstream {
-    addresses: Vec<SocketAddr>,
+    pub(crate) addresses: Vec<SocketAddr>,
     root_certificate: Option<reqwest::Certificate>,
 }
 
@@ -164,6 +165,7 @@ pub(crate) struct State {
     clients: Mutex<HashMap<(String, u16), PooledClient>>,
     hosts: HashSet<String>,
     unrestricted: bool,
+    pub(crate) allowed_tcp_ports: Option<Vec<u16>>,
     bindings: Vec<Binding>,
     identity: EgressIdentity,
     resolver: Option<Arc<dyn EgressCredentialResolver>>,
@@ -280,6 +282,13 @@ impl State {
         placeholders: Option<&HashMap<String, String>>,
     ) -> Result<Self> {
         ensure!(
+            policy
+                .allowed_tcp_ports
+                .as_ref()
+                .is_none_or(|ports| ports.iter().all(|port| *port != 0)),
+            "policy.allowed_tcp_ports cannot contain port zero"
+        );
+        ensure!(
             !identity.sandbox_id.is_empty(),
             "egress identity is required"
         );
@@ -363,6 +372,7 @@ impl State {
             clients: Mutex::new(HashMap::new()),
             hosts,
             unrestricted,
+            allowed_tcp_ports: policy.allowed_tcp_ports,
             bindings,
             identity,
             resolver,
@@ -370,7 +380,18 @@ impl State {
         })
     }
 
+    fn check_port(&self, port: u16) -> Result<()> {
+        ensure!(
+            self.allowed_tcp_ports
+                .as_ref()
+                .is_none_or(|ports| ports.contains(&port)),
+            "TCP port is not allowed"
+        );
+        Ok(())
+    }
+
     fn connect_host(&self, authority: &str) -> Result<String> {
+        self.check_port(443)?;
         let authority: hyper::http::uri::Authority = authority.parse()?;
         ensure!(
             authority.port_u16() == Some(443),
@@ -466,6 +487,7 @@ impl State {
             "host is not allowed"
         );
         let port = if sni.is_some() { 443 } else { 80 };
+        self.check_port(port)?;
         ensure!(
             authority.port_u16().unwrap_or(port) == port,
             "only standard HTTP ports are supported"
@@ -838,6 +860,7 @@ async fn transparent_https_connection<T>(
 where
     T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
+    state.check_port(443)?;
     if !state.unrestricted {
         return https_connection(stream, tls, state, None).await;
     }

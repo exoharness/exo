@@ -437,6 +437,7 @@ fn identity(sandbox_id: &str) -> EgressIdentity {
 
 fn policy() -> EgressPolicy {
     EgressPolicy {
+        allowed_tcp_ports: None,
         networking: SandboxNetworkPolicy::Limited {
             allowed_hosts: vec!["api.test".into(), "public.test".into()],
         },

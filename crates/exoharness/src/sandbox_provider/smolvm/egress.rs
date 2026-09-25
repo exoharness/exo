@@ -12,10 +12,12 @@ pub(super) struct SmolvmProxy {
     connection: ProxyConnection,
     address: SocketAddr,
     token: [u8; 32],
+    allowed_tcp_ports: Option<Vec<u16>>,
 }
 
 impl SmolvmProxy {
     pub(super) async fn start(state: State, cancel: CancellationToken) -> Result<Self> {
+        let allowed_tcp_ports = state.allowed_tcp_ports.clone();
         let listener = Arc::new(TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?);
         let address = listener.local_addr()?;
         let mut token = [0; 32];
@@ -37,6 +39,7 @@ impl SmolvmProxy {
             connection,
             address,
             token,
+            allowed_tcp_ports,
         })
     }
 
@@ -49,7 +52,21 @@ impl SmolvmProxy {
         command
             .arg("--egress-interceptor")
             .arg(self.address.to_string())
+            .arg("--egress-interceptor-ports")
+            .arg("80,443")
             .env("SMOLVM_INTERCEPTOR_TOKEN", token);
+        if let Some(ports) = &self.allowed_tcp_ports {
+            command.arg("--egress-allowed-tcp-ports");
+            if !ports.is_empty() {
+                command.arg(
+                    ports
+                        .iter()
+                        .map(u16::to_string)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                );
+            }
+        }
     }
 }
 
@@ -210,7 +227,12 @@ mod tests {
         let command = command.as_std();
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
-            ["--egress-interceptor", &proxy.address.to_string()]
+            [
+                "--egress-interceptor",
+                &proxy.address.to_string(),
+                "--egress-interceptor-ports",
+                "80,443"
+            ]
         );
         let env = command.get_envs().collect::<Vec<_>>();
         assert_eq!(env.len(), 1);

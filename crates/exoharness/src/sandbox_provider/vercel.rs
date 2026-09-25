@@ -753,6 +753,10 @@ struct VercelPolicyUpdate {
 
 impl VercelNetworkPolicy {
     fn from_policy(policy: &crate::EgressPolicy) -> Result<Self> {
+        anyhow::ensure!(
+            policy.allowed_tcp_ports.is_none(),
+            "Vercel does not support policy.allowed_tcp_ports"
+        );
         if !policy.credentials.is_empty() {
             bail!(
                 "Vercel does not support policy.credentials placeholder substitution; its native transforms set whole header values"

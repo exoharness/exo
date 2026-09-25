@@ -790,11 +790,7 @@ impl FirecrackerSandboxBackend {
         policy: &crate::SandboxNetworkPolicy,
     ) -> Result<Arc<dyn crate::egress::EgressTransport>> {
         Ok(Arc::new(
-            crate::egress::LocalEgressTransport::for_policy(
-                policy,
-                self.shared.config.egress_listen,
-            )
-            .await?,
+            native_egress_transport(policy, self.shared.config.egress_listen).await?,
         ))
     }
 
@@ -1904,11 +1900,12 @@ impl Shared {
                             .is_none_or(|entry| entry.egress_proxy != Some(proxy))
                     {
                         let network = machine.record.network();
+                        let policy = request.spec.policy.clone();
                         tokio::task::spawn_blocking(move || {
                             let rules = format!(
                                 "delete table inet {}\n{}",
                                 network.nft_table,
-                                proxy_network_firewall_rules(&network, proxy)?
+                                proxy_network_firewall_rules(&network, &policy, proxy)?
                             );
                             run_checked_input("nft", &["-f", "-"], rules.as_bytes())
                         })
@@ -2112,7 +2109,7 @@ impl Shared {
                     prepare_network(
                         &config,
                         &network,
-                        &request.spec.policy.networking,
+                        &request.spec.policy,
                         request.egress_proxy,
                         jailer_uid(&config, &record)?,
                     )?;
@@ -3121,7 +3118,7 @@ fn ipv4_add(address: Ipv4Addr, offset: u32) -> Ipv4Addr {
 fn prepare_network(
     config: &FirecrackerConfig,
     network: &NetworkConfig,
-    policy: &SandboxNetworkPolicy,
+    policy: &crate::EgressPolicy,
     egress_proxy: Option<crate::SandboxEgressProxy>,
     jailer_uid: u32,
 ) -> Result<()> {
@@ -3298,7 +3295,7 @@ fn prepare_network(
 fn install_network_firewall(
     config: &FirecrackerConfig,
     network: &NetworkConfig,
-    policy: &SandboxNetworkPolicy,
+    policy: &crate::EgressPolicy,
     egress_proxy: Option<crate::SandboxEgressProxy>,
 ) -> Result<()> {
     let rules = network_firewall_rules(config, network, policy, egress_proxy)?;
@@ -3308,11 +3305,11 @@ fn install_network_firewall(
 fn network_firewall_rules(
     config: &FirecrackerConfig,
     network: &NetworkConfig,
-    policy: &SandboxNetworkPolicy,
+    policy: &crate::EgressPolicy,
     egress_proxy: Option<crate::SandboxEgressProxy>,
 ) -> Result<String> {
     if let Some(proxy) = egress_proxy {
-        return proxy_network_firewall_rules(network, proxy);
+        return proxy_network_firewall_rules(network, policy, proxy);
     }
     let mut rules = String::new();
     let table = &network.nft_table;
@@ -3366,7 +3363,7 @@ fn network_firewall_rules(
         "add rule inet {table} forward iifname {interface} ip daddr {{ {} }} counter reject",
         BLOCKED_EGRESS_CIDRS.join(", ")
     )?;
-    let final_egress_verdict = if *policy == SandboxNetworkPolicy::Unrestricted {
+    let final_egress_verdict = if policy.networking == SandboxNetworkPolicy::Unrestricted {
         "accept"
     } else {
         "reject"
@@ -3391,8 +3388,80 @@ fn network_firewall_rules(
     Ok(rules)
 }
 
+pub(super) async fn native_egress_transport(
+    policy: &SandboxNetworkPolicy,
+    listen: Option<crate::EgressListenConfig>,
+) -> Result<crate::egress::LocalEgressTransport> {
+    crate::egress::LocalEgressTransport::for_policy_with_dns(
+        policy,
+        listen,
+        Some(Arc::new(FirecrackerDns {
+            limited: matches!(policy, SandboxNetworkPolicy::Limited { .. }),
+        })),
+    )
+    .await
+}
+
+struct FirecrackerDns {
+    limited: bool,
+}
+
+#[async_trait]
+impl crate::egress::NetworkDns for FirecrackerDns {
+    async fn resolve(&self, source: Ipv4Addr, host: &str) -> Result<Vec<Ipv4Addr>> {
+        use crate::egress::UpstreamResolver;
+        let resolved = crate::egress::PublicUpstreamResolver
+            .resolve(host, 0)
+            .await?;
+        let mut addresses = resolved
+            .addresses
+            .into_iter()
+            .filter_map(|address| match address.ip() {
+                std::net::IpAddr::V4(ip) => Some(ip),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        addresses.sort_unstable();
+        addresses.dedup();
+        ensure!(addresses.len() <= 32, "too many DNS addresses");
+        if self.limited {
+            // network_config allocates eight addresses per slot; the guest is
+            // offset six. Only the bound VM can query this DNS listener.
+            let offset = u32::from(source)
+                .checked_sub(u32::from(NETWORK_BASE))
+                .context("invalid Firecracker DNS source")?;
+            ensure!(offset % 8 == 6, "invalid Firecracker DNS source");
+            let table = network_config(offset / 8).nft_table;
+            let entries = addresses
+                .iter()
+                .map(|address| format!("{address} timeout 1h"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let output = tokio::process::Command::new("nft")
+                .args([
+                    "add",
+                    "element",
+                    "inet",
+                    &table,
+                    "allowed_hosts",
+                    &format!("{{ {entries} }}"),
+                ])
+                .kill_on_drop(true)
+                .output()
+                .await?;
+            ensure!(
+                output.status.success(),
+                "admitting DNS addresses: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(addresses)
+    }
+}
+
 fn proxy_network_firewall_rules(
     network: &NetworkConfig,
+    policy: &crate::EgressPolicy,
     proxy: crate::SandboxEgressProxy,
 ) -> Result<String> {
     let table = &network.nft_table;
@@ -3411,16 +3480,24 @@ fn proxy_network_firewall_rules(
             "add chain inet {table} {chain} {{ type {kind} hook {chain} priority {priority}; policy accept; }}"
         )?;
     }
-    // Proxied mode redirects HTTP/HTTPS on TCP 80/443 and DNS on TCP/UDP 53.
-    // Other outbound traffic is rejected below, including HTTPS on 8443, SSH,
-    // and QUIC. This is a current implementation restriction: unrestricted
-    // outbound traffic with selective credential substitution still needs work.
+    // HTTP/HTTPS go through credential inspection; other permitted TCP uses
+    // native forwarding. Restricted policies learn public destination IPs from
+    // allowed DNS answers before replying to the guest. Expiring entries bound
+    // how long a previous DNS answer can authorize new connections.
+    // DNS is host-managed; other UDP traffic and IPv6 remain blocked.
+    writeln!(
+        rules,
+        "add set inet {table} allowed_hosts {{ type ipv4_addr; flags timeout; timeout 1h; size 4096; }}"
+    )?;
     for (protocol, port, destination) in [
         ("tcp", 80, proxy.http),
         ("tcp", 443, proxy.https),
         ("tcp", 53, proxy.dns),
         ("udp", 53, proxy.dns),
     ] {
+        if port != 53 && !policy.allows_tcp_port(port) {
+            continue;
+        }
         writeln!(
             rules,
             "add rule inet {table} prerouting iifname {interface} ip saddr {source} {protocol} dport {port} counter dnat ip to {destination}"
@@ -3452,6 +3529,36 @@ fn proxy_network_firewall_rules(
             rules,
             "add rule inet {table} {chain} iifname {interface} ct direction reply ct state established,related counter accept"
         )?;
+        if chain == "forward" {
+            writeln!(
+                rules,
+                "add rule inet {table} {chain} iifname {interface} ip daddr {{ {} }} counter reject",
+                BLOCKED_EGRESS_CIDRS.join(", ")
+            )?;
+            let hosts = if policy.networking == SandboxNetworkPolicy::Unrestricted {
+                ""
+            } else {
+                "ip daddr @allowed_hosts "
+            };
+            match &policy.allowed_tcp_ports {
+                None => writeln!(
+                    rules,
+                    "add rule inet {table} {chain} iifname {interface} {hosts}meta l4proto tcp counter accept"
+                )?,
+                Some(ports) if !ports.is_empty() => {
+                    let ports = ports
+                        .iter()
+                        .map(u16::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    writeln!(
+                        rules,
+                        "add rule inet {table} {chain} iifname {interface} {hosts}tcp dport {{ {ports} }} counter accept"
+                    )?;
+                }
+                Some(_) => {}
+            }
+        }
         writeln!(
             rules,
             "add rule inet {table} {chain} iifname {interface} counter reject"

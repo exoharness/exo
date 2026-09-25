@@ -392,9 +392,8 @@ async fn handle_request(
                 listeners.len() < MAX_EGRESS_LISTENERS,
                 "too many egress listeners"
             );
-            let listener: Arc<dyn crate::egress::EgressTransport> = Arc::new(
-                crate::egress::LocalEgressTransport::for_policy(&networking, listen).await?,
-            );
+            let listener: Arc<dyn crate::egress::EgressTransport> =
+                Arc::new(super::firecracker::native_egress_transport(&networking, listen).await?);
             let endpoints = listener.endpoints();
             let listener_id = uuid::Uuid::new_v4().to_string();
             listeners.insert(listener_id.clone(), listener);
