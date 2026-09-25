@@ -12,8 +12,11 @@
 //! Snapshots are bytes-by-reference like E2B/Daytona: the payload is a manifest
 //! pointing at a `.smolmachine` pack on disk.
 
+mod egress;
 #[cfg(target_os = "macos")]
 mod image_cache;
+
+use egress::SmolvmProxy;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -33,7 +36,7 @@ use crate::SandboxAttachment;
 #[cfg(test)]
 use crate::egress::UpstreamResolver;
 use crate::egress::{
-    EgressCredentialResolver, EgressRuntime, PublicUpstreamResolver, SandboxEgress, SmolvmProxy,
+    EgressCredentialResolver, EgressRuntime, PublicUpstreamResolver, SandboxEgress,
 };
 use crate::sandbox::{
     ManagedSandboxBackend, ManagedSandboxHandle, SandboxCommand, SandboxCommandOutput,

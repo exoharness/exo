@@ -43,12 +43,10 @@ mod transport;
 pub mod vault;
 pub use transport::{EgressTransport, LocalEgressTransport};
 mod sandbox;
-mod smolvm;
-pub(crate) use sandbox::{EgressRuntime, SandboxEgress};
-pub(crate) use smolvm::SmolvmProxy;
+pub(crate) use sandbox::{EgressRuntime, SandboxEgress, SandboxProxy};
 
 const PLACEHOLDER_PREFIX: &str = "exo_egress_";
-const IO_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const IO_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_REQUEST_BODY: usize = 8 * 1024 * 1024;
 const HTTP_BUFFER_SIZE: usize = 32 * 1024;
@@ -199,10 +197,11 @@ impl EgressProxy {
             move || {
                 let transport = incoming.clone();
                 async move {
-                    tokio::select! {
+                    let connection = tokio::select! {
                         stream = transport.accept(false) => stream.map(Connection::Http),
                         stream = transport.accept(true) => stream.map(Connection::Https),
-                    }
+                    }?;
+                    Ok(std::future::ready(Ok(connection)))
                 }
             },
             move || cleanup.close(),
@@ -264,7 +263,7 @@ impl Drop for EgressProxy {
 }
 
 impl State {
-    fn new(
+    pub(crate) fn new(
         identity: EgressIdentity,
         policy: EgressPolicy,
         resolver: Option<Arc<dyn EgressCredentialResolver>>,
@@ -682,7 +681,7 @@ fn proxy_response(response: reqwest::Response) -> Result<Response<ProxyBody>> {
 // https://www.iana.org/assignments/iana-ipv4-special-registry/
 // Also excludes multicast (RFC 1112). The whole 192.0.0.0/24 protocol block and
 // deprecated 192.88.99.0/24 stay blocked, including their anycast exceptions.
-fn public_ipv4(ip: IpAddr) -> bool {
+pub(crate) fn public_ipv4(ip: IpAddr) -> bool {
     let IpAddr::V4(ip) = ip else {
         return false;
     };
@@ -882,14 +881,13 @@ where
     Ok(())
 }
 
-enum Connection {
+pub(crate) enum Connection {
     Http(crate::BoxSandboxTcpStream),
     Https(crate::BoxSandboxTcpStream),
-    Smolvm(tokio::net::TcpStream, [u8; 32]),
 }
 
 impl ProxyConnection {
-    fn start<A, F>(
+    pub(crate) fn start<A, F, C>(
         state: State,
         cancel: CancellationToken,
         accept: A,
@@ -897,7 +895,8 @@ impl ProxyConnection {
     ) -> Result<Self>
     where
         A: Fn() -> F + Send + 'static,
-        F: std::future::Future<Output = Result<Connection>> + Send + 'static,
+        F: std::future::Future<Output = Result<C>> + Send + 'static,
+        C: std::future::Future<Output = Result<Connection>> + Send + 'static,
     {
         let (ca_pem, tls) = tls_configuration(state.hosts.iter().cloned().collect())?;
         let environment = state
@@ -930,10 +929,11 @@ impl Drop for ProxyConnection {
     }
 }
 
-async fn serve<A, F>(accept: A, tls: TlsAcceptor, state: Arc<State>, cancel: CancellationToken)
+async fn serve<A, F, C>(accept: A, tls: TlsAcceptor, state: Arc<State>, cancel: CancellationToken)
 where
     A: Fn() -> F,
-    F: std::future::Future<Output = Result<Connection>>,
+    F: std::future::Future<Output = Result<C>>,
+    C: std::future::Future<Output = Result<Connection>> + Send + 'static,
 {
     let mut tasks = JoinSet::new();
     let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
@@ -952,10 +952,9 @@ where
                 let tls = tls.clone();
                 tasks.spawn(async move {
                     let _permit = permit;
-                    match connection {
+                    match connection.await? {
                         Connection::Http(stream) => http_connection(stream, state, None).await,
                         Connection::Https(stream) => transparent_https_connection(stream, tls, state).await,
-                        Connection::Smolvm(stream, token) => smolvm::connection(stream, token, tls, state).await,
                     }
                 });
             }

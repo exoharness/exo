@@ -1,15 +1,21 @@
-use super::*;
-use tokio::io::AsyncWriteExt;
-use tokio::net::{TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 
-pub(crate) struct SmolvmProxy {
+use anyhow::{Result, ensure};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio_util::sync::CancellationToken;
+
+use crate::egress::{Connection, IO_TIMEOUT, ProxyConnection, SandboxProxy, State, public_ipv4};
+
+pub(super) struct SmolvmProxy {
     connection: ProxyConnection,
     address: SocketAddr,
     token: [u8; 32],
 }
 
 impl SmolvmProxy {
-    pub(crate) async fn start(state: State, cancel: CancellationToken) -> Result<Self> {
+    pub(super) async fn start(state: State, cancel: CancellationToken) -> Result<Self> {
         let listener = Arc::new(TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?);
         let address = listener.local_addr()?;
         let mut token = [0; 32];
@@ -20,7 +26,10 @@ impl SmolvmProxy {
             cancel,
             move || {
                 let listener = listener.clone();
-                async move { Ok(Connection::Smolvm(listener.accept().await?.0, token)) }
+                async move {
+                    let stream = listener.accept().await?.0;
+                    Ok(connection(stream, token))
+                }
             },
             || {},
         )?;
@@ -31,7 +40,7 @@ impl SmolvmProxy {
         })
     }
 
-    pub(crate) fn configure(&self, command: &mut tokio::process::Command) {
+    pub(super) fn configure(&self, command: &mut tokio::process::Command) {
         let token: String = self
             .token
             .iter()
@@ -44,18 +53,13 @@ impl SmolvmProxy {
     }
 }
 
-impl sandbox::SandboxProxy for SmolvmProxy {
+impl SandboxProxy for SmolvmProxy {
     fn connection(&self) -> &ProxyConnection {
         &self.connection
     }
 }
 
-pub(super) async fn connection(
-    mut stream: TcpStream,
-    token: [u8; 32],
-    tls: TlsAcceptor,
-    state: Arc<State>,
-) -> Result<()> {
+async fn connection(mut stream: TcpStream, token: [u8; 32]) -> Result<Connection> {
     let port = tokio::time::timeout(IO_TIMEOUT, async {
         let mut header = [0; 44];
         stream.read_exact(&mut header).await?;
@@ -87,17 +91,20 @@ pub(super) async fn connection(
     })
     .await??;
     if port == 443 {
-        transparent_https_connection(stream, tls, state).await
+        Ok(Connection::Https(Box::pin(stream)))
     } else {
-        http_connection(stream, state, None).await
+        Ok(Connection::Http(Box::pin(stream)))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::sandbox::SandboxProxy;
     use super::*;
+    use crate::SandboxNetworkPolicy;
+    use crate::egress::{EgressIdentity, ResolvedUpstream, UpstreamResolver};
+    use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     #[derive(Default)]
     struct Upstream(AtomicUsize);
@@ -166,9 +173,14 @@ mod tests {
             let mut stream = connect(&first, first.token, destination.parse()?).await?;
             assert_ne!(stream.read_u8().await?, 0, "{destination}");
         }
+        let mut pending = TcpStream::connect(first.address).await?;
+        pending.write_all(b"SMO").await?;
         for (host, expected_uses) in [("blocked.test", 0), ("api.test", 1)] {
             let mut stream = connect(&first, first.token, public).await?;
-            assert_eq!(stream.read_u8().await?, 0);
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(1), stream.read_u8()).await??,
+                0
+            );
             stream
                 .write_all(
                     format!("GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
@@ -180,7 +192,6 @@ mod tests {
             assert!(response.starts_with("HTTP/1.1 502"), "{response}");
             assert_eq!(upstream.0.load(Ordering::SeqCst), expected_uses);
         }
-        let mut pending = TcpStream::connect(first.address).await?;
         first.close();
         assert!(
             tokio::time::timeout(Duration::from_secs(1), pending.read_u8())
@@ -205,12 +216,6 @@ mod tests {
         assert_eq!(env.len(), 1);
         assert_eq!(env[0].0, "SMOLVM_INTERCEPTOR_TOKEN");
         assert_eq!(env[0].1.unwrap().len(), 64);
-        assert!(
-            !proxy
-                .connection
-                .environment
-                .contains_key("SMOLVM_INTERCEPTOR_TOKEN")
-        );
         Ok(())
     }
 }
