@@ -56,7 +56,7 @@ const MAX_CONNECTIONS: usize = 128;
 
 pub(crate) struct ResolvedUpstream {
     pub(crate) addresses: Vec<SocketAddr>,
-    root_certificate: Option<reqwest::Certificate>,
+    pub(crate) root_certificate: Option<reqwest::Certificate>,
 }
 
 #[async_trait]
@@ -166,7 +166,7 @@ pub(crate) struct State {
     clients: Mutex<HashMap<(String, u16), PooledClient>>,
     hosts: HashSet<String>,
     unrestricted: bool,
-    pub(crate) allowed_tcp_ports: Option<Vec<u16>>,
+    allowed_tcp_ports: Option<Vec<u16>>,
     bindings: Vec<Binding>,
     identity: EgressIdentity,
     resolver: Option<Arc<dyn EgressCredentialResolver>>,
@@ -197,7 +197,7 @@ impl EgressProxy {
         let connection = ProxyConnection::start(
             state,
             cancel,
-            move || {
+            move |_| {
                 let transport = incoming.clone();
                 async move {
                     let connection = tokio::select! {
@@ -381,14 +381,41 @@ impl State {
         })
     }
 
-    fn check_port(&self, port: u16) -> Result<()> {
+    pub(crate) fn check_port(&self, port: u16) -> Result<()> {
         ensure!(
-            self.allowed_tcp_ports
-                .as_ref()
-                .is_none_or(|ports| ports.contains(&port)),
+            port != 0
+                && self
+                    .allowed_tcp_ports
+                    .as_ref()
+                    .is_none_or(|ports| ports.contains(&port)),
             "TCP port is not allowed"
         );
         Ok(())
+    }
+
+    pub(crate) async fn connect_tcp(
+        &self,
+        destination: SocketAddr,
+    ) -> Result<tokio::net::TcpStream> {
+        ensure!(
+            self.unrestricted,
+            "opaque TCP requires unrestricted networking"
+        );
+        self.check_port(destination.port())?;
+        ensure!(
+            public_ipv4(destination.ip()),
+            "TCP destination is not permitted"
+        );
+        let addresses = self
+            .upstream
+            .resolve(&destination.ip().to_string(), destination.port())
+            .await?
+            .addresses;
+        Ok(tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            tokio::net::TcpStream::connect(addresses.as_slice()),
+        )
+        .await??)
     }
 
     fn connect_host(&self, authority: &str) -> Result<String> {
@@ -908,6 +935,10 @@ where
 pub(crate) enum Connection {
     Http(crate::BoxSandboxTcpStream),
     Https(crate::BoxSandboxTcpStream),
+    Tcp {
+        downstream: crate::BoxSandboxTcpStream,
+        upstream: tokio::net::TcpStream,
+    },
 }
 
 impl ProxyConnection {
@@ -918,7 +949,7 @@ impl ProxyConnection {
         close: impl FnOnce() + Send + 'static,
     ) -> Result<Self>
     where
-        A: Fn() -> F + Send + 'static,
+        A: Fn(Arc<State>) -> F + Send + 'static,
         F: std::future::Future<Output = Result<C>> + Send + 'static,
         C: std::future::Future<Output = Result<Connection>> + Send + 'static,
     {
@@ -955,7 +986,7 @@ impl Drop for ProxyConnection {
 
 async fn serve<A, F, C>(accept: A, tls: TlsAcceptor, state: Arc<State>, cancel: CancellationToken)
 where
-    A: Fn() -> F,
+    A: Fn(Arc<State>) -> F,
     F: std::future::Future<Output = Result<C>>,
     C: std::future::Future<Output = Result<Connection>> + Send + 'static,
 {
@@ -969,7 +1000,7 @@ where
                     tracing::debug!("egress connection closed with an error");
                 }
             }
-            incoming = accept() => {
+            incoming = accept(state.clone()) => {
                 let Ok(connection) = incoming else { break; };
                 let Ok(permit) = permits.clone().try_acquire_owned() else { continue; };
                 let state = state.clone();
@@ -979,6 +1010,10 @@ where
                     match connection.await? {
                         Connection::Http(stream) => http_connection(stream, state, None).await,
                         Connection::Https(stream) => transparent_https_connection(stream, tls, state).await,
+                        Connection::Tcp { mut downstream, mut upstream } => {
+                            tokio::io::copy_bidirectional(&mut downstream, &mut upstream).await?;
+                            Ok(())
+                        }
                     }
                 });
             }

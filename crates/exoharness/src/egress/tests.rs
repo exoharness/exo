@@ -2231,6 +2231,7 @@ async fn smolvm_proxy_live(with_gh: bool) -> Result<()> {
     let resolver = TestResolver::new();
     let mut config = policy();
     config.networking = SandboxNetworkPolicy::Unrestricted;
+    config.allowed_tcp_ports = Some(vec![443, 8443]);
     if with_gh {
         config.credentials[0].environment_variable = "GH_TOKEN".into();
         config.credentials[0].networking = CredentialNetworkPolicy::Limited {
@@ -2328,6 +2329,15 @@ gh api repos/org/repo/pulls/10/reviews --jq '.[0].body'
                 "anonymous HTTPS failed: {}",
                 output.stderr
             );
+            command.argv[2] = "curl --noproxy '*' --resolve public.test:8443:93.184.216.34 --cacert /tmp/public-ca.pem -fsS --max-time 10 https://public.test:8443/auth".into();
+            let output = handle.exec(&command).await?;
+            ensure!(
+                output.ok && output.stdout == "anonymous",
+                "opaque TCP relay failed: {}",
+                output.stderr
+            );
+            command.argv[2] = "curl --noproxy '*' --resolve public.test:8444:93.184.216.34 --cacert /tmp/public-ca.pem -fsS --max-time 10 https://public.test:8444/auth".into();
+            ensure!(!handle.exec(&command).await?.ok, "blocked TCP port was accepted");
         }
         replacement.shutdown_egress();
         ensure!(handle.exec(&command).await.is_err(), "closed proxy still supplies commands");

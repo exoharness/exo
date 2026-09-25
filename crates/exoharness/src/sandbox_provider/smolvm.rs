@@ -266,7 +266,7 @@ impl SmolvmSandboxBackend {
                         .is_some_and(|version| version >= MIN_WARM_VERSION),
                     labels: self.probe_flag("machine", "create", LABEL_FLAG).await,
                     interceptor: self
-                        .probe_flag("machine", "start", "--egress-interceptor-ports")
+                        .probe_flag("machine", "start", "--egress-interceptor")
                         .await,
                 }
             })
@@ -590,7 +590,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             );
             ensure!(
                 self.capabilities().await?.interceptor,
-                "smolvm proxy egress requires a binary with --egress-interceptor-ports support; configure --smolvm-binary"
+                "smolvm proxy egress requires a binary with --egress-interceptor support; configure --smolvm-binary"
             );
         }
         let binary = self.binary().await?;
@@ -1223,7 +1223,7 @@ esac"#,
             .err()
             .unwrap()
             .to_string();
-        assert!(error.contains("--egress-interceptor-ports"), "{error}");
+        assert!(error.contains("--egress-interceptor"), "{error}");
         assert!(!dir.path().join("cache").exists());
         let mut limited = request.clone();
         limited.spec.policy.networking = SandboxNetworkPolicy::Limited {
