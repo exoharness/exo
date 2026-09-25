@@ -126,20 +126,59 @@ async fn bind_dns(config: &crate::EgressListenConfig) -> io::Result<(TcpListener
 
 impl LocalEgressTransport {
     pub async fn for_hosts(hosts: &[String]) -> Result<Self> {
-        let probe = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
-        probe.connect((SYNTHETIC_IP, 9)).await?;
-        let IpAddr::V4(host_ip) = probe.local_addr()?.ip() else {
-            return Err(anyhow!("egress requires host IPv4 routing"));
-        };
-        let hosts = canonical_egress_hosts(hosts)?;
-        Self::bind(host_ip, &hosts).await
+        Self::for_policy(
+            &crate::SandboxNetworkPolicy::Limited {
+                allowed_hosts: hosts.to_vec(),
+            },
+            None,
+        )
+        .await
     }
 
     pub async fn with_config(config: crate::EgressListenConfig, hosts: &[String]) -> Result<Self> {
-        let hosts = canonical_egress_hosts(hosts)?;
-        Self::listen(config, &hosts).await
+        Self::for_policy(
+            &crate::SandboxNetworkPolicy::Limited {
+                allowed_hosts: hosts.to_vec(),
+            },
+            Some(config),
+        )
+        .await
     }
 
+    pub(crate) async fn for_policy(
+        policy: &crate::SandboxNetworkPolicy,
+        config: Option<crate::EgressListenConfig>,
+    ) -> Result<Self> {
+        let hosts = match policy {
+            crate::SandboxNetworkPolicy::Limited { allowed_hosts } => {
+                Some(canonical_egress_hosts(allowed_hosts)?)
+            }
+            crate::SandboxNetworkPolicy::Unrestricted => None,
+            crate::SandboxNetworkPolicy::Disabled => {
+                anyhow::bail!("disabled networking cannot use an egress proxy")
+            }
+        };
+        let config = match config {
+            Some(config) => config,
+            None => {
+                let probe = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+                probe.connect((SYNTHETIC_IP, 9)).await?;
+                let IpAddr::V4(host_ip) = probe.local_addr()?.ip() else {
+                    return Err(anyhow!("egress requires host IPv4 routing"));
+                };
+                crate::EgressListenConfig {
+                    bind_address: host_ip,
+                    advertised_address: host_ip,
+                    http_port: 0,
+                    https_port: 0,
+                    dns_port: 0,
+                }
+            }
+        };
+        Self::listen(config, hosts).await
+    }
+
+    #[cfg(test)]
     pub(super) async fn bind(host_ip: Ipv4Addr, hosts: &HashSet<String>) -> Result<Self> {
         Self::listen(
             crate::EgressListenConfig {
@@ -149,12 +188,15 @@ impl LocalEgressTransport {
                 https_port: 0,
                 dns_port: 0,
             },
-            hosts,
+            Some(hosts.clone()),
         )
         .await
     }
 
-    async fn listen(config: crate::EgressListenConfig, hosts: &HashSet<String>) -> Result<Self> {
+    async fn listen(
+        config: crate::EgressListenConfig,
+        hosts: Option<HashSet<String>>,
+    ) -> Result<Self> {
         let host_ip = config.advertised_address;
         let http = TcpListener::bind((config.bind_address, config.http_port)).await?;
         let https = TcpListener::bind((config.bind_address, config.https_port)).await?;
@@ -266,7 +308,7 @@ pub(super) async fn retry_after_error(cancel: &CancellationToken) -> bool {
 async fn serve_dns(
     dns: Arc<Socket<UdpSocket>>,
     tcp: Arc<Socket<TcpListener>>,
-    hosts: HashSet<String>,
+    hosts: Option<HashSet<String>>,
     source: Arc<AtomicU32>,
     cancel: CancellationToken,
 ) {
@@ -291,7 +333,7 @@ async fn serve_dns(
                     }
                 };
                 if !accepts_peer(&source, peer) { continue; }
-                if let Ok(answer) = dns_response(&hosts, &buffer[..size])
+                if let Ok(answer) = dns_response(hosts.as_ref().as_ref(), &buffer[..size])
                     && dns.send_to(&answer, peer).await.is_err() {
                     tracing::debug!("egress DNS response failed");
                 }
@@ -315,7 +357,7 @@ async fn serve_dns(
                         ensure!(usize::from(size) <= DNS_BUFFER_SIZE, "DNS request too large");
                         let mut bytes = vec![0; size as usize];
                         stream.read_exact(&mut bytes).await?;
-                        let answer = dns_response(&hosts, &bytes)?;
+                        let answer = dns_response(hosts.as_ref().as_ref(), &bytes)?;
                         stream.write_u16(answer.len().try_into()?).await?;
                         stream.write_all(&answer).await?;
                         Ok::<_, anyhow::Error>(())
@@ -326,7 +368,7 @@ async fn serve_dns(
     }
     tasks.shutdown().await;
 }
-pub(super) fn dns_response(hosts: &HashSet<String>, bytes: &[u8]) -> Result<Vec<u8>> {
+pub(super) fn dns_response(hosts: Option<&HashSet<String>>, bytes: &[u8]) -> Result<Vec<u8>> {
     let query = Message::from_vec(bytes)?;
     ensure!(
         query.message_type() == MessageType::Query
@@ -349,7 +391,7 @@ pub(super) fn dns_response(hosts: &HashSet<String>, bytes: &[u8]) -> Result<Vec<
         .to_ascii_lowercase();
     if question.query_class() != DNSClass::IN {
         response.set_response_code(ResponseCode::Refused);
-    } else if !hosts.contains(&host) {
+    } else if hosts.is_some_and(|hosts| !hosts.contains(&host)) {
         response.set_response_code(ResponseCode::NXDomain);
     } else if question.query_type() == RecordType::A {
         response.add_answer(Record::from_rdata(

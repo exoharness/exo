@@ -847,7 +847,7 @@ impl EgressPolicy {
         Ok(())
     }
 
-    #[cfg(feature = "firecracker")]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
     pub(crate) fn requires_proxy(&self) -> bool {
         !self.credentials.is_empty()
             || matches!(self.networking, SandboxNetworkPolicy::Limited { .. })

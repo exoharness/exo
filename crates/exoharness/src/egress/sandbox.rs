@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::future::Future;
+#[cfg(any(feature = "firecracker", test))]
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
@@ -9,20 +10,52 @@ use anyhow::{Result, ensure};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    EgressCredentialResolver, EgressIdentity, EgressProxy, EgressTransport, State, UpstreamResolver,
-};
+#[cfg(any(feature = "firecracker", test))]
+use super::EgressTransport;
+use super::{EgressCredentialResolver, EgressIdentity, EgressProxy, State, UpstreamResolver};
 use crate::{ManagedSandboxHandle, SandboxCommand, SandboxRequest};
 
 use super::PREPARE_TRUST;
 
 // Proxy and guest-side settings for one VM allocation. The handle uses this to
 // add placeholders and the CA path to commands; it never passes real secrets.
-pub(crate) struct SandboxEgress {
-    proxy: EgressProxy,
+pub(crate) struct SandboxEgress<P = EgressProxy> {
+    pub(crate) proxy: P,
     ca_path: String,
 }
 
+#[async_trait::async_trait]
+pub(crate) trait SandboxProxy: Send + Sync {
+    fn connection(&self) -> &super::ProxyConnection;
+    fn close(&self) {
+        self.connection().close();
+    }
+    fn is_open(&self) -> bool {
+        !self.connection().cancel.is_cancelled()
+    }
+    async fn shutdown(&self) -> Result<()> {
+        self.close();
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl SandboxProxy for EgressProxy {
+    fn connection(&self) -> &super::ProxyConnection {
+        &self.connection
+    }
+    fn close(&self) {
+        EgressProxy::close(self);
+    }
+    fn is_open(&self) -> bool {
+        !self.connection.cancel.is_cancelled() && !self.transport.is_closed()
+    }
+    async fn shutdown(&self) -> Result<()> {
+        self.transport.shutdown().await
+    }
+}
+
+#[cfg(feature = "firecracker")]
 impl SandboxEgress {
     pub(crate) fn endpoints(&self) -> crate::SandboxEgressProxy {
         self.proxy.endpoints()
@@ -34,12 +67,25 @@ impl SandboxEgress {
         source: Ipv4Addr,
     ) -> Result<()> {
         self.proxy.bind_source(source).await?;
+        self.initialize_trust(handle).await
+    }
+
+    pub(crate) fn transport(&self) -> Arc<dyn EgressTransport> {
+        self.proxy.transport.clone()
+    }
+}
+
+impl<P: SandboxProxy> SandboxEgress<P> {
+    pub(crate) async fn initialize_trust(&self, handle: &dyn ManagedSandboxHandle) -> Result<()> {
         let prepared = handle
             .exec(&SandboxCommand {
                 argv: vec!["/bin/sh".into(), "-c".into(), PREPARE_TRUST.into()],
                 env: HashMap::from([
                     ("EXO_EGRESS_CA_PATH".into(), self.ca_path.clone()),
-                    ("EXO_EGRESS_CA_PEM".into(), self.proxy.ca_pem().into()),
+                    (
+                        "EXO_EGRESS_CA_PEM".into(),
+                        self.proxy.connection().ca_pem.clone(),
+                    ),
                 ]),
                 display_argv: None,
                 cwd: None,
@@ -64,19 +110,18 @@ impl SandboxEgress {
         }
     }
 
-    pub(crate) fn transport(&self) -> Arc<dyn EgressTransport> {
-        self.proxy.transport.clone()
-    }
-
     pub(crate) fn command(&self, command: &SandboxCommand) -> Result<SandboxCommand> {
         ensure!(
             self.is_open(),
             "sandbox egress proxy is closed; acquire the sandbox again"
         );
         let mut command = command.clone();
-        command.env.extend(self.proxy.environment().clone());
+        command
+            .env
+            .extend(self.proxy.connection().environment.clone());
         for key in [
             "SSL_CERT_FILE",
+            "CODEX_CA_CERTIFICATE",
             "REQUESTS_CA_BUNDLE",
             "NODE_EXTRA_CA_CERTS",
             "CURL_CA_BUNDLE",
@@ -92,28 +137,28 @@ impl SandboxEgress {
     }
 
     fn is_open(&self) -> bool {
-        !self.proxy.cancel.is_cancelled() && !self.proxy.transport.is_closed()
+        self.proxy.is_open()
     }
 }
 
-struct CachedSandbox<H> {
+struct CachedSandbox<H, P> {
     request: SandboxRequest,
     handle: Option<Arc<H>>,
-    egress: Arc<SandboxEgress>,
+    egress: Arc<SandboxEgress<P>>,
 }
 
-// Shared acquisition logic for the native Firecracker and Lima backends.
+// Shared acquisition logic for native sandbox egress.
 // This owns cached handles/proxies, not VM execution or the secret store.
 // A hosted backend can own its own allocation lifecycle instead of using this.
-pub(crate) struct EgressRuntime<H> {
+pub(crate) struct EgressRuntime<H, P = EgressProxy> {
     resolver: Option<Arc<dyn EgressCredentialResolver>>,
     upstream: Arc<dyn UpstreamResolver>,
     locks: Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
-    sandboxes: Mutex<HashMap<String, CachedSandbox<H>>>,
+    sandboxes: Mutex<HashMap<String, CachedSandbox<H, P>>>,
     closed: CancellationToken,
 }
 
-impl<H: ManagedSandboxHandle + 'static> EgressRuntime<H> {
+impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
     pub(crate) fn new(
         resolver: Option<Arc<dyn EgressCredentialResolver>>,
         upstream: Arc<dyn UpstreamResolver>,
@@ -127,7 +172,7 @@ impl<H: ManagedSandboxHandle + 'static> EgressRuntime<H> {
         }
     }
 
-    fn sandboxes(&self) -> MutexGuard<'_, HashMap<String, CachedSandbox<H>>> {
+    fn sandboxes(&self) -> MutexGuard<'_, HashMap<String, CachedSandbox<H, P>>> {
         self.sandboxes.lock().expect("egress sandbox map poisoned")
     }
 
@@ -160,17 +205,17 @@ impl<H: ManagedSandboxHandle + 'static> EgressRuntime<H> {
     // VM, binds its source address, and installs trust. T/B are those closures,
     // and TF/BF are the futures they return. Keeping that work in callbacks lets
     // both backends share cache checks and cleanup without a second VM wrapper.
-    pub(crate) async fn acquire<T, TF, B, BF>(
+    pub(crate) async fn acquire_with_proxy<T, TF, B, BF>(
         &self,
         request: SandboxRequest,
-        transport: T,
+        proxy: T,
         build: B,
         terminate: impl Future<Output = Result<()>>,
     ) -> Result<Arc<H>>
     where
-        T: FnOnce(Vec<String>) -> TF,
-        TF: Future<Output = Result<Arc<dyn EgressTransport>>>,
-        B: FnOnce(Option<Arc<SandboxEgress>>) -> BF,
+        T: FnOnce(State, CancellationToken) -> TF,
+        TF: Future<Output = Result<P>>,
+        B: FnOnce(Option<Arc<SandboxEgress<P>>>) -> BF,
         BF: Future<Output = Result<H>>,
     {
         // Serialize this sandbox's acquire/terminate operations; other sandboxes
@@ -205,13 +250,6 @@ impl<H: ManagedSandboxHandle + 'static> EgressRuntime<H> {
             request.lifecycle.idle_ttl.is_some(),
             "proxy egress requires a managed sandbox lifecycle"
         );
-        ensure!(
-            matches!(
-                request.spec.policy.networking,
-                crate::SandboxNetworkPolicy::Limited { .. }
-            ),
-            "Firecracker credential proxy requires policy.networking.limited"
-        );
         let state = State::new(
             EgressIdentity {
                 sandbox_id: request.sandbox_id.clone(),
@@ -223,10 +261,8 @@ impl<H: ManagedSandboxHandle + 'static> EgressRuntime<H> {
         )?;
         // The proxy must exist before boot so the backend can install its
         // endpoints in the VM's network rules. It admits no source yet.
-        let transport = transport(state.hosts.iter().cloned().collect()).await?;
         let egress = Arc::new(SandboxEgress {
-            proxy: EgressProxy::start_with_transport(transport, state, self.closed.child_token())
-                .await?,
+            proxy: proxy(state, self.closed.child_token()).await?,
             ca_path: format!("/tmp/exo-egress-{}.pem", uuid::Uuid::new_v4().simple()),
         });
         {
@@ -257,7 +293,7 @@ impl<H: ManagedSandboxHandle + 'static> EgressRuntime<H> {
         if result.is_err() {
             self.sandboxes().remove(&request.sandbox_id);
             egress.close();
-            if let Err(cleanup) = egress.proxy.transport.shutdown().await {
+            if let Err(cleanup) = egress.proxy.shutdown().await {
                 tracing::warn!(sandbox_id = %request.sandbox_id, %cleanup, "egress cleanup after failed acquisition");
             }
             if let Err(cleanup) = terminate.await {
@@ -271,7 +307,7 @@ impl<H: ManagedSandboxHandle + 'static> EgressRuntime<H> {
         let cached = self.sandboxes().remove(id);
         if let Some(cached) = cached {
             cached.egress.close();
-            cached.egress.proxy.transport.shutdown().await?;
+            cached.egress.proxy.shutdown().await?;
         }
         Ok(())
     }
@@ -295,7 +331,35 @@ impl<H: ManagedSandboxHandle + 'static> EgressRuntime<H> {
     }
 }
 
-impl<H> Drop for EgressRuntime<H> {
+#[cfg(any(feature = "firecracker", test))]
+impl<H: ManagedSandboxHandle + 'static> EgressRuntime<H> {
+    pub(crate) async fn acquire<T, TF, B, BF>(
+        &self,
+        request: SandboxRequest,
+        transport: T,
+        build: B,
+        terminate: impl Future<Output = Result<()>>,
+    ) -> Result<Arc<H>>
+    where
+        T: FnOnce(crate::SandboxNetworkPolicy) -> TF,
+        TF: Future<Output = Result<Arc<dyn EgressTransport>>>,
+        B: FnOnce(Option<Arc<SandboxEgress>>) -> BF,
+        BF: Future<Output = Result<H>>,
+    {
+        let policy = request.spec.policy.networking.clone();
+        self.acquire_with_proxy(
+            request,
+            |state, cancel| async move {
+                EgressProxy::start_with_transport(transport(policy).await?, state, cancel).await
+            },
+            build,
+            terminate,
+        )
+        .await
+    }
+}
+
+impl<H, P> Drop for EgressRuntime<H, P> {
     fn drop(&mut self) {
         self.closed.cancel();
     }

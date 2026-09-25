@@ -2,7 +2,7 @@
 //!
 //! `EgressTransport` supplies connections from the sandbox network. This module
 //! checks destinations, resolves credentials, and forwards requests. `sandbox`
-//! coordinates proxy setup with Firecracker/Lima acquisition; `transport`
+//! coordinates proxy setup with sandbox acquisition; `transport`
 //! implements the listeners and DNS service on the VM host.
 
 use std::collections::{HashMap, HashSet};
@@ -23,7 +23,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
@@ -39,15 +39,13 @@ use crate::{
 
 mod explicit;
 pub use explicit::{ExplicitProxy, ProxyAuthorizer, ProxySession, serve_connect_proxy};
-mod explicit_backend;
-pub(crate) use explicit_backend::CredentialProxyBackend;
 mod transport;
 pub mod vault;
 pub use transport::{EgressTransport, LocalEgressTransport};
-#[cfg(feature = "firecracker")]
 mod sandbox;
-#[cfg(feature = "firecracker")]
+mod smolvm;
 pub(crate) use sandbox::{EgressRuntime, SandboxEgress};
+pub(crate) use smolvm::SmolvmProxy;
 
 const PLACEHOLDER_PREFIX: &str = "exo_egress_";
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
@@ -135,6 +133,10 @@ pub trait EgressCredentialResolver: Send + Sync {
 pub struct EgressProxy {
     endpoints: SandboxEgressProxy,
     transport: Arc<dyn EgressTransport>,
+    connection: ProxyConnection,
+}
+
+pub(crate) struct ProxyConnection {
     ca_pem: String,
     environment: HashMap<String, String>,
     cancel: CancellationToken,
@@ -160,7 +162,7 @@ struct PooledClient {
 
 // Request handling shared by all connections to one sandbox's proxy. Clients
 // are pooled by destination and replaced whenever its resolved addresses change.
-struct State {
+pub(crate) struct State {
     clients: Mutex<HashMap<(String, u16), PooledClient>>,
     hosts: HashSet<String>,
     unrestricted: bool,
@@ -187,27 +189,28 @@ impl EgressProxy {
         state: State,
         cancel: CancellationToken,
     ) -> Result<Self> {
-        ensure!(
-            !state.unrestricted,
-            "transparent egress proxy requires limited networking"
-        );
         let endpoints = transport.endpoints();
         endpoints.validate()?;
-        let (ca_pem, tls) = tls_configuration(state.hosts.iter().cloned().collect())?;
-        let environment = state
-            .bindings
-            .iter()
-            .map(|b| (b.config.environment_variable.clone(), b.placeholder.clone()))
-            .collect();
-        let state = Arc::new(state);
-        let task = tokio::spawn(serve(transport.clone(), tls, state, cancel.clone()));
+        let incoming = transport.clone();
+        let cleanup = transport.clone();
+        let connection = ProxyConnection::start(
+            state,
+            cancel,
+            move || {
+                let transport = incoming.clone();
+                async move {
+                    tokio::select! {
+                        stream = transport.accept(false) => stream.map(Connection::Http),
+                        stream = transport.accept(true) => stream.map(Connection::Https),
+                    }
+                }
+            },
+            move || cleanup.close(),
+        )?;
         Ok(Self {
             endpoints,
             transport,
-            ca_pem,
-            environment,
-            cancel,
-            task,
+            connection,
         })
     }
 
@@ -220,15 +223,15 @@ impl EgressProxy {
     }
 
     pub fn ca_pem(&self) -> &str {
-        &self.ca_pem
+        &self.connection.ca_pem
     }
 
     pub fn environment(&self) -> &HashMap<String, String> {
-        &self.environment
+        &self.connection.environment
     }
 
     pub fn close(&self) {
-        self.cancel.cancel();
+        self.connection.close();
         self.transport.close();
     }
 }
@@ -257,7 +260,6 @@ where
 impl Drop for EgressProxy {
     fn drop(&mut self) {
         self.close();
-        self.task.abort();
     }
 }
 
@@ -829,12 +831,110 @@ where
     http_connection(stream, state, Some(sni)).await
 }
 
-async fn serve(
-    transport: Arc<dyn EgressTransport>,
+async fn transparent_https_connection<T>(
+    mut stream: T,
     tls: TlsAcceptor,
     state: Arc<State>,
-    cancel: CancellationToken,
-) {
+) -> Result<()>
+where
+    T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+{
+    if !state.unrestricted {
+        return https_connection(stream, tls, state, None).await;
+    }
+    let (host, prefix) = tokio::time::timeout(IO_TIMEOUT, async {
+        let mut acceptor = rustls::server::Acceptor::default();
+        let mut prefix = Vec::new();
+        let mut buffer = [0; 4096];
+        loop {
+            let count = stream.read(&mut buffer).await?;
+            ensure!(count > 0, "TLS connection closed before ClientHello");
+            ensure!(
+                prefix.len() + count <= 64 * 1024,
+                "TLS ClientHello too large"
+            );
+            prefix.extend_from_slice(&buffer[..count]);
+            acceptor.read_tls(&mut &buffer[..count])?;
+            if let Some(accepted) = acceptor.accept().map_err(|(error, _alert)| error)? {
+                let host = canonical_egress_host(
+                    accepted
+                        .client_hello()
+                        .server_name()
+                        .context("TLS SNI is required")?,
+                )?;
+                return Ok::<_, anyhow::Error>((host, prefix));
+            }
+        }
+    })
+    .await??;
+    let (read, write) = tokio::io::split(stream);
+    let mut stream = tokio::io::join(std::io::Cursor::new(prefix).chain(read), write);
+    if state.hosts.contains(&host) {
+        return https_connection(stream, tls, state, Some(&host)).await;
+    }
+    let addresses = state.upstream.resolve(&host, 443).await?.addresses;
+    let mut upstream = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        tokio::net::TcpStream::connect(addresses.as_slice()),
+    )
+    .await??;
+    tokio::io::copy_bidirectional(&mut stream, &mut upstream).await?;
+    Ok(())
+}
+
+enum Connection {
+    Http(crate::BoxSandboxTcpStream),
+    Https(crate::BoxSandboxTcpStream),
+    Smolvm(tokio::net::TcpStream, [u8; 32]),
+}
+
+impl ProxyConnection {
+    fn start<A, F>(
+        state: State,
+        cancel: CancellationToken,
+        accept: A,
+        close: impl FnOnce() + Send + 'static,
+    ) -> Result<Self>
+    where
+        A: Fn() -> F + Send + 'static,
+        F: std::future::Future<Output = Result<Connection>> + Send + 'static,
+    {
+        let (ca_pem, tls) = tls_configuration(state.hosts.iter().cloned().collect())?;
+        let environment = state
+            .bindings
+            .iter()
+            .map(|b| (b.config.environment_variable.clone(), b.placeholder.clone()))
+            .collect();
+        let shutdown = cancel.clone();
+        let task = tokio::spawn(async move {
+            serve(accept, tls, Arc::new(state), shutdown).await;
+            close();
+        });
+        Ok(Self {
+            ca_pem,
+            environment,
+            cancel,
+            task,
+        })
+    }
+
+    fn close(&self) {
+        self.cancel.cancel();
+    }
+}
+
+impl Drop for ProxyConnection {
+    fn drop(&mut self) {
+        self.close();
+        self.task.abort();
+    }
+}
+
+async fn serve<A, F>(accept: A, tls: TlsAcceptor, state: Arc<State>, cancel: CancellationToken)
+where
+    A: Fn() -> F,
+    F: std::future::Future<Output = Result<Connection>>,
+{
     let mut tasks = JoinSet::new();
     let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     loop {
@@ -845,29 +945,23 @@ async fn serve(
                     tracing::debug!("egress connection closed with an error");
                 }
             }
-            incoming = transport.accept(false) => {
-                let Ok(stream) = incoming else { break; };
-                let Ok(permit) = permits.clone().try_acquire_owned() else { continue; };
-                let state = state.clone();
-                tasks.spawn(async move {
-                    let _permit = permit;
-                    http_connection(stream, state, None).await
-                });
-            }
-            incoming = transport.accept(true) => {
-                let Ok(stream) = incoming else { break; };
+            incoming = accept() => {
+                let Ok(connection) = incoming else { break; };
                 let Ok(permit) = permits.clone().try_acquire_owned() else { continue; };
                 let state = state.clone();
                 let tls = tls.clone();
                 tasks.spawn(async move {
                     let _permit = permit;
-                    https_connection(stream, tls, state, None).await
+                    match connection {
+                        Connection::Http(stream) => http_connection(stream, state, None).await,
+                        Connection::Https(stream) => transparent_https_connection(stream, tls, state).await,
+                        Connection::Smolvm(stream, token) => smolvm::connection(stream, token, tls, state).await,
+                    }
                 });
             }
         }
     }
     cancel.cancel();
-    transport.close();
     tasks.shutdown().await;
 }
 

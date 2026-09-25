@@ -30,6 +30,11 @@ use tokio::process::Command;
 use tokio::sync::OnceCell;
 
 use crate::SandboxAttachment;
+#[cfg(test)]
+use crate::egress::UpstreamResolver;
+use crate::egress::{
+    EgressCredentialResolver, EgressRuntime, PublicUpstreamResolver, SandboxEgress, SmolvmProxy,
+};
 use crate::sandbox::{
     ManagedSandboxBackend, ManagedSandboxHandle, SandboxCommand, SandboxCommandOutput,
     SandboxMountAccess, SandboxNetworkPolicy, SandboxRequest, SandboxSpec, SnapshotFormat,
@@ -60,6 +65,7 @@ struct Capabilities {
     warm: bool,
     /// `machine create --label`; without it, reaping cannot cross processes.
     labels: bool,
+    interceptor: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -112,6 +118,7 @@ pub struct SmolvmSandboxBackend {
     capabilities: OnceCell<Capabilities>,
     /// Last use of each warm machine this process created, for TTL reaping.
     warm_seen: Mutex<HashMap<String, Instant>>,
+    egress: EgressRuntime<SmolvmWarmHandle, SmolvmProxy>,
 }
 
 impl SmolvmSandboxBackend {
@@ -147,7 +154,27 @@ impl SmolvmSandboxBackend {
             image_cache: config.image_cache,
             capabilities: OnceCell::new(),
             warm_seen: Mutex::new(HashMap::new()),
+            egress: EgressRuntime::new(None, Arc::new(PublicUpstreamResolver)),
         }
+    }
+
+    pub fn with_credentials(mut self, resolver: Arc<dyn EgressCredentialResolver>) -> Self {
+        self.egress = EgressRuntime::new(Some(resolver), Arc::new(PublicUpstreamResolver));
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_egress(
+        mut self,
+        resolver: Arc<dyn EgressCredentialResolver>,
+        upstream: Arc<dyn UpstreamResolver>,
+    ) -> Self {
+        self.egress = EgressRuntime::new(Some(resolver), upstream);
+        self
+    }
+
+    pub fn shutdown_egress(&self) {
+        self.egress.shutdown();
     }
 
     /// Resolved once and cached: every ephemeral `acquire` needs it, and the
@@ -235,6 +262,9 @@ impl SmolvmSandboxBackend {
                         .await
                         .is_some_and(|version| version >= MIN_WARM_VERSION),
                     labels: self.probe_flag("machine", "create", LABEL_FLAG).await,
+                    interceptor: self
+                        .probe_flag("machine", "start", "--egress-interceptor")
+                        .await,
                 }
             })
             .await)
@@ -326,6 +356,7 @@ impl SmolvmSandboxBackend {
         spec: &SandboxSpec,
         key: &str,
         image: &str,
+        egress: Option<&SandboxEgress<SmolvmProxy>>,
     ) -> Result<()> {
         let mut create = Command::new(self.binary().await?);
         create.arg("machine").arg("create").arg("--name").arg(name);
@@ -343,17 +374,25 @@ impl SmolvmSandboxBackend {
             if !cli_says::already_exists(&stderr) {
                 bail!("smolvm machine create failed: {}", stderr.trim());
             }
+            if egress.is_some() {
+                let mut stop = Command::new(self.binary().await?);
+                stop.args(["machine", "stop", "--name", name]);
+                run_checked(stop, "smolvm machine stop before replacing egress").await?;
+            }
         }
 
         let mut start = Command::new(self.binary().await?);
         start.arg("machine").arg("start").arg("--name").arg(name);
+        if let Some(egress) = egress {
+            egress.proxy.configure(&mut start);
+        }
         let output = start.output().await.context("spawn smolvm machine start")?;
         if output.status.success() {
             return Ok(());
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
         // Already up is the caller's intent, not an error.
-        if cli_says::already_running(&stderr) {
+        if egress.is_none() && cli_says::already_running(&stderr) {
             return Ok(());
         }
         bail!(
@@ -365,7 +404,7 @@ impl SmolvmSandboxBackend {
     /// Drop warm machines this process created that are idle past `idle_ttl`.
     /// Idle age lives in memory, so [`Self::reap_abandoned_machines`] covers
     /// machines stranded by an earlier process.
-    async fn reap_idle_machines(&self, request: &SandboxRequest, current: &str) {
+    async fn reap_idle_machines(&self, request: &SandboxRequest) {
         let Some(ttl) = request.lifecycle.idle_ttl else {
             return;
         };
@@ -375,10 +414,12 @@ impl SmolvmSandboxBackend {
                 return;
             };
             let now = Instant::now();
-            seen.insert(current.to_string(), now);
+            seen.insert(request.sandbox_id.clone(), now);
             let expired: Vec<String> = seen
                 .iter()
-                .filter(|(name, last)| name.as_str() != current && now.duration_since(**last) > ttl)
+                .filter(|(name, last)| {
+                    name.as_str() != request.sandbox_id && now.duration_since(**last) > ttl
+                })
                 .map(|(name, _)| name.clone())
                 .collect();
             for name in &expired {
@@ -386,8 +427,13 @@ impl SmolvmSandboxBackend {
             }
             expired
         };
-        for name in expired {
-            match self.delete_machine_if_present(&name).await {
+        for id in expired {
+            let name = machine_name(&id);
+            match self
+                .egress
+                .terminate(&id, self.delete_machine_if_present(&name))
+                .await
+            {
                 Ok(()) => tracing::info!(machine = %name, "reaped idle smolvm machine"),
                 Err(error) => {
                     tracing::warn!(machine = %name, %error, "failed to reap idle smolvm machine")
@@ -512,51 +558,89 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
 
     async fn terminate(&self, request: SandboxRequest) -> Result<()> {
         let machine = machine_name(&request.sandbox_id);
-        self.delete_machine_if_present(&machine).await?;
+        self.egress
+            .terminate(
+                &request.sandbox_id,
+                self.delete_machine_if_present(&machine),
+            )
+            .await?;
         self.warm_seen
             .lock()
             .expect("smolvm machine registry poisoned")
-            .remove(&machine);
+            .remove(&request.sandbox_id);
         Ok(())
     }
 
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        request.spec.policy.validate_basic("smolvm")?;
+        ensure!(
+            !matches!(
+                request.spec.policy.networking,
+                SandboxNetworkPolicy::Limited { .. }
+            ),
+            "smolvm does not support policy.networking.limited; its DNS filter permits subdomains, but Exo requires exact hosts"
+        );
+        let protected = request.spec.policy.requires_proxy();
+        if protected {
+            ensure!(
+                request.lifecycle.idle_ttl.is_some() && self.mode != SmolvmExecutionMode::OneShot,
+                "smolvm proxy egress requires a managed warm sandbox"
+            );
+            ensure!(
+                self.capabilities().await?.interceptor,
+                "smolvm proxy egress requires a binary with --egress-interceptor support; configure --smolvm-binary"
+            );
+        }
         let binary = self.binary().await?;
-        let image = self.prepare_image(&request.spec.image).await?;
-        reject_unsupported_spec(&request.spec, &image)?;
-        match self.resolve_mode(&request).await {
-            SmolvmExecutionMode::Warm => {
-                let machine = machine_name(request.sandbox_id.as_str());
-                self.ensure_machine_started(
-                    &machine,
-                    &request.spec,
-                    request.sandbox_id.as_str(),
-                    &image,
-                )
-                .await?;
-                self.reap_idle_machines(&request, &machine).await;
-                if self.labels_supported().await {
-                    self.reap_abandoned_machines(&machine).await;
-                }
-                Ok(crate::with_process_management(Arc::new(SmolvmWarmHandle {
-                    id: format!("smolvm:{machine}"),
-                    binary: binary.clone(),
-                    machine,
-                    request,
-                })))
-            }
-            // `Auto` is resolved by `resolve_mode`, so it never reaches here.
-            _ => Ok(crate::with_process_management(Arc::new(
+        reject_unsupported_spec(&request.spec, &request.spec.image)?;
+        if self.resolve_mode(&request).await != SmolvmExecutionMode::Warm {
+            let image = self.prepare_image(&request.spec.image).await?;
+            return Ok(crate::with_process_management(Arc::new(
                 SmolvmOneShotHandle {
-                    id: format!("smolvm-oneshot:{}", request.sandbox_id.as_str()),
+                    id: format!("smolvm-oneshot:{}", request.sandbox_id),
                     binary: binary.clone(),
                     image,
                     boot_binary: self.boot_binary().await?.clone(),
                     request,
                 },
-            ))),
+            )));
         }
+        let machine = machine_name(&request.sandbox_id);
+        let handle = self
+            .egress
+            .acquire_with_proxy(
+                request.clone(),
+                SmolvmProxy::start,
+                |egress| async {
+                    let image = self.prepare_image(&request.spec.image).await?;
+                    self.ensure_machine_started(
+                        &machine,
+                        &request.spec,
+                        &request.sandbox_id,
+                        &image,
+                        egress.as_deref(),
+                    )
+                    .await?;
+                    let mut handle = SmolvmWarmHandle {
+                        id: format!("smolvm:{machine}"),
+                        binary: binary.clone(),
+                        machine: machine.clone(),
+                        request: request.clone(),
+                        egress: None,
+                    };
+                    if let Some(egress) = egress {
+                        egress.initialize_trust(&handle).await?;
+                        handle.egress = Some(egress);
+                    }
+                    Ok(handle)
+                },
+                self.delete_machine_if_present(&machine),
+            )
+            .await?;
+        self.reap_idle_machines(&request).await;
+        if self.labels_supported().await {
+            self.reap_abandoned_machines(&machine).await;
+        }
+        Ok(crate::with_process_management(handle))
     }
 
     async fn attach(
@@ -629,6 +713,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             binary: binary.clone(),
             machine,
             request,
+            egress: None,
         })))
     }
 }
@@ -705,6 +790,7 @@ struct SmolvmWarmHandle {
     binary: PathBuf,
     machine: String,
     request: SandboxRequest,
+    egress: Option<Arc<SandboxEgress<SmolvmProxy>>>,
 }
 
 impl SmolvmWarmHandle {
@@ -741,18 +827,50 @@ impl ManagedSandboxHandle for SmolvmWarmHandle {
     }
 
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {
+        let command = SandboxEgress::prepare_command(self.egress.as_deref(), command)?;
+        let command = command.as_ref();
         let cwd = resolve_cwd(command, &self.request.spec);
         let process = self.build(command, &cwd, false);
         run_command(process, &with_backstop_timeout(command), cwd).await
     }
 
     async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts> {
+        let command = SandboxEgress::prepare_command(self.egress.as_deref(), command)?;
+        let command = command.as_ref();
         let cwd = resolve_cwd(command, &self.request.spec);
         let process = self.build(command, &cwd, true);
         spawn_sandbox_process(process, command).await
     }
 
+    async fn is_running(&self) -> Result<Option<bool>> {
+        if self.egress.is_none() {
+            return Ok(None);
+        }
+        #[derive(Deserialize)]
+        struct Status {
+            state: String,
+        }
+        let mut status = Command::new(&self.binary);
+        status.args(["machine", "status", "--name", &self.machine, "--json"]);
+        let output = status
+            .output()
+            .await
+            .context("spawn smolvm machine status")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if cli_says::no_such_machine(&stderr) {
+                return Ok(Some(false));
+            }
+            bail!("smolvm machine status failed: {}", stderr.trim());
+        }
+        let status: Status = serde_json::from_slice(&output.stdout)?;
+        Ok(Some(status.state == "running"))
+    }
+
     async fn stop(&self) -> Result<()> {
+        if let Some(egress) = &self.egress {
+            egress.close();
+        }
         let mut stop = Command::new(&self.binary);
         stop.arg("machine")
             .arg("stop")
@@ -766,6 +884,10 @@ impl ManagedSandboxHandle for SmolvmWarmHandle {
     }
 
     async fn snapshot(&self) -> Result<SnapshotPayload> {
+        ensure!(
+            self.egress.is_none(),
+            "smolvm proxy egress does not support snapshots"
+        );
         // `pack create --from-vm` re-pulls by manifest, so a VM built from a local
         // archive can never be packed: smolvm flattens those at boot.
         if is_local_image_ref(&self.request.spec.image) {
@@ -853,7 +975,7 @@ fn configure_spec_args(process: &mut Command, spec: &SandboxSpec) {
     let resources = spec.resources.unwrap_or_default();
     process.arg("--cpus").arg(resources.vcpu_count.to_string());
     process.arg("--mem").arg(resources.memory_mib.to_string());
-    if spec.policy.networking == SandboxNetworkPolicy::Unrestricted {
+    if spec.policy.networking_enabled() {
         process.args(["--net", "--net-backend", "virtio-net"]);
     }
     for mount in &spec.mounts {
@@ -1057,6 +1179,60 @@ mod tests {
     use super::*;
     use crate::ResourceScope;
     use crate::sandbox::SandboxLifecycleConfig;
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn protected_sandboxes_require_the_native_hook_before_preparing_images() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let binary = dir.path().join("smolvm");
+        write_test_binary(
+            &binary,
+            r#"case "$*" in
+--version) printf 'smolvm 1.18.2\n';;
+'machine create --help'|'machine start --help') exit 0;;
+*) exit 23;;
+esac"#,
+        );
+        let backend = SmolvmSandboxBackend::from_config(SmolvmBackendConfig {
+            binary: Some(binary),
+            image_cache: Some(dir.path().join("cache")),
+            ..Default::default()
+        });
+        let mut request = test_request(Some(Duration::from_secs(60)));
+        request.spec.policy = SandboxNetworkPolicy::Unrestricted.into();
+        request
+            .spec
+            .policy
+            .credentials
+            .push(crate::EgressCredentialBinding {
+                name: "key".into(),
+                model: None,
+                environment_variable: "API_KEY".into(),
+                networking: crate::CredentialNetworkPolicy::Limited {
+                    allowed_hosts: vec!["api.test".into()],
+                },
+                injection_location: crate::CredentialInjectionLocation { header: true },
+            });
+        request.spec.image = "/nonexistent/image.tar".into();
+        let error = backend
+            .acquire(request.clone())
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("--egress-interceptor"), "{error}");
+        assert!(!dir.path().join("cache").exists());
+        let mut limited = request.clone();
+        limited.spec.policy.networking = SandboxNetworkPolicy::Limited {
+            allowed_hosts: vec!["api.test".into()],
+        };
+        let error = backend.acquire(limited).await.err().unwrap().to_string();
+        assert!(error.contains("exact hosts"), "{error}");
+        request.lifecycle.idle_ttl = None;
+        let error = backend.acquire(request).await.err().unwrap().to_string();
+        assert!(error.contains("managed warm sandbox"), "{error}");
+        Ok(())
+    }
 
     #[tokio::test]
     async fn missing_binary_reports_macos_install_instructions() {

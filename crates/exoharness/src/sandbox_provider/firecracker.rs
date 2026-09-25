@@ -787,15 +787,15 @@ impl FirecrackerSandboxBackend {
 
     async fn egress_transport(
         &self,
-        allowed_hosts: &[String],
+        policy: &crate::SandboxNetworkPolicy,
     ) -> Result<Arc<dyn crate::egress::EgressTransport>> {
-        let transport = match self.shared.config.egress_listen {
-            Some(config) => {
-                crate::egress::LocalEgressTransport::with_config(config, allowed_hosts).await?
-            }
-            None => crate::egress::LocalEgressTransport::for_hosts(allowed_hosts).await?,
-        };
-        Ok(Arc::new(transport))
+        Ok(Arc::new(
+            crate::egress::LocalEgressTransport::for_policy(
+                policy,
+                self.shared.config.egress_listen,
+            )
+            .await?,
+        ))
     }
 
     pub async fn new(config: FirecrackerConfig) -> Result<Self> {
@@ -1406,7 +1406,7 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
         self.egress
             .acquire(
                 request.clone(),
-                |hosts| async move { self.egress_transport(&hosts).await },
+                |policy| async move { self.egress_transport(&policy).await },
                 |egress| async move {
                     let mut handle = self
                         .acquire_raw(FirecrackerRequest {

@@ -28,7 +28,7 @@ const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(2);
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum FirecrackerBridgeRequest {
     EgressCreate {
-        allowed_hosts: Vec<String>,
+        networking: crate::SandboxNetworkPolicy,
         listen: Option<crate::EgressListenConfig>,
     },
     EgressBind {
@@ -385,22 +385,16 @@ async fn handle_request(
     backends: &BridgeBackendCache,
 ) -> Result<FirecrackerBridgeResponse> {
     match request {
-        FirecrackerBridgeRequest::EgressCreate {
-            allowed_hosts,
-            listen,
-        } => {
+        FirecrackerBridgeRequest::EgressCreate { networking, listen } => {
             let mut listeners = backends.egress.lock().await;
             listeners.retain(|_, listener| !listener.is_closed());
             ensure!(
                 listeners.len() < MAX_EGRESS_LISTENERS,
                 "too many egress listeners"
             );
-            let listener: Arc<dyn crate::egress::EgressTransport> = Arc::new(match listen {
-                Some(config) => {
-                    crate::egress::LocalEgressTransport::with_config(config, &allowed_hosts).await?
-                }
-                None => crate::egress::LocalEgressTransport::for_hosts(&allowed_hosts).await?,
-            });
+            let listener: Arc<dyn crate::egress::EgressTransport> = Arc::new(
+                crate::egress::LocalEgressTransport::for_policy(&networking, listen).await?,
+            );
             let endpoints = listener.endpoints();
             let listener_id = uuid::Uuid::new_v4().to_string();
             listeners.insert(listener_id.clone(), listener);
