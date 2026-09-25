@@ -41,6 +41,7 @@ mod explicit;
 pub use explicit::{ExplicitProxy, ProxyAuthorizer, ProxySession, serve_connect_proxy};
 mod transport;
 pub mod vault;
+#[cfg(feature = "firecracker")]
 pub(crate) use transport::NetworkDns;
 pub use transport::{EgressTransport, LocalEgressTransport};
 mod sandbox;

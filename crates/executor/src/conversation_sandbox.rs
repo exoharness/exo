@@ -122,7 +122,7 @@ pub async fn attached_conversation_sandbox(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ConversationSandboxCandidate {
-    Created(ConversationSandboxInfo),
+    Created(Box<ConversationSandboxInfo>),
     Attached { id: String },
 }
 
@@ -173,7 +173,7 @@ async fn conversation_sandbox_candidates(
                 policy,
                 ..
             } => {
-                candidates.push(ConversationSandboxCandidate::Created(
+                candidates.push(ConversationSandboxCandidate::Created(Box::new(
                     ConversationSandboxInfo {
                         id: sandbox_id,
                         policy,
@@ -185,7 +185,7 @@ async fn conversation_sandbox_candidates(
                         enable_networking,
                         idle_seconds,
                     },
-                ));
+                )));
             }
             EventData::SandboxAttached { sandbox_id, .. } => {
                 candidates.push(ConversationSandboxCandidate::Attached { id: sandbox_id });
@@ -256,7 +256,7 @@ pub(crate) async fn conversation_sandboxes(
         .await?
         .into_iter()
         .filter_map(|candidate| match candidate {
-            ConversationSandboxCandidate::Created(sandbox) => Some(sandbox),
+            ConversationSandboxCandidate::Created(sandbox) => Some(*sandbox),
             ConversationSandboxCandidate::Attached { .. } => None,
         })
         .collect())
