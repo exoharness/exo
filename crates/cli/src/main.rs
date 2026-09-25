@@ -41,10 +41,11 @@ use executor::{
     RlmHarness, RunInSandboxRequest, SANDBOX_MAIN_MOUNT_DIR, SandboxAttachment,
     SandboxBackendRegistration, SandboxProcess, SandboxProvider, SandboxProviderConfig,
     SandboxResourceShape, SandboxScope, Secret, SecretBackendChoice, SpritesBackendSpec,
-    ToolRequest, ToolRuntime, TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, VercelBackendSpec,
-    default_aws_agentcore_image, default_daytona_image, default_docker_image, default_e2b_template,
-    default_firecracker_image, default_vercel_image, effective_sandbox_scope,
-    finalize_rebuild_update_file, load_agent_config, record_host_event, send_conversation_wakeup,
+    ToolRequest, ToolRuntime, TypeScriptHarness, TypeScriptHarnessConfig, UnregisteredModelError,
+    Uuid7, VercelBackendSpec, default_aws_agentcore_image, default_daytona_image,
+    default_docker_image, default_e2b_template, default_firecracker_image, default_vercel_image,
+    effective_sandbox_scope, finalize_rebuild_update_file, format_user_facing_error,
+    load_agent_config, record_host_event, send_conversation_wakeup,
     serve_exoharness_http_listener_with_options,
 };
 use serde::Deserialize;
@@ -65,6 +66,13 @@ use crate::render::{Verbosity, print_message};
 use tui::run_chat_repl;
 
 const SANDBOX_CLI_AGENT_SLUG: &str = "__exo_sandbox_cli";
+
+pub(crate) fn format_repl_failure(error: &anyhow::Error, prefix: &str) -> String {
+    if error.downcast_ref::<UnregisteredModelError>().is_some() {
+        return format_user_facing_error(error);
+    }
+    format!("{prefix}: {}", format_user_facing_error(error))
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "exo")]
@@ -3461,17 +3469,12 @@ fn pick_repl_model(registered: &[String], requested: Option<String>) -> Result<S
         if registered.iter().any(|name| name == &requested) {
             return Ok(requested);
         }
-        bail!(
-            "model is not registered: {requested}; register it with `exo model register {requested} --secret <secret>`"
-        );
+        return Err(anyhow::Error::new(UnregisteredModelError::new(requested)));
     }
-    registered.first().cloned().ok_or_else(|| {
-        anyhow!(
-            "no model is registered; set one up first:\n  \
-             exo secret set openai --env OPENAI_API_KEY\n  \
-             exo model register gpt-5.5 --secret openai"
-        )
-    })
+    registered
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow::Error::new(UnregisteredModelError::new("gpt-5.6-terra")))
 }
 
 async fn find_secret_id(exoharness: &dyn ExoHarness, name: &str) -> Result<Option<Uuid7>> {
