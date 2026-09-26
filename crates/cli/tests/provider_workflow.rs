@@ -1756,10 +1756,6 @@ async fn secret_destination_updates_preserve_identity_locally_and_over_http() ->
 #[actix_web::test]
 async fn models_use_spec_names_and_selected_vault_credentials_locally_and_over_http() -> Result<()>
 {
-    use wiremock::{
-        Mock,
-        matchers::{body_partial_json, header, method, path},
-    };
     for provider in ["local", "remote"] {
         let f = Fixture::new().await?;
         f.cli(&["provider", "switch", provider]).await?;
@@ -1780,19 +1776,8 @@ async fn models_use_spec_names_and_selected_vault_credentials_locally_and_over_h
         )?;
         std::fs::write(
             &f.agent_file,
-            f.source().replace("gpt-5-mini", "gpt-5-unregistered"),
+            f.source().replace("gpt-5-mini", "gpt-5.6-sol"),
         )?;
-        Mock::given(method("POST"))
-            .and(path("/responses"))
-            .and(header("authorization", "Bearer personal-model-key"))
-            .and(body_partial_json(
-                serde_json::json!({"model": "gpt-5-unregistered"}),
-            ))
-            .respond_with(support::model_response())
-            .with_priority(1)
-            .expect(1)
-            .mount(&f.model)
-            .await;
         let result = f
             .cli(&[
                 "agent",
@@ -1806,7 +1791,24 @@ async fn models_use_spec_names_and_selected_vault_credentials_locally_and_over_h
             ])
             .await?;
         assert!(result.contains("Workflow reply."), "{result}");
-        f.model.verify().await;
+        let requests = f
+            .model
+            .received_requests()
+            .await
+            .context("model requests")?;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].headers["authorization"],
+            "Bearer personal-model-key"
+        );
+        #[derive(serde::Deserialize)]
+        struct ModelPayload {
+            model: String,
+        }
+        assert_eq!(
+            requests[0].body_json::<ModelPayload>()?.model,
+            "gpt-5.6-sol"
+        );
         let missing = f
             .source()
             .replace("credential: model-key", "credential: missing");

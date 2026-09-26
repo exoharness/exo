@@ -1253,6 +1253,18 @@ esac"#,
     }
 
     #[tokio::test]
+    #[cfg(feature = "smolvm")]
+    #[ignore = "provisions the pinned SmolVM release in the local SDK cache"]
+    async fn provisioned_runtime_supports_native_egress() -> Result<()> {
+        let backend = SmolvmSandboxBackend::new();
+        let binary = backend.binary().await?;
+        let capabilities = backend.capabilities().await?;
+        assert!(capabilities.warm && capabilities.labels && capabilities.interceptor);
+        eprintln!("Compatible SmolVM: {}", binary.display());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn missing_binary_reports_macos_install_instructions() {
         let backend = SmolvmSandboxBackend::from_config(SmolvmBackendConfig {
             binary: Some(PathBuf::from("/nonexistent/exo-test-smolvm")),
