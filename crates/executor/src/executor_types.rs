@@ -128,6 +128,23 @@ pub fn effective_sandbox_scope(
 }
 
 impl ConversationConfig {
+    pub async fn materialize_resources(
+        &mut self,
+        thread: &dyn ConversationHandle,
+        agent_config: &AgentConfig,
+    ) -> Result<()> {
+        if !self.resources.is_empty() {
+            tracing::info!(target: "exoharness::progress", "Preparing workspace");
+            self.resource_mounts = thread
+                .materialize_resources(
+                    self.resources.clone(),
+                    self.effective_sandbox_provider(agent_config),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
     pub fn effective_sandbox_image<'a>(&'a self, agent_config: &'a AgentConfig) -> Option<&'a str> {
         self.sandbox_image
             .as_deref()

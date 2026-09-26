@@ -2234,7 +2234,7 @@ async fn run_sandbox_shell_command(
     command: String,
 ) -> Result<SandboxShellOutput> {
     let agent_config = executor::load_agent_config(agent).await?;
-    let config = executor::load_conversation_config(conversation).await?;
+    let mut config = executor::load_conversation_config(conversation).await?;
     if config.shell_program.is_none() {
         bail!(
             "shell sandbox is not enabled for this conversation; run `exo thread update {} {} --shell-program /bin/bash`",
@@ -2242,6 +2242,10 @@ async fn run_sandbox_shell_command(
             conversation.record().slug
         );
     }
+    config
+        .materialize_resources(conversation, &agent_config)
+        .await?;
+    tracing::info!(target: "exoharness::progress", "Running sandbox command");
     let runtime = BasicToolRuntime;
 
     let mut arguments = serde_json::Map::new();

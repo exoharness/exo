@@ -3157,6 +3157,7 @@ impl ConversationHandle for BasicConversationHandle {
                 } = &resource.definition.source
             {
                 if let Some(name) = credential {
+                    tracing::info!(target: "exoharness::progress", "Loading Git credentials");
                     let reference =
                         crate::vault::find_secret(self, name)
                             .await?

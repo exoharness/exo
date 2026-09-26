@@ -520,3 +520,52 @@ async fn failed_destination_update_preserves_encrypted_secret_and_metadata() -> 
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn metadata_reads_do_not_wait_for_keychain_unlock() -> Result<()> {
+    use crate::secrets::{SecretKeyProvider, StaticSecretKeyProvider};
+    use std::{sync::mpsc, time::Duration};
+    use tokio::sync::Notify;
+
+    struct LockedKey {
+        started: Arc<Notify>,
+        unlock: Mutex<mpsc::Receiver<()>>,
+    }
+    impl SecretKeyProvider for LockedKey {
+        fn get_or_create_key(&self) -> Result<[u8; 32]> {
+            self.started.notify_one();
+            self.unlock.lock().unwrap().recv()?;
+            Ok([7; 32])
+        }
+    }
+
+    let temp = TempDir::new()?;
+    let store = BasicVaultStore::new(
+        Some(temp.path().to_owned()),
+        SecretCipher::new(Arc::new(StaticSecretKeyProvider::new([7; 32]))),
+    )?;
+    let vault = store.create_vault("personal").await?;
+    let id = vault.put_secret(request("github", "token", None)).await?;
+    let started = Arc::new(Notify::new());
+    let (unlock, locked) = mpsc::channel();
+    let store = BasicVaultStore::new(
+        Some(temp.path().to_owned()),
+        SecretCipher::new(Arc::new(LockedKey {
+            started: started.clone(),
+            unlock: Mutex::new(locked),
+        })),
+    )?;
+    let vault = store.get_vault(&vault.record().id).await?.unwrap();
+    let read = tokio::spawn(async move { vault.get_secret(&id).await });
+    started.notified().await;
+    let metadata = tokio::time::timeout(Duration::from_secs(1), store.list_vaults()).await;
+    unlock.send(())?;
+    assert_eq!(read.await??, Some(key("token")));
+    assert_eq!(
+        metadata
+            .context("vault metadata blocked on keychain unlock")??
+            .len(),
+        1
+    );
+    Ok(())
+}

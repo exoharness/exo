@@ -4,7 +4,7 @@ pub use config::{TypeScriptHarnessPreset, agent_config};
 
 use std::{path::Path, sync::Arc};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use exo_managed_agents::{self as managed, AgentBackend, AgentDefinition};
 use exo_mcp::McpToolSet;
@@ -162,12 +162,6 @@ impl AgentBackend for LocalProvider {
                 }
             }
             config.sandbox_scope = Some(crate::SandboxScope::Conversation);
-            config.resource_mounts = thread
-                .materialize_resources(
-                    config.resources.clone(),
-                    config.effective_sandbox_provider(&agent_config),
-                )
-                .await?;
         }
         let mcp_tools = self
             .executor
@@ -183,6 +177,25 @@ impl AgentBackend for LocalProvider {
                 }),
             )
             .await?;
+        }
+        if !config.resources.is_empty() {
+            let thread = agent
+                .get_thread(&thread.record().id)
+                .await?
+                .context("thread disappeared before resource preparation")?;
+            let provider = config.effective_sandbox_provider(&agent_config);
+            let mut preparations = self
+                .resource_preparations
+                .lock()
+                .expect("resource preparations poisoned");
+            while let Some(result) = preparations.try_join_next() {
+                result?;
+            }
+            preparations.spawn(async move {
+                if let Err(error) = thread.materialize_resources(config.resources, provider).await {
+                    tracing::debug!(%error, "background resource preparation failed; the next command will retry");
+                }
+            });
         }
         Ok(managed::ThreadInfo {
             model: Some(model),

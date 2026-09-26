@@ -79,7 +79,7 @@ impl BasicVaultStore {
                 operation(&mut catalog, &inner.cipher)
             }
             Storage::File(root) => {
-                let _lock = lock_secret_file(&root.join("vaults.lock"))?;
+                let lock = lock_secret_file(&root.join("vaults.lock"))?;
                 let path = root.join("vaults.json");
                 let mut catalog = match std::fs::read(&path) {
                     Ok(bytes) => serde_json::from_slice(&bytes).context("reading vault catalog")?,
@@ -88,14 +88,16 @@ impl BasicVaultStore {
                     }
                     Err(error) => return Err(error.into()),
                 };
-                let result = operation(&mut catalog, &inner.cipher)?;
-                if write {
-                    let mut file = tempfile::NamedTempFile::new_in(root)?;
-                    file.write_all(&serde_json::to_vec_pretty(&catalog)?)?;
-                    file.as_file().sync_all()?;
-                    file.persist(path).map_err(|error| error.error)?;
-                    std::fs::File::open(root)?.sync_all()?;
+                if !write {
+                    drop(lock);
+                    return operation(&mut catalog, &inner.cipher);
                 }
+                let result = operation(&mut catalog, &inner.cipher)?;
+                let mut file = tempfile::NamedTempFile::new_in(root)?;
+                file.write_all(&serde_json::to_vec_pretty(&catalog)?)?;
+                file.as_file().sync_all()?;
+                file.persist(path).map_err(|error| error.error)?;
+                std::fs::File::open(root)?.sync_all()?;
                 Ok(result)
             }
         })

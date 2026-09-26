@@ -505,7 +505,9 @@ async fn filesystem_resources_local_and_http() -> Result<()> {
         live(f, &["agent", "run", "--agent", "coder", "--thread", thread_slug(&first)?, "--environment-file", environment, "--prompt", "Reply without using tools."], "").await?;
         let sandbox = thread.list_sandboxes().await?.into_iter().find(|s| s.running).context("resumed sandbox")?.id;
         ensure!(shell(thread.as_ref(), &sandbox, "test \"$(cat README)\" = private").await? == 0, "resource edits were lost after sandbox replacement");
-        let thread_config = executor::load_conversation_config(thread.as_ref()).await?;
+        let agent_config = executor::load_agent_config(agent.as_ref()).await?;
+        let mut thread_config = executor::load_conversation_config(thread.as_ref()).await?;
+        thread_config.materialize_resources(thread.as_ref(), &agent_config).await?;
         let path = std::path::PathBuf::from(&thread_config.resource_mounts[0].host_path);
         f.cli(&["thread", "delete", "coder", thread_slug(&first)?]).await?;
         ensure!(!path.exists(), "deleted thread leaked a mounted volume");

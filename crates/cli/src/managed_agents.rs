@@ -198,7 +198,7 @@ pub async fn open_thread(
         environment.validate()?;
     }
     let slug = crate::generate_fun_slug();
-    eprintln!("Preparing thread resources and connections...");
+    eprintln!("Opening thread...");
     let opened = runtime
         .open_managed_thread(
             &agent,

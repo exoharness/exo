@@ -297,11 +297,8 @@ impl Runtime {
             thread_config.sandbox_scope = Some(crate::SandboxScope::Conversation);
         }
         if !thread_config.resources.is_empty() {
-            thread_config.resource_mounts = thread
-                .materialize_resources(
-                    thread_config.resources.clone(),
-                    thread_config.effective_sandbox_provider(&agent_config),
-                )
+            thread_config
+                .materialize_resources(thread.as_ref(), &agent_config)
                 .await?;
             let mut locations = String::from("Filesystem resources for this thread:\n");
             for resource in &thread_config.resources {

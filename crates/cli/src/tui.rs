@@ -857,13 +857,14 @@ impl ChatRepl {
     }
 
     async fn run_shell(&self, command: &str) -> Result<()> {
-        let output = shell_output(
-            self.runtime.as_ref(),
-            self.agent.as_ref(),
-            self.conversation.as_ref(),
-            command.to_string(),
-        )
-        .await?;
+        let output = TurnProgress::new()
+            .wait(shell_output(
+                self.runtime.as_ref(),
+                self.agent.as_ref(),
+                self.conversation.as_ref(),
+                command.to_string(),
+            ))
+            .await?;
         io::stdout().write_all(output.stdout.as_bytes())?;
         io::stderr().write_all(output.stderr.as_bytes())?;
         if output.exit_code != 0 {
