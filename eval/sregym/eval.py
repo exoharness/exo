@@ -223,14 +223,12 @@ def ensure_sregym_checkout(path: Path, *, repo: Path) -> None:
 
 
 def ensure_sregym_patch(sregym_root: Path, patch: Path = SREGYM_PATCH) -> None:
-    """Apply the Exo agent registration, egress exemption, and review hold."""
-    applied = subprocess.run(
-        ["git", "apply", "--check", "--reverse", str(patch)],
-        cwd=sregym_root,
-        capture_output=True,
-    )
-    if applied.returncode == 0:
-        return
+    """Apply the Exo agent registration, egress exemption, and review hold.
+
+    The checkout's tracked files go back to the pinned ref first, so an
+    earlier version of the patch never blocks the current one.
+    """
+    run(["git", "checkout", "-q", "--", "."], cwd=sregym_root)
     run(["git", "apply", str(patch)], cwd=sregym_root)
 
 
