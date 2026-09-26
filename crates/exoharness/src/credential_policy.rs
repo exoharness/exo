@@ -182,8 +182,7 @@ impl CredentialNetworkPolicy {
                 let hosts = allowed_destinations
                     .iter()
                     .map(|destination| {
-                        let destination = destination.normalized()?;
-                        Ok(url::Url::parse(destination.as_str())?
+                        Ok(CredentialDestination::parse(destination.as_str())?
                             .host_str()
                             .context("credential destination host")?
                             .to_owned())
@@ -192,6 +191,15 @@ impl CredentialNetworkPolicy {
                 crate::types::canonical_egress_hosts(&hosts)
             }
         }
+    }
+}
+
+pub(crate) fn is_loopback(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain("localhost")) => true,
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        _ => false,
     }
 }
 
@@ -229,14 +237,5 @@ mod tests {
             "https://api.example:8443/v1/messages"
         )?));
         Ok(())
-    }
-}
-
-pub(crate) fn is_loopback(url: &url::Url) -> bool {
-    match url.host() {
-        Some(url::Host::Domain("localhost")) => true,
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        _ => false,
     }
 }

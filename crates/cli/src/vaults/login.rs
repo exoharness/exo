@@ -161,8 +161,8 @@ async fn discover(
         serde_json::from_value(serde_json::to_value(&resolution.metadata)?)?;
     let methods = authentication.token_endpoint_auth_methods_supported;
     let client_secret_basic = client_secret.is_some()
-        && !(methods.iter().any(|m| m == "client_secret_post")
-            && !methods.iter().any(|m| m == "client_secret_basic"));
+        && (methods.iter().any(|m| m == "client_secret_basic")
+            || !methods.iter().any(|m| m == "client_secret_post"));
     let token_endpoint = resolution.metadata.token_endpoint.clone();
     manager.set_metadata(resolution.metadata);
     let grant = crate::oauth::authorize_with(
@@ -182,21 +182,18 @@ async fn discover(
         .credentials
         .token_received_at
         .context("OAuth receipt time missing")?;
-    Ok(Secret::Oauth {
-        access_token: response.access_token().secret().clone(),
-        refresh_token: response.refresh_token().map(|token| token.secret().clone()),
-        expires_at: response
-            .expires_in()
-            .map(|ttl| received_at.saturating_add(ttl.as_secs())),
-        refresh: Some(OAuthRefresh {
+    Ok(oauth_secret(
+        response,
+        received_at,
+        OAuthRefresh {
             token_endpoint,
             client_id: grant.credentials.client_id,
             client_secret,
             client_secret_basic,
             resource: grant.resource,
             scopes: grant.credentials.granted_scopes,
-        }),
-    })
+        },
+    ))
 }
 
 async fn device(args: &LoginArgs, client_secret: Option<String>) -> Result<Secret> {
@@ -239,30 +236,39 @@ async fn device(args: &LoginArgs, client_secret: Option<String>) -> Result<Secre
         result = tokio::signal::ctrl_c() => { result?; bail!("OAuth login canceled"); }
     };
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let scopes = response
-        .scopes()
-        .map(|scopes| {
-            scopes
-                .iter()
-                .map(|scope| scope.as_str().to_owned())
-                .collect()
-        })
-        .unwrap_or_else(|| args.scope.clone());
-    Ok(Secret::Oauth {
-        access_token: response.access_token().secret().clone(),
-        refresh_token: response.refresh_token().map(|token| token.secret().clone()),
-        expires_at: response
-            .expires_in()
-            .map(|ttl| now.saturating_add(ttl.as_secs())),
-        refresh: Some(OAuthRefresh {
+    Ok(oauth_secret(
+        response,
+        now,
+        OAuthRefresh {
             token_endpoint: token_url.into(),
             client_id: client_id.clone(),
             client_secret,
             client_secret_basic: false,
             resource: None,
-            scopes,
-        }),
-    })
+            scopes: args.scope.clone(),
+        },
+    ))
+}
+
+fn oauth_secret(
+    response: impl TokenResponse,
+    received_at: u64,
+    mut refresh: OAuthRefresh,
+) -> Secret {
+    if let Some(scopes) = response.scopes() {
+        refresh.scopes = scopes
+            .iter()
+            .map(|scope| scope.as_str().to_owned())
+            .collect();
+    }
+    Secret::Oauth {
+        access_token: response.access_token().secret().clone(),
+        refresh_token: response.refresh_token().map(|token| token.secret().clone()),
+        expires_at: response
+            .expires_in()
+            .map(|ttl| received_at.saturating_add(ttl.as_secs())),
+        refresh: Some(refresh),
+    }
 }
 
 async fn github_cli(args: &LoginArgs, env: &HashMap<String, String>) -> Result<Secret> {

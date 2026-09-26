@@ -2,17 +2,7 @@ use super::*;
 
 #[derive(Serialize, Deserialize)]
 struct LegacyCatalog {
-    vaults: Vec<LegacyVault>,
-}
-#[derive(Serialize, Deserialize)]
-struct LegacyVault {
-    record: VaultRecord,
-    secrets: Vec<LegacySecret>,
-}
-#[derive(Serialize, Deserialize)]
-struct LegacySecret {
-    metadata: LegacyMetadata,
-    secret: EncryptedSecret,
+    vaults: Vec<StoredVault<LegacyMetadata>>,
 }
 
 // These serialized fields are the authenticated data for vaults written before
@@ -121,13 +111,13 @@ mod tests {
                 },
                 &serde_json::to_vec(&(record.id, &metadata))?,
             )?;
-            secrets.push(LegacySecret { metadata, secret });
+            secrets.push(StoredSecret { metadata, secret });
         }
         let ids: Vec<_> = secrets.iter().map(|s| s.metadata.id).collect();
         let path = temp.path().join("vaults/vaults.json");
         std::fs::create_dir_all(path.parent().unwrap())?;
         let catalog = LegacyCatalog {
-            vaults: vec![LegacyVault {
+            vaults: vec![StoredVault {
                 record: record.clone(),
                 secrets,
             }],
@@ -144,37 +134,21 @@ mod tests {
             );
         }
         assert!(vault.list_secrets().await?.iter().all(|s| s.revision == 7));
-        vault
-            .resolve_secret(
-                &ids[0],
-                &CredentialDestination::url("https://github.com/repo")?,
-            )
-            .await?;
-        assert!(
-            vault
-                .resolve_secret(
-                    &ids[0],
-                    &CredentialDestination::url("https://api.github.com/repo")?
-                )
-                .await
-                .is_err()
-        );
-        vault
-            .resolve_secret(
-                &ids[1],
-                &CredentialDestination::url("https://notion.test/mcp/?a=1")?,
-            )
-            .await?;
-        for url in [
-            "https://notion.test/mcp",
-            "https://notion.test/mcp/?a=2",
-            "https://notion.test:8443/mcp/?a=1",
+        for (id, url, allowed) in [
+            (ids[0], "https://github.com/repo", true),
+            (ids[0], "https://api.github.com/repo", false),
+            (ids[1], "https://notion.test/mcp/?a=1", true),
+            (ids[1], "https://notion.test/mcp", false),
+            (ids[1], "https://notion.test/mcp/?a=2", false),
+            (ids[1], "https://notion.test:8443/mcp/?a=1", false),
         ] {
-            assert!(
+            assert_eq!(
                 vault
-                    .resolve_secret(&ids[1], &CredentialDestination::url(url)?)
+                    .resolve_secret(&id, &CredentialDestination::url(url)?)
                     .await
-                    .is_err()
+                    .is_ok(),
+                allowed,
+                "{url}"
             );
         }
         assert!(!std::fs::read_to_string(&path)?.contains("migration-canary"));

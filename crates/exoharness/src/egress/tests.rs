@@ -2409,6 +2409,7 @@ async fn proxy_enforces_resource_urls_before_resolving_credentials() -> Result<(
     let proxy = upstream
         .proxy_with_policy(host_ip()?, "one", resolver.clone(), policy)
         .await?;
+    proxy.bind_source(host_ip()?).await?;
     let client = client(&proxy)?;
     let placeholder = &proxy.environment()["TEST_API_KEY"];
     for (url, allowed) in [

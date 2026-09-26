@@ -37,14 +37,14 @@ struct Catalog {
 }
 
 #[derive(Serialize, Deserialize)]
-struct StoredVault {
+struct StoredVault<M = SecretMetadata> {
     record: VaultRecord,
-    secrets: Vec<StoredSecret>,
+    secrets: Vec<StoredSecret<M>>,
 }
 
 #[derive(Serialize, Deserialize)]
-struct StoredSecret {
-    metadata: SecretMetadata,
+struct StoredSecret<M = SecretMetadata> {
+    metadata: M,
     secret: EncryptedSecret,
 }
 
