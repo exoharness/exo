@@ -1035,7 +1035,7 @@ If the IRC server requires a password or NickServ token, store it as a normal
 secret:
 
 ```bash
-exo secret set irc-password --env IRC_PASSWORD
+exo secret create irc-password --env IRC_PASSWORD
 ```
 
 The exact CLI command may differ as the config surface evolves, but the storage

@@ -214,8 +214,8 @@ async function runHarnessChecks(
 }
 
 function registerSecretAndModel(harness: HarnessDefinition): void {
-  runExo(["secret", "set", harness.secret, "--env", harness.envName]);
-  runExo(["model", "register", harness.model, "--secret", harness.secret]);
+  runExo(["secret", "create", harness.secret, "--env", harness.envName]);
+  runExo(["model", "create", harness.model, "--secret", harness.secret]);
 }
 
 function createAgent(harness: HarnessDefinition): AgentRef {
@@ -258,11 +258,11 @@ function runHistoryReplayCheck(
   writeFileSync(join(workspace, "tool-marker.txt"), `${toolMarker}\n`);
 
   const conversation = `history-${harness.key}-${runId}`;
-  runExo(["conversation", "create", agent.slug, "--slug", conversation]);
+  runExo(["thread", "create", agent.slug, "--slug", conversation]);
   runExo([
-    "conversation",
+    "thread",
     "mount",
-    "add",
+    "create",
     agent.slug,
     conversation,
     workspace,
@@ -312,7 +312,7 @@ function runHistoryReplayCheck(
   const firstTurnEndedId = firstTurnEndedEventId(agent.slug, conversation);
   const fork = `fork-${harness.key}-${runId}`;
   runExo([
-    "conversation",
+    "thread",
     "fork",
     agent.slug,
     conversation,
@@ -358,11 +358,11 @@ function runFilesystemSandboxCheck(
   writeFileSync(join(outside, "secret.txt"), `${outsideMarker}\n`);
 
   const conversation = `sandbox-${harness.key}-${runId}`;
-  runExo(["conversation", "create", agent.slug, "--slug", conversation]);
+  runExo(["thread", "create", agent.slug, "--slug", conversation]);
   runExo([
-    "conversation",
+    "thread",
     "mount",
-    "add",
+    "create",
     agent.slug,
     conversation,
     workspace,
@@ -444,11 +444,11 @@ function runNetworkDisabledCheck(
     join(tmpdir(), `exo-${harness.key}-network-workspace-`),
   );
   const conversation = `network-${harness.key}-${runId}`;
-  runExo(["conversation", "create", agent.slug, "--slug", conversation]);
+  runExo(["thread", "create", agent.slug, "--slug", conversation]);
   runExo([
-    "conversation",
+    "thread",
     "mount",
-    "add",
+    "create",
     agent.slug,
     conversation,
     workspace,
@@ -511,7 +511,7 @@ function conversationEvents(
   extraArgs: string[],
 ): ConversationEventsResult {
   return parseJson<ConversationEventsResult>(
-    runExo(["conversation", "events", agent, conversation, ...extraArgs]),
+    runExo(["thread", "events", agent, conversation, ...extraArgs]),
   );
 }
 
@@ -521,7 +521,7 @@ function runChat(
   prompt: string,
   options: CommandOptions = {},
 ): string {
-  return runExo(["conversation", "send", agent, conversation, prompt], {
+  return runExo(["thread", "send", agent, conversation, prompt], {
     timeoutMs: options.timeoutMs ?? args.timeoutMs,
   });
 }

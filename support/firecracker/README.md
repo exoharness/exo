@@ -170,7 +170,7 @@ Run Exo as root, select the backend, and configure the provider binding:
 ```bash
 sudo EXO_FIRECRACKER_KERNEL=/var/lib/exo/firecracker/vmlinux \
   EXO_FIRECRACKER_INITRAMFS=/var/lib/exo/firecracker/exo-firecracker-initramfs.cpio \
-  target/debug/exo provider configure \
+  target/debug/exo provider create \
   --provider firecracker \
   --default-image 123456789012.dkr.ecr.us-east-1.amazonaws.com/exo-sandbox@sha256:...
 ```
@@ -190,7 +190,7 @@ sudo target/debug/exo sandbox play \
   --firecracker-vcpu-count 2
 ```
 
-`sandbox start --help` and `sandbox play --help` list every sandbox-creation
+`sandbox create --help` and `sandbox play --help` list every sandbox-creation
 parameter, including the working directory, idle timeout, host mounts, durable
 filesystems, and networking. Their `--firecracker-*` options control the VMM
 and jailer paths, kernel, initramfs, state root, VM sizing, DNS, UID range,
@@ -203,11 +203,11 @@ commands. Each command adopts the running Firecracker VM from its persisted
 state:
 
 ```bash
-sandbox_id=$(sudo target/debug/exo sandbox start --provider firecracker)
-sudo target/debug/exo sandbox ps
+sandbox_id=$(sudo target/debug/exo sandbox create --provider firecracker)
+sudo target/debug/exo sandbox list
 sudo target/debug/exo sandbox exec "$sandbox_id" -- /bin/echo hello
 sudo target/debug/exo sandbox connect "$sandbox_id"
-sudo target/debug/exo sandbox terminate "$sandbox_id"
+sudo target/debug/exo sandbox delete "$sandbox_id"
 ```
 
 `connect` streams an interactive shell over stdin/stdout/stderr; the current
@@ -217,14 +217,14 @@ Every lifecycle command accepts `--agent <slug>` to use that agent's sandbox
 scope. Without it, commands share an internal singleton owner intended for
 direct CLI use.
 
-`sandbox ps` shows running sandboxes by default; `-a` includes stopped records,
+`sandbox list` shows running sandboxes by default; `-a` includes stopped records,
 and `-q` prints only IDs.
 `stop` and `terminate` accept multiple IDs, so retained sandboxes can be cleaned
 up compositionally:
 
 ```bash
-sudo target/debug/exo sandbox ps -aq \
-  | sudo target/debug/exo sandbox terminate
+sudo target/debug/exo sandbox list -aq \
+  | sudo target/debug/exo sandbox delete
 ```
 
 ## Security model

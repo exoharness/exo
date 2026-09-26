@@ -2632,6 +2632,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "url",
+ "wiremock",
 ]
 
 [[package]]
@@ -2639,11 +2640,13 @@ name = "exo"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bytes",
  "clap",
  "cost",
  "crossterm",
  "executor",
+ "exo-managed-agents",
  "exoharness",
  "futures",
  "lingua",
@@ -2680,6 +2683,18 @@ name = "exo-firecracker-protocol"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "exo-managed-agents"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "exoharness",
+ "serde",
+ "serde_yaml_ng",
+ "tokio",
 ]
 
 [[package]]

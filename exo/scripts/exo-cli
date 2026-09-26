@@ -52,10 +52,10 @@ bootstrap() {
   [[ -d "$MOUNT_ROOT" ]] || die "workspace root does not exist: $MOUNT_ROOT (override with EXO_AGENT_CLI_ROOT)"
 
   echo "exo-cli: mounting $MOUNT_ROOT at $MOUNT_PATH in the agent sandbox..." >&2
-  exo conversation mount add "$AGENT" "$CONVERSATION" "$MOUNT_ROOT" "$MOUNT_PATH" --rw >/dev/null
+  exo thread mount create "$AGENT" "$CONVERSATION" "$MOUNT_ROOT" "$MOUNT_PATH" --rw >/dev/null
 
   echo "exo-cli: asking the agent to create the agent-cli adapter..." >&2
-  exo conversation send "$AGENT" "$CONVERSATION" "$(bootstrap_prompt)" >/dev/null
+  exo thread send "$AGENT" "$CONVERSATION" "$(bootstrap_prompt)" >/dev/null
 
   echo "exo-cli: waiting for the adapter socket at $SOCKET_PATH (up to ${BOOTSTRAP_WAIT_SECONDS}s)..." >&2
   local waited=0

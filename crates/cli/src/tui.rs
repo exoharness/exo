@@ -41,6 +41,20 @@ pub async fn run_chat_repl(
     Ok(())
 }
 
+pub async fn run_prompt(
+    agent: Arc<dyn HarnessAgent>,
+    conversation: Arc<dyn HarnessConversation>,
+    verbosity: Verbosity,
+    prompt: &str,
+) -> Result<()> {
+    let mut repl = ChatRepl::new(agent, conversation, verbosity)?;
+    repl.send(prompt).await?;
+    if let Some(session_id) = repl.session_id.take() {
+        repl.conversation.close_session(session_id).await?;
+    }
+    Ok(())
+}
+
 struct ChatHistory {
     state: Mutex<ChatHistoryState>,
 }

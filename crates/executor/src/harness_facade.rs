@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::{AgentConfig, ConversationConfig, ExecutionStreamHandle, SendRequest, SendResult};
+use anyhow::Context;
 use async_trait::async_trait;
 use exoharness::{
     AgentHandle, AgentRecord, ConversationHandle, ConversationRecord, ExoHarness, NewAgentRequest,
@@ -9,7 +10,7 @@ use exoharness::{
 use lingua::Message;
 
 use crate::harness_helpers::{
-    get_conversation_model_override, materialize_conversation_messages,
+    get_conversation_model_override, list_conversation_handles, materialize_conversation_messages,
     put_conversation_model_override, resolve_agent_handle, resolve_conversation_handle,
 };
 use crate::harness_types::{
@@ -195,11 +196,7 @@ where
     }
 
     async fn list_conversations(&self) -> Result<Vec<ConversationRecord>> {
-        let conversations = self
-            .agent
-            .list_conversations(exoharness::ListConversationsRequest::default())
-            .await?
-            .conversations;
+        let conversations = list_conversation_handles(self.agent.as_ref()).await?;
         Ok(conversations
             .into_iter()
             .map(|conversation| conversation.record().clone())
@@ -249,9 +246,19 @@ where
             durable_file_systems: default_conversation_config.durable_file_systems,
             sandbox_scope: default_conversation_config.sandbox_scope,
         };
-        self.runtime
+        if let Err(error) = self
+            .runtime
             .put_conversation_config(conversation.as_ref(), conversation_config)
-            .await?;
+            .await
+        {
+            self.agent
+                .delete_conversation(&conversation.record().id)
+                .await
+                .with_context(|| {
+                    format!("configuring thread failed ({error:#}); cleanup also failed")
+                })?;
+            return Err(error);
+        }
         Ok(Arc::new(SharedHarnessConversation {
             agent: Arc::clone(&self.agent),
             conversation,

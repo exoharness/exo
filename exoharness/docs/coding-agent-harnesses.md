@@ -17,7 +17,7 @@ The examples below use `./target/debug/exo`. If you have the binary on your
 The `codex`, `claude-code`, and `cursor` harness presets select the matching
 TypeScript module, sandbox image, and networking defaults.
 
-For `secret set`, `--env` takes the variable name literally. For example, use
+For `secret create`, `--env` takes the variable name literally. For example, use
 `--env OPENAI_API_KEY`, not `--env $OPENAI_API_KEY`.
 
 The sandbox image commands use Apple container. It currently requires an Apple
@@ -52,8 +52,8 @@ its context-size estimates are excluded from token and cost totals.
 Register an OpenAI model:
 
 ```bash
-./target/debug/exo secret set openai --env OPENAI_API_KEY
-./target/debug/exo model register gpt-5.5 --secret openai
+./target/debug/exo secret create openai --env OPENAI_API_KEY
+./target/debug/exo model create gpt-5.5 --secret openai
 ```
 
 Build the sandbox image:
@@ -71,9 +71,9 @@ Create the agent and start a conversation:
 ./target/debug/exo --harness codex agent create "TS Codex" \
   --model gpt-5.5
 
-./target/debug/exo conversation create ts-codex
-./target/debug/exo conversation mount add ts-codex <conversation> "$PWD" /workspace --rw
-./target/debug/exo repl --agent ts-codex --conversation <conversation>
+./target/debug/exo thread create ts-codex
+./target/debug/exo thread mount create ts-codex <conversation> "$PWD" /workspace --rw
+./target/debug/exo chat --agent ts-codex --thread <conversation>
 ```
 
 ## Claude Code
@@ -81,8 +81,8 @@ Create the agent and start a conversation:
 Register an Anthropic model:
 
 ```bash
-./target/debug/exo secret set anthropic --env ANTHROPIC_API_KEY
-./target/debug/exo model register claude-sonnet-4-6 --secret anthropic
+./target/debug/exo secret create anthropic --env ANTHROPIC_API_KEY
+./target/debug/exo model create claude-sonnet-4-6 --secret anthropic
 ```
 
 Build the sandbox image:
@@ -100,9 +100,9 @@ Create the agent and start a conversation:
 ./target/debug/exo --harness claude-code agent create "TS Claude Code" \
   --model claude-sonnet-4-6
 
-./target/debug/exo conversation create ts-claude-code
-./target/debug/exo conversation mount add ts-claude-code <conversation> "$PWD" /workspace --rw
-./target/debug/exo repl --agent ts-claude-code --conversation <conversation>
+./target/debug/exo thread create ts-claude-code
+./target/debug/exo thread mount create ts-claude-code <conversation> "$PWD" /workspace --rw
+./target/debug/exo chat --agent ts-claude-code --thread <conversation>
 ```
 
 ## Cursor
@@ -110,8 +110,8 @@ Create the agent and start a conversation:
 Register a Cursor model:
 
 ```bash
-./target/debug/exo secret set cursor --env CURSOR_API_KEY
-./target/debug/exo model register auto --secret cursor
+./target/debug/exo secret create cursor --env CURSOR_API_KEY
+./target/debug/exo model create auto --secret cursor
 ```
 
 Build the sandbox image:
@@ -130,9 +130,9 @@ Create the agent and start a conversation:
 ./target/debug/exo --harness cursor agent create "TS Cursor" \
   --model auto
 
-./target/debug/exo conversation create ts-cursor
-./target/debug/exo conversation mount add ts-cursor <conversation> "$PWD" /workspace --rw
-./target/debug/exo repl --agent ts-cursor --conversation <conversation>
+./target/debug/exo thread create ts-cursor
+./target/debug/exo thread mount create ts-cursor <conversation> "$PWD" /workspace --rw
+./target/debug/exo chat --agent ts-cursor --thread <conversation>
 ```
 
 ## Pi
@@ -141,8 +141,8 @@ Register a model Pi supports. Pi reads the provider key from the sandbox
 environment, so the same variable has to be set where exo runs:
 
 ```bash
-./target/debug/exo secret set openai --env OPENAI_API_KEY
-./target/debug/exo model register gpt-5.5 --secret openai
+./target/debug/exo secret create openai --env OPENAI_API_KEY
+./target/debug/exo model create gpt-5.5 --secret openai
 ```
 
 Build the sandbox image:
@@ -160,9 +160,9 @@ Create the agent and start a conversation:
 ./target/debug/exo --harness pi agent create "TS Pi" \
   --model gpt-5.5
 
-./target/debug/exo conversation create ts-pi
-./target/debug/exo conversation mount add ts-pi <conversation> "$PWD" /workspace --rw
-./target/debug/exo repl --agent ts-pi --conversation <conversation>
+./target/debug/exo thread create ts-pi
+./target/debug/exo thread mount create ts-pi <conversation> "$PWD" /workspace --rw
+./target/debug/exo chat --agent ts-pi --thread <conversation>
 ```
 
 An agent model of `provider/model` selects a provider explicitly; a bare name

@@ -21,7 +21,7 @@ import type {
 //
 // Backend provider for search is Brave Search API (requires a key) or
 // DuckDuckGo HTML (no key), and is selected per-call based on the presence
-// of a Brave key in the exo secret store (`exo secret set brave-api-key ...`)
+// of a Brave key in the exo secret store (`exo secret create brave-api-key ...`)
 // or BRAVE_API_KEY env var.
 //
 // EXO_WEB_SEARCH_PROVIDER=brave|duckduckgo to force a provider.
@@ -393,7 +393,7 @@ async function searchDuckDuckGo(
   });
   if (!response.ok) {
     throw new Error(
-      `DuckDuckGo returned HTTP ${response.status}; it may be rate limiting. Configure a Brave key (exo secret set ${BRAVE_SECRET_ID}) for a more reliable provider.`,
+      `DuckDuckGo returned HTTP ${response.status}; it may be rate limiting. Configure a Brave key (exo secret create ${BRAVE_SECRET_ID}) for a more reliable provider.`,
     );
   }
   return parseDuckDuckGoHtml(await response.text(), count);
@@ -406,7 +406,7 @@ async function searchBrave(
 ): Promise<WebSearchResult[]> {
   if (key === null) {
     throw new Error(
-      `no Brave key configured; run \`exo secret set ${BRAVE_SECRET_ID} --value ...\` or set BRAVE_API_KEY, or unset EXO_WEB_SEARCH_PROVIDER`,
+      `no Brave key configured; run \`exo secret create ${BRAVE_SECRET_ID} --value ...\` or set BRAVE_API_KEY, or unset EXO_WEB_SEARCH_PROVIDER`,
     );
   }
   const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${count}`;
@@ -657,7 +657,7 @@ function webSearchTool(): ToolInstance {
           results: results.map((result) => ({ ...result })),
         };
         if (results.length === 0 && provider === "duckduckgo") {
-          value.note = `No results parsed; DuckDuckGo may be rate limiting or its markup may have changed. Consider configuring a Brave key (exo secret set ${BRAVE_SECRET_ID}).`;
+          value.note = `No results parsed; DuckDuckGo may be rate limiting or its markup may have changed. Consider configuring a Brave key (exo secret create ${BRAVE_SECRET_ID}).`;
         }
         cacheSet(cacheKey, value);
         return value;

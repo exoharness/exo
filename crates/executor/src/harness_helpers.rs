@@ -67,13 +67,36 @@ pub(crate) async fn resolve_conversation_handle(
         return Ok(Some(conversation));
     }
 
-    let conversations = agent
-        .list_conversations(exoharness::ListConversationsRequest::default())
-        .await?
-        .conversations;
+    let conversations = list_conversation_handles(agent).await?;
     Ok(conversations
         .into_iter()
         .find(|conversation| conversation.record().slug == conversation_ref))
+}
+
+pub(crate) async fn list_conversation_handles(
+    agent: &dyn AgentHandle,
+) -> Result<Vec<Arc<dyn ConversationHandle>>> {
+    let mut conversations = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = agent
+            .list_conversations(exoharness::ListConversationsRequest {
+                cursor,
+                limit: None,
+            })
+            .await?;
+        conversations.extend(page.conversations);
+        match page.next_cursor {
+            Some(next) => {
+                anyhow::ensure!(
+                    cursor.is_none_or(|cursor| next < cursor),
+                    "thread listing cursor did not advance"
+                );
+                cursor = Some(next);
+            }
+            None => return Ok(conversations),
+        }
+    }
 }
 
 pub(crate) async fn materialize_conversation_messages(
@@ -181,7 +204,7 @@ pub(crate) async fn resolve_model_binding(
         .find(|binding| binding.name == name)
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "model is not registered: {name}; run `exo model register {name} --secret <secret>`"
+                "model is not registered: {name}; run `exo model create {name} --secret <secret>`"
             )
         })?;
     let Binding::Llm {

@@ -39,7 +39,7 @@ as `egress.json` (the flag also accepts `.yaml`, `.yml`, and `.toml`):
 ```
 
 ```bash
-exo secret set notion --env NOTION_API_KEY
+exo secret create notion --env NOTION_API_KEY
 exo --egress-policy egress.json sandbox play \
   --provider firecracker --networking enabled --idle-seconds 300
 ```
@@ -59,7 +59,7 @@ work; routing and framing headers cannot contain placeholders.
 The CLI interprets binding names as names or IDs in the local encrypted secret
 store. Names resolve in the nearest scope: thread, then agent, then global. IDs
 must belong to one of those scopes. Missing, ambiguous, or non-key secrets fail
-the request. The same flag works with `exo repl` and a managed Firecracker
+the request. The same flag works with `exo chat` and a managed Firecracker
 sandbox. Tell the agent which variables it can use; the runtime currently
 injects the environment without adding a credential inventory to its prompt.
 

@@ -23,7 +23,7 @@ Use this flow:
 4. After the user confirms the app is created, explain that Slack shows the Signing Secret immediately on the app's Basic Information page. Ask the user to copy the Signing Secret and store it locally with:
 
    ```bash
-   exo secret set slack-signing-secret --value '<signing-secret>'
+   exo secret create slack-signing-secret --value '<signing-secret>'
    ```
 
    Tell the user not to paste the value into chat. Ask them to reply `signing secret stored` when done.
@@ -31,7 +31,7 @@ Use this flow:
 5. Then tell the user to open **OAuth & Permissions** in the Slack app sidebar, click **Install to Workspace**, approve the install, copy the **Bot User OAuth Token** that starts with `xoxb-`, and store it locally with:
 
    ```bash
-   exo secret set slack-bot-token --value 'xoxb-...'
+   exo secret create slack-bot-token --value 'xoxb-...'
    ```
 
    Tell the user not to paste the token into chat. Ask them to reply `bot token stored` when done.
@@ -107,4 +107,4 @@ settings:
 
 The manifest above is the recommended **Mentions + DMs** profile. Fill in the user's chosen app name and bot display name before showing it. For **Mentions only**, remove the `app_home` block and the `im:*` scopes. For **Public active threads**, add `channels:history`. For **Public + private active threads** and **All subscribed channel messages**, add both `channels:history` and `groups:history`.
 
-If the user says the app and secrets already exist, skip directly to adapter creation. If adapter creation reports a missing Slack token or signing secret, tell the user to run the relevant `exo secret set ... --value ...` command above and then continue from adapter creation.
+If the user says the app and secrets already exist, skip directly to adapter creation. If adapter creation reports a missing Slack token or signing secret, tell the user to run the relevant `exo secret create ... --value ...` command above and then continue from adapter creation.

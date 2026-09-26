@@ -174,7 +174,7 @@ The snapshot's existence is also recorded in the conversation event log as
 
 ## CLI surface
 
-Inside the chat REPL (`exo chat repl <agent> <conv>`):
+Inside the chat REPL (`exo chat --agent <agent> --thread <conv>`):
 
 ```
 /snapshot           capture the conversation's currently-running sandbox;
@@ -188,7 +188,7 @@ Inside the chat REPL (`exo chat repl <agent> <conv>`):
 /help               show command list
 ```
 
-There is intentionally no top-level `exo conversation snapshot` subcommand
+There is intentionally no top-level `exo thread snapshot` subcommand
 today — see "Known limits" for the cross-invocation gap that makes such
 a subcommand useless until it's resolved.
 
@@ -259,8 +259,8 @@ the container for the conversation's duration) rather than as standalone
 The fix is well-scoped — on `acquire`, query
 `docker ps --filter label=exo.sandbox.key=<key> --filter status=running` and
 adopt the existing container if its `exo.sandbox.spec-hash` label matches
-the requested spec. Once that lands, `exo conversation snapshot` and
-`exo conversation rewind` become trivial CLI subcommands that just call the
+the requested spec. Once that lands, `exo thread snapshot` and
+`exo thread rewind` become trivial CLI subcommands that just call the
 same `ConversationHandle` methods the REPL slash commands use.
 
 ### Payload size

@@ -358,6 +358,54 @@ pub trait ManagedSandboxBackend: Send + Sync {
     /// Enforce `request.spec.policy` before returning a usable handle. Attach,
     /// restore, and fork must provide the same guarantee or reject the policy.
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>>;
+
+    /// Reconnect to an existing sandbox without provisioning a replacement.
+    /// `request` is available when the caller retained the acquisition context;
+    /// remote backends may resolve `sandbox_id` without it. Return `None` when the
+    /// sandbox is gone or reconnection is unsupported. Reuse `previous` when its
+    /// connection is unchanged so any process bookkeeping remains intact.
+    async fn resolve_existing(
+        &self,
+        _sandbox_id: &str,
+        _request: Option<&SandboxRequest>,
+        _previous: &Arc<dyn ManagedSandboxHandle>,
+    ) -> Result<Option<Arc<dyn ManagedSandboxHandle>>> {
+        Ok(None)
+    }
+
+    /// Stop the sandbox identified by `sandbox_id`, even if `previous` is stale.
+    /// Backends with independently changing allocations should override this to
+    /// target the current allocation without acquiring or resuming a sandbox.
+    async fn stop_existing(
+        &self,
+        _sandbox_id: &str,
+        previous: &Arc<dyn ManagedSandboxHandle>,
+    ) -> Result<()> {
+        previous.stop().await
+    }
+
+    /// Terminate an existing sandbox. Backends that can resolve IDs independently
+    /// may override this to work without the original acquisition request.
+    async fn terminate_existing(
+        &self,
+        _sandbox_id: &str,
+        request: Option<&SandboxRequest>,
+    ) -> Result<()> {
+        self.terminate(
+            request
+                .context("sandbox termination requires its acquisition request")?
+                .clone(),
+        )
+        .await
+    }
+
+    /// Whether an operation failure requires reconnecting before the next operation.
+    /// Ordinary command failures and missing process IDs must not invalidate a handle.
+    /// Callers must not replay an operation whose outcome is ambiguous.
+    fn invalidates_handle(&self, _error: &anyhow::Error) -> bool {
+        false
+    }
+
     async fn attach(
         &self,
         request: SandboxRequest,

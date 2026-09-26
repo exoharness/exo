@@ -1,0 +1,17 @@
+[package]
+name = "exo-managed-agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+exoharness = { path = "../exoharness" }
+serde.workspace = true
+serde_yaml_ng.workspace = true
+
+[dev-dependencies]
+exoharness = { path = "../exoharness", features = ["basic-backend"] }
+tokio.workspace = true
