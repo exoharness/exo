@@ -185,6 +185,47 @@ index 85a7b4be..2c3d543c 100644
  @app.get("/get_app")
  async def get_app():
      if _conductor is None:
+diff --git a/sregym/conductor/problem_sets.py b/sregym/conductor/problem_sets.py
+index de3825fb..73f3c270 100644
+--- a/sregym/conductor/problem_sets.py
++++ b/sregym/conductor/problem_sets.py
+@@ -24,4 +24,35 @@ SREGYM_LITE_PROBLEMS = (
+     "search_rate_retry_collapse_hotel_reservation",
+ )
+ 
+-PROBLEM_SETS = {"sregym-lite": SREGYM_LITE_PROBLEMS}
++# Incidents from the same fault families as SREGym-Lite, held out of it:
++# first the same fault injected into a different application, then the
++# lite problem's closest relatives. Learn on lite, test on these.
++SREGYM_LITE_TRANSFER_PROBLEMS = (
++    # same fault, different application
++    "service_dns_resolution_failure_astronomy_shop",
++    "readiness_probe_misconfiguration_astronomy_shop",
++    "readiness_probe_misconfiguration_hotel_reservation",
++    "duplicate_pvc_mounts_astronomy_shop",
++    "duplicate_pvc_mounts_hotel_reservation",
++    "wrong_dns_policy_hotel_reservation",
++    "wrong_dns_policy_social_network",
++    "wrong_service_selector_astronomy_shop",
++    "wrong_service_selector_hotel_reservation",
++    "rolling_update_misconfigured_hotel_reservation",
++    # related fault
++    "incorrect_port_assignment",
++    "missing_env_variable_astronomy_shop",
++    "admission_webhook_tls_mismatch_hotel_reservation",
++    "cumulative_admission_webhook_timeout_hotel_reservation",
++    "valkey_memory_disruption",
++    "kafka_queue_problems",
++    "kafka_producer_leak",
++    "load_spike_rpc_retry_storm",
++    "capacity_decrease_rpc_retry_storm",
++    "service_port_conflict_hotel_reservation",
++)
++
++PROBLEM_SETS = {
++    "sregym-lite": SREGYM_LITE_PROBLEMS,
++    "sregym-lite-transfer": SREGYM_LITE_TRANSFER_PROBLEMS,
++}
 diff --git a/sregym/service/container_runner.py b/sregym/service/container_runner.py
 index 4fd0fe76..8131bd2b 100644
 --- a/sregym/service/container_runner.py

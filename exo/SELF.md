@@ -30,6 +30,31 @@ Use this map before changing Exo itself.
 - `crates/executor/src/conversation_sandbox.rs`: conversation sandbox selection.
 - `crates/exoharness/`: durable harness API, conversation state, events, artifacts, and sandbox lifecycle.
 
+## How Your Context Is Assembled
+
+Every model round starts from `exoInstructions` in `exo/harness.ts`, which
+builds the developer messages in this order: the agent's configured
+instructions, the identity prompt from `exo/prompts/me.md`, a capabilities
+block written inline in `harness.ts` (scheduled tasks, snapshots,
+self-maintenance, adapters, wakeups, memory, todos, skills, web), the Slack
+setup guide from `exo/adapters/slack/setup-prompt.md`, the pointer to this
+source tree, an optional local prompt file (`.exo/exo-profile.md`, read if it
+exists), then the dynamic blocks: every durable memory entry
+(`memoryInstruction` in `exo/tools/memory-tools.ts`), the todo list, and the
+installed skills index (`skillsInstruction` in
+`exoharness/typescript/harness/skill-tools.ts`). Skill bodies are not in
+context until `use_skill` loads them.
+
+The harness runner imports `exo/harness.ts` fresh each time it starts, so a
+change to any of these TypeScript or Markdown files is live on the next turn
+without a rebuild; only Rust changes need `rebuild_and_restart_exo`. Nothing
+validates a harness edit before it is live: if `harness.ts` fails to load, so
+does every following turn, including the one you would use to fix it. Check
+the edit (for example `node --import tsx -e "import('/workspace/exo/exo/harness.ts')"`)
+before relying on it. The cost of each model round, with token counts, is
+recorded on that round's `messages` event in your conversation log
+(`list_conversation_events` with kinds `["messages"]`).
+
 ## Local State
 
 - `.exo/` contains local harness state, adapter config, pairing data, artifacts,

@@ -11,16 +11,32 @@ the host, so the agent container gets neither API keys nor Codex auth), lets
 the runner add bind mounts to the agent container, and adds an optional review
 hold used by `--reflection`.
 
-As in a regular `exo.sh` launch, this repository is mounted read-write at
-`/workspace/exo` inside the container Exo works in, so Exo can inspect and
-edit its own code. `rebuild_and_restart_exo` runs the service guardian on the
-host with `EXO_ROOT` set to the run's Exo state; a successful build replaces
-`target/debug/exo`, which the next turn picks up, and a failed build leaves
-the previous binary in place. The runner stops any guardian-started scheduler
-and adapters when the evaluation ends. Files Exo writes through the mount are
+Each run gets its own git worktree of this repository's committed `HEAD` at
+`<run>/exo-source`, built with `pnpm install` and `cargo build`. As in a
+regular `exo.sh` launch, that tree is mounted read-write at `/workspace/exo`
+inside the container Exo works in, so Exo can inspect and edit its own code
+without touching the checkout the runner was started from (uncommitted changes
+there are not part of the run). `rebuild_and_restart_exo` runs the service
+guardian in the worktree with `EXO_ROOT` set to the run's Exo state; a
+successful build replaces the worktree's `target/debug/exo`, which the next
+turn picks up, and a failed build leaves the previous binary in place. Exo's
+TypeScript harness loads fresh every turn, so a harness edit is live at once.
+The runner stops any guardian-started scheduler and adapters when the
+evaluation ends, and removes the worktree after a completed run (the policy
+repository keeps its final source). Files Exo writes through the mount are
 owned by root on the host. For each incident, Exo attaches to SREGym's isolated
 agent container. SREGym still owns the cluster, fault injection, network policy,
 agent container, grading, timeout, and cleanup.
+
+Nothing in Exo validates a source edit before it is live, and a harness that
+fails to load fails every later turn, including the one Exo would need to
+repair it. So after any trial that changed the worktree, the runner sends a
+tool-free probe turn ("reply ok") in a separate `health-*` conversation
+attached to a throwaway `alpine` container. If the turn completes, the change
+is committed in the worktree as the new known-good state; if it fails, the
+worktree is reset to the previous one (and rebuilt), and the policy
+repository gets a commit saying so. Every check is appended to
+`<run>/source-checks.json`. This is the runner's backstop, not part of Exo.
 
 Each incident gets a fresh conversation, while memory, skills, and installed
 tools remain attached to the same run-scoped Exo agent. Trials are deliberately
@@ -94,6 +110,26 @@ against SREGym's agent timeout.
 ```bash
 ./eval.sh --suite sregym-lite --profile full --reflection
 ```
+
+## Learn, then test on unseen incidents
+
+`--test-suite` (or `--test-problem`) adds a second phase: after the first
+selection finishes, the same agent, with everything it built, runs the test
+selection with reflection off, so no grades are revealed there. What it
+learned is measured on incidents it has never seen. The patch adds the
+`sregym-lite-transfer` problem set for this: 20 incidents from the same fault
+families as SREGym-Lite but held out of it, first the same fault injected into
+a different application, then each lite problem's closest relatives.
+
+```bash
+./eval.sh --suite sregym-lite --test-suite sregym-lite-transfer \
+  --profile full --reflection --model gpt-5.6-sol --judge-model gpt-5
+```
+
+Each phase is its own SREGym invocation and results batch, mirrored as
+`harbor-jobs/<run>-learn` and `<run>-test`. Policy commits carry the phase in
+their subject. To resume an interrupted test phase, pass `--resume-phase
+test` with the usual `--resume <csv> --run-dir <run>`.
 
 ## Outputs
 

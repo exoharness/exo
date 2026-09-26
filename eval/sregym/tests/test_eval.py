@@ -15,6 +15,8 @@ MODULE_PATH = MODULE_DIR / "eval.py"
 SPEC = importlib.util.spec_from_file_location("sregym_eval", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 sregym_eval = importlib.util.module_from_spec(SPEC)
+# Registered so pydantic can resolve the module's postponed annotations.
+sys.modules["sregym_eval"] = sregym_eval
 SPEC.loader.exec_module(sregym_eval)
 
 
@@ -48,6 +50,7 @@ class EvalTests(unittest.TestCase):
             "sregym/conductor/conductor_api.py",
             "sregym/service/container_runner.py",
             "sregym/agent_launcher.py",
+            "sregym/conductor/problem_sets.py",
             "main.py",
         ):
             self.assertIn(f"+++ b/{path}", patch)
@@ -99,9 +102,18 @@ class EvalTests(unittest.TestCase):
             run_dir = root / "run"
             run_dir.mkdir()
 
-            args = sregym_eval.parse_args(["--exo-profile", "memory-only", "--reflection"])
-            sregym_eval.write_run_manifest(run_dir, args=args, repo=repo, command=["uv", "run"])
-            sregym_eval.write_run_manifest(run_dir, args=args, repo=repo, command=["uv", "run", "--resume"])
+            args = sregym_eval.parse_args(
+                ["--exo-profile", "memory-only", "--reflection", "--test-suite", "sregym-lite-transfer"]
+            )
+            phases = sregym_eval.run_phases(args)
+            commands = [sregym_eval.sregym_command(args, phase) for phase in phases]
+            sregym_eval.write_run_manifest(run_dir, args=args, repo=repo, phases=phases, commands=commands)
+            args.resume = Path("results.csv")
+            args.run_dir = run_dir
+            args.resume_phase = "test"
+            phases = sregym_eval.run_phases(args)
+            commands = [sregym_eval.sregym_command(args, phase) for phase in phases]
+            sregym_eval.write_run_manifest(run_dir, args=args, repo=repo, phases=phases, commands=commands)
 
             entries = json.loads((run_dir / "run.json").read_text())
             self.assertEqual(len(entries), 2)
@@ -110,7 +122,11 @@ class EvalTests(unittest.TestCase):
             self.assertEqual(entries[0]["sregym_ref"], sregym_eval.SREGYM_REF)
             self.assertIn("faster or more cheaply", entries[0]["reflection_instructions"]["opening"])
             self.assertIn("top goal", entries[0]["task_brief"]["self_modification"])
-            self.assertEqual(entries[1]["sregym_command"][-1], "--resume")
+            self.assertEqual([phase["name"] for phase in entries[0]["phases"]], ["learn", "test"])
+            self.assertTrue(entries[0]["phases"][0]["reflection"])
+            self.assertFalse(entries[0]["phases"][1]["reflection"])
+            self.assertEqual(entries[1]["phases"][0]["name"], "test")
+            self.assertEqual(entries[1]["phases"][0]["sregym_command"][-1], str(Path("results.csv").resolve()))
 
     def test_exo_profile_defaults_to_practical(self) -> None:
         self.assertEqual(sregym_eval.parse_args([]).exo_profile, "practical")
@@ -200,10 +216,9 @@ class EvalTests(unittest.TestCase):
         )
 
     def test_sregym_command_keeps_native_staged_runner(self) -> None:
-        args = sregym_eval.parse_args([])
-        args.problem = "network_policy_block"
-        args.suite = None
-        command = sregym_eval.sregym_command(args)
+        args = sregym_eval.parse_args(["--problem", "network_policy_block"])
+        [phase] = sregym_eval.run_phases(args)
+        command = sregym_eval.sregym_command(args, phase)
 
         self.assertEqual(command[:3], ["uv", "run", "main.py"])
         self.assertEqual(command[command.index("--agent") + 1], "exo")
@@ -211,6 +226,81 @@ class EvalTests(unittest.TestCase):
             command[command.index("--problem") + 1], "network_policy_block"
         )
         self.assertNotIn("--use-external-harness", command)
+
+    def test_phases_learn_with_reflection_then_test_without(self) -> None:
+        args = sregym_eval.parse_args(["--reflection", "--test-suite", "sregym-lite-transfer"])
+        phases = sregym_eval.run_phases(args)
+        self.assertEqual([phase.name for phase in phases], ["learn", "test"])
+        self.assertEqual(phases[0].selection, ["--suite", "sregym-lite"])
+        self.assertTrue(phases[0].reflection)
+        self.assertEqual(phases[1].selection, ["--suite", "sregym-lite-transfer"])
+        self.assertFalse(phases[1].reflection)
+        self.assertIn(
+            "--resume", sregym_eval.sregym_command(
+                sregym_eval.parse_args(["--resume", "r.csv", "--run-dir", "d", "--test-suite", "t"]),
+                sregym_eval.run_phases(
+                    sregym_eval.parse_args(["--resume", "r.csv", "--run-dir", "d", "--test-suite", "t"])
+                )[0],
+            ),
+        )
+        with self.assertRaises(SystemExit):
+            sregym_eval.parse_args(["--resume-phase", "test"])
+        with self.assertRaises(SystemExit):
+            sregym_eval.parse_args(["--test-suite", "t", "--test-problem", "p"])
+        [_, test] = sregym_eval.run_phases(sregym_eval.parse_args(["--test-problem", "wrong_dns_policy_social_network"]))
+        self.assertEqual(test.selection, ["--problem", "wrong_dns_policy_social_network"])
+
+    def test_source_guard_accepts_working_edits_and_reverts_broken_ones(self) -> None:
+        class Client:
+            def __init__(self) -> None:
+                self.healthy = True
+                self.probes = 0
+
+            def send(self, conversation: str, instruction: str, timeout: int) -> None:
+                self.probes += 1
+                if not self.healthy:
+                    raise RuntimeError("harness failed to load")
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            worktree = Path(temporary_directory) / "source"
+            worktree.mkdir()
+            git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(worktree)]
+            (worktree / "harness.ts").write_text("ok\n")
+            (worktree / ".gitignore").write_text("target/\n")
+            subprocess.run([*git, "init", "-q"], check=True)
+            subprocess.run([*git, "add", "."], check=True)
+            subprocess.run([*git, "commit", "-q", "-m", "base"], check=True)
+            client = Client()
+            guard = sregym_eval.SourceGuard(worktree, client=client, log=Path(temporary_directory) / "checks.json")
+            guard.conversation = "health"
+            guard.revert = lambda: (  # no cargo in the test
+                subprocess.run([*git, "reset", "-q", "--hard", guard.accepted], check=True),
+                subprocess.run([*git, "clean", "-fdq"], check=True),
+            )
+
+            self.assertFalse(guard.check(1).changed)
+            self.assertEqual(client.probes, 0)
+
+            (worktree / "harness.ts").write_text("better\n")
+            (worktree / "target").mkdir()
+            (worktree / "target" / "exo").write_text("binary")
+            accepted = guard.check(2)
+            self.assertTrue(accepted.healthy)
+            self.assertIsNone(accepted.reverted_to)
+            self.assertFalse(guard.changed())
+            good = guard.accepted
+
+            (worktree / "harness.ts").write_text("broken\n")
+            (worktree / "new-tool.ts").write_text("x")
+            client.healthy = False
+            reverted = guard.check(3)
+            self.assertFalse(reverted.healthy)
+            self.assertEqual(reverted.reverted_to, good)
+            self.assertEqual((worktree / "harness.ts").read_text(), "better\n")
+            self.assertFalse((worktree / "new-tool.ts").exists())
+            self.assertTrue((worktree / "target" / "exo").exists())
+            records = json.loads((Path(temporary_directory) / "checks.json").read_text())
+            self.assertEqual([record["trial"] for record in records], [1, 2, 3])
 
 
 if __name__ == "__main__":
