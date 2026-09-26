@@ -157,7 +157,35 @@ fn check_git_thread_isolation(store: &ResourceStore, temp: &tempfile::TempDir) -
         assert_eq!(fs::read_dir(store.root.join("snapshots"))?.count(), 0);
         store.unmount_volume(&store.thread_directory(agent, a).join("code"))?;
         fs::rename(&source, temp.path().join("offline"))?;
-        let reopened = store.materialize(agent, a, prepared.clone(), vec![None])?;
+        let mut authenticated = prepared.clone();
+        let ResourceSource::GitRepository { credential, .. } =
+            &mut authenticated[0].definition.source
+        else {
+            unreachable!()
+        };
+        *credential = Some("github-git".into());
+        let reopened = store.materialize(agent, a, authenticated.clone(), vec![None])?;
+        let reopened_root = mounted_resource(store, &reopened[0])?;
+        assert_eq!(
+            git(&reopened_root, ["rev-parse", "HEAD"], None)?.trim(),
+            first_revision
+        );
+        assert!(!git(&reopened_root, ["branch", "--list", "private"], None)?.is_empty());
+        let manifest: Vec<Instance> = serde_json::from_slice(&fs::read(
+            store.thread_directory(agent, a).join("resources.json"),
+        )?)?;
+        assert_eq!(manifest[0].prepared, authenticated[0]);
+        let mut changed_source = authenticated;
+        let ResourceSource::GitRepository { url, .. } = &mut changed_source[0].definition.source
+        else {
+            unreachable!()
+        };
+        *url = Some("https://github.com/other/repo".into());
+        assert!(
+            store
+                .materialize(agent, a, changed_source, vec![None])
+                .is_err()
+        );
         assert_eq!(
             fs::read_to_string(mounted_resource(store, &reopened[0])?.join("README"))?,
             "private edit"

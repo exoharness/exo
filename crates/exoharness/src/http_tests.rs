@@ -670,6 +670,45 @@ async fn http_vault_contexts_and_secrets_round_trip() -> crate::Result<()> {
     );
     let sibling = agent.new_thread(NewThreadRequest::default()).await?;
     assert!(sibling.get_vault(&user.record().id).await?.is_none());
+    let sibling = sibling.attach_vaults(vaults.clone()).await?;
+    let environment = crate::EnvironmentDefinition {
+        name: "updated".into(),
+        config: crate::CreateSandboxRequest {
+            provider: SandboxProvider::LocalProcess,
+            image: "local".into(),
+            enable_networking: Some(true),
+            model: None,
+            name: None,
+            resources: None,
+            default_workdir: None,
+            file_system_mounts: None,
+            durable_file_systems: None,
+            policy: None,
+            idle_seconds: None,
+        },
+    };
+    let sibling = sibling.update_environment(environment.clone()).await?;
+    assert_eq!(sibling.record().environment.as_ref(), Some(&environment));
+    assert_eq!(
+        agent
+            .get_thread(&sibling.record().id)
+            .await?
+            .unwrap()
+            .record(),
+        sibling.record()
+    );
+
+    assert_eq!(sibling.record().vaults, vaults);
+    assert_eq!(
+        sibling
+            .get_vault(&user.record().id)
+            .await?
+            .unwrap()
+            .resolve_secret(&id, &target)
+            .await?
+            .revision,
+        updated.revision
+    );
     let scoped = thread.get_vault(&user.record().id).await?.unwrap();
     assert_eq!(
         scoped.resolve_secret(&id, &target).await?.revision,

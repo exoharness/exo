@@ -33,6 +33,17 @@ pub(super) fn prepare(
     cache: &Path,
     image: &str,
 ) -> Result<Option<PathBuf>> {
+    let archive = if super::is_local_image_ref(image) {
+        None
+    } else {
+        docker_archive(cache, image)?
+    };
+    let image = match &archive {
+        Some(path) => path
+            .to_str()
+            .context("SmolVM image cache path must be UTF-8")?,
+        None => image,
+    };
     let Some((digest, compressed)) = archive_key(image)? else {
         return Ok(None);
     };
@@ -49,7 +60,7 @@ pub(super) fn prepare(
     lock.lock()?;
     let destination = cache.join(&key);
     if !destination.exists() {
-        eprintln!("Preparing SmolVM image (cached for new threads)...");
+        tracing::info!(target: "exoharness::progress", "Preparing SmolVM image (cached for new threads)");
         let staging = tempfile::Builder::new()
             .prefix("prepare-")
             .tempdir_in(&cache)?;
@@ -123,6 +134,56 @@ pub(super) fn prepare(
         fs::rename(staging.path(), &destination)?;
     }
     mount_read_only(&destination).map(Some)
+}
+
+fn docker_archive(cache: &Path, image: &str) -> Result<Option<PathBuf>> {
+    let output = match Command::new("docker")
+        .args(["image", "inspect", "--format", "{{.Id}}", image])
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("checking the local Docker image store"),
+    };
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let id = String::from_utf8(output.stdout)?;
+    let id = id.trim();
+    let digest = id
+        .strip_prefix("sha256:")
+        .context("Docker image has no content digest")?;
+    ensure!(
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "invalid Docker image digest"
+    );
+    fs::create_dir_all(cache)?;
+    fs::set_permissions(cache, fs::Permissions::from_mode(0o700))?;
+    let archive = cache.join(format!("docker-{digest}.tar"));
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(cache.join(format!("docker-{digest}.lock")))?;
+    lock.lock()?;
+    if !archive.exists() {
+        tracing::info!(target: "exoharness::progress", "Importing local Docker image {image} for SmolVM");
+        let staging = tempfile::NamedTempFile::new_in(cache)?;
+        let output = Command::new("docker")
+            .args(["image", "save", "--output"])
+            .arg(staging.path())
+            .arg(id)
+            .output()
+            .context("exporting the local Docker image")?;
+        ensure!(
+            output.status.success(),
+            "exporting Docker image {image}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        staging.persist(&archive)?;
+    }
+    Ok(Some(archive))
 }
 
 fn archive_key(image: &str) -> Result<Option<(String, bool)>> {

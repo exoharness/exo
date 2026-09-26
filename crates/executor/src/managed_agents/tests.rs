@@ -10,14 +10,9 @@ use tempfile::TempDir;
 const SOURCE: &str = "---\nname: support-analyst\nharness: basic\nconfig:\n  model: gpt-5.4\n---\n\nInvestigate support tickets.\n";
 
 #[test]
-fn explicit_sandbox_keeps_the_harness_preset_image() -> Result<()> {
-    let definition = AgentDefinition::parse(
-        SOURCE
-            .replace("harness: basic", "harness: codex")
-            .replace("config:\n", "sandbox:\n  provider: docker\nconfig:\n"),
-    )?;
-    let config =
-        super::config::agent_config(&definition, SandboxProvider::LocalProcess, None, None)?;
+fn sandbox_provider_keeps_the_harness_preset_image() -> Result<()> {
+    let definition = AgentDefinition::parse(SOURCE.replace("harness: basic", "harness: codex"))?;
+    let config = super::config::agent_config(&definition, SandboxProvider::Docker, None, None)?;
     assert_eq!(
         config.sandbox.image.as_deref(),
         Some("exo-codex-sandbox:latest")
@@ -254,7 +249,7 @@ async fn vault_selection_survives_resume_and_rejects_unsafe_config_changes() -> 
         .await?;
     assert_eq!(
         managed::vaults::load_selection(thread.as_ref()).await?,
-        Some(selection)
+        Some(selection.clone())
     );
     assert_eq!(vault_versions(thread.list_artifacts().await?), versions);
     for thread_config in [
@@ -276,18 +271,20 @@ async fn vault_selection_survives_resume_and_rejects_unsafe_config_changes() -> 
         assert!(saved.mounts.is_empty());
         unsafe_runtime.shutdown().await?;
     }
-    assert!(
-        runtime
-            .open_managed_thread(
-                &agent,
-                Some(&reference),
-                NewThreadRequest {
-                    vaults: vec![bob.record().id],
-                    ..Default::default()
-                }
-            )
-            .await
-            .is_err()
+    let attached = runtime
+        .open_managed_thread(
+            &agent,
+            Some(&reference),
+            NewThreadRequest {
+                vaults: vec![bob.record().id],
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert!(attached.thread.record().vaults.contains(&bob.record().id));
+    assert_eq!(
+        managed::vaults::load_selection(attached.thread.as_ref()).await?,
+        Some(selection)
     );
     let mut changed = runtime.get_agent_config(agent.as_ref()).await?;
     changed.harness = crate::AgentHarnessKind::Rlm;

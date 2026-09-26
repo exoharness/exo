@@ -72,6 +72,20 @@ fn http_commands_reject_local_execution_options() -> Result<()> {
             "local-process",
         ],
         vec!["exo", "agent", "serve", "support"],
+        vec![
+            "exo", "thread", "update", "support", "thread", "--vault", "personal", "--model",
+            "other",
+        ],
+        vec![
+            "exo",
+            "thread",
+            "update",
+            "support",
+            "thread",
+            "--vault",
+            "personal",
+            "--clear-provider",
+        ],
     ] {
         let cli = crate::Cli::try_parse_from(args)?;
         assert!(validate_http_command(&cli.command).is_err());

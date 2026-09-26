@@ -249,6 +249,16 @@ pub enum Request {
         agent_id: AgentId,
         binding_id: BindingId,
     },
+    ConversationUpdateEnvironment {
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+        environment: crate::EnvironmentDefinition,
+    },
+    ConversationAttachVaults {
+        agent_id: AgentId,
+        conversation_id: ConversationId,
+        vaults: Vec<VaultId>,
+    },
     ConversationStartSession {
         agent_id: AgentId,
         conversation_id: ConversationId,
@@ -383,6 +393,8 @@ impl Request {
             Self::AgentListBindings { .. } => "agent_list_bindings",
             Self::AgentPutBinding { .. } => "agent_put_binding",
             Self::AgentGetBinding { .. } => "agent_get_binding",
+            Self::ConversationUpdateEnvironment { .. } => "conversation_update_environment",
+            Self::ConversationAttachVaults { .. } => "conversation_attach_vaults",
             Self::ConversationStartSession { .. } => "conversation_start_session",
             Self::ConversationEndSession { .. } => "conversation_end_session",
             Self::ConversationBeginTurn { .. } => "conversation_begin_turn",

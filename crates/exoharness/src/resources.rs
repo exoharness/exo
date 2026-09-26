@@ -47,11 +47,37 @@ pub struct PreparedResource {
     pub snapshot: Option<String>,
 }
 
+impl PreparedResource {
+    pub fn same_workspace(&self, other: &Self) -> bool {
+        let mut definition = self.definition.clone();
+        if let (
+            ResourceSource::GitRepository { credential, .. },
+            ResourceSource::GitRepository {
+                credential: other_credential,
+                ..
+            },
+        ) = (&mut definition.source, &other.definition.source)
+        {
+            *credential = other_credential.clone();
+        }
+        self.snapshot == other.snapshot && definition == other.definition
+    }
+}
+
 fn writable() -> FileSystemMountMode {
     FileSystemMountMode::ReadWrite
 }
 
 impl ResourceDefinition {
+    pub fn git_credential_variable(&self) -> String {
+        let name: String = self
+            .name
+            .bytes()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        format!("EXO_GIT_{name}")
+    }
+
     pub fn local_path(&self) -> Option<&Path> {
         match &self.source {
             ResourceSource::Directory { path } => Some(path),

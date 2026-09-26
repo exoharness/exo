@@ -9,6 +9,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
+#[path = "git_tests.rs"]
+mod git;
+
 const GIT_REFS_PATH: &str = "/authorized-repo.git/info/refs?service=git-upload-pack";
 const GIT_RECEIVE_REFS_PATH: &str = "/authorized-repo.git/info/refs?service=git-receive-pack";
 const GIT_UPLOAD_PACK_PATH: &str = "/authorized-repo.git/git-upload-pack";
@@ -103,7 +106,7 @@ impl EgressCredentialResolver for GitResolver {
                 && authorized_path,
             "git request is not authorized"
         );
-        Ok("eC1hY2Nlc3MtdG9rZW46Y2FuYXJ5LXYx".into())
+        Ok("canary-v1".into())
     }
 }
 
@@ -121,8 +124,16 @@ impl Drop for Upstream {
 
 impl Upstream {
     async fn start() -> Result<Self> {
+        Self::start_with_git(None).await
+    }
+
+    async fn start_with_git(repository_root: Option<std::path::PathBuf>) -> Result<Self> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
-        let (ca_pem, tls) = tls_configuration(vec!["api.test".into(), "public.test".into()])?;
+        let (ca_pem, tls) = tls_configuration(vec![
+            "api.test".into(),
+            "public.test".into(),
+            "api.github.com".into(),
+        ])?;
         let config = TestUpstream {
             address: listener.local_addr()?,
             ca_pem,
@@ -137,9 +148,14 @@ impl Upstream {
                         let Ok((stream, _)) = incoming else { break; };
                         connection_count.fetch_add(1, Ordering::SeqCst);
                         let tls = tls.clone();
+                        let repository_root = repository_root.clone();
                         connections.spawn(async move {
                             let stream = tls.accept(stream).await?;
-                            let service = service_fn(|request: Request<Incoming>| async move {
+                            let repository_root = repository_root.as_deref();
+                            let service = service_fn(move |request: Request<Incoming>| async move {
+                                if let Some(root) = repository_root {
+                                    return Ok::<_, Infallible>(git::respond(root, request).await.unwrap());
+                                }
                                 if matches!(request.uri().path(), "/refresh" | "/reject" | "/forbidden") {
                                     let path = request.uri().path().to_owned();
                                     let valid = request.headers().get("authorization").and_then(|h| h.to_str().ok()) == Some("Bearer canary-v2");
@@ -557,7 +573,13 @@ async fn proxy_supports_git_smart_http() -> Result<()> {
 
     let upstream = Upstream::start().await?;
     let (proxy, proxy_client) = bound_proxy(&upstream, "git", Arc::new(GitResolver)).await?;
-    let authorization = format!("Basic {}", proxy.environment()["TEST_API_KEY"]);
+    let authorization = format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(format!(
+            "x-access-token:{}",
+            proxy.environment()["TEST_API_KEY"]
+        ))
+    );
 
     let refs = proxy_client
         .get(format!("https://api.test{GIT_REFS_PATH}"))
@@ -688,6 +710,15 @@ async fn proxy_rejects_cleartext_wrong_destinations_and_other_sandboxes() -> Res
         cleartext
             .get("http://api.test/auth")
             .header("authorization", &bearer)
+            .send()
+            .await?
+            .status()
+            .is_server_error()
+    );
+    assert!(
+        cleartext
+            .get("http://api.test/auth")
+            .basic_auth("x-access-token", Some(&proxy.environment()["TEST_API_KEY"]))
             .send()
             .await?
             .status()
@@ -2033,15 +2064,33 @@ async fn hosted_proxy_times_out_authorization_before_accepting_a_tunnel() -> Res
 #[tokio::test]
 #[ignore = "requires SmolVM and EXO_SMOLVM_TEST_IMAGE with curl and CA certificates"]
 async fn smolvm_explicit_proxy_live() -> Result<()> {
+    smolvm_proxy_live(false).await
+}
+
+#[tokio::test]
+#[ignore = "requires SmolVM and EXO_SMOLVM_TEST_IMAGE with gh"]
+async fn smolvm_github_cli_live() -> Result<()> {
+    smolvm_proxy_live(true).await
+}
+
+async fn smolvm_proxy_live(with_gh: bool) -> Result<()> {
     use crate::{
         ManagedSandboxBackend, SandboxCommand, SandboxLifecycleConfig, SandboxRequest,
         SandboxResourceShape, SandboxSpec, SmolvmExecutionMode, SmolvmSandboxBackend,
     };
     let image = std::env::var("EXO_SMOLVM_TEST_IMAGE")?;
-    let upstream = Upstream::start().await?;
+    let directory = tempfile::tempdir()?;
+    let cache = tempfile::tempdir()?;
+    let upstream = Upstream::start_with_git(with_gh.then(|| directory.path().to_owned())).await?;
     let resolver = TestResolver::new();
     let mut config = policy();
     config.networking = SandboxNetworkPolicy::Unrestricted;
+    if with_gh {
+        config.credentials[0].environment_variable = "GH_TOKEN".into();
+        config.credentials[0].networking = CredentialNetworkPolicy::Limited {
+            allowed_hosts: vec!["api.github.com".into()],
+        };
+    }
     let state = State::new(
         identity("smolvm-proxy"),
         config,
@@ -2054,7 +2103,11 @@ async fn smolvm_explicit_proxy_live() -> Result<()> {
         "host.smolvm.internal",
     )
     .await?;
-    let backend = SmolvmSandboxBackend::with_mode(SmolvmExecutionMode::Warm);
+    let backend = SmolvmSandboxBackend::from_config(crate::SmolvmBackendConfig {
+        mode: SmolvmExecutionMode::Warm,
+        image_cache: Some(cache.path().to_path_buf()),
+        ..Default::default()
+    });
     let request = SandboxRequest {
         sandbox_id: format!("smolvm-proxy-{}", uuid::Uuid::new_v4()),
         scope: Default::default(),
@@ -2088,21 +2141,34 @@ async fn smolvm_explicit_proxy_live() -> Result<()> {
         };
         let output = handle.exec(&command).await?;
         ensure!(output.ok, "trust setup: {}", output.stderr);
-        command.env = HashMap::from([("TEST_API_KEY".into(), "caller-supplied-secret".into())]);
+        command.env = HashMap::from([(
+            if with_gh { "GH_TOKEN" } else { "TEST_API_KEY" }.into(),
+            "caller-supplied-secret".into(),
+        )]);
         command.argv[2] = r#"
 case "$TEST_API_KEY" in exo_egress_*) ;; *) exit 1;; esac
 case "$(env)" in *canary-v1*|*canary-v2*|*caller-supplied-secret*) exit 1;; esac
 curl -fsS --max-time 10 https://api.test/auth -H "Authorization: Bearer $TEST_API_KEY"
 "#
         .into();
+        if with_gh {
+            command.argv[2] = r#"
+case "$GH_TOKEN" in exo_egress_*) ;; *) exit 1;; esac
+case "$(env)" in *canary-v1*|*canary-v2*|*caller-supplied-secret*) exit 1;; esac
+gh api repos/org/repo/pulls/10/reviews --jq '.[0].body'
+"#
+            .into();
+        }
         for (secret, expected) in [
             ("canary-v1", "authenticated-v1"),
             ("canary-v2", "authenticated-v2"),
         ] {
             *resolver.value.write().await = Some(secret.into());
+            std::fs::write(directory.path().join("expected-token"), secret)?;
+            let expected = if with_gh { "private review" } else { expected };
             let output = handle.exec(&proxy.command(&command)?).await?;
             ensure!(
-                output.ok && output.stdout == expected,
+                output.ok && output.stdout.trim() == expected,
                 "proxy request: {} {}",
                 output.stdout,
                 output.stderr
@@ -2111,13 +2177,15 @@ curl -fsS --max-time 10 https://api.test/auth -H "Authorization: Bearer $TEST_AP
         *resolver.value.write().await = None;
         let output = handle.exec(&proxy.command(&command)?).await?;
         ensure!(!output.ok, "revoked credential was still accepted");
-        command.argv[2] = "curl -fsS --max-time 10 https://public.test/auth".into();
-        let output = handle.exec(&proxy.command(&command)?).await?;
-        ensure!(
-            output.ok && output.stdout == "anonymous",
-            "anonymous HTTPS failed: {}",
-            output.stderr
-        );
+        if !with_gh {
+            command.argv[2] = "curl -fsS --max-time 10 https://public.test/auth".into();
+            let output = handle.exec(&proxy.command(&command)?).await?;
+            ensure!(
+                output.ok && output.stdout == "anonymous",
+                "anonymous HTTPS failed: {}",
+                output.stderr
+            );
+        }
         proxy.close();
         ensure!(
             proxy.command(&command).is_err(),
@@ -2128,6 +2196,13 @@ curl -fsS --max-time 10 https://api.test/auth -H "Authorization: Bearer $TEST_AP
     .await;
     proxy.close();
     let cleanup = backend.terminate(request).await;
-    result?;
-    cleanup
+    cleanup?;
+    #[cfg(target_os = "macos")]
+    for entry in std::fs::read_dir(cache.path())? {
+        let path = entry?.path();
+        if path.join("volume.sparseimage").exists() {
+            crate::local_volume::unmount_volume(&path)?;
+        }
+    }
+    result
 }

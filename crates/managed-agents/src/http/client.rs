@@ -272,6 +272,42 @@ impl RuntimeClient {
             .await
     }
 
+    pub async fn update_thread_environment(
+        &self,
+        agent_id: AgentId,
+        thread_id: ThreadId,
+        environment: &exoharness::EnvironmentDefinition,
+    ) -> Result<ThreadResult> {
+        self.http
+            .json(
+                self.http
+                    .request(
+                        Method::PUT,
+                        &format!("{}/environment", thread_path(agent_id, thread_id)),
+                    )?
+                    .json(environment),
+            )
+            .await
+    }
+
+    pub async fn attach_thread_vaults(
+        &self,
+        agent_id: AgentId,
+        thread_id: ThreadId,
+        body: &AttachThreadVaultsBody,
+    ) -> Result<ThreadResult> {
+        self.http
+            .json(
+                self.http
+                    .request(
+                        Method::POST,
+                        &format!("{}/vault", thread_path(agent_id, thread_id)),
+                    )?
+                    .json(body),
+            )
+            .await
+    }
+
     pub async fn delete_thread(
         &self,
         agent_id: AgentId,

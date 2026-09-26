@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use support::{Fixture, thread_slug};
 
 #[actix_web::test]
-async fn environments_are_sent_to_the_provider_and_frozen_per_thread() -> Result<()> {
+async fn environments_reconcile_saved_threads_locally_and_over_http() -> Result<()> {
     for provider in ["local", "remote"] {
         let f = Fixture::new().await?;
         f.cli(&["provider", "switch", provider]).await?;
@@ -80,32 +80,55 @@ async fn environments_are_sent_to_the_provider_and_frozen_per_thread() -> Result
                 _ => None,
             })
             .context("environment sandbox")?;
+        environment.config.image = "updated-image".into();
         environment.config.idle_seconds = Some(900);
         std::fs::write(&file, serde_yaml_ng::to_string(&environment)?)?;
         f.cli(&["environment", "update", "dev", "--file", path])
             .await?;
-        let rejected = f
-            .output(
-                &[
-                    "agent",
-                    "run",
-                    "--agent",
-                    "saved",
-                    "--thread",
-                    slug,
-                    "--environment",
-                    "dev",
-                    "--prompt",
-                    "changed",
-                ],
-                None,
-                None,
-            )
-            .await?;
-        assert!(!rejected.status.success());
-        assert!(
-            String::from_utf8_lossy(&rejected.stderr).contains("cannot change the environment")
+        std::fs::write(workspace.join("saved-work"), "keep me")?;
+        f.cli(&[
+            "agent",
+            "run",
+            "--agent",
+            "saved",
+            "--thread",
+            slug,
+            "--environment",
+            "dev",
+            "--prompt",
+            "changed",
+        ])
+        .await?;
+        let resumed = exo_managed_agents::find_thread(agent.as_ref(), slug).await?;
+        assert_eq!(resumed.record().id, thread.record().id);
+        assert_eq!(resumed.record().environment.as_ref(), Some(&environment));
+        let replacement = resumed.list_sandboxes().await?;
+        assert_eq!(replacement.len(), 1);
+        assert_ne!(replacement[0].id, sandbox);
+        let sandbox = replacement[0].id.clone();
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("saved-work"))?,
+            "keep me"
         );
+        let resumed_events = resumed.get_events(None).await?.events;
+        for event in &events {
+            assert!(resumed_events.iter().any(|saved| saved.id == event.id));
+        }
+        f.cli(&[
+            "agent",
+            "run",
+            "--agent",
+            "saved",
+            "--thread",
+            slug,
+            "--environment-file",
+            path,
+            "--prompt",
+            "same environment",
+        ])
+        .await?;
+        let unchanged = exo_managed_agents::find_thread(agent.as_ref(), slug).await?;
+        assert_eq!(unchanged.list_sandboxes().await?[0].id, sandbox);
         f.cli(&["environment", "delete", "dev"]).await?;
         assert!(
             !f.cli(&["environment", "list"])

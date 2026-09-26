@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::io::{self, IsTerminal, Write};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -8,6 +9,41 @@ use executor::{
     ConversationHandle, EventData, EventId, EventKind, EventQuery, EventQueryDirection, TurnId,
     UsageRecord,
 };
+use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
+
+static BACKEND_PROGRESS: Mutex<Option<String>> = Mutex::new(None);
+
+pub(crate) fn init_progress() -> Result<()> {
+    tracing_subscriber::registry()
+        .with(
+            ProgressLayer.with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+                metadata.target() == "exoharness::progress"
+            })),
+        )
+        .try_init()?;
+    Ok(())
+}
+
+struct ProgressLayer;
+
+impl<S: tracing::Subscriber> Layer<S> for ProgressLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        event.record(&mut ProgressLayer);
+    }
+}
+
+impl tracing::field::Visit for ProgressLayer {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            *BACKEND_PROGRESS.lock().expect("backend progress poisoned") =
+                Some(format!("{value:?}"));
+        }
+    }
+}
 
 pub(crate) async fn interruptible<T>(future: impl Future<Output = Result<T>>) -> Result<Option<T>> {
     tokio::select! {
@@ -29,6 +65,7 @@ pub(crate) struct TurnProgress {
 
 impl TurnProgress {
     pub(crate) fn new() -> Self {
+        *BACKEND_PROGRESS.lock().expect("backend progress poisoned") = None;
         Self {
             enabled: io::stdout().is_terminal(),
             status: Some("Starting turn".to_string()),
@@ -38,6 +75,7 @@ impl TurnProgress {
     }
 
     pub(crate) fn set_status(&mut self, status: Option<String>) {
+        *BACKEND_PROGRESS.lock().expect("backend progress poisoned") = None;
         self.status = status;
     }
 
@@ -57,6 +95,9 @@ impl TurnProgress {
                     return Err(io::Error::new(io::ErrorKind::Interrupted, "turn interrupted").into());
                 }
                 _ = interval.tick(), if self.enabled && self.status.is_some() => {
+                    if let Some(status) = BACKEND_PROGRESS.lock().expect("backend progress poisoned").take() {
+                        self.status = Some(status);
+                    }
                     let frame = ["-", "\\", "|", "/"][self.frame % 4];
                     self.frame = self.frame.wrapping_add(1);
                     print!("\r\x1b[2K{frame} {}", self.status.as_deref().unwrap_or_default());
@@ -68,6 +109,7 @@ impl TurnProgress {
     }
 
     fn clear(&mut self) -> Result<()> {
+        *BACKEND_PROGRESS.lock().expect("backend progress poisoned") = None;
         if self.rendered {
             print!("\r\x1b[2K");
             io::stdout().flush()?;

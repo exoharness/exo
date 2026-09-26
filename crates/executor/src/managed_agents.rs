@@ -81,6 +81,15 @@ impl AgentBackend for LocalProvider {
         } else {
             crate::load_conversation_config(thread).await?
         };
+        for resource in &mut config.resources {
+            if let Some(updated) = agent_config
+                .resources
+                .iter()
+                .find(|candidate| resource.same_workspace(candidate))
+            {
+                *resource = updated.clone();
+            }
+        }
         if let Some(definition) = managed::load_definition(agent).await? {
             config.permissions = definition.permissions();
         }

@@ -105,6 +105,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         web::scope(RUNTIME_PATH)
             .wrap(from_fn(authorize))
             .route("/identity", web::get().to(identity))
+            .route(
+                "/agent/{agent_id}/thread/{thread_id}/environment",
+                web::put().to(update_thread_environment),
+            )
             .route("/environment", web::get().to(list_environments))
             .route("/environment", web::put().to(put_environment))
             .route("/environment/{name}", web::delete().to(delete_environment))
@@ -118,6 +122,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route(
                 "/agent/{agent_id}/thread/{thread_id}/vault",
                 web::get().to(list_vaults),
+            )
+            .route(
+                "/agent/{agent_id}/thread/{thread_id}/vault",
+                web::post().to(attach_thread_vaults),
             )
             .route(
                 "/agent/{agent_id}/thread/{thread_id}/vault/{vault_id}/secret",
@@ -600,6 +608,48 @@ async fn create_thread(
         agent: agent.record().clone(),
         thread: thread.record().clone(),
         harness: harness_name(&config).to_owned(),
+    }))
+}
+
+async fn update_thread_environment(
+    service: web::Data<Arc<RuntimeHttpService>>,
+    path: web::Path<ThreadPath>,
+    body: web::Json<exoharness::EnvironmentDefinition>,
+) -> Result<web::Json<ThreadResult>, Error> {
+    let agent = service.agent(path.agent_id).await?;
+    let opened = service
+        .runtime
+        .open_managed_thread(
+            &agent,
+            Some(&path.thread_id.to_string()),
+            exoharness::NewThreadRequest {
+                environment: Some(body.into_inner()),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(ErrorBadRequest)?;
+    Ok(web::Json(ThreadResult {
+        agent: agent.record().clone(),
+        thread: opened.thread.record().clone(),
+    }))
+}
+
+async fn attach_thread_vaults(
+    service: web::Data<Arc<RuntimeHttpService>>,
+    path: web::Path<ThreadPath>,
+    body: web::Json<AttachThreadVaultsBody>,
+) -> Result<web::Json<ThreadResult>, Error> {
+    let agent = service.agent(path.agent_id).await?;
+    let thread = service
+        .thread(agent.as_ref(), path.thread_id)
+        .await?
+        .attach_vaults(body.into_inner().vaults)
+        .await
+        .map_err(ErrorBadRequest)?;
+    Ok(web::Json(ThreadResult {
+        agent: agent.record().clone(),
+        thread: thread.record().clone(),
     }))
 }
 

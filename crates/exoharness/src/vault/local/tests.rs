@@ -56,6 +56,72 @@ async fn vault_secrets_share_one_store_and_rotate_without_changing_id() -> Resul
 }
 
 #[tokio::test]
+async fn attaching_vaults_preserves_concurrent_updates_and_survives_reopening() -> Result<()> {
+    let temp = TempDir::new()?;
+    let harness = BasicExoHarness::new(local_test_config(temp.path())).await?;
+    let first = harness.create_vault("first").await?.record().id;
+    let second = harness.create_vault("second").await?.record().id;
+    let third = harness.create_vault("third").await?.record().id;
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            name: "agent".into(),
+            slug: "agent".into(),
+            vaults: vec![],
+        })
+        .await?;
+    let thread = agent
+        .new_thread(NewThreadRequest {
+            vaults: vec![first],
+            ..Default::default()
+        })
+        .await?;
+    let sibling = agent.new_thread(NewThreadRequest::default()).await?;
+    let events = thread
+        .add_events(crate::AddEventsRequest {
+            session_id: None,
+            turn_id: None,
+            data: vec![crate::EventData::Custom {
+                event_type: "checkpoint".into(),
+                payload: serde_json::json!({"saved": true}),
+            }],
+        })
+        .await?;
+    assert!(
+        thread
+            .attach_vaults(vec![second, crate::Uuid7::now()])
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        agent
+            .get_thread(&thread.record().id)
+            .await?
+            .unwrap()
+            .record()
+            .vaults,
+        vec![first]
+    );
+    tokio::try_join!(
+        thread.attach_vaults(vec![second, second]),
+        thread.attach_vaults(vec![third]),
+    )?;
+    let reopened = BasicExoHarness::new(local_test_config(temp.path())).await?;
+    let agent = reopened.get_agent(&agent.record().id).await?.unwrap();
+    let saved = agent.get_thread(&thread.record().id).await?.unwrap();
+    assert_eq!(saved.record().latest_event_id, Some(events.latest_event_id));
+    assert_eq!(saved.record().vaults.len(), 3);
+    for id in [first, second, third] {
+        assert!(saved.get_vault(&id).await?.is_some());
+        assert!(sibling.get_vault(&id).await?.is_none());
+    }
+    assert!(harness.delete_vault(&second).await.is_err());
+    agent.delete_thread(&thread.record().id).await?;
+    assert!(thread.attach_vaults(vec![second]).await.is_err());
+    assert!(agent.get_thread(&thread.record().id).await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
 async fn vault_contexts_compose_without_exposing_unattached_vaults() -> Result<()> {
     let temp = TempDir::new()?;
     let harness = BasicExoHarness::new(local_test_config(temp.path())).await?;

@@ -357,6 +357,36 @@ impl ExoHttpTransport for RuntimeTransport {
                     value: result.deleted,
                 })
             }
+            Request::ConversationUpdateEnvironment {
+                agent_id,
+                conversation_id,
+                environment,
+            } => {
+                let result = self
+                    .client
+                    .update_thread_environment(agent_id, conversation_id, &environment)
+                    .await?;
+                Ok(Response::Conversation {
+                    conversation: Some(self.info(agent_id, result.thread)),
+                })
+            }
+            Request::ConversationAttachVaults {
+                agent_id,
+                conversation_id,
+                vaults,
+            } => {
+                let result = self
+                    .client
+                    .attach_thread_vaults(
+                        agent_id,
+                        conversation_id,
+                        &AttachThreadVaultsBody { vaults },
+                    )
+                    .await?;
+                Ok(Response::Conversation {
+                    conversation: Some(self.info(agent_id, result.thread)),
+                })
+            }
             Request::ConversationListArtifacts {
                 agent_id,
                 conversation_id,

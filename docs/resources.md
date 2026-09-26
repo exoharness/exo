@@ -65,8 +65,10 @@ Basic authentication with username `x-access-token`, with host credential helper
 disabled for that request. Credentials stay on the
 host; they are not saved in Git configuration or copied into thread volumes.
 Caches are partitioned by URL, checkout and vault credential identity.
-Authentication for Git commands _inside_ the sandbox, including pushes and PR
-approvals, is separate work and is not provided by this resource feature.
+Git commands inside the sandbox use a placeholder credential through Exo's
+egress proxy; the real credential stays outside the sandbox. GitHub resources
+also expose a placeholder as `GH_TOKEN` for `gh`. The credential's permissions
+control repository access; this does not add a separate Git push approval policy.
 
 ## Local sources
 

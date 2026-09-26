@@ -1,0 +1,12 @@
+name: codex-smolvm
+config:
+  provider: smolvm
+  image: exo-codex-sandbox:latest
+  resources:
+    vcpu_count: 2
+    memory_mib: 1024
+  default_workdir: /workspace
+  policy:
+    networking:
+      type: unrestricted
+  idle_seconds: 600

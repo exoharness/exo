@@ -488,28 +488,31 @@ async fn filesystem_resources_local_and_http() -> Result<()> {
         std::fs::create_dir(&fixture)?;
         std::fs::write(fixture.join("data"), "read only")?;
         std::fs::write(&f.agent_file, format!(
-            "---\nname: coder\nharness: basic\nconfig:\n  model: gpt-5-mini\nsandbox:\n  provider: apple_container\n  image: exo-codex-sandbox:latest\nresources:\n  - name: code\n    type: git_repository\n    path: {}\n    mount_path: /workspace\n  - name: fixtures\n    type: directory\n    path: {}\n    mount_path: /fixtures\n    mode: ro\n---\nHelp with the code in /workspace.\n", source.display(), fixture.display()
+            "---\nname: coder\nharness: basic\nconfig:\n  model: gpt-5-mini\nresources:\n  - name: code\n    type: git_repository\n    path: {}\n    mount_path: /workspace\n  - name: fixtures\n    type: directory\n    path: {}\n    mount_path: /fixtures\n    mode: ro\n---\nHelp with the code in /workspace.\n", source.display(), fixture.display()
         ))?;
+        let environment = f.temp.path().join("environment.yaml");
+        std::fs::write(&environment, "name: coder\nconfig:\n  provider: apple_container\n  image: exo-codex-sandbox:latest\n  enable_networking: true\n")?;
+        let environment = environment.to_str().unwrap();
         f.cli(&["agent", "create", "coder", "--file", f.agent_file.to_str().unwrap()]).await?;
-        let first = live(f, &["agent", "run", "--agent", "coder", "--prompt", "Reply without using tools."], "").await?;
+        let first = live(f, &["agent", "run", "--agent", "coder", "--environment-file", environment, "--prompt", "Reply without using tools."], "").await?;
         let agent = exo_managed_agents::find_agent(f.runtime.exoharness_handle().as_ref(), "coder").await?;
         let thread = exo_managed_agents::find_thread(agent.as_ref(), thread_slug(&first)?).await?;
         let sandbox = thread.list_sandboxes().await?[0].id.clone();
         ensure!(shell(thread.as_ref(), &sandbox, "test \"$(pwd)\" = /workspace && test \"$(cat README)\" = original && ! touch /fixtures/forbidden && git status --porcelain && echo private > README").await? == 0, "cwd or resource mounts incorrect");
         ensure!(std::fs::read_to_string(source.join("README"))? == "original", "thread modified its source");
-        let second = live(f, &["agent", "run", "--agent", "coder", "--prompt", "Reply without using tools."], "").await?;
+        let second = live(f, &["agent", "run", "--agent", "coder", "--environment-file", environment, "--prompt", "Reply without using tools."], "").await?;
         let second_thread = exo_managed_agents::find_thread(agent.as_ref(), thread_slug(&second)?).await?;
         let second_sandbox = second_thread.list_sandboxes().await?[0].id.clone();
         ensure!(shell(second_thread.as_ref(), &second_sandbox, "test \"$(cat README)\" = original").await? == 0, "threads shared changes");
-        thread.terminate_sandbox(sandbox).await?;
-        live(f, &["agent", "run", "--agent", "coder", "--thread", thread_slug(&first)?, "--prompt", "Reply without using tools."], "").await?;
+        std::fs::write(environment, "name: coder\nconfig:\n  provider: apple_container\n  image: exo-codex-sandbox:latest\n  enable_networking: true\n  idle_seconds: 900\n")?;
+        live(f, &["agent", "run", "--agent", "coder", "--thread", thread_slug(&first)?, "--environment-file", environment, "--prompt", "Reply without using tools."], "").await?;
         let sandbox = thread.list_sandboxes().await?.into_iter().find(|s| s.running).context("resumed sandbox")?.id;
         ensure!(shell(thread.as_ref(), &sandbox, "test \"$(cat README)\" = private").await? == 0, "resource edits were lost after sandbox replacement");
         let thread_config = executor::load_conversation_config(thread.as_ref()).await?;
         let path = std::path::PathBuf::from(&thread_config.resource_mounts[0].host_path);
         f.cli(&["thread", "delete", "coder", thread_slug(&first)?]).await?;
         ensure!(!path.exists(), "deleted thread leaked a mounted volume");
-        live(f, &["agent", "run", "--agent-file", f.agent_file.to_str().unwrap(), "--prompt", "Reply without using tools."], "").await?;
+        live(f, &["agent", "run", "--agent-file", f.agent_file.to_str().unwrap(), "--environment-file", environment, "--prompt", "Reply without using tools."], "").await?;
         Ok(())
     }).await
 }

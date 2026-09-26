@@ -692,6 +692,7 @@ enum ConversationCommands {
     },
     Fork {
         agent: String,
+        #[arg(value_name = "THREAD")]
         conversation: String,
         name: Option<String>,
         #[arg(long)]
@@ -701,6 +702,7 @@ enum ConversationCommands {
     },
     Update {
         agent: String,
+        #[arg(value_name = "THREAD")]
         conversation: String,
         #[command(flatten)]
         sandbox_runtime: ConversationSandboxRuntimeUpdateArgs,
@@ -714,6 +716,9 @@ enum ConversationCommands {
         clear_max_output_tokens: bool,
         #[arg(long)]
         clear_model_override: bool,
+        /// Attach a vault without removing existing vaults or changing selected credentials.
+        #[arg(long)]
+        vault: Vec<String>,
     },
     Mount {
         #[command(subcommand)]
@@ -726,10 +731,12 @@ enum ConversationCommands {
     #[command(alias = "show")]
     Get {
         agent: String,
+        #[arg(value_name = "THREAD")]
         conversation: String,
     },
     Events {
         agent: String,
+        #[arg(value_name = "THREAD")]
         conversation: String,
         #[arg(long = "type")]
         types: Vec<String>,
@@ -762,11 +769,13 @@ enum ConversationCommands {
     },
     Send {
         agent: String,
+        #[arg(value_name = "THREAD")]
         conversation: String,
         prompt: String,
     },
     Delete {
         agent: String,
+        #[arg(value_name = "THREAD")]
         conversation: String,
     },
 }
@@ -775,6 +784,7 @@ enum ConversationCommands {
 enum ConversationSandboxCommands {
     Attach {
         agent: String,
+        #[arg(value_name = "THREAD")]
         conversation: String,
         #[arg(long = "sandbox", value_enum)]
         provider: SandboxProviderArg,
@@ -785,11 +795,13 @@ enum ConversationSandboxCommands {
     },
     Detach {
         agent: String,
+        #[arg(value_name = "THREAD")]
         conversation: String,
         sandbox_id: String,
     },
     Run {
         agent: String,
+        #[arg(value_name = "THREAD")]
         conversation: String,
         command: String,
     },
@@ -1102,11 +1114,13 @@ impl ConversationSandboxRuntimeUpdateArgs {
 enum ConversationMountCommands {
     List {
         agent: String,
+        #[arg(value_name = "THREAD")]
         conversation: String,
     },
     #[command(alias = "add")]
     Create {
         agent: String,
+        #[arg(value_name = "THREAD")]
         conversation: String,
         host_path: PathBuf,
         mount_path: Option<String>,
@@ -1118,6 +1132,7 @@ enum ConversationMountCommands {
     #[command(alias = "remove")]
     Delete {
         agent: String,
+        #[arg(value_name = "THREAD")]
         conversation: String,
         mount_path: String,
     },
@@ -1156,6 +1171,15 @@ async fn main() -> Result<(), CliError> {
         Commands::Agent { command: AgentCommands::Run { thread, .. }, .. }
         if thread.verbosity == Verbosity::Full
     );
+    if matches!(
+        &cli.command,
+        Commands::Agent {
+            command: AgentCommands::Run { .. },
+            ..
+        }
+    ) {
+        turn_display::init_progress().map_err(|error| CliError { error, verbose })?;
+    }
     run(cli).await.map_err(|error| CliError { error, verbose })
 }
 
@@ -1627,6 +1651,7 @@ async fn run_selected(
                 max_output_tokens,
                 clear_max_output_tokens,
                 clear_model_override,
+                vault,
             } => {
                 if clear_model_override
                     && (model.is_some() || max_output_tokens.is_some() || clear_max_output_tokens)
@@ -1686,11 +1711,25 @@ async fn run_selected(
                     None
                 };
 
-                if !changed {
+                if !changed && vault.is_empty() {
                     bail!("no changes provided");
                 }
+                if !vault.is_empty() {
+                    let root = harness.exoharness_handle();
+                    let vaults = futures::future::try_join_all(
+                        vault.iter().map(|name| {
+                            exo_managed_agents::vaults::find_vault(root.as_ref(), name)
+                        }),
+                    )
+                    .await?;
+                    conversation
+                        .attach_vaults(vaults.iter().map(|vault| vault.record().id).collect())
+                        .await?;
+                }
 
-                harness.put_conversation_config(&*conversation, config).await?;
+                if changed {
+                    harness.put_conversation_config(&*conversation, config).await?;
+                }
                 if let Some(model_override) = updated_model_override {
                     executor::put_conversation_model_override(&*conversation, model_override).await?;
                 }

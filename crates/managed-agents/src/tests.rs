@@ -32,16 +32,8 @@ const SOURCE: &str = "---\nname: support-analyst\nharness: codex\nconfig:\n  mod
 
 #[test]
 fn sandbox_networking_defaults_to_enabled() -> Result<()> {
-    let definition = AgentDefinition::parse(
-        SOURCE.replace("config:\n", "sandbox:\n  provider: docker\nconfig:\n"),
-    )?;
-    assert!(
-        definition
-            .frontmatter
-            .sandbox
-            .context("sandbox")?
-            .enable_networking
-    );
+    let sandbox: AgentSandboxConfig = serde_yaml_ng::from_str("provider: docker")?;
+    assert!(sandbox.enable_networking);
     Ok(())
 }
 
@@ -179,6 +171,10 @@ fn parses_frontmatter_and_preserves_the_original_document() -> Result<()> {
         SOURCE.replace("model: gpt-5.6-sol", "model: ''"),
         SOURCE.replace("model: gpt-5.6-sol", "model: gpt-5.6-sol\n  temperature: 1"),
         SOURCE.replace("config:\n", "permissions: always_ask\nconfig:\n"),
+        SOURCE.replace(
+            "config:\n",
+            "sandbox: {provider: docker, image: ubuntu:24.04}\nconfig:\n",
+        ),
         SOURCE.replacen("---\n", "", 1),
         "---\nname: support-analyst".to_string(),
         SOURCE.split("\n\nInvestigate").next().unwrap().to_string(),

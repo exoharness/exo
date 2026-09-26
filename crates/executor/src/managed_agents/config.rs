@@ -156,24 +156,6 @@ pub fn agent_config(
     if model.trim().is_empty() {
         bail!("model must not be empty");
     }
-    let preset_image = preset
-        .and_then(TypeScriptHarnessPreset::sandbox_image)
-        .map(str::to_string);
-    let sandbox = match definition.frontmatter.sandbox.clone() {
-        Some(mut sandbox) => {
-            if sandbox.image.is_none() {
-                sandbox.image = preset_image;
-            }
-            sandbox
-        }
-        None => AgentSandboxConfig {
-            image: preset_image,
-            provider: sandbox,
-            scope: Default::default(),
-            mounts: vec![],
-            enable_networking: true,
-        },
-    };
     Ok(AgentConfig {
         resources: Vec::new(),
         harness: kind,
@@ -182,7 +164,15 @@ pub fn agent_config(
         instructions: vec![crate::harness_helpers::system_message(
             &definition.system_prompt(),
         )],
-        sandbox,
+        sandbox: AgentSandboxConfig {
+            image: preset
+                .and_then(TypeScriptHarnessPreset::sandbox_image)
+                .map(str::to_string),
+            provider: sandbox,
+            scope: Default::default(),
+            mounts: vec![],
+            enable_networking: true,
+        },
         model: model.into(),
         max_output_tokens: definition.frontmatter.config.max_output_tokens,
         max_tool_round_trips: definition.frontmatter.config.max_tool_round_trips,

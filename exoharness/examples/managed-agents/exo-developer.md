@@ -9,6 +9,7 @@ resources:
     url: https://github.com/exoharness/exo
     checkout: { type: branch, name: main }
     mount_path: /workspace
+    credential: github-git
 ---
 
 Work on Exo in /workspace. Read the repository's AGENTS.md before making changes.

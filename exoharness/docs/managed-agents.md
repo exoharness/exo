@@ -133,14 +133,17 @@ Declare TypeScript tool modules in `tools: [./tools.ts]`; their paths follow the
 same resolution rules as harness modules. Optional `config.braintrust` retains
 tracing settings (`org_name` and `project: {kind: name, value: PROJECT}`). `tool_creation: true` enables the
 harness's agent-authored tool support. For `harness: exo`, set `config.module`
-to the Exo harness module. Optional `sandbox` defaults use `provider`, `image`,
-`scope`, `mounts`, and `enable_networking`; named environments remain thread settings.
+to the Exo harness module. Sandbox configuration, including the image, belongs
+in an environment definition, not the agent file.
 
 Model bindings select the upstream model and base URL. Their credentials live
 in vaults: `exo model create MODEL --vault team --secret openai`. Sandbox provider
 bindings likewise accept `--vault team --secret KEY` under `exo sandbox provider`.
 
 ## Serve over HTTP
+
+See the [remote server plan](design/remote-server.md) for personal/team login,
+vault ownership, multiplayer sharing, and the web UI.
 
 ```sh
 exo agent serve support --bind 127.0.0.1:8080
@@ -279,6 +282,12 @@ exo agent run --agent-file exoharness/examples/managed-agents/pi-assistant.md \
 ```
 
 The example uses Apple container. Change `config.provider` to `docker` on Linux.
+`config.image` names the container image (a tag or digest). With SmolVM on macOS,
+Exo imports matching images from the local Docker store into its private cache;
+registry images are handled by SmolVM. You do not need to export an archive.
+Building an image remains a separate step from selecting it in the environment.
+For Codex on SmolVM, build `exo-codex-sandbox:latest` with Docker and select
+`--environment-file exoharness/examples/environments/codex-smolvm.yaml`.
 Definitions forward the existing sandbox settings: `provider`, `image`,
 `resources`, `default_workdir`, `file_system_mounts`, `durable_file_systems`, `policy`,
 `enable_networking`, and `idle_seconds`. `policy.networking` takes precedence over
@@ -295,10 +304,14 @@ mounting host paths, and local-process execution. Give it only to trusted runtim
 operators.
 
 `exo environment update NAME --file path.yaml` changes the saved definition for
-new threads. Existing threads retain their resolved environment and sandbox.
-Resume with `--agent NAME --thread THREAD`; changing that thread's environment is
-rejected. `exo environment delete NAME` removes only the definition. Explicit
-host mounts can share data between sandboxes; ordinary sandbox files are private
+new threads. Resume with `--agent NAME --thread THREAD --environment NAME` or
+`--environment-file path.yaml` to apply an updated definition to a saved thread.
+A changed definition replaces its sandbox and preserves thread history and
+filesystem resources; files outside persistent mounts are discarded. Omitting
+both environment flags retains the thread's saved configuration. Reapplying the
+same definition reuses its sandbox. To upgrade the image of an existing sandbox,
+change the image reference in the environment; use a versioned tag or digest.
+`exo environment delete NAME` removes only the definition. Explicit host mounts can share data between sandboxes; ordinary sandbox files are private
 to their thread. Persistence after a backend terminates a sandbox still follows
 that backend's existing lifecycle and durable-file-system support.
 
@@ -364,9 +377,10 @@ a new credential is added with the same name or URL. An in-flight call can finis
 
 Vault access composes from global to agent to thread. Agent and thread records
 store their attached vault ids. Creating a named vault doesn't grant it to every
-agent. `--vault personal` attaches that vault to a new thread; repeat `--vault`
-to attach more than one. Later attachments take precedence when selecting an MCP
-credential for the same destination.
+agent. `--vault personal` attaches that vault to a new or resumed thread; repeat
+`--vault` to attach more than one. On resume, attachments are additive and
+duplicates are ignored. Later attachments take precedence when initially selecting an MCP
+credential for the same destination; existing selections stay pinned.
 
 Bindings identify both the vault and secret. A personal MCP credential cannot
 shadow a model credential with the same name. Thread attachments and selected MCP
@@ -377,9 +391,21 @@ exo agent run --agent support --vault personal
 exo agent run --agent support --thread <thread-slug>
 ```
 
-Changing the attachments or MCP destinations requires a new thread. Revoked secrets
-fail instead of switching to another account. Agent and thread records retain
-vault references, not copies of secret values.
+To attach a vault without starting a turn:
+
+```bash
+exo thread update support <thread-slug> --vault personal
+```
+
+Adding a vault preserves the thread's history, environment, resources, and selected
+MCP credentials. It does not rebind existing credentials or change a resource's
+saved credential reference. Resume with `--agent-file <file> --thread <thread-slug>`
+to apply a Git resource's updated `credential` name. Credential-only changes preserve
+the existing checkout, branches, commits, and uncommitted work. Git commands use
+that credential through the sandbox's egress proxy; real tokens stay outside the
+sandbox. Changing MCP destinations requires a new thread.
+Revoked secrets fail instead of switching to another account. Agent and thread
+records retain vault references, not copies of secret values.
 
 Model bindings use the global vault unless `--vault` selects a different one:
 
@@ -394,6 +420,14 @@ On first open, existing global secrets move into the global vault. Existing agen
 and thread secrets move into vaults attached at their original scopes. Secret ids
 are preserved, and bindings are rewritten to include the vault id. Source files
 remain until those changes are saved, so an interrupted migration can be retried.
+
+GitHub repository resources with a vault `credential` also configure `GH_TOKEN`
+for GitHub API access through the egress proxy. `gh` receives a placeholder; the
+real token stays in the vault, so no `gh auth login` is needed inside the sandbox.
+The default Codex image includes `gh`; other images can install it if needed.
+Restricted environment network policies must allow `github.com` and
+`api.github.com`. GitHub resources must share a credential for automatic
+`GH_TOKEN` selection.
 
 Vault-backed chat requires an isolated sandbox. Local-process execution and mounts
 that expose the vault store or its key are rejected. Harness implementations remain
