@@ -1757,7 +1757,7 @@ async fn secret_destination_updates_preserve_identity_locally_and_over_http() ->
 async fn models_use_spec_names_and_selected_vault_credentials_locally_and_over_http() -> Result<()>
 {
     for provider in ["local", "remote"] {
-        let f = Fixture::new().await?;
+        let f = Fixture::with_sandbox(exoharness::SandboxProvider::Docker).await?;
         f.cli(&["provider", "switch", provider]).await?;
         f.cli(&["vault", "create", "personal"]).await?;
         success(
