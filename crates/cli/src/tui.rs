@@ -20,8 +20,8 @@ use tokio::runtime::Handle;
 use tokio_stream::StreamExt;
 
 use crate::render::{
-    ASSISTANT_LABEL, Verbosity, compact_timestamp, print_transcript, render_assistant_content,
-    render_tool_call, render_tool_result,
+    ASSISTANT_LABEL, Verbosity, compact_result_status, compact_timestamp, print_transcript,
+    render_assistant_content, render_tool_call, render_tool_result,
 };
 use crate::run_sandbox_shell_command;
 use crate::turn_display::{TurnProgress, UsageTotals, UsageTracker, interruptible};
@@ -661,9 +661,7 @@ impl ChatRepl {
         let mut streamed_text = String::new();
         let mut ttft = None;
         let mut completed_turn = None;
-        // Tool names by call id, so results (which only carry the id) can be
-        // labeled in compact mode.
-        let mut pending_tool_calls: HashMap<String, String> = HashMap::new();
+        let mut pending_tool_calls: HashMap<String, (String, Option<String>)> = HashMap::new();
         while let Some(event) = progress
             .wait(async { stream.next().await.transpose() })
             .await?
@@ -706,28 +704,38 @@ impl ChatRepl {
                 } => {
                     if printed_assistant && !streamed_text.ends_with('\n') {
                         println!();
-                        printed_assistant = false;
-                        streamed_text.clear();
                     }
-                    if let Some(rendered) = render_tool_call(&tool_name, &arguments, self.verbosity)
+                    let rendered = render_tool_call(&tool_name, &arguments, self.verbosity);
+                    if self.verbosity == Verbosity::Full
+                        && let Some(rendered) = &rendered
                     {
                         println!("{rendered}");
-                        printed_assistant = false;
-                        streamed_text.clear();
                     }
+                    printed_assistant = false;
+                    streamed_text.clear();
                     progress.set_status(Some(format!("Running tool {tool_name}")));
-                    pending_tool_calls.insert(tool_call_id, tool_name);
+                    pending_tool_calls.insert(tool_call_id, (tool_name, rendered));
                 }
                 ExecutionStreamEvent::ToolResult {
                     tool_call_id,
                     result,
                 } => {
-                    let tool_name = pending_tool_calls
+                    let (tool_name, call) = pending_tool_calls
                         .remove(&tool_call_id)
-                        .unwrap_or_else(|| "tool".to_string());
-                    if let Some(rendered) = render_tool_result(&tool_name, &result, self.verbosity)
-                    {
+                        .unwrap_or_else(|| ("tool".to_string(), None));
+                    let rendered = match (self.verbosity, call) {
+                        (Verbosity::Compact, Some(call)) => {
+                            Some(format!("{call} {}", compact_result_status(&result)))
+                        }
+                        _ => render_tool_result(&tool_name, &result, self.verbosity),
+                    };
+                    if let Some(rendered) = rendered {
+                        if printed_assistant && !streamed_text.ends_with('\n') {
+                            println!();
+                        }
                         println!("{rendered}");
+                        printed_assistant = false;
+                        streamed_text.clear();
                     }
                     progress.set_status(Some(if pending_tool_calls.is_empty() {
                         "Waiting for model".to_string()
