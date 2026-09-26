@@ -1198,7 +1198,7 @@ enum ConversationMountCommands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
     if matches!(cli.command, Commands::FirecrackerBridge) {
         #[cfg(feature = "firecracker")]
         {
@@ -1259,12 +1259,27 @@ async fn main() -> Result<()> {
     } else {
         exoharness
     };
+    let mcp = managed_agents::connect_mcp(
+        exoharness.as_ref(),
+        definition.as_ref(),
+        &mut cli.command,
+        &env_vars,
+    )
+    .await?;
     let harness_kind = determine_harness_kind(
         exoharness.as_ref(),
         harness_selection.as_ref(),
         &cli.command,
     )
     .await?;
+    let mcp_env_names = match &cli.command {
+        Commands::Chat { thread, .. } | Commands::Run { thread, .. } => thread
+            .mcp_token_env
+            .iter()
+            .filter_map(|reference| reference.split_once('=').map(|(_, name)| name.to_string()))
+            .collect(),
+        _ => Vec::new(),
+    };
     let pricing = Arc::new(cost::load(cli.pricing_path.clone(), cli.pricing_url.clone()).await);
     let harness = instantiate_harness(
         &cli.root,
@@ -1273,6 +1288,8 @@ async fn main() -> Result<()> {
         runtime_config.clone(),
         env_vars.clone(),
         pricing,
+        Arc::clone(&mcp),
+        mcp_env_names,
     )
     .await?;
     let result: Result<()> = async {
@@ -1290,6 +1307,7 @@ async fn main() -> Result<()> {
                 definition.as_ref(),
                 harness_selection.as_ref(),
                 &thread,
+                &mcp,
             )
             .await?;
             let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
@@ -1305,6 +1323,7 @@ async fn main() -> Result<()> {
                 definition.as_ref(),
                 harness_selection.as_ref(),
                 &thread,
+                &mcp,
             )
             .await?;
             tui::run_prompt(agent, conversation, thread.verbosity, &prompt).await?;
@@ -2543,6 +2562,7 @@ async fn main() -> Result<()> {
     Ok(())
     }.await;
     let shutdown = harness.shutdown().await;
+    let mcp_shutdown = mcp.close().await;
     let cleanup = async {
         if temporary {
             for agent in harness.list_agents().await? {
@@ -2554,6 +2574,7 @@ async fn main() -> Result<()> {
     .await;
     result?;
     shutdown?;
+    mcp_shutdown?;
     cleanup?;
     Ok(())
 }
@@ -3088,29 +3109,39 @@ async fn instantiate_harness(
     runtime_config: Option<BraintrustRuntimeConfig>,
     env_vars: HashMap<String, String>,
     pricing: Arc<cost::PricingTable>,
+    mcp: Arc<exo_mcp::McpToolSet>,
+    mcp_env_names: Vec<String>,
 ) -> Result<Arc<dyn Harness>> {
     let harness: Arc<dyn Harness> = match kind {
-        HarnessKind::Basic => Arc::new(BasicHarness::from_exoharness(
+        HarnessKind::Basic => Arc::new(BasicHarness::with_runtime_config(
             exoharness,
-            runtime_config,
-            env_vars,
+            Arc::new(executor::RouterModelClient::new(env_vars)),
+            Arc::new(executor::McpToolRuntime::new(BasicToolRuntime, mcp)),
             pricing,
+            runtime_config,
         )),
-        HarnessKind::Rlm => Arc::new(RlmHarness::from_exoharness(
+        HarnessKind::Rlm => Arc::new(RlmHarness::with_runtime_config(
+            exoharness,
+            Arc::new(executor::RouterModelClient::new(env_vars)),
+            Arc::new(executor::McpToolRuntime::new(BasicToolRuntime, mcp)),
+            runtime_config,
+        )),
+        HarnessKind::Exo => Arc::new(TypeScriptHarness::from_exoharness(
             exoharness,
             runtime_config,
             env_vars,
-        )),
-        HarnessKind::Exo => Arc::new(TypeScriptHarness::<ExoToolRuntime>::exo_from_exoharness(
-            root,
-            exoharness,
-            runtime_config,
-            env_vars,
+            Arc::new(executor::McpToolRuntime::new(
+                ExoToolRuntime::from_root(root)?,
+                mcp,
+            )),
+            mcp_env_names,
         )?),
         HarnessKind::TypeScript => Arc::new(TypeScriptHarness::from_exoharness(
             exoharness,
             runtime_config,
             env_vars,
+            Arc::new(executor::McpToolRuntime::new(BasicToolRuntime, mcp)),
+            mcp_env_names,
         )?),
     };
     Ok(harness)

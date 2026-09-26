@@ -20,6 +20,7 @@ braintrust-sdk-rust.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 cost = { path = "../cost" }
+exo-mcp = { path = "../mcp" }
 exoharness = { path = "../exoharness", features = [
   "apple-keychain",
   "basic-backend",

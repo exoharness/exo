@@ -1653,3 +1653,142 @@ async fn remote_threads_paginate_and_failed_creation_only_deletes_the_new_thread
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn basic_and_rlm_models_receive_mcp_errors_and_can_continue() -> Result<()> {
+    use exo_mcp::{McpCredentials, McpServerConfig, McpToolSet};
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_partial_json, method},
+    };
+
+    #[derive(serde::Deserialize)]
+    struct Rpc {
+        id: u64,
+    }
+    let server = MockServer::start().await;
+    for (method_name, result) in [
+        (
+            "initialize",
+            json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}}),
+        ),
+        (
+            "tools/list",
+            json!({"tools":[{"name":"search","inputSchema":{"type":"object"}}]}),
+        ),
+        (
+            "tools/call",
+            json!({"isError":true,"content":[{"type":"text","text":"Please supply a query"}],"structuredContent":{"reason":"missing_query"}}),
+        ),
+    ] {
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method":method_name})))
+            .respond_with(move |request: &wiremock::Request| {
+                let rpc: Rpc = request.body_json().unwrap();
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"jsonrpc":"2.0","id":rpc.id,"result":result}))
+            })
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("POST"))
+        .and(body_partial_json(
+            json!({"method":"notifications/initialized"}),
+        ))
+        .respond_with(ResponseTemplate::new(202))
+        .mount(&server)
+        .await;
+    let mcp = Arc::new(
+        McpToolSet::connect(
+            &[McpServerConfig {
+                name: "fixture".into(),
+                url: server.uri(),
+                allowed_tools: None,
+                blocked_tools: vec![],
+            }],
+            McpCredentials::default(),
+        )
+        .await?,
+    );
+    for kind in [crate::AgentHarnessKind::Basic, crate::AgentHarnessKind::Rlm] {
+        let temp = TempDir::new()?;
+        let root =
+            Arc::new(BasicExoHarness::new(local_test_config(temp.path().join("state"))).await?);
+        let model = Arc::new(FakeModelClient::new(vec![
+            serde_json::from_value(
+                json!({"messages":[],"tool_calls":[{"tool_call_id":"search-1","request":{"function_name":"exo_mcp__fixture__search","arguments":{}}}]}),
+            )?,
+            serde_json::from_value(
+                json!({"messages":[{"role":"assistant","content":"Please supply a query."}],"tool_calls":[]}),
+            )?,
+        ]));
+        let tools = Arc::new(crate::McpToolRuntime::new(
+            BasicToolRuntime,
+            Arc::clone(&mcp),
+        ));
+        let harness: Box<dyn Harness> = match kind {
+            crate::AgentHarnessKind::Basic => {
+                Box::new(BasicHarness::new(root, Arc::clone(&model), tools))
+            }
+            _ => Box::new(crate::RlmHarness::with_runtime_config(
+                root,
+                Arc::clone(&model),
+                tools,
+                None,
+            )),
+        };
+        register_test_models(harness.exoharness_handle().as_ref()).await;
+        let agent = harness
+            .create_agent(CreateAgentRequest {
+                slug: "mcp-errors".into(),
+                name: None,
+                harness: kind,
+                typescript: None,
+                enable_agent_tool_creation: false,
+                sandbox_image: None,
+                sandbox_provider: SandboxProvider::LocalProcess,
+                sandbox_scope: None,
+                enable_networking: true,
+                model: "gpt-5.4".into(),
+                max_output_tokens: None,
+                max_tool_round_trips: Some(1),
+                braintrust: None,
+            })
+            .await?;
+        let thread = agent
+            .create_conversation(CreateConversationRequest::default())
+            .await?;
+        thread
+            .send(SendRequest {
+                input: vec![user_message("Search")],
+                session_id: None,
+            })
+            .await?;
+        let requests = model.requests();
+        assert_eq!(requests.len(), 2);
+        let output = requests[1]
+            .messages
+            .iter()
+            .find_map(|message| {
+                if let Message::Tool { content } = message {
+                    let lingua::universal::ToolContentPart::ToolResult(result) = &content[0];
+                    Some(&result.output)
+                } else {
+                    None
+                }
+            })
+            .expect("model should receive the MCP error result");
+        assert_eq!(
+            lingua::serde_json::to_string(output)?,
+            json!({
+                "isError":true,"content":[{"type":"text","text":"Please supply a query"}],
+                "structuredContent":{"reason":"missing_query"}
+            })
+            .to_string()
+        );
+        harness.shutdown().await?;
+    }
+    mcp.close().await?;
+    Ok(())
+}

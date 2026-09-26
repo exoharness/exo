@@ -124,6 +124,19 @@ async function runResponsesTurnLoop(
     if (options.registerTools) {
       await options.registerTools(tools, context);
     }
+    for (const definition of context.tools) {
+      tools.register({
+        definition,
+        source: "built_in",
+        handler: {
+          execute: (args) =>
+            context.executeTool({
+              functionName: definition.name,
+              arguments: args,
+            }),
+        },
+      });
+    }
     const messages = await materializePromptMessages(
       conversation,
       options.instructions

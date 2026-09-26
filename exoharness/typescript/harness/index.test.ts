@@ -1315,6 +1315,7 @@ function fakeTurnContext(
   const streamEvents = options.streamEvents ?? [];
   let artifactIndex = 0;
   return {
+    tools: [],
     agentConfig: {
       instructions: [],
       harness: "typescript",

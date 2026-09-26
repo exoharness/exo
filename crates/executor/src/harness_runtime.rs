@@ -370,7 +370,7 @@ fn tool_definition_to_universal(tool: &ToolDefinition) -> Result<UniversalTool> 
         tool.name.clone(),
         Some(tool.description.clone()),
         Some(to_lingua_value(tool.parameters.clone())),
-        Some(true),
+        Some(tool.strict.unwrap_or(true)),
     ))
 }
 

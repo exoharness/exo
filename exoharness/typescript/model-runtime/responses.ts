@@ -891,7 +891,7 @@ function toolDefinitionsToChatTools(
       name: tool.name,
       description: tool.description,
       parameters: tool.parameters as JsonObject,
-      strict: true,
+      strict: tool.strict ?? true,
     },
   }));
 }
@@ -1254,7 +1254,7 @@ export function toolDefinitionsToResponsesTools(
     name: tool.name,
     description: tool.description,
     parameters: tool.parameters as JsonObject,
-    strict: true,
+    strict: tool.strict ?? true,
   }));
 }
 

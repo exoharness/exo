@@ -42,6 +42,15 @@ pub struct ExoToolRuntime {
 }
 
 impl ExoToolRuntime {
+    pub fn from_root(root: impl AsRef<std::path::Path>) -> Result<Self> {
+        let root = root.as_ref();
+        Ok(Self::with_roots(
+            root.join("scheduled-tasks"),
+            root.join("adapters"),
+            crate::typescript::typescript_workspace_root()?.join("exo/adapters"),
+        ))
+    }
+
     pub fn with_roots(
         scheduler_root: impl Into<PathBuf>,
         adapter_root: impl Into<PathBuf>,

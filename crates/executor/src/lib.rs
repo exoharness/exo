@@ -28,6 +28,7 @@ mod harness_test;
 mod harness_tool;
 mod harness_types;
 mod local_sandbox;
+mod mcp;
 mod rlm;
 #[cfg(test)]
 mod rlm_tests;
@@ -83,11 +84,13 @@ pub use exoharness::{
 };
 pub use harness_basic::BasicHarness;
 pub use harness_config::load_agent_config;
+pub use harness_runtime::RouterModelClient;
 pub use harness_tool::{BasicToolRuntime, ExoToolRuntime};
 pub use harness_types::{
     CreateAgentRequest, CreateConversationRequest, Harness, HarnessAgent, HarnessConversation,
 };
 pub use local_sandbox::LocalSandboxExoHarness;
+pub use mcp::McpToolRuntime;
 pub use rlm::RlmHarness;
 pub use scheduler_runtime::{
     SchedulerRunOptions, redeliver_pending_wakes, run_due_tasks, run_task,

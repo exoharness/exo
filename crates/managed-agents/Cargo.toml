@@ -6,6 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+futures.workspace = true
+exo-mcp = { path = "../mcp" }
 anyhow.workspace = true
 async-trait.workspace = true
 exoharness = { path = "../exoharness" }

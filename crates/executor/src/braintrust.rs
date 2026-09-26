@@ -407,12 +407,11 @@ pub struct ToolTrace {
 
 impl ToolTrace {
     async fn finish_success_inner(self, result: &ToolResult) {
-        self.span.log(
-            SpanLog::builder()
-                .output(result.clone())
-                .build()
-                .expect("span log should build"),
-        );
+        let mut log = SpanLog::builder().output(result.clone());
+        if exo_mcp::tool_result_is_error(result) {
+            log = log.error("MCP tool returned an error");
+        }
+        self.span.log(log.build().expect("span log should build"));
         self.span.end();
     }
 

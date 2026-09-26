@@ -395,7 +395,9 @@ pub(crate) fn compact_result_status(result: &Value) -> String {
         {
             return format!("✗ exit {code}");
         }
-        if object.get("error").is_some_and(|error| !error.is_null()) {
+        if object.get("error").is_some_and(|error| !error.is_null())
+            || exo_mcp::tool_result_is_error(result)
+        {
             return "✗ error".to_string();
         }
     }
@@ -527,6 +529,18 @@ mod tests {
         assert_eq!(
             render_tool_result("shell", &json!({"error": "boom"}), Verbosity::Compact),
             Some("← shell ✗ error".to_string())
+        );
+    }
+
+    #[test]
+    fn mcp_results_show_error_status_without_rejecting_the_result() {
+        assert_eq!(
+            super::compact_result_status(&json!({"isError": true, "content": []})),
+            "✗ error"
+        );
+        assert_eq!(
+            super::compact_result_status(&json!({"isError": false, "content": []})),
+            "✓"
         );
     }
 

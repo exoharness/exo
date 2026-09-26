@@ -22,6 +22,7 @@ clap.workspace = true
 cost = { path = "../cost" }
 crossterm.workspace = true
 executor = { path = "../executor" }
+exo-mcp = { path = "../mcp" }
 exoharness = { path = "../exoharness" }
 lingua.workspace = true
 ratatui.workspace = true

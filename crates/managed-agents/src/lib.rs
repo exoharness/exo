@@ -1,3 +1,5 @@
+pub mod mcp;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -7,6 +9,7 @@ use exoharness::{
     AgentHandle, ExoHarness, ListThreadsRequest, NewAgentRequest, NewThreadRequest,
     ReadArtifactRequest, SessionId, ThreadHandle, Uuid7, WriteArtifactRequest,
 };
+use mcp::McpServerDefinition;
 use serde::Deserialize;
 
 pub const AGENT_DEFINITION_PATH: &str = "managed-agents/agent.md";
@@ -17,6 +20,8 @@ pub struct AgentFrontmatter {
     pub name: String,
     pub harness: String,
     pub config: AgentModelConfig,
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerDefinition>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,6 +69,7 @@ impl AgentDefinition {
                 bail!("agent {field} must not be empty");
             }
         }
+        mcp::validate_servers(&frontmatter.mcp_servers)?;
         Ok(Self {
             frontmatter,
             instructions,
@@ -245,6 +251,7 @@ pub struct OpenedThread {
 #[derive(Default)]
 pub struct ThreadInfo {
     pub model: Option<String>,
+    pub mcp_tools: Option<usize>,
 }
 
 pub async fn open_thread(
