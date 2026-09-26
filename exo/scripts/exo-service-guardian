@@ -141,10 +141,6 @@ adapters_restart_file() {
   echo "$STATE_DIR/exo-adapters.restart"
 }
 
-adapters_lock_file() {
-  echo "$STATE_DIR/exo-adapters.lock"
-}
-
 reboot_notice_file() {
   echo "$STATE_DIR/exo-reboot-notice.json"
 }
@@ -272,10 +268,10 @@ start_adapters() {
   rm -f "$(adapters_restart_file)"
   read_exo_global_args
   echo "Starting adapter runner..."
-  nohup "$EXO_BIN" "${EXO_GLOBAL_ARGS[@]}" --harness "$HARNESS" \
-    adapters run \
-      --limit "$ADAPTER_LIMIT" \
-      --lock-file "$(adapters_lock_file)" \
+  nohup "$EXO_BIN" agent "${EXO_GLOBAL_ARGS[@]}" --harness "$HARNESS" \
+    serve \
+      --adapters-only \
+      --adapter-limit "$ADAPTER_LIMIT" \
       --drain-marker "$(adapters_restart_file)" \
       --reboot-notice "$(reboot_notice_file)" \
     >>"$log_file" 2>&1 &

@@ -141,7 +141,15 @@ async fn conversation_send_round_trips_through_real_sandbox_and_mocked_openai() 
         .await;
 
     run_exo(
-        &["secret", "create", "test-key", "--env", "OPENAI_API_KEY"],
+        &[
+            "vault",
+            "secret",
+            "create",
+            "global",
+            "test-key",
+            "--token-env",
+            "OPENAI_API_KEY",
+        ],
         &root,
         &xdg,
     );
@@ -158,22 +166,34 @@ async fn conversation_send_round_trips_through_real_sandbox_and_mocked_openai() 
         &root,
         &xdg,
     );
+    let spec = root_dir.path().join("agent.md");
+    std::fs::write(&spec, "---\nname: Integration Test Agent\nharness: basic\nconfig:\n  model: gpt-test\n---\nReply to the user.\n").unwrap();
     run_exo(
         &[
             "agent",
             "create",
-            "--slug",
             "test-agent",
-            "--model",
-            "gpt-test",
-            "--sandbox",
-            provider.cli_arg(),
-            "Integration Test Agent",
+            "--file",
+            spec.to_str().unwrap(),
         ],
         &root,
         &xdg,
     );
-    run_exo(&["thread", "create", "test-agent", "first"], &root, &xdg);
+
+    run_exo(
+        &[
+            "thread",
+            "create",
+            "test-agent",
+            "first",
+            "--slug",
+            "first",
+            "--sandbox",
+            provider.cli_arg(),
+        ],
+        &root,
+        &xdg,
+    );
 
     let output = run_exo(
         &["thread", "send", "test-agent", "first", "hello there"],

@@ -26,17 +26,13 @@ pub(crate) async fn runtime(
     use std::sync::Arc;
 
     let thread = match &cli.command {
-        Commands::Chat { thread, .. } | Commands::Run { thread, .. } => Some(thread),
+        Commands::Agent {
+            command: AgentCommands::Run { thread, .. },
+            ..
+        } => Some(thread),
         _ => None,
     };
-    let temporary = thread.is_some_and(|args| args.agent_file.is_some());
-    let model = match &cli.command {
-        Commands::Agent {
-            command: AgentCommands::Create { model, .. },
-            ..
-        } => model.clone(),
-        _ => thread.and_then(|args| args.model.clone()),
-    };
+    let model = thread.and_then(|args| args.model.clone());
     if let Some(client) = client {
         validate_http_command(&cli.command)?;
         if matches!(
@@ -53,7 +49,6 @@ pub(crate) async fn runtime(
                     .harness
                     .as_ref()
                     .map(crate::format_harness_selection),
-                temporary,
             ),
             None,
         )));
@@ -61,24 +56,7 @@ pub(crate) async fn runtime(
 
     let config = crate::build_exo_config(cli)?;
     let env_vars = env.clone().into_vars();
-    let bearer = cli
-        .runtime()
-        .bearer_env
-        .as_deref()
-        .map(|name| crate::env_value_from_arg("--bearer-env", name, &env_vars))
-        .transpose()?;
-    let state = crate::instantiate_exoharness(
-        &config,
-        cli.runtime().exoharness_url.as_deref(),
-        bearer,
-        !matches!(cli.command, Commands::Sandbox { .. }),
-    )
-    .await?;
-    let state: Arc<dyn ExoHarness> = if temporary {
-        Arc::new(BasicExoHarness::in_memory(config.clone(), Some(state.as_ref())).await?)
-    } else {
-        state
-    };
+    let state: Arc<dyn ExoHarness> = Arc::new(BasicExoHarness::new(config.clone()).await?);
     if let Some(reference) = thread.and_then(|args| args.agent.as_deref())
         && let Some(selection) = cli.runtime().harness.as_ref()
     {
@@ -94,7 +72,7 @@ pub(crate) async fn runtime(
                         .harness
                         .as_ref()
                         .context("agent definition has no harness")?,
-                    model.as_deref(),
+                    None,
                 )
             })
             .transpose()?,
@@ -103,18 +81,17 @@ pub(crate) async fn runtime(
             .map(|args| args.local_config())
             .transpose()?
             .unwrap_or_default(),
-        temporary,
     };
     let pricing = Arc::new(
         if matches!(
             cli.command,
-            Commands::Chat { .. }
-                | Commands::Run { .. }
-                | Commands::Adapters { .. }
-                | Commands::Conversation {
-                    command: crate::ConversationCommands::Send { .. },
-                    ..
-                }
+            Commands::Agent {
+                command: AgentCommands::Run { .. } | AgentCommands::Serve(_),
+                ..
+            } | Commands::Conversation {
+                command: crate::ConversationCommands::Send { .. },
+                ..
+            }
         ) {
             cost::load(
                 cli.runtime().pricing_path.clone(),
@@ -140,16 +117,19 @@ pub(crate) async fn runtime(
 pub(crate) fn validate_http_command(command: &crate::Commands) -> Result<()> {
     use crate::{AgentCommands, Commands, ConversationCommands};
     match command {
-        Commands::Chat { tui: true, .. } => bail!("HTTP providers support inline chat; omit --tui"),
-        Commands::Chat { thread, .. } | Commands::Run { thread, .. } => thread.validate_remote(),
         Commands::Agent {
-            command: AgentCommands::Create { file: None, .. },
+            command: AgentCommands::Run { tui: true, .. },
             ..
-        } => bail!("remote agent creation requires --file"),
+        } => bail!("HTTP providers support inline chat; omit --tui"),
+        Commands::Agent {
+            command: AgentCommands::Run { thread, .. },
+            ..
+        } => thread.validate_remote(),
         Commands::Agent {
             command:
                 AgentCommands::List
                 | AgentCommands::Create { .. }
+                | AgentCommands::Update { .. }
                 | AgentCommands::Get { .. }
                 | AgentCommands::Delete { .. },
             ..
@@ -639,18 +619,19 @@ impl Store {
         let mut profile = self.profile(name)?.clone();
         profile.context = selection.context.clone();
         let mut client = profile.client()?;
-        let Some(variable) = &profile.api_key_env else {
+        if let Some(variable) = &profile.api_key_env {
+            let token = std::env::var(variable).with_context(|| {
+                format!("provider credential environment variable {variable} is not set")
+            })?;
+            if token.trim().is_empty() {
+                bail!("provider credential is empty");
+            }
+            client = client.with_bearer_token(token);
+        } else if profile.stored_credentials {
             return oauth::client(&profile, &self.directory)
                 .await
                 .with_context(|| format!("authenticating provider {name}"));
-        };
-        let token = std::env::var(variable).with_context(|| {
-            format!("provider credential environment variable {variable} is not set")
-        })?;
-        if token.trim().is_empty() {
-            bail!("provider credential is empty");
         }
-        client = client.with_bearer_token(token);
         let account = client.identity().await?.account_id;
         if profile
             .account_id

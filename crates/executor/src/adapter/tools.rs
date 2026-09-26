@@ -353,6 +353,7 @@ impl AdapterCreationConfig {
                         .password_secret_id
                         .map(|secret_id| {
                             vec![WorkerSecretEnvVar {
+                                vault: None,
                                 env: "EXO_IRC_PASSWORD".to_string(),
                                 secret_id,
                             }]
@@ -406,11 +407,13 @@ impl AdapterCreationConfig {
                 // bind it only when voice is on so text-only adapters need no
                 // OpenAI key.
                 let mut secret_env = vec![WorkerSecretEnvVar {
+                    vault: None,
                     env: "EXO_DISCORD_BOT_TOKEN".to_string(),
                     secret_id: config.bot_token_secret_id,
                 }];
                 if config.voice {
                     secret_env.push(WorkerSecretEnvVar {
+                        vault: None,
                         env: "OPENAI_API_KEY".to_string(),
                         secret_id: config
                             .openai_secret_id
@@ -463,10 +466,12 @@ impl AdapterCreationConfig {
                     state_dir: None,
                     secret_env: vec![
                         WorkerSecretEnvVar {
+                            vault: None,
                             env: "EXO_SLACK_BOT_TOKEN".to_string(),
                             secret_id: config.bot_token_secret_id,
                         },
                         WorkerSecretEnvVar {
+                            vault: None,
                             env: "EXO_SLACK_SIGNING_SECRET".to_string(),
                             secret_id: config.signing_secret_id,
                         },
@@ -494,6 +499,7 @@ impl AdapterCreationConfig {
                     secret_env: secret_id
                         .map(|secret_id| {
                             vec![WorkerSecretEnvVar {
+                                vault: None,
                                 env: "EXO_EXOCHAT_SECRET".to_string(),
                                 secret_id,
                             }]
@@ -636,6 +642,7 @@ async fn bind_exochat_secret(agent: &dyn AgentHandle, config: &mut AdapterConfig
         })
         .await?;
     config.secret_env.push(WorkerSecretEnvVar {
+        vault: None,
         env: "EXO_EXOCHAT_SECRET".to_string(),
         secret_id: secret_id.to_string(),
     });
@@ -1655,6 +1662,7 @@ mod tests {
                     }),
                     state_dir: None,
                     secret_env: vec![WorkerSecretEnvVar {
+                        vault: None,
                         env: "EXO_EXOCHAT_SECRET".to_string(),
                         secret_id: secret_id.to_string(),
                     }],

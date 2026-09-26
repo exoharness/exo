@@ -40,9 +40,16 @@ executor.
 The `typescript` harness runs a module that owns the turn loop:
 
 ```bash
-exo agent --harness typescript create "TS Basic" \
-  --module exoharness/examples/typescript/basic-harness.ts \
-  --model gpt-5.5
+cat > ts-basic.md <<'EOF'
+---
+name: "TS Basic"
+harness: exoharness/examples/typescript/basic-harness.ts
+config:
+  model: gpt-5.5
+---
+Help the user with their task.
+EOF
+exo agent create ts-basic --file ts-basic.md
 ```
 
 This is the main extension point for building your own agent — see the

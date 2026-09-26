@@ -306,16 +306,13 @@ mod tests {
     #[tokio::test]
     async fn mcp_composes_vaults_and_keeps_its_selection_across_rotation_and_revocation()
     -> Result<()> {
-        let harness = BasicExoHarness::in_memory(
-            BasicExoHarnessConfig {
-                root: Default::default(),
-                secret_backend: SecretBackendChoice::Static([1; 32]),
-                sandbox_default: SandboxProvider::LocalProcess,
-                sandbox_policy: None,
-                sandbox_backends: vec![SandboxBackendRegistration::local_process()],
-            },
-            None,
-        )
+        let harness = BasicExoHarness::in_memory(BasicExoHarnessConfig {
+            root: Default::default(),
+            secret_backend: SecretBackendChoice::Static([1; 32]),
+            sandbox_default: SandboxProvider::LocalProcess,
+            sandbox_policy: None,
+            sandbox_backends: vec![SandboxBackendRegistration::local_process()],
+        })
         .await?;
         let global = exoharness::vault::global_vault(&harness).await?;
         let user = harness.create_vault("alice").await?;

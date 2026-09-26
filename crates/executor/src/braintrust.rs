@@ -1,3 +1,4 @@
+pub use exo_managed_agents::{BraintrustProject, BraintrustTracingConfig};
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -10,7 +11,7 @@ use exoharness::{
     AgentRecord, ConversationRecord, Result, SessionId, ToolRequest, ToolResult, TurnId,
 };
 use lingua::UniversalUsage;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 use tokio::sync::Mutex;
 
@@ -24,19 +25,6 @@ pub struct BraintrustRuntimeConfig {
     pub api_key: String,
     pub app_url: Option<String>,
     pub api_url: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BraintrustTracingConfig {
-    pub org_name: Option<String>,
-    pub project: BraintrustProject,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
-pub enum BraintrustProject {
-    Name(String),
-    Id(String),
 }
 
 #[derive(Default)]

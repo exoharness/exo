@@ -1,6 +1,6 @@
 //! Regression test: a model-call failure mid-turn must not kill the chat.
 //!
-//! Exercises the real `exo chat` binary with piped stdin against a
+//! Exercises the real `exo agent run` binary with piped stdin against a
 //! wiremock-backed fake OpenAI endpoint that always returns 400. Each sent
 //! line fails its turn; the chat must print `turn failed: ...` and keep
 //! reading input instead of exiting non-zero after the first error.
@@ -65,7 +65,15 @@ async fn chat_survives_model_call_failure() {
         .await;
 
     run_exo(
-        &["secret", "create", "test-key", "--env", "OPENAI_API_KEY"],
+        &[
+            "vault",
+            "secret",
+            "create",
+            "global",
+            "test-key",
+            "--token-env",
+            "OPENAI_API_KEY",
+        ],
         &root,
         &xdg,
     );
@@ -82,24 +90,22 @@ async fn chat_survives_model_call_failure() {
         &root,
         &xdg,
     );
+    let spec = root_dir.path().join("agent.md");
+    std::fs::write(&spec, "---\nname: Chat Error Test Agent\nharness: basic\nconfig:\n  model: gpt-test\n---\nReply to the user.\n").unwrap();
     run_exo(
         &[
             "agent",
             "create",
-            "--slug",
             "test-agent",
-            "--model",
-            "gpt-test",
-            "--sandbox",
-            "local-process",
-            "Chat Error Test Agent",
+            "--file",
+            spec.to_str().unwrap(),
         ],
         &root,
         &xdg,
     );
 
     let mut chat = Command::new(exo_bin())
-        .arg("chat")
+        .args(["agent", "run"])
         .args(["--root", &root])
         .args(["--secret-backend", "file"])
         .arg("--master-key-path")
@@ -114,7 +120,7 @@ async fn chat_survives_model_call_failure() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("failed to spawn exo chat");
+        .expect("failed to spawn exo agent run");
 
     // Two turns: before the fix the process died on the first model error and
     // never saw the second line.

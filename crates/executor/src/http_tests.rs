@@ -94,12 +94,13 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Result<Self> {
+        Self::with_scope(false).await
+    }
+
+    async fn with_scope(scoped: bool) -> Result<Self> {
         let state: Arc<dyn ExoHarness> = Arc::new(
-            BasicExoHarness::in_memory(
-                crate::test_support::local_test_config("unused-http-test"),
-                None,
-            )
-            .await?,
+            BasicExoHarness::in_memory(crate::test_support::local_test_config("unused-http-test"))
+                .await?,
         );
         state
             .put_binding(exoharness::Binding::Llm {
@@ -133,14 +134,11 @@ impl Fixture {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let client = RuntimeClient::new(&format!("http://{}/exo", listener.local_addr()?))?
             .with_bearer_token("test-token".into());
-        let server = server(
-            listener,
-            Arc::new(RuntimeHttpService::new(
-                Arc::clone(&runtime),
-                "test-token",
-                crate::test_support::local_test_config("unused-http-test"),
-            )?),
-        )?;
+        let mut service = RuntimeHttpService::new(Arc::clone(&runtime), Some("test-token"))?;
+        if scoped {
+            service = service.for_agent(agent.record().id);
+        }
+        let server = server(listener, Arc::new(service))?;
         let handle = server.handle();
         actix_web::rt::spawn(server);
         Ok(Self {
@@ -716,52 +714,9 @@ async fn http_runtime_preserves_server_failure_and_turn_id() -> Result<()> {
 }
 
 #[actix_web::test]
-async fn temporary_provider_cleanup_waits_for_turn_finalization() -> Result<()> {
-    let f = Fixture::new().await?;
-    let runtime = Runtime::new(
-        LocalProvider::new(
-            f.runtime.exoharness_handle(),
-            Arc::new(ControlledExecutor(Arc::clone(&f.release))),
-        )
-        .with_managed_agents(crate::managed_agents::LocalAgentSetup {
-            temporary: true,
-            ..Default::default()
-        }),
-        None,
-    );
-    let agent = runtime
-        .get_agent(&f.agent_id.to_string())
-        .await?
-        .context("agent")?;
-    let thread = agent.new_thread(Default::default()).await?;
-    let (_, mut stream) = runtime
-        .start_turn(
-            agent,
-            thread,
-            SendRequest {
-                input: vec![crate::harness_helpers::user_message("hello")],
-                session_id: None,
-            },
-            true,
-            None,
-        )
-        .await?;
-    runtime.shutdown().await?;
-    let error = stream
-        .next()
-        .await
-        .context("finalization result")?
-        .err()
-        .context("cancelled turn")?;
-    assert_eq!(error.to_string(), "harness turn cancelled");
-    assert!(runtime.list_agents().await?.is_empty());
-    f.stop().await
-}
-
-#[actix_web::test]
 async fn approval_decisions_cancellation_sessions_and_reconnect() -> Result<()> {
     for remote in [false, true] {
-        let f = Fixture::new().await?;
+        let f = Fixture::with_scope(true).await?;
         let runtime = if remote {
             Arc::new(Runtime::new(HttpProvider::new(f.client.clone()), None))
         } else {

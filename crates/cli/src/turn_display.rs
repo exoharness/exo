@@ -331,16 +331,13 @@ mod tests {
         use lingua::{Message, universal::AssistantContent};
 
         let temp = tempfile::TempDir::new()?;
-        let store = BasicExoHarness::in_memory(
-            BasicExoHarnessConfig {
-                root: temp.path().into(),
-                secret_backend: SecretBackendChoice::File { path: None },
-                sandbox_default: SandboxProvider::LocalProcess,
-                sandbox_policy: None,
-                sandbox_backends: vec![SandboxBackendRegistration::local_process()],
-            },
-            None,
-        )
+        let store = BasicExoHarness::in_memory(BasicExoHarnessConfig {
+            root: temp.path().into(),
+            secret_backend: SecretBackendChoice::File { path: None },
+            sandbox_default: SandboxProvider::LocalProcess,
+            sandbox_policy: None,
+            sandbox_backends: vec![SandboxBackendRegistration::local_process()],
+        })
         .await?;
         let agent = store
             .new_agent(NewAgentRequest {

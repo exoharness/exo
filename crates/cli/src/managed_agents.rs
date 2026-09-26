@@ -9,19 +9,20 @@ use executor::{
 };
 use exo_managed_agents::{self as managed, AgentDefinition};
 use exoharness::NewThreadRequest;
+use sha2::{Digest, Sha256};
 
 use crate::render::Verbosity;
 use crate::{Commands, HarnessSelection, SandboxProviderArg};
 
 #[derive(Debug, Args)]
 pub struct ThreadArgs {
-    /// Run a Markdown agent with temporary in-memory state.
+    /// Sync a saved agent from a Markdown file and start or resume a saved thread.
     #[arg(long, required_unless_present = "agent", conflicts_with = "agent")]
     pub agent_file: Option<PathBuf>,
     #[arg(long, required_unless_present = "agent_file")]
     pub agent: Option<String>,
     /// Resume a saved thread by slug or id.
-    #[arg(long, requires = "agent")]
+    #[arg(long)]
     pub thread: Option<String>,
     /// Override the model binding for this thread.
     #[arg(long)]
@@ -105,13 +106,15 @@ pub fn harness_selection(definition: &AgentDefinition) -> Result<HarnessSelectio
 
 pub fn load_definition(command: &Commands) -> Result<Option<AgentDefinition>> {
     let path = match command {
-        Commands::Chat { thread, .. } | Commands::Run { thread, .. } => {
-            thread.agent_file.as_deref()
-        }
         Commands::Agent {
-            command: crate::AgentCommands::Create { file, .. },
+            command: crate::AgentCommands::Run { thread, .. },
             ..
-        } => file.as_deref(),
+        } => thread.agent_file.as_deref(),
+        Commands::Agent {
+            command:
+                crate::AgentCommands::Create { file, .. } | crate::AgentCommands::Update { file, .. },
+            ..
+        } => Some(file.as_path()),
         _ => None,
     };
     path.map(AgentDefinition::load).transpose()
@@ -136,12 +139,27 @@ pub async fn open_thread(
     args: &ThreadArgs,
 ) -> Result<(Arc<dyn AgentHandle>, Arc<dyn ConversationHandle>)> {
     let agent = if let Some(definition) = definition {
+        let path = args
+            .agent_file
+            .as_ref()
+            .context("provide --agent-file")?
+            .canonicalize()
+            .context("resolving agent file")?;
+        let name = path.file_stem().context("agent file has no filename")?;
+        let hash = format!("{:x}", Sha256::digest(path.as_os_str().as_encoded_bytes()));
         let slug = format!(
             "{}-{}",
-            crate::slugify(&definition.frontmatter.name),
-            exoharness::Uuid7::now()
+            crate::slugify(&name.to_string_lossy()),
+            &hash[..16]
         );
-        runtime.create_managed_agent(definition, &slug).await?
+        eprintln!("Syncing agent resources...");
+        match runtime.get_agent(&slug).await? {
+            Some(agent) => {
+                runtime.update_managed_agent(&agent, definition).await?;
+                agent
+            }
+            None => runtime.create_managed_agent(definition, &slug).await?,
+        }
     } else {
         crate::must_get_agent(
             runtime,
@@ -192,9 +210,6 @@ pub async fn open_thread(
         )
         .await?;
     println!("agent: {} ({})", agent.record().slug, agent.record().id);
-    if args.agent_file.is_some() {
-        println!("state: temporary (agent and thread history are discarded on exit)");
-    }
     println!(
         "thread: {} ({})",
         opened.thread.record().slug,

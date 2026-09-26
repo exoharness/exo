@@ -224,16 +224,26 @@ export default defineHarness({
 ## Run it
 
 ```bash
-exo agent --harness typescript create "Coder" \
-  --module exoharness/examples/typescript/coding-agent-harness.ts \
-  --model gpt-5.5 \
-  --sandbox-image python:3.12-slim
+cat > coder.md <<'EOF'
+---
+name: "Coder"
+harness: exoharness/examples/typescript/coding-agent-harness.ts
+config:
+  model: gpt-5.5
+sandbox:
+  provider: docker
+  image: python:3.12-slim
+  enable_networking: true
+---
+Help the user with their task.
+EOF
+exo agent create coder --file coder.md
 exo thread create coder "Build"
-exo chat --agent coder --thread coder-build
+exo agent run --agent coder --thread coder-build
 ```
 
 The default sandbox image is `ubuntu:24.04`, which is bare — no Python,
-Node, etc. Setting `--sandbox-image` on the *agent* makes every
+Node, etc. Setting `sandbox.image` in the *agent spec* makes every
 conversation it owns boot that image; the model installs anything else it
 needs with the shell tool.
 

@@ -48,7 +48,7 @@ async fn chat_shows_one_line_for_auth_errors_unless_full_verbosity_is_requested(
             .env_clear()
             .env("EXO_CONFIG_DIR", temp.path().join("config"))
             .current_dir(temp.path())
-            .arg("chat")
+            .args(["agent", "run"])
             .arg("--root")
             .arg(temp.path().join("state"))
             .args(["--secret-backend", "file", "--master-key-path"])
@@ -67,8 +67,8 @@ async fn chat_shows_one_line_for_auth_errors_unless_full_verbosity_is_requested(
             assert!(stderr.contains("Auth required"), "{stderr}");
         } else {
             assert_eq!(
-                stderr,
-                "Error: connecting MCP server github. Add a secret for this MCP server URL to a selected vault, or attach the vault containing it, then start a new thread.\n"
+                stderr.split_once("Error: ").expect("CLI error").1,
+                "connecting MCP server github. Add a secret for this MCP server URL to a selected vault, or attach the vault containing it, then start a new thread.\n"
             );
         }
     }

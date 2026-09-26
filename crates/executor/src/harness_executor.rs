@@ -61,10 +61,6 @@ pub(crate) trait HarnessExecutor: Send + Sync + 'static {
         Ok(0)
     }
 
-    fn fork(&self, _state: Arc<dyn ExoHarness>) -> Result<Arc<dyn HarnessExecutor>> {
-        Err(anyhow!("this executor does not support temporary agents"))
-    }
-
     async fn shutdown(&self) -> Result<()> {
         Ok(())
     }
@@ -506,35 +502,71 @@ impl Runtime {
             result?;
         }
         let flush = self.tracer.flush().await;
-        let cleanup = self.provider.cleanup().await;
         shutdown?;
-        flush?;
-        cleanup
+        flush
     }
 }
 
 impl Runtime {
-    pub(crate) async fn configure_managed_agent(
+    pub async fn update_managed_agent(
         &self,
         agent: &Arc<dyn AgentHandle>,
         definition: &exo_managed_agents::AgentDefinition,
-    ) -> Result<()> {
-        self.provider.configure_agent(agent, definition).await?;
+    ) -> Result<exoharness::ArtifactVersion> {
+        let previous = exo_managed_agents::load_definition(agent.as_ref()).await?;
+        let previous_spec_mounts = previous
+            .as_ref()
+            .and_then(|definition| definition.frontmatter.sandbox.as_ref())
+            .map(|sandbox| sandbox.mounts.as_slice())
+            .unwrap_or_default();
+        let external_mounts: Vec<_> = crate::find_agent_config(agent.as_ref())
+            .await?
+            .into_iter()
+            .flat_map(|config| config.sandbox.mounts)
+            .filter(|mount| !previous_spec_mounts.contains(mount))
+            .collect();
+        let version = agent
+            .write_artifact(exoharness::WriteArtifactRequest {
+                path: exo_managed_agents::AGENT_DEFINITION_PATH.into(),
+                contents: definition.source().as_bytes().to_vec(),
+            })
+            .await?;
+        if let Err(error) = self.provider.configure_agent(agent, definition).await {
+            agent
+                .write_artifact(exoharness::WriteArtifactRequest {
+                    path: exo_managed_agents::AGENT_DEFINITION_PATH.into(),
+                    contents: previous
+                        .map(|definition| definition.source().as_bytes().to_vec())
+                        .unwrap_or_default(),
+                })
+                .await
+                .with_context(|| {
+                    format!(
+                        "updating agent configuration failed: {error:#}; restoring previous definition"
+                    )
+                })?;
+            return Err(error);
+        }
         self.agent_config_cache
             .write()
             .expect("agent config cache poisoned")
             .remove(&agent.record().id);
-        Ok(())
-    }
-
-    pub(crate) async fn temporary(
-        &self,
-        config: exoharness::BasicExoHarnessConfig,
-    ) -> Result<Self> {
-        let state =
-            exoharness::BasicExoHarness::in_memory(config, Some(self.exoharness_handle().as_ref()))
-                .await?;
-        self.provider.temporary(Arc::new(state))
+        if !external_mounts.is_empty() {
+            let mut config = self.get_agent_config(agent.as_ref()).await?;
+            for mount in external_mounts {
+                config
+                    .sandbox
+                    .mounts
+                    .retain(|other| other.mount_path != mount.mount_path);
+                config.sandbox.mounts.push(mount);
+            }
+            self.put_agent_config(agent.as_ref(), config).await?;
+        }
+        self.agent_config_cache
+            .write()
+            .expect("agent config cache poisoned")
+            .remove(&agent.record().id);
+        Ok(version)
     }
 
     pub fn exoharness_handle(&self) -> Arc<dyn ExoHarness> {

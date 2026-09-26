@@ -70,24 +70,47 @@ cargo build -p exo
 Register a model, create an agent, then start chatting:
 
 ```bash
-./target/debug/exo secret create openai --env OPENAI_API_KEY
+./target/debug/exo vault secret create global openai --token-env OPENAI_API_KEY
 ./target/debug/exo model create gpt-5.5 --secret openai
-./target/debug/exo agent create assistant --model gpt-5.5
-./target/debug/exo chat --agent assistant
+cat > assistant.md <<'EOF'
+---
+name: "assistant"
+harness: basic
+config:
+  model: gpt-5.5
+---
+Help the user with their task.
+EOF
+./target/debug/exo agent create assistant --file assistant.md
+./target/debug/exo agent run --agent assistant
 ```
 
-`exo chat --agent assistant` starts a new saved thread. Pass `--thread <slug>`
-to resume an existing thread, or `--agent-file agent.md` for a temporary run.
+`exo agent run --agent assistant` starts a new saved thread. Pass `--thread <slug>`
+to resume an existing thread. `exo agent run --agent-file agent.md` creates or
+updates a saved agent from the file, then starts a saved thread; add `--thread
+<slug>` to resume one. The agent slug combines the filename with a hash of its
+canonical absolute path, so rerunning the same file reuses the agent without a
+local association file. Moving the file creates a different agent. Each run
+replaces the saved definition, including fields removed from the file. Agents
+and history remain available until explicitly deleted.
 
-`--env` takes the variable name literally. Use `--value "$OPENAI_API_KEY"` if
-you intentionally want the shell to expand the value.
+`--token-env` takes the environment variable name; the CLI reads its value.
 
 For explicit control over agents, conversations, or a shell-enabled sandbox:
 
 ```bash
-./target/debug/exo agent create --model gpt-5.5 "Sandbox Example"
+cat > sandbox-example.md <<'EOF'
+---
+name: "Sandbox Example"
+harness: basic
+config:
+  model: gpt-5.5
+---
+Help the user with their task.
+EOF
+./target/debug/exo agent create sandbox-example --file sandbox-example.md
 ./target/debug/exo thread create sandbox-example "Local Dev"
-./target/debug/exo chat --agent sandbox-example --thread local-dev
+./target/debug/exo agent run --agent sandbox-example --thread local-dev
 ```
 
 The CLI stores state under `.exo` by default. Pass `--root <path>` to use a
@@ -105,9 +128,16 @@ pnpm install
 Then create an agent backed by a TypeScript harness module:
 
 ```bash
-./target/debug/exo agent --harness typescript create "TS Basic" \
-  --module exoharness/examples/typescript/basic-harness.ts \
-  --model gpt-5.5
+cat > ts-basic.md <<'EOF'
+---
+name: "TS Basic"
+harness: exoharness/examples/typescript/basic-harness.ts
+config:
+  model: gpt-5.5
+---
+Help the user with their task.
+EOF
+./target/debug/exo agent create ts-basic --file ts-basic.md
 ```
 
 The `exoharness/examples/typescript` directory also contains Codex, Claude Code, Cursor,

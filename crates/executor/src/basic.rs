@@ -375,14 +375,6 @@ where
     M: ModelClient + 'static,
     T: ToolRuntime + 'static,
 {
-    fn fork(&self, _state: Arc<dyn exoharness::ExoHarness>) -> Result<Arc<dyn HarnessExecutor>> {
-        Ok(Arc::new(Self::with_pricing(
-            self.model.clone(),
-            self.tools.clone(),
-            self.pricing.clone(),
-        )))
-    }
-
     fn name(&self) -> &'static str {
         "basic"
     }

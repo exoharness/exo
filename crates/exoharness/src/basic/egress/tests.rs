@@ -281,36 +281,11 @@ async fn credentials_compose_by_scope_and_remain_pinned_after_restart() -> Resul
 }
 
 #[tokio::test]
-async fn temporary_sandboxes_use_live_vaults_and_require_http_authorization() -> Result<()> {
+async fn http_credentials_require_explicit_destination_authorization() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let config = crate::test_support::local_test_config(directory.path());
-    let saved = BasicExoHarness::new(config.clone()).await?;
-    let global = global_vault(&saved).await?;
-    let id = secret(global.as_ref(), "token", "initial").await?;
-    secret(global.as_ref(), "other-account", "other-token").await?;
-    let temporary = BasicExoHarness::in_memory(config, Some(&saved)).await?;
-    let other = bind(&temporary, ResourceScope::Global, "other-account").await?;
-    assert_eq!(
-        resolver(&temporary)
-            .resolve(&other, "other-account", &destination("api.test"))
-            .await?,
-        "other-token"
-    );
-    let identity = bind(&temporary, ResourceScope::Global, "token").await?;
-    global
-        .update_secret(
-            &id,
-            Secret::Key {
-                value: "rotated".into(),
-            },
-        )
-        .await?;
-    assert_eq!(
-        resolver(&temporary)
-            .resolve(&identity, "token", &destination("api.test"))
-            .await?,
-        "rotated"
-    );
+    let harness =
+        BasicExoHarness::new(crate::test_support::local_test_config(directory.path())).await?;
+    let global = global_vault(&harness).await?;
     for (name, target) in [
         ("model", None),
         ("mcp", Some(SecretTarget::mcp("https://api.test/mcp")?)),
@@ -324,20 +299,14 @@ async fn temporary_sandboxes_use_live_vaults_and_require_http_authorization() ->
                 },
             })
             .await?;
-        let identity = bind(&temporary, ResourceScope::Global, name).await?;
+        let identity = bind(&harness, ResourceScope::Global, name).await?;
         assert!(
-            resolver(&temporary)
+            resolver(&harness)
                 .resolve(&identity, name, &destination("api.test"))
                 .await
                 .is_err()
         );
     }
-    assert!(
-        resolver(&saved)
-            .resolve(&identity, "token", &destination("api.test"))
-            .await
-            .is_err()
-    );
     Ok(())
 }
 

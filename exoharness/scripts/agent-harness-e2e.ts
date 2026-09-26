@@ -214,35 +214,59 @@ async function runHarnessChecks(
 }
 
 function registerSecretAndModel(harness: HarnessDefinition): void {
-  runExo(["secret", "create", harness.secret, "--env", harness.envName]);
+  runExo([
+    "vault",
+    "secret",
+    "create",
+    "global",
+    harness.secret,
+    "--token-env",
+    harness.envName,
+  ]);
   runExo(["model", "create", harness.model, "--secret", harness.secret]);
+}
+
+function saveAgentSpec(
+  harness: HarnessDefinition,
+  slug: string,
+  networking = true,
+): string {
+  const tracing = args.braintrust ? braintrustConfig() : null;
+  const definition = {
+    name: slug,
+    harness: resolve(repoRoot, harness.module),
+    config: {
+      model: harness.model,
+      braintrust: tracing
+        ? {
+            org_name: tracing.org,
+            project: { kind: "name", value: tracing.project },
+          }
+        : null,
+    },
+    sandbox: {
+      provider: process.platform === "darwin" ? "apple_container" : "docker",
+      image: harness.image,
+      enable_networking: networking,
+    },
+  };
+  const file = join(root, `${slug}.md`);
+  writeFileSync(
+    file,
+    `---\n${JSON.stringify(definition)}\n---\nFollow the user's instructions.\n`,
+  );
+  return file;
 }
 
 function createAgent(harness: HarnessDefinition): AgentRef {
   const slug = `e2e-${harness.key}-${runId}`;
-  const commandArgs = [
-    "--harness",
-    "typescript",
+  const output = runExo([
     "agent",
     "create",
     slug,
-    "--module",
-    harness.module,
-    "--model",
-    harness.model,
-    "--sandbox-image",
-    harness.image,
-  ];
-  if (args.braintrust) {
-    const config = braintrustConfig();
-    commandArgs.push(
-      "--braintrust-org",
-      config.org,
-      "--braintrust-project",
-      config.project,
-    );
-  }
-  const output = runExo(commandArgs);
+    "--file",
+    saveAgentSpec(harness, slug),
+  ]);
   return { slug, id: parseCreatedId(output, "agent") };
 }
 
@@ -269,7 +293,13 @@ function runHistoryReplayCheck(
     "/workspace",
     "--rw",
   ]);
-  runExo(["agent", "update", agent.slug, "--networking", "enabled"]);
+  runExo([
+    "agent",
+    "update",
+    agent.slug,
+    "--file",
+    saveAgentSpec(harness, agent.slug),
+  ]);
 
   const codeWord = `${harness.key}-blue-lantern-${runId}`;
   runChat(
@@ -369,7 +399,13 @@ function runFilesystemSandboxCheck(
     "/workspace",
     "--rw",
   ]);
-  runExo(["agent", "update", agent.slug, "--networking", "enabled"]);
+  runExo([
+    "agent",
+    "update",
+    agent.slug,
+    "--file",
+    saveAgentSpec(harness, agent.slug),
+  ]);
 
   const outsideSecret = join(outside, "secret.txt");
   const outsideWrite = join(outside, "escape.txt");
@@ -455,7 +491,13 @@ function runNetworkDisabledCheck(
     "/workspace",
     "--rw",
   ]);
-  runExo(["agent", "update", agent.slug, "--networking", "disabled"]);
+  runExo([
+    "agent",
+    "update",
+    agent.slug,
+    "--file",
+    saveAgentSpec(harness, agent.slug, false),
+  ]);
 
   let failedText: string | null = null;
   try {
@@ -597,7 +639,14 @@ function resolveExoBin(): string {
 function runExo(commandArgs: string[], options: CommandOptions = {}): string {
   return run(
     exoBin,
-    ["--root", root, "--env-file-if-exists", ".env", ...commandArgs],
+    [
+      commandArgs[0],
+      "--root",
+      root,
+      "--env-file-if-exists",
+      ".env",
+      ...commandArgs.slice(1),
+    ],
     options,
   );
 }

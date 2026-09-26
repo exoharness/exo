@@ -1019,7 +1019,7 @@ async function requireCodexSandboxNetworking(
 function codexSandboxNetworkingError(context: TurnContext): string {
   return [
     "Codex requires agent networking because it runs model calls inside the exoharness sandbox.",
-    `Enable it with: exo agent update ${context.exoharness.current.agent.record.slug} --networking enabled`,
+    `Set sandbox.enable_networking to true in the agent spec, then run: exo agent update ${context.exoharness.current.agent.record.slug} --file agent.md`,
   ].join(" ");
 }
 

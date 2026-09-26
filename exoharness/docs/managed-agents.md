@@ -30,9 +30,9 @@ Resource commands use `create`, `list`, `get`, `update`, and `delete` where supp
 | `vault`                                      | `create`, `list`, `get`, `delete`           |
 | `vault secret`                               | `create`, `list`, `get`, `update`, `delete` |
 | `sandbox`, `agent mount`, `thread mount`     | `create`, `list`, `delete`                  |
-| `model`, `secret`, `sandbox-provider`        | `create`, `list`                            |
+| `model`, `sandbox provider`                  | `create`, `list`                            |
 
-Use `exo thread list AGENT` to list saved chats and `exo chat --agent AGENT --thread THREAD`
+Use `exo thread list AGENT` to list saved chats and `exo agent run --agent AGENT --thread THREAD`
 to resume one. `exo sandbox stop` retains a sandbox record; `exo sandbox delete` destroys
 it and deletes the record. `sandbox list` shows running sandboxes; add `--all` to include
 stopped ones. Runtime-specific scope belongs in the provider URL. Exo preserves its path
@@ -47,11 +47,11 @@ pnpm install --frozen-lockfile
 cargo build -p exo
 export PATH="$PWD/target/debug:$PATH"
 
-exo secret create openai --env OPENAI_API_KEY
+exo vault secret create global openai --token-env OPENAI_API_KEY
 exo model create gpt-5.6-sol --secret openai
 ```
 
-`OPENAI_API_KEY` must already be set. `--env` takes the variable's name.
+`OPENAI_API_KEY` must already be set. `--token-env` takes the variable's name.
 The model in the file names an Exo model binding, so it can also point to a
 compatible endpoint using `exo model create --base-url`. If that model isn't
 registered, Exo uses the first registered model and prints which one it selected.
@@ -71,7 +71,7 @@ See [coding agent harnesses](coding-agent-harnesses.md) for other harness setup.
 
 ## Run it
 
-`exo chat` runs inline and leaves the conversation in your terminal scrollback.
+`exo agent run` runs inline and leaves the conversation in your terminal scrollback.
 Use `--tui` to opt into the full-screen interface. Type `/help` for commands or
 `/exit` to quit.
 
@@ -79,12 +79,12 @@ Your turn streams as it runs. Updates from other clients appear when you submit
 the next line; pressing Enter on an empty prompt also checks for updates.
 
 ```bash
-exo chat --agent-file exoharness/examples/managed-agents/support-analyst.md
+exo agent run --agent-file exoharness/examples/managed-agents/support-analyst.md
 
-exo run --agent-file exoharness/examples/managed-agents/support-analyst.md \
+exo agent run --agent-file exoharness/examples/managed-agents/support-analyst.md \
   --mount ./tickets:/workspace/tickets:ro \
   --mount ./reports:/workspace/reports:rw \
-  "Analyze the tickets in /workspace/tickets and save /workspace/reports/report.md"
+  --prompt "Analyze the tickets in /workspace/tickets and save /workspace/reports/report.md"
 ```
 
 Create the host directories before mounting them. Mounts are read-only unless
@@ -96,23 +96,24 @@ To save an agent under a name:
 ```bash
 exo agent create support --file exoharness/examples/managed-agents/support-analyst.md
 exo agent list
-exo chat --agent support
+exo agent run --agent support
 exo thread list support
-exo chat --agent support --thread <thread-slug>
+exo agent run --agent support --thread <thread-slug>
 ```
 
 The CLI prints the agent and thread ids. Both ids and slugs work when resuming.
 A missing `--thread` starts a new thread; an unknown thread is an error.
-`exo run` accepts the same `--agent` and `--thread` options.
+Add `--prompt "..."` to run a single turn and exit.
 
-Each `--agent-file` invocation runs with an in-memory agent and thread. Its definition,
-history, and runtime artifacts are discarded on exit and never appear in the saved
-agent list. Registered models and secrets are available to temporary runs. Files
-written to mounted host directories remain on disk.
+Each `--agent-file` invocation creates or updates a saved agent from the Markdown
+file, then starts a saved thread. The agent slug combines the filename with a hash
+of its canonical absolute path; rerunning the same file reuses the agent and
+replaces its saved definition. Moving the file creates a different agent. Add
+`--thread <slug>` to resume a saved thread. Agents and history remain until deleted.
 
-Use `exo agent create` to save an agent and `exo chat --agent` for durable threads.
-Named creation rejects an existing name. Editing or deleting the source Markdown
-has no effect on saved agents. `--model` overrides the model for a thread;
+Use `exo agent create` to save an agent with an explicit name and `exo agent run
+--agent` to run it without syncing a file. Named creation rejects an existing name.
+Editing or deleting the source Markdown has no effect until it is synced again. `--model` overrides the model for a thread;
 `--harness` can override the harness when loading a file. Saved agents keep their
 harness.
 
@@ -121,6 +122,51 @@ Anthropic model binding and the Claude Code sandbox image. Custom TypeScript
 harness paths are resolved relative to the Markdown file for local execution,
 and relative to the provider's working directory for remote execution. Modules
 must be installed on the provider; the spec does not bundle their code.
+
+## Specs and credentials
+
+`exo agent update NAME --file agent.md` replaces the saved spec. It preserves
+threads and restores the previous spec if the provider rejects the update.
+`exo agent get NAME` shows the saved spec and resolved harness configuration.
+
+Declare TypeScript tool modules in `tools: [./tools.ts]`; their paths follow the
+same resolution rules as harness modules. Optional `config.braintrust` retains
+tracing settings (`org_name` and `project: {kind: name, value: PROJECT}`). `tool_creation: true` enables the
+harness's agent-authored tool support. For `harness: exo`, set `config.module`
+to the Exo harness module. Optional `sandbox` defaults use `provider`, `image`,
+`scope`, `mounts`, and `enable_networking`; named environments remain thread settings.
+
+Model bindings select the upstream model and base URL. Their credentials live
+in vaults: `exo model create MODEL --vault team --secret openai`. Sandbox provider
+bindings likewise accept `--vault team --secret KEY` under `exo sandbox provider`.
+
+## Serve over HTTP
+
+```sh
+exo agent serve support --bind 127.0.0.1:8080
+# In another terminal:
+exo provider create served --url http://127.0.0.1:8080/exo
+exo --provider served agent run --agent support --prompt "Summarize today's tickets"
+```
+
+The server uses the existing managed-agent HTTP API: agent discovery, saved
+threads, turns, event streaming, cancellation, approval responses, and reconnect.
+With an agent argument, only that agent is visible and other agents are inaccessible.
+Omit the argument to serve the local provider, including agent creation. This does not expose the raw ExoHarness `/request` transport.
+
+Declare adapter attachment names in the agent spec, for example
+`adapters: [support-slack]`. Pass deployment definitions as
+`exo agent serve support --adapters-file adapters.yaml`.
+Each YAML key is an attachment name; its value is an `AdapterConfig` with
+`adapterType`, `workerCommand`, optional `initialization`, `stateDir`, and
+`secretEnv: [{env: SLACK_BOT_TOKEN, vault: team, secretId: slack-token}]`.
+Credentials are vault references, never literal values. Omitted `vault` means `global`.
+
+The service supervises the attached workers. Restart it after changing adapter
+attachments or deployment configuration; existing adapter IDs, threads, and
+queued deliveries survive a restart. Removed spec attachments are disabled.
+
+TODO: Design vault-based authentication for `agent serve`. The CLI server currently serves without authentication.
 
 ## MCP
 
@@ -152,8 +198,8 @@ mcp_servers:
 DeepWiki doesn't need credentials. Try the example:
 
 ```bash
-exo run --agent-file exoharness/examples/managed-agents/repo-analyst.md \
-  "Use DeepWiki to explain how tokio-rs/tokio schedules tasks."
+exo agent run --agent-file exoharness/examples/managed-agents/repo-analyst.md \
+  --prompt "Use DeepWiki to explain how tokio-rs/tokio schedules tasks."
 ```
 
 The client uses Streamable HTTP, initializes each server, and discovers its tools
@@ -228,7 +274,7 @@ name; each new thread gets its own sandbox:
 exo environment create pi-local --file exoharness/examples/environments/pi-local.yaml
 exo environment list
 exo environment get pi-local
-exo chat --agent-file exoharness/examples/managed-agents/pi-assistant.md \
+exo agent run --agent-file exoharness/examples/managed-agents/pi-assistant.md \
   --environment pi-local
 ```
 
@@ -260,9 +306,9 @@ that backend's existing lifecycle and durable-file-system support.
 
 ```sh
 container build -t exo-pi-sandbox:latest exoharness/containers/pi-sandbox
-exo secret create openai --env OPENAI_API_KEY
+exo vault secret create global openai --token-env OPENAI_API_KEY
 exo model create gpt-5-mini --secret openai
-exo chat --agent-file exoharness/examples/managed-agents/pi-assistant.md \
+exo agent run --agent-file exoharness/examples/managed-agents/pi-assistant.md \
   --environment-file exoharness/examples/environments/pi-local.yaml
 ```
 
@@ -292,7 +338,7 @@ exo vault secret create personal github \
   --token-env GITHUB_TOKEN
 unset GITHUB_TOKEN
 
-exo chat --agent-file exoharness/examples/managed-agents/github-analyst.md \
+exo agent run --agent-file exoharness/examples/managed-agents/github-analyst.md \
   --vault personal
 ```
 
@@ -327,15 +373,15 @@ shadow a model credential with the same name. Thread attachments and selected MC
 secret references survive resume and fork:
 
 ```bash
-exo chat --agent support --vault personal
-exo chat --agent support --thread <thread-slug>
+exo agent run --agent support --vault personal
+exo agent run --agent support --thread <thread-slug>
 ```
 
 Changing the attachments or MCP destinations requires a new thread. Revoked secrets
-fail instead of switching to another account. Temporary chats retain vault handles;
-they do not copy secret values into their agent or thread records.
+fail instead of switching to another account. Agent and thread records retain
+vault references, not copies of secret values.
 
-Model registration and the existing `exo secret` commands default to the global vault:
+Model bindings use the global vault unless `--vault` selects a different one:
 
 ```bash
 exo vault secret create global openai --token-env OPENAI_API_KEY
@@ -367,16 +413,16 @@ value together.
 
 ## Runtime providers
 
-The same CLI commands drive local Exo and an authenticated HTTP runtime:
+The same CLI commands drive local Exo and an HTTP runtime:
 
 ```sh
 exo provider create local --local-root .exo
-exo provider create oss --url http://localhost:8080/exo --api-key-env EXO_RUNTIME_TOKEN
+exo provider create oss --url http://localhost:8080/exo
 exo provider switch oss
 exo agent create analyst --file ./analyst.md
-exo run --agent analyst "Summarize this project"
+exo agent run --agent analyst --prompt "Summarize this project"
 exo thread list analyst
-exo chat --agent analyst --thread <thread-slug>
+exo agent run --agent analyst --thread <thread-slug>
 ```
 
 `exo provider switch <name>` persists the selection globally for future commands.
@@ -397,10 +443,8 @@ each thread. Client credentials and harness modules are not copied to the server
 `type: provider` asks the selected runtime to resolve its built-in MCP; `name`
 only sets its local tool namespace and grants no vault access.
 
-HTTP `--agent-file` runs use isolated in-memory state. The CLI renews their
-90-second lease every 30 seconds and deletes them on exit. Abandoned agents are
-reaped every 30 seconds after expiry; cleanup cancels their execution without
-stopping saved agents. Saved HTTP turns continue after the CLI disconnects;
+HTTP `--agent-file` runs sync saved agents through the same API as explicit
+creation and updates. Saved HTTP turns continue after the CLI disconnects;
 reopening their thread recovers durable history, not missed streaming previews.
 
 `GET /agent/{agent_id}/thread/{thread_id}/turn/{turn_id}` under the runtime base URL

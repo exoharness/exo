@@ -309,12 +309,20 @@ round, and the RAM state, refreshing once a second.
 Then, in another terminal (from the repo root), create the agent and play:
 
 ```bash
-exo secret create openai --env OPENAI_API_KEY          # once
+exo vault secret create global openai --token-env OPENAI_API_KEY          # once
 exo model create gpt-5.5 --secret openai          # once
 
-exo agent --harness typescript create "Gameboy" \
-  --module exoharness/examples/gameboy-agent/agent/harness.ts \
-  --model gpt-5.5 --max-tool-round-trips 20         # once
+cat > gameboy.md <<'EOF'
+---
+name: "Gameboy"
+harness: exoharness/examples/gameboy-agent/agent/harness.ts
+config:
+  model: gpt-5.5
+  max_tool_round_trips: 20
+---
+Help the user with their task.
+EOF
+exo agent create gameboy --file gameboy.md
 exo thread create gameboy "Play Pokemon"      # once
 
 exo thread send gameboy play-pokemon \
@@ -432,8 +440,5 @@ export default defineHarness({
 Point your **existing** agent record at the wrapper and it keeps its memory,
 artifacts, skills, and every conversation — it just gains a live view of the emulator, and tooling to press buttons:
 
-```bash
-exo agent update exo --module path/to/exo-gameboy-harness.ts
-# ...and back again to un-extend:
-exo agent update exo --module exo/harness.ts
-```
+Edit `config.module` in the Exo agent spec, then apply it with
+`exo agent update exo --file exo.md`. Start a new thread after changing harnesses.

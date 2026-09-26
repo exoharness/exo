@@ -170,7 +170,7 @@ Run Exo as root, select the backend, and configure the provider binding:
 ```bash
 sudo EXO_FIRECRACKER_KERNEL=/var/lib/exo/firecracker/vmlinux \
   EXO_FIRECRACKER_INITRAMFS=/var/lib/exo/firecracker/exo-firecracker-initramfs.cpio \
-  target/debug/exo sandbox-provider create \
+  target/debug/exo sandbox provider create \
   --sandbox firecracker \
   --default-image 123456789012.dkr.ecr.us-east-1.amazonaws.com/exo-sandbox@sha256:...
 ```
@@ -195,7 +195,7 @@ parameter, including the working directory, idle timeout, host mounts, durable
 filesystems, and networking. Their `--firecracker-*` options control the VMM
 and jailer paths, kernel, initramfs, state root, VM sizing, DNS, UID range,
 image/workspace sizes, and network rate limit. The same options live under
-`exo serve` for a persistent backend. The corresponding `EXO_FIRECRACKER_*`
+`exo agent serve` for a persistent backend. The corresponding `EXO_FIRECRACKER_*`
 environment variables remain supported.
 
 For a sandbox that survives between CLI invocations, use the separate lifecycle
@@ -211,7 +211,7 @@ sudo target/debug/exo sandbox delete "$sandbox_id"
 ```
 
 `connect` streams an interactive shell over stdin/stdout/stderr; the current
-sandbox process API does not provide a PTY. A long-running `exo serve` process
+sandbox process API does not provide a PTY. A long-running `exo agent serve` process
 is still useful when multiple clients need concurrent access to one backend.
 Every lifecycle command accepts `--agent <slug>` to use that agent's sandbox
 scope. Without it, commands share an internal singleton owner intended for

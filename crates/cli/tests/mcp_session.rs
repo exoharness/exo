@@ -90,7 +90,15 @@ async fn vault_credentials_stay_host_side_and_typescript_preserves_oauth_refresh
         cmd
     };
     for args in [
-        vec!["secret", "create", "model-key", "--env", "EXO_TEST_VISIBLE"],
+        vec![
+            "vault",
+            "secret",
+            "create",
+            "global",
+            "model-key",
+            "--token-env",
+            "EXO_TEST_VISIBLE",
+        ],
         vec!["model", "create", "fixture", "--secret", "model-key"],
         vec![
             "agent",
@@ -153,7 +161,8 @@ async fn vault_credentials_stay_host_side_and_typescript_preserves_oauth_refresh
         (true, 2, 3),
     ] {
         revision.store(version, Ordering::SeqCst);
-        let mut cmd = command("run");
+        let mut cmd = command("agent");
+        cmd.arg("run");
         if saved {
             cmd.arg("--env-file").arg(&env_file);
         }
@@ -163,7 +172,7 @@ async fn vault_credentials_stay_host_side_and_typescript_preserves_oauth_refresh
             } else {
                 definition.to_str().unwrap()
             })
-            .arg("test");
+            .args(["--prompt", "test"]);
         if saved {
             cmd.args(["--thread", "history"]);
         }

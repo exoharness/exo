@@ -1,6 +1,6 @@
 mod support;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use support::{Fixture, success, thread_slug};
 
 fn mutation_output(output: std::process::Output, provider: &str) -> Result<String> {
@@ -52,19 +52,32 @@ async fn local_and_http_cli_workflows() -> Result<()> {
             }
         }
         let first = mutation_output(
-            f.output(&["run", "--agent", "saved", "first input"], None, None)
-                .await?,
+            f.output(
+                &[
+                    "agent",
+                    "run",
+                    "--agent",
+                    "saved",
+                    "--prompt",
+                    "first input",
+                ],
+                None,
+                None,
+            )
+            .await?,
             provider,
         )?;
         assert!(first.contains("Workflow reply."), "{provider}: {first}");
         let thread = thread_slug(&first)?;
         let resumed = f
             .cli(&[
+                "agent",
                 "run",
                 "--agent",
                 "saved",
                 "--thread",
                 thread,
+                "--prompt",
                 "second input",
             ])
             .await?;
@@ -73,7 +86,7 @@ async fn local_and_http_cli_workflows() -> Result<()> {
         assert!(f.cli(&["thread", "list", "saved"]).await?.contains(thread));
         let history = success(
             f.output(
-                &["chat", "--agent", "saved", "--thread", thread],
+                &["agent", "run", "--agent", "saved", "--thread", thread],
                 None,
                 Some("/history\n/quit\n"),
             )
@@ -87,18 +100,6 @@ async fn local_and_http_cli_workflows() -> Result<()> {
         assert!(shown.contains("message_count: 4"), "{shown}");
         let events = f.cli(&["thread", "events", "saved", thread]).await?;
         assert!(events.contains("turn_ended"), "{events}");
-        let temporary = f
-            .cli(&["run", "--agent-file", file, "temporary input"])
-            .await?;
-        assert!(
-            temporary.contains("state: temporary") && temporary.contains("Workflow reply."),
-            "{temporary}"
-        );
-        let listed = f.cli(&["agent", "list"]).await?;
-        assert!(
-            !listed.contains("workflow-agent-"),
-            "temporary agent leaked: {listed}"
-        );
         mutation_output(
             f.output(&["thread", "delete", "saved", thread], None, None)
                 .await?,
@@ -119,6 +120,167 @@ async fn local_and_http_cli_workflows() -> Result<()> {
             }
         }
         assert!(!f.cli(&["agent", "list"]).await?.contains("saved"));
+        f.stop().await?;
+    }
+    Ok(())
+}
+
+#[actix_web::test]
+async fn local_and_http_file_runs_sync_saved_agents_and_preserve_history() -> Result<()> {
+    for provider in ["local", "remote"] {
+        let f = Fixture::new().await?;
+        f.cli(&["provider", "switch", provider]).await?;
+        let file = f.agent_file.to_str().context("agent file")?;
+        let original = support::SOURCE.replace("config:", "config:\n  max_tool_round_trips: 17");
+        std::fs::write(&f.agent_file, &original)?;
+        let first = f
+            .cli(&[
+                "agent",
+                "run",
+                "--agent-file",
+                file,
+                "--prompt",
+                "first file input",
+            ])
+            .await?;
+        let agent = f
+            .runtime
+            .exoharness_handle()
+            .list_agents()
+            .await?
+            .pop()
+            .context("saved file agent")?;
+        let slug = &agent.record().slug;
+        let first_thread = thread_slug(&first)?;
+        assert!(f.cli(&["agent", "list"]).await?.contains(slug));
+        assert_eq!(
+            executor::load_agent_config(agent.as_ref())
+                .await?
+                .max_tool_round_trips,
+            Some(17)
+        );
+
+        let updated = support::SOURCE
+            .replace("Workflow agent", "Renamed file agent")
+            .replace("Reply to the user.", "Follow the updated instructions.");
+        std::fs::write(&f.agent_file, &updated)?;
+        let directory = f.temp.path().join("nested");
+        std::fs::create_dir(&directory)?;
+        let second = success(
+            f.output(
+                &[
+                    "agent",
+                    "run",
+                    "--agent-file",
+                    "../agent.md",
+                    "--prompt",
+                    "second file input",
+                ],
+                Some(&directory),
+                None,
+            )
+            .await?,
+        )?;
+        assert!(
+            second.contains(&format!("agent: {slug} ({})", agent.record().id)),
+            "{second}"
+        );
+        assert_ne!(thread_slug(&second)?, first_thread);
+        assert_eq!(f.runtime.list_agents().await?.len(), 1);
+        let saved = exo_managed_agents::load_definition(agent.as_ref())
+            .await?
+            .context("saved definition")?;
+        assert_eq!(saved.source(), updated);
+        assert!(
+            executor::load_agent_config(agent.as_ref())
+                .await?
+                .max_tool_round_trips
+                .is_none()
+        );
+        let requests = f
+            .model
+            .received_requests()
+            .await
+            .context("model requests")?;
+        let request = String::from_utf8_lossy(&requests.last().context("updated turn")?.body);
+        assert!(
+            request.contains("You are Renamed file agent.")
+                && request.contains("Follow the updated instructions."),
+            "{request}"
+        );
+        assert!(!request.contains("Reply to the user."), "{request}");
+
+        std::fs::write(
+            &f.agent_file,
+            updated.replace("harness: basic", "harness: unknown"),
+        )?;
+        assert!(
+            !f.output(
+                &["agent", "run", "--agent-file", file, "--prompt", "invalid"],
+                None,
+                None
+            )
+            .await?
+            .status
+            .success()
+        );
+        assert_eq!(
+            exo_managed_agents::load_definition(agent.as_ref())
+                .await?
+                .context("unchanged definition")?
+                .source(),
+            updated
+        );
+        std::fs::write(&f.agent_file, &updated)?;
+        let resumed = f
+            .cli(&[
+                "agent",
+                "run",
+                "--agent-file",
+                file,
+                "--thread",
+                first_thread,
+                "--prompt",
+                "resumed file input",
+            ])
+            .await?;
+        assert_eq!(thread_slug(&resumed)?, first_thread);
+        assert_eq!(
+            exo_managed_agents::list_threads(agent.as_ref())
+                .await?
+                .len(),
+            2
+        );
+        let history = success(
+            f.output(
+                &["agent", "run", "--agent", slug, "--thread", first_thread],
+                None,
+                Some("/history\n/quit\n"),
+            )
+            .await?,
+        )?;
+        assert!(
+            history.contains("first file input") && history.contains("resumed file input"),
+            "{history}"
+        );
+        assert!(!history.contains("second file input"), "{history}");
+
+        let other = directory.join("agent.md");
+        std::fs::write(&other, updated)?;
+        f.cli(&[
+            "agent",
+            "run",
+            "--agent-file",
+            other.to_str().context("other file")?,
+            "--prompt",
+            "other file input",
+        ])
+        .await?;
+        let agents = f.runtime.list_agents().await?;
+        assert_eq!(agents.len(), 2);
+        assert_ne!(agents[0].slug, agents[1].slug);
+        f.cli(&["agent", "delete", slug]).await?;
+        assert!(f.runtime.get_agent(slug).await?.is_none());
         f.stop().await?;
     }
     Ok(())
@@ -177,7 +339,9 @@ async fn provider_crud_defaults_and_aliases_survive_cli_restarts() -> Result<()>
         f.agent_file.to_str().unwrap(),
     ])
     .await?;
-    let first = f.cli(&["run", "--agent", "pinned", "hello"]).await?;
+    let first = f
+        .cli(&["agent", "run", "--agent", "pinned", "--prompt", "hello"])
+        .await?;
     let thread = thread_slug(&first)?;
     f.cli(&["provider", "switch", "local"]).await?;
     f.contexts.lock().unwrap().clear();
@@ -338,9 +502,16 @@ async fn local_and_http_live_cancellation_finalizes_and_allows_resume() -> Resul
             .mount_as_scoped(&f.model)
             .await;
         let args = if mode == "chat" {
-            vec!["chat", "--agent", "saved"]
+            vec!["agent", "run", "--agent", "saved"]
         } else {
-            vec!["run", "--agent", "saved", "cancel this turn"]
+            vec![
+                "agent",
+                "run",
+                "--agent",
+                "saved",
+                "--prompt",
+                "cancel this turn",
+            ]
         };
         let mut child = f
             .command(&args)
@@ -396,9 +567,18 @@ async fn local_and_http_live_cancellation_finalizes_and_allows_resume() -> Resul
         );
         drop(delay);
         assert!(
-            f.cli(&["run", "--agent", "saved", "--thread", thread, "try again"])
-                .await?
-                .contains("Workflow reply.")
+            f.cli(&[
+                "agent",
+                "run",
+                "--agent",
+                "saved",
+                "--thread",
+                thread,
+                "--prompt",
+                "try again"
+            ])
+            .await?
+            .contains("Workflow reply.")
         );
         f.stop().await?;
     }
@@ -406,7 +586,7 @@ async fn local_and_http_live_cancellation_finalizes_and_allows_resume() -> Resul
 }
 
 #[actix_web::test]
-async fn saved_http_turn_survives_cli_disconnect_and_temporary_cleanup() -> Result<()> {
+async fn saved_http_turn_survives_cli_disconnect_and_another_file_run() -> Result<()> {
     use exo_managed_agents::http::{
         RuntimeClient,
         protocol::{EventsQuery, WatchQuery},
@@ -435,7 +615,14 @@ async fn saved_http_turn_survives_cli_disconnect_and_temporary_cleanup() -> Resu
         .mount_as_scoped(&f.model)
         .await;
     let mut child = f
-        .command(&["run", "--agent", "saved", "detached turn"])
+        .command(&[
+            "agent",
+            "run",
+            "--agent",
+            "saved",
+            "--prompt",
+            "detached turn",
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -461,16 +648,18 @@ async fn saved_http_turn_survives_cli_disconnect_and_temporary_cleanup() -> Resu
             .iter()
             .any(|event| matches!(event.data, exoharness::EventData::TurnEnded))
     );
-    let temporary = f
+    let file_run = f
         .cli(&[
+            "agent",
             "run",
             "--agent-file",
             f.agent_file.to_str().unwrap(),
-            "short temporary turn",
+            "--prompt",
+            "short file turn",
         ])
         .await?;
-    assert!(temporary.contains("Workflow reply."));
-    let id: exoharness::AgentId = temporary
+    assert!(file_run.contains("Workflow reply."));
+    let id: exoharness::AgentId = file_run
         .lines()
         .find(|line| line.starts_with("agent: "))
         .unwrap()
@@ -479,7 +668,7 @@ async fn saved_http_turn_survives_cli_disconnect_and_temporary_cleanup() -> Resu
         .1
         .trim_end_matches(')')
         .parse()?;
-    assert!(client.get_agent(id).await?.is_none());
+    assert!(client.get_agent(id).await?.is_some());
     let mut watch = client
         .watch(
             agent.id,
@@ -506,7 +695,7 @@ async fn saved_http_turn_survives_cli_disconnect_and_temporary_cleanup() -> Resu
     drop(watch);
     let history = success(
         f.output(
-            &["chat", "--agent", "saved", "--thread", slug],
+            &["agent", "run", "--agent", "saved", "--thread", slug],
             None,
             Some("/history\n/quit\n"),
         )
@@ -567,7 +756,7 @@ async fn local_and_http_providers_configure_named_harnesses() -> Result<()> {
             }
             success(
                 f.output(
-                    &["chat", "--harness", harness, "--agent", &name],
+                    &["agent", "run", "--harness", harness, "--agent", &name],
                     None,
                     Some("/quit\n"),
                 )
@@ -691,53 +880,57 @@ export default defineHarness({{
     );
     let first = f
         .cli(&[
+            "agent",
             "run",
             "--agent",
             "remote-workspace",
             "--vault",
             "server-only",
+            "--prompt",
             "first",
         ])
         .await?;
     assert!(first.contains("Server workspace"), "{first}");
     let other = f
         .cli(&[
+            "agent",
             "run",
             "--agent",
             "remote-workspace",
             "--vault",
             "other",
+            "--prompt",
             "second",
         ])
         .await?;
     assert!(other.contains("Other workspace"), "{other}");
     let resumed = f
         .cli(&[
+            "agent",
             "run",
             "--agent",
             "remote-workspace",
             "--thread",
             thread_slug(&first)?,
+            "--prompt",
             "again",
         ])
         .await?;
     assert!(resumed.contains("Server workspace"), "{resumed}");
-    let temporary = f
+    let file_run = f
         .cli(&[
+            "agent",
             "run",
             "--agent-file",
             f.agent_file.to_str().unwrap(),
             "--vault",
             "other",
-            "temporary",
+            "--prompt",
+            "file turn",
         ])
         .await?;
-    assert!(temporary.contains("Other workspace"), "{temporary}");
-    assert!(
-        !f.cli(&["agent", "list"])
-            .await?
-            .contains("remote-workspace-")
-    );
+    assert!(file_run.contains("Other workspace"), "{file_run}");
+    assert!(f.cli(&["agent", "list"]).await?.contains("agent-"));
     assert!(!f.root.exists(), "remote execution created local state");
     assert!(f.model.received_requests().await.unwrap().is_empty());
     success(
@@ -758,11 +951,13 @@ export default defineHarness({{
     )?;
     let rotated = f
         .cli(&[
+            "agent",
             "run",
             "--agent",
             "remote-workspace",
             "--thread",
             thread_slug(&first)?,
+            "--prompt",
             "after rotation",
         ])
         .await?;
@@ -780,11 +975,13 @@ export default defineHarness({{
     let revoked = f
         .output(
             &[
+                "agent",
                 "run",
                 "--agent",
                 "remote-workspace",
                 "--thread",
                 thread_slug(&first)?,
+                "--prompt",
                 "after revocation",
             ],
             None,
@@ -808,11 +1005,13 @@ export default defineHarness({{
     let changed = f
         .output(
             &[
+                "agent",
                 "run",
                 "--agent",
                 "remote-workspace",
                 "--thread",
                 thread_slug(&first)?,
+                "--prompt",
                 "after spec change",
             ],
             None,
@@ -1064,7 +1263,14 @@ async fn saved_aliases_keep_their_context_after_profile_and_selection_changes() 
     ])
     .await?;
     let first = f
-        .cli(&["run", "--agent", "pinned-context", "hello"])
+        .cli(&[
+            "agent",
+            "run",
+            "--agent",
+            "pinned-context",
+            "--prompt",
+            "hello",
+        ])
         .await?;
     let thread = thread_slug(&first)?;
     f.cli(&[
@@ -1086,11 +1292,13 @@ async fn saved_aliases_keep_their_context_after_profile_and_selection_changes() 
     for args in [
         vec!["agent", "get", "pinned-context"],
         vec![
+            "agent",
             "run",
             "--agent",
             "pinned-context",
             "--thread",
             thread,
+            "--prompt",
             "resume",
         ],
     ] {
@@ -1225,5 +1433,61 @@ async fn provider_errors_explain_how_to_set_context_and_creation_is_offline() ->
         .await?;
     assert!(!invalid.status.success());
     assert!(!f.cli(&["provider", "list"]).await?.contains("invalid"));
+    f.stop().await
+}
+
+#[actix_web::test]
+async fn model_and_sandbox_bindings_keep_the_explicit_vault() -> Result<()> {
+    let f = Fixture::new().await?;
+    f.cli(&["vault", "create", "team"]).await?;
+    f.cli(&[
+        "vault",
+        "secret",
+        "create",
+        "team",
+        "model-key",
+        "--token-env",
+        "SMOKE_API_KEY",
+    ])
+    .await?;
+    f.cli(&[
+        "model",
+        "create",
+        "team-model",
+        "--vault",
+        "team",
+        "--secret",
+        "model-key",
+    ])
+    .await?;
+    f.cli(&[
+        "sandbox",
+        "provider",
+        "create",
+        "--sandbox",
+        "daytona",
+        "--vault",
+        "team",
+        "--secret",
+        "model-key",
+    ])
+    .await?;
+    let state = f.runtime.exoharness_handle();
+    let team = exo_managed_agents::vaults::find_vault(state.as_ref(), "team").await?;
+    let model = state
+        .list_bindings()
+        .await?
+        .into_iter()
+        .find_map(|record| match record.binding {
+            exoharness::Binding::Llm { name, secret, .. } if name == "team-model" => secret,
+            _ => None,
+        })
+        .context("model binding")?;
+    assert_eq!(model.vault_id, team.record().id);
+    let listing = f.cli(&["model", "list"]).await?;
+    assert!(listing.contains("team/model-key"), "{listing}");
+    let bindings = state.list_bindings().await?;
+    let sandbox = bindings.iter().find(|record| matches!(&record.binding, exoharness::Binding::Sandbox { name, .. } if name == "daytona")).context("sandbox binding")?;
+    assert!(serde_json::to_string(&sandbox.binding)?.contains(&team.record().id.to_string()));
     f.stop().await
 }

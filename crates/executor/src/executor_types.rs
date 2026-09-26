@@ -1,3 +1,4 @@
+pub use exo_managed_agents::{AgentSandboxConfig, SandboxScope};
 use std::fmt;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -30,23 +31,6 @@ pub struct AgentConfig {
     pub max_output_tokens: Option<i64>,
     pub max_tool_round_trips: Option<u32>,
     pub braintrust: Option<BraintrustTracingConfig>,
-}
-
-/// Agent-level defaults for conversation sandboxes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentSandboxConfig {
-    /// Default scope for conversation that don't specify a `sandbox_scope`.
-    #[serde(default)]
-    pub scope: SandboxScope,
-    #[serde(default)]
-    pub image: Option<String>,
-    pub provider: SandboxProvider,
-    /// Mounts for the agent-scoped sandbox. These apply to every conversation
-    /// that uses the shared agent sandbox.
-    #[serde(default)]
-    pub mounts: Vec<FileSystemMount>,
-    #[serde(default)]
-    pub enable_networking: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -88,14 +72,6 @@ pub struct ConversationConfig {
     pub durable_file_systems: Vec<DurableFileSystem>,
     #[serde(default)]
     pub sandbox_scope: Option<SandboxScope>,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SandboxScope {
-    Agent,
-    #[default]
-    Conversation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

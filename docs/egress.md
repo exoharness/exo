@@ -71,14 +71,15 @@ HTTP credentials authorize one exact HTTPS origin, including its port. The
 MCP credentials authorize only their exact MCP endpoint, including path and query.
 Keys without a destination do not grant HTTP access.
 Sandbox and credential host policies still apply. The same policy flag
-works with `exo chat` and a managed Firecracker sandbox. Tell the agent which
+works with `exo agent run` and a managed Firecracker sandbox. Tell the agent which
 variables it can use; the runtime currently injects the environment without
 adding a credential inventory to its prompt.
 
-For a managed agent, use `exo chat --agent-file agent.md --sandbox firecracker
+For a managed agent, use `exo agent run --agent-file agent.md --sandbox firecracker
 --vault alice --egress-policy egress.json` to attach a named vault to the thread.
-`--agent-file` keeps the agent, thread, and sandbox selection temporary while
-credential rotation still reads the live vault.
+`--agent-file` syncs a saved agent and starts a saved thread. Sandbox selection
+and vault attachments belong to the thread; credential rotation reads the live
+vault.
 
 ## Agent model credentials
 
@@ -88,7 +89,7 @@ when creating their sandbox. Register the key and model once:
 ```bash
 exo vault secret create global openai --token-env OPENAI_API_KEY
 exo model create gpt-5-mini --secret openai
-exo chat --agent-file exoharness/examples/managed-agents/pi-assistant.md --environment-file exoharness/examples/environments/pi-local.yaml
+exo agent run --agent-file exoharness/examples/managed-agents/pi-assistant.md --environment-file exoharness/examples/environments/pi-local.yaml
 ```
 
 The runtime adds the model credential to the selected environment's policy. The

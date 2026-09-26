@@ -63,15 +63,6 @@ impl<T> HarnessExecutor for TypeScriptExecutor<T>
 where
     T: ToolRuntime + 'static,
 {
-    fn fork(&self, state: Arc<dyn exoharness::ExoHarness>) -> Result<Arc<dyn HarnessExecutor>> {
-        Ok(Arc::new(Self::new(
-            state,
-            self.workspace_root.clone(),
-            (*self.env).clone(),
-            self.tools.clone(),
-        )))
-    }
-
     fn name(&self) -> &'static str {
         "typescript"
     }

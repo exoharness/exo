@@ -27,10 +27,6 @@ pub trait Provider: AgentBackend {
         turn: exoharness::TurnId,
     ) -> Result<bool>;
 
-    fn temporary(&self, _state: Arc<dyn ExoHarness>) -> Result<Runtime> {
-        anyhow::bail!("this provider does not support temporary agents")
-    }
-
     async fn approval_response(
         &self,
         _agent: exoharness::AgentId,
@@ -39,10 +35,6 @@ pub trait Provider: AgentBackend {
         _body: &exo_managed_agents::http::protocol::ApprovalResponseBody,
     ) -> Result<exoharness::EventId> {
         anyhow::bail!("this provider does not support tool approvals")
-    }
-
-    async fn cleanup(&self) -> Result<()> {
-        Ok(())
     }
 }
 
@@ -164,30 +156,8 @@ impl Provider for LocalProvider {
         .await
     }
 
-    fn temporary(&self, state: Arc<dyn ExoHarness>) -> Result<Runtime> {
-        let executor = self.executor.fork(state.clone())?;
-        Ok(Runtime::new(
-            Self::new(state, executor).with_managed_agents(
-                crate::managed_agents::LocalAgentSetup {
-                    temporary: true,
-                    ..Default::default()
-                },
-            ),
-            None,
-        ))
-    }
-
     fn harness(&self) -> &dyn Harness<ProviderTurn> {
         self
-    }
-
-    async fn cleanup(&self) -> Result<()> {
-        if self.managed.temporary {
-            for agent in self.state.list_agents().await? {
-                self.state.delete_agent(&agent.record().id).await?;
-            }
-        }
-        Ok(())
     }
 }
 

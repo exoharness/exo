@@ -19,11 +19,24 @@ pub(crate) const MAX_DELIVERY_ATTEMPTS: u32 = 3;
 #[derive(Debug, Clone)]
 pub struct AdapterStore {
     root: PathBuf,
+    agent_id: Option<String>,
 }
 
 impl AdapterStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            agent_id: None,
+        }
+    }
+
+    pub fn for_agent(mut self, agent_id: String) -> Self {
+        self.agent_id = Some(agent_id);
+        self
+    }
+
+    pub fn includes_agent(&self, agent_id: &str) -> bool {
+        self.agent_id.as_deref().is_none_or(|id| id == agent_id)
     }
 
     pub fn root(&self) -> &Path {
@@ -59,6 +72,7 @@ impl AdapterStore {
                 .with_context(|| format!("failed to read adapter {}", path.display()))?;
             adapters.push(serde_json::from_slice::<AdapterRecord>(&bytes)?);
         }
+        adapters.retain(|adapter| self.includes_agent(&adapter.agent_id));
         adapters.sort_by(|left, right| left.name.cmp(&right.name).then(left.id.cmp(&right.id)));
         Ok(adapters)
     }

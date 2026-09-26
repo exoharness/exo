@@ -12,9 +12,21 @@ own a sandbox.
 ## Create an agent and conversation
 
 ```bash
-exo agent create --model gpt-5.5 --sandbox docker "Sandbox Example"
+cat > sandbox-example.md <<'EOF'
+---
+name: "Sandbox Example"
+harness: basic
+config:
+  model: gpt-5.5
+sandbox:
+  provider: docker
+  enable_networking: true
+---
+Help the user with their task.
+EOF
+exo agent create sandbox-example --file sandbox-example.md
 exo thread create sandbox-example "Local Dev"
-exo chat --agent sandbox-example --thread local-dev
+exo agent run --agent sandbox-example --thread local-dev
 ```
 
 The agent can now execute commands in the conversation's sandbox via the
@@ -39,8 +51,8 @@ Remote sandbox providers (Daytona, E2B, Vercel, Sprites, AWS AgentCore) are
 configured as *provider bindings*:
 
 ```bash
-exo secret create daytona --env DAYTONA_API_KEY
-exo sandbox-provider create --sandbox daytona --secret daytona
+exo vault secret create global daytona --token-env DAYTONA_API_KEY
+exo sandbox provider create --sandbox daytona --secret daytona
 ```
 
 ## Sandbox scope and image

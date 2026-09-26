@@ -17,7 +17,6 @@ pub struct LocalAgentSetup {
     pub agent: Option<AgentConfig>,
     pub model: Option<String>,
     pub thread: ConversationConfig,
-    pub temporary: bool,
 }
 
 #[async_trait]
@@ -38,14 +37,6 @@ impl AgentBackend for LocalProvider {
         config.instructions = vec![crate::harness_helpers::system_message(
             &definition.system_prompt(),
         )];
-        if self.managed.temporary {
-            config.model = resolve_model(
-                self.state.as_ref(),
-                self.managed.model.as_deref(),
-                &config.model,
-            )
-            .await?;
-        }
         crate::harness_config::store_agent_config(agent.as_ref(), &config).await
     }
 
@@ -119,9 +110,7 @@ impl AgentBackend for LocalProvider {
             .configure_managed_thread(agent, thread, &agent_config, &config)
             .await?;
         crate::harness_config::store_conversation_config(thread, &config).await?;
-        if (self.managed.model.is_some() && !(created && self.managed.temporary))
-            || model != preferred
-        {
+        if self.managed.model.is_some() || model != preferred {
             crate::put_conversation_model_override(
                 thread,
                 Some(ConversationModelConfig {
@@ -186,7 +175,7 @@ async fn resolve_model(
             "model is not registered: {selected}; register it with `exo model create {selected} --secret <secret>`"
         );
     }
-    let model = registered.first().context("no model is registered; run `exo secret create openai --env OPENAI_API_KEY` and `exo model create gpt-5.6-sol --secret openai`")?;
+    let model = registered.first().context("no model is registered; run `exo vault secret create global openai --token-env OPENAI_API_KEY` and `exo model create gpt-5.6-sol --secret openai`")?;
     tracing::warn!(
         preferred,
         model,

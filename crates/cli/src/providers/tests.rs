@@ -34,11 +34,13 @@ async fn http_runtime_does_not_initialize_local_state_or_resolve_remote_harnesse
     let root = temp.path().join("local-state");
     let cli = crate::Cli::try_parse_from([
         "exo",
+        "agent",
         "run",
         "--root",
         root.to_str().unwrap(),
         "--agent-file",
         "remote-agent.md",
+        "--prompt",
         "hello",
     ])?;
     let definition = exo_managed_agents::AgentDefinition::parse(
@@ -59,16 +61,17 @@ async fn http_runtime_does_not_initialize_local_state_or_resolve_remote_harnesse
 #[test]
 fn http_commands_reject_local_execution_options() -> Result<()> {
     for args in [
-        vec!["exo", "chat", "--agent", "support", "--tui"],
+        vec!["exo", "agent", "run", "--agent", "support", "--tui"],
         vec![
             "exo",
-            "chat",
+            "agent",
+            "run",
             "--agent",
             "support",
             "--sandbox",
             "local-process",
         ],
-        vec!["exo", "agent", "create", "support", "--model", "test-model"],
+        vec!["exo", "agent", "serve", "support"],
     ] {
         let cli = crate::Cli::try_parse_from(args)?;
         assert!(validate_http_command(&cli.command).is_err());
@@ -389,7 +392,7 @@ fn local_commands_resolve_agent_and_thread_aliases() -> Result<()> {
         thread,
     )?;
     for args in [
-        "agent update agent --model gpt-5-mini",
+        "agent update agent --file agent.md",
         "agent mount create agent /tmp /work",
         "thread fork agent thread",
         "thread update agent thread --model gpt-5-mini",
