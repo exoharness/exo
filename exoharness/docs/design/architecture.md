@@ -79,12 +79,29 @@ The root handle manages global state:
 - `list_bindings() -> Vec<BindingMetadata>`
 - `put_binding(Binding) -> BindingId`
 - `get_binding(id) -> Option<Binding>`
+- `list_vaults() -> Vec<VaultHandle>`
+- `get_vault(id) -> Option<VaultHandle>`
+- `create_vault(name) -> VaultHandle`
+- `delete_vault(id)`
+
+Global bindings act as defaults. Vault access composes from global to agent to
+thread through `VaultContext`. Creating a vault does not attach it to every agent.
+
+### Vault: `VaultHandle`
+
+A vault owns its secrets and authorizes their use:
+
+- `record() -> VaultRecord`
 - `list_secrets() -> Vec<SecretMetadata>`
 - `put_secret(PutSecretRequest) -> SecretId`
 - `get_secret(id) -> Option<Secret>`
+- `update_secret(id, Secret) -> SecretMetadata`
+- `delete_secret(id)`
+- `resolve_secret(id, target) -> ResolvedSecret`
 
-Global bindings and secrets act as defaults. Agent and conversation scopes can
-override them by name.
+Agent and thread records store their attached vault ids. Bindings name a specific
+vault and secret. MCP selects from the accessible vaults and saves those references
+on the thread. Secret metadata includes a destination and revision for rotation.
 
 ### Agent: `AgentHandle`
 
@@ -96,7 +113,7 @@ An agent handle exposes conversations and agent-scoped resources:
 - `new_conversation(NewConversationRequest) -> ConversationHandle`
 - `delete_conversation(id) -> bool`
 - `list_bindings()`, `put_binding()`, `get_binding()`
-- `list_secrets()`, `put_secret()`, `get_secret()`
+- `list_vaults()`, `get_vault(id)`
 - `list_artifacts()`, `write_artifact()`, `read_artifact()`
 
 Agent-scoped artifacts are useful for configuration and data that should live
@@ -123,7 +140,7 @@ environment:
 - `stop_sandbox(sandbox_id)`
 - `run_in_sandbox(RunInSandboxRequest) -> SandboxProcess`
 - `list_bindings()`, `put_binding()`, `get_binding()`
-- `list_secrets()`, `put_secret()`, `get_secret()`
+- `list_vaults()`, `get_vault(id)`
 
 Conversation-level `add_events()` is append-only. Callers that need to avoid
 overlapping agent runs should serialize through the executor-level `send()` APIs
@@ -318,17 +335,22 @@ Every server message is:
 The protocol request variants mirror the core handles:
 
 - Root: `list_agents`, `get_agent`, `new_agent`, `delete_agent`,
-  `list_bindings`, `put_binding`, `get_binding`, `list_secrets`, `put_secret`,
-  `get_secret`.
+  `list_bindings`, `put_binding`, `get_binding`, `list_vaults`,
+  `get_vault`, `create_vault`, `delete_vault`.
+- Vault: `vault_list_secrets`, `vault_put_secret`, `vault_get_secret`,
+  `vault_update_secret`, `vault_delete_secret`, `vault_resolve_secret`.
 - Agent: `list_conversations`, `get_conversation`, `new_conversation`,
   `delete_conversation`, `agent_list_artifacts`, `agent_read_artifact`,
-  `agent_write_artifact`, agent bindings, agent secrets.
+  `agent_write_artifact`, agent bindings.
 - Conversation: `conversation_start_session`, `conversation_end_session`,
   `conversation_get_events`, `conversation_get_event`,
   `conversation_add_events`, `conversation_fork`,
   `conversation_list_artifacts`, `conversation_read_artifact`,
-  `conversation_write_artifact`, conversation bindings, conversation secrets.
+  `conversation_write_artifact`, conversation bindings.
 - Turn: `turn_add_events`, `turn_write_artifact`, `turn_finish`.
+
+Vault requests carry a `ResourceScope`: global, agent, or thread. Sandbox requests
+use the same scope; snapshot and start operations also accept turn attribution.
 
 The protocol addresses turns by durable ids. TypeScript code receives the active
 turn's agent, conversation, session, and turn ids, and subsequent turn requests

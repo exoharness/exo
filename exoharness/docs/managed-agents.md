@@ -137,12 +137,6 @@ exo run --agent-file exoharness/examples/managed-agents/repo-analyst.md \
   "Use DeepWiki to explain how tokio-rs/tokio schedules tasks."
 ```
 
-For authenticated servers, use `--mcp-token-env SERVER=ENV_VAR`, for example
-`exo chat --agent-file agent.md --mcp-token-env tickets=TICKETS_TOKEN`.
-Exo reads the named variable from `--env-file` or the shell environment. The token
-stays in the host MCP client for this CLI session; it is not saved in the agent
-or forwarded to the TypeScript harness process.
-
 The client uses Streamable HTTP, initializes each server, and discovers its tools
 when the CLI starts. All tools are available unless the server entry specifies
 `allowed_tools` or `blocked_tools`, using the original tool names. An empty
@@ -153,33 +147,88 @@ Tools run without an approval prompt. Names are scoped to their
 server, such as `exo_mcp__deepwiki__read_wiki_structure`. Thread events also record
 the mapping to the original server and tool names.
 
-## State
-
-State defaults to `.exo/exoharness` under the current directory. Use an absolute
-`--root` to share it across working directories:
-
-```bash
-exo --root ~/.exo-managed chat --agent support --thread <thread-slug>
-```
-
-Use the same root for setup, agent creation, and chat. Agent records, resolved
-configuration, the original Markdown (`managed-agents/agent.md`), and thread events
-live in Exo's storage. Resume loads them from there. The existing `conversation`
-commands still work for inspecting events and managing threads.
-
-## Runtime
-
-`executor::harness::Harness` provides the execution interface: submit a turn,
-cancel it, and receive events through a sink. Submission returns when accepted.
-`TurnFinished` reports the result; `ExecutionStopped` releases the thread for its
-next turn. Dropping a response stream cancels execution, and CLI shutdown waits
-for cleanup and the final thread events to be saved.
-
-The existing Basic, RLM, and TypeScript executors run through an adapter to this
-interface. Agent and thread storage still live behind Exo's existing storage
-facade (`executor::Harness`). The execution interface doesn't choose a backend.
-
 Codex uses the pinned 0.153.4 app-server inside the sandbox. It resumes its native
 thread after a restart when that state is available. Otherwise, it replays Exo's
 events with structured tool calls and results, compacting between batches instead
 of truncating history. The Markdown body supplies developer instructions while preserving Codex's built-in instructions.
+
+## Vaults
+
+For authenticated MCP servers, save a credential once and select its vault when
+starting a thread. For example, with `GITHUB_TOKEN` already set:
+
+```bash
+exo vault create personal
+exo vault secret create personal github \
+  --mcp-server-url https://api.githubcopilot.com/mcp/ \
+  --token-env GITHUB_TOKEN
+unset GITHUB_TOKEN
+
+exo chat --agent-file exoharness/examples/managed-agents/github-analyst.md \
+  --vault personal
+```
+
+`--token-env` reads a variable from the process environment or `--env-file` once.
+It accepts a variable name, not a token. Subsequent chats don't need that variable.
+The credential URL must match the agent's MCP URL, including its path, trailing slash, and query; names are labels. A vault allows one credential per destination. Servers without a matching
+credential connect unauthenticated.
+
+```bash
+exo vault list
+exo vault get personal
+exo vault secret list personal
+exo vault secret get personal github
+exo vault secret update personal github --token-env NEW_GITHUB_TOKEN
+exo vault secret delete personal github
+```
+
+List/get return metadata only. Update preserves the credential id and increments
+its revision. Running MCP clients check the credential before tool calls and
+reconnect after rotation. Removing a credential makes later calls fail, even if
+a new credential is added with the same name or URL. An in-flight call can finish.
+`exo vault delete personal` deletes the vault and its credentials.
+
+Vault access composes from global to agent to thread. Agent and thread records
+store their attached vault ids. Creating a named vault doesn't grant it to every
+agent. `--vault personal` attaches that vault to a new thread; repeat `--vault`
+to attach more than one. Later attachments take precedence when selecting an MCP
+credential for the same destination.
+
+Bindings identify both the vault and secret. A personal MCP credential cannot
+shadow a model credential with the same name. Thread attachments and selected MCP
+secret references survive resume and fork:
+
+```bash
+exo chat --agent support --vault personal
+exo chat --agent support --thread <thread-slug>
+```
+
+Changing the attachments or MCP destinations requires a new thread. Revoked secrets
+fail instead of switching to another account. Temporary chats retain vault handles;
+they do not copy secret values into their agent or thread records.
+
+Model registration and the existing `exo secret` commands default to the global vault:
+
+```bash
+exo vault secret create global openai --token-env OPENAI_API_KEY
+exo model create gpt-5.6-sol --secret openai
+```
+
+All local secrets live in the harness's encrypted vault store under
+`<root>/exoharness/vaults`. The master key uses the configured Exo key provider.
+On first open, existing global secrets move into the global vault. Existing agent
+and thread secrets move into vaults attached at their original scopes. Secret ids
+are preserved, and bindings are rewritten to include the vault id. Source files
+remain until those changes are saved, so an interrupted migration can be retried.
+
+Vault-backed chat requires an isolated sandbox. Local-process execution and mounts
+that expose the vault store or its key are rejected. Harness implementations remain
+trusted code.
+
+`VaultContext` provides lookup and listing on the harness, agent, and thread.
+`ExoHarness` also creates and deletes vaults. `ResourceScope` is shared with
+sandboxes; vaults have global, agent, and thread contexts. `VaultHandle` owns
+`list_secrets`, `put_secret`, `get_secret`, `update_secret`, and `delete_secret`.
+`SecretMetadata` includes an optional destination and a revision. The MCP client
+uses `VaultHandle::resolve_secret` to check the destination and read the current
+value together.

@@ -5,7 +5,8 @@ use tokio::time::{self, Duration};
 
 use super::HTTP_EXOHARNESS_TRACING_TARGET;
 use super::client::HttpExoHarness;
-use crate::protocol::{Request, Response, SandboxScope};
+use crate::ResourceScope;
+use crate::protocol::{Request, Response};
 use crate::{
     CloseSandboxProcessInputRequest, Result, SandboxId, SandboxProcess, SandboxProcessEvent,
     SandboxProcessEventQuery, SandboxProcessId, SandboxProcessParts, SandboxProcessStatus,
@@ -26,7 +27,7 @@ impl SandboxProcess for LiveHttpSandboxProcess {
 
 pub(super) fn spawn_http_sandbox_process_event_poller(
     harness: HttpExoHarness,
-    scope: SandboxScope,
+    scope: ResourceScope,
     sandbox_id: SandboxId,
     process_id: SandboxProcessId,
     mut stdout: tokio::io::DuplexStream,
@@ -124,7 +125,7 @@ pub(super) fn spawn_http_sandbox_process_event_poller(
 
 pub(super) fn spawn_http_sandbox_process_stdin_forwarder(
     harness: HttpExoHarness,
-    scope: SandboxScope,
+    scope: ResourceScope,
     sandbox_id: SandboxId,
     process_id: SandboxProcessId,
     mut stdin: tokio::io::DuplexStream,

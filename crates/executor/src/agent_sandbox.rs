@@ -186,6 +186,7 @@ mod tests {
             .unwrap();
         exoharness
             .new_agent(NewAgentRequest {
+                vaults: vec![],
                 slug: "agent".to_string(),
                 name: "Agent".to_string(),
             })

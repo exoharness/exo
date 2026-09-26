@@ -77,6 +77,7 @@ pub struct CreateAgentRequest {
 
 #[derive(Debug, Clone, Default)]
 pub struct CreateConversationRequest {
+    pub vaults: Vec<exoharness::vault::VaultId>,
     pub slug: Option<String>,
     pub name: Option<String>,
     pub sandbox_image: Option<String>,

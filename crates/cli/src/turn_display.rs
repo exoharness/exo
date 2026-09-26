@@ -341,6 +341,7 @@ mod tests {
             .new_agent(NewAgentRequest {
                 name: "Usage test".into(),
                 slug: "usage-test".into(),
+                vaults: vec![],
             })
             .await?;
         let thread = agent.new_thread(Default::default()).await?;

@@ -13,9 +13,11 @@ use super::process::{
     LiveHttpSandboxProcess, spawn_http_sandbox_process_event_poller,
     spawn_http_sandbox_process_stdin_forwarder,
 };
+use crate::ResourceScope;
 use crate::protocol::{
-    ClientMessage, ConversationHandleInfo, Request, Response, SandboxScope, ServerMessage,
+    ClientMessage, ConversationHandleInfo, Request, Response, ServerMessage, SnapshotScope,
 };
+use crate::vault::{ResolvedSecret, SecretTarget, VaultContext, VaultHandle, VaultId, VaultRecord};
 use crate::{
     AddEventsRequest, AddEventsResult, AgentHandle, AgentId, AgentRecord, Artifact,
     ArtifactVersion, AttachSandboxRequest, BeginTurnRequest, Binding, BindingId, BindingRecord,
@@ -164,24 +166,21 @@ impl ExoHarness for HttpExoHarness {
         }
     }
 
-    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
-        match self.request(Request::ListSecrets).await? {
-            Response::Secrets { secrets } => Ok(secrets),
-            response => unexpected_response(response, "secrets"),
+    async fn create_vault(&self, name: &str) -> Result<Arc<dyn VaultHandle>> {
+        match self
+            .request(Request::CreateVault { name: name.into() })
+            .await?
+        {
+            Response::Vault {
+                vault: Some(record),
+            } => Ok(self.vault_handle(ResourceScope::Global, record)),
+            response => unexpected_response(response, "vault"),
         }
     }
-
-    async fn put_secret(&self, request: PutSecretRequest) -> Result<SecretId> {
-        match self.request(Request::PutSecret { request }).await? {
-            Response::SecretId { secret_id } => Ok(secret_id),
-            response => unexpected_response(response, "secret_id"),
-        }
-    }
-
-    async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>> {
-        match self.request(Request::GetSecret { secret_id: *id }).await? {
-            Response::Secret { secret } => Ok(secret),
-            response => unexpected_response(response, "secret"),
+    async fn delete_vault(&self, id: &VaultId) -> Result<()> {
+        match self.request(Request::DeleteVault { vault_id: *id }).await? {
+            Response::Bool { value: true } => Ok(()),
+            response => unexpected_response(response, "true"),
         }
     }
 }
@@ -196,8 +195,8 @@ impl HttpAgentHandle {
         Self { harness, record }
     }
 
-    fn sandbox_scope(&self) -> SandboxScope {
-        SandboxScope::Agent {
+    fn sandbox_scope(&self) -> ResourceScope {
+        ResourceScope::Agent {
             agent_id: self.record.id,
         }
     }
@@ -205,7 +204,7 @@ impl HttpAgentHandle {
 
 async fn http_create_sandbox(
     harness: &HttpExoHarness,
-    scope: SandboxScope,
+    scope: ResourceScope,
     request: CreateSandboxRequest,
 ) -> Result<SandboxId> {
     match harness
@@ -219,7 +218,7 @@ async fn http_create_sandbox(
 
 async fn http_fork_sandbox(
     harness: &HttpExoHarness,
-    scope: SandboxScope,
+    scope: ResourceScope,
     request: ForkSandboxRequest,
 ) -> Result<SandboxId> {
     match harness
@@ -233,7 +232,7 @@ async fn http_fork_sandbox(
 
 async fn http_restore_sandbox(
     harness: &HttpExoHarness,
-    scope: SandboxScope,
+    scope: ResourceScope,
     request: RestoreSandboxRequest,
 ) -> Result<SandboxId> {
     match harness
@@ -247,7 +246,7 @@ async fn http_restore_sandbox(
 
 async fn http_list_sandboxes(
     harness: &HttpExoHarness,
-    scope: SandboxScope,
+    scope: ResourceScope,
 ) -> Result<Vec<SandboxRecord>> {
     match harness.request(Request::ListSandboxes { scope }).await? {
         Response::Sandboxes { sandboxes } => Ok(sandboxes),
@@ -257,7 +256,7 @@ async fn http_list_sandboxes(
 
 async fn http_terminate_sandbox(
     harness: &HttpExoHarness,
-    scope: SandboxScope,
+    scope: ResourceScope,
     sandbox_id: SandboxId,
 ) -> Result<()> {
     match harness
@@ -271,7 +270,7 @@ async fn http_terminate_sandbox(
 
 async fn http_attach_sandbox(
     harness: &HttpExoHarness,
-    scope: SandboxScope,
+    scope: ResourceScope,
     request: AttachSandboxRequest,
 ) -> Result<SandboxId> {
     match harness
@@ -285,7 +284,7 @@ async fn http_attach_sandbox(
 
 async fn http_detach_sandbox(
     harness: &HttpExoHarness,
-    scope: SandboxScope,
+    scope: ResourceScope,
     sandbox_id: SandboxId,
 ) -> Result<SandboxAttachment> {
     match harness
@@ -299,7 +298,7 @@ async fn http_detach_sandbox(
 
 async fn http_snapshot_sandbox(
     harness: &HttpExoHarness,
-    scope: SandboxScope,
+    scope: SnapshotScope,
     id: SandboxId,
 ) -> Result<SnapshotId> {
     match harness
@@ -316,7 +315,7 @@ async fn http_snapshot_sandbox(
 
 async fn http_start_sandbox(
     harness: &HttpExoHarness,
-    scope: SandboxScope,
+    scope: SnapshotScope,
     request: StartSandboxRequest,
 ) -> Result<()> {
     match harness
@@ -330,7 +329,7 @@ async fn http_start_sandbox(
 
 async fn http_stop_sandbox(
     harness: &HttpExoHarness,
-    scope: SandboxScope,
+    scope: ResourceScope,
     id: SandboxId,
 ) -> Result<()> {
     match harness
@@ -347,7 +346,7 @@ async fn http_stop_sandbox(
 
 async fn http_start_sandbox_process(
     harness: &HttpExoHarness,
-    scope: SandboxScope,
+    scope: ResourceScope,
     request: StartSandboxProcessRequest,
 ) -> Result<SandboxProcessRecord> {
     match harness
@@ -361,7 +360,7 @@ async fn http_start_sandbox_process(
 
 async fn http_write_sandbox_process_input(
     harness: &HttpExoHarness,
-    scope: SandboxScope,
+    scope: ResourceScope,
     request: WriteSandboxProcessInputRequest,
 ) -> Result<()> {
     match harness
@@ -375,7 +374,7 @@ async fn http_write_sandbox_process_input(
 
 async fn http_close_sandbox_process_input(
     harness: &HttpExoHarness,
-    scope: SandboxScope,
+    scope: ResourceScope,
     request: CloseSandboxProcessInputRequest,
 ) -> Result<()> {
     match harness
@@ -389,7 +388,7 @@ async fn http_close_sandbox_process_input(
 
 async fn http_get_sandbox_process_events(
     harness: &HttpExoHarness,
-    scope: SandboxScope,
+    scope: ResourceScope,
     query: SandboxProcessEventQuery,
 ) -> Result<GetSandboxProcessEventsResult> {
     match harness
@@ -403,7 +402,7 @@ async fn http_get_sandbox_process_events(
 
 async fn http_wait_sandbox_process(
     harness: &HttpExoHarness,
-    scope: SandboxScope,
+    scope: ResourceScope,
     request: WaitSandboxProcessRequest,
 ) -> Result<SandboxProcessStatus> {
     match harness
@@ -417,7 +416,7 @@ async fn http_wait_sandbox_process(
 
 async fn http_cancel_sandbox_process(
     harness: &HttpExoHarness,
-    scope: SandboxScope,
+    scope: ResourceScope,
     request: CancelSandboxProcessRequest,
 ) -> Result<SandboxProcessStatus> {
     match harness
@@ -431,7 +430,7 @@ async fn http_cancel_sandbox_process(
 
 async fn http_run_in_sandbox(
     harness: &HttpExoHarness,
-    scope: SandboxScope,
+    scope: ResourceScope,
     request: RunInSandboxRequest,
 ) -> Result<Box<dyn SandboxProcess>> {
     let sandbox_id = request.id;
@@ -622,47 +621,6 @@ impl AgentHandle for HttpAgentHandle {
         }
     }
 
-    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
-        match self
-            .harness
-            .request(Request::AgentListSecrets {
-                agent_id: self.record.id,
-            })
-            .await?
-        {
-            Response::Secrets { secrets } => Ok(secrets),
-            response => unexpected_response(response, "secrets"),
-        }
-    }
-
-    async fn put_secret(&self, request: PutSecretRequest) -> Result<SecretId> {
-        match self
-            .harness
-            .request(Request::AgentPutSecret {
-                agent_id: self.record.id,
-                request,
-            })
-            .await?
-        {
-            Response::SecretId { secret_id } => Ok(secret_id),
-            response => unexpected_response(response, "secret_id"),
-        }
-    }
-
-    async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>> {
-        match self
-            .harness
-            .request(Request::AgentGetSecret {
-                agent_id: self.record.id,
-                secret_id: *id,
-            })
-            .await?
-        {
-            Response::Secret { secret } => Ok(secret),
-            response => unexpected_response(response, "secret"),
-        }
-    }
-
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion> {
         match self
             .harness
@@ -708,11 +666,25 @@ impl AgentHandle for HttpAgentHandle {
 #[async_trait]
 impl SnapshotHandle for HttpAgentHandle {
     async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
-        http_snapshot_sandbox(&self.harness, self.sandbox_scope(), id).await
+        http_snapshot_sandbox(
+            &self.harness,
+            SnapshotScope::Resource {
+                scope: self.sandbox_scope(),
+            },
+            id,
+        )
+        .await
     }
 
     async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
-        http_start_sandbox(&self.harness, self.sandbox_scope(), request).await
+        http_start_sandbox(
+            &self.harness,
+            SnapshotScope::Resource {
+                scope: self.sandbox_scope(),
+            },
+            request,
+        )
+        .await
     }
 }
 
@@ -821,10 +793,10 @@ impl HttpConversationHandle {
         }
     }
 
-    fn sandbox_scope(&self) -> SandboxScope {
-        SandboxScope::Conversation {
+    fn sandbox_scope(&self) -> ResourceScope {
+        ResourceScope::Thread {
             agent_id: self.agent_id,
-            conversation_id: self.record.id,
+            thread_id: self.record.id,
         }
     }
 }
@@ -1050,60 +1022,30 @@ impl ConversationHandle for HttpConversationHandle {
             response => unexpected_response(response, "binding"),
         }
     }
-
-    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
-        match self
-            .harness
-            .request(Request::ConversationListSecrets {
-                agent_id: self.agent_id,
-                conversation_id: self.record.id,
-            })
-            .await?
-        {
-            Response::Secrets { secrets } => Ok(secrets),
-            response => unexpected_response(response, "secrets"),
-        }
-    }
-
-    async fn put_secret(&self, request: PutSecretRequest) -> Result<SecretId> {
-        match self
-            .harness
-            .request(Request::ConversationPutSecret {
-                agent_id: self.agent_id,
-                conversation_id: self.record.id,
-                request,
-            })
-            .await?
-        {
-            Response::SecretId { secret_id } => Ok(secret_id),
-            response => unexpected_response(response, "secret_id"),
-        }
-    }
-
-    async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>> {
-        match self
-            .harness
-            .request(Request::ConversationGetSecret {
-                agent_id: self.agent_id,
-                conversation_id: self.record.id,
-                secret_id: *id,
-            })
-            .await?
-        {
-            Response::Secret { secret } => Ok(secret),
-            response => unexpected_response(response, "secret"),
-        }
-    }
 }
 
 #[async_trait]
 impl SnapshotHandle for HttpConversationHandle {
     async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
-        http_snapshot_sandbox(&self.harness, self.sandbox_scope(), id).await
+        http_snapshot_sandbox(
+            &self.harness,
+            SnapshotScope::Resource {
+                scope: self.sandbox_scope(),
+            },
+            id,
+        )
+        .await
     }
 
     async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
-        http_start_sandbox(&self.harness, self.sandbox_scope(), request).await
+        http_start_sandbox(
+            &self.harness,
+            SnapshotScope::Resource {
+                scope: self.sandbox_scope(),
+            },
+            request,
+        )
+        .await
     }
 }
 
@@ -1211,10 +1153,10 @@ impl HttpTurnHandle {
         }
     }
 
-    fn sandbox_scope(&self) -> SandboxScope {
-        SandboxScope::Turn {
+    fn sandbox_scope(&self) -> SnapshotScope {
+        SnapshotScope::Turn {
             agent_id: self.agent_id,
-            conversation_id: self.conversation_id,
+            thread_id: self.conversation_id,
             session_id: self.record.session_id,
             turn_id: self.record.id,
         }
@@ -1321,4 +1263,194 @@ fn unexpected_response<T>(response: Response, expected: &str) -> Result<T> {
 
 fn unsupported<T>(operation: &str) -> Result<T> {
     bail!("HTTP exoharness does not support {operation} yet")
+}
+
+impl HttpExoHarness {
+    fn vault_handle(&self, scope: ResourceScope, record: VaultRecord) -> Arc<dyn VaultHandle> {
+        Arc::new(HttpVaultHandle {
+            harness: self.clone(),
+            record,
+            scope,
+        })
+    }
+    async fn get_scoped_vault(
+        &self,
+        scope: ResourceScope,
+        vault_id: VaultId,
+    ) -> Result<Option<Arc<dyn VaultHandle>>> {
+        match self.request(Request::GetVault { scope, vault_id }).await? {
+            Response::Vault { vault } => Ok(vault.map(|record| self.vault_handle(scope, record))),
+            response => unexpected_response(response, "vault"),
+        }
+    }
+}
+
+struct HttpVaultHandle {
+    scope: ResourceScope,
+    harness: HttpExoHarness,
+    record: VaultRecord,
+}
+
+#[async_trait]
+impl VaultHandle for HttpVaultHandle {
+    fn record(&self) -> &VaultRecord {
+        &self.record
+    }
+    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>> {
+        match self
+            .harness
+            .request(Request::VaultListSecrets {
+                scope: self.scope,
+                vault_id: self.record.id,
+            })
+            .await?
+        {
+            Response::Secrets { secrets } => Ok(secrets),
+            response => unexpected_response(response, "secrets"),
+        }
+    }
+    async fn put_secret(&self, request: PutSecretRequest) -> Result<SecretId> {
+        match self
+            .harness
+            .request(Request::VaultPutSecret {
+                scope: self.scope,
+                vault_id: self.record.id,
+                request,
+            })
+            .await?
+        {
+            Response::SecretId { secret_id } => Ok(secret_id),
+            response => unexpected_response(response, "secret_id"),
+        }
+    }
+    async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>> {
+        match self
+            .harness
+            .request(Request::VaultGetSecret {
+                scope: self.scope,
+                vault_id: self.record.id,
+                secret_id: *id,
+            })
+            .await?
+        {
+            Response::Secret { secret } => Ok(secret),
+            response => unexpected_response(response, "secret"),
+        }
+    }
+    async fn update_secret(&self, id: &SecretId, secret: Secret) -> Result<SecretMetadata> {
+        match self
+            .harness
+            .request(Request::VaultUpdateSecret {
+                scope: self.scope,
+                vault_id: self.record.id,
+                secret_id: *id,
+                secret,
+            })
+            .await?
+        {
+            Response::SecretMetadata { metadata } => Ok(metadata),
+            response => unexpected_response(response, "secret_metadata"),
+        }
+    }
+    async fn delete_secret(&self, id: &SecretId) -> Result<()> {
+        match self
+            .harness
+            .request(Request::VaultDeleteSecret {
+                scope: self.scope,
+                vault_id: self.record.id,
+                secret_id: *id,
+            })
+            .await?
+        {
+            Response::Bool { value: true } => Ok(()),
+            response => unexpected_response(response, "true"),
+        }
+    }
+    async fn refresh_secret(
+        &self,
+        id: &SecretId,
+        target: &SecretTarget,
+        rejected_revision: u64,
+    ) -> Result<ResolvedSecret> {
+        match self
+            .harness
+            .request(Request::VaultRefreshSecret {
+                scope: self.scope,
+                vault_id: self.record.id,
+                secret_id: *id,
+                target: target.clone(),
+                rejected_revision,
+            })
+            .await?
+        {
+            Response::ResolvedSecret { revision, secret } => {
+                Ok(ResolvedSecret { revision, secret })
+            }
+            response => unexpected_response(response, "resolved_secret"),
+        }
+    }
+
+    async fn resolve_secret(&self, id: &SecretId, target: &SecretTarget) -> Result<ResolvedSecret> {
+        match self
+            .harness
+            .request(Request::VaultResolveSecret {
+                scope: self.scope,
+                vault_id: self.record.id,
+                secret_id: *id,
+                target: target.clone(),
+            })
+            .await?
+        {
+            Response::ResolvedSecret { revision, secret } => {
+                Ok(ResolvedSecret { revision, secret })
+            }
+            response => unexpected_response(response, "resolved_secret"),
+        }
+    }
+}
+
+impl HttpExoHarness {
+    async fn list_scoped_vaults(&self, scope: ResourceScope) -> Result<Vec<Arc<dyn VaultHandle>>> {
+        match self.request(Request::ListVaults { scope }).await? {
+            Response::Vaults { vaults } => Ok(vaults
+                .into_iter()
+                .map(|record| self.vault_handle(scope, record))
+                .collect()),
+            response => unexpected_response(response, "vaults"),
+        }
+    }
+}
+
+#[async_trait]
+impl VaultContext for HttpExoHarness {
+    async fn list_vaults(&self) -> Result<Vec<Arc<dyn VaultHandle>>> {
+        self.list_scoped_vaults(ResourceScope::Global).await
+    }
+    async fn get_vault(&self, id: &VaultId) -> Result<Option<Arc<dyn VaultHandle>>> {
+        self.get_scoped_vault(ResourceScope::Global, *id).await
+    }
+}
+
+#[async_trait]
+impl VaultContext for HttpAgentHandle {
+    async fn list_vaults(&self) -> Result<Vec<Arc<dyn VaultHandle>>> {
+        self.harness.list_scoped_vaults(self.sandbox_scope()).await
+    }
+    async fn get_vault(&self, id: &VaultId) -> Result<Option<Arc<dyn VaultHandle>>> {
+        self.harness
+            .get_scoped_vault(self.sandbox_scope(), *id)
+            .await
+    }
+}
+
+#[async_trait]
+impl VaultContext for HttpConversationHandle {
+    async fn list_vaults(&self) -> Result<Vec<Arc<dyn VaultHandle>>> {
+        self.harness.list_scoped_vaults(self.sandbox_scope()).await
+    }
+    async fn get_vault(&self, id: &VaultId) -> Result<Option<Arc<dyn VaultHandle>>> {
+        self.harness
+            .get_scoped_vault(self.sandbox_scope(), *id)
+            .await
+    }
 }

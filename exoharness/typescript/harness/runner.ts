@@ -33,6 +33,10 @@ import {
   type SendRequest,
   type Secret,
   type SecretMetadata,
+  type SecretTarget,
+  type Vault,
+  type VaultContext,
+  type SecretReference,
   type ToolDefinition,
   type ToolRequest,
   type ToolResult,
@@ -92,12 +96,14 @@ interface RawToolRequest {
 }
 
 interface RawAgentRecord {
+  vaults?: string[];
   id: string;
   slug: string;
   name: string;
 }
 
 interface RawConversationRecord {
+  vaults?: string[];
   id: string;
   slug: string;
   name: string;
@@ -121,25 +127,30 @@ interface RawArtifact extends RawArtifactVersion {
   contents: number[];
 }
 
+interface RawSecretReference {
+  vault_id: string;
+  secret_id: string;
+}
+
 type RawBinding =
   | {
       type: "env";
       name: string;
       env_var: string;
-      secret_id: string;
+      secret: RawSecretReference;
     }
   | {
       type: "mcp";
       name: string;
       server_url: string;
-      secret_id?: string | null;
+      secret?: RawSecretReference | null;
     }
   | {
       type: "llm";
       name: string;
       model: string;
       base_url?: string | null;
-      secret_id?: string | null;
+      secret?: RawSecretReference | null;
     };
 
 interface RawBindingRecord {
@@ -159,9 +170,27 @@ type RawSecret =
       type: "oauth";
       access_token: string;
       refresh_token?: string | null;
+      expires_at?: number | null;
+      refresh?: {
+        token_endpoint: string;
+        client_id: string;
+        resource: string | null;
+        scopes: string[];
+      } | null;
     };
 
+interface RawVaultRecord {
+  id: string;
+  name: string;
+  created_at: string;
+}
+type RawSecretTarget =
+  | { type: "mcp"; server_url: string }
+  | { type: "http"; origin: string };
+
 interface RawSecretMetadata {
+  target?: RawSecretTarget | null;
+  revision: number;
   id: string;
   type: "key" | "oauth";
   name: string;
@@ -252,21 +281,68 @@ type RawRuntimeEvent =
       message: string;
     };
 
+type RawResourceScope =
+  | { type: "global" }
+  | { type: "agent"; agent_id: string }
+  | { type: "thread"; agent_id: string; thread_id: string };
+
 type RawExoRequest =
+  | { type: "list_vaults"; scope: RawResourceScope }
+  | { type: "get_vault"; scope: RawResourceScope; vault_id: string }
+  | { type: "create_vault"; name: string }
+  | { type: "delete_vault"; vault_id: string }
+  | { type: "vault_list_secrets"; scope: RawResourceScope; vault_id: string }
+  | {
+      type: "vault_get_secret";
+      scope: RawResourceScope;
+      vault_id: string;
+      secret_id: string;
+    }
+  | {
+      type: "vault_put_secret";
+      scope: RawResourceScope;
+      vault_id: string;
+      request: { name: string; secret: RawSecret; target?: RawSecretTarget };
+    }
+  | {
+      type: "vault_update_secret";
+      scope: RawResourceScope;
+      vault_id: string;
+      secret_id: string;
+      secret: RawSecret;
+    }
+  | {
+      type: "vault_delete_secret";
+      scope: RawResourceScope;
+      vault_id: string;
+      secret_id: string;
+    }
+  | {
+      type: "vault_resolve_secret";
+      scope: RawResourceScope;
+      vault_id: string;
+      secret_id: string;
+      target: RawSecretTarget;
+    }
   | { type: "list_agents" }
   | { type: "get_agent"; agent_id: string }
-  | { type: "new_agent"; request: { slug: string; name: string } }
+  | {
+      type: "new_agent";
+      request: { slug: string; name: string; vaults?: string[] };
+    }
   | { type: "delete_agent"; agent_id: string }
   | { type: "list_bindings" }
   | { type: "get_binding"; binding_id: string }
-  | { type: "list_secrets" }
-  | { type: "get_secret"; secret_id: string }
   | { type: "list_conversations"; agent_id: string }
   | { type: "get_conversation"; agent_id: string; conversation_id: string }
   | {
       type: "new_conversation";
       agent_id: string;
-      request: { slug?: string | null; name?: string | null };
+      request: {
+        slug?: string | null;
+        name?: string | null;
+        vaults?: string[];
+      };
     }
   | { type: "delete_conversation"; agent_id: string; conversation_id: string }
   | { type: "agent_list_artifacts"; agent_id: string }
@@ -282,8 +358,6 @@ type RawExoRequest =
     }
   | { type: "agent_list_bindings"; agent_id: string }
   | { type: "agent_get_binding"; agent_id: string; binding_id: string }
-  | { type: "agent_list_secrets"; agent_id: string }
-  | { type: "agent_get_secret"; agent_id: string; secret_id: string }
   | {
       type: "conversation_start_session";
       agent_id: string;
@@ -363,17 +437,6 @@ type RawExoRequest =
       binding_id: string;
     }
   | {
-      type: "conversation_list_secrets";
-      agent_id: string;
-      conversation_id: string;
-    }
-  | {
-      type: "conversation_get_secret";
-      agent_id: string;
-      conversation_id: string;
-      secret_id: string;
-    }
-  | {
       type: "turn_add_events";
       agent_id: string;
       conversation_id: string;
@@ -412,6 +475,11 @@ type RawExoResponse =
   | { type: "artifact_version"; artifact: RawArtifactVersion }
   | { type: "bindings"; bindings: RawBindingRecord[] }
   | { type: "binding"; binding: RawBinding | null }
+  | { type: "resolved_secret"; secret: RawSecret; revision: number }
+  | { type: "vault"; vault: RawVaultRecord | null }
+  | { type: "vaults"; vaults: RawVaultRecord[] }
+  | { type: "secret_metadata"; metadata: RawSecretMetadata }
+  | { type: "secret_id"; secret_id: string }
   | { type: "secrets"; secrets: RawSecretMetadata[] }
   | { type: "secret"; secret: RawSecret | null }
   | { type: "turn"; turn: RawTurnHandleInfo }
@@ -890,6 +958,7 @@ function toRawToolRequest(request: ToolRequest): RawToolRequest {
 
 function toAgentRecord(raw: RawAgentRecord): AgentRecord {
   return {
+    vaults: raw.vaults ?? [],
     id: raw.id,
     slug: raw.slug,
     name: raw.name,
@@ -898,6 +967,7 @@ function toAgentRecord(raw: RawAgentRecord): AgentRecord {
 
 function toConversationRecord(raw: RawConversationRecord): ConversationRecord {
   return {
+    vaults: raw.vaults ?? [],
     id: raw.id,
     slug: raw.slug,
     name: raw.name,
@@ -939,13 +1009,17 @@ function toBindingRecord(raw: RawBindingRecord): BindingRecord {
   };
 }
 
+function toSecretReference(raw: RawSecretReference): SecretReference {
+  return { vaultId: raw.vault_id, secretId: raw.secret_id };
+}
+
 function toBinding(raw: RawBinding): Binding {
   if (raw.type === "env") {
     return {
       type: "env",
       name: raw.name,
       envVar: raw.env_var,
-      secretId: raw.secret_id,
+      secret: toSecretReference(raw.secret),
     };
   }
   if (raw.type === "mcp") {
@@ -953,7 +1027,7 @@ function toBinding(raw: RawBinding): Binding {
       type: "mcp",
       name: raw.name,
       serverUrl: raw.server_url,
-      secretId: raw.secret_id ?? null,
+      secret: raw.secret ? toSecretReference(raw.secret) : null,
     };
   }
   return {
@@ -961,12 +1035,17 @@ function toBinding(raw: RawBinding): Binding {
     name: raw.name,
     model: raw.model,
     baseUrl: raw.base_url ?? null,
-    secretId: raw.secret_id ?? null,
+    secret: raw.secret ? toSecretReference(raw.secret) : null,
   };
 }
 
 function toSecretMetadata(raw: RawSecretMetadata): SecretMetadata {
   return {
+    revision: raw.revision,
+    target:
+      raw.target?.type === "mcp"
+        ? { type: "mcp", serverUrl: raw.target.server_url }
+        : (raw.target ?? null),
     id: raw.id,
     type: raw.type,
     name: raw.name,
@@ -985,7 +1064,22 @@ function toSecret(raw: RawSecret): Secret {
     type: "oauth",
     accessToken: raw.access_token,
     refreshToken: raw.refresh_token ?? null,
+    expiresAt: raw.expires_at ?? null,
+    refresh: raw.refresh
+      ? {
+          tokenEndpoint: raw.refresh.token_endpoint,
+          clientId: raw.refresh.client_id,
+          resource: raw.refresh.resource,
+          scopes: raw.refresh.scopes,
+        }
+      : null,
   };
+}
+
+function toRawSecretTarget(target: SecretTarget): RawSecretTarget {
+  return target.type === "mcp"
+    ? { type: "mcp", server_url: target.serverUrl }
+    : target;
 }
 
 function decodeArtifactText(artifact: Artifact | null): string | null {
@@ -1064,12 +1158,14 @@ function toRawAddEventsRequest(request: AddEventsRequest): {
 }
 
 function toRawNewConversationRequest(request?: NewConversationRequest): {
+  vaults?: string[];
   slug?: string | null;
   name?: string | null;
 } {
   return {
     slug: request?.slug ?? null,
     name: request?.name ?? null,
+    vaults: request?.vaults,
   };
 }
 
@@ -1088,6 +1184,7 @@ function toRawForkConversationRequest(request?: ForkConversationRequest): {
 function createAgent(client: ProtocolClient, raw: RawAgentRecord): Agent {
   const record = toAgentRecord(raw);
   const agent: Agent = {
+    ...createVaultContext(client, { type: "agent", agent_id: record.id }),
     record,
 
     async listConversations(): Promise<Conversation[]> {
@@ -1235,29 +1332,6 @@ function createAgent(client: ProtocolClient, raw: RawAgentRecord): Agent {
       }
       return payload.binding ? toBinding(payload.binding) : null;
     },
-
-    async listSecrets(): Promise<SecretMetadata[]> {
-      const payload = await client.requestExo({
-        type: "agent_list_secrets",
-        agent_id: record.id,
-      });
-      if (payload.type !== "secrets") {
-        throw new Error(`expected secrets payload, got ${payload.type}`);
-      }
-      return payload.secrets.map(toSecretMetadata);
-    },
-
-    async getSecret(id: string): Promise<Secret | null> {
-      const payload = await client.requestExo({
-        type: "agent_get_secret",
-        agent_id: record.id,
-        secret_id: id,
-      });
-      if (payload.type !== "secret") {
-        throw new Error(`expected secret payload, got ${payload.type}`);
-      }
-      return payload.secret ? toSecret(payload.secret) : null;
-    },
   };
   return agent;
 }
@@ -1267,6 +1341,7 @@ function createExoHarness(
   current: ExoHarnessCurrent,
 ): ExoHarness {
   return {
+    ...createVaultContext(client, { type: "global" }),
     current,
 
     async listAgents(): Promise<Agent[]> {
@@ -1329,23 +1404,21 @@ function createExoHarness(
       return payload.binding ? toBinding(payload.binding) : null;
     },
 
-    async listSecrets(): Promise<SecretMetadata[]> {
-      const payload = await client.requestExo({ type: "list_secrets" });
-      if (payload.type !== "secrets") {
-        throw new Error(`expected secrets payload, got ${payload.type}`);
+    async createVault(name: string): Promise<Vault> {
+      const payload = await client.requestExo({ type: "create_vault", name });
+      if (payload.type !== "vault" || !payload.vault) {
+        throw new Error("server did not return the new vault");
       }
-      return payload.secrets.map(toSecretMetadata);
+      return createVault(client, payload.vault, { type: "global" });
     },
-
-    async getSecret(id: string): Promise<Secret | null> {
+    async deleteVault(id: string): Promise<void> {
       const payload = await client.requestExo({
-        type: "get_secret",
-        secret_id: id,
+        type: "delete_vault",
+        vault_id: id,
       });
-      if (payload.type !== "secret") {
-        throw new Error(`expected secret payload, got ${payload.type}`);
+      if (payload.type !== "bool" || !payload.value) {
+        throw new Error("vault deletion failed");
       }
-      return payload.secret ? toSecret(payload.secret) : null;
     },
   };
 }
@@ -1358,6 +1431,11 @@ function createConversation(
   const conversation: Conversation = {
     agentId: raw.agent_id,
     record,
+    ...createVaultContext(client, {
+      type: "thread",
+      agent_id: raw.agent_id,
+      thread_id: record.id,
+    }),
 
     async startSession(): Promise<string> {
       const payload = await client.requestExo({
@@ -1531,31 +1609,6 @@ function createConversation(
         throw new Error(`expected binding payload, got ${payload.type}`);
       }
       return payload.binding ? toBinding(payload.binding) : null;
-    },
-
-    async listSecrets(): Promise<SecretMetadata[]> {
-      const payload = await client.requestExo({
-        type: "conversation_list_secrets",
-        agent_id: raw.agent_id,
-        conversation_id: record.id,
-      });
-      if (payload.type !== "secrets") {
-        throw new Error(`expected secrets payload, got ${payload.type}`);
-      }
-      return payload.secrets.map(toSecretMetadata);
-    },
-
-    async getSecret(id: string): Promise<Secret | null> {
-      const payload = await client.requestExo({
-        type: "conversation_get_secret",
-        agent_id: raw.agent_id,
-        conversation_id: record.id,
-        secret_id: id,
-      });
-      if (payload.type !== "secret") {
-        throw new Error(`expected secret payload, got ${payload.type}`);
-      }
-      return payload.secret ? toSecret(payload.secret) : null;
     },
   };
   return conversation;
@@ -1804,3 +1857,140 @@ async function main(): Promise<void> {
 void main().catch(() => {
   process.exitCode = 1;
 });
+
+function toRawSecret(secret: Secret): RawSecret {
+  return secret.type === "key"
+    ? secret
+    : {
+        type: "oauth",
+        access_token: secret.accessToken,
+        refresh_token: secret.refreshToken,
+        expires_at: secret.expiresAt,
+        refresh: secret.refresh
+          ? {
+              token_endpoint: secret.refresh.tokenEndpoint,
+              client_id: secret.refresh.clientId,
+              resource: secret.refresh.resource,
+              scopes: secret.refresh.scopes,
+            }
+          : null,
+      };
+}
+
+function createVault(
+  client: ProtocolClient,
+  raw: RawVaultRecord,
+  scope: RawResourceScope,
+): Vault {
+  return {
+    record: { id: raw.id, name: raw.name, createdAt: raw.created_at },
+    async listSecrets() {
+      const payload = await client.requestExo({
+        type: "vault_list_secrets",
+        scope,
+        vault_id: raw.id,
+      });
+      if (payload.type !== "secrets") {
+        throw new Error(`expected secrets payload, got ${payload.type}`);
+      }
+      return payload.secrets.map(toSecretMetadata);
+    },
+    async getSecret(id) {
+      const payload = await client.requestExo({
+        type: "vault_get_secret",
+        scope,
+        vault_id: raw.id,
+        secret_id: id,
+      });
+      if (payload.type !== "secret") {
+        throw new Error(`expected secret payload, got ${payload.type}`);
+      }
+      return payload.secret ? toSecret(payload.secret) : null;
+    },
+    async putSecret(request) {
+      const payload = await client.requestExo({
+        type: "vault_put_secret",
+        scope,
+        vault_id: raw.id,
+        request: {
+          name: request.name,
+          secret: toRawSecret(request.secret),
+          target: request.target
+            ? toRawSecretTarget(request.target)
+            : undefined,
+        },
+      });
+      if (payload.type !== "secret_id") {
+        throw new Error(`expected secret_id payload, got ${payload.type}`);
+      }
+      return payload.secret_id;
+    },
+    async resolveSecret(id, target) {
+      const payload = await client.requestExo({
+        type: "vault_resolve_secret",
+        scope,
+        vault_id: raw.id,
+        secret_id: id,
+        target: toRawSecretTarget(target),
+      });
+      if (payload.type !== "resolved_secret") {
+        throw new Error(
+          `expected resolved_secret payload, got ${payload.type}`,
+        );
+      }
+      return { secret: toSecret(payload.secret), revision: payload.revision };
+    },
+    async updateSecret(id, secret) {
+      const payload = await client.requestExo({
+        type: "vault_update_secret",
+        scope,
+        vault_id: raw.id,
+        secret_id: id,
+        secret: toRawSecret(secret),
+      });
+      if (payload.type !== "secret_metadata") {
+        throw new Error(
+          `expected secret_metadata payload, got ${payload.type}`,
+        );
+      }
+      return toSecretMetadata(payload.metadata);
+    },
+    async deleteSecret(id) {
+      const payload = await client.requestExo({
+        type: "vault_delete_secret",
+        scope,
+        vault_id: raw.id,
+        secret_id: id,
+      });
+      if (payload.type !== "bool" || !payload.value) {
+        throw new Error("secret deletion failed");
+      }
+    },
+  };
+}
+
+function createVaultContext(
+  client: ProtocolClient,
+  scope: RawResourceScope,
+): VaultContext {
+  return {
+    async listVaults() {
+      const payload = await client.requestExo({ type: "list_vaults", scope });
+      if (payload.type !== "vaults") {
+        throw new Error(`expected vaults payload, got ${payload.type}`);
+      }
+      return payload.vaults.map((record) => createVault(client, record, scope));
+    },
+    async getVault(id) {
+      const payload = await client.requestExo({
+        type: "get_vault",
+        scope,
+        vault_id: id,
+      });
+      if (payload.type !== "vault") {
+        throw new Error(`expected vault payload, got ${payload.type}`);
+      }
+      return payload.vault ? createVault(client, payload.vault, scope) : null;
+    },
+  };
+}

@@ -40,6 +40,7 @@ use crate::{
 mod explicit;
 pub use explicit::{ExplicitProxy, ProxyAuthorizer, ProxySession, serve_connect_proxy};
 mod transport;
+pub mod vault;
 pub use transport::{EgressTransport, LocalEgressTransport};
 #[cfg(feature = "firecracker")]
 mod sandbox;
@@ -93,7 +94,7 @@ type ProxyBody = BoxBody<Bytes, ProxyError>;
 #[derive(Debug, Clone)]
 pub struct EgressIdentity {
     pub sandbox_id: String,
-    pub scope: Option<crate::SandboxScope>,
+    pub scope: crate::ResourceScope,
 }
 
 #[derive(Debug)]
@@ -115,6 +116,16 @@ pub trait EgressCredentialResolver: Send + Sync {
         binding_name: &str,
         destination: &EgressDestination,
     ) -> Result<String>;
+
+    async fn refresh(
+        &self,
+        _identity: &EgressIdentity,
+        _binding_name: &str,
+        _destination: &EgressDestination,
+        _rejected: &str,
+    ) -> Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 // Owns one sandbox's TLS server, placeholders, and active proxy connections.
@@ -372,7 +383,7 @@ impl State {
 
     async fn forward(
         &self,
-        request: Request<Incoming>,
+        mut request: Request<Incoming>,
         sni: Option<&str>,
     ) -> Result<Response<ProxyBody>> {
         let (destination, url) = self.destination(&request, sni)?;
@@ -380,9 +391,43 @@ impl State {
         self.validate_credentials(&headers, &destination.host, sni.is_some())?;
         strip_hop_headers(&mut headers)?;
         let client = self.client(&destination.host, destination.port).await?;
-        self.substitute_credentials(&mut headers, &destination)
+        let original_headers = headers.clone();
+        let credentials = self
+            .substitute_credentials(&mut headers, &destination)
             .await?;
-        relay(request, headers, url, client).await
+        let body = tokio::time::timeout(
+            IO_TIMEOUT,
+            Limited::new(request.body_mut(), MAX_REQUEST_BODY).collect(),
+        )
+        .await?
+        .map_err(|_| anyhow!("invalid or oversized request body"))?
+        .to_bytes();
+        let method = request.method().clone();
+        let mut response =
+            relay(method.clone(), headers, url.clone(), body.clone(), &client).await?;
+        if response.status() == StatusCode::UNAUTHORIZED && !credentials.is_empty() {
+            let resolver = self
+                .resolver
+                .as_ref()
+                .context("credential resolver is unavailable")?;
+            let mut refreshed = false;
+            for (name, rejected) in credentials {
+                refreshed |= tokio::time::timeout(
+                    IO_TIMEOUT,
+                    resolver.refresh(&self.identity, &name, &destination, &rejected),
+                )
+                .await?
+                .map_err(|_| anyhow!("credential refresh failed"))?
+                .is_some();
+            }
+            if refreshed {
+                let mut headers = original_headers;
+                self.substitute_credentials(&mut headers, &destination)
+                    .await?;
+                response = relay(method, headers, url, body, &client).await?;
+            }
+        }
+        proxy_response(response)
     }
 
     fn destination(
@@ -494,7 +539,8 @@ impl State {
         &self,
         headers: &mut HeaderMap,
         destination: &EgressDestination,
-    ) -> Result<()> {
+    ) -> Result<Vec<(String, String)>> {
+        let mut credentials = Vec::new();
         for (header, header_value) in headers.iter_mut() {
             let basic = basic_credential_placeholder(header, header_value)?;
             if basic.is_none() && !contains_placeholder(header_value.as_bytes()) {
@@ -521,6 +567,7 @@ impl State {
                 .await?
                 .map_err(|_| anyhow!("credential is unavailable or not authorized"))?;
                 replacement = replacement.replace(&binding.placeholder, &value);
+                credentials.push((binding.config.name.clone(), value));
             }
             if encode_basic {
                 replacement = format!(
@@ -533,7 +580,7 @@ impl State {
             value.set_sensitive(true);
             *header_value = value;
         }
-        Ok(())
+        Ok(credentials)
     }
 
     async fn client(&self, host: &str, port: u16) -> Result<reqwest::Client> {
@@ -596,28 +643,24 @@ fn contains_placeholder(value: &[u8]) -> bool {
 }
 
 async fn relay(
-    mut request: Request<Incoming>,
+    method: Method,
     mut headers: HeaderMap,
     url: reqwest::Url,
-    client: reqwest::Client,
-) -> Result<Response<ProxyBody>> {
+    body: Bytes,
+    client: &reqwest::Client,
+) -> Result<reqwest::Response> {
     headers.remove(HOST);
     headers.remove("content-length");
-    let method = request.method().clone();
-    let body = tokio::time::timeout(
-        IO_TIMEOUT,
-        Limited::new(request.body_mut(), MAX_REQUEST_BODY).collect(),
-    )
-    .await?
-    .map_err(|_| anyhow!("invalid or oversized request body"))?
-    .to_bytes();
-    let response = client
+    client
         .request(method, url)
         .headers(headers)
         .body(body)
         .send()
         .await
-        .map_err(|_| anyhow!("upstream request failed"))?;
+        .map_err(|_| anyhow!("upstream request failed"))
+}
+
+fn proxy_response(response: reqwest::Response) -> Result<Response<ProxyBody>> {
     let status = response.status();
     let mut headers = response.headers().clone();
     strip_hop_headers(&mut headers)?;

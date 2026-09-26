@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use exoharness::{AgentHandle, ConversationHandle, Secret, SecretId};
+use exoharness::{AgentHandle, ConversationHandle, Secret};
 use serde::Deserialize;
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
@@ -1048,12 +1048,21 @@ async fn worker_secret_env(
     agent: &dyn AgentHandle,
     config: &AdapterConfig,
 ) -> Result<Vec<(String, String)>> {
+    let vault = exoharness::vault::global_vault(agent).await?;
+    let secrets = vault.list_secrets().await?;
     let mut env = Vec::new();
     for secret_env in &config.secret_env {
-        let secret_uuid = resolve_secret_id(agent, &secret_env.secret_id).await?;
-        let Some(secret) = agent.get_secret(&secret_uuid).await? else {
-            bail!("adapter secret not found: {}", secret_env.secret_id);
-        };
+        let id = secret_env.secret_id.parse::<exoharness::SecretId>().ok();
+        let metadata = secrets
+            .iter()
+            .find(|secret| {
+                id.map_or_else(|| secret.name == secret_env.secret_id, |id| secret.id == id)
+            })
+            .with_context(|| format!("adapter secret not found: {}", secret_env.secret_id))?;
+        let secret = vault
+            .get_secret(&metadata.id)
+            .await?
+            .with_context(|| format!("adapter secret not found: {}", secret_env.secret_id))?;
         let value = match secret {
             Secret::Key { value } => value,
             Secret::Oauth { .. } => bail!("adapter worker secrets must be key secrets"),
@@ -1063,22 +1072,60 @@ async fn worker_secret_env(
     Ok(env)
 }
 
-async fn resolve_secret_id(agent: &dyn AgentHandle, reference: &str) -> Result<SecretId> {
-    if let Ok(secret_id) = reference.parse() {
-        return Ok(secret_id);
-    }
-    agent
-        .list_secrets()
-        .await?
-        .into_iter()
-        .find(|secret| secret.name == reference)
-        .map(|secret| secret.id)
-        .ok_or_else(|| anyhow!("adapter secret not found: {reference}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn attached_vault_cannot_shadow_adapter_credentials() -> Result<()> {
+        use super::super::types::WorkerSecretEnvVar;
+        use exoharness::ExoHarness;
+        let temp = tempfile::TempDir::new()?;
+        let harness =
+            exoharness::BasicExoHarness::new(crate::test_support::local_test_config(temp.path()))
+                .await?;
+        let global = exoharness::vault::global_vault(&harness).await?;
+        let user = harness.create_vault("user").await?;
+        let mut original = None;
+        for (vault, value) in [(&global, "runtime-token"), (&user, "shadow-token")] {
+            let id = vault
+                .put_secret(exoharness::PutSecretRequest {
+                    name: "adapter".into(),
+                    target: None,
+                    secret: Secret::Key {
+                        value: value.into(),
+                    },
+                })
+                .await?;
+            if value == "runtime-token" {
+                original = Some(id);
+            }
+        }
+        let agent = harness
+            .new_agent(exoharness::NewAgentRequest {
+                slug: "adapter".into(),
+                name: "Adapter".into(),
+                vaults: vec![user.record().id],
+            })
+            .await?;
+        for reference in ["adapter".to_owned(), original.unwrap().to_string()] {
+            let config = AdapterConfig {
+                adapter_type: "test".into(),
+                worker_command: Vec::new(),
+                initialization: serde_json::Value::Null,
+                state_dir: None,
+                secret_env: vec![WorkerSecretEnvVar {
+                    env: "TOKEN".into(),
+                    secret_id: reference,
+                }],
+            };
+            assert_eq!(
+                worker_secret_env(agent.as_ref(), &config).await?,
+                vec![("TOKEN".into(), "runtime-token".into())]
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn claims_and_parses_fresh_reboot_notice() {

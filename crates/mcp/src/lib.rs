@@ -91,37 +91,9 @@ pub fn validate_servers(servers: &[McpServerConfig]) -> Result<()> {
 #[derive(Default)]
 pub struct McpCredentials(HashMap<String, String>);
 
-impl McpCredentials {
-    pub fn from_env(
-        servers: &[McpServerConfig],
-        references: &[String],
-        lookup: impl Fn(&str) -> Option<String>,
-    ) -> Result<Self> {
-        let mut tokens = HashMap::new();
-        for reference in references {
-            let (server, variable) = reference
-                .split_once('=')
-                .context("--mcp-token-env must be SERVER=ENV_VAR")?;
-            if !servers.iter().any(|config| config.name == server) {
-                bail!("--mcp-token-env refers to unknown MCP server {server}");
-            }
-            if variable.is_empty()
-                || !variable.bytes().enumerate().all(|(i, c)| {
-                    c.is_ascii_alphabetic() || c == b'_' || (i > 0 && c.is_ascii_digit())
-                })
-            {
-                bail!("--mcp-token-env requires an environment variable name");
-            }
-            let token = lookup(variable)
-                .filter(|value| !value.trim().is_empty())
-                .with_context(|| {
-                    format!("MCP server {server} requires environment variable {variable}")
-                })?;
-            if tokens.insert(server.to_string(), token).is_some() {
-                bail!("duplicate --mcp-token-env for MCP server {server}");
-            }
-        }
-        Ok(Self(tokens))
+impl From<HashMap<String, String>> for McpCredentials {
+    fn from(tokens: HashMap<String, String>) -> Self {
+        Self(tokens)
     }
 }
 
@@ -214,6 +186,26 @@ async fn connect_service(
         .await
         .context("MCP initialization timed out")?
         .map_err(auth::authentication_context)
+}
+
+pub async fn probe_auth_challenge(url: &str) -> Result<Option<String>> {
+    let server = McpServerConfig {
+        name: "authorization".into(),
+        url: url.into(),
+        allowed_tools: None,
+        blocked_tools: Vec::new(),
+    };
+    validate_servers(std::slice::from_ref(&server))?;
+    match connect_service(&server, Arc::new(McpCredentials::default())).await {
+        Ok(mut service) => {
+            service.close_with_timeout(Duration::from_secs(5)).await?;
+            Ok(None)
+        }
+        Err(error) => match auth::auth_challenge(&error) {
+            Some(challenge) => Ok(Some(challenge.to_owned())),
+            None => Err(error),
+        },
+    }
 }
 
 pub fn tool_result_is_error(result: &Value) -> bool {

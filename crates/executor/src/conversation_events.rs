@@ -241,6 +241,7 @@ mod tests {
             .unwrap();
         let agent = exoharness
             .new_agent(NewAgentRequest {
+                vaults: vec![],
                 slug: "agent".to_string(),
                 name: "Agent".to_string(),
             })
@@ -248,6 +249,7 @@ mod tests {
             .unwrap();
         agent
             .new_conversation(NewConversationRequest {
+                vaults: vec![],
                 slug: Some("conversation".to_string()),
                 name: Some("Conversation".to_string()),
             })

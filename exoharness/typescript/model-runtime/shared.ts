@@ -248,10 +248,14 @@ export async function resolveLlmBinding(
     throw new Error(`registered model binding disappeared: ${name}`);
   }
   let apiKey: string | undefined;
-  if (binding.secretId) {
-    const secret = await context.exoharness.current.conversation.getSecret(
-      binding.secretId,
+  if (binding.secret) {
+    const vault = await context.exoharness.current.conversation.getVault(
+      binding.secret.vaultId,
     );
+    if (!vault) {
+      throw new Error("model credential vault is unavailable");
+    }
+    const secret = await vault.getSecret(binding.secret.secretId);
     if (!secret) {
       throw new Error(`model secret does not exist for ${name}`);
     }

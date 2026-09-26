@@ -5,21 +5,21 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use exoharness::{
-    ManagedSandboxBackend, SandboxCommand, SandboxLifecycleConfig, SandboxNetworkPolicy,
-    SandboxRequest, SandboxScope, SandboxSpec, VercelConfig, VercelSandboxBackend,
+    ManagedSandboxBackend, ResourceScope, SandboxCommand, SandboxLifecycleConfig,
+    SandboxNetworkPolicy, SandboxRequest, SandboxSpec, VercelConfig, VercelSandboxBackend,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path, path_regex, query_param};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
-fn make_request(thread_id: &str, sandbox_id: &str) -> SandboxRequest {
+fn make_request(thread_id: exoharness::Uuid7, sandbox_id: &str) -> SandboxRequest {
     SandboxRequest {
         sandbox_id: sandbox_id.into(),
-        scope: Some(SandboxScope::Thread {
-            agent_id: "agent-1".into(),
-            thread_id: thread_id.into(),
-        }),
+        scope: ResourceScope::Thread {
+            agent_id: exoharness::Uuid7::now(),
+            thread_id,
+        },
         spec: SandboxSpec {
             image: "node24".into(),
             resources: Default::default(),
@@ -117,7 +117,7 @@ async fn acquire_creates_named_sandbox_when_missing() {
         .await;
 
     backend
-        .acquire(make_request("conv-1", "sandbox-1"))
+        .acquire(make_request(exoharness::Uuid7::now(), "sandbox-1"))
         .await
         .expect("acquire should create a named Vercel sandbox");
 }
@@ -130,7 +130,7 @@ async fn acquire_reuses_named_sandbox_without_create() {
     mount_existing_named_sandbox(&server, "sess_reused").await;
 
     backend
-        .acquire(make_request("conv-2", "sandbox-2"))
+        .acquire(make_request(exoharness::Uuid7::now(), "sandbox-2"))
         .await
         .expect("acquire should reuse the named Vercel sandbox");
 
@@ -203,7 +203,7 @@ async fn exec_sends_command_env_and_collects_logs() {
         .await;
 
     let handle = backend
-        .acquire(make_request("conv-3", "sandbox-3"))
+        .acquire(make_request(exoharness::Uuid7::now(), "sandbox-3"))
         .await
         .unwrap();
     let mut env = HashMap::new();
@@ -244,7 +244,7 @@ async fn stop_stops_vercel_session() {
         .await;
 
     let handle = backend
-        .acquire(make_request("conv-4", "sandbox-4"))
+        .acquire(make_request(exoharness::Uuid7::now(), "sandbox-4"))
         .await
         .unwrap();
     handle
@@ -299,7 +299,7 @@ async fn start_process_reports_bridge_install_failure() {
         .await;
 
     let handle = backend
-        .acquire(make_request("conv-5", "sandbox-5"))
+        .acquire(make_request(exoharness::Uuid7::now(), "sandbox-5"))
         .await
         .unwrap();
     let result = handle
@@ -365,7 +365,7 @@ async fn start_process_rejects_existing_vercel_bridge() {
         .await;
 
     let handle = backend
-        .acquire(make_request("conv-6", "sandbox-6"))
+        .acquire(make_request(exoharness::Uuid7::now(), "sandbox-6"))
         .await
         .unwrap();
     let result = handle
@@ -526,7 +526,7 @@ async fn limited_policy_pins_each_allowed_host() {
         .expect(1)
         .mount(&server)
         .await;
-    let mut request = make_request("thread", "limited");
+    let mut request = make_request(exoharness::Uuid7::now(), "limited");
     request.spec.policy = SandboxNetworkPolicy::Limited {
         allowed_hosts: vec!["API.example.com".into()],
     }
@@ -538,7 +538,7 @@ async fn limited_policy_pins_each_allowed_host() {
 async fn unsupported_credentials_fail_before_any_provider_request() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
-    let mut request = make_request("thread", "credentials");
+    let mut request = make_request(exoharness::Uuid7::now(), "credentials");
     request
         .spec
         .policy
@@ -567,7 +567,7 @@ async fn resume_applies_policy_before_starting_the_session() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
     mount_named_sandbox_with_status(&server, "resumed", "stopped").await;
-    let mut request = make_request("thread", "disabled");
+    let mut request = make_request(exoharness::Uuid7::now(), "disabled");
     request.spec.policy = SandboxNetworkPolicy::Disabled.into();
     backend.acquire(request).await.expect("resume with policy");
     let requests = server.received_requests().await.unwrap();
@@ -599,7 +599,7 @@ async fn failed_policy_update_does_not_resume_the_sandbox() {
         .mount(&server)
         .await;
     let result = backend
-        .acquire(make_request("thread", "failed-update"))
+        .acquire(make_request(exoharness::Uuid7::now(), "failed-update"))
         .await;
     assert!(
         result
@@ -615,7 +615,7 @@ async fn failed_policy_update_does_not_resume_the_sandbox() {
 async fn invalid_host_fails_before_any_provider_request() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
-    let mut request = make_request("thread", "invalid-host");
+    let mut request = make_request(exoharness::Uuid7::now(), "invalid-host");
     request.spec.policy = SandboxNetworkPolicy::Limited {
         allowed_hosts: vec!["*.example.com".into()],
     }
@@ -650,7 +650,7 @@ async fn redacted_host_pinning_is_reapplied_without_resuming() {
         .expect(1)
         .mount(&server)
         .await;
-    let mut request = make_request("thread", "limited-reuse");
+    let mut request = make_request(exoharness::Uuid7::now(), "limited-reuse");
     request.spec.policy = SandboxNetworkPolicy::Limited {
         allowed_hosts: vec!["api.test".into()],
     }

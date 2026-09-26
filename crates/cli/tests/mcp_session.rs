@@ -1,3 +1,8 @@
+use exoharness::vault::{OAuthRefresh, SecretTarget, global_vault};
+use exoharness::{
+    BasicExoHarness, BasicExoHarnessConfig, PutSecretRequest, SandboxBackendRegistration,
+    SandboxProvider, Secret, SecretBackendChoice,
+};
 use serde::Deserialize;
 use serde_json::json;
 use std::process::Command;
@@ -12,7 +17,8 @@ use wiremock::{
 };
 
 #[tokio::test]
-async fn mcp_credentials_stay_host_side_for_saved_and_temporary_agents() -> anyhow::Result<()> {
+async fn vault_credentials_stay_host_side_and_typescript_preserves_oauth_refresh()
+-> anyhow::Result<()> {
     #[derive(Deserialize)]
     struct Rpc {
         id: Option<u64>,
@@ -45,16 +51,18 @@ async fn mcp_credentials_stay_host_side_for_saved_and_temporary_agents() -> anyh
     let definition = temp.path().join("agent.md");
     let env_file = temp.path().join("test.env");
     std::fs::write(&prices, "{}")?;
-    std::fs::write(
-        &env_file,
-        "MCP_TEST_TOKEN=selected-token\nEXO_TEST_VISIBLE=yes\n",
-    )?;
+    std::fs::write(&env_file, "EXO_TEST_VISIBLE=yes\n")?;
     std::fs::write(
         &module,
         r#"export default {
   async runTurn(context) {
-    if (process.env.MCP_TEST_TOKEN !== undefined) throw new Error("MCP token reached runner");
+    if (Object.values(process.env).includes("selected-token")) throw new Error("MCP token reached runner");
     if (process.env.EXO_TEST_VISIBLE !== "yes") throw new Error("ordinary environment was lost");
+    const vaults = await context.exoharness.current.conversation.listVaults();
+    const vault = vaults.find((vault) => vault.record.name === "global");
+    const metadata = (await vault.listSecrets()).find((secret) => secret.name === "mcp");
+    const secret = await vault.getSecret(metadata.id);
+    await vault.updateSecret(metadata.id, secret);
     await context.stream.text("credentials stayed host-side");
   }
 };"#,
@@ -77,7 +85,6 @@ async fn mcp_credentials_stay_host_side_for_saved_and_temporary_agents() -> anyh
             .arg(temp.path().join("master.key"))
             .arg("--pricing-path")
             .arg(&prices)
-            .env("MCP_TEST_TOKEN", "selected-token")
             .env("EXO_TEST_VISIBLE", "yes");
         cmd
     };
@@ -107,6 +114,35 @@ async fn mcp_credentials_stay_host_side_for_saved_and_temporary_agents() -> anyh
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    let storage = BasicExoHarness::new(BasicExoHarnessConfig {
+        root: root.join("exoharness"),
+        secret_backend: SecretBackendChoice::File {
+            path: Some(temp.path().join("master.key")),
+        },
+        sandbox_default: SandboxProvider::LocalProcess,
+        sandbox_policy: None,
+        sandbox_backends: vec![SandboxBackendRegistration::local_process()],
+    })
+    .await?;
+    let vault = global_vault(&storage).await?;
+    let secret = Secret::Oauth {
+        access_token: "selected-token".into(),
+        refresh_token: Some("refresh-token".into()),
+        expires_at: Some(4_000_000_000),
+        refresh: Some(OAuthRefresh {
+            token_endpoint: format!("{}/token", server.uri()),
+            client_id: "fixture".into(),
+            resource: Some(server.uri()),
+            scopes: vec!["read".into()],
+        }),
+    };
+    let id = vault
+        .put_secret(PutSecretRequest {
+            name: "mcp".into(),
+            target: Some(SecretTarget::mcp(&server.uri())?),
+            secret: secret.clone(),
+        })
+        .await?;
     for (saved, version, expected_inventories) in [
         (false, 0, 0),
         (true, 0, 1),
@@ -118,9 +154,7 @@ async fn mcp_credentials_stay_host_side_for_saved_and_temporary_agents() -> anyh
         revision.store(version, Ordering::SeqCst);
         let mut cmd = command();
         if saved {
-            cmd.arg("--env-file")
-                .arg(&env_file)
-                .env("MCP_TEST_TOKEN", "wrong-shell-token");
+            cmd.arg("--env-file").arg(&env_file);
         }
         cmd.arg("run")
             .arg(if saved { "--agent" } else { "--agent-file" })
@@ -129,7 +163,7 @@ async fn mcp_credentials_stay_host_side_for_saved_and_temporary_agents() -> anyh
             } else {
                 definition.to_str().unwrap()
             })
-            .args(["--mcp-token-env", "fixture=MCP_TEST_TOKEN", "test"]);
+            .arg("test");
         if saved {
             cmd.args(["--thread", "history"]);
         }
@@ -137,6 +171,7 @@ async fn mcp_credentials_stay_host_side_for_saved_and_temporary_agents() -> anyh
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert_eq!(vault.get_secret(&id).await?, Some(secret.clone()));
         assert!(
             stdout.contains("credentials stayed host-side"),
             "{stdout}\n{stderr}"

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{Context, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -26,7 +26,12 @@ impl SecretCipher {
         Self { key_provider }
     }
 
+    #[cfg(test)]
     pub(crate) fn encrypt_secret(&self, secret: &Secret) -> Result<EncryptedSecret> {
+        self.encrypt_bound(secret, &[])
+    }
+
+    pub(crate) fn encrypt_bound(&self, secret: &Secret, aad: &[u8]) -> Result<EncryptedSecret> {
         let key = self.key_provider.get_or_create_key()?;
         let payload = serde_json::to_vec(secret)?;
         let cipher = Aes256Gcm::new_from_slice(&key)
@@ -34,7 +39,7 @@ impl SecretCipher {
         let nonce = random_nonce();
         let nonce = Nonce::from(nonce);
         let ciphertext = cipher
-            .encrypt(&nonce, payload.as_slice())
+            .encrypt(&nonce, Payload { msg: &payload, aad })
             .context("failed to encrypt secret payload")?;
         Ok(EncryptedSecret {
             algorithm: SecretEncryptionAlgorithm::Aes256Gcm,
@@ -44,6 +49,10 @@ impl SecretCipher {
     }
 
     pub(crate) fn decrypt_secret(&self, encrypted: &EncryptedSecret) -> Result<Secret> {
+        self.decrypt_bound(encrypted, &[])
+    }
+
+    pub(crate) fn decrypt_bound(&self, encrypted: &EncryptedSecret, aad: &[u8]) -> Result<Secret> {
         match encrypted.algorithm {
             SecretEncryptionAlgorithm::Aes256Gcm => {}
         }
@@ -59,7 +68,13 @@ impl SecretCipher {
         let cipher = Aes256Gcm::new_from_slice(&key)
             .map_err(|_| anyhow!("invalid secret encryption key length"))?;
         let plaintext = cipher
-            .decrypt(&Nonce::from(nonce), encrypted.ciphertext.as_slice())
+            .decrypt(
+                &Nonce::from(nonce),
+                Payload {
+                    msg: &encrypted.ciphertext,
+                    aad,
+                },
+            )
             .context("failed to decrypt secret payload")?;
         serde_json::from_slice(&plaintext).map_err(Into::into)
     }
@@ -109,6 +124,7 @@ impl SecretKeyProvider for AppleKeychainSecretKeyProvider {
         if let Some(key) = self.key.get() {
             return Ok(*key);
         }
+        let _lock = lock_secret_file(&default_master_key_path()?.with_extension("keychain.lock"))?;
         ensure_apple_keychain_store()?;
         let entry = Entry::new(KEYCHAIN_SERVICE, &self.account)?;
         let key = match entry.get_password() {
@@ -122,10 +138,7 @@ impl SecretKeyProvider for AppleKeychainSecretKeyProvider {
             }
             Err(error) => return Err(error.into()),
         };
-        match self.key.set(key) {
-            Ok(()) => Ok(key),
-            Err(key) => Ok(self.key.get().copied().unwrap_or(key)),
-        }
+        Ok(*self.key.get_or_init(|| key))
     }
 }
 
@@ -148,6 +161,7 @@ impl SecretKeyProvider for FileBackedSecretKeyProvider {
         if let Some(key) = self.key.get() {
             return Ok(*key);
         }
+        let _lock = lock_secret_file(&self.path.with_extension("lock"))?;
         let key = match std::fs::read(&self.path) {
             Ok(bytes) => parse_master_key_bytes(&bytes)
                 .with_context(|| format!("reading master key at {}", self.path.display()))?,
@@ -161,8 +175,7 @@ impl SecretKeyProvider for FileBackedSecretKeyProvider {
                     .context(format!("reading master key at {}", self.path.display())));
             }
         };
-        let _ = self.key.set(key);
-        Ok(key)
+        Ok(*self.key.get_or_init(|| key))
     }
 }
 
@@ -230,35 +243,45 @@ fn parse_master_key_bytes(bytes: &[u8]) -> Result<[u8; MASTER_KEY_LEN]> {
     Ok(key)
 }
 
+pub(crate) fn private_directory(path: &Path) -> Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(MASTER_KEY_DIR_PERMS)
+        .create(path)
+        .with_context(|| format!("creating private directory {}", path.display()))
+}
+
+pub(crate) fn lock_secret_file(path: &Path) -> Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        private_directory(parent)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(MASTER_KEY_FILE_PERMS)
+        .open(path)?;
+    file.lock().context("locking secret storage")?;
+    Ok(file)
+}
+
 fn write_master_key_file(path: &Path, key: &[u8; MASTER_KEY_LEN]) -> Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating master key directory {}", parent.display()))?;
-        std::fs::set_permissions(
-            parent,
-            std::fs::Permissions::from_mode(MASTER_KEY_DIR_PERMS),
-        )
-        .with_context(|| format!("setting permissions on {}", parent.display()))?;
-    }
-
-    let tmp_path = path.with_extension("tmp");
-    let _ = std::fs::remove_file(&tmp_path);
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(MASTER_KEY_FILE_PERMS)
-        .open(&tmp_path)
-        .with_context(|| format!("creating master key file {}", tmp_path.display()))?;
-    file.write_all(key)
-        .with_context(|| format!("writing master key file {}", tmp_path.display()))?;
-    file.sync_all()
-        .with_context(|| format!("syncing master key file {}", tmp_path.display()))?;
-    drop(file);
-    std::fs::rename(&tmp_path, path)
-        .with_context(|| format!("renaming master key into place at {}", path.display()))?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    private_directory(parent)?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    file.write_all(key)?;
+    file.as_file().sync_all()?;
+    file.persist_noclobber(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("persisting master key at {}", path.display()))?;
+    std::fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 

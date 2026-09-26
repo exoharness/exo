@@ -7,21 +7,21 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use exoharness::{
-    ManagedSandboxBackend, SandboxLifecycleConfig, SandboxMount, SandboxMountAccess,
-    SandboxNetworkPolicy, SandboxRequest, SandboxScope, SandboxSpec, SnapshotFormat,
-    SnapshotPayload, SpritesConfig, SpritesSandboxBackend,
+    ManagedSandboxBackend, ResourceScope, SandboxLifecycleConfig, SandboxMount, SandboxMountAccess,
+    SandboxNetworkPolicy, SandboxRequest, SandboxSpec, SnapshotFormat, SnapshotPayload,
+    SpritesConfig, SpritesSandboxBackend,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-fn make_request(thread_id: &str, sandbox_id: &str) -> SandboxRequest {
+fn make_request(thread_id: exoharness::Uuid7, sandbox_id: &str) -> SandboxRequest {
     SandboxRequest {
         sandbox_id: sandbox_id.into(),
-        scope: Some(SandboxScope::Thread {
-            agent_id: "agent-1".into(),
-            thread_id: thread_id.into(),
-        }),
+        scope: ResourceScope::Thread {
+            agent_id: exoharness::Uuid7::now(),
+            thread_id,
+        },
         spec: SandboxSpec {
             image: "default".into(),
             resources: Default::default(),
@@ -83,7 +83,7 @@ fn sprite_info_json(name: &str) -> Value {
 async fn acquire_creates_sprite_when_missing() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
-    let request = make_request("conv-1", "sandbox-1");
+    let request = make_request(exoharness::Uuid7::now(), "sandbox-1");
     let name = expected_sprite_name(&request);
 
     Mock::given(method("GET"))
@@ -107,7 +107,7 @@ async fn acquire_creates_sprite_when_missing() {
 async fn acquire_create_includes_exo_metadata_labels() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
-    let request = make_request("conv-labels", "sandbox-labels");
+    let request = make_request(exoharness::Uuid7::now(), "sandbox-labels");
     let name = expected_sprite_name(&request);
     let spec_hash = sandbox_spec_hash(&request.spec);
 
@@ -160,7 +160,7 @@ async fn acquire_create_honors_binding_url_auth_and_organization() {
             extra_labels: vec!["prod".into()],
         },
     );
-    let request = make_request("conv-bind", "sandbox-bind");
+    let request = make_request(exoharness::Uuid7::now(), "sandbox-bind");
     let name = expected_sprite_name(&request);
 
     Mock::given(method("GET"))
@@ -203,7 +203,7 @@ async fn acquire_rejects_host_mounts() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
 
-    let mut request = make_request("conv-2", "sandbox-2");
+    let mut request = make_request(exoharness::Uuid7::now(), "sandbox-2");
     request.spec.mounts.push(SandboxMount {
         host_path: PathBuf::from("/tmp/foo"),
         guest_path: "/workspace".into(),
@@ -230,7 +230,7 @@ async fn acquire_rejects_host_mounts() {
 async fn acquire_reuses_existing_sprite_without_create() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
-    let request = make_request("conv-3", "sandbox-3");
+    let request = make_request(exoharness::Uuid7::now(), "sandbox-3");
     let name = expected_sprite_name(&request);
 
     Mock::given(method("GET"))
@@ -257,7 +257,7 @@ async fn acquire_reuses_existing_sprite_without_create() {
 async fn stop_does_not_delete_sprite() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
-    let request = make_request("conv-5", "sandbox-5");
+    let request = make_request(exoharness::Uuid7::now(), "sandbox-5");
     let name = expected_sprite_name(&request);
 
     Mock::given(method("GET"))
@@ -280,7 +280,7 @@ async fn stop_does_not_delete_sprite() {
 async fn exec_accepts_plain_text_http_response() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
-    let request = make_request("conv-plain", "sandbox-plain");
+    let request = make_request(exoharness::Uuid7::now(), "sandbox-plain");
     let name = expected_sprite_name(&request);
 
     Mock::given(method("GET"))
@@ -315,7 +315,7 @@ async fn exec_accepts_plain_text_http_response() {
 async fn exec_uses_http_post_with_cmd_query_params() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
-    let request = make_request("conv-6", "sandbox-6");
+    let request = make_request(exoharness::Uuid7::now(), "sandbox-6");
     let name = expected_sprite_name(&request);
 
     Mock::given(method("GET"))
@@ -364,7 +364,7 @@ async fn exec_uses_http_post_with_cmd_query_params() {
 async fn snapshot_returns_sprites_snapshot_payload() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
-    let request = make_request("conv-7", "sandbox-7");
+    let request = make_request(exoharness::Uuid7::now(), "sandbox-7");
     let name = expected_sprite_name(&request);
 
     Mock::given(method("GET"))
@@ -406,7 +406,7 @@ async fn snapshot_returns_sprites_snapshot_payload() {
 async fn acquire_from_snapshot_restores_checkpoint() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
-    let request = make_request("conv-8", "sandbox-8");
+    let request = make_request(exoharness::Uuid7::now(), "sandbox-8");
     let name = expected_sprite_name(&request);
 
     Mock::given(method("GET"))
@@ -451,7 +451,7 @@ async fn acquire_from_snapshot_rejects_wrong_format() {
     };
 
     let error = match backend
-        .acquire_from_snapshot(make_request("conv-9", "sandbox-9"), payload)
+        .acquire_from_snapshot(make_request(exoharness::Uuid7::now(), "sandbox-9"), payload)
         .await
     {
         Ok(_) => panic!("wrong snapshot format should fail"),
@@ -468,7 +468,7 @@ async fn acquire_from_snapshot_rejects_wrong_format() {
 async fn disabled_networking_fails_before_any_provider_request() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
-    let mut request = make_request("thread", "disabled");
+    let mut request = make_request(exoharness::Uuid7::now(), "disabled");
     request.spec.policy = SandboxNetworkPolicy::Disabled.into();
     let result = backend.acquire(request).await;
     assert!(

@@ -59,6 +59,7 @@ async fn agent_runs_a_command_in_a_smolvm_microvm() {
 
     let agent = harness
         .new_agent(NewAgentRequest {
+            vaults: vec![],
             slug: "smolvm-e2e".to_string(),
             name: "smolvm e2e".to_string(),
         })
@@ -186,6 +187,7 @@ async fn agent_runs_the_default_sandbox_shape() {
 
     let agent = harness
         .new_agent(NewAgentRequest {
+            vaults: vec![],
             slug: "smolvm-default".to_string(),
             name: "smolvm default".to_string(),
         })

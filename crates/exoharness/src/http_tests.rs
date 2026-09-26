@@ -131,6 +131,7 @@ async fn http_exoharness_runs_noninteractive_sandbox_commands() {
     let agent = fixture
         .harness
         .new_agent(crate::NewAgentRequest {
+            vaults: vec![],
             slug: "agent".to_string(),
             name: "Agent".to_string(),
         })
@@ -185,6 +186,7 @@ async fn http_exoharness_runs_agent_scoped_sandbox_commands() {
     let agent = fixture
         .harness
         .new_agent(crate::NewAgentRequest {
+            vaults: vec![],
             slug: "agent".to_string(),
             name: "Agent".to_string(),
         })
@@ -258,6 +260,7 @@ async fn http_exoharness_supports_sandbox_process_events() {
     let agent = fixture
         .harness
         .new_agent(crate::NewAgentRequest {
+            vaults: vec![],
             slug: "agent".to_string(),
             name: "Agent".to_string(),
         })
@@ -347,6 +350,7 @@ async fn http_exoharness_supports_turn_scoped_sandbox_snapshot_and_start() {
     let agent = fixture
         .harness
         .new_agent(crate::NewAgentRequest {
+            vaults: vec![],
             slug: "agent".to_string(),
             name: "Agent".to_string(),
         })
@@ -440,6 +444,7 @@ async fn http_exoharness_restores_a_snapshot_into_a_new_sandbox() {
     let agent = fixture
         .harness
         .new_agent(crate::NewAgentRequest {
+            vaults: vec![],
             slug: "agent".to_string(),
             name: "Agent".to_string(),
         })
@@ -594,4 +599,85 @@ fn hosted_harness_from_env() -> Arc<dyn ExoHarness> {
         harness = harness.with_bearer_token(token);
     }
     Arc::new(harness)
+}
+
+#[actix_web::test]
+async fn http_vault_contexts_and_secrets_round_trip() -> crate::Result<()> {
+    use crate::vault::SecretTarget;
+    use crate::{NewAgentRequest, NewThreadRequest, PutSecretRequest, Secret};
+    let fixture = http_harness().await;
+    let harness = &fixture.harness;
+    let runtime = crate::vault::global_vault(harness.as_ref()).await?;
+    let user = harness.create_vault("alice").await?;
+    let target = SecretTarget::mcp("https://example.com/mcp")?;
+    let id = user
+        .put_secret(PutSecretRequest {
+            name: "github".into(),
+            secret: Secret::Key {
+                value: "first".into(),
+            },
+            target: Some(target.clone()),
+        })
+        .await?;
+    assert_eq!(user.list_secrets().await?[0].id, id);
+    assert!(runtime.get_secret(&id).await?.is_none());
+    let updated = user
+        .update_secret(
+            &id,
+            Secret::Key {
+                value: "second".into(),
+            },
+        )
+        .await?;
+    let resolved = user.resolve_secret(&id, &target).await?;
+    assert_eq!(resolved.revision, updated.revision);
+    assert_eq!(
+        resolved.secret,
+        Secret::Key {
+            value: "second".into()
+        }
+    );
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            vaults: vec![],
+            name: "agent".into(),
+            slug: "agent".into(),
+        })
+        .await?;
+    let vaults = vec![user.record().id];
+    let thread = agent
+        .new_thread(NewThreadRequest {
+            vaults: vaults.clone(),
+            ..Default::default()
+        })
+        .await?;
+    assert_eq!(thread.record().vaults, vaults);
+    assert_eq!(
+        thread.get_vault(&user.record().id).await?.unwrap().record(),
+        user.record()
+    );
+    assert_eq!(
+        thread
+            .get_vault(&runtime.record().id)
+            .await?
+            .unwrap()
+            .record(),
+        runtime.record()
+    );
+    let sibling = agent.new_thread(NewThreadRequest::default()).await?;
+    assert!(sibling.get_vault(&user.record().id).await?.is_none());
+    let scoped = thread.get_vault(&user.record().id).await?.unwrap();
+    assert_eq!(
+        scoped.resolve_secret(&id, &target).await?.revision,
+        updated.revision
+    );
+    user.delete_secret(&id).await?;
+    assert!(scoped.resolve_secret(&id, &target).await.is_err());
+    assert!(user.resolve_secret(&id, &target).await.is_err());
+    assert!(harness.delete_vault(&user.record().id).await.is_err());
+    harness.delete_agent(&agent.record().id).await?;
+    harness.delete_vault(&user.record().id).await?;
+    assert!(harness.get_vault(&user.record().id).await?.is_none());
+    fixture.server.abort();
+    Ok(())
 }

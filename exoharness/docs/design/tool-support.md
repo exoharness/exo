@@ -816,8 +816,11 @@ async function resolvePassword(
   if (!secretId) {
     return null;
   }
-  const secret =
-    await context.exoharness.current.conversation.getSecret(secretId);
+  const vaults = await context.exoharness.current.conversation.listVaults();
+  const secrets = await Promise.all(
+    vaults.reverse().map((vault) => vault.getSecret(secretId)),
+  );
+  const secret = secrets.find((value) => value !== null);
   if (!secret) {
     throw new Error(`IRC password secret does not exist: ${secretId}`);
   }

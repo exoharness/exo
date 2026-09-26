@@ -110,7 +110,7 @@ fn proxy_transport_enforces_egress_independently_of_network_policy() {
     let request = |networking, egress_proxy| FirecrackerRequest {
         sandbox: SandboxRequest {
             sandbox_id: "policy-validation".into(),
-            scope: None,
+            scope: crate::ResourceScope::Global,
             provider_state: None,
             spec: SandboxSpec {
                 image: String::new(),
@@ -878,7 +878,7 @@ impl DurableStopFixture {
         };
         let request = SandboxRequest {
             sandbox_id: "durable".into(),
-            scope: None,
+            scope: crate::ResourceScope::Global,
             spec: SandboxSpec {
                 image: "/images/test.ext4".into(),
                 resources: Default::default(),

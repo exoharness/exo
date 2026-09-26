@@ -2692,6 +2692,7 @@ dependencies = [
 name = "exo"
 version = "0.1.0"
 dependencies = [
+ "actix-web",
  "anyhow",
  "async-trait",
  "bytes",
@@ -2704,7 +2705,10 @@ dependencies = [
  "exoharness",
  "futures",
  "lingua",
+ "oauth2",
  "ratatui",
+ "reqwest 0.12.28",
+ "rmcp",
  "rustyline",
  "serde",
  "serde_json",
@@ -2718,6 +2722,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "url",
  "wiremock",
 ]
 
@@ -2749,7 +2754,9 @@ dependencies = [
  "exoharness",
  "futures",
  "serde",
+ "serde_json",
  "serde_yaml_ng",
+ "tempfile",
  "tokio",
 ]
 
@@ -2809,6 +2816,7 @@ dependencies = [
  "keyring-core",
  "libc",
  "lingua",
+ "oauth2",
  "object_store",
  "oci-client",
  "rcgen",
@@ -2830,6 +2838,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "wiremock",
  "zstd",
 ]
 
@@ -4654,6 +4663,7 @@ dependencies = [
  "getrandom 0.2.17",
  "http 1.4.0",
  "rand 0.8.5",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "serde_path_to_error",

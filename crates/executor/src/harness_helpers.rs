@@ -210,16 +210,17 @@ pub(crate) async fn resolve_model_binding(
     let Binding::Llm {
         model,
         base_url,
-        secret_id,
+        secret,
         ..
     } = binding_record.binding
     else {
         return Err(anyhow::anyhow!("binding is not a model: {name}"));
     };
-    let api_key = match secret_id {
-        Some(secret_id) => {
-            let secret = conversation
-                .get_secret(&secret_id)
+    let api_key = match secret {
+        Some(reference) => {
+            let secret = exoharness::vault::require_vault(conversation, &reference.vault_id)
+                .await?
+                .get_secret(&reference.secret_id)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("model secret does not exist for {name}"))?;
             match secret {
@@ -475,5 +476,107 @@ mod tests {
             lingua::serde_json::from_str(&encoded).expect("test json should parse as lingua json");
 
         assert_eq!(to_lingua_value(value), expected);
+    }
+}
+
+#[cfg(test)]
+mod vault_tests {
+    use super::*;
+    use exoharness::vault::SecretReference;
+    use exoharness::{
+        BasicExoHarness, BasicExoHarnessConfig, NewAgentRequest, NewThreadRequest,
+        PutSecretRequest, SandboxBackendRegistration, SandboxProvider, SecretBackendChoice,
+    };
+
+    #[tokio::test]
+    async fn model_auth_uses_the_runtime_vault_even_when_user_secret_names_match() -> Result<()> {
+        let harness = BasicExoHarness::in_memory(
+            BasicExoHarnessConfig {
+                root: Default::default(),
+                secret_backend: SecretBackendChoice::Static([1; 32]),
+                sandbox_default: SandboxProvider::LocalProcess,
+                sandbox_policy: None,
+                sandbox_backends: vec![SandboxBackendRegistration::local_process()],
+            },
+            None,
+        )
+        .await?;
+        let runtime = exoharness::vault::global_vault(&harness).await?;
+        let user = harness.create_vault("alice").await?;
+        let model_secret = runtime
+            .put_secret(PutSecretRequest {
+                name: "provider".into(),
+                target: None,
+                secret: Secret::Key {
+                    value: "runtime-key".into(),
+                },
+            })
+            .await?;
+        let user_secret = user
+            .put_secret(PutSecretRequest {
+                name: "provider".into(),
+                target: None,
+                secret: Secret::Key {
+                    value: "user-key".into(),
+                },
+            })
+            .await?;
+        harness
+            .put_binding(Binding::Llm {
+                name: "model".into(),
+                model: "gpt-5.6-sol".into(),
+                base_url: None,
+                secret: Some(SecretReference {
+                    vault_id: runtime.record().id,
+                    secret_id: model_secret,
+                }),
+            })
+            .await?;
+        let agent = harness
+            .new_agent(NewAgentRequest {
+                vaults: vec![],
+                name: "agent".into(),
+                slug: "agent".into(),
+            })
+            .await?;
+        let thread = agent
+            .new_thread(NewThreadRequest {
+                vaults: vec![user.record().id],
+                ..Default::default()
+            })
+            .await?;
+        let model = resolve_model_binding(thread.as_ref(), "model").await?;
+        assert_eq!(model.api_key.as_deref(), Some("runtime-key"));
+        user.update_secret(
+            &user_secret,
+            Secret::Key {
+                value: "rotated-user-key".into(),
+            },
+        )
+        .await?;
+        assert_eq!(
+            resolve_model_binding(thread.as_ref(), "model")
+                .await?
+                .api_key
+                .as_deref(),
+            Some("runtime-key")
+        );
+        harness
+            .put_binding(Binding::Llm {
+                name: "user-secret-model".into(),
+                model: "gpt-5.6-sol".into(),
+                base_url: None,
+                secret: Some(SecretReference {
+                    vault_id: runtime.record().id,
+                    secret_id: user_secret,
+                }),
+            })
+            .await?;
+        assert!(
+            resolve_model_binding(thread.as_ref(), "user-secret-model")
+                .await
+                .is_err()
+        );
+        Ok(())
     }
 }

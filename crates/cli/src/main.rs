@@ -1,3 +1,4 @@
+use exoharness::vault::{SecretReference, global_vault};
 mod adapters;
 mod env;
 #[cfg(test)]
@@ -7,6 +8,7 @@ mod managed_agents;
 mod mount_tests;
 #[cfg(test)]
 mod naming_tests;
+mod oauth;
 mod render;
 #[cfg(test)]
 mod secret_tests;
@@ -14,6 +16,7 @@ mod tools;
 mod tui;
 mod tui_app;
 mod turn_display;
+mod vaults;
 
 use std::collections::HashMap;
 use std::io::{self, IsTerminal, Read, Write};
@@ -561,6 +564,10 @@ impl From<SandboxScopeArg> for SandboxScope {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    Vault {
+        #[command(subcommand)]
+        command: vaults::VaultCommands,
+    },
     #[command(hide = true)]
     FirecrackerBridge,
     /// Manage agents and their executor configuration.
@@ -1196,9 +1203,39 @@ enum ConversationMountCommands {
     },
 }
 
+struct CliError {
+    error: anyhow::Error,
+    verbose: bool,
+}
+
+impl std::fmt::Debug for CliError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if !self.verbose
+            && let Some(auth) = self.error.downcast_ref::<exo_mcp::McpAuthenticationError>()
+        {
+            let help = if auth.credential_supplied {
+                "The server rejected the token. Check its validity and permissions."
+            } else {
+                "Add a secret for this MCP server URL to a selected vault, or attach the vault containing it, then start a new thread."
+            };
+            write!(f, "connecting MCP server {}. {help}", auth.server_name)
+        } else {
+            std::fmt::Debug::fmt(&self.error, f)
+        }
+    }
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
-    let mut cli = Cli::parse();
+async fn main() -> Result<(), CliError> {
+    let cli = Cli::parse();
+    let verbose = matches!(&cli.command,
+        Commands::Chat { thread, .. } | Commands::Run { thread, .. }
+        if thread.verbosity == Verbosity::Full
+    );
+    run(cli).await.map_err(|error| CliError { error, verbose })
+}
+
+async fn run(mut cli: Cli) -> Result<()> {
     if matches!(cli.command, Commands::FirecrackerBridge) {
         #[cfg(feature = "firecracker")]
         {
@@ -1254,32 +1291,24 @@ async fn main() -> Result<()> {
         route_local_sandboxes,
     )
     .await?;
+    if let Commands::Vault { command } = &cli.command {
+        return vaults::run(exoharness.as_ref(), command, &env_vars).await;
+    }
     let exoharness: Arc<dyn ExoHarness> = if temporary {
         Arc::new(BasicExoHarness::in_memory(exo_config.clone(), Some(exoharness.as_ref())).await?)
     } else {
         exoharness
     };
-    let mcp = managed_agents::connect_mcp(
-        exoharness.as_ref(),
-        definition.as_ref(),
-        &mut cli.command,
-        &env_vars,
-    )
-    .await?;
+    let prepared_mcp =
+        managed_agents::connect_mcp(exoharness.as_ref(), definition.as_ref(), &mut cli.command)
+            .await?;
+    let mcp = Arc::clone(&prepared_mcp.tools);
     let harness_kind = determine_harness_kind(
         exoharness.as_ref(),
         harness_selection.as_ref(),
         &cli.command,
     )
     .await?;
-    let mcp_env_names = match &cli.command {
-        Commands::Chat { thread, .. } | Commands::Run { thread, .. } => thread
-            .mcp_token_env
-            .iter()
-            .filter_map(|reference| reference.split_once('=').map(|(_, name)| name.to_string()))
-            .collect(),
-        _ => Vec::new(),
-    };
     let pricing = Arc::new(cost::load(cli.pricing_path.clone(), cli.pricing_url.clone()).await);
     let harness = instantiate_harness(
         &cli.root,
@@ -1289,7 +1318,6 @@ async fn main() -> Result<()> {
         env_vars.clone(),
         pricing,
         Arc::clone(&mcp),
-        mcp_env_names,
     )
     .await?;
     let result: Result<()> = async {
@@ -1297,7 +1325,9 @@ async fn main() -> Result<()> {
         Commands::FirecrackerBridge => {
             unreachable!("Firecracker bridge returns before harness startup")
         }
-        Commands::Tools { .. } => unreachable!("tools commands return before harness startup"),
+        Commands::Tools { .. } | Commands::Vault { .. } => {
+            unreachable!("management commands return before harness startup")
+        }
         Commands::Adapters { command } => {
             adapters::handle_adapter_command(&cli.root, Arc::clone(&harness), command).await?;
         }
@@ -1307,7 +1337,8 @@ async fn main() -> Result<()> {
                 definition.as_ref(),
                 harness_selection.as_ref(),
                 &thread,
-                &mcp,
+                &prepared_mcp,
+                &exo_config,
             )
             .await?;
             let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
@@ -1323,7 +1354,8 @@ async fn main() -> Result<()> {
                 definition.as_ref(),
                 harness_selection.as_ref(),
                 &thread,
-                &mcp,
+                &prepared_mcp,
+                &exo_config,
             )
             .await?;
             tui::run_prompt(agent, conversation, thread.verbosity, &prompt).await?;
@@ -1855,6 +1887,7 @@ async fn main() -> Result<()> {
                 }
                 let conversation = agent
                     .create_conversation(CreateConversationRequest {
+    vaults: vec![],
                         slug: Some(slug),
                         name,
                         sandbox_image: sandbox_runtime.sandbox_image,
@@ -2339,7 +2372,7 @@ async fn main() -> Result<()> {
         }
         Commands::Secret { command } => match command {
             SecretCommands::List => {
-                let secrets = harness.exoharness_handle().list_secrets().await?;
+                let secrets = global_vault(harness.exoharness_handle().as_ref()).await?.list_secrets().await?;
                 print_table(
                     &["SECRET", "TYPE", "CREATED_AT"],
                     secrets
@@ -2363,9 +2396,8 @@ async fn main() -> Result<()> {
                     }
                     (None, None) => bail!("provide --env or --value"),
                 };
-                let id = harness
-                    .exoharness_handle()
-                    .put_secret(PutSecretRequest {
+                let id = global_vault(harness.exoharness_handle().as_ref()).await?.put_secret(PutSecretRequest {
+    target: None,
                         name: name.clone(),
                         secret: Secret::Key { value },
                     })
@@ -2407,7 +2439,7 @@ async fn main() -> Result<()> {
                         name: name.clone(),
                         model: upstream_model,
                         base_url,
-                        secret_id: Some(secret_id),
+                        secret: Some(secret_id),
                     })
                     .await?;
                 println!("created model {} ({})", name, id);
@@ -2455,7 +2487,7 @@ async fn main() -> Result<()> {
                                 .await?
                                 .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
                         SandboxProviderConfig::Daytona {
-                            api_key_secret_id: secret_id,
+                            api_key_secret: secret_id,
                             region,
                             organization_id,
                             api_url,
@@ -2474,7 +2506,7 @@ async fn main() -> Result<()> {
                         let project_id = project_id
                             .ok_or_else(|| anyhow!("--project-id is required for vercel"))?;
                         SandboxProviderConfig::Vercel {
-                            api_token_secret_id: secret_id,
+                            api_token_secret: secret_id,
                             team_id,
                             project_id,
                             api_url,
@@ -2522,7 +2554,7 @@ async fn main() -> Result<()> {
                                 .await?
                                 .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
                         SandboxProviderConfig::E2b {
-                            api_key_secret_id: secret_id,
+                            api_key_secret: secret_id,
                             api_url,
                             default_image: default_image.unwrap_or_else(default_e2b_template),
                         }
@@ -2535,7 +2567,7 @@ async fn main() -> Result<()> {
                                 .await?
                                 .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
                         SandboxProviderConfig::Sprites {
-                            token_secret_id: secret_id,
+                            token_secret: secret_id,
                             api_url,
                             url_auth,
                             organization: organization_id,
@@ -2791,6 +2823,7 @@ async fn sandbox_owner(
 
     exoharness
         .new_agent(NewAgentRequest {
+            vaults: vec![],
             slug: SANDBOX_CLI_AGENT_SLUG.to_string(),
             name: "Sandbox CLI".to_string(),
         })
@@ -2967,7 +3000,8 @@ fn command_agent_ref(command: &Commands) -> Option<&str> {
         | Commands::Provider { .. }
         | Commands::Adapters { .. }
         | Commands::Tools { .. }
-        | Commands::Serve { .. } => None,
+        | Commands::Serve { .. }
+        | Commands::Vault { .. } => None,
     }
 }
 
@@ -3110,7 +3144,6 @@ async fn instantiate_harness(
     env_vars: HashMap<String, String>,
     pricing: Arc<cost::PricingTable>,
     mcp: Arc<exo_mcp::McpToolSet>,
-    mcp_env_names: Vec<String>,
 ) -> Result<Arc<dyn Harness>> {
     let harness: Arc<dyn Harness> = match kind {
         HarnessKind::Basic => Arc::new(BasicHarness::with_runtime_config(
@@ -3134,14 +3167,12 @@ async fn instantiate_harness(
                 ExoToolRuntime::from_root(root)?,
                 mcp,
             )),
-            mcp_env_names,
         )?),
         HarnessKind::TypeScript => Arc::new(TypeScriptHarness::from_exoharness(
             exoharness,
             runtime_config,
             env_vars,
             Arc::new(executor::McpToolRuntime::new(BasicToolRuntime, mcp)),
-            mcp_env_names,
         )?),
     };
     Ok(harness)
@@ -3360,22 +3391,22 @@ struct RegisteredModel {
 }
 
 async fn list_model_bindings(exoharness: &dyn ExoHarness) -> Result<Vec<RegisteredModel>> {
-    let secrets = exoharness.list_secrets().await?;
+    let secrets = global_vault(exoharness).await?.list_secrets().await?;
     let mut models = Vec::new();
     for metadata in exoharness.list_bindings().await? {
         let Binding::Llm {
             name,
             model,
             base_url,
-            secret_id,
+            secret,
         } = metadata.binding
         else {
             continue;
         };
-        let secret_name = secret_id.and_then(|secret_id| {
+        let secret_name = secret.and_then(|reference| {
             secrets
                 .iter()
-                .find(|secret| secret.id == secret_id)
+                .find(|secret| secret.id == reference.secret_id)
                 .map(|secret| secret.name.clone())
         });
         models.push(RegisteredModel {
@@ -3399,14 +3430,21 @@ async fn list_model_bindings(exoharness: &dyn ExoHarness) -> Result<Vec<Register
     Ok(deduped)
 }
 
-async fn find_secret_id(exoharness: &dyn ExoHarness, name: &str) -> Result<Option<Uuid7>> {
-    Ok(exoharness
+async fn find_secret_id(
+    exoharness: &dyn ExoHarness,
+    name: &str,
+) -> Result<Option<SecretReference>> {
+    let vault = global_vault(exoharness).await?;
+    Ok(vault
         .list_secrets()
         .await?
         .into_iter()
         .rev()
         .find(|secret| secret.name == name)
-        .map(|secret| secret.id))
+        .map(|secret| SecretReference {
+            vault_id: vault.record().id,
+            secret_id: secret.id,
+        }))
 }
 
 fn build_braintrust_tracing_config(

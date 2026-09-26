@@ -55,6 +55,7 @@ async fn filesystem_snapshot_and_rewind_round_trip() {
 
     let agent = harness
         .new_agent(NewAgentRequest {
+            vaults: vec![],
             slug: "snap-test-agent".into(),
             name: "snap-test agent".into(),
         })
@@ -62,6 +63,7 @@ async fn filesystem_snapshot_and_rewind_round_trip() {
         .expect("new_agent");
     let conversation = agent
         .new_conversation(NewConversationRequest {
+            vaults: vec![],
             slug: Some("snap-test-conv".into()),
             name: Some("snap-test conversation".into()),
         })

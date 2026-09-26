@@ -1,7 +1,6 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use exo_mcp::{McpCredentials, McpToolSet};
+use exo_mcp::McpToolSet;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -12,6 +11,7 @@ use executor::{
     FileSystemMount, Harness, HarnessAgent, HarnessConversation,
 };
 use exo_managed_agents::{self as managed, AgentBackend, AgentDefinition};
+use exoharness::vault::{VaultId, compose_vaults, global_vault};
 use exoharness::{AgentHandle, ExoHarness};
 use lingua::Message;
 
@@ -31,9 +31,8 @@ pub struct ThreadArgs {
     /// Override the model binding for this thread.
     #[arg(long)]
     pub model: Option<String>,
-    /// Supply an MCP bearer token for this session from an environment variable.
-    #[arg(long, value_name = "SERVER=ENV_VAR")]
-    pub mcp_token_env: Vec<String>,
+    #[arg(long)]
+    pub vault: Vec<String>,
     #[arg(long = "provider", visible_alias = "sandbox", value_enum)]
     provider: Option<SandboxProviderArg>,
     #[arg(long)]
@@ -95,38 +94,81 @@ pub fn load_definition(command: &Commands) -> Result<Option<AgentDefinition>> {
     path.map(AgentDefinition::load).transpose()
 }
 
+#[derive(Default)]
+pub struct PreparedMcp {
+    pub tools: Arc<McpToolSet>,
+    selection: Option<managed::vaults::VaultSelection>,
+    attached_vaults: Vec<VaultId>,
+    selection_is_new: bool,
+}
+
 pub async fn connect_mcp(
     root: &dyn executor::ExoHarness,
     definition: Option<&AgentDefinition>,
     command: &mut Commands,
-    env: &HashMap<String, String>,
-) -> Result<Arc<McpToolSet>> {
+) -> Result<PreparedMcp> {
     let args = match command {
         Commands::Chat { thread, .. } | Commands::Run { thread, .. } => thread,
-        _ => return Ok(Arc::default()),
+        _ => return Ok(PreparedMcp::default()),
     };
+    let attached = futures::future::try_join_all(
+        args.vault
+            .iter()
+            .map(|v| managed::vaults::find_vault(root, v)),
+    )
+    .await?;
+    let attached_vaults: Vec<_> = attached.iter().map(|v| v.record().id).collect();
+    let mut vaults = vec![global_vault(root).await?];
+    let mut selection = None;
     let saved;
     let definition = if let Some(definition) = definition {
         Some(definition)
     } else {
-        let reference = args
-            .agent
-            .as_deref()
-            .context("provide --agent-file or --agent")?;
-        let agent = managed::find_agent(root, reference).await?;
+        let agent = managed::find_agent(
+            root,
+            args.agent
+                .as_deref()
+                .context("provide --agent-file or --agent")?,
+        )
+        .await?;
         args.agent = Some(agent.record().id.to_string());
+        vaults = agent.list_vaults().await?;
+        if let Some(reference) = &args.thread {
+            let thread = managed::find_thread(agent.as_ref(), reference).await?;
+            if !attached_vaults.is_empty() && thread.record().vaults != attached_vaults {
+                bail!("cannot switch vaults on an existing thread; start a new thread");
+            }
+            vaults = thread.list_vaults().await?;
+            selection = managed::vaults::load_selection(thread.as_ref()).await?;
+        }
         saved = managed::load_definition(agent.as_ref()).await?;
         saved.as_ref()
     };
+    vaults = compose_vaults(root, vaults, &attached_vaults).await?;
     let resolved = match definition {
         Some(definition) => definition.resolve_mcp_servers(&()).await?,
         None => Vec::new(),
     };
     let servers = resolved.as_slice();
-    let credentials = McpCredentials::from_env(servers, &args.mcp_token_env, |name| {
-        env.get(name).cloned().or_else(|| std::env::var(name).ok())
-    })?;
-    Ok(Arc::new(McpToolSet::connect(servers, credentials).await?))
+    if servers.is_empty() && attached_vaults.is_empty() && vaults.len() == 1 {
+        return Ok(PreparedMcp {
+            attached_vaults,
+            ..Default::default()
+        });
+    }
+    let selection_is_new = selection.is_none();
+    let selection = match selection {
+        Some(selection) => selection,
+        None => managed::vaults::VaultSelection::from_vaults(&vaults, servers).await?,
+    };
+    selection.validate_servers(servers)?;
+    let credentials = managed::vaults::VaultMcpCredentials::new(vaults, selection.clone());
+    Ok(PreparedMcp {
+        tools: Arc::new(McpToolSet::connect_with_provider(servers, Arc::new(credentials)).await?),
+        selection: Some(selection),
+        attached_vaults,
+        selection_is_new,
+    })
 }
 
 pub async fn create_agent(
@@ -176,8 +218,10 @@ pub async fn open_thread(
     definition: Option<&AgentDefinition>,
     selection: Option<&HarnessSelection>,
     args: &ThreadArgs,
-    mcp: &McpToolSet,
+    prepared_mcp: &PreparedMcp,
+    vault_config: &exoharness::BasicExoHarnessConfig,
 ) -> Result<(Arc<dyn HarnessAgent>, Arc<dyn HarnessConversation>)> {
+    let mcp = &prepared_mcp.tools;
     let mut mounts = args.mounts.clone();
     for mount in &mut mounts {
         mount.host_path = crate::canonicalize_directory(&PathBuf::from(&mount.host_path))?
@@ -231,10 +275,10 @@ pub async fn open_thread(
         ),
         None => None,
     };
+    let agent_config = agent.config().await?;
     let (model, override_model) = match resolved_model {
         Some(model) => (model, false),
         None => {
-            let agent_config = agent.config().await?;
             let current_model = match &existing_conversation {
                 Some(conversation) => conversation.model_override().await?,
                 None => None,
@@ -248,12 +292,53 @@ pub async fn open_thread(
             (model, override_model)
         }
     };
+    let config_changed =
+        args.provider.is_some() || args.sandbox_image.is_some() || !mounts.is_empty();
+    let mut config = match &existing_conversation {
+        Some(conversation) => conversation.config().await?,
+        None => Default::default(),
+    };
+    if let Some(provider) = args.provider {
+        config.sandbox_provider = Some(provider.into());
+    }
+    if let Some(image) = &args.sandbox_image {
+        config.sandbox_image = Some(image.clone());
+    }
+    for mount in mounts {
+        config
+            .mounts
+            .retain(|other| other.mount_path != mount.mount_path);
+        config.mounts.push(mount);
+    }
+    let provider = config
+        .sandbox_provider
+        .as_ref()
+        .unwrap_or(&agent_config.sandbox.provider);
+    if *provider != exoharness::SandboxProvider::LocalProcess {
+        for mount in agent_config
+            .sandbox
+            .mounts
+            .iter()
+            .chain(config.mounts.iter())
+        {
+            vault_config.validate_secret_mount(Path::new(&mount.host_path))?;
+        }
+    }
+    if let Some(selection) = &prepared_mcp.selection
+        && *provider == exoharness::SandboxProvider::LocalProcess
+        && (selection.vaults.len() > 1 || selection.bindings.iter().any(|b| b.secret.is_some()))
+    {
+        bail!(
+            "vault-backed chat requires an isolated sandbox; local-process can read host credentials"
+        );
+    }
     let conversation = match existing_conversation {
         Some(conversation) => conversation,
         None => {
             let slug = crate::generate_fun_slug();
             agent
                 .create_conversation(CreateConversationRequest {
+                    vaults: prepared_mcp.attached_vaults.clone(),
                     slug: Some(slug.clone()),
                     name: Some(slug),
                     ..Default::default()
@@ -261,6 +346,19 @@ pub async fn open_thread(
                 .await?
         }
     };
+    if let Some(selection) = &prepared_mcp.selection {
+        if prepared_mcp.selection_is_new {
+            selection
+                .save(conversation.exoharness_handle().as_ref())
+                .await?;
+        }
+        for vault in &selection.vaults {
+            println!("vault: {} ({})", vault.name, vault.id);
+        }
+    }
+    if config_changed {
+        conversation.put_config(config).await?;
+    }
     if override_model {
         conversation
             .put_model_override(Some(ConversationModelConfig {
@@ -268,22 +366,6 @@ pub async fn open_thread(
                 max_output_tokens: None,
             }))
             .await?;
-    }
-    if args.provider.is_some() || args.sandbox_image.is_some() || !mounts.is_empty() {
-        let mut config = conversation.config().await?;
-        if let Some(provider) = args.provider {
-            config.sandbox_provider = Some(provider.into());
-        }
-        if let Some(image) = &args.sandbox_image {
-            config.sandbox_image = Some(image.clone());
-        }
-        for mount in mounts {
-            config
-                .mounts
-                .retain(|other| other.mount_path != mount.mount_path);
-            config.mounts.push(mount);
-        }
-        conversation.put_config(config).await?;
     }
     println!("agent: {} ({})", agent.record().slug, agent.record().id);
     if args.agent_file.is_some() {

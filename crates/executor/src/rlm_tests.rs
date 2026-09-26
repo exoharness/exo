@@ -635,8 +635,11 @@ fn assistant_text(message: &Message) -> String {
 }
 
 async fn register_test_model(exoharness: &dyn ExoHarness) {
-    let secret_id = exoharness
+    let secret_id = exoharness::vault::global_vault(exoharness)
+        .await
+        .expect("runtime vault")
         .put_secret(PutSecretRequest {
+            target: None,
             name: "test-openai".to_string(),
             secret: Secret::Key {
                 value: "test-key".to_string(),
@@ -650,7 +653,14 @@ async fn register_test_model(exoharness: &dyn ExoHarness) {
             name: "gpt-5.4".to_string(),
             model: "gpt-5.4".to_string(),
             base_url: None,
-            secret_id: Some(secret_id),
+            secret: Some(exoharness::vault::SecretReference {
+                vault_id: exoharness::vault::global_vault(exoharness)
+                    .await
+                    .unwrap()
+                    .record()
+                    .id,
+                secret_id,
+            }),
         })
         .await
         .expect("test model should register");

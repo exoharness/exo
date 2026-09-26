@@ -627,8 +627,10 @@ async fn bind_exochat_secret(agent: &dyn AgentHandle, config: &mut AdapterConfig
         .and_then(|value| value.as_str().map(ToOwned::to_owned))
         .context("exochat initialization secret is required")?;
     let secret_name = format!("exochat-{}", Uuid7::now());
-    let secret_id = agent
+    let secret_id = exoharness::vault::global_vault(agent)
+        .await?
         .put_secret(PutSecretRequest {
+            target: None,
             name: secret_name,
             secret: Secret::Key { value: secret },
         })
@@ -744,7 +746,8 @@ async fn exochat_chat_url(
     let secret_id = if let Ok(id) = secret_ref.parse() {
         id
     } else {
-        let Some(metadata) = agent
+        let Some(metadata) = exoharness::vault::global_vault(agent)
+            .await?
             .list_secrets()
             .await?
             .into_iter()
@@ -754,7 +757,11 @@ async fn exochat_chat_url(
         };
         metadata.id
     };
-    let Some(Secret::Key { value: secret }) = agent.get_secret(&secret_id).await? else {
+    let Some(Secret::Key { value: secret }) = exoharness::vault::global_vault(agent)
+        .await?
+        .get_secret(&secret_id)
+        .await?
+    else {
         return Ok(None);
     };
     Ok(Some(format!(
@@ -1389,6 +1396,7 @@ mod tests {
             .unwrap();
         let agent = exoharness
             .new_agent(NewAgentRequest {
+                vaults: vec![],
                 slug: "agent".to_string(),
                 name: "Agent".to_string(),
             })
@@ -1396,6 +1404,7 @@ mod tests {
             .unwrap();
         let conversation = agent
             .new_conversation(NewConversationRequest {
+                vaults: vec![],
                 slug: Some("conversation".to_string()),
                 name: Some("Conversation".to_string()),
             })
@@ -1611,13 +1620,17 @@ mod tests {
             .unwrap();
         let agent = exoharness
             .new_agent(NewAgentRequest {
+                vaults: vec![],
                 slug: "agent".to_string(),
                 name: "Agent".to_string(),
             })
             .await
             .unwrap();
-        let secret_id = agent
+        let secret_id = exoharness::vault::global_vault(agent.as_ref())
+            .await
+            .expect("runtime vault")
             .put_secret(PutSecretRequest {
+                target: None,
                 name: "exochat-test".to_string(),
                 secret: Secret::Key {
                     value: "secret-456".to_string(),
@@ -1663,6 +1676,7 @@ mod tests {
             .unwrap();
         let agent = exoharness
             .new_agent(NewAgentRequest {
+                vaults: vec![],
                 slug: "agent".to_string(),
                 name: "Agent".to_string(),
             })
@@ -1670,6 +1684,7 @@ mod tests {
             .unwrap();
         let conversation = agent
             .new_conversation(NewConversationRequest {
+                vaults: vec![],
                 slug: Some("conversation".to_string()),
                 name: Some("Conversation".to_string()),
             })
@@ -1765,6 +1780,7 @@ mod tests {
             .unwrap();
         let agent = exoharness
             .new_agent(NewAgentRequest {
+                vaults: vec![],
                 slug: "agent".to_string(),
                 name: "Agent".to_string(),
             })
@@ -1772,6 +1788,7 @@ mod tests {
             .unwrap();
         let conversation = agent
             .new_conversation(NewConversationRequest {
+                vaults: vec![],
                 slug: Some("conversation".to_string()),
                 name: Some("Conversation".to_string()),
             })
@@ -1814,6 +1831,7 @@ mod tests {
             .unwrap();
         let agent = exoharness
             .new_agent(NewAgentRequest {
+                vaults: vec![],
                 slug: "agent".to_string(),
                 name: "Agent".to_string(),
             })
@@ -1821,6 +1839,7 @@ mod tests {
             .unwrap();
         let conversation = agent
             .new_conversation(NewConversationRequest {
+                vaults: vec![],
                 slug: Some("conversation".to_string()),
                 name: Some("Conversation".to_string()),
             })
