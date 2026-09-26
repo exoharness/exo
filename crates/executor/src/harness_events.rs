@@ -23,6 +23,13 @@ pub(crate) struct HarnessEvents {
 }
 
 impl HarnessEvents {
+    pub(crate) fn contains(&self, key: HarnessTurnKey) -> bool {
+        self.turns
+            .lock()
+            .expect("harness event routes poisoned")
+            .contains_key(&key)
+    }
+
     pub(crate) fn register(
         &self,
         thread: Arc<dyn ConversationHandle>,

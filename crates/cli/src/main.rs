@@ -9,6 +9,7 @@ mod mount_tests;
 #[cfg(test)]
 mod naming_tests;
 mod oauth;
+mod providers;
 mod render;
 #[cfg(test)]
 mod secret_tests;
@@ -33,22 +34,20 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use executor::{
     AgentHandle, AgentHarnessKind, AttachSandboxRequest, BasicExoHarness, BasicExoHarnessConfig,
-    BasicHarness, BasicToolRuntime, Binding, BraintrustProject, BraintrustRuntimeConfig,
-    BraintrustTracingConfig, ConversationModelConfig, CreateAgentRequest,
-    CreateConversationRequest, CreateSandboxRequest, DEFAULT_SANDBOX_MEMORY_MIB,
-    DEFAULT_SANDBOX_VCPU_COUNT, DaytonaBackendSpec, DurableFileSystem, E2bBackendSpec, EventKind,
-    EventQuery, EventQueryDirection, ExoHarness, ExoHarnessHttpServeOptions, ExoToolRuntime,
-    FileSystemMount, FileSystemMountMode, FirecrackerBackendSpec, ForkConversationRequest,
-    HOST_EVENT_REBUILD_AND_RESTART, HTTP_EXOHARNESS_TRACING_TARGET, Harness, HarnessAgent,
-    HarnessConversation, HttpExoHarness, LocalSandboxExoHarness, NewAgentRequest, PutSecretRequest,
-    RlmHarness, RunInSandboxRequest, SANDBOX_MAIN_MOUNT_DIR, SandboxAttachment,
-    SandboxBackendRegistration, SandboxProcess, SandboxProvider, SandboxProviderConfig,
-    SandboxResourceShape, SandboxScope, Secret, SecretBackendChoice, SpritesBackendSpec,
-    ToolRequest, ToolRuntime, TypeScriptHarness, TypeScriptHarnessConfig, Uuid7, VercelBackendSpec,
-    default_aws_agentcore_image, default_daytona_image, default_docker_image, default_e2b_template,
-    default_firecracker_image, default_vercel_image, effective_sandbox_scope,
-    finalize_rebuild_update_file, load_agent_config, record_host_event, send_conversation_wakeup,
-    serve_exoharness_http_listener_with_options,
+    BasicToolRuntime, Binding, BraintrustProject, BraintrustTracingConfig, ConversationHandle,
+    ConversationModelConfig, CreateAgentRequest, CreateConversationRequest, CreateSandboxRequest,
+    DEFAULT_SANDBOX_MEMORY_MIB, DEFAULT_SANDBOX_VCPU_COUNT, DaytonaBackendSpec, DurableFileSystem,
+    E2bBackendSpec, EventKind, EventQuery, EventQueryDirection, ExoHarness,
+    ExoHarnessHttpServeOptions, FileSystemMount, FileSystemMountMode, FirecrackerBackendSpec,
+    ForkConversationRequest, HOST_EVENT_REBUILD_AND_RESTART, HTTP_EXOHARNESS_TRACING_TARGET,
+    HttpExoHarness, LocalSandboxExoHarness, NewAgentRequest, PutSecretRequest, RunInSandboxRequest,
+    Runtime, SANDBOX_MAIN_MOUNT_DIR, SandboxAttachment, SandboxBackendRegistration, SandboxProcess,
+    SandboxProvider, SandboxProviderConfig, SandboxResourceShape, SandboxScope, Secret,
+    SecretBackendChoice, SpritesBackendSpec, ToolRequest, ToolRuntime, TypeScriptHarnessConfig,
+    Uuid7, VercelBackendSpec, default_aws_agentcore_image, default_daytona_image,
+    default_docker_image, default_e2b_template, default_firecracker_image, default_vercel_image,
+    effective_sandbox_scope, finalize_rebuild_update_file, record_host_event,
+    send_conversation_wakeup, serve_exoharness_http_listener_with_options,
 };
 use serde::Deserialize;
 use tabwriter::TabWriter;
@@ -65,6 +64,7 @@ use executor::{
 
 use crate::env::CliEnvironment;
 use crate::render::{Verbosity, print_message};
+use executor::managed_agents::TypeScriptHarnessPreset;
 use tui::run_chat_repl;
 
 const SANDBOX_CLI_AGENT_SLUG: &str = "__exo_sandbox_cli";
@@ -72,10 +72,22 @@ const SANDBOX_CLI_AGENT_SLUG: &str = "__exo_sandbox_cli";
 #[derive(Debug, Parser)]
 #[command(name = "exo")]
 #[command(about = "CLI for exo agents")]
-#[command(
-    after_help = "Runtime options:\n  --braintrust-api-key <BRAINTRUST_API_KEY>\n  --braintrust-app-url <BRAINTRUST_APP_URL>\n  --braintrust-api-url <BRAINTRUST_API_URL>\n\nThese options are accepted globally, including after subcommands, but are hidden from subcommand help to reduce noise."
-)]
 struct Cli {
+    /// Override the provider and use its profile context, ignoring directory/global context (saved aliases retain theirs).
+    #[arg(long = "provider", global = true)]
+    provider_profile: Option<String>,
+    /// Directory containing saved provider profiles and authentication state.
+    #[arg(long, global = true, env = "EXO_CONFIG_DIR")]
+    config_dir: Option<PathBuf>,
+    /// Home directory used when --config-dir is not set.
+    #[arg(long, global = true, env = "HOME")]
+    home: Option<PathBuf>,
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Debug, Args)]
+struct RuntimeArgs {
     /// JSON, YAML, or TOML policy for sandbox hosts and credential substitution.
     #[arg(long, global = true, conflicts_with = "exoharness_url")]
     egress_policy: Option<PathBuf>,
@@ -99,12 +111,7 @@ struct Cli {
     braintrust_app_url: Option<String>,
     #[arg(long, global = true, env = "BRAINTRUST_API_URL", hide = true)]
     braintrust_api_url: Option<String>,
-    #[arg(
-        long = "exoharness-url",
-        visible_alias = "url",
-        global = true,
-        env = "EXO_EXOHARNESS_URL"
-    )]
+    #[arg(long = "exoharness-url", global = true, env = "EXO_EXOHARNESS_URL")]
     exoharness_url: Option<String>,
     #[arg(
         long = "bearer-env",
@@ -122,8 +129,6 @@ struct Cli {
     /// URL to fetch the LiteLLM price JSON from (overrides the default source).
     #[arg(long, global = true, env = "EXO_LITELLM_PRICES_URL")]
     pricing_url: Option<String>,
-    #[command(subcommand)]
-    command: Commands,
 }
 
 #[cfg(feature = "firecracker")]
@@ -315,14 +320,6 @@ enum HarnessSelection {
     TypeScriptModule(PathBuf),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TypeScriptHarnessPreset {
-    Codex,
-    ClaudeCode,
-    Cursor,
-    Pi,
-}
-
 impl HarnessSelection {
     fn harness_kind(&self) -> HarnessKind {
         match self {
@@ -358,26 +355,6 @@ impl FromStr for HarnessSelection {
             _ => Err(format!(
                 "unknown harness `{raw}`; expected basic, rlm, typescript, exo, codex, claude-code, cursor, or a TypeScript module path"
             )),
-        }
-    }
-}
-
-impl TypeScriptHarnessPreset {
-    fn module_path(self) -> &'static Path {
-        match self {
-            Self::Codex => Path::new("exoharness/examples/typescript/codex-harness.ts"),
-            Self::ClaudeCode => Path::new("exoharness/examples/typescript/claude-code-harness.ts"),
-            Self::Cursor => Path::new("exoharness/examples/typescript/cursor-sdk-harness.ts"),
-            Self::Pi => Path::new("exoharness/examples/typescript/pi-harness.ts"),
-        }
-    }
-
-    fn sandbox_image(self) -> Option<&'static str> {
-        match self {
-            Self::Codex => Some("exo-codex-sandbox:latest"),
-            Self::ClaudeCode => Some("exo-claude-code-sandbox:latest"),
-            Self::Cursor => Some("exo-cursor-sdk-sandbox:latest"),
-            Self::Pi => Some("exo-pi-sandbox:latest"),
         }
     }
 }
@@ -442,10 +419,14 @@ fn read_config_file<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> R
 }
 
 fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
-    let secret_backend = match cli.secret_backend.unwrap_or_else(default_secret_backend) {
+    let secret_backend = match cli
+        .runtime()
+        .secret_backend
+        .unwrap_or_else(default_secret_backend)
+    {
         SecretBackendArg::AppleKeychain => SecretBackendChoice::AppleKeychain,
         SecretBackendArg::File => SecretBackendChoice::File {
-            path: cli.master_key_path.clone(),
+            path: cli.runtime().master_key_path.clone(),
         },
     };
     #[cfg(feature = "firecracker")]
@@ -457,12 +438,13 @@ fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
     let firecracker_spec = FirecrackerBackendSpec::default();
     let sandbox_backends = default_sandbox_backends(firecracker_spec);
     let sandbox_policy = cli
+        .runtime()
         .egress_policy
         .as_ref()
         .map(|path| read_config_file(path))
         .transpose()?;
     Ok(BasicExoHarnessConfig {
-        root: cli.root.join("exoharness"),
+        root: cli.runtime().root.join("exoharness"),
         secret_backend,
         sandbox_default: default_local_sandbox_provider(),
         sandbox_policy,
@@ -475,9 +457,11 @@ fn command_firecracker_args(command: &Commands) -> Option<&FirecrackerArgs> {
     match command {
         Commands::Sandbox {
             command: SandboxCommands::Create(args),
+            ..
         } => Some(&args.firecracker),
         Commands::Sandbox {
             command: SandboxCommands::Play(args),
+            ..
         } => Some(&args.firecracker),
         Commands::Serve { firecracker, .. } => Some(firecracker),
         _ => None,
@@ -562,9 +546,41 @@ impl From<SandboxScopeArg> for SandboxScope {
     }
 }
 
+// Provider and FirecrackerBridge return from run before runtime options are accessed.
+macro_rules! runtime_accessor {
+    ($name:ident $(, $mutable:tt)?) => {
+        fn $name(&$($mutable)? self) -> &$($mutable)? RuntimeArgs {
+            match &$($mutable)? self.command {
+                Commands::Vault { runtime, .. }
+                | Commands::Agent { runtime, .. }
+                | Commands::Conversation { runtime, .. }
+                | Commands::Model { runtime, .. }
+                | Commands::SandboxProvider { runtime, .. }
+                | Commands::Sandbox { runtime, .. }
+                | Commands::Secret { runtime, .. }
+                | Commands::Chat { runtime, .. }
+                | Commands::Run { runtime, .. }
+                | Commands::Adapters { runtime, .. }
+                | Commands::Tools { runtime, .. }
+                | Commands::Serve { runtime, .. } => runtime,
+                Commands::Provider { .. } | Commands::FirecrackerBridge => {
+                    unreachable!("command does not use runtime options")
+                }
+            }
+        }
+    };
+}
+
+impl Cli {
+    runtime_accessor!(runtime);
+    runtime_accessor!(runtime_mut, mut);
+}
+
 #[derive(Debug, Subcommand)]
 enum Commands {
     Vault {
+        #[command(flatten)]
+        runtime: RuntimeArgs,
         #[command(subcommand)]
         command: vaults::VaultCommands,
     },
@@ -572,37 +588,56 @@ enum Commands {
     FirecrackerBridge,
     /// Manage agents and their executor configuration.
     Agent {
+        #[command(flatten)]
+        runtime: RuntimeArgs,
         #[command(subcommand)]
         command: AgentCommands,
     },
     /// Manage saved threads, mounts, events, and one-shot sends.
     #[command(name = "thread", alias = "conversation")]
     Conversation {
+        #[command(flatten)]
+        runtime: RuntimeArgs,
         #[command(subcommand)]
         command: ConversationCommands,
     },
     /// Register and list model bindings.
     Model {
+        #[command(flatten)]
+        runtime: RuntimeArgs,
         #[command(subcommand)]
         command: ModelCommands,
     },
-    /// Configure and list sandbox provider bindings.
+    /// Configure managed-agent providers and log in.
     Provider {
+        #[command(subcommand)]
+        command: providers::ProviderCommands,
+    },
+    /// Configure and list sandbox provider bindings.
+    SandboxProvider {
+        #[command(flatten)]
+        runtime: RuntimeArgs,
         #[command(subcommand)]
         command: ProviderCommands,
     },
     /// Manage sandboxes directly. Each command accepts --agent; omitted uses a shared owner.
     Sandbox {
+        #[command(flatten)]
+        runtime: RuntimeArgs,
         #[command(subcommand)]
         command: SandboxCommands,
     },
     /// Manage local stored secrets.
     Secret {
+        #[command(flatten)]
+        runtime: RuntimeArgs,
         #[command(subcommand)]
         command: SecretCommands,
     },
     /// Chat with an agent defined in Markdown or a saved agent.
     Chat {
+        #[command(flatten)]
+        runtime: RuntimeArgs,
         #[command(flatten)]
         thread: managed_agents::ThreadArgs,
         /// Use the full-screen TUI instead of inline chat.
@@ -612,19 +647,27 @@ enum Commands {
     /// Run one prompt with an agent.
     Run {
         #[command(flatten)]
+        runtime: RuntimeArgs,
+        #[command(flatten)]
         thread: managed_agents::ThreadArgs,
         prompt: String,
     },
     Adapters {
+        #[command(flatten)]
+        runtime: RuntimeArgs,
         #[command(subcommand)]
         command: adapters::AdapterCommands,
     },
     /// Inspect locally installed tool modules.
     Tools {
+        #[command(flatten)]
+        runtime: RuntimeArgs,
         #[command(subcommand)]
         command: tools::ToolCommands,
     },
     Serve {
+        #[command(flatten)]
+        runtime: RuntimeArgs,
         #[arg(long, default_value = "127.0.0.1:4766")]
         bind: SocketAddr,
         #[arg(short, long, action = ArgAction::Count)]
@@ -653,7 +696,7 @@ enum AgentCommands {
         tool_creation: Option<EnabledDisabled>,
         #[arg(long)]
         sandbox_image: Option<String>,
-        #[arg(long = "provider", value_enum)]
+        #[arg(long = "sandbox", value_enum)]
         sandbox_provider: Option<SandboxProviderArg>,
         #[arg(long, value_enum)]
         sandbox_scope: Option<SandboxScopeArg>,
@@ -690,7 +733,7 @@ enum AgentCommands {
         sandbox_image: Option<String>,
         #[arg(long)]
         clear_sandbox_image: bool,
-        #[arg(long = "provider", value_enum)]
+        #[arg(long = "sandbox", value_enum)]
         sandbox_provider: Option<SandboxProviderArg>,
         #[arg(long, value_enum)]
         sandbox_scope: Option<SandboxScopeArg>,
@@ -851,7 +894,7 @@ enum ConversationSandboxCommands {
     Attach {
         agent: String,
         conversation: String,
-        #[arg(long, value_enum)]
+        #[arg(long = "sandbox", value_enum)]
         provider: SandboxProviderArg,
         #[arg(long)]
         external_id: String,
@@ -950,7 +993,7 @@ struct SandboxStartArgs {
 
 #[derive(Debug, Args)]
 struct SandboxCreateArgs {
-    #[arg(long, value_enum)]
+    #[arg(long = "sandbox", value_enum)]
     provider: SandboxProviderArg,
     /// Image, template, or root filesystem understood by the provider.
     /// Omitting it uses the provider binding's default.
@@ -1047,7 +1090,7 @@ enum ProviderCommands {
 
 #[derive(Debug, Args)]
 struct ProviderConfigureArgs {
-    #[arg(long, value_enum)]
+    #[arg(long = "sandbox", value_enum)]
     provider: SandboxProviderArg,
     /// Binding name (default: the provider name).
     #[arg(long)]
@@ -1098,7 +1141,7 @@ struct ProviderConfigureArgs {
 struct ConversationSandboxRuntimeArgs {
     #[arg(long)]
     sandbox_image: Option<String>,
-    #[arg(long = "provider", value_enum)]
+    #[arg(long = "sandbox", value_enum)]
     sandbox_provider: Option<SandboxProviderArg>,
     #[arg(long)]
     shell_program: Option<String>,
@@ -1219,6 +1262,10 @@ impl std::fmt::Debug for CliError {
                 "Add a secret for this MCP server URL to a selected vault, or attach the vault containing it, then start a new thread."
             };
             write!(f, "connecting MCP server {}. {help}", auth.server_name)
+        } else if !self.verbose
+            && let Some(context) = self.error.downcast_ref::<providers::ContextError>()
+        {
+            std::fmt::Display::fmt(context, f)
         } else {
             std::fmt::Debug::fmt(&self.error, f)
         }
@@ -1248,119 +1295,212 @@ async fn run(mut cli: Cli) -> Result<()> {
         #[cfg(not(feature = "firecracker"))]
         bail!("Firecracker bridge support requires building Exo with --features firecracker");
     }
-    let exo_config = build_exo_config(&cli)?;
-    let env = CliEnvironment::load(cli.env_file_if_exists.as_deref(), cli.env_file.as_deref())?;
-    let runtime_config = env.braintrust_runtime_config(
-        cli.braintrust_api_key,
-        cli.braintrust_app_url,
-        cli.braintrust_api_url,
-    );
-    let env_vars = env.into_vars();
+    let config_directory = match cli.config_dir.clone() {
+        Some(path) => path,
+        None => cli
+            .home
+            .as_ref()
+            .context("--config-dir or --home is required")?
+            .join(".config/exo"),
+    };
+    let mut provider_store = providers::Store::load(config_directory)?;
+    if let Commands::Provider { command } = &cli.command {
+        return providers::run(command, &mut provider_store).await;
+    }
+    let selected_provider =
+        if matches!(cli.command, Commands::Tools { .. } | Commands::Serve { .. }) {
+            if cli.provider_profile.is_some() {
+                bail!("this command does not use a managed-agent provider");
+            }
+            None
+        } else {
+            let (agent, thread) = command_refs_mut(&mut cli.command);
+            provider_store.selected(
+                cli.provider_profile.as_deref(),
+                agent.map(|value| value.as_str()),
+                thread.map(|value| value.as_str()),
+            )?
+        };
+    run_selected(cli, provider_store, selected_provider.as_ref())
+        .await
+        .map_err(|error| {
+            if let Some(selection) = &selected_provider {
+                providers::request_error(error, selection)
+            } else {
+                error
+            }
+        })
+}
+
+async fn run_selected(
+    mut cli: Cli,
+    mut provider_store: providers::Store,
+    selected_provider: Option<&providers::Selection>,
+) -> Result<()> {
+    struct SelectedProvider<'a> {
+        selection: &'a providers::Selection,
+        account: String,
+        client: Option<exo_managed_agents::http::RuntimeClient>,
+    }
+    let selected_provider = if let Some(selection) = selected_provider {
+        let name = &selection.name;
+        let (client, account) = match &provider_store.profile(name)?.connection {
+            providers::Connection::Http { .. } => {
+                let (client, account) = provider_store.client(selection).await?;
+                (Some(client), account)
+            }
+            providers::Connection::Local { root } => {
+                cli.runtime_mut().root = root.clone();
+                (None, root.display().to_string())
+            }
+        };
+        if !matches!(
+            cli.command,
+            Commands::Agent {
+                command: AgentCommands::List
+                    | AgentCommands::Get { .. }
+                    | AgentCommands::Mount {
+                        command: AgentMountCommands::List { .. }
+                    },
+                ..
+            } | Commands::Conversation {
+                command: ConversationCommands::List { .. }
+                    | ConversationCommands::Get { .. }
+                    | ConversationCommands::Events { .. }
+                    | ConversationCommands::Mount {
+                        command: ConversationMountCommands::List { .. }
+                    },
+                ..
+            } | Commands::Vault {
+                command: vaults::VaultCommands::List
+                    | vaults::VaultCommands::Get { .. }
+                    | vaults::VaultCommands::Secret {
+                        command: vaults::SecretCommands::List { .. }
+                            | vaults::SecretCommands::Get { .. }
+                    },
+                ..
+            } | Commands::Model {
+                command: ModelCommands::List,
+                ..
+            } | Commands::SandboxProvider {
+                command: ProviderCommands::List,
+                ..
+            } | Commands::Sandbox {
+                command: SandboxCommands::List { .. },
+                ..
+            } | Commands::Secret {
+                command: SecretCommands::List,
+                ..
+            } | Commands::Adapters {
+                command: adapters::AdapterCommands::List { .. },
+                ..
+            }
+        ) {
+            eprintln!(
+                "provider: {}; account: {}",
+                name.escape_debug(),
+                account.escape_debug()
+            );
+            if !selection.context.is_empty() {
+                eprintln!("context: {}", serde_json::to_string(&selection.context)?);
+            }
+        }
+        provider_store.resolve_aliases(&mut cli.command, &account)?;
+        Some(SelectedProvider {
+            selection,
+            account,
+            client,
+        })
+    } else {
+        None
+    };
+    let http_client = selected_provider
+        .as_ref()
+        .and_then(|provider| provider.client.clone());
+    let env = CliEnvironment::load(
+        cli.runtime().env_file_if_exists.as_deref(),
+        cli.runtime().env_file.as_deref(),
+    )?;
     let definition = managed_agents::load_definition(&cli.command)?;
     let temporary = matches!(&cli.command,
         Commands::Chat { thread, .. } | Commands::Run { thread, .. }
         if thread.agent_file.is_some()
     );
-    let harness_selection = match cli.harness {
-        Some(selection) => Some(selection),
-        None => definition
+    if http_client.is_none() && cli.runtime().harness.is_none() {
+        cli.runtime_mut().harness = definition
             .as_ref()
             .map(managed_agents::harness_selection)
-            .transpose()?,
-    };
-    if let Commands::Tools { command } = &cli.command {
-        tools::handle_tool_command(&cli.root, command)?;
+            .transpose()?;
+    }
+    if let Commands::Tools { command, .. } = &cli.command {
+        tools::handle_tool_command(&cli.runtime().root, command)?;
         return Ok(());
     }
     if let Some(config) = serve_config(&cli.command) {
-        serve_exoharness_http(&exo_config, config).await?;
+        serve_exoharness_http(&build_exo_config(&cli)?, config).await?;
         return Ok(());
     }
 
-    let bearer_token = cli
-        .bearer_env
-        .as_deref()
-        .map(|env| env_value_from_arg("--bearer-env", env, &env_vars))
-        .transpose()?;
+    let harness = providers::runtime(&cli, http_client, definition.as_ref(), &env).await?;
+    let env_vars = env.into_vars();
+    let harness_selection = cli.runtime().harness.clone();
+    let harness_kind = harness_selection
+        .as_ref()
+        .map(HarnessSelection::harness_kind)
+        .unwrap_or(HarnessKind::Basic);
     let default_sandbox_provider = default_local_sandbox_provider();
-    let route_local_sandboxes = !matches!(&cli.command, Commands::Sandbox { .. });
-    let exoharness = instantiate_exoharness(
-        &exo_config,
-        cli.exoharness_url.as_deref(),
-        bearer_token,
-        route_local_sandboxes,
-    )
-    .await?;
-    if let Commands::Vault { command } = &cli.command {
-        return vaults::run(exoharness.as_ref(), command, &env_vars).await;
-    }
-    let exoharness: Arc<dyn ExoHarness> = if temporary {
-        Arc::new(BasicExoHarness::in_memory(exo_config.clone(), Some(exoharness.as_ref())).await?)
-    } else {
-        exoharness
-    };
-    let prepared_mcp =
-        managed_agents::connect_mcp(exoharness.as_ref(), definition.as_ref(), &mut cli.command)
-            .await?;
-    let mcp = Arc::clone(&prepared_mcp.tools);
-    let harness_kind = determine_harness_kind(
-        exoharness.as_ref(),
-        harness_selection.as_ref(),
-        &cli.command,
-    )
-    .await?;
-    let pricing = Arc::new(cost::load(cli.pricing_path.clone(), cli.pricing_url.clone()).await);
-    let harness = instantiate_harness(
-        &cli.root,
-        exoharness,
-        harness_kind,
-        runtime_config.clone(),
-        env_vars.clone(),
-        pricing,
-        Arc::clone(&mcp),
-    )
-    .await?;
+    let root = cli.runtime().root.clone();
     let result: Result<()> = async {
     match cli.command {
         Commands::FirecrackerBridge => {
             unreachable!("Firecracker bridge returns before harness startup")
         }
-        Commands::Tools { .. } | Commands::Vault { .. } => {
+        Commands::Tools { .. } | Commands::Provider { .. } => {
             unreachable!("management commands return before harness startup")
         }
-        Commands::Adapters { command } => {
-            adapters::handle_adapter_command(&cli.root, Arc::clone(&harness), command).await?;
+        Commands::Vault { command, .. } => vaults::run(harness.exoharness_handle().as_ref(), &command, &env_vars).await?,
+        Commands::Adapters { command, .. } => {
+            adapters::handle_adapter_command(&root, Arc::clone(&harness), command).await?;
         }
-        Commands::Chat { thread, tui } => {
+        command @ (Commands::Chat { .. } | Commands::Run { .. }) => {
+            let (thread, tui, prompt) = match &command {
+                Commands::Chat { thread, tui, .. } => (thread, *tui, None),
+                Commands::Run { thread, prompt, .. } => (thread, false, Some(prompt.as_str())),
+                _ => unreachable!(),
+            };
             let (agent, conversation) = managed_agents::open_thread(
                 harness.as_ref(),
                 definition.as_ref(),
-                harness_selection.as_ref(),
-                &thread,
-                &prepared_mcp,
-                &exo_config,
+                thread,
             )
             .await?;
+            if !temporary && let Some(provider) = &selected_provider {
+                provider_store.pin_thread(
+                    conversation.record().slug.clone(),
+                    provider.selection,
+                    &provider.account,
+                    agent.record().id,
+                    conversation.record().id,
+                )?;
+            }
             let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
-            if tui && interactive {
-                tui_app::run_chat_tui(agent, conversation, thread.verbosity).await?;
+            if let Some(prompt) = prompt {
+                tui::run_prompt(
+                    Arc::clone(&harness), agent, conversation, thread.verbosity, prompt,
+                ).await?;
+            } else if tui && interactive {
+                tui_app::run_chat_tui(
+                    Arc::clone(&harness),
+                    agent,
+                    conversation,
+                    thread.verbosity,
+                )
+                .await?;
             } else {
-                run_chat_repl(agent, conversation, thread.verbosity).await?;
+                run_chat_repl(Arc::clone(&harness), agent, conversation, thread.verbosity).await?;
             }
         }
-        Commands::Run { thread, prompt } => {
-            let (agent, conversation) = managed_agents::open_thread(
-                harness.as_ref(),
-                definition.as_ref(),
-                harness_selection.as_ref(),
-                &thread,
-                &prepared_mcp,
-                &exo_config,
-            )
-            .await?;
-            tui::run_prompt(agent, conversation, thread.verbosity, &prompt).await?;
-        }
-        Commands::Agent { command } => match command {
+        Commands::Agent { command, .. } => match command {
             AgentCommands::List => {
                 let agents = harness.list_agents().await?;
                 print_table(
@@ -1401,14 +1541,17 @@ async fn run(mut cli: Cli) -> Result<()> {
                     bail!("sandbox image must not be empty");
                 }
                 if let Some(definition) = definition.as_ref() {
-                    let agent = managed_agents::create_agent(
-                        harness.as_ref(),
-                        definition,
-                        &slug,
-                        harness_selection.as_ref(),
-                        model.as_deref(),
-                    )
-                    .await?;
+                    if selected_provider.is_some() {
+                        provider_store.ensure_agent_alias_available(&slug)?;
+                    }
+                    let agent = harness.create_managed_agent(definition, &slug).await?;
+                    if let Some(provider) = &selected_provider {
+                        provider_store.pin_agent(
+                            agent.record().slug.clone(), provider.selection,
+                            &provider.account,
+                            agent.record().id,
+                        )?;
+                    }
                     println!(
                         "created agent {} ({})",
                         agent.record().slug,
@@ -1516,7 +1659,7 @@ async fn run(mut cli: Cli) -> Result<()> {
                     );
                 }
                 let agent = must_get_agent(harness.as_ref(), &agent).await?;
-                let mut config = agent.config().await?;
+                let mut config = executor::load_agent_config(&*agent).await?;
                 let mut changed = false;
                 if let Some(set_harness) = set_harness.as_ref() {
                     if clear_module {
@@ -1695,13 +1838,13 @@ async fn run(mut cli: Cli) -> Result<()> {
                 {
                     bail!("TypeScript and Exo agents require a module path; pass --module <path>");
                 }
-                agent.put_config(config).await?;
+                harness.put_agent_config(&*agent, config).await?;
                 println!("updated agent {}", agent.record().slug);
             }
             AgentCommands::Mount { command } => match command {
                 AgentMountCommands::List { agent } => {
                     let agent = must_get_agent(harness.as_ref(), &agent).await?;
-                    let config = agent.config().await?;
+                    let config = executor::load_agent_config(&*agent).await?;
                     print_mounts(&config.sandbox.mounts);
                 }
                 AgentMountCommands::Create {
@@ -1714,7 +1857,7 @@ async fn run(mut cli: Cli) -> Result<()> {
                     let agent = must_get_agent(harness.as_ref(), &agent).await?;
                     let canonical_host_path = canonicalize_directory(&host_path)?;
 
-                    let mut config = agent.config().await?;
+                    let mut config = executor::load_agent_config(&*agent).await?;
                     let mount_path = match mount_path {
                         Some(mount_path) => {
                             validate_mount_path(&mount_path)?;
@@ -1744,7 +1887,7 @@ async fn run(mut cli: Cli) -> Result<()> {
                         config.sandbox.mounts.push(new_mount);
                     }
 
-                    agent.put_config(config).await?;
+                    harness.put_agent_config(&*agent, config).await?;
                     println!(
                         "mounted {} -> {} ({}) for agent {}",
                         canonical_host_path.display(),
@@ -1755,7 +1898,7 @@ async fn run(mut cli: Cli) -> Result<()> {
                 }
                 AgentMountCommands::Delete { agent, mount_path } => {
                     let agent = must_get_agent(harness.as_ref(), &agent).await?;
-                    let mut config = agent.config().await?;
+                    let mut config = executor::load_agent_config(&*agent).await?;
                     let before = config.sandbox.mounts.len();
                     config
                         .sandbox
@@ -1764,7 +1907,7 @@ async fn run(mut cli: Cli) -> Result<()> {
                     if config.sandbox.mounts.len() == before {
                         bail!("mount not found: {mount_path}");
                     }
-                    agent.put_config(config).await?;
+                    harness.put_agent_config(&*agent, config).await?;
                     println!(
                         "removed mount {} from agent {}",
                         mount_path,
@@ -1774,10 +1917,15 @@ async fn run(mut cli: Cli) -> Result<()> {
             },
             AgentCommands::Get { agent } => {
                 let agent = must_get_agent(harness.as_ref(), &agent).await?;
-                let config = agent.config().await?;
                 println!("id: {}", agent.record().id);
                 println!("slug: {}", agent.record().slug);
                 println!("name: {}", agent.record().name);
+                if let Some(definition) = exo_managed_agents::load_definition(agent.as_ref()).await? {
+                    println!("{}", definition.source());
+                }
+                let Some(config) = executor::find_agent_config(agent.as_ref()).await? else {
+                    return Ok(());
+                };
                 println!("harness: {}", format_harness_kind(config.harness));
                 println!(
                     "typescript_module: {}",
@@ -1843,29 +1991,19 @@ async fn run(mut cli: Cli) -> Result<()> {
                 );
             }
             AgentCommands::Delete { agent } => {
+                let record = must_get_agent(harness.as_ref(), &agent).await?.record().clone();
                 if !harness.delete_agent(&agent).await? {
                     bail!("agent not found: {agent}");
+                }
+                if let Some(provider) = &selected_provider {
+                    provider_store.unpin_agent(&provider.selection.name, &provider.account, record.id)?;
                 }
                 println!("deleted agent {}", agent);
             }
         },
-        Commands::Conversation { command } => match command {
+        Commands::Conversation { command, .. } => match command {
             ConversationCommands::List { agent } => {
-                let agent = must_get_agent(harness.as_ref(), &agent).await?;
-                let conversations = agent.list_conversations().await?;
-                print_table(
-                    &["THREAD", "ID", "NAME"],
-                    conversations
-                        .into_iter()
-                        .map(|conversation| {
-                            vec![
-                                conversation.slug,
-                                conversation.id.to_string(),
-                                conversation.name,
-                            ]
-                        })
-                        .collect(),
-                )?;
+                managed_agents::list_threads(harness.as_ref(), &agent).await?;
             }
             ConversationCommands::Create {
                 agent,
@@ -1885,22 +2023,25 @@ async fn run(mut cli: Cli) -> Result<()> {
                 if slug.is_empty() {
                     bail!("conversation slug resolved to an empty value");
                 }
-                let conversation = agent
-                    .create_conversation(CreateConversationRequest {
-    vaults: vec![],
-                        slug: Some(slug),
-                        name,
-                        sandbox_image: sandbox_runtime.sandbox_image,
-                        sandbox_provider: sandbox_runtime
-                            .sandbox_provider
-                            .map(SandboxProvider::from),
-                        shell_program: sandbox_runtime.shell_program,
-                    })
+                let conversation = harness
+                    .create_conversation(
+                        agent.as_ref(),
+                        CreateConversationRequest {
+                            vaults: vec![],
+                            slug: Some(slug),
+                            name,
+                            sandbox_image: sandbox_runtime.sandbox_image,
+                            sandbox_provider: sandbox_runtime
+                                .sandbox_provider
+                                .map(SandboxProvider::from),
+                            shell_program: sandbox_runtime.shell_program,
+                        },
+                    )
                     .await?;
                 if let Some(sandbox_scope) = sandbox_scope {
-                    let mut config = conversation.config().await?;
+                    let mut config = executor::load_conversation_config(&*conversation).await?;
                     config.sandbox_scope = Some(sandbox_scope.into());
-                    conversation.put_config(config).await?;
+                    harness.put_conversation_config(&*conversation, config).await?;
                 }
                 println!(
                     "created conversation {} ({})",
@@ -1924,7 +2065,6 @@ async fn run(mut cli: Cli) -> Result<()> {
             } => {
                 let source = must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
                 let forked = source
-                    .exoharness_handle()
                     .fork(ForkConversationRequest {
                         up_to_inclusive: parse_optional_uuid7(up_to.as_deref(), "up_to")?,
                         slug,
@@ -1965,11 +2105,11 @@ async fn run(mut cli: Cli) -> Result<()> {
                 }
 
                 let agent_handle = must_get_agent(harness.as_ref(), &agent).await?;
-                let conversation = agent_handle
-                    .get_conversation(&conversation)
+                let conversation = harness
+                    .get_conversation(agent_handle.as_ref(), &conversation)
                     .await?
                     .ok_or_else(|| anyhow!("conversation not found: {}", conversation))?;
-                let mut config = conversation.config().await?;
+                let mut config = executor::load_conversation_config(&*conversation).await?;
                 let mut changed = sandbox_runtime.apply(&mut config)?;
 
                 if let Some(sandbox_scope) = sandbox_scope {
@@ -1982,10 +2122,9 @@ async fn run(mut cli: Cli) -> Result<()> {
                     Some(None)
                 } else if model.is_some() || max_output_tokens.is_some() || clear_max_output_tokens
                 {
-                    let agent_config = agent_handle.config().await?;
+                    let agent_config = executor::load_agent_config(agent_handle.as_ref()).await?;
                     let mut model_override =
-                        conversation
-                            .model_override()
+                        executor::get_conversation_model_override(&*conversation)
                             .await?
                             .unwrap_or(ConversationModelConfig {
                                 model: agent_config.model,
@@ -2014,9 +2153,9 @@ async fn run(mut cli: Cli) -> Result<()> {
                     bail!("no changes provided");
                 }
 
-                conversation.put_config(config).await?;
+                harness.put_conversation_config(&*conversation, config).await?;
                 if let Some(model_override) = updated_model_override {
-                    conversation.put_model_override(model_override).await?;
+                    executor::put_conversation_model_override(&*conversation, model_override).await?;
                 }
                 println!("updated conversation {}", conversation.record().slug);
             }
@@ -2027,7 +2166,7 @@ async fn run(mut cli: Cli) -> Result<()> {
                 } => {
                     let conversation =
                         must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
-                    let config = conversation.config().await?;
+                    let config = executor::load_conversation_config(&*conversation).await?;
                     print_mounts(&config.mounts);
                 }
                 ConversationMountCommands::Create {
@@ -2042,7 +2181,7 @@ async fn run(mut cli: Cli) -> Result<()> {
                         must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
                     let canonical_host_path = canonicalize_directory(&host_path)?;
 
-                    let mut config = conversation.config().await?;
+                    let mut config = executor::load_conversation_config(&*conversation).await?;
                     let mount_path = match mount_path {
                         Some(mount_path) => {
                             validate_mount_path(&mount_path)?;
@@ -2071,7 +2210,7 @@ async fn run(mut cli: Cli) -> Result<()> {
                         config.mounts.push(new_mount);
                     }
 
-                    conversation.put_config(config).await?;
+                    harness.put_conversation_config(&*conversation, config).await?;
                     println!(
                         "mounted {} -> {} ({}) for {}",
                         canonical_host_path.display(),
@@ -2087,13 +2226,13 @@ async fn run(mut cli: Cli) -> Result<()> {
                 } => {
                     let conversation =
                         must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
-                    let mut config = conversation.config().await?;
+                    let mut config = executor::load_conversation_config(&*conversation).await?;
                     let before = config.mounts.len();
                     config.mounts.retain(|mount| mount.mount_path != mount_path);
                     if config.mounts.len() == before {
                         bail!("mount not found: {mount_path}");
                     }
-                    conversation.put_config(config).await?;
+                    harness.put_conversation_config(&*conversation, config).await?;
                     println!(
                         "removed mount {} from {}",
                         mount_path,
@@ -2101,7 +2240,7 @@ async fn run(mut cli: Cli) -> Result<()> {
                     );
                 }
             },
-            ConversationCommands::Sandbox { command } => match command {
+            ConversationCommands::Sandbox { command, .. } => match command {
                 ConversationSandboxCommands::Attach {
                     agent,
                     conversation,
@@ -2123,7 +2262,6 @@ async fn run(mut cli: Cli) -> Result<()> {
                     let conversation =
                         must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
                     let sandbox_id = conversation
-                        .exoharness_handle()
                         .attach_sandbox(AttachSandboxRequest {
                             attachment,
                             default_workdir,
@@ -2143,7 +2281,6 @@ async fn run(mut cli: Cli) -> Result<()> {
                     let conversation =
                         must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
                     let attachment = conversation
-                        .exoharness_handle()
                         .detach_sandbox(sandbox_id.clone())
                         .await?;
                     println!(
@@ -2159,8 +2296,8 @@ async fn run(mut cli: Cli) -> Result<()> {
                     command,
                 } => {
                     let agent_handle = must_get_agent(harness.as_ref(), &agent).await?;
-                    let conversation = agent_handle
-                        .get_conversation(&conversation)
+                    let conversation = harness
+                        .get_conversation(agent_handle.as_ref(), &conversation)
                         .await?
                         .ok_or_else(|| anyhow!("conversation not found: {}", conversation))?;
                     let output = run_sandbox_shell_command(
@@ -2181,21 +2318,12 @@ async fn run(mut cli: Cli) -> Result<()> {
                 conversation,
             } => {
                 let agent_handle = must_get_agent(harness.as_ref(), &agent).await?;
-                let agent_config = agent_handle.config().await?;
-                let conversation = agent_handle
-                    .get_conversation(&conversation)
+                let conversation = harness
+                    .get_conversation(agent_handle.as_ref(), &conversation)
                     .await?
                     .ok_or_else(|| anyhow!("conversation not found: {}", conversation))?;
-                let config = conversation.config().await?;
-                let model_override = conversation.model_override().await?;
-                let messages = conversation.messages().await?;
-                let effective_model =
-                    model_override
-                        .clone()
-                        .unwrap_or_else(|| ConversationModelConfig {
-                            model: agent_config.model.clone(),
-                            max_output_tokens: agent_config.max_output_tokens,
-                        });
+                let messages =
+                    executor::materialize_conversation_messages(conversation.as_ref()).await?;
                 println!("id: {}", conversation.record().id);
                 println!("slug: {}", conversation.record().slug);
                 println!("name: {}", conversation.record().name);
@@ -2208,6 +2336,15 @@ async fn run(mut cli: Cli) -> Result<()> {
                         .unwrap_or_else(|| "none".to_string())
                 );
                 println!("message_count: {}", messages.len());
+                let Some(agent_config) = executor::find_agent_config(agent_handle.as_ref()).await? else {
+                    render::print_transcript(&messages, Verbosity::default());
+                    return Ok(());
+                };
+                let config = executor::load_conversation_config(&*conversation).await?;
+                let model_override = executor::get_conversation_model_override(&*conversation).await?;
+                let effective_model = model_override.clone().unwrap_or_else(|| ConversationModelConfig {
+                    model: agent_config.model.clone(), max_output_tokens: agent_config.max_output_tokens,
+                });
                 println!(
                     "shell_program: {}",
                     config.shell_program.as_deref().unwrap_or("none")
@@ -2276,7 +2413,6 @@ async fn run(mut cli: Cli) -> Result<()> {
                 let conversation =
                     must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
                 let result = conversation
-                    .exoharness_handle()
                     .get_events(Some(EventQuery {
                         cursor: parse_optional_uuid7(cursor.as_deref(), "cursor")?,
                         direction: Some(if desc {
@@ -2334,7 +2470,7 @@ async fn run(mut cli: Cli) -> Result<()> {
                     },
                 };
                 record_host_event(
-                    conversation.exoharness_handle().as_ref(),
+                    conversation.as_ref(),
                     HOST_EVENT_REBUILD_AND_RESTART,
                     serde_json::to_value(&completed)?,
                 )
@@ -2348,9 +2484,12 @@ async fn run(mut cli: Cli) -> Result<()> {
             } => {
                 let conversation =
                     must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
-                let previous_messages = conversation.messages().await?;
-                send_conversation_wakeup(conversation.as_ref(), prompt).await?;
-                let messages = conversation.messages().await?;
+                let previous_messages =
+                    executor::materialize_conversation_messages(conversation.as_ref()).await?;
+                let agent = must_get_agent(harness.as_ref(), &agent).await?;
+                send_conversation_wakeup(harness.as_ref(), &agent, &conversation, prompt).await?;
+                let messages =
+                    executor::materialize_conversation_messages(conversation.as_ref()).await?;
                 for message in &messages[previous_messages.len()..] {
                     print_message(message, Verbosity::Full);
                 }
@@ -2360,17 +2499,21 @@ async fn run(mut cli: Cli) -> Result<()> {
                 conversation,
             } => {
                 let agent = must_get_agent(harness.as_ref(), &agent).await?;
-                if !agent.delete_conversation(&conversation).await? {
+                let thread = harness.get_conversation(agent.as_ref(), &conversation).await?;
+                if !harness.delete_conversation(&*agent, &conversation).await? {
                     println!("conversation {} not found; nothing to delete", conversation);
                 } else {
+                    if let (Some(provider), Some(thread)) = (&selected_provider, thread) {
+                        provider_store.unpin_thread(&provider.selection.name, &provider.account, thread.record().id)?;
+                    }
                     println!("deleted conversation {}", conversation);
                 }
             }
         },
-        Commands::Sandbox { command } => {
+        Commands::Sandbox { command, .. } => {
             handle_sandbox_command(harness.as_ref(), command).await?;
         }
-        Commands::Secret { command } => match command {
+        Commands::Secret { command, .. } => match command {
             SecretCommands::List => {
                 let secrets = global_vault(harness.exoharness_handle().as_ref()).await?.list_secrets().await?;
                 print_table(
@@ -2405,7 +2548,7 @@ async fn run(mut cli: Cli) -> Result<()> {
                 println!("created secret {} ({})", name, id);
             }
         },
-        Commands::Model { command } => match command {
+        Commands::Model { command, .. } => match command {
             ModelCommands::List => {
                 let models = list_model_bindings(harness.exoharness_handle().as_ref()).await?;
                 print_table(
@@ -2445,7 +2588,7 @@ async fn run(mut cli: Cli) -> Result<()> {
                 println!("created model {} ({})", name, id);
             }
         },
-        Commands::Provider { command } => match command {
+        Commands::SandboxProvider { command, .. } => match command {
             ProviderCommands::List => {
                 for record in harness.exoharness_handle().list_bindings().await? {
                     if let Binding::Sandbox { name, config } = record.binding {
@@ -2594,24 +2737,11 @@ async fn run(mut cli: Cli) -> Result<()> {
     Ok(())
     }.await;
     let shutdown = harness.shutdown().await;
-    let mcp_shutdown = mcp.close().await;
-    let cleanup = async {
-        if temporary {
-            for agent in harness.list_agents().await? {
-                harness.delete_agent(&agent.id.to_string()).await?;
-            }
-        }
-        Ok::<(), anyhow::Error>(())
-    }
-    .await;
     result?;
-    shutdown?;
-    mcp_shutdown?;
-    cleanup?;
-    Ok(())
+    shutdown
 }
 
-async fn handle_sandbox_command(harness: &dyn Harness, command: SandboxCommands) -> Result<()> {
+async fn handle_sandbox_command(harness: &Runtime, command: SandboxCommands) -> Result<()> {
     match command {
         SandboxCommands::Create(args) => {
             let SandboxStartArgs {
@@ -2796,10 +2926,7 @@ fn write_sandbox_ids(ids: impl IntoIterator<Item = String>) -> Result<()> {
     Ok(())
 }
 
-async fn sandbox_owner(
-    harness: &dyn Harness,
-    agent_ref: Option<&str>,
-) -> Result<Arc<dyn AgentHandle>> {
+async fn sandbox_owner(harness: &Runtime, agent_ref: Option<&str>) -> Result<Arc<dyn AgentHandle>> {
     let exoharness = harness.exoharness_handle();
     if let Some(agent_ref) = agent_ref {
         return exoharness
@@ -2831,7 +2958,7 @@ async fn sandbox_owner(
 }
 
 async fn start_sandbox(
-    harness: &dyn Harness,
+    harness: &Runtime,
     agent: Option<String>,
     name: Option<String>,
     args: SandboxCreateArgs,
@@ -2941,67 +3068,110 @@ async fn stream_sandbox_process(
     Ok(exit_code)
 }
 
-async fn determine_harness_kind(
-    exoharness: &dyn ExoHarness,
-    selection: Option<&HarnessSelection>,
-    command: &Commands,
-) -> Result<HarnessKind> {
-    if let Some(selection) = selection {
-        return Ok(selection.harness_kind());
-    }
-    let Some(agent_ref) = command_agent_ref(command) else {
-        return Ok(HarnessKind::Basic);
-    };
-
-    Ok(infer_agent_harness_kind(exoharness, agent_ref)
-        .await?
-        .unwrap_or(HarnessKind::Basic))
-}
-
-fn command_agent_ref(command: &Commands) -> Option<&str> {
+fn command_refs_mut(command: &mut Commands) -> (Option<&mut String>, Option<&mut String>) {
     match command {
-        Commands::Agent { command } => match command {
+        Commands::Agent { command, .. } => match command {
             AgentCommands::Update { agent, .. }
             | AgentCommands::Get { agent }
-            | AgentCommands::Delete { agent } => Some(agent.as_str()),
+            | AgentCommands::Delete { agent } => (Some(agent), None),
             AgentCommands::Mount { command } => match command {
                 AgentMountCommands::List { agent }
                 | AgentMountCommands::Create { agent, .. }
-                | AgentMountCommands::Delete { agent, .. } => Some(agent.as_str()),
+                | AgentMountCommands::Delete { agent, .. } => (Some(agent), None),
             },
-            AgentCommands::List | AgentCommands::Create { .. } => None,
+            AgentCommands::List | AgentCommands::Create { .. } => (None, None),
         },
-        Commands::Conversation { command } => match command {
-            ConversationCommands::List { agent }
-            | ConversationCommands::Create { agent, .. }
-            | ConversationCommands::Fork { agent, .. }
-            | ConversationCommands::Update { agent, .. }
-            | ConversationCommands::Get { agent, .. }
-            | ConversationCommands::Events { agent, .. }
-            | ConversationCommands::Send { agent, .. }
-            | ConversationCommands::Delete { agent, .. } => Some(agent.as_str()),
+        Commands::Conversation { command, .. } => match command {
+            ConversationCommands::List { agent } | ConversationCommands::Create { agent, .. } => {
+                (Some(agent), None)
+            }
+            ConversationCommands::Fork {
+                agent,
+                conversation,
+                ..
+            }
+            | ConversationCommands::Update {
+                agent,
+                conversation,
+                ..
+            }
+            | ConversationCommands::Get {
+                agent,
+                conversation,
+            }
+            | ConversationCommands::Events {
+                agent,
+                conversation,
+                ..
+            }
+            | ConversationCommands::Send {
+                agent,
+                conversation,
+                ..
+            }
+            | ConversationCommands::Delete {
+                agent,
+                conversation,
+            } => (Some(agent), Some(conversation)),
             ConversationCommands::Mount { command } => match command {
-                ConversationMountCommands::List { agent, .. }
-                | ConversationMountCommands::Create { agent, .. }
-                | ConversationMountCommands::Delete { agent, .. } => Some(agent.as_str()),
+                ConversationMountCommands::List {
+                    agent,
+                    conversation,
+                }
+                | ConversationMountCommands::Create {
+                    agent,
+                    conversation,
+                    ..
+                }
+                | ConversationMountCommands::Delete {
+                    agent,
+                    conversation,
+                    ..
+                } => (Some(agent), Some(conversation)),
             },
-            ConversationCommands::Sandbox { command } => match command {
-                ConversationSandboxCommands::Attach { agent, .. }
-                | ConversationSandboxCommands::Detach { agent, .. }
-                | ConversationSandboxCommands::Run { agent, .. } => Some(agent.as_str()),
+            ConversationCommands::Sandbox { command, .. } => match command {
+                ConversationSandboxCommands::Attach {
+                    agent,
+                    conversation,
+                    ..
+                }
+                | ConversationSandboxCommands::Detach {
+                    agent,
+                    conversation,
+                    ..
+                }
+                | ConversationSandboxCommands::Run {
+                    agent,
+                    conversation,
+                    ..
+                } => (Some(agent), Some(conversation)),
             },
-            ConversationCommands::CompleteRebuildUpdate { .. } => None,
+            ConversationCommands::CompleteRebuildUpdate { .. } => (None, None),
         },
-        Commands::Chat { thread, .. } | Commands::Run { thread, .. } => thread.agent.as_deref(),
+        Commands::Chat { thread, .. } | Commands::Run { thread, .. } => {
+            (thread.agent.as_mut(), thread.thread.as_mut())
+        }
+        Commands::Sandbox { command, .. } => {
+            let owner = match command {
+                SandboxCommands::Create(args) => &mut args.owner,
+                SandboxCommands::Play(args) => &mut args.owner,
+                SandboxCommands::List { owner, .. }
+                | SandboxCommands::Exec { owner, .. }
+                | SandboxCommands::Connect { owner, .. }
+                | SandboxCommands::Stop { owner, .. }
+                | SandboxCommands::Delete { owner, .. } => owner,
+            };
+            (owner.agent.as_mut(), None)
+        }
         Commands::Secret { .. }
         | Commands::FirecrackerBridge
-        | Commands::Sandbox { .. }
         | Commands::Model { .. }
         | Commands::Provider { .. }
+        | Commands::SandboxProvider { .. }
         | Commands::Adapters { .. }
         | Commands::Tools { .. }
         | Commands::Serve { .. }
-        | Commands::Vault { .. } => None,
+        | Commands::Vault { .. } => (None, None),
     }
 }
 
@@ -3084,27 +3254,6 @@ fn init_serve_tracing(verbosity: u8) {
     }
 }
 
-async fn infer_agent_harness_kind(
-    exoharness: &dyn ExoHarness,
-    agent_ref: &str,
-) -> Result<Option<HarnessKind>> {
-    let agent = if let Ok(agent_id) = agent_ref.parse::<Uuid7>() {
-        exoharness.get_agent(&agent_id).await?
-    } else {
-        exoharness
-            .list_agents()
-            .await?
-            .into_iter()
-            .find(|agent| agent.record().slug == agent_ref)
-    };
-    let Some(agent) = agent else {
-        return Ok(None);
-    };
-
-    let config = load_agent_config(agent.as_ref()).await?;
-    Ok(Some(from_agent_harness_kind(config.harness)))
-}
-
 async fn instantiate_exoharness(
     exo_config: &BasicExoHarnessConfig,
     http_url: Option<&str>,
@@ -3112,10 +3261,7 @@ async fn instantiate_exoharness(
     route_local_sandboxes: bool,
 ) -> Result<Arc<dyn ExoHarness>> {
     if let Some(http_url) = http_url {
-        let mut harness = HttpExoHarness::new(http_url)?;
-        if let Some(bearer_token) = bearer_token {
-            harness = harness.with_bearer_token(bearer_token);
-        }
+        let harness = HttpExoHarness::new(http_url, bearer_token)?;
         let remote: Arc<dyn ExoHarness> = Arc::new(harness);
         if !route_local_sandboxes {
             return Ok(remote);
@@ -3136,63 +3282,12 @@ async fn instantiate_exoharness(
     Ok(Arc::new(BasicExoHarness::new(exo_config.clone()).await?))
 }
 
-async fn instantiate_harness(
-    root: &Path,
-    exoharness: Arc<dyn ExoHarness>,
-    kind: HarnessKind,
-    runtime_config: Option<BraintrustRuntimeConfig>,
-    env_vars: HashMap<String, String>,
-    pricing: Arc<cost::PricingTable>,
-    mcp: Arc<exo_mcp::McpToolSet>,
-) -> Result<Arc<dyn Harness>> {
-    let harness: Arc<dyn Harness> = match kind {
-        HarnessKind::Basic => Arc::new(BasicHarness::with_runtime_config(
-            exoharness,
-            Arc::new(executor::RouterModelClient::new(env_vars)),
-            Arc::new(executor::McpToolRuntime::new(BasicToolRuntime, mcp)),
-            pricing,
-            runtime_config,
-        )),
-        HarnessKind::Rlm => Arc::new(RlmHarness::with_runtime_config(
-            exoharness,
-            Arc::new(executor::RouterModelClient::new(env_vars)),
-            Arc::new(executor::McpToolRuntime::new(BasicToolRuntime, mcp)),
-            runtime_config,
-        )),
-        HarnessKind::Exo => Arc::new(TypeScriptHarness::from_exoharness(
-            exoharness,
-            runtime_config,
-            env_vars,
-            Arc::new(executor::McpToolRuntime::new(
-                ExoToolRuntime::from_root(root)?,
-                mcp,
-            )),
-        )?),
-        HarnessKind::TypeScript => Arc::new(TypeScriptHarness::from_exoharness(
-            exoharness,
-            runtime_config,
-            env_vars,
-            Arc::new(executor::McpToolRuntime::new(BasicToolRuntime, mcp)),
-        )?),
-    };
-    Ok(harness)
-}
-
 fn to_agent_harness_kind(kind: HarnessKind) -> AgentHarnessKind {
     match kind {
         HarnessKind::Basic => AgentHarnessKind::Basic,
         HarnessKind::Rlm => AgentHarnessKind::Rlm,
         HarnessKind::TypeScript => AgentHarnessKind::TypeScript,
         HarnessKind::Exo => AgentHarnessKind::Exo,
-    }
-}
-
-fn from_agent_harness_kind(kind: AgentHarnessKind) -> HarnessKind {
-    match kind {
-        AgentHarnessKind::Basic => HarnessKind::Basic,
-        AgentHarnessKind::Rlm => HarnessKind::Rlm,
-        AgentHarnessKind::TypeScript => HarnessKind::TypeScript,
-        AgentHarnessKind::Exo => HarnessKind::Exo,
     }
 }
 
@@ -3259,10 +3354,10 @@ fn build_typescript_harness_config(
 }
 
 async fn ensure_agent_matches_harness_selection(
-    agent: &dyn HarnessAgent,
+    agent: &dyn AgentHandle,
     selection: &HarnessSelection,
 ) -> Result<()> {
-    let config = agent.config().await?;
+    let config = executor::load_agent_config(agent).await?;
     let expected = to_agent_harness_kind(selection.harness_kind());
     if config.harness != expected {
         bail!(
@@ -3546,7 +3641,7 @@ fn parse_environment(values: Vec<String>) -> Result<HashMap<String, String>> {
         .collect()
 }
 
-fn canonicalize_directory(path: &PathBuf) -> Result<PathBuf> {
+fn canonicalize_directory(path: &Path) -> Result<PathBuf> {
     let canonical = std::fs::canonicalize(path)?;
     if !canonical.is_dir() {
         bail!(
@@ -3607,7 +3702,7 @@ fn print_mounts(mounts: &[FileSystemMount]) {
     }
 }
 
-async fn must_get_agent(harness: &dyn Harness, agent_ref: &str) -> Result<Arc<dyn HarnessAgent>> {
+async fn must_get_agent(harness: &Runtime, agent_ref: &str) -> Result<Arc<dyn AgentHandle>> {
     harness
         .get_agent(agent_ref)
         .await?
@@ -3615,13 +3710,13 @@ async fn must_get_agent(harness: &dyn Harness, agent_ref: &str) -> Result<Arc<dy
 }
 
 async fn must_get_conversation(
-    harness: &dyn Harness,
+    harness: &Runtime,
     agent_ref: &str,
     conversation_ref: &str,
-) -> Result<Arc<dyn HarnessConversation>> {
+) -> Result<Arc<dyn ConversationHandle>> {
     let agent = must_get_agent(harness, agent_ref).await?;
-    agent
-        .get_conversation(conversation_ref)
+    harness
+        .get_conversation(&*agent, conversation_ref)
         .await?
         .ok_or_else(|| anyhow!("conversation not found: {conversation_ref}"))
 }
@@ -3634,12 +3729,12 @@ struct SandboxShellOutput {
 }
 
 async fn run_sandbox_shell_command(
-    agent: &dyn HarnessAgent,
-    conversation: &dyn HarnessConversation,
+    agent: &dyn AgentHandle,
+    conversation: &dyn ConversationHandle,
     command: String,
 ) -> Result<SandboxShellOutput> {
-    let agent_config = agent.config().await?;
-    let config = conversation.config().await?;
+    let agent_config = executor::load_agent_config(agent).await?;
+    let config = executor::load_conversation_config(conversation).await?;
     if config.shell_program.is_none() {
         bail!(
             "shell sandbox is not enabled for this conversation; run `exo thread update {} {} --shell-program /bin/bash`",
@@ -3647,16 +3742,14 @@ async fn run_sandbox_shell_command(
             conversation.record().slug
         );
     }
-    let agent_handle = agent.exoharness_handle();
-    let conversation_handle = conversation.exoharness_handle();
     let runtime = BasicToolRuntime;
 
     let mut arguments = serde_json::Map::new();
     arguments.insert("command".to_string(), serde_json::Value::String(command));
     let result = runtime
         .execute(
-            agent_handle.as_ref(),
-            conversation_handle.as_ref(),
+            agent,
+            conversation,
             None,
             &agent_config,
             &config,
@@ -3794,7 +3887,7 @@ mod create_tests {
             super::Cli::try_parse_from(["exo", "chat", "--agent", "codex", "--harness", "codex"])
                 .expect("chat parses with a preset harness");
         assert!(matches!(
-            cli.harness,
+            &cli.runtime().harness,
             Some(super::HarnessSelection::TypeScriptPreset(
                 super::TypeScriptHarnessPreset::Codex
             ))
@@ -3821,7 +3914,8 @@ mod create_tests {
                         super::TypeScriptHarnessPreset::Codex
                     )),
                     ..
-                }
+                },
+                ..
             }
         ));
     }
@@ -3860,7 +3954,7 @@ mod create_tests {
         ])
         .expect("chat parses with a TypeScript module path");
         assert!(matches!(
-            cli.harness,
+            &cli.runtime().harness,
             Some(super::HarnessSelection::TypeScriptModule(path))
                 if path.as_path() == std::path::Path::new("./my-harness.ts")
         ));
@@ -3878,7 +3972,8 @@ mod create_tests {
                     agent,
                     conversation,
                     prompt,
-                }
+                },
+                ..
             } if agent == "agent" && conversation == "conv" && prompt == "hello"
         ));
     }
@@ -3905,7 +4000,8 @@ mod create_tests {
                         conversation,
                         command,
                     },
-                }
+                },
+                ..
             } if agent == "agent" && conversation == "conv" && command == "pwd && git status"
         ));
     }
@@ -3920,7 +4016,7 @@ mod create_tests {
             "attach",
             "agent",
             "conv",
-            "--provider",
+            "--sandbox",
             "docker",
             "--external-id",
             "harbor-task",
@@ -3939,7 +4035,8 @@ mod create_tests {
                         external_id,
                         default_workdir: Some(default_workdir),
                     },
-                }
+                },
+                ..
             } if agent == "agent"
                 && conversation == "conv"
                 && external_id == "harbor-task"
@@ -3948,23 +4045,26 @@ mod create_tests {
     }
 
     #[test]
-    fn exoharness_http_aliases_parse() {
+    fn exoharness_http_options_parse() {
         use clap::Parser;
         let cli = super::Cli::try_parse_from([
             "exo",
-            "--url",
+            "agent",
+            "--exoharness-url",
             "http://localhost:8000/exo/v1/projects/project-id",
             "--bearer-env",
             "BRAINTRUST_API_KEY",
-            "agent",
             "list",
         ])
-        .expect("HTTP exoharness aliases parse");
+        .expect("HTTP exoharness options parse");
         assert_eq!(
-            cli.exoharness_url.as_deref(),
+            cli.runtime().exoharness_url.as_deref(),
             Some("http://localhost:8000/exo/v1/projects/project-id")
         );
-        assert_eq!(cli.bearer_env.as_deref(), Some("BRAINTRUST_API_KEY"));
+        assert_eq!(
+            cli.runtime().bearer_env.as_deref(),
+            Some("BRAINTRUST_API_KEY")
+        );
     }
 
     #[test]
@@ -3972,9 +4072,9 @@ mod create_tests {
         use clap::Parser;
         let error = super::Cli::try_parse_from([
             "exo",
+            "agent",
             "--bearer-env",
             "BRAINTRUST_API_KEY",
-            "agent",
             "list",
         ])
         .expect_err("bearer env should require an exoharness URL");
@@ -3992,7 +4092,7 @@ mod create_tests {
             "agent",
             "create",
             "test",
-            "--provider",
+            "--sandbox",
             "local-process",
             "--model",
             "test-model",
@@ -4004,7 +4104,8 @@ mod create_tests {
                 command: super::AgentCommands::Create {
                     sandbox_provider: Some(super::SandboxProviderArg::LocalProcess),
                     ..
-                }
+                },
+                ..
             }
         ));
     }

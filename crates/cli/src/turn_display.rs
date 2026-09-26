@@ -51,6 +51,11 @@ impl TurnProgress {
                     self.clear()?;
                     return result;
                 }
+                signal = tokio::signal::ctrl_c() => {
+                    self.clear()?;
+                    signal?;
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, "turn interrupted").into());
+                }
                 _ = interval.tick(), if self.enabled && self.status.is_some() => {
                     let frame = ["-", "\\", "|", "/"][self.frame % 4];
                     self.frame = self.frame.wrapping_add(1);

@@ -48,11 +48,12 @@ async fn chat_shows_one_line_for_auth_errors_unless_full_verbosity_is_requested(
             .env_clear()
             .env("EXO_CONFIG_DIR", temp.path().join("config"))
             .current_dir(temp.path())
+            .arg("chat")
             .arg("--root")
             .arg(temp.path().join("state"))
             .args(["--secret-backend", "file", "--master-key-path"])
             .arg(temp.path().join("master-key"))
-            .args(["chat", "--agent-file"])
+            .arg("--agent-file")
             .arg(&agent);
         if let Some(verbosity) = verbosity {
             command.args(["--verbosity", verbosity]);

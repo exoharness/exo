@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 use async_trait::async_trait;
-use exoharness::{AgentHandle, BeginTurnRequest, ConversationHandle, Result, TurnHandle};
+use exoharness::{
+    AgentHandle, AgentRecord, BeginTurnRequest, ConversationHandle, ExoHarness, NewAgentRequest,
+    NewConversationRequest, Result, TurnHandle,
+};
 use tokio::sync::{OnceCell, mpsc};
 use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
 
@@ -13,20 +16,22 @@ use crate::execution_tracing::{ExecutionTracer, TurnExecutionTrace};
 use crate::harness::{
     Harness, HarnessCommand, HarnessEventSink, HarnessTurnKey, HarnessTurnOutcome,
 };
-use crate::harness_adapter::{ExecutorHarness, ExecutorTurn};
+use crate::harness_adapter::ExecutorTurn;
 use crate::harness_config::{
     load_agent_config, load_conversation_config, store_agent_config, store_conversation_config,
 };
 use crate::harness_events::HarnessEvents;
-use crate::harness_facade::HarnessRuntime;
-use crate::harness_helpers::get_conversation_model_override;
+use crate::harness_helpers::{
+    get_conversation_model_override, resolve_agent_handle, resolve_conversation_handle,
+};
 use crate::shared::{
     AGENT_CONFIG_CACHE_NAME, CONVERSATION_CONFIG_CACHE_NAME, cache_agent_config,
     cache_conversation_config, finalize_turn, get_or_load_cached,
 };
 use crate::{
-    AgentConfig, ConversationConfig, ConversationModelConfig, ExecutionStreamEvent,
-    ExecutionStreamHandle, SendRequest, SendResult,
+    AgentConfig, ConversationConfig, ConversationModelConfig, CreateAgentRequest,
+    CreateConversationRequest, ExecutionStreamEvent, ExecutionStreamHandle, Provider, SendRequest,
+    SendResult,
 };
 
 #[derive(Clone, Copy)]
@@ -36,10 +41,29 @@ pub(crate) enum ExecutorStreamMode<'a> {
 }
 
 #[async_trait]
-pub(crate) trait HarnessExecutor: Send + Sync + Clone + 'static {
-    type Prepared: Send + Sync + 'static;
-
+pub(crate) trait HarnessExecutor: Send + Sync + 'static {
     fn name(&self) -> &'static str;
+
+    fn agent_config(
+        &self,
+        _definition: &exo_managed_agents::AgentDefinition,
+    ) -> Result<AgentConfig> {
+        Err(anyhow!("this executor does not configure managed agents"))
+    }
+
+    async fn configure_managed_thread(
+        &self,
+        _agent: &dyn AgentHandle,
+        _thread: &dyn ConversationHandle,
+        _agent_config: &AgentConfig,
+        _thread_config: &ConversationConfig,
+    ) -> Result<usize> {
+        Ok(0)
+    }
+
+    fn fork(&self, _state: Arc<dyn ExoHarness>) -> Result<Arc<dyn HarnessExecutor>> {
+        Err(anyhow!("this executor does not support temporary agents"))
+    }
 
     async fn shutdown(&self) -> Result<()> {
         Ok(())
@@ -63,8 +87,6 @@ pub(crate) trait HarnessExecutor: Send + Sync + Clone + 'static {
         Ok(())
     }
 
-    fn prepare_request(&self, request: &SendRequest) -> Result<Self::Prepared>;
-
     async fn execute_turn(
         &self,
         agent: &dyn AgentHandle,
@@ -72,15 +94,15 @@ pub(crate) trait HarnessExecutor: Send + Sync + Clone + 'static {
         turn: Arc<dyn TurnHandle>,
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
-        prepared: &Self::Prepared,
+        request: &SendRequest,
         stream_mode: ExecutorStreamMode<'_>,
         turn_trace: Option<&dyn TurnExecutionTrace>,
     ) -> Result<()>;
 }
 
-pub(crate) struct ExecutorHarnessRuntime<E> {
-    executor: E,
-    harness: Arc<ExecutorHarness<E>>,
+#[derive(Clone)]
+pub struct Runtime {
+    provider: Arc<dyn Provider>,
     initialized: Arc<OnceCell<()>>,
     events: Arc<HarnessEvents>,
     finalizers: Arc<tokio::sync::Mutex<tokio::task::JoinSet<()>>>,
@@ -89,11 +111,13 @@ pub(crate) struct ExecutorHarnessRuntime<E> {
     conversation_config_cache: Arc<RwLock<HashMap<exoharness::ConversationId, ConversationConfig>>>,
 }
 
-impl<E: HarnessExecutor> ExecutorHarnessRuntime<E> {
-    pub(crate) fn new(executor: E, runtime_config: Option<BraintrustRuntimeConfig>) -> Self {
+impl Runtime {
+    pub fn new(
+        provider: impl Provider + 'static,
+        runtime_config: Option<BraintrustRuntimeConfig>,
+    ) -> Self {
         Self {
-            harness: Arc::new(ExecutorHarness::new(executor.clone())),
-            executor,
+            provider: Arc::new(provider),
             initialized: Arc::default(),
             events: Arc::default(),
             finalizers: Arc::default(),
@@ -103,29 +127,67 @@ impl<E: HarnessExecutor> ExecutorHarnessRuntime<E> {
         }
     }
 
-    async fn start_turn(
+    pub async fn start_turn(
         &self,
         agent: Arc<dyn AgentHandle>,
         thread: Arc<dyn ConversationHandle>,
         request: SendRequest,
         streaming: bool,
-    ) -> Result<ExecutionStreamHandle> {
+        config_override: Option<AgentConfig>,
+    ) -> Result<(exoharness::TurnRecord, ExecutionStreamHandle)> {
+        let (receipt, response) = tokio::sync::oneshot::channel();
+        self.provider
+            .harness()
+            .submit(HarnessCommand::StartTurn(crate::provider::ProviderTurn {
+                agent,
+                thread,
+                request,
+                streaming,
+                config_override,
+                receipt,
+                runtime: self.clone(),
+            }))
+            .await?;
+        response
+            .await
+            .map_err(|error| anyhow!("provider stopped before acknowledging the turn: {error}"))
+    }
+
+    pub(crate) async fn start_local_turn(
+        &self,
+        provider: &crate::LocalProvider,
+        agent: Arc<dyn AgentHandle>,
+        thread: Arc<dyn ConversationHandle>,
+        request: SendRequest,
+        streaming: bool,
+        config_override: Option<AgentConfig>,
+    ) -> Result<(exoharness::TurnRecord, ExecutionStreamHandle)> {
         self.initialized
             .get_or_try_init(|| {
-                self.harness
+                provider
+                    .harness
                     .init(HarnessEventSink::new(self.events.clone()))
             })
             .await?;
         let guard = conversation_send_lock(&thread.record().id.to_string())
             .lock_owned()
             .await;
-        let (mut agent_config, thread_config, model_override) = tokio::try_join!(
-            self.get_agent_config(agent.as_ref()),
+        let (agent_config, thread_config) = tokio::try_join!(
+            async {
+                if let Some(config) = config_override {
+                    return Ok(config);
+                }
+                let (mut config, model) = tokio::try_join!(
+                    self.get_agent_config(agent.as_ref()),
+                    get_conversation_model_override(thread.as_ref()),
+                )?;
+                apply_conversation_model_override(&mut config, model);
+                Ok::<_, anyhow::Error>(config)
+            },
             self.get_conversation_config(thread.as_ref()),
-            get_conversation_model_override(thread.as_ref()),
         )?;
-        apply_conversation_model_override(&mut agent_config, model_override);
-        self.executor
+        provider
+            .executor
             .prepare_conversation(
                 agent.as_ref(),
                 thread.as_ref(),
@@ -133,17 +195,17 @@ impl<E: HarnessExecutor> ExecutorHarnessRuntime<E> {
                 &thread_config,
             )
             .await?;
-        let prepared = self.executor.prepare_request(&request)?;
         let turn = thread
             .begin_turn(BeginTurnRequest {
                 session_id: request.session_id,
-                input: request.input,
+                input: request.input.clone(),
             })
             .await?;
         let key = HarnessTurnKey {
             thread_id: thread.record().id,
             turn_id: turn.record().id,
         };
+        let record = turn.record().clone();
         let mut completion = self
             .events
             .register(Arc::clone(&thread), Arc::clone(&turn))?;
@@ -161,7 +223,13 @@ impl<E: HarnessExecutor> ExecutorHarnessRuntime<E> {
             .await
             .map(Arc::from);
         let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let submission = self
+        let mut finalizers = self.finalizers.lock().await;
+        while let Some(result) = finalizers.try_join_next() {
+            if let Err(error) = result {
+                tracing::error!(%error, "harness turn finalization panicked");
+            }
+        }
+        let submission = provider
             .harness
             .submit(HarnessCommand::StartTurn(ExecutorTurn {
                 agent,
@@ -169,7 +237,7 @@ impl<E: HarnessExecutor> ExecutorHarnessRuntime<E> {
                 turn: Arc::clone(&turn),
                 agent_config,
                 thread_config,
-                prepared,
+                request,
                 stream: streaming.then(|| event_tx.clone()),
                 trace: trace.clone(),
             }))
@@ -184,13 +252,7 @@ impl<E: HarnessExecutor> ExecutorHarnessRuntime<E> {
             }
             return Err(error);
         }
-        let harness = Arc::clone(&self.harness);
-        let mut finalizers = self.finalizers.lock().await;
-        while let Some(result) = finalizers.try_join_next() {
-            if let Err(error) = result {
-                tracing::error!(%error, "harness turn finalization panicked");
-            }
-        }
+        let harness = Arc::clone(&provider.harness);
         finalizers.spawn(async move {
             let _guard = guard;
             let outcome = tokio::select! {
@@ -226,24 +288,10 @@ impl<E: HarnessExecutor> ExecutorHarnessRuntime<E> {
                 tracing::debug!(?key, "harness stream closed before completion delivery");
             }
         });
-        Ok(ExecutionStreamHandle::new(UnboundedReceiverStream::new(
-            event_rx,
-        )))
-    }
-}
-
-impl<E: Clone> Clone for ExecutorHarnessRuntime<E> {
-    fn clone(&self) -> Self {
-        Self {
-            executor: self.executor.clone(),
-            harness: Arc::clone(&self.harness),
-            initialized: Arc::clone(&self.initialized),
-            events: Arc::clone(&self.events),
-            finalizers: Arc::clone(&self.finalizers),
-            tracer: Arc::clone(&self.tracer),
-            agent_config_cache: Arc::clone(&self.agent_config_cache),
-            conversation_config_cache: Arc::clone(&self.conversation_config_cache),
-        }
+        Ok((
+            record,
+            ExecutionStreamHandle::new(UnboundedReceiverStream::new(event_rx)),
+        ))
     }
 }
 
@@ -257,9 +305,8 @@ fn apply_conversation_model_override(
     }
 }
 
-#[async_trait]
-impl<E: HarnessExecutor> HarnessRuntime for ExecutorHarnessRuntime<E> {
-    async fn get_agent_config(&self, agent: &dyn AgentHandle) -> Result<AgentConfig> {
+impl Runtime {
+    pub async fn get_agent_config(&self, agent: &dyn AgentHandle) -> Result<AgentConfig> {
         get_or_load_cached(
             &self.agent_config_cache,
             agent.record().id,
@@ -269,13 +316,17 @@ impl<E: HarnessExecutor> HarnessRuntime for ExecutorHarnessRuntime<E> {
         .await
     }
 
-    async fn put_agent_config(&self, agent: &dyn AgentHandle, config: AgentConfig) -> Result<()> {
+    pub async fn put_agent_config(
+        &self,
+        agent: &dyn AgentHandle,
+        config: AgentConfig,
+    ) -> Result<()> {
         store_agent_config(agent, &config).await?;
         cache_agent_config(&self.agent_config_cache, agent.record().id, config);
         Ok(())
     }
 
-    async fn get_conversation_config(
+    pub async fn get_conversation_config(
         &self,
         conversation: &dyn ConversationHandle,
     ) -> Result<ConversationConfig> {
@@ -288,7 +339,7 @@ impl<E: HarnessExecutor> HarnessRuntime for ExecutorHarnessRuntime<E> {
         .await
     }
 
-    async fn put_conversation_config(
+    pub async fn put_conversation_config(
         &self,
         conversation: &dyn ConversationHandle,
         config: ConversationConfig,
@@ -302,13 +353,15 @@ impl<E: HarnessExecutor> HarnessRuntime for ExecutorHarnessRuntime<E> {
         Ok(())
     }
 
-    async fn send(
+    pub async fn send(
         &self,
         agent: Arc<dyn AgentHandle>,
         conversation: Arc<dyn ConversationHandle>,
         request: SendRequest,
     ) -> Result<SendResult> {
-        let mut events = self.start_turn(agent, conversation, request, false).await?;
+        let (_, mut events) = self
+            .start_turn(agent, conversation, request, false, None)
+            .await?;
         while let Some(event) = events.next().await {
             if let ExecutionStreamEvent::Completed(result) = event? {
                 return Ok(result);
@@ -317,23 +370,225 @@ impl<E: HarnessExecutor> HarnessRuntime for ExecutorHarnessRuntime<E> {
         Err(anyhow!("harness stopped without completion"))
     }
 
-    async fn send_stream(
+    pub async fn send_stream(
         &self,
         agent: Arc<dyn AgentHandle>,
         conversation: Arc<dyn ConversationHandle>,
         request: SendRequest,
     ) -> Result<ExecutionStreamHandle> {
-        self.start_turn(agent, conversation, request, true).await
+        self.start_turn(agent, conversation, request, true, None)
+            .await
+            .map(|(_, stream)| stream)
     }
 
-    async fn shutdown(&self) -> Result<()> {
-        let shutdown = self.harness.shutdown().await;
+    pub(crate) async fn cancel_turn(&self, key: HarnessTurnKey) -> Result<bool> {
+        if !self.events.contains(key) {
+            return Ok(false);
+        }
+        self.cancel(key).await?;
+        Ok(true)
+    }
+
+    pub async fn cancel(&self, key: HarnessTurnKey) -> Result<()> {
+        self.provider
+            .harness()
+            .submit(HarnessCommand::CancelTurn { key })
+            .await
+    }
+
+    pub async fn flush_tracing(&self) -> Result<()> {
+        self.tracer.flush().await
+    }
+
+    pub async fn shutdown(&self) -> Result<()> {
+        let shutdown = self.provider.harness().shutdown().await;
         let mut finalizers = self.finalizers.lock().await;
         while let Some(result) = finalizers.join_next().await {
             result?;
         }
         let flush = self.tracer.flush().await;
+        let cleanup = self.provider.cleanup().await;
         shutdown?;
-        flush
+        flush?;
+        cleanup
+    }
+}
+
+impl Runtime {
+    pub(crate) async fn configure_managed_agent(
+        &self,
+        agent: &Arc<dyn AgentHandle>,
+        definition: &exo_managed_agents::AgentDefinition,
+    ) -> Result<()> {
+        self.provider.configure_agent(agent, definition).await?;
+        self.agent_config_cache
+            .write()
+            .expect("agent config cache poisoned")
+            .remove(&agent.record().id);
+        Ok(())
+    }
+
+    pub(crate) async fn temporary(
+        &self,
+        config: exoharness::BasicExoHarnessConfig,
+    ) -> Result<Self> {
+        let state =
+            exoharness::BasicExoHarness::in_memory(config, Some(self.exoharness_handle().as_ref()))
+                .await?;
+        self.provider.temporary(Arc::new(state))
+    }
+
+    pub fn exoharness_handle(&self) -> Arc<dyn ExoHarness> {
+        self.provider.exoharness()
+    }
+
+    pub async fn create_managed_agent(
+        &self,
+        definition: &exo_managed_agents::AgentDefinition,
+        slug: &str,
+    ) -> Result<Arc<dyn AgentHandle>> {
+        exo_managed_agents::create_agent(self.provider.as_ref(), definition, slug).await
+    }
+
+    pub async fn open_managed_thread(
+        &self,
+        agent: &Arc<dyn AgentHandle>,
+        reference: Option<&str>,
+        request: NewConversationRequest,
+    ) -> Result<exo_managed_agents::OpenedThread> {
+        let opened =
+            exo_managed_agents::open_thread(self.provider.as_ref(), agent, reference, request)
+                .await?;
+        self.conversation_config_cache
+            .write()
+            .expect("conversation config cache poisoned")
+            .remove(&opened.thread.record().id);
+        Ok(opened)
+    }
+
+    pub async fn end_session(
+        &self,
+        thread: &dyn ConversationHandle,
+        session_id: exoharness::SessionId,
+    ) -> Result<()> {
+        self.provider.end_session(thread, session_id).await
+    }
+
+    pub async fn list_agents(&self) -> Result<Vec<AgentRecord>> {
+        let agents = self.provider.exoharness().list_agents().await?;
+        Ok(agents
+            .into_iter()
+            .map(|agent| agent.record().clone())
+            .collect())
+    }
+
+    pub async fn get_agent(&self, agent_ref: &str) -> Result<Option<Arc<dyn AgentHandle>>> {
+        resolve_agent_handle(self.provider.exoharness().as_ref(), agent_ref).await
+    }
+
+    pub async fn create_agent(&self, request: CreateAgentRequest) -> Result<Arc<dyn AgentHandle>> {
+        let name = request.name.clone().unwrap_or_else(|| request.slug.clone());
+        let config = AgentConfig {
+            instructions: Vec::new(),
+            harness: request.harness,
+            typescript: request.typescript,
+            enable_agent_tool_creation: request.enable_agent_tool_creation,
+            sandbox: crate::AgentSandboxConfig {
+                image: request.sandbox_image,
+                provider: request.sandbox_provider,
+                mounts: Vec::new(),
+                enable_networking: request.enable_networking,
+                scope: request.sandbox_scope.unwrap_or_default(),
+            },
+            model: request.model,
+            max_output_tokens: request.max_output_tokens,
+            max_tool_round_trips: request.max_tool_round_trips,
+            braintrust: request.braintrust,
+        };
+        let agent = self
+            .provider
+            .exoharness()
+            .new_agent(NewAgentRequest {
+                vaults: vec![],
+                slug: request.slug,
+                name,
+            })
+            .await?;
+        self.put_agent_config(agent.as_ref(), config).await?;
+        Ok(agent)
+    }
+
+    pub async fn delete_agent(&self, agent_ref: &str) -> Result<bool> {
+        let Some(agent) =
+            resolve_agent_handle(self.provider.exoharness().as_ref(), agent_ref).await?
+        else {
+            return Ok(false);
+        };
+        self.provider
+            .exoharness()
+            .delete_agent(&agent.record().id)
+            .await
+    }
+
+    pub async fn get_conversation(
+        &self,
+        agent: &dyn AgentHandle,
+        reference: &str,
+    ) -> Result<Option<Arc<dyn ConversationHandle>>> {
+        resolve_conversation_handle(agent, reference).await
+    }
+
+    pub async fn delete_conversation(
+        &self,
+        agent: &dyn AgentHandle,
+        reference: &str,
+    ) -> Result<bool> {
+        let Some(thread) = resolve_conversation_handle(agent, reference).await? else {
+            return Ok(false);
+        };
+        agent.delete_conversation(&thread.record().id).await
+    }
+
+    pub async fn create_conversation(
+        &self,
+        agent: &dyn AgentHandle,
+        request: CreateConversationRequest,
+    ) -> Result<Arc<dyn ConversationHandle>> {
+        let agent_config = self.get_agent_config(agent).await?;
+        let conversation = agent
+            .new_conversation(NewConversationRequest {
+                vaults: request.vaults,
+                slug: request.slug,
+                name: request.name,
+            })
+            .await?;
+        let default_conversation_config = ConversationConfig::default();
+        let conversation_config = ConversationConfig {
+            sandbox_image: request.sandbox_image.or(agent_config.sandbox.image),
+            sandbox_provider: Some(
+                request
+                    .sandbox_provider
+                    .unwrap_or(agent_config.sandbox.provider),
+            ),
+            shell_program: request
+                .shell_program
+                .or(default_conversation_config.shell_program),
+            mounts: default_conversation_config.mounts,
+            durable_file_systems: default_conversation_config.durable_file_systems,
+            sandbox_scope: default_conversation_config.sandbox_scope,
+        };
+        if let Err(error) = self
+            .put_conversation_config(conversation.as_ref(), conversation_config)
+            .await
+        {
+            agent
+                .delete_conversation(&conversation.record().id)
+                .await
+                .with_context(|| {
+                    format!("configuring thread failed ({error:#}); cleanup also failed")
+                })?;
+            return Err(error);
+        }
+        Ok(conversation)
     }
 }

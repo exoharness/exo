@@ -2663,6 +2663,7 @@ dependencies = [
 name = "executor"
 version = "0.1.0"
 dependencies = [
+ "actix-web",
  "anyhow",
  "async-trait",
  "base64 0.22.1",
@@ -2672,6 +2673,7 @@ dependencies = [
  "bytes",
  "chrono",
  "cost",
+ "exo-managed-agents",
  "exo-mcp",
  "exoharness",
  "futures",
@@ -2683,6 +2685,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tracing",
  "url",
  "wiremock",
@@ -2704,6 +2707,8 @@ dependencies = [
  "exo-mcp",
  "exoharness",
  "futures",
+ "keyring",
+ "keyring-core",
  "lingua",
  "oauth2",
  "ratatui",
@@ -2750,14 +2755,19 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bytes",
  "exo-mcp",
  "exoharness",
  "futures",
+ "lingua",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "serde_yaml_ng",
  "tempfile",
  "tokio",
+ "tokio-util",
+ "url",
 ]
 
 [[package]]

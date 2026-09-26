@@ -7,9 +7,9 @@ use std::time::Instant;
 
 use anyhow::Result;
 use executor::{
-    ConversationHandle, EventData, EventId, EventKind, EventQuery, EventQueryDirection,
-    ExecutionStreamEvent, HarnessAgent, HarnessConversation, SandboxId, SandboxProvider,
-    SendRequest, SessionId, SnapshotId, StartSandboxRequest,
+    AgentHandle, ConversationHandle, EventData, EventId, EventKind, EventQuery,
+    EventQueryDirection, ExecutionStreamEvent, Runtime, SandboxId, SandboxProvider, SendRequest,
+    SessionId, SnapshotId, StartSandboxRequest,
 };
 use lingua::universal::{UserContent, UserContentPart};
 use lingua::{Message, UniversalStreamChunk};
@@ -25,34 +25,34 @@ use crate::render::{
 };
 use crate::run_sandbox_shell_command;
 use crate::turn_display::{TurnProgress, UsageTotals, UsageTracker, interruptible};
+use executor::harness::HarnessTurnKey;
 
 const DEFAULT_SHELL_PROGRAM: &str = "/bin/bash";
 const REMOTE_HISTORY_BASE: usize = 1_000_000;
 const REMOTE_HISTORY_PAGE_SIZE: u32 = 32;
 
 pub async fn run_chat_repl(
-    agent: Arc<dyn HarnessAgent>,
-    conversation: Arc<dyn HarnessConversation>,
+    runtime: Arc<Runtime>,
+    agent: Arc<dyn AgentHandle>,
+    conversation: Arc<dyn ConversationHandle>,
     verbosity: Verbosity,
 ) -> Result<()> {
-    let mut repl = ChatRepl::new(agent, conversation, verbosity)?;
+    let mut repl = ChatRepl::new(runtime, agent, conversation, verbosity)?;
     interruptible(repl.print_transcript()).await?;
     while interruptible(repl.run()).await?.is_none() {}
     Ok(())
 }
 
 pub async fn run_prompt(
-    agent: Arc<dyn HarnessAgent>,
-    conversation: Arc<dyn HarnessConversation>,
+    runtime: Arc<Runtime>,
+    agent: Arc<dyn AgentHandle>,
+    conversation: Arc<dyn ConversationHandle>,
     verbosity: Verbosity,
     prompt: &str,
 ) -> Result<()> {
-    let mut repl = ChatRepl::new(agent, conversation, verbosity)?;
+    let mut repl = ChatRepl::new(runtime, agent, conversation, verbosity)?;
     repl.send(prompt).await?;
-    if let Some(session_id) = repl.session_id.take() {
-        repl.conversation.close_session(session_id).await?;
-    }
-    Ok(())
+    repl.end_session().await
 }
 
 struct ChatHistory {
@@ -363,8 +363,10 @@ fn fetch_remote_user_messages(
 }
 
 struct ChatRepl {
-    agent: Arc<dyn HarnessAgent>,
-    conversation: Arc<dyn HarnessConversation>,
+    runtime: Arc<Runtime>,
+    active_turn: Option<HarnessTurnKey>,
+    agent: Arc<dyn AgentHandle>,
+    conversation: Arc<dyn ConversationHandle>,
     editor: Editor<(), ChatHistory>,
     session_id: Option<SessionId>,
     watch_after: Option<EventId>,
@@ -374,15 +376,18 @@ struct ChatRepl {
 
 impl ChatRepl {
     fn new(
-        agent: Arc<dyn HarnessAgent>,
-        conversation: Arc<dyn HarnessConversation>,
+        runtime: Arc<Runtime>,
+        agent: Arc<dyn AgentHandle>,
+        conversation: Arc<dyn ConversationHandle>,
         verbosity: Verbosity,
     ) -> Result<Self> {
         let latest_event_id = conversation.record().latest_event_id;
-        let history = ChatHistory::new(conversation.exoharness_handle(), latest_event_id);
+        let history = ChatHistory::new(conversation.clone(), latest_event_id);
         let mut editor = Editor::with_history(Config::default(), history)?;
         editor.bind_sequence(KeyEvent(KeyCode::Enter, Modifiers::ALT), Cmd::Newline);
         Ok(Self {
+            runtime,
+            active_turn: None,
             agent,
             conversation,
             editor,
@@ -394,7 +399,7 @@ impl ChatRepl {
     }
 
     async fn print_transcript(&self) -> Result<()> {
-        let messages = self.conversation.messages().await?;
+        let messages = executor::materialize_conversation_messages(&*self.conversation).await?;
         print_transcript(&messages, self.verbosity);
         Ok(())
     }
@@ -540,10 +545,15 @@ impl ChatRepl {
             }
         }
 
-        if let Some(session_id) = self.session_id.take() {
-            self.conversation.close_session(session_id).await?;
-        }
+        self.end_session().await
+    }
 
+    async fn end_session(&mut self) -> Result<()> {
+        if let Some(session_id) = self.session_id.take() {
+            self.runtime
+                .end_session(self.conversation.as_ref(), session_id)
+                .await?;
+        }
         Ok(())
     }
 
@@ -563,12 +573,10 @@ impl ChatRepl {
         println!("snapshotting sandbox {sandbox_id}...");
         let snapshot_id = self
             .conversation
-            .exoharness_handle()
             .snapshot_sandbox(sandbox_id.clone())
             .await?;
         println!("snapshot {snapshot_id} captured; restoring on {provider}...");
         self.conversation
-            .exoharness_handle()
             .start_sandbox(StartSandboxRequest {
                 id: sandbox_id.clone(),
                 snapshot_id,
@@ -580,22 +588,40 @@ impl ChatRepl {
     }
 
     async fn send(&mut self, input: &str) -> Result<()> {
+        let result = self.send_inner(input).await;
+        if result.as_ref().err().is_some_and(|error| {
+            error
+                .downcast_ref::<io::Error>()
+                .is_some_and(|error| error.kind() == io::ErrorKind::Interrupted)
+        }) && let Some(key) = self.active_turn.take()
+        {
+            self.runtime.cancel(key).await?;
+        }
+        self.active_turn = None;
+        result
+    }
+
+    async fn send_inner(&mut self, input: &str) -> Result<()> {
         let started = Instant::now();
         let mut progress = TurnProgress::new();
         progress
-            .wait(
-                self.usage
-                    .refresh(self.conversation.exoharness_handle().as_ref(), None),
-            )
+            .wait(self.usage.refresh(self.conversation.as_ref(), None))
             .await?;
-        let mut stream = progress
-            .wait(self.conversation.send_stream(SendRequest {
-                input: vec![Message::User {
-                    content: UserContent::String(input.to_string()),
-                }],
-                session_id: self.session_id,
-            }))
+        let (turn, mut stream) = progress
+            .wait(self.runtime.start_turn(
+                Arc::clone(&self.agent),
+                Arc::clone(&self.conversation),
+                SendRequest {
+                    input: vec![Message::User {
+                        content: UserContent::String(input.to_string()),
+                    }],
+                    session_id: self.session_id,
+                },
+                true,
+                None,
+            ))
             .await?;
+        self.active_turn = Some(HarnessTurnKey::new(self.conversation.record().id, turn.id));
         progress.set_status(Some("Waiting for model".to_string()));
         let mut stdout = io::stdout();
         let mut printed_assistant = false;
@@ -677,7 +703,11 @@ impl ChatRepl {
 
         if printed_assistant {
             println!();
-        } else if let Some(last_message) = self.conversation.messages().await?.last().cloned()
+        } else if let Some(last_message) =
+            executor::materialize_conversation_messages(&*self.conversation)
+                .await?
+                .last()
+                .cloned()
             && let Message::Assistant { content, .. } = last_message
         {
             let rendered = render_assistant_content(&content, self.verbosity);
@@ -687,10 +717,10 @@ impl ChatRepl {
         }
         progress.set_status(Some("Finishing turn".to_string()));
         match progress
-            .wait(self.usage.refresh(
-                self.conversation.exoharness_handle().as_ref(),
-                completed_turn,
-            ))
+            .wait(
+                self.usage
+                    .refresh(self.conversation.as_ref(), completed_turn),
+            )
             .await
         {
             Ok(usage) => println!("{}", usage.display(&self.usage.total, ttft, elapsed)),
@@ -707,7 +737,7 @@ impl ChatRepl {
     }
 
     async fn print_pending_events(&mut self) -> Result<()> {
-        let conversation = self.conversation.exoharness_handle();
+        let conversation = &self.conversation;
         loop {
             let result = conversation
                 .get_events(Some(EventQuery {
@@ -731,6 +761,7 @@ impl ChatRepl {
 
     async fn run_shell(&self, command: &str) -> Result<()> {
         let output = shell_output(
+            self.runtime.as_ref(),
             self.agent.as_ref(),
             self.conversation.as_ref(),
             command.to_string(),
@@ -824,25 +855,23 @@ fn print_help() {
 /// `/cost` output: summarize token usage and dollar cost for the conversation
 /// from the `usage` records on its `messages` events. Paginates so it covers
 /// the whole conversation, not just one page.
-pub(crate) async fn cost_lines(conversation: &dyn HarnessConversation) -> Vec<String> {
+pub(crate) async fn cost_lines(conversation: &dyn ConversationHandle) -> Vec<String> {
     match cost_summary(conversation).await {
         Ok(lines) => lines,
         Err(error) => vec![format!("cost summary failed: {error:#}")],
     }
 }
 
-async fn cost_summary(conversation: &dyn HarnessConversation) -> Result<Vec<String>> {
+async fn cost_summary(conversation: &dyn ConversationHandle) -> Result<Vec<String>> {
     let mut tracker = UsageTracker::default();
-    tracker
-        .refresh(conversation.exoharness_handle().as_ref(), None)
-        .await?;
+    tracker.refresh(conversation, None).await?;
     Ok(tracker.cost_lines())
 }
 
 /// `/snapshot` output: snapshot the given sandbox, or the conversation's
 /// latest one when no id is given.
 pub(crate) async fn snapshot_lines(
-    conversation: &dyn HarnessConversation,
+    conversation: &dyn ConversationHandle,
     explicit_id: Option<SandboxId>,
 ) -> Vec<String> {
     match snapshot_sandbox(conversation, explicit_id).await {
@@ -852,7 +881,7 @@ pub(crate) async fn snapshot_lines(
 }
 
 async fn snapshot_sandbox(
-    conversation: &dyn HarnessConversation,
+    conversation: &dyn ConversationHandle,
     explicit_id: Option<SandboxId>,
 ) -> Result<SnapshotId> {
     let sandbox_id = match explicit_id {
@@ -861,15 +890,12 @@ async fn snapshot_sandbox(
             anyhow::anyhow!("no sandbox has been created in this conversation yet")
         })?,
     };
-    let id = conversation
-        .exoharness_handle()
-        .snapshot_sandbox(sandbox_id)
-        .await?;
+    let id = conversation.snapshot_sandbox(sandbox_id).await?;
     Ok(id)
 }
 
 /// `/snapshots` output: every snapshot taken in the conversation.
-pub(crate) async fn snapshots_lines(conversation: &dyn HarnessConversation) -> Vec<String> {
+pub(crate) async fn snapshots_lines(conversation: &dyn ConversationHandle) -> Vec<String> {
     match list_snapshots(conversation).await {
         Ok(snapshots) if snapshots.is_empty() => {
             vec!["no snapshots yet for this conversation".to_string()]
@@ -895,7 +921,7 @@ pub(crate) async fn snapshots_lines(conversation: &dyn HarnessConversation) -> V
 /// snapshot. Stops the current container, decodes the snapshot payload, and
 /// starts a fresh container from that state.
 pub(crate) async fn rewind_lines(
-    conversation: &dyn HarnessConversation,
+    conversation: &dyn ConversationHandle,
     snapshot_id: &str,
 ) -> Vec<String> {
     match rewind_to_snapshot(conversation, snapshot_id).await {
@@ -905,7 +931,7 @@ pub(crate) async fn rewind_lines(
 }
 
 async fn rewind_to_snapshot(
-    conversation: &dyn HarnessConversation,
+    conversation: &dyn ConversationHandle,
     snapshot_id_str: &str,
 ) -> Result<()> {
     let snapshot_id = snapshot_id_str
@@ -915,7 +941,6 @@ async fn rewind_to_snapshot(
         .await?
         .ok_or_else(|| anyhow::anyhow!("snapshot {snapshot_id} not found in this conversation"))?;
     conversation
-        .exoharness_handle()
         .start_sandbox(StartSandboxRequest {
             id: sandbox_id,
             snapshot_id,
@@ -932,7 +957,7 @@ async fn rewind_to_snapshot(
 /// move; only the backend (and the machine actually running the container)
 /// changes.
 pub(crate) async fn teleport_lines(
-    conversation: &dyn HarnessConversation,
+    conversation: &dyn ConversationHandle,
     provider: &str,
 ) -> Vec<String> {
     match teleport_sandbox(conversation, provider).await {
@@ -944,7 +969,7 @@ pub(crate) async fn teleport_lines(
 }
 
 async fn teleport_sandbox(
-    conversation: &dyn HarnessConversation,
+    conversation: &dyn ConversationHandle,
     provider_str: &str,
 ) -> Result<(SandboxId, SandboxProvider)> {
     let provider = provider_str
@@ -953,12 +978,8 @@ async fn teleport_sandbox(
     let sandbox_id = latest_sandbox_id(conversation)
         .await?
         .ok_or_else(|| anyhow::anyhow!("no sandbox has been created in this conversation yet"))?;
-    let snapshot_id = conversation
-        .exoharness_handle()
-        .snapshot_sandbox(sandbox_id.clone())
-        .await?;
+    let snapshot_id = conversation.snapshot_sandbox(sandbox_id.clone()).await?;
     conversation
-        .exoharness_handle()
         .start_sandbox(StartSandboxRequest {
             id: sandbox_id.clone(),
             snapshot_id,
@@ -972,11 +993,12 @@ async fn teleport_sandbox(
 /// `/shell` output as display lines. The line-mode repl streams raw bytes to
 /// stdout/stderr instead; this is for UIs that own the screen.
 pub(crate) async fn shell_lines(
-    agent: &dyn HarnessAgent,
-    conversation: &dyn HarnessConversation,
+    harness: &Runtime,
+    agent: &dyn AgentHandle,
+    conversation: &dyn ConversationHandle,
     command: String,
 ) -> Vec<String> {
-    match shell_output(agent, conversation, command).await {
+    match shell_output(harness, agent, conversation, command).await {
         Ok(output) => {
             let mut lines: Vec<String> = output
                 .stdout
@@ -994,14 +1016,17 @@ pub(crate) async fn shell_lines(
 }
 
 async fn shell_output(
-    agent: &dyn HarnessAgent,
-    conversation: &dyn HarnessConversation,
+    harness: &Runtime,
+    agent: &dyn AgentHandle,
+    conversation: &dyn ConversationHandle,
     command: String,
 ) -> Result<crate::SandboxShellOutput> {
-    let mut config = conversation.config().await?;
+    let mut config = executor::load_conversation_config(conversation).await?;
     if config.shell_program.is_none() {
         config.shell_program = Some(DEFAULT_SHELL_PROGRAM.to_string());
-        conversation.put_config(config).await?;
+        harness
+            .put_conversation_config(conversation, config)
+            .await?;
     }
     run_sandbox_shell_command(agent, conversation, command).await
 }
@@ -1009,9 +1034,8 @@ async fn shell_output(
 /// Walk the conversation's event log to find the latest `SandboxCreated`
 /// event, returning the sandbox id. Returns `None` if no sandbox has been
 /// created yet (e.g. nothing has been chatted with).
-async fn latest_sandbox_id(conversation: &dyn HarnessConversation) -> Result<Option<SandboxId>> {
+async fn latest_sandbox_id(conversation: &dyn ConversationHandle) -> Result<Option<SandboxId>> {
     let result = conversation
-        .exoharness_handle()
         .get_events(Some(EventQuery {
             cursor: None,
             direction: Some(EventQueryDirection::Desc),
@@ -1037,13 +1061,12 @@ async fn latest_sandbox_id(conversation: &dyn HarnessConversation) -> Result<Opt
 /// All snapshots taken in the conversation, oldest-first. Each tuple is
 /// `(snapshot_id, sandbox_id_it_was_taken_from)`.
 async fn list_snapshots(
-    conversation: &dyn HarnessConversation,
+    conversation: &dyn ConversationHandle,
 ) -> Result<Vec<(SnapshotId, SandboxId)>> {
     let mut out = Vec::new();
     let mut cursor: Option<EventId> = None;
     loop {
         let result = conversation
-            .exoharness_handle()
             .get_events(Some(EventQuery {
                 cursor,
                 direction: Some(EventQueryDirection::Asc),
@@ -1080,7 +1103,7 @@ async fn list_snapshots(
 /// Find the sandbox a particular snapshot was taken from, by scanning the
 /// `SandboxSnapshotted` events.
 async fn sandbox_id_for_snapshot(
-    conversation: &dyn HarnessConversation,
+    conversation: &dyn ConversationHandle,
     target: SnapshotId,
 ) -> Result<Option<SandboxId>> {
     let snapshots = list_snapshots(conversation).await?;

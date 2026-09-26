@@ -21,8 +21,7 @@ use crate::harness::{
 };
 use crate::harness_adapter::{ExecutorHarness, ExecutorTurn};
 use crate::harness_events::HarnessEvents;
-use crate::harness_executor::{ExecutorHarnessRuntime, ExecutorStreamMode, HarnessExecutor};
-use crate::harness_facade::HarnessRuntime;
+use crate::harness_executor::{ExecutorStreamMode, HarnessExecutor, Runtime};
 use crate::{
     AgentConfig, AgentHarnessKind, AgentSandboxConfig, ConversationConfig, SandboxProvider,
     SendRequest,
@@ -58,14 +57,9 @@ impl Drop for Running {
 
 #[async_trait]
 impl HarnessExecutor for ControlledExecutor {
-    type Prepared = bool;
     fn name(&self) -> &'static str {
         "controlled"
     }
-    fn prepare_request(&self, _: &SendRequest) -> Result<bool> {
-        Ok(false)
-    }
-
     async fn execute_turn(
         &self,
         _: &dyn AgentHandle,
@@ -73,14 +67,14 @@ impl HarnessExecutor for ControlledExecutor {
         _: Arc<dyn TurnHandle>,
         _: &AgentConfig,
         _: &ConversationConfig,
-        panic: &bool,
+        request: &SendRequest,
         _: ExecutorStreamMode<'_>,
         _: Option<&dyn TurnExecutionTrace>,
     ) -> Result<()> {
         assert_eq!(self.running.fetch_add(1, Ordering::SeqCst), 0);
         let _running = Running(Arc::clone(&self.running));
         self.started.notify_one();
-        assert!(!panic, "test harness panic");
+        assert!(request.input.is_empty(), "test harness panic");
         self.release.acquire().await?.forget();
         Ok(())
     }
@@ -94,6 +88,7 @@ impl HarnessExecutor for ControlledExecutor {
 
 struct Fixture {
     _temp: TempDir,
+    storage: Arc<dyn ExoHarness>,
     agent: Arc<dyn AgentHandle>,
     thread: Arc<dyn ConversationHandle>,
     config: AgentConfig,
@@ -102,8 +97,9 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Result<Self> {
         let temp = TempDir::new()?;
-        let storage =
-            BasicExoHarness::new(crate::test_support::local_test_config(temp.path())).await?;
+        let storage: Arc<dyn ExoHarness> = Arc::new(
+            BasicExoHarness::new(crate::test_support::local_test_config(temp.path())).await?,
+        );
         let agent = storage
             .new_agent(NewAgentRequest {
                 vaults: vec![],
@@ -138,20 +134,28 @@ impl Fixture {
         crate::harness_config::store_agent_config(agent.as_ref(), &config).await?;
         Ok(Self {
             _temp: temp,
+            storage,
             agent,
             thread,
             config,
         })
     }
 
-    fn work(&self, turn: Arc<dyn TurnHandle>, panic: bool) -> ExecutorTurn<bool> {
+    fn work(&self, turn: Arc<dyn TurnHandle>, panic: bool) -> ExecutorTurn {
         ExecutorTurn {
             agent: Arc::clone(&self.agent),
             thread: Arc::clone(&self.thread),
             turn,
             agent_config: self.config.clone(),
             thread_config: ConversationConfig::default(),
-            prepared: panic,
+            request: SendRequest {
+                input: if panic {
+                    vec![crate::harness_helpers::user_message("panic")]
+                } else {
+                    Vec::new()
+                },
+                session_id: None,
+            },
             stream: None,
             trace: None,
         }
@@ -180,7 +184,7 @@ impl HarnessEventHandler for Recorder {
 async fn submission_is_nonblocking_and_cancellation_waits_for_cleanup() -> Result<()> {
     let fixture = Fixture::new().await?;
     let executor = ControlledExecutor::default();
-    let harness = ExecutorHarness::new(executor.clone());
+    let harness = ExecutorHarness::new(Arc::new(executor.clone()));
     let (tx, mut events) = mpsc::unbounded_channel();
     harness
         .init(HarnessEventSink::new(Arc::new(Recorder(tx))))
@@ -239,7 +243,7 @@ async fn submission_is_nonblocking_and_cancellation_waits_for_cleanup() -> Resul
 #[tokio::test]
 async fn panic_reports_failure_and_releases_execution() -> Result<()> {
     let fixture = Fixture::new().await?;
-    let harness = ExecutorHarness::new(ControlledExecutor::default());
+    let harness = ExecutorHarness::new(Arc::new(ControlledExecutor::default()));
     let (tx, mut events) = mpsc::unbounded_channel();
     harness
         .init(HarnessEventSink::new(Arc::new(Recorder(tx))))
@@ -270,7 +274,10 @@ async fn panic_reports_failure_and_releases_execution() -> Result<()> {
 async fn dropping_stream_holds_thread_lock_until_cancelled_execution_stops() -> Result<()> {
     let fixture = Fixture::new().await?;
     let executor = ControlledExecutor::default();
-    let runtime = ExecutorHarnessRuntime::new(executor.clone(), None);
+    let runtime = Runtime::new(
+        crate::LocalProvider::new(Arc::clone(&fixture.storage), Arc::new(executor.clone())),
+        None,
+    );
     let first = runtime
         .send_stream(
             Arc::clone(&fixture.agent),

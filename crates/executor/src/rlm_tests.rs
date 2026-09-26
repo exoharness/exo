@@ -18,7 +18,7 @@ use tempfile::TempDir;
 use tokio_stream::StreamExt;
 
 use crate::test_support::local_test_config;
-use crate::{CreateAgentRequest, CreateConversationRequest, Harness, RlmHarness};
+use crate::{CreateAgentRequest, CreateConversationRequest, LocalProvider, Runtime};
 
 #[tokio::test(flavor = "current_thread")]
 async fn rlm_send_executes_repl_steps_and_persists_final_answer() {
@@ -63,7 +63,10 @@ async fn rlm_send_executes_repl_steps_and_persists_final_answer() {
             duration: None,
         },
     ]));
-    let harness = RlmHarness::new(exoharness, model);
+    let harness = Runtime::new(
+        LocalProvider::rlm(exoharness, model, Arc::new(crate::BasicToolRuntime)),
+        None,
+    );
     register_test_model(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness
@@ -84,26 +87,31 @@ async fn rlm_send_executes_repl_steps_and_persists_final_answer() {
         })
         .await
         .expect("agent should be created");
-    let conversation = agent
-        .create_conversation(CreateConversationRequest::default())
+    let conversation = harness
+        .create_conversation(&*agent, CreateConversationRequest::default())
         .await
         .expect("conversation should be created");
 
-    conversation
-        .send(SendRequest {
-            input: vec![user_message("say done after you inspect context")],
-            session_id: None,
-        })
+    harness
+        .send(
+            Arc::clone(&agent),
+            Arc::clone(&conversation),
+            SendRequest {
+                input: vec![user_message("say done after you inspect context")],
+                session_id: None,
+            },
+        )
         .await
         .expect("send should succeed");
 
-    let messages = conversation.messages().await.expect("messages should load");
+    let messages = crate::materialize_conversation_messages(&*conversation)
+        .await
+        .expect("messages should load");
     assert_eq!(messages.len(), 2);
     assert!(matches!(messages[0], Message::User { .. }));
     assert_eq!(assistant_text(&messages[1]), "done");
 
     let events = conversation
-        .exoharness_handle()
         .get_events(Some(EventQuery {
             cursor: None,
             direction: Some(EventQueryDirection::Asc),
@@ -210,7 +218,14 @@ async fn rlm_subquery_variable_can_store_final_answer() {
             duration: None,
         },
     ]));
-    let harness = RlmHarness::new(exoharness, Arc::clone(&model));
+    let harness = Runtime::new(
+        LocalProvider::rlm(
+            exoharness,
+            Arc::clone(&model),
+            Arc::new(crate::BasicToolRuntime),
+        ),
+        None,
+    );
     register_test_model(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness
@@ -231,20 +246,26 @@ async fn rlm_subquery_variable_can_store_final_answer() {
         })
         .await
         .expect("agent should be created");
-    let conversation = agent
-        .create_conversation(CreateConversationRequest::default())
+    let conversation = harness
+        .create_conversation(&*agent, CreateConversationRequest::default())
         .await
         .expect("conversation should be created");
 
-    conversation
-        .send(SendRequest {
-            input: vec![user_message("what is 2 + 2?")],
-            session_id: None,
-        })
+    harness
+        .send(
+            Arc::clone(&agent),
+            Arc::clone(&conversation),
+            SendRequest {
+                input: vec![user_message("what is 2 + 2?")],
+                session_id: None,
+            },
+        )
         .await
         .expect("send should succeed");
 
-    let messages = conversation.messages().await.expect("messages should load");
+    let messages = crate::materialize_conversation_messages(&*conversation)
+        .await
+        .expect("messages should load");
     assert_eq!(
         assistant_text(messages.last().expect("assistant message")),
         "4"
@@ -281,7 +302,10 @@ async fn rlm_send_stream_suppresses_internal_control_text() {
             duration: None,
         },
     }]));
-    let harness = RlmHarness::new(exoharness, model);
+    let harness = Runtime::new(
+        LocalProvider::rlm(exoharness, model, Arc::new(crate::BasicToolRuntime)),
+        None,
+    );
     register_test_model(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness
@@ -302,16 +326,20 @@ async fn rlm_send_stream_suppresses_internal_control_text() {
         })
         .await
         .expect("agent should be created");
-    let conversation = agent
-        .create_conversation(CreateConversationRequest::default())
+    let conversation = harness
+        .create_conversation(&*agent, CreateConversationRequest::default())
         .await
         .expect("conversation should be created");
 
-    let mut stream = conversation
-        .send_stream(SendRequest {
-            input: vec![user_message("what is 1 + 1?")],
-            session_id: None,
-        })
+    let mut stream = harness
+        .send_stream(
+            Arc::clone(&agent),
+            Arc::clone(&conversation),
+            SendRequest {
+                input: vec![user_message("what is 1 + 1?")],
+                session_id: None,
+            },
+        )
         .await
         .expect("send stream should succeed");
 
@@ -328,7 +356,9 @@ async fn rlm_send_stream_suppresses_internal_control_text() {
 
     assert!(!saw_chunk, "RLM should not stream raw control text");
 
-    let messages = conversation.messages().await.expect("messages should load");
+    let messages = crate::materialize_conversation_messages(&*conversation)
+        .await
+        .expect("messages should load");
     assert_eq!(
         assistant_text(messages.last().expect("assistant message")),
         "2"
@@ -398,7 +428,10 @@ globalThis.answer = String(\n\
             duration: None,
         },
     ]));
-    let harness = RlmHarness::new(exoharness, model);
+    let harness = Runtime::new(
+        LocalProvider::rlm(exoharness, model, Arc::new(crate::BasicToolRuntime)),
+        None,
+    );
     register_test_model(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness
@@ -419,28 +452,38 @@ globalThis.answer = String(\n\
         })
         .await
         .expect("agent should be created");
-    let conversation = agent
-        .create_conversation(CreateConversationRequest::default())
+    let conversation = harness
+        .create_conversation(&*agent, CreateConversationRequest::default())
         .await
         .expect("conversation should be created");
 
-    conversation
-        .send(SendRequest {
-            input: vec![user_message("fn trace_test() { assert!(true); }")],
-            session_id: None,
-        })
+    harness
+        .send(
+            Arc::clone(&agent),
+            Arc::clone(&conversation),
+            SendRequest {
+                input: vec![user_message("fn trace_test() { assert!(true); }")],
+                session_id: None,
+            },
+        )
         .await
         .expect("initial send should succeed");
 
-    conversation
-        .send(SendRequest {
-            input: vec![user_message("how many assert statements are in that file?")],
-            session_id: None,
-        })
+    harness
+        .send(
+            Arc::clone(&agent),
+            Arc::clone(&conversation),
+            SendRequest {
+                input: vec![user_message("how many assert statements are in that file?")],
+                session_id: None,
+            },
+        )
         .await
         .expect("follow-up send should succeed");
 
-    let messages = conversation.messages().await.expect("messages should load");
+    let messages = crate::materialize_conversation_messages(&*conversation)
+        .await
+        .expect("messages should load");
     assert_eq!(
         assistant_text(messages.last().expect("assistant message")),
         "true"
@@ -475,7 +518,14 @@ async fn rlm_can_finish_by_setting_final_in_repl() {
         ttft: None,
         duration: None,
     }]));
-    let harness = RlmHarness::new(exoharness, Arc::clone(&model));
+    let harness = Runtime::new(
+        LocalProvider::rlm(
+            exoharness,
+            Arc::clone(&model),
+            Arc::new(crate::BasicToolRuntime),
+        ),
+        None,
+    );
     register_test_model(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness
@@ -496,20 +546,26 @@ async fn rlm_can_finish_by_setting_final_in_repl() {
         })
         .await
         .expect("agent should be created");
-    let conversation = agent
-        .create_conversation(CreateConversationRequest::default())
+    let conversation = harness
+        .create_conversation(&*agent, CreateConversationRequest::default())
         .await
         .expect("conversation should be created");
 
-    conversation
-        .send(SendRequest {
-            input: vec![user_message("say done")],
-            session_id: None,
-        })
+    harness
+        .send(
+            Arc::clone(&agent),
+            Arc::clone(&conversation),
+            SendRequest {
+                input: vec![user_message("say done")],
+                session_id: None,
+            },
+        )
         .await
         .expect("send should succeed");
 
-    let messages = conversation.messages().await.expect("messages should load");
+    let messages = crate::materialize_conversation_messages(&*conversation)
+        .await
+        .expect("messages should load");
     assert_eq!(
         assistant_text(messages.last().expect("assistant message")),
         "done"

@@ -104,5 +104,5 @@ exo serve -v --bind 127.0.0.1:4766
 Another CLI process can use that server instead of opening the local basic backend directly:
 
 ```bash
-exo --exoharness-url http://127.0.0.1:4766 agent list
+exo agent --exoharness-url http://127.0.0.1:4766 list
 ```

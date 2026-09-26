@@ -317,7 +317,7 @@ The adapter runner starts by default. Use `--no-adapters` to skip it, or
 You can list configured adapters with:
 
 ```bash
-target/debug/exo --harness exo adapters list
+target/debug/exo adapters --harness exo list
 ```
 
 See the sections below for more details on individual adapter configuration.
@@ -370,7 +370,7 @@ If you want a conversation to have its own sandbox, use `sandboxScope: "conversa
 
 ```bash
 ./exo.sh --conversation isolated-dev --sandbox-scope conversation
-exo --harness exo thread update exo-agent isolated-dev --sandbox-scope conversation
+exo thread --harness exo update exo-agent isolated-dev --sandbox-scope conversation
 ```
 
 Scheduled tasks also default to `sandboxMode: "agent"`. A task can explicitly use

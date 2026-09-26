@@ -1,3 +1,4 @@
+pub mod http;
 pub mod mcp;
 pub mod vaults;
 
@@ -13,6 +14,8 @@ use exoharness::{
 use mcp::McpServerDefinition;
 use serde::Deserialize;
 
+/// An empty latest artifact means no saved definition, allowing a rejected first
+/// upload to be rolled back without deleting artifact history.
 pub const AGENT_DEFINITION_PATH: &str = "managed-agents/agent.md";
 
 #[derive(Debug, Deserialize)]
@@ -199,6 +202,9 @@ pub async fn load_definition(agent: &dyn AgentHandle) -> Result<Option<AgentDefi
         })
         .await?
         .context("saved agent definition is missing")?;
+    if artifact.contents.is_empty() {
+        return Ok(None);
+    }
     AgentDefinition::parse(String::from_utf8(artifact.contents)?)
         .map(Some)
         .with_context(|| format!("invalid saved definition for agent {}", agent.record().slug))

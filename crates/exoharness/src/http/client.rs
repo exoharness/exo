@@ -13,7 +13,6 @@ use super::process::{
     LiveHttpSandboxProcess, spawn_http_sandbox_process_event_poller,
     spawn_http_sandbox_process_stdin_forwarder,
 };
-use crate::ResourceScope;
 use crate::protocol::{
     ClientMessage, ConversationHandleInfo, Request, Response, ServerMessage, SnapshotScope,
 };
@@ -33,58 +32,71 @@ use crate::{
     TurnHandle, TurnRecord, WaitSandboxProcessRequest, WriteArtifactRequest,
     WriteSandboxProcessInputRequest,
 };
+use crate::{HttpClient, ResourceScope};
 
 #[derive(Clone)]
 pub struct HttpExoHarness {
-    client: reqwest::Client,
-    endpoint: Url,
-    bearer_token: Option<String>,
+    transport: Arc<dyn ExoHttpTransport>,
+}
+
+#[async_trait]
+pub trait ExoHttpTransport: Send + Sync {
+    fn endpoint(&self) -> &Url;
+    async fn request(&self, request: Request) -> Result<Response>;
+    async fn watch_events(
+        &self,
+        _agent_id: AgentId,
+        _thread_id: crate::ThreadId,
+        _after_exclusive: Bound<EventId>,
+    ) -> Result<EventStream> {
+        unsupported("watch_events")
+    }
+}
+
+#[derive(Clone)]
+struct RpcTransport {
+    http: HttpClient,
     next_request_id: Arc<AtomicU64>,
 }
 
 impl HttpExoHarness {
-    pub fn new(base_url: impl AsRef<str>) -> Result<Self> {
-        Ok(Self {
-            client: reqwest::Client::new(),
-            endpoint: request_endpoint(base_url.as_ref())?,
-            bearer_token: None,
+    pub fn new(base_url: impl AsRef<str>, bearer_token: Option<String>) -> Result<Self> {
+        let mut http = HttpClient::new(request_endpoint(base_url.as_ref())?)?;
+        if let Some(token) = bearer_token {
+            http = http.with_bearer_token(token);
+        }
+        Ok(Self::from_transport(Arc::new(RpcTransport {
+            http,
             next_request_id: Arc::new(AtomicU64::new(1)),
-        })
+        })))
     }
 
-    pub fn with_bearer_token(mut self, bearer_token: String) -> Self {
-        self.bearer_token = Some(bearer_token);
-        self
+    pub fn from_transport(transport: Arc<dyn ExoHttpTransport>) -> Self {
+        Self { transport }
     }
 
     pub fn endpoint(&self) -> &Url {
-        &self.endpoint
+        self.transport.endpoint()
     }
 
     pub(super) async fn request(&self, request: Request) -> Result<Response> {
+        self.transport.request(request).await
+    }
+}
+
+#[async_trait]
+impl ExoHttpTransport for RpcTransport {
+    fn endpoint(&self) -> &Url {
+        self.http.endpoint()
+    }
+
+    async fn request(&self, request: Request) -> Result<Response> {
         let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let message = ClientMessage::Request { id, request };
-        let mut request = self.client.post(self.endpoint.clone()).json(&message);
-        if let Some(bearer_token) = &self.bearer_token {
-            request = request.bearer_auth(bearer_token);
-        }
-        let response = request
-            .send()
-            .await
-            .context("failed to send HTTP exoharness request")?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|error| format!("failed to read response body: {error}"));
-            bail!("HTTP exoharness request failed ({status}): {body}");
-        }
-
-        let message = response
-            .json::<ServerMessage>()
-            .await
-            .context("failed to decode HTTP exoharness response")?;
+        let message: ServerMessage = self
+            .http
+            .json(self.http.request(reqwest::Method::POST, "")?.json(&message))
+            .await?;
         let ServerMessage::Response {
             id: response_id,
             ok,
@@ -878,8 +890,11 @@ impl ConversationHandle for HttpConversationHandle {
         }
     }
 
-    async fn watch_events(&self, _after_exclusive: Bound<EventId>) -> Result<EventStream> {
-        unsupported("watch_events")
+    async fn watch_events(&self, after_exclusive: Bound<EventId>) -> Result<EventStream> {
+        self.harness
+            .transport
+            .watch_events(self.agent_id, self.record.id, after_exclusive)
+            .await
     }
 
     async fn get_event(&self, id: EventId) -> Result<Option<Event>> {
@@ -1233,10 +1248,6 @@ impl TurnHandle for HttpTurnHandle {
 
 fn request_endpoint(base_url: &str) -> Result<Url> {
     let mut url = Url::parse(base_url).context("invalid HTTP exoharness URL")?;
-    match url.scheme() {
-        "http" | "https" => {}
-        scheme => bail!("HTTP exoharness URL must use http or https, got {scheme}"),
-    }
     url.set_query(None);
     url.set_fragment(None);
     if url

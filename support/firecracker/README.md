@@ -170,12 +170,12 @@ Run Exo as root, select the backend, and configure the provider binding:
 ```bash
 sudo EXO_FIRECRACKER_KERNEL=/var/lib/exo/firecracker/vmlinux \
   EXO_FIRECRACKER_INITRAMFS=/var/lib/exo/firecracker/exo-firecracker-initramfs.cpio \
-  target/debug/exo provider create \
-  --provider firecracker \
+  target/debug/exo sandbox-provider create \
+  --sandbox firecracker \
   --default-image 123456789012.dkr.ecr.us-east-1.amazonaws.com/exo-sandbox@sha256:...
 ```
 
-Agents can then select `--provider firecracker`; the Exo CLI and data
+Agents can then select `--sandbox firecracker`; the Exo CLI and data
 model remain the same as for hosted sandbox providers.
 
 To start an unnamed sandbox and connect a shell in one command, use `sandbox
@@ -183,7 +183,7 @@ play`. It destroys the sandbox when the shell exits:
 
 ```bash
 sudo target/debug/exo sandbox play \
-  --provider firecracker \
+  --sandbox firecracker \
   --image 123456789012.dkr.ecr.us-east-1.amazonaws.com/exo-sandbox@sha256:... \
   --networking enabled \
   --firecracker-memory-mib 2048 \
@@ -203,7 +203,7 @@ commands. Each command adopts the running Firecracker VM from its persisted
 state:
 
 ```bash
-sandbox_id=$(sudo target/debug/exo sandbox create --provider firecracker)
+sandbox_id=$(sudo target/debug/exo sandbox create --sandbox firecracker)
 sudo target/debug/exo sandbox list
 sudo target/debug/exo sandbox exec "$sandbox_id" -- /bin/echo hello
 sudo target/debug/exo sandbox connect "$sandbox_id"
@@ -377,7 +377,7 @@ auto-create the instance: it must already exist, so a typo'd
 `EXO_FIRECRACKER_LIMA_INSTANCE` cannot silently provision a default VM that
 mounts your home directory. The Firecracker binaries, kernel, initramfs, and
 state directory remain inside that VM. Run the macOS Exo CLI normally with
-`--provider firecracker`.
+`--sandbox firecracker`.
 
 Use `make restart-firecracker-lima` to restart the outer VM without removing
 Exo state. Use `make clean-firecracker-microvms` to restart it and remove all

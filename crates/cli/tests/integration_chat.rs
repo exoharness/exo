@@ -66,9 +66,11 @@ fn exo_bin() -> PathBuf {
 
 fn run_exo(args: &[&str], root: &str, xdg: &str) -> std::process::Output {
     let output = Command::new(exo_bin())
+        .arg(args[0])
         .args(["--root", root])
         .args(["--secret-backend", "file"])
-        .args(args)
+        .args(&args[1..])
+        .env("EXO_CONFIG_DIR", xdg)
         .env("XDG_CONFIG_HOME", xdg)
         .env("OPENAI_API_KEY", "sk-test-key")
         .output()
@@ -164,7 +166,7 @@ async fn conversation_send_round_trips_through_real_sandbox_and_mocked_openai() 
             "test-agent",
             "--model",
             "gpt-test",
-            "--provider",
+            "--sandbox",
             provider.cli_arg(),
             "Integration Test Agent",
         ],

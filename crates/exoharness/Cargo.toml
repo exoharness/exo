@@ -7,13 +7,14 @@ rust-version.workspace = true
 
 [features]
 default = []
+http-client = ["dep:reqwest"]
 basic-backend = [
+  "http-client",
   "dep:aes-gcm",
   "dep:actix-web",
   "dep:base64",
   "dep:object_store",
   "dep:oauth2",
-  "dep:reqwest",
   "dep:tokio",
   "dep:tokio-stream",
   "dep:tokio-tungstenite",

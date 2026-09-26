@@ -105,7 +105,7 @@ pnpm install
 Then create an agent backed by a TypeScript harness module:
 
 ```bash
-./target/debug/exo --harness typescript agent create "TS Basic" \
+./target/debug/exo agent --harness typescript create "TS Basic" \
   --module exoharness/examples/typescript/basic-harness.ts \
   --model gpt-5.5
 ```

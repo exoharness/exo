@@ -212,7 +212,7 @@ pnpm install   # once, for the TypeScript runtime
 exo secret create openai --env OPENAI_API_KEY
 exo model create gpt-5.5 --secret openai
 
-exo --harness typescript agent create "Sysmon" \
+exo agent --harness typescript create "Sysmon" \
   --module exoharness/examples/typescript/sysmon-harness.ts \
   --model gpt-5.5
 exo thread create sysmon "Sysmon Test"

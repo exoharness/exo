@@ -252,7 +252,7 @@ execution there.
 ```bash
 # Attach an existing Docker container to a conversation
 exo thread sandbox attach <agent> <conversation> \
-  --provider docker \
+  --sandbox docker \
   --external-id <container-id> \
   --default-workdir /workspace
 
@@ -401,7 +401,7 @@ sender, and reply instructions.
 
 ```bash
 # Started automatically by canonical ./exo.sh; or:
-exo --harness exo adapters run --watch --limit 50
+exo adapters --harness exo run --watch --limit 50
 
 exo adapters list
 # agent tools: create_adapter, list_adapters, disable_adapter,

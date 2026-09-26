@@ -13,7 +13,7 @@ use crate::scheduler_types::{
     DEFAULT_COMMAND_TIMEOUT_MS, DEFAULT_TASK_LEASE_MS, ScheduledFireRecord, ScheduledTaskRecord,
     ScheduledTaskRunRecord, ScheduledTaskSandboxMode, now_ms,
 };
-use crate::{Harness, Uuid7};
+use crate::{Runtime, Uuid7};
 
 #[derive(Debug, Clone, Copy)]
 pub struct SchedulerRunOptions {
@@ -44,7 +44,7 @@ struct ScheduledTaskArtifact {
 }
 
 pub async fn run_due_tasks(
-    harness: Arc<dyn Harness>,
+    harness: Arc<Runtime>,
     store: &SchedulerStore,
     options: SchedulerRunOptions,
 ) -> Result<Vec<ScheduledTaskRunRecord>> {
@@ -69,7 +69,7 @@ pub async fn run_due_tasks(
 /// wakeup lands but before it is marked will repeat it; the `(task, slot)` key
 /// keeps that bounded to one repeat rather than a loop.
 pub async fn redeliver_pending_wakes(
-    harness: Arc<dyn Harness>,
+    harness: Arc<Runtime>,
     store: &SchedulerStore,
 ) -> Result<usize> {
     let mut delivered = 0;
@@ -82,13 +82,17 @@ pub async fn redeliver_pending_wakes(
                 .await?;
             continue;
         };
-        let Some(conversation) = agent.get_conversation(&fire.conversation_id).await? else {
+        let Some(conversation) = harness
+            .get_conversation(&*agent, &fire.conversation_id)
+            .await?
+        else {
             store
                 .mark_fire_delivered(&fire.task_id, fire.slot_ms)
                 .await?;
             continue;
         };
-        send_conversation_wakeup(conversation.as_ref(), fire.prompt.clone()).await?;
+        send_conversation_wakeup(harness.as_ref(), &agent, &conversation, fire.prompt.clone())
+            .await?;
         store
             .mark_fire_delivered(&fire.task_id, fire.slot_ms)
             .await?;
@@ -102,7 +106,7 @@ pub async fn redeliver_pending_wakes(
 /// under [`MissedPolicy::All`](crate::MissedPolicy::All) after downtime, and
 /// none under [`MissedPolicy::Skip`](crate::MissedPolicy::Skip).
 pub async fn run_task(
-    harness: Arc<dyn Harness>,
+    harness: Arc<Runtime>,
     store: &SchedulerStore,
     mut task: ScheduledTaskRecord,
 ) -> Result<Vec<ScheduledTaskRunRecord>> {
@@ -122,7 +126,7 @@ pub async fn run_task(
 }
 
 async fn fire_once(
-    harness: Arc<dyn Harness>,
+    harness: Arc<Runtime>,
     store: &SchedulerStore,
     task: &mut ScheduledTaskRecord,
     slot_ms: u64,
@@ -199,7 +203,7 @@ struct TaskOutput {
 }
 
 async fn run_task_inner(
-    harness: Arc<dyn Harness>,
+    harness: Arc<Runtime>,
     store: &SchedulerStore,
     task: &mut ScheduledTaskRecord,
     run_id: &str,
@@ -209,8 +213,8 @@ async fn run_task_inner(
         .get_agent(&task.agent_id)
         .await?
         .ok_or_else(|| anyhow!("scheduled task agent does not exist: {}", task.agent_id))?;
-    let conversation = agent
-        .get_conversation(&task.conversation_id)
+    let conversation = harness
+        .get_conversation(&*agent, &task.conversation_id)
         .await?
         .ok_or_else(|| {
             anyhow!(
@@ -218,14 +222,12 @@ async fn run_task_inner(
                 task.conversation_id
             )
         })?;
-    let agent_config = agent.config().await?;
-    let conversation_config = conversation.config().await?;
-    let conversation_handle = conversation.exoharness_handle();
-    let agent_handle = agent.exoharness_handle();
+    let agent_config = crate::load_agent_config(&*agent).await?;
+    let conversation_config = crate::load_conversation_config(&*conversation).await?;
     let sandbox = resolve_task_sandbox(
         task,
-        agent_handle.as_ref(),
-        std::sync::Arc::clone(&conversation_handle),
+        agent.as_ref(),
+        std::sync::Arc::clone(&conversation),
         &agent_config,
         &conversation_config,
     )
@@ -233,7 +235,7 @@ async fn run_task_inner(
     let command_result: Result<CommandOutput> = async {
         let process = sandbox
             .run_in_sandbox(
-                agent_handle.as_ref(),
+                agent.as_ref(),
                 task.setup_command
                     .clone()
                     .unwrap_or_else(|| task.command.clone()),
@@ -258,7 +260,7 @@ async fn run_task_inner(
             });
         }
         let process = sandbox
-            .run_in_sandbox(agent_handle.as_ref(), task.command.clone())
+            .run_in_sandbox(agent.as_ref(), task.command.clone())
             .await?;
         let main_output =
             read_process_output(process, task.max_output_bytes, DEFAULT_COMMAND_TIMEOUT_MS).await?;
@@ -315,7 +317,7 @@ async fn run_task_inner(
         truncated,
         error: error.clone(),
     };
-    let artifact_version = conversation_handle
+    let artifact_version = conversation
         .write_artifact(WriteArtifactRequest {
             path: format!("scheduled-tasks/{}/{run_id}.json", task.name),
             contents: serde_json::to_vec_pretty(&artifact)?,
@@ -350,7 +352,7 @@ async fn run_task_inner(
         fired_at_ms: now_ms(),
     };
     store.put_pending_fire(&fire).await?;
-    send_conversation_wakeup(conversation.as_ref(), fire.prompt.clone()).await?;
+    send_conversation_wakeup(harness.as_ref(), &agent, &conversation, fire.prompt.clone()).await?;
     store
         .mark_fire_delivered(&fire.task_id, fire.slot_ms)
         .await?;

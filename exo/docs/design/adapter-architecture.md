@@ -31,7 +31,7 @@ The implementation is split across a few small executor and CLI modules:
 - `crates/executor/src/adapter/tools.rs` implements the host-backed tool calls
   used by Exo.
 - `exoharness/typescript/harness/adapter-tools.ts` exposes the model-facing Exo tools.
-- `crates/cli/src/adapters.rs` provides `exo --harness exo adapters ...`.
+- `crates/cli/src/adapters.rs` provides `exo adapters --harness exo ...`.
 - `./exo.sh` starts the adapter runner next to the scheduler.
 
 At a high level:
@@ -280,7 +280,7 @@ connection and sends when it is ready.
 The adapter runner is started by:
 
 ```bash
-./target/debug/exo --harness exo adapters run --limit 50
+./target/debug/exo adapters --harness exo run --limit 50
 ```
 
 `./exo.sh` starts this automatically unless `--no-adapters` is

@@ -27,14 +27,10 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::execution_tracing::TurnExecutionTrace;
-use crate::harness_executor::{ExecutorHarnessRuntime, ExecutorStreamMode, HarnessExecutor};
-use crate::harness_facade::{SharedHarness, SharedHarnessBacked};
-use crate::harness_tool::{ExoToolRuntime, ensure_shell_sandbox};
+use crate::harness_executor::{ExecutorStreamMode, HarnessExecutor};
+use crate::harness_tool::ensure_shell_sandbox;
 use crate::shared::try_send_stream_event;
-use crate::{
-    AgentConfig, BraintrustRuntimeConfig, ConversationConfig, ExecutionStreamEvent, SendRequest,
-    ToolRuntime,
-};
+use crate::{AgentConfig, ConversationConfig, ExecutionStreamEvent, SendRequest, ToolRuntime};
 
 pub struct TypeScriptExecutor<T> {
     root: Arc<dyn ExoHarness>,
@@ -61,24 +57,19 @@ impl<T> TypeScriptExecutor<T> {
     }
 }
 
-impl<T> Clone for TypeScriptExecutor<T> {
-    fn clone(&self) -> Self {
-        Self {
-            root: Arc::clone(&self.root),
-            workspace_root: self.workspace_root.clone(),
-            env: Arc::clone(&self.env),
-            tools: Arc::clone(&self.tools),
-            runners: Arc::clone(&self.runners),
-        }
-    }
-}
-
 #[async_trait]
 impl<T> HarnessExecutor for TypeScriptExecutor<T>
 where
     T: ToolRuntime + 'static,
 {
-    type Prepared = SendRequest;
+    fn fork(&self, state: Arc<dyn exoharness::ExoHarness>) -> Result<Arc<dyn HarnessExecutor>> {
+        Ok(Arc::new(Self::new(
+            state,
+            self.workspace_root.clone(),
+            (*self.env).clone(),
+            self.tools.clone(),
+        )))
+    }
 
     fn name(&self) -> &'static str {
         "typescript"
@@ -127,10 +118,6 @@ where
             .await
     }
 
-    fn prepare_request(&self, request: &SendRequest) -> Result<Self::Prepared> {
-        Ok(request.clone())
-    }
-
     async fn execute_turn(
         &self,
         agent: &dyn AgentHandle,
@@ -138,7 +125,7 @@ where
         turn: Arc<dyn TurnHandle>,
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
-        prepared: &Self::Prepared,
+        prepared: &SendRequest,
         stream_mode: ExecutorStreamMode<'_>,
         turn_trace: Option<&dyn TurnExecutionTrace>,
     ) -> Result<()> {
@@ -893,80 +880,6 @@ pub(crate) fn typescript_workspace_root() -> Result<PathBuf> {
         .join("../..")
         .canonicalize()
         .context("failed to resolve Exo installation for TypeScript harness")
-}
-
-pub struct TypeScriptHarness<T> {
-    inner: SharedHarness<ExecutorHarnessRuntime<TypeScriptExecutor<T>>>,
-}
-
-impl<T> TypeScriptHarness<T> {
-    pub fn from_exoharness(
-        exoharness: Arc<dyn ExoHarness>,
-        runtime_config: Option<BraintrustRuntimeConfig>,
-        env: HashMap<String, String>,
-        tools: Arc<T>,
-    ) -> Result<Self>
-    where
-        T: ToolRuntime + 'static,
-    {
-        let executor = TypeScriptExecutor::new(
-            Arc::clone(&exoharness),
-            typescript_workspace_root()?,
-            env,
-            tools,
-        );
-        Ok(Self {
-            inner: SharedHarness::new(
-                exoharness,
-                ExecutorHarnessRuntime::new(executor, runtime_config),
-            ),
-        })
-    }
-
-    pub fn new(exoharness: Arc<dyn ExoHarness>, workspace_root: PathBuf, tools: Arc<T>) -> Self
-    where
-        T: ToolRuntime + 'static,
-    {
-        let runtime = ExecutorHarnessRuntime::new(
-            TypeScriptExecutor::new(
-                Arc::clone(&exoharness),
-                workspace_root,
-                HashMap::new(),
-                tools,
-            ),
-            None,
-        );
-        Self {
-            inner: SharedHarness::new(exoharness, runtime),
-        }
-    }
-}
-
-impl TypeScriptHarness<ExoToolRuntime> {
-    pub fn exo_from_exoharness(
-        root: impl AsRef<Path>,
-        exoharness: Arc<dyn ExoHarness>,
-        runtime_config: Option<BraintrustRuntimeConfig>,
-        env: HashMap<String, String>,
-    ) -> Result<Self> {
-        Self::from_exoharness(
-            exoharness,
-            runtime_config,
-            env,
-            Arc::new(ExoToolRuntime::from_root(root)?),
-        )
-    }
-}
-
-impl<T> SharedHarnessBacked for TypeScriptHarness<T>
-where
-    T: ToolRuntime + 'static,
-{
-    type Runtime = ExecutorHarnessRuntime<TypeScriptExecutor<T>>;
-
-    fn shared_harness(&self) -> &SharedHarness<Self::Runtime> {
-        &self.inner
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

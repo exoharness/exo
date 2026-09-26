@@ -40,7 +40,7 @@ executor.
 The `typescript` harness runs a module that owns the turn loop:
 
 ```bash
-exo --harness typescript agent create "TS Basic" \
+exo agent --harness typescript create "TS Basic" \
   --module exoharness/examples/typescript/basic-harness.ts \
   --model gpt-5.5
 ```

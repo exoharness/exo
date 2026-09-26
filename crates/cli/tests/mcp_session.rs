@@ -75,9 +75,10 @@ async fn vault_credentials_stay_host_side_and_typescript_preserves_oauth_refresh
             server.uri()
         ),
     )?;
-    let command = || {
+    let command = |name: &str| {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_exo"));
-        cmd.current_dir(temp.path())
+        cmd.arg(name)
+            .current_dir(temp.path())
             .arg("--root")
             .arg(&root)
             .args(["--secret-backend", "file"])
@@ -107,7 +108,7 @@ async fn vault_credentials_stay_host_side_and_typescript_preserves_oauth_refresh
             "history",
         ],
     ] {
-        let output = command().args(args).output()?;
+        let output = command(args[0]).args(&args[1..]).output()?;
         assert!(
             output.status.success(),
             "{}",
@@ -152,12 +153,11 @@ async fn vault_credentials_stay_host_side_and_typescript_preserves_oauth_refresh
         (true, 2, 3),
     ] {
         revision.store(version, Ordering::SeqCst);
-        let mut cmd = command();
+        let mut cmd = command("run");
         if saved {
             cmd.arg("--env-file").arg(&env_file);
         }
-        cmd.arg("run")
-            .arg(if saved { "--agent" } else { "--agent-file" })
+        cmd.arg(if saved { "--agent" } else { "--agent-file" })
             .arg(if saved {
                 "saved"
             } else {
@@ -177,15 +177,8 @@ async fn vault_credentials_stay_host_side_and_typescript_preserves_oauth_refresh
             "{stdout}\n{stderr}"
         );
         if saved {
-            let output = command()
-                .args([
-                    "conversation",
-                    "events",
-                    "saved",
-                    "history",
-                    "--type",
-                    "mcp_tools",
-                ])
+            let output = command("conversation")
+                .args(["events", "saved", "history", "--type", "mcp_tools"])
                 .output()?;
             assert!(
                 output.status.success(),

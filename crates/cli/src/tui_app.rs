@@ -11,8 +11,8 @@ use crossterm::event::{
     EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use executor::{
-    EventId, EventQuery, EventQueryDirection, ExecutionStreamEvent, HarnessAgent,
-    HarnessConversation, SendRequest, SessionId,
+    AgentHandle, ConversationHandle, EventId, EventQuery, EventQueryDirection,
+    ExecutionStreamEvent, Runtime, SendRequest, SessionId,
 };
 use lingua::Message;
 use lingua::universal::UserContent;
@@ -368,8 +368,9 @@ enum AppEvent {
 }
 
 pub async fn run_chat_tui(
-    agent: Arc<dyn HarnessAgent>,
-    conversation: Arc<dyn HarnessConversation>,
+    runtime: Arc<Runtime>,
+    agent: Arc<dyn AgentHandle>,
+    conversation: Arc<dyn ConversationHandle>,
     verbosity: Verbosity,
 ) -> Result<()> {
     let terminal = ratatui::init();
@@ -378,7 +379,7 @@ pub async fn run_chat_tui(
     // Bracketed paste keeps pasted newlines literal instead of sending the
     // message once per line.
     let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
-    let result = TuiApp::new(agent, conversation, verbosity)
+    let result = TuiApp::new(runtime, agent, conversation, verbosity)
         .run(terminal)
         .await;
     let _ = crossterm::execute!(
@@ -391,8 +392,9 @@ pub async fn run_chat_tui(
 }
 
 struct TuiApp {
-    agent: Arc<dyn HarnessAgent>,
-    conversation: Arc<dyn HarnessConversation>,
+    runtime: Arc<Runtime>,
+    agent: Arc<dyn AgentHandle>,
+    conversation: Arc<dyn ConversationHandle>,
     verbosity: Verbosity,
     transcript: Vec<Line<'static>>,
     input: InputBuffer,
@@ -429,12 +431,14 @@ struct TuiApp {
 
 impl TuiApp {
     fn new(
-        agent: Arc<dyn HarnessAgent>,
-        conversation: Arc<dyn HarnessConversation>,
+        runtime: Arc<Runtime>,
+        agent: Arc<dyn AgentHandle>,
+        conversation: Arc<dyn ConversationHandle>,
         verbosity: Verbosity,
     ) -> Self {
         let watch_after = Arc::new(Mutex::new(conversation.record().latest_event_id));
         Self {
+            runtime,
             agent,
             conversation,
             verbosity,
@@ -512,13 +516,15 @@ impl TuiApp {
 
         watcher.abort();
         if let Some(session_id) = self.session_id.take() {
-            self.conversation.close_session(session_id).await?;
+            self.runtime
+                .end_session(self.conversation.as_ref(), session_id)
+                .await?;
         }
         outcome
     }
 
     async fn load_transcript(&mut self) -> Result<()> {
-        let messages = self.conversation.messages().await?;
+        let messages = executor::materialize_conversation_messages(&*self.conversation).await?;
         self.transcript = render_transcript_lines(&messages, self.verbosity)
             .iter()
             .flat_map(|rendered| styled_message_lines(rendered))
@@ -695,6 +701,8 @@ impl TuiApp {
             self.push_notice("still waiting on the previous operation");
             return Ok(false);
         }
+        let harness = Arc::clone(&self.runtime);
+        let agent = Arc::clone(&self.agent);
         let conversation = Arc::clone(&self.conversation);
         match command {
             ReplCommand::Quit => return Ok(true),
@@ -713,9 +721,14 @@ impl TuiApp {
                 self.spawn_command(tx, async move { cost_lines(conversation.as_ref()).await })
             }
             ReplCommand::Shell { command } => {
-                let agent = Arc::clone(&self.agent);
                 self.spawn_command(tx, async move {
-                    shell_lines(agent.as_ref(), conversation.as_ref(), command).await
+                    shell_lines(
+                        harness.as_ref(),
+                        agent.as_ref(),
+                        conversation.as_ref(),
+                        command,
+                    )
+                    .await
                 });
             }
             ReplCommand::Snapshot { sandbox_id } => self.spawn_command(tx, async move {
@@ -759,6 +772,8 @@ impl TuiApp {
         self.assistant_prefixed = false;
         self.open_calls.clear();
         let conversation = Arc::clone(&self.conversation);
+        let harness = Arc::clone(&self.runtime);
+        let agent = Arc::clone(&self.agent);
         let session_id = self.session_id;
         tokio::spawn(async move {
             let started = std::time::Instant::now();
@@ -770,7 +785,10 @@ impl TuiApp {
                 }],
                 session_id,
             };
-            match conversation.send_stream(request).await {
+            match harness
+                .send_stream(Arc::clone(&agent), Arc::clone(&conversation), request)
+                .await
+            {
                 Ok(mut stream) => {
                     while let Some(event) = stream.next().await {
                         let app_event = match event {
@@ -805,10 +823,7 @@ impl TuiApp {
             let elapsed = started.elapsed();
             if let Some(turn_id) = completed_turn {
                 let mut tracker = crate::turn_display::UsageTracker::default();
-                let summary = match tracker
-                    .refresh(conversation.exoharness_handle().as_ref(), Some(turn_id))
-                    .await
-                {
+                let summary = match tracker.refresh(conversation.as_ref(), Some(turn_id)).await {
                     Ok(usage) => usage.display(&tracker.total, ttft, elapsed),
                     Err(error) => format!("usage summary failed: {error:#}"),
                 };
@@ -1020,7 +1035,7 @@ impl TuiApp {
         &self,
         tx: mpsc::UnboundedSender<AppEvent>,
     ) -> tokio::task::JoinHandle<()> {
-        let conversation = self.conversation.exoharness_handle();
+        let conversation = self.conversation.clone();
         let watch_after = Arc::clone(&self.watch_after);
         let busy = Arc::clone(&self.busy);
         let verbosity = self.verbosity;

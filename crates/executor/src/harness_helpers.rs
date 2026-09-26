@@ -99,7 +99,7 @@ pub(crate) async fn list_conversation_handles(
     }
 }
 
-pub(crate) async fn materialize_conversation_messages(
+pub async fn materialize_conversation_messages(
     conversation: &dyn ConversationHandle,
 ) -> Result<Vec<Message>> {
     let mut events = Vec::new();
@@ -130,7 +130,7 @@ pub(crate) async fn materialize_conversation_messages(
     Ok(messages)
 }
 
-pub(crate) async fn get_conversation_model_override(
+pub async fn get_conversation_model_override(
     conversation: &dyn ConversationHandle,
 ) -> Result<Option<ConversationModelConfig>> {
     let events = conversation
@@ -158,7 +158,7 @@ pub(crate) async fn get_conversation_model_override(
     Ok(config_event.into_model_config())
 }
 
-pub(crate) async fn put_conversation_model_override(
+pub async fn put_conversation_model_override(
     conversation: &dyn ConversationHandle,
     config: Option<ConversationModelConfig>,
 ) -> Result<()> {

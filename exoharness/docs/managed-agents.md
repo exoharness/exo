@@ -70,7 +70,7 @@ exo run --agent-file exoharness/examples/managed-agents/support-analyst.md \
 ```
 
 Create the host directories before mounting them. Mounts are read-only unless
-`:rw` is supplied. Mounts and `--provider` / `--sandbox-image` are thread settings,
+`:rw` is supplied. Mounts and `--sandbox` / `--sandbox-image` are thread settings,
 so the same agent can run in different environments.
 
 To save an agent under a name:
@@ -100,8 +100,9 @@ harness.
 
 Use `harness: basic` for Exo's native tool loop, or `harness: claude-code` with an
 Anthropic model binding and the Claude Code sandbox image. Custom TypeScript
-harness paths are resolved relative to the Markdown file. Those modules must
-remain installed; Exo saves the Markdown, not a bundle of code.
+harness paths are resolved relative to the Markdown file for local execution,
+and relative to the provider's working directory for remote execution. Modules
+must be installed on the provider; the spec does not bundle their code.
 
 ## MCP
 
@@ -232,3 +233,51 @@ sandboxes; vaults have global, agent, and thread contexts. `VaultHandle` owns
 `SecretMetadata` includes an optional destination and a revision. The MCP client
 uses `VaultHandle::resolve_secret` to check the destination and read the current
 value together.
+
+## Runtime providers
+
+The same CLI commands drive local Exo and an authenticated HTTP runtime:
+
+```sh
+exo provider create local --local-root .exo
+exo provider create oss --url http://localhost:8080/exo --api-key-env EXO_RUNTIME_TOKEN
+exo provider switch oss
+exo agent create analyst --file ./analyst.md
+exo run --agent analyst "Summarize this project"
+exo thread list analyst
+exo chat --agent analyst --thread <thread-slug>
+```
+
+`exo provider switch <name>` persists the selection globally for future commands.
+Add `--local` to apply it to the current directory and its descendants.
+`exo --provider <name> ...` overrides selection for one command. Saved agent and
+thread aliases retain their provider, endpoint (including scope), and account;
+switching providers never redirects an alias. Endpoint or account changes require restoring
+the original connection or explicitly using a remote ID.
+See [Provider configuration](../../docs/providers.md) for context and selection.
+
+The CLI sends the Markdown spec unchanged to the selected HTTP provider. The
+provider selects the harness, connects MCP servers, and resolves model bindings
+and vault credentials using its own installation and state. Local Exo uses the
+same setup. The OSS service supports native and TypeScript harnesses, including
+the named presets, with separate MCP connections and credential selections for
+each thread. Client credentials and harness modules are not copied to the server.
+
+`type: provider` asks the selected runtime to resolve its built-in MCP; `name`
+only sets its local tool namespace and grants no vault access.
+
+HTTP `--agent-file` runs use isolated in-memory state. The CLI renews their
+90-second lease every 30 seconds and deletes them on exit. Abandoned agents are
+reaped every 30 seconds after expiry; cleanup cancels their execution without
+stopping saved agents. Saved HTTP turns continue after the CLI disconnects;
+reopening their thread recovers durable history, not missed streaming previews.
+
+The workflow tests launch the real CLI and OSS HTTP service with a local model
+fixture, so they need no external deployment or model credentials:
+
+```sh
+cargo test -p exo --test provider_workflow --test vault_oauth
+cargo test -p exo-mcp --test http deepwiki_live -- --ignored
+```
+
+The second command separately tests anonymous access to the public DeepWiki MCP.

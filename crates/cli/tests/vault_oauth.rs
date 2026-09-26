@@ -101,13 +101,14 @@ impl Fixture {
             .env_clear()
             .env("EXO_CONFIG_DIR", self.temp.path().join("config"))
             .current_dir(self.temp.path())
+            .arg(args[0])
             .arg("--root")
             .arg(self.temp.path().join("state"))
             .args(["--secret-backend", "file", "--master-key-path"])
             .arg(self.temp.path().join("master-key"))
             .arg("--pricing-path")
             .arg(self.temp.path().join("prices.json"))
-            .args(args)
+            .args(&args[1..])
             .kill_on_drop(true);
         command
     }
@@ -475,8 +476,10 @@ async fn rejected_tokens_refresh_once_without_reinitializing_the_mcp_session() -
         let mut server = None;
         let vault = if unknown_expiry {
             let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-            let remote =
-                exoharness::HttpExoHarness::new(format!("http://{}", listener.local_addr()?))?;
+            let remote = exoharness::HttpExoHarness::new(
+                format!("http://{}", listener.local_addr()?),
+                None,
+            )?;
             let state = Arc::new(BasicExoHarness::new(config(&f.temp)).await?);
             server = Some(actix_web::rt::spawn(
                 exoharness::serve_exoharness_http_listener(listener, state),

@@ -14,6 +14,8 @@ mod error;
 pub mod harness;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod http;
+#[cfg(feature = "http-client")]
+mod http_client;
 #[cfg(all(test, not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod http_tests;
 pub mod protocol;
@@ -39,6 +41,8 @@ pub use basic::*;
 pub use error::*;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub use http::*;
+#[cfg(feature = "http-client")]
+pub use http_client::{AccessTokenProvider, HttpClient, HttpResponseError};
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub use sandbox::*;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
