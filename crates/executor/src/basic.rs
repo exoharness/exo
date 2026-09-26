@@ -9,7 +9,10 @@ use exoharness::{
     EventQueryDirection, Result, ToolCallId, ToolRequest, TurnHandle, UsageRecord,
 };
 use lingua::Message;
-use lingua::universal::{ToolContentPart, ToolResultContentPart};
+use lingua::universal::{
+    AssistantContent, AssistantContentPart, ToolCallArguments, ToolContentPart,
+    ToolResultContentPart,
+};
 use serde_json::json;
 
 use crate::execution_tracing::TurnExecutionTrace;
@@ -368,6 +371,10 @@ where
 {
     type Prepared = ();
 
+    fn name(&self) -> &'static str {
+        "basic"
+    }
+
     async fn prepare_conversation(
         &self,
         agent: &dyn AgentHandle,
@@ -387,7 +394,7 @@ where
     async fn execute_turn(
         &self,
         agent: &dyn AgentHandle,
-        conversation: &dyn ConversationHandle,
+        conversation: Arc<dyn ConversationHandle>,
         turn: Arc<dyn TurnHandle>,
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
@@ -397,7 +404,7 @@ where
     ) -> Result<()> {
         self.run_turn_loop(
             agent,
-            conversation,
+            conversation.as_ref(),
             turn,
             agent_config,
             conversation_config,
@@ -408,7 +415,9 @@ where
     }
 }
 
-fn extend_message_history(
+/// Each batch must contain complete tool rounds: calls still pending at its end
+/// receive cancellation results, and their later real results would be discarded.
+pub(crate) fn extend_message_history(
     history: &mut Vec<Message>,
     tool_call_names: &mut HashMap<ToolCallId, String>,
     events: &[exoharness::Event],
@@ -418,14 +427,64 @@ fn extend_message_history(
     for event in events {
         match &event.data {
             EventData::Messages { messages, .. } => {
-                flush_dangling_tool_results(history, tool_call_names, &mut pending_tool_call_ids);
-                history.extend(messages.clone());
+                for message in messages {
+                    match message {
+                        Message::Tool { content } => {
+                            for ToolContentPart::ToolResult(result) in content {
+                                remove_pending_tool_call(
+                                    &mut pending_tool_call_ids,
+                                    &result.tool_call_id,
+                                );
+                            }
+                        }
+                        _ => flush_dangling_tool_results(
+                            history,
+                            tool_call_names,
+                            &mut pending_tool_call_ids,
+                        ),
+                    }
+                    if let Message::Assistant {
+                        content: AssistantContent::Array(parts),
+                        ..
+                    } = message
+                    {
+                        for part in parts {
+                            if let AssistantContentPart::ToolCall {
+                                tool_call_id,
+                                tool_name,
+                                ..
+                            } = part
+                            {
+                                tool_call_names.insert(tool_call_id.clone(), tool_name.clone());
+                                pending_tool_call_ids.push(tool_call_id.clone());
+                            }
+                        }
+                    }
+                    history.push(message.clone());
+                }
             }
             EventData::ToolRequested {
                 tool_call_id,
                 request,
                 ..
-            } => {
+            } if !tool_call_names.contains_key(tool_call_id) => {
+                history.push(Message::Assistant {
+                    content: AssistantContent::Array(vec![AssistantContentPart::ToolCall {
+                        tool_call_id: tool_call_id.clone(),
+                        tool_name: request.function_name.clone(),
+                        arguments: ToolCallArguments::Valid(
+                            request
+                                .arguments
+                                .iter()
+                                .map(|(key, value)| (key.clone(), to_lingua_value(value.clone())))
+                                .collect(),
+                        ),
+                        encrypted_content: None,
+                        provider_options: None,
+                        provider_executed: None,
+                    }]),
+                    id: None,
+                });
                 tool_call_names.insert(tool_call_id.clone(), request.function_name.clone());
                 pending_tool_call_ids.push(tool_call_id.clone());
             }
@@ -433,6 +492,9 @@ fn extend_message_history(
                 tool_call_id,
                 result,
             } => {
+                if !pending_tool_call_ids.contains(tool_call_id) {
+                    continue;
+                }
                 let Some(tool_name) = tool_call_names.get(tool_call_id) else {
                     continue;
                 };
@@ -449,6 +511,7 @@ fn extend_message_history(
             _ => {}
         }
     }
+    flush_dangling_tool_results(history, tool_call_names, &mut pending_tool_call_ids);
 }
 
 fn flush_dangling_tool_results(
@@ -511,11 +574,11 @@ fn build_usage_record(
     pricing: &PricingTable,
 ) -> Option<Box<UsageRecord>> {
     // Only emit a record when we have *something* worth recording — token usage
-    // or timing. Skipping when both are absent keeps event JSON clean for
+    // cost, or timing. Skipping when all are absent keeps event JSON clean for
     // tests/fakes that don't populate metadata.
     let has_usage = response.usage.is_some();
     let has_timing = response.ttft.is_some() || response.duration.is_some();
-    if !has_usage && !has_timing {
+    if !has_usage && !has_timing && response.provider_cost_usd.is_none() {
         return None;
     }
 

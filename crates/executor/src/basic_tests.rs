@@ -76,7 +76,7 @@ async fn send_appends_user_and_assistant_messages() {
     HarnessExecutor::execute_turn(
         &executor,
         agent.as_ref(),
-        conversation.as_ref(),
+        Arc::clone(&conversation),
         Arc::clone(&turn),
         &default_agent_config(),
         &ConversationConfig::default(),
@@ -181,7 +181,7 @@ async fn send_executes_tool_round_trip() {
     HarnessExecutor::execute_turn(
         &executor,
         agent.as_ref(),
-        conversation.as_ref(),
+        Arc::clone(&conversation),
         Arc::clone(&turn),
         &agent_config,
         &conversation_config,
@@ -297,7 +297,7 @@ async fn send_records_tool_result_when_tool_execution_fails() {
     HarnessExecutor::execute_turn(
         &executor,
         agent.as_ref(),
-        conversation.as_ref(),
+        Arc::clone(&conversation),
         Arc::clone(&turn),
         &default_agent_config(),
         &ConversationConfig {
@@ -409,7 +409,7 @@ async fn send_stream_emits_chunks_and_persists_final_response() {
     HarnessExecutor::execute_turn(
         &executor,
         agent.as_ref(),
-        conversation.as_ref(),
+        Arc::clone(&conversation),
         Arc::clone(&turn),
         &default_agent_config(),
         &ConversationConfig::default(),

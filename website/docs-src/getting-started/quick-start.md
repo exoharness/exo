@@ -46,6 +46,18 @@ first registered model (override with `--model`), so you can start chatting
 in one command. It's a plain chat with no shell sandbox; see
 [A Sandboxed Conversation](./sandboxed-conversation) when you want tools.
 
+Chat runs inline, keeping your terminal scrollback available. Use `exo repl --tui`
+to opt into the full-screen interface.
+
+While a turn runs, a spinner shows whether the agent is waiting for the model,
+thinking, or running a tool. Each response ends with time to first token, duration,
+token throughput, token counts, and cost. Totals include earlier turns in the
+conversation. Usage and cost are shown as unavailable when the harness or pricing
+table does not supply them. Press Ctrl+C to interrupt a turn and return to the prompt.
+
+Messages from other clients appear when you submit your next line; press Enter on
+an empty line to check for updates.
+
 ## Where state lives
 
 The CLI stores everything — agents, conversations, the event log, secrets —

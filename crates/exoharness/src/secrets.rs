@@ -190,7 +190,7 @@ fn deserialize_key(serialized: &str) -> Result<[u8; MASTER_KEY_LEN]> {
     Ok(key)
 }
 
-fn random_master_key() -> [u8; MASTER_KEY_LEN] {
+pub(crate) fn random_master_key() -> [u8; MASTER_KEY_LEN] {
     let mut key = [0u8; MASTER_KEY_LEN];
     key[..16].copy_from_slice(Uuid::new_v4().as_bytes());
     key[16..].copy_from_slice(Uuid::new_v4().as_bytes());

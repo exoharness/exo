@@ -35,6 +35,92 @@ use crate::{
 };
 
 const DEFAULT_DURABLE_CONTRACT_MOUNT_PATH: &str = "/home/exo/workspace";
+
+#[tokio::test]
+async fn in_memory_state_does_not_create_files_or_survive_reopening() -> crate::Result<()> {
+    let temp = TempDir::new()?;
+    let root = temp.path().join("unused");
+    let harness = BasicExoHarness::in_memory(local_test_config(&root), None).await?;
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "temporary".to_string(),
+            name: "Temporary".to_string(),
+        })
+        .await?;
+    let thread = agent
+        .new_conversation(NewConversationRequest::default())
+        .await?;
+    let turn = thread
+        .begin_turn(BeginTurnRequest {
+            session_id: None,
+            input: vec![user_message("remember this")],
+        })
+        .await?;
+    turn.write_artifact(WriteArtifactRequest {
+        path: "report.md".to_string(),
+        contents: b"temporary report".to_vec(),
+    })
+    .await?;
+    turn.finish().await?;
+    assert!(!thread.get_events(None).await?.events.is_empty());
+    assert_eq!(thread.list_artifacts().await?.len(), 1);
+    assert!(!root.exists());
+    let reopened = BasicExoHarness::in_memory(local_test_config(&root), None).await?;
+    assert!(reopened.get_agent(&agent.record().id).await?.is_none());
+    assert!(reopened.list_agents().await?.is_empty());
+    assert!(!root.exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn in_memory_state_inherits_bindings_and_secrets_but_not_agents() -> crate::Result<()> {
+    let temp = TempDir::new()?;
+    let source = BasicExoHarness::new(local_test_config(temp.path())).await?;
+    let secret_id = source
+        .put_secret(PutSecretRequest {
+            name: "provider".to_string(),
+            secret: Secret::Key {
+                value: "test-only".to_string(),
+            },
+        })
+        .await?;
+    let binding_id = source
+        .put_binding(Binding::Llm {
+            name: "model".to_string(),
+            model: "gpt-5.6-sol".to_string(),
+            base_url: None,
+            secret_id: Some(secret_id),
+        })
+        .await?;
+    source
+        .new_agent(NewAgentRequest {
+            slug: "saved".to_string(),
+            name: "Saved".to_string(),
+        })
+        .await?;
+    let memory =
+        BasicExoHarness::in_memory(local_test_config(temp.path().join("unused")), Some(&source))
+            .await?;
+    assert!(memory.list_agents().await?.is_empty());
+    assert_eq!(
+        memory.get_binding(&binding_id).await?,
+        source.get_binding(&binding_id).await?
+    );
+    assert_eq!(
+        memory.get_secret(&secret_id).await?,
+        source.get_secret(&secret_id).await?
+    );
+    memory
+        .new_agent(NewAgentRequest {
+            slug: "temporary".to_string(),
+            name: "Temporary".to_string(),
+        })
+        .await?;
+    let saved = source.list_agents().await?;
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].record().slug, "saved");
+    Ok(())
+}
 #[cfg(feature = "aws-agentcore")]
 const DEFAULT_AGENTCORE_DURABLE_CONTRACT_MOUNT_PATH: &str = "/mnt/workspace";
 

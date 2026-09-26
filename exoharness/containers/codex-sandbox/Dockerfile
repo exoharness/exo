@@ -1,6 +1,6 @@
 FROM node:22-bookworm-slim
 
-ARG CODEX_PACKAGE=@openai/codex
+COPY version /tmp/codex-version
 
 ENV CODEX_HOME=/home/exo/.codex
 ENV HOME=/home/exo
@@ -16,7 +16,7 @@ RUN apt-get update \
         ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g "${CODEX_PACKAGE}"
+RUN npm install -g "@openai/codex@$(cat /tmp/codex-version)" && rm /tmp/codex-version
 
 RUN mkdir -p /home/exo/.codex /home/exo/workspace
 

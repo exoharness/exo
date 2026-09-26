@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -41,9 +42,9 @@ pub(crate) trait TurnExecutionTrace: Send + Sync {
         round_index: usize,
     ) -> Option<Box<dyn ToolExecutionTrace>>;
 
-    async fn finish_success(self: Box<Self>, latest_event_id: Option<EventId>);
+    async fn finish_success(self: Arc<Self>, latest_event_id: Option<EventId>);
 
-    async fn finish_error(self: Box<Self>, error: &anyhow::Error);
+    async fn finish_error(self: Arc<Self>, error: &anyhow::Error);
 }
 
 #[async_trait]

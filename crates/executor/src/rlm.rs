@@ -408,6 +408,10 @@ where
 {
     type Prepared = String;
 
+    fn name(&self) -> &'static str {
+        "rlm"
+    }
+
     fn prepare_request(&self, request: &crate::SendRequest) -> Result<Self::Prepared> {
         Ok(messages_to_transcript(&request.input))
     }
@@ -415,7 +419,7 @@ where
     async fn execute_turn(
         &self,
         _agent: &dyn AgentHandle,
-        conversation: &dyn ConversationHandle,
+        conversation: Arc<dyn ConversationHandle>,
         turn: Arc<dyn TurnHandle>,
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
@@ -424,7 +428,7 @@ where
         turn_trace: Option<&dyn TurnExecutionTrace>,
     ) -> Result<()> {
         self.run_turn_loop(
-            conversation,
+            conversation.as_ref(),
             turn.as_ref(),
             agent_config,
             conversation_config,

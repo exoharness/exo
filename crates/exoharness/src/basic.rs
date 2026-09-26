@@ -878,6 +878,52 @@ fn nonempty_env(name: &str) -> Option<String> {
 }
 
 impl BasicExoHarness {
+    /// Temporary state always uses a fresh encryption key, ignoring `config.secret_backend`.
+    pub async fn in_memory(
+        mut config: BasicExoHarnessConfig,
+        globals: Option<&dyn ExoHarness>,
+    ) -> Result<Self> {
+        config.secret_backend = SecretBackendChoice::Static(crate::secrets::random_master_key());
+        let harness = Self::new_with_storage(config, None, BasicObjectStore::in_memory()).await?;
+        if let Some(globals) = globals {
+            let (bindings, secrets) =
+                tokio::try_join!(globals.list_bindings(), globals.list_secrets())?;
+            for binding in bindings {
+                harness
+                    .inner
+                    .storage
+                    .put_json(
+                        harness.bindings_dir().join(format!("{}.json", binding.id)),
+                        &StoredBinding { record: binding },
+                    )
+                    .await?;
+            }
+            for metadata in secrets {
+                let secret = globals.get_secret(&metadata.id).await?.ok_or_else(|| {
+                    anyhow!(
+                        "secret {} disappeared while opening temporary state",
+                        metadata.id
+                    )
+                })?;
+                let record = StoredSecret {
+                    secret: harness.inner.secret_cipher.encrypt_secret(&secret)?,
+                    metadata,
+                };
+                harness
+                    .inner
+                    .storage
+                    .put_json(
+                        harness
+                            .secrets_dir()
+                            .join(format!("{}.json", record.metadata.id)),
+                        &record,
+                    )
+                    .await?;
+            }
+        }
+        Ok(harness)
+    }
+
     pub async fn new(config: BasicExoHarnessConfig) -> Result<Self> {
         Self::new_with_backend(config, None).await
     }
@@ -903,6 +949,15 @@ impl BasicExoHarness {
         config: BasicExoHarnessConfig,
         seed: Option<Arc<dyn ManagedSandboxBackend>>,
     ) -> Result<Self> {
+        let storage = BasicObjectStore::local_filesystem(&config.root).await?;
+        Self::new_with_storage(config, seed, storage).await
+    }
+
+    async fn new_with_storage(
+        config: BasicExoHarnessConfig,
+        seed: Option<Arc<dyn ManagedSandboxBackend>>,
+        storage: BasicObjectStore,
+    ) -> Result<Self> {
         let BasicExoHarnessConfig {
             root,
             secret_backend,
@@ -927,7 +982,6 @@ impl BasicExoHarness {
             cache.insert(sandbox_default.clone(), backend);
         }
 
-        let storage = BasicObjectStore::local_filesystem(&root).await?;
         let secret_cipher =
             build_secret_cipher(secret_backend, root.to_string_lossy().to_string())?;
         Ok(Self {
@@ -2852,6 +2906,9 @@ impl ConversationHandle for BasicConversationHandle {
                 events.truncate(limit as usize);
             }
         }
+        // The cursor is a resume position, even on the final page; Basic's history
+        // cache needs it to avoid replaying events. Callers that scan until an empty
+        // page pay another full log read here, which is acceptable for Basic.
         let cursor = events.last().map(|event| event.id);
         Ok(GetEventsResult { events, cursor })
     }
@@ -4794,6 +4851,39 @@ async fn list_secret_metadata(
         .collect::<Vec<_>>();
     secrets.sort_by_key(|metadata| metadata.id);
     Ok(secrets)
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn in_memory_preserves_inherited_binding_ids_and_metadata() -> Result<()> {
+    let temp = tempfile::TempDir::new()?;
+    let config = crate::test_support::local_test_config(temp.path());
+    let source = BasicExoHarness::in_memory(config.clone(), None).await?;
+    let record = BindingRecord {
+        id: "97c9457a-dbd2-4ab2-8dd3-c1af0a93d14d".parse()?,
+        r#type: BindingType::Llm,
+        name: "model".into(),
+        created_at: Uuid7::now().timestamp().expect("uuid7 timestamp"),
+        binding: Binding::Llm {
+            name: "model".into(),
+            model: "gpt-5.6-sol".into(),
+            base_url: None,
+            secret_id: None,
+        },
+    };
+    source
+        .inner
+        .storage
+        .put_json(
+            source.bindings_dir().join(format!("{}.json", record.id)),
+            &StoredBinding {
+                record: record.clone(),
+            },
+        )
+        .await?;
+    let memory = BasicExoHarness::in_memory(config, Some(&source)).await?;
+    assert_eq!(memory.list_bindings().await?, vec![record]);
+    Ok(())
 }
 
 fn merge_binding_records(scopes: Vec<Vec<BindingRecord>>) -> Vec<BindingRecord> {

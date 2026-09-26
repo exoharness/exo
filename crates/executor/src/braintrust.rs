@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -296,7 +297,7 @@ impl TurnTrace {
         Some(ToolTrace { span })
     }
 
-    async fn finish(self) {
+    async fn finish(&self) {
         self.span.end();
     }
 }
@@ -330,7 +331,7 @@ impl TurnExecutionTrace for TurnTrace {
             .map(|trace| Box::new(trace) as Box<dyn ToolExecutionTrace>)
     }
 
-    async fn finish_success(self: Box<Self>, latest_event_id: Option<exoharness::EventId>) {
+    async fn finish_success(self: Arc<Self>, latest_event_id: Option<exoharness::EventId>) {
         self.span.log(
             SpanLog::builder()
                 .metadata(metadata_object(json!({
@@ -343,7 +344,7 @@ impl TurnExecutionTrace for TurnTrace {
         (*self).finish().await;
     }
 
-    async fn finish_error(self: Box<Self>, error: &anyhow::Error) {
+    async fn finish_error(self: Arc<Self>, error: &anyhow::Error) {
         self.span.log(
             SpanLog::builder()
                 .metadata(metadata_object(json!({ "status": "error" })))

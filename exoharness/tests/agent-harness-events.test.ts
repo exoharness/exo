@@ -10,6 +10,10 @@ import {
   userTextMessage,
   type Event,
 } from "../typescript/harness";
+import {
+  codexReplayChunks,
+  codexReplayItems,
+} from "../typescript/codex/replay";
 
 describe("agent harness canonical events", () => {
   it("replays message and tool events into portable conversation messages", () => {
@@ -25,6 +29,7 @@ describe("agent harness canonical events", () => {
           },
         }),
       ),
+      event("usage", messagesEvent([])),
       event(
         "e3",
         toolResultEvent("tool-1", {
@@ -38,6 +43,17 @@ describe("agent harness canonical events", () => {
 
     expect(materializeEventsToMessages(events)).toEqual([
       userTextMessage("inspect the repo"),
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_call",
+            tool_call_id: "tool-1",
+            tool_name: "codex.shell",
+            arguments: { type: "valid", value: { command: "pwd" } },
+          },
+        ],
+      },
       {
         role: "tool",
         content: [
@@ -54,6 +70,50 @@ describe("agent harness canonical events", () => {
         ],
       },
       assistantTextMessage("done"),
+    ]);
+    const replay = codexReplayItems(materializeEventsToMessages(events));
+    expect(replay[1]).toMatchObject({
+      type: "function_call",
+      call_id: "tool-1",
+      name: "codex_shell",
+      arguments: '{"command":"pwd"}',
+    });
+    expect(replay[2]).toMatchObject({
+      type: "function_call_output",
+      call_id: "tool-1",
+    });
+  });
+
+  it("bounds replay chunks after a cancelled embedded tool call", () => {
+    const messages = materializeEventsToMessages([
+      event(
+        "call",
+        messagesEvent([
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_call",
+                tool_call_id: "cancelled",
+                tool_name: "shell",
+                arguments: { type: "valid", value: {} },
+              },
+            ],
+          },
+        ]),
+      ),
+      ...Array.from({ length: 20 }, (_, i) =>
+        event(`text-${i}`, messagesEvent([userTextMessage("a".repeat(700))])),
+      ),
+    ]);
+    const chunks = codexReplayChunks(codexReplayItems(messages), 1024);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.every((chunk) => JSON.stringify(chunk).length <= 1024)).toBe(
+      true,
+    );
+    expect(chunks[0]?.map((item) => item.type)).toEqual([
+      "function_call",
+      "function_call_output",
     ]);
   });
 

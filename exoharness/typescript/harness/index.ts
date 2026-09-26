@@ -596,19 +596,60 @@ export async function materializeConversationMessages(
 
 export function materializeEventsToMessages(events: Event[]): Message[] {
   const messages: Message[] = [];
-  const toolCallNames = new Map<string, string>();
-  const pendingToolCallIds: string[] = [];
-
+  const seen = new Set<string>();
+  const pending = new Map<string, string>();
+  const flush = () => {
+    for (const [id, name] of pending) {
+      messages.push(
+        toolResultMessage(id, name, {
+          ok: false,
+          error:
+            "tool execution did not complete before the previous turn ended",
+        }),
+      );
+    }
+    pending.clear();
+  };
   for (const event of events) {
-    extendMaterializedMessages(
-      messages,
-      toolCallNames,
-      pendingToolCallIds,
-      event,
-    );
+    const data = event.data;
+    if (isMessagesEvent(data)) {
+      for (const message of data.messages) {
+        if (message.role !== "tool") flush();
+        if (Array.isArray(message.content)) {
+          for (const part of message.content) {
+            if (part.type === "tool_call") {
+              seen.add(part.tool_call_id);
+              pending.set(part.tool_call_id, part.tool_name);
+            } else if (part.type === "tool_result") {
+              pending.delete(part.tool_call_id);
+            }
+          }
+        }
+        messages.push(message);
+      }
+    } else if (isToolRequestedEvent(data) && !seen.has(data.tool_call_id)) {
+      messages.push({
+        role: "assistant",
+        content: [
+          {
+            type: "tool_call",
+            tool_call_id: data.tool_call_id,
+            tool_name: data.request.function_name,
+            arguments: { type: "valid", value: data.request.arguments },
+          },
+        ],
+      });
+      seen.add(data.tool_call_id);
+      pending.set(data.tool_call_id, data.request.function_name);
+    } else if (isToolResultEvent(data)) {
+      const name = pending.get(data.tool_call_id);
+      if (name) {
+        messages.push(toolResultMessage(data.tool_call_id, name, data.result));
+        pending.delete(data.tool_call_id);
+      }
+    }
   }
-  flushDanglingToolResults(messages, toolCallNames, pendingToolCallIds);
-
+  flush();
   return messages;
 }
 
@@ -748,72 +789,6 @@ function contentText(content: unknown): string {
       return "";
     })
     .join("");
-}
-
-function extendMaterializedMessages(
-  messages: Message[],
-  toolCallNames: Map<string, string>,
-  pendingToolCallIds: string[],
-  event: Event,
-): void {
-  if (isMessagesEvent(event.data)) {
-    flushDanglingToolResults(messages, toolCallNames, pendingToolCallIds);
-    messages.push(...event.data.messages);
-    return;
-  }
-
-  if (isToolRequestedEvent(event.data)) {
-    toolCallNames.set(
-      event.data.tool_call_id,
-      event.data.request.function_name,
-    );
-    pendingToolCallIds.push(event.data.tool_call_id);
-    return;
-  }
-
-  if (isToolResultEvent(event.data)) {
-    const toolName = toolCallNames.get(event.data.tool_call_id);
-    if (!toolName) {
-      return;
-    }
-    removePendingToolCall(pendingToolCallIds, event.data.tool_call_id);
-    messages.push(
-      toolResultMessage(event.data.tool_call_id, toolName, event.data.result),
-    );
-  }
-}
-
-function flushDanglingToolResults(
-  messages: Message[],
-  toolCallNames: Map<string, string>,
-  pendingToolCallIds: string[],
-): void {
-  while (pendingToolCallIds.length > 0) {
-    const toolCallId = pendingToolCallIds.shift();
-    if (!toolCallId) {
-      continue;
-    }
-    const toolName = toolCallNames.get(toolCallId);
-    if (!toolName) {
-      continue;
-    }
-    messages.push(
-      toolResultMessage(toolCallId, toolName, {
-        ok: false,
-        error: "tool execution did not complete before the previous turn ended",
-      }),
-    );
-  }
-}
-
-function removePendingToolCall(
-  pendingToolCallIds: string[],
-  toolCallId: string,
-): void {
-  const index = pendingToolCallIds.indexOf(toolCallId);
-  if (index >= 0) {
-    pendingToolCallIds.splice(index, 1);
-  }
 }
 
 function isMessagesEvent(

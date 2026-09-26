@@ -6,6 +6,7 @@ use bytes::Bytes;
 use futures::TryStreamExt;
 use object_store::ObjectStore;
 use object_store::local::LocalFileSystem;
+use object_store::memory::InMemory;
 use object_store::path::Path as ObjectPath;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -19,6 +20,12 @@ pub(crate) struct BasicObjectStore {
 }
 
 impl BasicObjectStore {
+    pub(crate) fn in_memory() -> Self {
+        Self {
+            store: Arc::new(InMemory::new()),
+        }
+    }
+
     pub(crate) async fn local_filesystem(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
         fs::create_dir_all(&root).await?;

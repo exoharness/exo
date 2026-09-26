@@ -21,7 +21,7 @@ pub trait Harness: Send + Sync {
     async fn get_agent(&self, agent_ref: &str) -> Result<Option<Arc<dyn HarnessAgent>>>;
     async fn create_agent(&self, request: CreateAgentRequest) -> Result<Arc<dyn HarnessAgent>>;
     async fn delete_agent(&self, agent_ref: &str) -> Result<bool>;
-    async fn flush_tracing(&self) -> Result<()>;
+    async fn shutdown(&self) -> Result<()>;
 }
 
 #[async_trait]

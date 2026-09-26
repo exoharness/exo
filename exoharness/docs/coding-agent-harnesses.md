@@ -38,7 +38,16 @@ container system start
 For upgrades, downgrades, uninstall instructions, and building from source, see
 <https://github.com/apple/container>.
 
+The built-in TypeScript harness constructors resolve bundled runners and modules
+from the source checkout used to build Exo, for both Basic and Exo tool runtimes.
+Keep that checkout installed; embedders can pass an explicit workspace root to
+`TypeScriptHarness::new`.
+
 ## Codex
+
+Usage counts upstream `rawResponse/completed` records, including local replay
+compaction. Codex's remote compaction endpoint does not expose billable usage;
+its context-size estimates are excluded from token and cost totals.
 
 Register an OpenAI model:
 
