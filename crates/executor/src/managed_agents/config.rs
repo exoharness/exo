@@ -175,6 +175,7 @@ pub fn agent_config(
         },
     };
     Ok(AgentConfig {
+        resources: Vec::new(),
         harness: kind,
         typescript: module,
         enable_agent_tool_creation: definition.frontmatter.tool_creation,

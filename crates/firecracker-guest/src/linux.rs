@@ -997,7 +997,7 @@ fn initialize_guest() -> Result<(), String> {
     let command_line = fs::read_to_string("/proc/cmdline").map_err(|error| error.to_string())?;
     setup_root_overlay()?;
     configure_network(&command_line)?;
-    let workspace = command_line_value(&command_line, "exo_workspace")
+    let workspace = command_line_value(&command_line, "exo_workdir")
         .unwrap_or_else(|| "/home/exo/workspace".to_string());
     if let Some(path) = command_line_value(&command_line, "exo_workspace")
         && Path::new("/dev/vdc").exists()
@@ -1008,6 +1008,21 @@ fn initialize_guest() -> Result<(), String> {
     }
     fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
     chown(&workspace, Some(GUEST_UID), Some(GUEST_GID)).map_err(|error| error.to_string())?;
+    if let Some(encoded) = command_line_value(&command_line, "exo_resource_mounts") {
+        let bytes = STANDARD
+            .decode(encoded)
+            .map_err(|error| error.to_string())?;
+        let mounts: Vec<exo_firecracker_protocol::GuestResourceMount> =
+            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        for mount in mounts {
+            wait_for_device(&mount.device)?;
+            fs::create_dir_all(&mount.path).map_err(|error| error.to_string())?;
+            let flags = libc::MS_NOSUID
+                | libc::MS_NODEV
+                | if mount.read_only { libc::MS_RDONLY } else { 0 };
+            mount_filesystem(Some(&mount.device), &mount.path, Some("ext4"), flags, None)?;
+        }
+    }
     std::env::set_current_dir(&workspace).map_err(|error| error.to_string())?;
     Ok(())
 }
@@ -1454,7 +1469,7 @@ mod tests {
     #[test]
     fn parses_typed_requests() {
         let request = serde_json::from_str::<Message<Request>>(
-            r#"{"protocol_version":2,"payload":{"type":"exec","argv":["/bin/echo","hi"],"env":{},"cwd":"/","timeout_ms":1000}}"#,
+            r#"{"protocol_version":3,"payload":{"type":"exec","argv":["/bin/echo","hi"],"env":{},"cwd":"/","timeout_ms":1000}}"#,
         )
         .unwrap();
         assert!(matches!(request.payload, Request::Exec { .. }));

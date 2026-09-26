@@ -66,6 +66,10 @@ pub(crate) async fn ensure_conversation_sandbox(
         match candidate {
             ConversationSandboxCandidate::Attached { id } => {
                 anyhow::ensure!(
+                    config.resources.is_empty(),
+                    "filesystem resources require an Exo-managed sandbox"
+                );
+                anyhow::ensure!(
                     model.is_none(),
                     "sandbox model credentials require an Exo-managed sandbox"
                 );
@@ -290,6 +294,7 @@ pub(crate) fn conversation_sandbox_spec(
             .unwrap_or_default(),
         default_workdir: environment
             .and_then(|env| env.default_workdir.clone())
+            .or_else(|| (!config.resources.is_empty()).then(|| "/workspace".to_string()))
             .or_else(|| {
                 config
                     .mounts
@@ -303,7 +308,10 @@ pub(crate) fn conversation_sandbox_spec(
                     })
             })
             .unwrap_or_else(|| "/".to_string()),
-        file_system_mounts: normalize_mounts(&config.mounts),
+        file_system_mounts: normalize_mounts(&config.mounts)
+            .into_iter()
+            .chain(config.resource_mounts.clone())
+            .collect(),
         durable_file_systems: config.durable_file_systems.clone(),
         enable_networking: environment
             .and_then(|env| {

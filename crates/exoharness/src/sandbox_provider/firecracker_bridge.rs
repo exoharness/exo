@@ -42,6 +42,15 @@ pub enum FirecrackerBridgeRequest {
     EgressClose {
         listener_id: String,
     },
+    MaterializeResources {
+        config: FirecrackerConfig,
+        request: crate::resources::MaterializeResourcesRequest,
+    },
+    RemoveResources {
+        config: FirecrackerConfig,
+        agent: crate::AgentId,
+        thread: crate::ThreadId,
+    },
     ResolveImage {
         config: FirecrackerConfig,
         image: String,
@@ -116,6 +125,9 @@ pub enum FirecrackerBridgeResponse {
         endpoints: crate::SandboxEgressProxy,
     },
     Image(crate::ResolvedSandboxImage),
+    Resources {
+        mounts: Vec<crate::FileSystemMount>,
+    },
     Running {
         running: Option<bool>,
     },
@@ -218,6 +230,12 @@ impl BridgeBackendCache {
         let mut backends = self.backends.lock().await;
         if let Some(backend) = backends.get(&config) {
             return Ok(Arc::clone(backend));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let config = config.clone();
+            tokio::task::spawn_blocking(move || super::firecracker::lima_storage::prepare(&config))
+                .await??;
         }
         let backend = Arc::new(FirecrackerSandboxBackend::new(config.clone()).await?);
         // The backend exclusively owns its state root. This first reap removes
@@ -410,6 +428,26 @@ async fn handle_request(
         }
         FirecrackerBridgeRequest::EgressAccept { .. } => bail!("egress accept requires a stream"),
 
+        FirecrackerBridgeRequest::MaterializeResources { config, request } => {
+            let mounts = backends
+                .backend(config)
+                .await?
+                .materialize_resources(request)
+                .await?;
+            Ok(FirecrackerBridgeResponse::Resources { mounts })
+        }
+        FirecrackerBridgeRequest::RemoveResources {
+            config,
+            agent,
+            thread,
+        } => {
+            backends
+                .backend(config)
+                .await?
+                .remove_thread_resources(agent, thread)
+                .await?;
+            Ok(FirecrackerBridgeResponse::Unit)
+        }
         FirecrackerBridgeRequest::ResolveImage { config, image } => {
             Ok(FirecrackerBridgeResponse::Image(
                 backends

@@ -124,6 +124,17 @@ pub trait SandboxHandle: SnapshotHandle {
 pub trait AgentHandle: SandboxHandle + VaultContext {
     fn record(&self) -> &AgentRecord;
 
+    async fn prepare_resources(
+        &self,
+        resources: Vec<crate::resources::ResourceDefinition>,
+    ) -> Result<Vec<crate::resources::PreparedResource>> {
+        anyhow::ensure!(
+            resources.is_empty(),
+            "this provider does not support filesystem resources"
+        );
+        Ok(Vec::new())
+    }
+
     async fn list_threads(
         &self,
         request: ListThreadsRequest,
@@ -166,6 +177,18 @@ pub trait AgentHandle: SandboxHandle + VaultContext {
 #[async_trait]
 pub trait ThreadHandle: SandboxHandle + VaultContext {
     fn record(&self) -> &ThreadRecord;
+
+    async fn materialize_resources(
+        &self,
+        resources: Vec<crate::resources::PreparedResource>,
+        _provider: SandboxProvider,
+    ) -> Result<Vec<FileSystemMount>> {
+        anyhow::ensure!(
+            resources.is_empty(),
+            "this provider does not support filesystem resources"
+        );
+        Ok(Vec::new())
+    }
 
     async fn start_session(&self) -> Result<SessionId>;
     async fn end_session(&self, id: SessionId) -> Result<()>;

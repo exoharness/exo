@@ -26,6 +26,8 @@ fn default_true() -> bool {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentFrontmatter {
+    #[serde(default)]
+    pub resources: Vec<exoharness::resources::ResourceDefinition>,
     pub name: String,
     pub harness: String,
     pub config: AgentModelConfig,
@@ -94,6 +96,7 @@ impl AgentDefinition {
             }
         }
         mcp::validate_servers(&frontmatter.mcp_servers)?;
+        exoharness::resources::validate_resources(&frontmatter.resources)?;
         for (index, name) in frontmatter.adapters.iter().enumerate() {
             if name.is_empty()
                 || !name

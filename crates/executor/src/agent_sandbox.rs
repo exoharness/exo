@@ -197,6 +197,7 @@ mod tests {
 
     fn test_agent_config(sandbox: AgentSandboxConfig) -> AgentConfig {
         AgentConfig {
+            resources: Vec::new(),
             instructions: vec![],
             harness: AgentHarnessKind::Exo,
             typescript: None,

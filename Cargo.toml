@@ -97,3 +97,6 @@ braintrust-llm-router = { git = "https://github.com/braintrustdata/lingua.git", 
   "provider-bedrock",
   "rustls",
 ] }
+
+[profile.dev.package."sha2:0.10.9"]
+opt-level = 3

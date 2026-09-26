@@ -1337,6 +1337,7 @@ fn test_secret_metadata() -> SecretMetadata {
 
 fn default_agent_config() -> AgentConfig {
     AgentConfig {
+        resources: Vec::new(),
         instructions: Vec::new(),
         harness: crate::AgentHarnessKind::Basic,
         typescript: None,

@@ -600,7 +600,7 @@ enum Commands {
     /// Configure managed-agent providers and log in.
     Provider {
         #[command(subcommand)]
-        command: providers::ProviderCommands,
+        command: Option<providers::ProviderCommands>,
     },
     /// Manage sandboxes and their provider bindings.
     Sandbox {
@@ -1182,7 +1182,7 @@ async fn run(mut cli: Cli) -> Result<()> {
     };
     let mut provider_store = providers::Store::load(config_directory)?;
     if let Commands::Provider { command } = &cli.command {
-        return providers::run(command, &mut provider_store).await;
+        return providers::run(command.as_ref(), &mut provider_store).await;
     }
     let (agent, thread) = command_refs_mut(&mut cli.command);
     let selected_provider = provider_store.selected(
@@ -1365,6 +1365,7 @@ async fn run_selected(
                 if selected_provider.is_some() {
                     provider_store.ensure_agent_alias_available(&slug)?;
                 }
+                eprintln!("Preparing agent resources...");
                 let agent = harness.create_managed_agent(definition, &slug).await?;
                 if let Some(provider) = &selected_provider {
                     provider_store.pin_agent(agent.record().slug.clone(), provider.selection, &provider.account, agent.record().id)?;
@@ -1373,6 +1374,7 @@ async fn run_selected(
             }
             AgentCommands::Update { agent, file: _ } => {
                 let agent = must_get_agent(harness.as_ref(), &agent).await?;
+                eprintln!("Preparing agent resources...");
                 harness.update_managed_agent(&agent, definition.as_ref().context("agent spec is required")?).await?;
                 println!("updated agent {}", agent.record().slug);
             }

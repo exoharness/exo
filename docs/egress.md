@@ -8,12 +8,14 @@ The basic runtime includes the credential proxy; the `egress` feature also expos
 it without a VM backend. Programs receive placeholder
 environment variables; the proxy resolves credentials outside the sandbox and
 substitutes them on authorized requests. Firecracker uses transparent network
-interception. Apple container and Docker use an authenticated HTTP CONNECT
-transport into the same credential resolver and request forwarding code.
+interception. Apple Containers, Docker, and SmolVM use an authenticated HTTP
+CONNECT transport into the same credential resolver and request forwarding code.
 
 On macOS, TLS and credential resolution run in the native Exo process. The
 existing Lima bridge carries streams and DNS configuration, without receiving
-credentials or the TLS signing key.
+model/API credentials or the TLS signing key. Git resource preparation is
+separate: it runs on the Linux host and can receive the selected Git credential
+from macOS. That credential is never sent into the agent microVM.
 
 ## Try it
 
@@ -322,10 +324,14 @@ bindings are rejected: native header transforms set whole values and do not
 implement Exo's per-request credential resolution. A Vercel forwarding adapter
 would be a separate implementation.
 
-Docker and Apple Containers support credential bindings on managed sandboxes
-with unrestricted networking. They reject limited networking, credential-protected
-attachments, and restoring credential-protected snapshots. Credential proxies
-close when the sandbox stops or the runtime exits. Smolvm, E2B, and Daytona retain
+Docker, Apple Containers, and SmolVM support credential bindings on managed
+sandboxes with unrestricted networking. They reject limited networking,
+credential-protected attachments, and restoring credential-protected snapshots.
+Credential proxies
+close when the sandbox stops or the runtime exits. SmolVM uses `virtio-net` and
+`host.smolvm.internal` to reach a proxy bound to host loopback. It uses the normal
+Codex, Claude Code, and Pi harnesses; no direct-key wrapper is needed. Clients
+must honor `HTTPS_PROXY` and the configured CA trust. E2B and Daytona retain
 their enabled / disabled networking support and reject credential bindings and
 limited networking. Local processes, Sprites, and AWS AgentCore only accept unrestricted
 networking. Docker attachments also reject disabled networking because Exo does
@@ -334,7 +340,7 @@ not control the attached container's network.
 ## Current scope
 
 The transparent proxy supports limited networking with exact hosts and HTTPS
-header substitution. The container CONNECT transport supports credential
+header substitution. The HTTP CONNECT transport supports credential
 substitution with unrestricted networking; other public HTTPS destinations pass
 through without interception. Firecracker still rejects unrestricted networking
 with credential bindings. Body substitution is not part of the policy yet.

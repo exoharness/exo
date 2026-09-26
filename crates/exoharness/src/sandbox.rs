@@ -334,6 +334,21 @@ pub struct ResolvedSandboxImage {
 
 #[async_trait]
 pub trait ManagedSandboxBackend: Send + Sync {
+    async fn materialize_resources(
+        &self,
+        _request: crate::resources::MaterializeResourcesRequest,
+    ) -> Result<Vec<crate::FileSystemMount>> {
+        bail!("sandbox backend does not support filesystem resources")
+    }
+
+    async fn remove_thread_resources(
+        &self,
+        _agent: crate::AgentId,
+        _thread: crate::ThreadId,
+    ) -> Result<()> {
+        bail!("sandbox backend does not support filesystem resources")
+    }
+
     fn is_local(&self) -> bool;
 
     /// Formats this backend can consume in `acquire_from_snapshot`.
@@ -2072,7 +2087,12 @@ async fn kill_named_container_if_present(container_bin: &Path, name: &str) -> Re
     if !kill.status.success() {
         let stderr = String::from_utf8_lossy(&kill.stderr).trim().to_string();
         if !is_missing_container_error(&stderr) && !is_container_not_running_error(&stderr) {
-            return Err(anyhow!("failed to kill warm sandbox {}: {}", name, stderr));
+            return Err(anyhow!(
+                "failed to kill warm sandbox {} ({}): {}",
+                name,
+                kill.status,
+                stderr
+            ));
         }
     }
     Ok(())
@@ -2294,6 +2314,8 @@ where
         .join(" ");
     let mut command = Command::new(container_bin);
     command.args(&args).kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
     match time::timeout(timeout, command.output()).await {
         Ok(output) => Ok(output?),
         Err(_) => Err(anyhow!(
@@ -2484,6 +2506,26 @@ async fn docker_load_image(container_bin: &Path, payload: &Bytes) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn container_admin_commands_have_their_own_process_group() -> Result<()> {
+        let output = run_container_admin_command(
+            Path::new("/bin/sh"),
+            Duration::from_secs(5),
+            ["-c", r#"printf '%s ' "$$"; ps -o pgid= -p "$$""#],
+        )
+        .await?;
+        assert!(output.status.success());
+        let output = String::from_utf8(output.stdout)?;
+        let ids = output.split_whitespace().collect::<Vec<_>>();
+        assert_eq!(ids.len(), 2, "{output}");
+        assert_eq!(
+            ids[0], ids[1],
+            "cleanup must not share the terminal's process group"
+        );
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[tokio::test]

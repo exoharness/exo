@@ -336,3 +336,119 @@ async fn vault_selection_survives_resume_and_rejects_unsafe_config_changes() -> 
     reopened.shutdown().await?;
     runtime.shutdown().await
 }
+
+#[tokio::test]
+#[ignore = "requires APFS disk images on macOS or reflink-capable storage on Linux"]
+async fn agent_resources_are_inherited_pinned_and_cleaned_up() -> Result<()> {
+    let temp = TempDir::new()?;
+    let source = temp.path().join("repo");
+    std::fs::create_dir(&source)?;
+    std::fs::write(source.join("file"), "first")?;
+    let config = crate::test_support::local_test_config(temp.path().join("state"));
+    let store = state(&config).await?;
+    let runtime = runtime(
+        store.clone(),
+        &config,
+        ConversationConfig {
+            sandbox_provider: Some(SandboxProvider::Smolvm),
+            ..Default::default()
+        },
+    )?;
+    let agent_file = temp.path().join("agent.md");
+    let definition_text = SOURCE.replace("config:\n", "resources:\n  - name: code\n    type: directory\n    path: ./repo\n    mount_path: /workspace\nconfig:\n");
+    std::fs::write(&agent_file, &definition_text)?;
+    let definition = AgentDefinition::load(&agent_file)?;
+    let agent = runtime
+        .create_managed_agent(&definition, "resources")
+        .await?;
+    let result = async {
+        let first = runtime
+            .open_managed_thread(&agent, None, NewThreadRequest::default())
+            .await?;
+        let first_config = crate::load_conversation_config(first.thread.as_ref()).await?;
+        assert_eq!(first_config.resource_mounts.len(), 1);
+        assert_eq!(
+            crate::conversation_sandbox::conversation_sandbox_spec(
+                &crate::load_agent_config(agent.as_ref()).await?,
+                &first_config
+            )
+            .default_workdir,
+            "/workspace"
+        );
+        let first_path = Path::new(&first_config.resource_mounts[0].host_path);
+        std::fs::write(first_path.join("file"), "private")?;
+        std::fs::write(source.join("file"), "updated source")?;
+        runtime.update_managed_agent(&agent, &definition).await?;
+        let resumed = runtime
+            .open_managed_thread(
+                &agent,
+                Some(&first.thread.record().slug),
+                NewThreadRequest::default(),
+            )
+            .await?;
+        let resumed_config = crate::load_conversation_config(resumed.thread.as_ref()).await?;
+        assert_eq!(resumed_config.resources, first_config.resources);
+        assert_eq!(std::fs::read_to_string(first_path.join("file"))?, "private");
+        let second = runtime
+            .open_managed_thread(&agent, None, NewThreadRequest::default())
+            .await?;
+        let second_config = crate::load_conversation_config(second.thread.as_ref()).await?;
+        let second_path = Path::new(&second_config.resource_mounts[0].host_path);
+        assert_eq!(
+            std::fs::read_to_string(second_path.join("file"))?,
+            "updated source"
+        );
+        assert!(agent.delete_thread(&first.thread.record().id).await?);
+        assert!(!first_path.exists());
+        assert!(second_path.exists());
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    store.delete_agent(&agent.record().id).await?;
+    runtime.shutdown().await?;
+    result
+}
+
+#[tokio::test]
+async fn git_resources_require_a_selected_vault_and_matching_origin() -> Result<()> {
+    let temp = TempDir::new()?;
+    let config = crate::test_support::local_test_config(temp.path().join("state"));
+    let store = state(&config).await?;
+    let vault = store.create_vault("personal").await?;
+    vault
+        .put_secret(PutSecretRequest {
+            name: "github".into(),
+            target: Some(SecretTarget::http("https://different.example")?),
+            secret: Secret::Key {
+                value: "must-not-leak".into(),
+            },
+        })
+        .await?;
+    let runtime = runtime(store.clone(), &config, Default::default())?;
+    let definition = AgentDefinition::parse(SOURCE.replace("config:\n", "resources:\n  - name: code\n    type: git_repository\n    url: https://github.com/exoharness/exo\n    credential: github\n    mount_path: /workspace\nconfig:\n"))?;
+    let agent = runtime
+        .create_managed_agent(&definition, "private-code")
+        .await?;
+    for vaults in [vec![], vec![vault.record().id]] {
+        let error = runtime
+            .open_managed_thread(
+                &agent,
+                None,
+                NewThreadRequest {
+                    vaults,
+                    ..Default::default()
+                },
+            )
+            .await
+            .err()
+            .context("credential selection should fail")?;
+        assert!(!format!("{error:#}").contains("must-not-leak"));
+        assert!(
+            exo_managed_agents::list_threads(agent.as_ref())
+                .await?
+                .is_empty()
+        );
+    }
+    runtime.shutdown().await?;
+    Ok(())
+}

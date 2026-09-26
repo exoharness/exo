@@ -80,7 +80,7 @@ fn request(id: &str) -> SandboxRequest {
 #[tokio::test]
 async fn unrelated_acquires_progress_while_same_sandbox_and_termination_wait() -> Result<()> {
     let (calls, mut received) = mpsc::unbounded_channel();
-    let backend = CredentialContainerBackend {
+    let backend = CredentialProxyBackend {
         inner: Arc::new(BlockingBackend(calls)),
         provider: SandboxProvider::Docker,
         resolver: Arc::new(NoCredentials),
@@ -123,7 +123,7 @@ async fn unrelated_acquires_progress_while_same_sandbox_and_termination_wait() -
 #[tokio::test]
 async fn failed_protected_acquires_release_entries_and_drop_tolerates_lock_errors() -> Result<()> {
     let (calls, mut received) = mpsc::unbounded_channel();
-    let backend = CredentialContainerBackend {
+    let backend = CredentialProxyBackend {
         inner: Arc::new(BlockingBackend(calls)),
         provider: SandboxProvider::Docker,
         resolver: Arc::new(NoCredentials),

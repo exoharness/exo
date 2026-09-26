@@ -227,6 +227,34 @@ sudo target/debug/exo sandbox list -aq \
   | sudo target/debug/exo sandbox delete
 ```
 
+## Resource storage
+
+Filesystem resources require the Firecracker state root to reside on XFS with
+`reflink=1`. Exo verifies the filesystem and probes `cp --reflink=always`; it
+never falls back to a full copy. Resource disks contain ext4 for the guest, while
+XFS on the host supplies copy-on-write cloning. The Linux host needs `git`,
+`xfsprogs`, `e2fsprogs`, and `util-linux`.
+
+On macOS, Exo provisions XFS automatically inside Lima at the configured state
+root (normally `/var/lib/exo/firecracker/state`). The first startup installs
+`xfsprogs` if needed, creates a sparse backing file alongside the state root,
+and preserves existing state in it. The volume is sized to 80% of the VM's
+available disk space at creation; physical storage grows as data is written.
+Subsequent starts reuse it and remount it after a VM reboot. Existing XFS
+storage is used directly. Stop running sandboxes before the first migration.
+
+No storage environment variable or manual mount is needed:
+
+```sh
+exo agent run \
+  --agent-file exoharness/examples/managed-agents/exo-developer.md \
+  --environment-file exoharness/examples/environments/codex-firecracker.yaml
+```
+
+The rootfs must contain the selected harness. Rebuild the guest initramfs after
+updating Exo. See [resources](../../docs/resources.md) for Git caching,
+credentials, local directory imports, and thread cleanup.
+
 ## Security model
 
 Isolation is layered rather than resting on one wall. The workload runs as an

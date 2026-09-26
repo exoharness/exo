@@ -116,6 +116,7 @@ impl Fixture {
             })
             .await?;
         let config = AgentConfig {
+            resources: Vec::new(),
             instructions: Vec::new(),
             harness: AgentHarnessKind::Basic,
             typescript: None,

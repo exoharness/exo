@@ -20,7 +20,10 @@ mod http;
 mod http_client;
 #[cfg(all(test, not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod http_tests;
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+mod local_volume;
 pub mod protocol;
+pub mod resources;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod sandbox;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]

@@ -152,8 +152,15 @@ pub(crate) fn validate_http_command(command: &crate::Commands) -> Result<()> {
 #[derive(Debug, Subcommand)]
 pub enum ProviderCommands {
     List,
+    /// Show a profile, or the current selection when NAME is omitted.
     Get {
-        name: String,
+        name: Option<String>,
+    },
+    /// Clear the global provider selection without deleting profiles or credentials.
+    Clear {
+        /// Clear only the selection saved in this directory.
+        #[arg(long)]
+        local: bool,
     },
     Create(ConfigureArgs),
     Update(ConfigureArgs),
@@ -668,27 +675,69 @@ fn absolute_root(path: &Path) -> Result<PathBuf> {
     Ok(path.canonicalize()?)
 }
 
-pub async fn run(command: &ProviderCommands, store: &mut Store) -> Result<()> {
+fn print_selection(store: &Store) -> Result<()> {
+    let Some(selection) = store.selected(None, None, None)? else {
+        println!("provider: local (built-in; no saved selection)");
+        return Ok(());
+    };
+    println!("provider: {}", selection.name.escape_debug());
+    match selection.source {
+        SelectionSource::Global => println!("selection: global"),
+        SelectionSource::Directory(path) => println!(
+            "selection: directory {}",
+            path.display().to_string().escape_debug()
+        ),
+        SelectionSource::Profile => println!("selection: explicit profile"),
+        SelectionSource::Alias => println!("selection: saved alias"),
+    }
+    if !selection.context.is_empty() {
+        println!("context: {}", serde_json::to_string(&selection.context)?);
+    }
+    Ok(())
+}
+
+pub async fn run(command: Option<&ProviderCommands>, store: &mut Store) -> Result<()> {
+    let current = ProviderCommands::Get { name: None };
+    let command = command.unwrap_or(&current);
     match command {
-        ProviderCommands::List => crate::print_table(
-            &["PROVIDER", "CONNECTION", "ACCOUNT"],
-            store
-                .config
-                .profiles
-                .iter()
-                .map(|(name, profile)| {
-                    vec![
-                        name.clone(),
-                        match &profile.connection {
-                            Connection::Local { root } => root.display().to_string(),
-                            Connection::Http { endpoint, .. } => endpoint.clone(),
-                        },
-                        profile.account_id.clone().unwrap_or_default(),
-                    ]
-                })
-                .collect(),
-        )?,
-        ProviderCommands::Get { name } => {
+        ProviderCommands::Get { name: None } => print_selection(store)?,
+        ProviderCommands::Clear { local } => {
+            let directory = local.then(std::env::current_dir).transpose()?;
+            store.update(|config| {
+                if let Some(directory) = &directory {
+                    config.directory_defaults.remove(directory);
+                    config.directory_contexts.remove(directory);
+                } else {
+                    config.default = None;
+                    config.default_context = None;
+                }
+                Ok(())
+            })?;
+            print_selection(store)?;
+        }
+        ProviderCommands::List => {
+            print_selection(store)?;
+            println!();
+            crate::print_table(
+                &["PROVIDER", "CONNECTION", "ACCOUNT"],
+                store
+                    .config
+                    .profiles
+                    .iter()
+                    .map(|(name, profile)| {
+                        vec![
+                            name.clone(),
+                            match &profile.connection {
+                                Connection::Local { root } => root.display().to_string(),
+                                Connection::Http { endpoint, .. } => endpoint.clone(),
+                            },
+                            profile.account_id.clone().unwrap_or_default(),
+                        ]
+                    })
+                    .collect(),
+            )?;
+        }
+        ProviderCommands::Get { name: Some(name) } => {
             #[derive(Serialize)]
             struct View<'a> {
                 #[serde(flatten)]

@@ -1915,6 +1915,7 @@ mod tests {
 
     fn test_agent_config() -> AgentConfig {
         AgentConfig {
+            resources: Vec::new(),
             instructions: Vec::new(),
             harness: AgentHarnessKind::Exo,
             typescript: None,

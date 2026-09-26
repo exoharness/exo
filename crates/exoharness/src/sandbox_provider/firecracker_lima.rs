@@ -218,6 +218,42 @@ impl LimaFirecrackerSandboxBackend {
 
 #[async_trait]
 impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
+    async fn materialize_resources(
+        &self,
+        request: crate::resources::MaterializeResourcesRequest,
+    ) -> Result<Vec<crate::FileSystemMount>> {
+        match self
+            .request(FirecrackerBridgeRequest::MaterializeResources {
+                config: self.config.clone(),
+                request,
+            })
+            .await?
+        {
+            FirecrackerBridgeResponse::Resources { mounts } => Ok(mounts),
+            _ => bail!(
+                "Firecracker Lima bridge returned the wrong response to materialize_resources"
+            ),
+        }
+    }
+
+    async fn remove_thread_resources(
+        &self,
+        agent: crate::AgentId,
+        thread: crate::ThreadId,
+    ) -> Result<()> {
+        match self
+            .request(FirecrackerBridgeRequest::RemoveResources {
+                config: self.config.clone(),
+                agent,
+                thread,
+            })
+            .await?
+        {
+            FirecrackerBridgeResponse::Unit => Ok(()),
+            _ => bail!("Firecracker Lima bridge returned the wrong response to remove_resources"),
+        }
+    }
+
     fn is_local(&self) -> bool {
         true
     }
@@ -239,7 +275,8 @@ impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
         }
     }
 
-    async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
+    async fn acquire(&self, mut request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
+        request.spec.resources.get_or_insert_with(Default::default);
         let terminate = self.terminate_request(request.clone());
         self.egress
             .acquire(
@@ -290,9 +327,11 @@ impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
 
     async fn fork_sandbox(
         &self,
-        source: SandboxRequest,
-        target: SandboxRequest,
+        mut source: SandboxRequest,
+        mut target: SandboxRequest,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
+        source.spec.resources.get_or_insert_with(Default::default);
+        target.spec.resources.get_or_insert_with(Default::default);
         source
             .spec
             .policy
@@ -333,9 +372,10 @@ impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
 
     async fn acquire_from_snapshot(
         &self,
-        request: SandboxRequest,
+        mut request: SandboxRequest,
         payload: SnapshotPayload,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
+        request.spec.resources.get_or_insert_with(Default::default);
         request
             .spec
             .policy
@@ -593,6 +633,11 @@ impl LimaBridgeManager {
         )
         .await?;
         self.check_kvm_access().await?;
+        let mut storage = Command::new(&self.limactl);
+        storage.args(["shell", &self.instance, "--", "sh", "-c",
+            "if ! command -v mkfs.xfs >/dev/null; then sudo -n apt-get update && sudo -n apt-get install -y xfsprogs; fi"]);
+        self.run_checked(&mut storage, "installing Lima XFS tools")
+            .await?;
         if !self.build_bridge {
             return Ok(());
         }
@@ -1638,13 +1683,15 @@ mod egress_cleanup_tests {
                     connection: Mutex::new(Some(connection.clone())),
                 }),
             };
+            let resources =
+                fail_proxy_cleanup.then(|| crate::SandboxResourceShape::new(3, 2048).unwrap());
             let request = SandboxRequest {
                 sandbox_id: "failed-egress-setup".into(),
                 scope: crate::ResourceScope::Global,
                 provider_state: None,
                 spec: crate::SandboxSpec {
                     image: "test".into(),
-                    resources: Default::default(),
+                    resources,
                     mounts: vec![],
                     durable_file_systems: vec![],
                     default_workdir: "/workspace".into(),
@@ -1679,6 +1726,7 @@ mod egress_cleanup_tests {
                         FirecrackerBridgeRequest::Acquire { request, .. } => {
                             assert_eq!(request.sandbox_id, "failed-egress-setup");
                             assert!(request.egress_proxy.is_some());
+                            assert_eq!(request.spec.resources, Some(resources.unwrap_or_default()));
                             operations.push("acquire");
                             Ok(FirecrackerBridgeResponse::Handle {
                                 id: "firecracker:test-vm".into(),
@@ -1691,7 +1739,8 @@ mod egress_cleanup_tests {
                             operations.push("bind");
                             Ok(FirecrackerBridgeResponse::Unit)
                         }
-                        FirecrackerBridgeRequest::Exec { .. } => {
+                        FirecrackerBridgeRequest::Exec { request, .. } => {
+                            assert_eq!(request.spec.resources, Some(resources.unwrap_or_default()));
                             operations.push("initialize");
                             Err("TLS trust preparation failed".into())
                         }

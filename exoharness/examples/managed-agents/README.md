@@ -68,3 +68,18 @@ bearer authentication.
 
 Provider login authenticates the CLI to a runtime. Use vault credentials for
 external MCP servers, as in the Notion example above.
+
+## Work on a repository
+
+Save an agent with a Git resource so every new thread starts with its own checkout:
+
+```sh
+exo agent create exo-dev --file exoharness/examples/managed-agents/exo-developer.md
+exo agent run --agent exo-dev
+```
+
+The shared Git checkout is refreshed before each new thread and its volume is
+cloned with copy-on-write. See [filesystem resources](../../../docs/resources.md)
+for local directories, vault credentials and lifecycle details. Choose an
+environment containing the repository's build tools when compiling code; the
+standard Codex image does not include Rust.

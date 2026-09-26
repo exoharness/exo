@@ -1491,3 +1491,59 @@ async fn model_and_sandbox_bindings_keep_the_explicit_vault() -> Result<()> {
     assert!(serde_json::to_string(&sandbox.binding)?.contains(&team.record().id.to_string()));
     f.stop().await
 }
+
+#[actix_web::test]
+async fn provider_selection_is_visible_and_clearable() -> Result<()> {
+    let f = Fixture::new().await?;
+    let profile = f.cli(&["provider", "get", "remote"]).await?;
+    assert!(
+        f.cli(&["provider"])
+            .await?
+            .contains("local (built-in; no saved selection)")
+    );
+    assert_eq!(
+        f.cli(&["provider"]).await?,
+        f.cli(&["provider", "get"]).await?
+    );
+    f.cli(&[
+        "provider",
+        "switch",
+        "remote",
+        "--context",
+        "workspace=test",
+    ])
+    .await?;
+    let current = f.cli(&["provider"]).await?;
+    assert!(current.contains("provider: remote\nselection: global"));
+    assert!(current.contains("\"workspace\":\"test\""));
+    assert!(f.cli(&["provider", "list"]).await?.starts_with(&current));
+    let directory = f.temp.path().join("project");
+    let nested = directory.join("nested");
+    std::fs::create_dir_all(&nested)?;
+    success(
+        f.output(
+            &["provider", "switch", "local", "--local"],
+            Some(&directory),
+            None,
+        )
+        .await?,
+    )?;
+    let current = success(f.output(&["provider"], Some(&nested), None).await?)?;
+    assert!(current.contains("provider: local\nselection: directory "));
+    assert!(current.contains(&directory.display().to_string()));
+    f.cli(&["provider", "clear"]).await?;
+    assert_eq!(
+        success(f.output(&["provider"], Some(&nested), None).await?)?,
+        current
+    );
+    success(
+        f.output(&["provider", "clear", "--local"], Some(&directory), None)
+            .await?,
+    )?;
+    assert!(
+        success(f.output(&["provider"], Some(&nested), None).await?)?
+            .contains("no saved selection")
+    );
+    assert_eq!(f.cli(&["provider", "get", "remote"]).await?, profile);
+    f.stop().await
+}
