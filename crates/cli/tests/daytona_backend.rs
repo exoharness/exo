@@ -169,7 +169,7 @@ async fn one_shot_sandbox_skips_reuse_and_requests_delete_on_stop() {
         .mount(&server)
         .await;
 
-    let mut request = make_request("conv-one-shot", "sandbox-one-shot");
+    let mut request = make_request(exoharness::Uuid7::now(), "sandbox-one-shot");
     request.lifecycle.idle_ttl = None;
     let first = backend.acquire(request.clone()).await.unwrap();
     first.stop().await.unwrap();
