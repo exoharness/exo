@@ -206,10 +206,7 @@ impl SmolvmSandboxBackend {
                     Some(explicit) => explicit.clone(),
                     None => match which_binary(Path::new(DEFAULT_SMOLVM_BIN)).await {
                         Some(installed) if probe_flag_at(&installed, "machine", "start", INTERCEPTOR_FLAG).await => installed,
-                        installed => {
-                            if let Some(installed) = installed {
-                                eprintln!("SmolVM at {} lacks {INTERCEPTOR_FLAG}; preparing a compatible runtime...", installed.display());
-                            }
+                        _ => {
                             #[cfg(feature = "smolvm")]
                             {
                                 tokio::task::spawn_blocking(|| {
