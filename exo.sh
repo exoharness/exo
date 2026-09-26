@@ -335,17 +335,17 @@ scheduler_source_newer_than() {
   return 1
 }
 
-append_exo_global_args() {
-  EXO_GLOBAL_ARGS=()
+prepare_exo_args() {
+  EXO_ARGS=("$1")
   if [[ -f "$ENV_FILE" ]]; then
-    EXO_GLOBAL_ARGS=(--env-file "$ENV_FILE")
+    EXO_ARGS+=(--env-file "$ENV_FILE")
   fi
+  EXO_ARGS+=("${@:2}")
 }
 
 exo() {
-  EXO_GLOBAL_ARGS=()
-  append_exo_global_args
-  "$EXO_BIN" "$1" "${EXO_GLOBAL_ARGS[@]}" "${@:2}"
+  prepare_exo_args "$@"
+  "$EXO_BIN" "${EXO_ARGS[@]}"
 }
 
 scheduler_pid_file() {
@@ -465,9 +465,8 @@ ensure_adapters() {
   pid_file="$(adapters_pid_file)"
   log_file="$(adapters_log_file)"
   echo "Starting adapter runner..."
-  EXO_GLOBAL_ARGS=()
-  append_exo_global_args
-  nohup "$EXO_BIN" serve "${EXO_GLOBAL_ARGS[@]}" --harness "$HARNESS" \
+  prepare_exo_args serve
+  nohup "$EXO_BIN" "${EXO_ARGS[@]}" --harness "$HARNESS" \
     --agent "$AGENT" \
       --adapters-only \
       --adapter-limit "$ADAPTER_LIMIT" \
@@ -535,8 +534,6 @@ setup_agent() {
   fi
   ensure_agent
   ensure_conversation
-  ensure_self_repo_mount
-  ensure_agent_cli_mount
 }
 
 agent_exists() {
@@ -592,13 +589,7 @@ ensure_conversation() {
     [[ "${SANDBOX_SCOPE:-conversation}" == conversation ]] || die "launch environments use conversation sandbox scope"
     local environment="$ROOT_DIR/.exo/launch-environment.json"
     mkdir -p "$ROOT_DIR/.exo"
-    python3 - "$environment" "${PROVIDER:-docker}" "$SANDBOX_IMAGE" "$NETWORKING" <<'PYTHON'
-import json, pathlib, sys
-path, provider, image, networking = sys.argv[1:]
-provider = {"apple-container": "apple_container", "local-process": "local_process"}.get(provider, provider)
-environment = {"name": "launch", "config": {"provider": provider, "image": image, "enable_networking": networking == "enabled"}}
-pathlib.Path(path).write_text(json.dumps(environment) + "\n")
-PYTHON
+    write_launch_environment "$environment"
     exo thread update "$AGENT" "$CONVERSATION" --shell-program "$SHELL_PROGRAM" >/dev/null
     # Opening with EOF saves the environment without submitting a model turn,
     # so startup prompts, adapters, and later CLI calls use the same settings.
@@ -607,10 +598,8 @@ PYTHON
   fi
 }
 
-ensure_self_repo_mount() {
-  if [[ "$USE_SANDBOX" != true ]]; then
-    return
-  fi
+write_launch_environment() {
+  local environment="$1"
   if [[ ! "$SELF_REPO_MOUNT_PATH" = /* ]]; then
     die "self repo mount path must be absolute: $SELF_REPO_MOUNT_PATH"
   fi
@@ -618,26 +607,30 @@ ensure_self_repo_mount() {
     die "Exo self map is missing: exo/SELF.md"
   fi
 
-  # Agent-level mounts are inherited by each thread's sandbox, including
-  # adapter conversations.
-  exo agent mount create "$AGENT" "$ROOT_DIR" "$SELF_REPO_MOUNT_PATH" --rw >/dev/null
-}
-
-ensure_agent_cli_mount() {
-  if [[ "$USE_SANDBOX" != true || -z "$AGENT_CLI_MOUNT_ROOT" ]]; then
-    return
-  fi
-  if [[ ! "$AGENT_CLI_MOUNT_ROOT" = /* ]]; then
-    die "agent-cli mount root must be absolute: $AGENT_CLI_MOUNT_ROOT"
-  fi
-  if [[ ! -d "$AGENT_CLI_MOUNT_ROOT" ]]; then
-    die "agent-cli mount root does not exist: $AGENT_CLI_MOUNT_ROOT"
-  fi
-  if [[ ! "$AGENT_CLI_MOUNT_PATH" = /* ]]; then
-    die "agent-cli mount path must be absolute: $AGENT_CLI_MOUNT_PATH"
+  if [[ -n "$AGENT_CLI_MOUNT_ROOT" ]]; then
+    if [[ ! "$AGENT_CLI_MOUNT_ROOT" = /* ]]; then
+      die "agent-cli mount root must be absolute: $AGENT_CLI_MOUNT_ROOT"
+    fi
+    if [[ ! -d "$AGENT_CLI_MOUNT_ROOT" ]]; then
+      die "agent-cli mount root does not exist: $AGENT_CLI_MOUNT_ROOT"
+    fi
+    if [[ ! "$AGENT_CLI_MOUNT_PATH" = /* ]]; then
+      die "agent-cli mount path must be absolute: $AGENT_CLI_MOUNT_PATH"
+    fi
   fi
 
-  exo agent mount create "$AGENT" "$AGENT_CLI_MOUNT_ROOT" "$AGENT_CLI_MOUNT_PATH" --rw >/dev/null
+  # Resuming a thread restores its mounts from the saved environment.
+  python3 - "$environment" "${PROVIDER:-docker}" "$SANDBOX_IMAGE" "$NETWORKING" \
+    "$ROOT_DIR" "$SELF_REPO_MOUNT_PATH" "$AGENT_CLI_MOUNT_ROOT" "$AGENT_CLI_MOUNT_PATH" <<'PYTHON'
+import json, pathlib, sys
+path, provider, image, networking, root, repo_mount, cli_root, cli_mount = sys.argv[1:]
+provider = {"apple-container": "apple_container", "local-process": "local_process"}.get(provider, provider)
+mounts = [{"host_path": str(pathlib.Path(root).resolve()), "mount_path": repo_mount, "mode": "rw"}]
+if cli_root:
+    mounts.append({"host_path": str(pathlib.Path(cli_root).resolve()), "mount_path": cli_mount, "mode": "rw"})
+environment = {"name": "launch", "config": {"provider": provider, "image": image, "enable_networking": networking == "enabled", "file_system_mounts": mounts}}
+pathlib.Path(path).write_text(json.dumps(environment) + "\n")
+PYTHON
 }
 
 list_agents_and_conversations() {
@@ -846,8 +839,6 @@ run_repl() {
   fi
   ensure_agent
   ensure_conversation
-  ensure_self_repo_mount
-  ensure_agent_cli_mount
   configure_guardian_for_current_launch
   local scheduler_log_start_line
   scheduler_log_start_line="$(scheduler_log_line_count)"
@@ -862,9 +853,8 @@ run_repl() {
   if [[ "$CONTROL" == true ]]; then
     run_control_repl "$scheduler_log_start_line" "$adapter_log_start_line"
   else
-    EXO_GLOBAL_ARGS=()
-    append_exo_global_args
-    exec "$EXO_BIN" agent "${EXO_GLOBAL_ARGS[@]}" run \
+    prepare_exo_args agent run
+    exec "$EXO_BIN" "${EXO_ARGS[@]}" \
       --agent "$AGENT" \
       --thread "$CONVERSATION"
   fi
@@ -917,15 +907,14 @@ run_control_repl() {
     start_control_log_tail "adapters" "$(adapters_log_file)" "$adapter_start_line"
   fi
 
-  EXO_GLOBAL_ARGS=()
-  append_exo_global_args
+  prepare_exo_args agent run
   while true; do
     rm -f "$(repl_restart_file)"
     watch_repl_restart_request "$$" &
     restart_watcher_pid="$!"
 
     local repl_exit
-    if "$EXO_BIN" agent "${EXO_GLOBAL_ARGS[@]}" run \
+    if "$EXO_BIN" "${EXO_ARGS[@]}" \
       --agent "$AGENT" \
       --thread "$CONVERSATION"; then
       repl_exit=0

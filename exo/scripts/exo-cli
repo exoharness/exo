@@ -33,11 +33,11 @@ die() {
 }
 
 exo() {
-  local args=()
+  local args=("$1")
   if [[ -f "$ENV_FILE" ]]; then
     args+=(--env-file "$ENV_FILE")
   fi
-  "$EXO_BIN" "$1" "${args[@]}" "${@:2}"
+  "$EXO_BIN" "${args[@]}" "${@:2}"
 }
 
 adapter_runner_running() {
