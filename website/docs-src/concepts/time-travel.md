@@ -19,7 +19,7 @@ recreated as of that point.
 - **Fork** branches a new conversation from an existing one:
 
 ```bash
-exo conversation fork <agent> <conversation> "Fork Name"
+exo thread fork <agent> <conversation> "Fork Name"
 ```
 
 The data model supports recreating state as of *any* past event; the CLI

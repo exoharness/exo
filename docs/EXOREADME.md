@@ -67,17 +67,17 @@ cargo build -p exo
 ./target/debug/exo --help
 ```
 
-Register a model, then drop into a REPL:
+Register a model, create an agent, then start chatting:
 
 ```bash
-./target/debug/exo secret set openai --env OPENAI_API_KEY
-./target/debug/exo model register gpt-5.5 --secret openai
-./target/debug/exo repl
+./target/debug/exo secret create openai --env OPENAI_API_KEY
+./target/debug/exo model create gpt-5.5 --secret openai
+./target/debug/exo agent create assistant --model gpt-5.5
+./target/debug/exo chat --agent assistant
 ```
 
-`exo repl` reuses or creates a default agent and conversation and uses a
-registered model, so you can start chatting in one command. It's a plain chat
-with no shell sandbox; create a conversation explicitly when you want tools.
+`exo chat --agent assistant` starts a new saved thread. Pass `--thread <slug>`
+to resume an existing thread, or `--agent-file agent.md` for a temporary run.
 
 `--env` takes the variable name literally. Use `--value "$OPENAI_API_KEY"` if
 you intentionally want the shell to expand the value.
@@ -86,8 +86,8 @@ For explicit control over agents, conversations, or a shell-enabled sandbox:
 
 ```bash
 ./target/debug/exo agent create --model gpt-5.5 "Sandbox Example"
-./target/debug/exo conversation create sandbox-example "Local Dev"
-./target/debug/exo repl --agent sandbox-example --conversation local-dev
+./target/debug/exo thread create sandbox-example "Local Dev"
+./target/debug/exo chat --agent sandbox-example --thread local-dev
 ```
 
 The CLI stores state under `.exo` by default. Pass `--root <path>` to use a

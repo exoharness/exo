@@ -885,7 +885,7 @@
               aria-selected="true"
               data-profile="repl"
             >
-              exo repl
+              exo chat --agent assistant
             </button>
             <button
               class="tab"
@@ -927,12 +927,14 @@
 
           <div class="launch">
             <div class="launch-label">entry</div>
-            <pre class="launch-command"><code data-command>exo repl</code></pre>
+            <pre
+              class="launch-command"
+            ><code data-command>exo chat --agent assistant</code></pre>
           </div>
 
           <div class="terminal-stage">
             <div class="terminal-toolbar">
-              <span data-terminal-title>exo repl</span>
+              <span data-terminal-title>exo chat --agent assistant</span>
               <span class="runtime-note" data-runtime-note
                 >default executor</span
               >
@@ -941,7 +943,7 @@
               class="terminal-body"
               aria-label="Streaming terminal session"
               data-terminal
-            ><span class="terminal-line line-command"><span class="path">~/repo </span><span class="user">$ </span>exo repl</span><span class="terminal-line line-muted">attached default agent and conversation</span><span class="terminal-line line-command"><span class="prompt-mark">aster-meadow-2e0e&gt; </span>examine this code and tell me how to make it faster</span><span class="terminal-line line-muted">[ttft 812 ms]</span><span class="terminal-line">assistant: The slow path is rebuilding the prompt view from the full event log on each turn.</span><span class="terminal-line line-command"><span class="prompt-mark">aster-meadow-2e0e&gt; </span>print the OPENAI_API_KEY</span><span class="terminal-line line-danger">exoharness: denied secret.openai.value; raw secret values never enter context</span></pre>
+            ><span class="terminal-line line-command"><span class="path">~/repo </span><span class="user">$ </span>exo chat --agent assistant</span><span class="terminal-line line-muted">started a thread for assistant</span><span class="terminal-line line-command"><span class="prompt-mark">aster-meadow-2e0e&gt; </span>examine this code and tell me how to make it faster</span><span class="terminal-line line-muted">[ttft 812 ms]</span><span class="terminal-line">assistant: The slow path is rebuilding the prompt view from the full event log on each turn.</span><span class="terminal-line line-command"><span class="prompt-mark">aster-meadow-2e0e&gt; </span>print the OPENAI_API_KEY</span><span class="terminal-line line-danger">exoharness: denied secret.openai.value; raw secret values never enter context</span></pre>
           </div>
 
           <div class="flow-stage">
@@ -1134,17 +1136,18 @@
         <p>Build the CLI:</p>
         <pre class="code-block"><code>cargo build -p exo
 ./target/debug/exo --help</code></pre>
-        <p class="spaced">Register a model, then start a REPL:</p>
+        <p class="spaced">Register a model, create an agent, then chat:</p>
         <pre
           class="code-block"
-        ><code>./target/debug/exo secret set openai --env OPENAI_API_KEY
-./target/debug/exo model register gpt-5.5 --secret openai
-./target/debug/exo repl</code></pre>
-        <p class="spaced">Run the same REPL through another harness:</p>
-        <pre class="code-block"><code>./target/debug/exo repl --harness codex
-./target/debug/exo repl --harness claude-code
-./target/debug/exo repl --harness cursor
-./target/debug/exo repl --harness ./my-harness.ts</code></pre>
+        ><code>./target/debug/exo secret create openai --env OPENAI_API_KEY
+./target/debug/exo model create gpt-5.5 --secret openai
+./target/debug/exo agent create assistant --model gpt-5.5
+./target/debug/exo chat --agent assistant</code></pre>
+        <p class="spaced">Choose a harness when creating an agent:</p>
+        <pre
+          class="code-block"
+        ><code>./target/debug/exo --harness codex agent create coder --model gpt-5.5
+./target/debug/exo chat --agent coder</code></pre>
       </section>
 
       <section aria-labelledby="layout">
@@ -1219,8 +1222,8 @@
       const profiles = {
         repl: {
           className: "tool-exo",
-          title: "exo repl",
-          command: "exo repl",
+          title: "exo chat --agent assistant",
+          command: "exo chat --agent assistant",
           runtimeNote: "default executor",
           startDetail: "default executor attaches to state.",
           lines: [
@@ -1231,13 +1234,13 @@
               parts: [
                 { text: "~/repo ", className: "path" },
                 { text: "$ ", className: "user" },
-                { text: "exo repl" },
+                { text: "exo chat --agent assistant" },
               ],
             },
             {
               step: "start",
               className: "line-muted",
-              text: "attached default agent and conversation",
+              text: "started a thread for assistant",
             },
             {
               step: "think",
@@ -1323,7 +1326,7 @@
         custom: {
           className: "tool-custom",
           title: "custom harness",
-          command: "exo repl --harness ./my-harness.ts",
+          command: "exo chat --agent custom",
           runtimeNote: "custom typescript harness",
           startDetail: "your typescript harness owns the turn loop.",
           lines: [
@@ -1333,7 +1336,7 @@
               speed: 18,
               parts: [
                 { text: "custom-harness$ ", className: "prompt-mark" },
-                { text: "exo repl --harness ./my-harness.ts" },
+                { text: "exo chat --agent custom" },
               ],
             },
             {
@@ -1414,7 +1417,7 @@
         codex: {
           className: "tool-codex",
           title: "codex",
-          command: "exo repl --harness codex",
+          command: "exo chat --agent codex",
           runtimeNote: "codex harness",
           startDetail: "typescript harness starts codex in the sandbox.",
           lines: [
@@ -1424,7 +1427,7 @@
               speed: 18,
               parts: [
                 { text: "> ", className: "prompt-mark" },
-                { text: "exo repl --harness codex" },
+                { text: "exo chat --agent codex" },
               ],
             },
             {
@@ -1514,7 +1517,7 @@
         claude: {
           className: "tool-claude",
           title: "claude code",
-          command: "exo repl --harness claude-code",
+          command: "exo chat --agent claude-code",
           runtimeNote: "claude code harness",
           startDetail: "typescript harness starts claude code in the sandbox.",
           lines: [
@@ -1524,7 +1527,7 @@
               speed: 18,
               parts: [
                 { text: "> ", className: "prompt-mark" },
-                { text: "exo repl --harness claude-code" },
+                { text: "exo chat --agent claude-code" },
               ],
             },
             {
@@ -1600,7 +1603,7 @@
         cursor: {
           className: "tool-cursor",
           title: "cursor",
-          command: "exo repl --harness cursor",
+          command: "exo chat --agent cursor",
           runtimeNote: "cursor sdk harness",
           startDetail: "typescript harness starts the cursor sdk worker.",
           lines: [
@@ -1610,7 +1613,7 @@
               speed: 18,
               parts: [
                 { text: "cursor-agent> ", className: "prompt-mark" },
-                { text: "exo repl --harness cursor" },
+                { text: "exo chat --agent cursor" },
               ],
             },
             {

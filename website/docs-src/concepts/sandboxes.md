@@ -32,8 +32,8 @@ exo agent create --model <model> --provider docker "My Agent"
 **Remote** backends are configured as bindings and need an API key:
 
 ```bash
-exo secret set <name> --env <PROVIDER_API_KEY>
-exo provider configure --provider <name> --secret <name>
+exo secret create <name> --env <PROVIDER_API_KEY>
+exo provider create --provider <name> --secret <name>
 ```
 
 Remote backends run the sandbox on hosted infrastructure instead of your

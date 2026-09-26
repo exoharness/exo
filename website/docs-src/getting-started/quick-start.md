@@ -1,6 +1,6 @@
 ---
 title: Using the CLI Directly
-description: Store a secret, register a model, and start a bare REPL.
+description: Store a secret, register a model, and start chatting.
 ---
 
 # Using the CLI Directly
@@ -13,7 +13,7 @@ primitives the setup script drives.
 ## 1. Store a secret
 
 ```bash
-exo secret set openai --env OPENAI_API_KEY
+exo secret create openai --env OPENAI_API_KEY
 ```
 
 This stores your API key in exo's secret store (file-backed by default,
@@ -28,25 +28,25 @@ Apple Keychain also supported via `--secret-backend`).
 ## 2. Register a model
 
 ```bash
-exo model register gpt-5.5 --secret openai
+exo model create gpt-5.5 --secret openai
 ```
 
 This writes a *model binding*: a named model plus the secret it
 authenticates with. Use `--base-url` to target any OpenAI-compatible
 endpoint. Model names starting with `claude` use the Anthropic API.
 
-## 3. Start the REPL
+## 3. Create an agent and chat
 
 ```bash
-exo repl
+exo agent create assistant --model gpt-5.5
+exo chat --agent assistant
 ```
 
-`exo repl` reuses or creates a default agent and conversation and uses the
-first registered model (override with `--model`), so you can start chatting
-in one command. It's a plain chat with no shell sandbox; see
-[A Sandboxed Conversation](./sandboxed-conversation) when you want tools.
+Each `exo chat --agent assistant` invocation starts a new saved thread.
+Use `--agent-file agent.md` instead to run a Markdown agent with temporary state.
+See [A Sandboxed Conversation](./sandboxed-conversation) to configure a sandbox.
 
-Chat runs inline, keeping your terminal scrollback available. Use `exo repl --tui`
+Chat runs inline, keeping your terminal scrollback available. Use `exo chat --agent assistant --tui`
 to opt into the full-screen interface.
 
 While a turn runs, a spinner shows whether the agent is waiting for the model,
@@ -68,8 +68,8 @@ Because all conversation state is durable and owned by the exoharness, you
 can quit the REPL and resume the same conversation later:
 
 ```bash
-exo repl --agent repl --conversation <slug>
+exo chat --agent assistant --thread <slug>
 ```
 
-Use `exo conversation list` to find the slug, and
-`conversation events <slug>` to inspect the raw event log.
+Use `exo thread list assistant` to find the slug, and
+`exo thread events assistant <slug>` to inspect the raw event log.

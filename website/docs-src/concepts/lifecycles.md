@@ -115,7 +115,7 @@ you return.
 ### Create
 
 ```bash
-exo conversation create <agent> "Dev"
+exo thread create <agent> "Dev"
 # canonical setup creates conversation slug `dev` automatically
 ```
 
@@ -139,7 +139,7 @@ start_session  →  begin_turn(input)  →  (model + tools…)  →  turn.finish
 Common entry points:
 
 - **REPL / CLI chat** — human messages in an open session
-- **`exo conversation send`** — one-shot prompt
+- **`exo thread send`** — one-shot prompt
 - **Adapter wakeup** — inbound external message becomes a normal turn
   (fresh session, closed when the wakeup completes)
 - **Scheduler** — completed task can wake the conversation with a compact
@@ -167,7 +167,7 @@ executor; the raw log remains queryable.
 ### Fork
 
 ```bash
-exo conversation fork <agent> <conversation> "Fork Name"
+exo thread fork <agent> <conversation> "Fork Name"
 ```
 
 Fork branches a **new** conversation from an existing one (optionally up
@@ -189,7 +189,7 @@ after `/exit`.
 ### Delete
 
 ```bash
-exo conversation delete <agent> <conversation>
+exo thread delete <agent> <conversation>
 ```
 
 Appends a `conversation_deleted` marker, then removes the conversation
@@ -251,13 +251,13 @@ execution there.
 
 ```bash
 # Attach an existing Docker container to a conversation
-exo conversation sandbox attach <agent> <conversation> \
+exo thread sandbox attach <agent> <conversation> \
   --provider docker \
   --external-id <container-id> \
   --default-workdir /workspace
 
 # Later, hand it back
-exo conversation sandbox detach <agent> <conversation> <exo-sandbox-id>
+exo thread sandbox detach <agent> <conversation> <exo-sandbox-id>
 ```
 
 ### Which sandbox does a turn use?

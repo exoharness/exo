@@ -70,7 +70,7 @@ connections on worker startup, or leave gracefully before a planned restart.
   voice is on), both on `create_adapter`.
 - The `GuildVoiceStates` intent is added automatically when voice is on
   (non-privileged).
-- An OpenAI secret: `exo secret set openai --env OPENAI_API_KEY`.
+- An OpenAI secret: `exo secret create openai --env OPENAI_API_KEY`.
 
 Both fields are in the `create_adapter` Discord schema's `required[]`: OpenAI
 strict function-calling rejects a tool that declares a property without listing

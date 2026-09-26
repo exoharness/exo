@@ -40,3 +40,4 @@ libc = "0.2"
 [dev-dependencies]
 futures.workspace = true
 tempfile = "3.23.0"
+wiremock = "0.6"

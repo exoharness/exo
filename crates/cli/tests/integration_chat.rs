@@ -139,14 +139,14 @@ async fn conversation_send_round_trips_through_real_sandbox_and_mocked_openai() 
         .await;
 
     run_exo(
-        &["secret", "set", "test-key", "--env", "OPENAI_API_KEY"],
+        &["secret", "create", "test-key", "--env", "OPENAI_API_KEY"],
         &root,
         &xdg,
     );
     run_exo(
         &[
             "model",
-            "register",
+            "create",
             "gpt-test",
             "--secret",
             "test-key",
@@ -171,14 +171,10 @@ async fn conversation_send_round_trips_through_real_sandbox_and_mocked_openai() 
         &root,
         &xdg,
     );
-    run_exo(
-        &["conversation", "create", "test-agent", "first"],
-        &root,
-        &xdg,
-    );
+    run_exo(&["thread", "create", "test-agent", "first"], &root, &xdg);
 
     let output = run_exo(
-        &["conversation", "send", "test-agent", "first", "hello there"],
+        &["thread", "send", "test-agent", "first", "hello there"],
         &root,
         &xdg,
     );

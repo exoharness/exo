@@ -228,8 +228,8 @@ exo --harness typescript agent create "Coder" \
   --module exoharness/examples/typescript/coding-agent-harness.ts \
   --model gpt-5.5 \
   --sandbox-image python:3.12-slim
-exo conversation create coder "Build"
-exo repl --agent coder --conversation coder-build
+exo thread create coder "Build"
+exo chat --agent coder --thread coder-build
 ```
 
 The default sandbox image is `ubuntu:24.04`, which is bare — no Python,

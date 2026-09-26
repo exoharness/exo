@@ -1502,3 +1502,154 @@ async fn register_test_models(exoharness: &dyn ExoHarness) {
             .expect("test model should register");
     }
 }
+
+#[tokio::test]
+async fn remote_threads_paginate_and_failed_creation_only_deletes_the_new_thread() -> Result<()> {
+    use exoharness::protocol::{
+        ClientMessage, ConversationHandleInfo, Request, Response, ServerMessage,
+    };
+    use exoharness::{HttpExoHarness, ListConversationsResult};
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+
+    let temp = TempDir::new()?;
+    let local = BasicHarness::new(
+        Arc::new(BasicExoHarness::new(local_test_config(temp.path())).await?),
+        Arc::new(FakeModelClient::default()),
+        Arc::new(BasicToolRuntime),
+    );
+    let agent = local
+        .create_agent(CreateAgentRequest {
+            slug: "support".to_string(),
+            name: None,
+            harness: crate::AgentHarnessKind::Basic,
+            typescript: None,
+            enable_agent_tool_creation: false,
+            sandbox_image: None,
+            sandbox_provider: SandboxProvider::LocalProcess,
+            sandbox_scope: None,
+            enable_networking: false,
+            model: "gpt-test".to_string(),
+            max_output_tokens: None,
+            max_tool_round_trips: None,
+            braintrust: None,
+        })
+        .await?;
+    let config = agent.config().await?;
+    let artifact = agent.exoharness_handle().list_artifacts().await?.remove(0);
+    let agent_record = agent.record().clone();
+    let agent_id = agent_record.id;
+    let mut threads = Vec::new();
+    for slug in ["failed", "older", "middle", "recent"] {
+        let thread = agent
+            .create_conversation(CreateConversationRequest {
+                slug: Some(slug.to_string()),
+                ..Default::default()
+            })
+            .await?;
+        threads.push(ConversationHandleInfo {
+            agent_id,
+            record: thread.record().clone(),
+        });
+    }
+    threads.reverse();
+    let recent_id = threads[0].record.id;
+    let failed_id = threads[3].record.id;
+    let invalid_cursor = Arc::new(Mutex::new(None::<Uuid7>));
+    let cursor_override = invalid_cursor.clone();
+    let deleted = Arc::new(Mutex::new(Vec::new()));
+    let deletions = deleted.clone();
+    let server = MockServer::start().await;
+    Mock::given(path("/request"))
+        .respond_with(move |request: &wiremock::Request| {
+            let ClientMessage::Request { id, request } =
+                serde_json::from_slice(&request.body).unwrap();
+            let response = match request {
+                Request::GetAgent { .. } => Some(Response::Agent {
+                    agent: Some(agent_record.clone()),
+                }),
+                Request::AgentWriteArtifact { .. } => Some(Response::ArtifactVersion {
+                    artifact: artifact.clone(),
+                }),
+                Request::ListConversations { request, .. } => {
+                    let index = request.cursor.map_or(0, |cursor| {
+                        threads
+                            .iter()
+                            .position(|thread| thread.record.id == cursor)
+                            .unwrap()
+                            + 1
+                    });
+                    let mut next_cursor = (index < 2).then_some(threads[index].record.id);
+                    if request.cursor.is_some() {
+                        next_cursor = cursor_override.lock().unwrap().or(next_cursor);
+                    }
+                    Some(Response::Conversations {
+                        result: ListConversationsResult {
+                            conversations: vec![threads[index].clone()],
+                            next_cursor,
+                        },
+                    })
+                }
+                Request::NewConversation { .. } => Some(Response::Conversation {
+                    conversation: Some(threads[3].clone()),
+                }),
+                Request::ConversationWriteArtifact { .. } => None,
+                Request::DeleteConversation {
+                    conversation_id, ..
+                } => {
+                    deletions.lock().unwrap().push(conversation_id);
+                    Some(Response::Bool { value: true })
+                }
+                other => panic!("unexpected request: {other:?}"),
+            };
+            ResponseTemplate::new(200).set_body_json(ServerMessage::Response {
+                id,
+                ok: response.is_some(),
+                error: response
+                    .is_none()
+                    .then(|| "configuration write failed".to_string()),
+                response,
+            })
+        })
+        .mount(&server)
+        .await;
+    let remote = BasicHarness::new(
+        Arc::new(HttpExoHarness::new(server.uri())?),
+        Arc::new(FakeModelClient::default()),
+        Arc::new(BasicToolRuntime),
+    );
+    let agent = remote.get_agent(&agent_id.to_string()).await?.unwrap();
+    assert_eq!(agent.list_conversations().await?.len(), 3);
+    assert_eq!(
+        agent
+            .get_conversation("older")
+            .await?
+            .unwrap()
+            .record()
+            .slug,
+        "older"
+    );
+    // Prime the runtime cache so creation reaches the failing thread-config write.
+    agent.put_config(config).await?;
+    let error = agent
+        .create_conversation(CreateConversationRequest::default())
+        .await
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("configuration write failed"));
+    assert_eq!(*deleted.lock().unwrap(), vec![failed_id]);
+    for cursor in [recent_id, Uuid7::now()] {
+        *invalid_cursor.lock().unwrap() = Some(cursor);
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            agent.list_conversations(),
+        )
+        .await?
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("thread listing cursor did not advance")
+        );
+    }
+    Ok(())
+}
