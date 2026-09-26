@@ -66,7 +66,7 @@ You can also create the adapter at stack startup instead of waiting for the firs
 ## Quirks And Gotchas
 
 - The bootstrap requires the adapter runner to already be running; `exo-cli` cannot start the Exo stack itself and will tell you to run `./exo.sh` if it is down.
-- Configure the mount through the launcher's `--agent-cli-mount` flag on each launch (or `EXO_AGENT_CLI_ROOT`). Direct `thread mount create` changes are overwritten when an environment-backed thread reopens.
+- Configure the mount through the launcher's `--agent-cli-mount` flag on each launch (or `EXO_AGENT_CLI_ROOT`). Direct `thread mount create` and `thread mount delete` commands reject environment-backed threads; update their environment instead.
 - `exo-cli` exits after the first reply. The conversation keeps its history, so a follow-up `exo-cli` invocation continues the same conversation context.
 - Replies can take as long as an agent turn. The client waits up to `EXO_AGENT_CLI_TIMEOUT_MS` (default 15 minutes).
 - If the client disconnects (Ctrl-C) before the agent replies, the reply is nacked and surfaced as an adapter error event rather than delivered.
