@@ -21,7 +21,9 @@ const GIT_AUTHORIZATION: &str = "Basic eC1hY2Nlc3MtdG9rZW46Y2FuYXJ5LXYx";
 impl EgressProxy {
     async fn shutdown(mut self) -> Result<()> {
         self.close();
-        (&mut self.task).await.context("joining egress proxy")?;
+        (&mut self.connection.task)
+            .await
+            .context("joining egress proxy")?;
         Ok(())
     }
 }
@@ -269,13 +271,25 @@ impl Upstream {
         resolver: Arc<dyn EgressCredentialResolver>,
         policy: EgressPolicy,
     ) -> Result<EgressProxy> {
+        let transport = Arc::new(
+            LocalEgressTransport::for_policy(
+                &policy.networking,
+                Some(crate::EgressListenConfig {
+                    bind_address: host_ip,
+                    advertised_address: host_ip,
+                    http_port: 0,
+                    https_port: 0,
+                    dns_port: 0,
+                }),
+            )
+            .await?,
+        );
         let state = State::new(
             identity(sandbox_id),
             policy,
             Some(resolver),
             Arc::new(self.config.clone()),
         )?;
-        let transport = Arc::new(LocalEgressTransport::bind(host_ip, &state.hosts).await?);
         EgressProxy::start_with_transport(transport, state, CancellationToken::new()).await
     }
 }
@@ -423,6 +437,7 @@ fn identity(sandbox_id: &str) -> EgressIdentity {
 
 fn policy() -> EgressPolicy {
     EgressPolicy {
+        allowed_tcp_ports: None,
         networking: SandboxNetworkPolicy::Limited {
             allowed_hosts: vec!["api.test".into(), "public.test".into()],
         },
@@ -970,7 +985,7 @@ fn dns_only_answers_exact_allowed_names() -> Result<()> {
         query
             .set_id(123)
             .add_query(Query::query(Name::from_ascii(host)?, kind));
-        let response = Message::from_vec(&dns_response(&state.hosts, &query.to_vec()?)?)?;
+        let response = Message::from_vec(&dns_response(Some(&state.hosts), &query.to_vec()?)?)?;
         assert_eq!(response.id(), 123);
         assert_eq!(
             response.response_code(),
@@ -1129,7 +1144,7 @@ print('PASS transparent Python and curl HTTPS, anonymous host, wrong host/SNI, D
         println!("{}", guest(&two, &other, &attack).await?);
         *resolver.value.write().await = None;
         println!("{}", guest(&one, &proxy, &format!("{setup}\nassert get()[0] == 502\nprint('PASS removal')")).await?);
-        proxy.cancel.cancel();
+        proxy.connection.cancel.cancel();
         tokio::time::sleep(Duration::from_millis(100)).await;
         let stopped = format!("{setup}\ntry:\n get()\n raise AssertionError('stopped proxy still permits requests')\nexcept (urllib.error.URLError, OSError):\n pass\nprint('PASS proxy failure blocks egress')");
         println!("{}", guest(&one, &proxy, &stopped).await?);
@@ -1148,6 +1163,18 @@ print('PASS transparent Python and curl HTTPS, anonymous host, wrong host/SNI, D
 #[tokio::test]
 #[ignore = "requires Firecracker artifacts; macOS also requires EXO_EGRESS_BRIDGE_BINARY in Lima"]
 async fn managed_firecracker_egress_live() -> Result<()> {
+    managed_firecracker_egress(false).await
+}
+
+#[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "firecracker"))]
+#[tokio::test]
+#[ignore = "requires Firecracker artifacts; macOS also requires EXO_EGRESS_BRIDGE_BINARY in Lima"]
+async fn managed_firecracker_unrestricted_egress_live() -> Result<()> {
+    managed_firecracker_egress(true).await
+}
+
+#[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "firecracker"))]
+async fn managed_firecracker_egress(unrestricted: bool) -> Result<()> {
     use crate::{
         ManagedSandboxBackend, ResourceScope, SandboxCommand, SandboxLifecycleConfig,
         SandboxRequest, SandboxResourceShape, SandboxSpec,
@@ -1187,6 +1214,10 @@ async fn managed_firecracker_egress_live() -> Result<()> {
             .with_egress(Some(resolver.clone()), Arc::new(upstream.config.clone()))
     };
     let backend = make_backend();
+    let mut network_policy = policy();
+    if unrestricted {
+        network_policy.networking = SandboxNetworkPolicy::Unrestricted;
+    }
     let request = SandboxRequest {
         sandbox_id: "managed-egress-live".into(),
         scope: ResourceScope::Thread {
@@ -1199,7 +1230,7 @@ async fn managed_firecracker_egress_live() -> Result<()> {
             resources: SandboxResourceShape::new(1, 512),
             mounts: vec![],
             durable_file_systems: vec![],
-            policy: policy(),
+            policy: network_policy,
             default_workdir: "/home/exo/workspace".into(),
         },
         lifecycle: SandboxLifecycleConfig {
@@ -1208,7 +1239,10 @@ async fn managed_firecracker_egress_live() -> Result<()> {
     };
     let command = |script: String| SandboxCommand {
         argv: vec!["python3".into(), "-c".into(), script],
-        env: HashMap::from([("TEST_API_KEY".into(), "must-be-overridden".into())]),
+        env: HashMap::from([
+            ("TEST_API_KEY".into(), "must-be-overridden".into()),
+            ("UNRESTRICTED".into(), unrestricted.to_string()),
+        ]),
         display_argv: None,
         cwd: None,
         timeout: Some(Duration::from_secs(30)),
@@ -1237,17 +1271,20 @@ result = subprocess.run(['curl', '--noproxy', '*', '--max-time', '5', '-sS', '-H
 assert result.stdout == 'authenticated-v1'
 pathlib.Path('egress-retained').write_text('keep this')
 pathlib.Path('old-placeholder').write_text(os.environ['TEST_API_KEY'])
-try:
-    socket.getaddrinfo('blocked.test', 443)
-    raise AssertionError('blocked DNS resolved')
-except socket.gaierror:
-    pass
+if os.environ['UNRESTRICTED'] == 'true':
+    assert socket.getaddrinfo('other.test', 443)
+else:
+    try:
+        socket.getaddrinfo('blocked.test', 443)
+        raise AssertionError('blocked DNS resolved')
+    except socket.gaierror:
+        pass
 try:
     socket.create_connection(('1.1.1.1', 22), timeout=2)
     raise AssertionError('direct egress succeeded')
 except OSError:
     pass
-print('PASS automatic placeholders, Python and curl trust, native transport, DNS and direct egress denial')
+print('PASS automatic placeholders, Python and curl trust, native transport, DNS policy and direct egress denial')
 "#)).await?;
         ensure!(check.ok, "managed check failed: {}", check.stderr);
         println!("{}", check.stdout);
@@ -1292,6 +1329,8 @@ print('PASS reconnect retains VM files and rejects the previous placeholder')
     }.await;
     let cleanup = backend.terminate(request).await;
     cleanup?;
+    drop(backend);
+    drop(raw);
     #[cfg(target_os = "linux")]
     tokio::fs::remove_dir_all(&state_root).await?;
     #[cfg(target_os = "macos")]
@@ -1303,8 +1342,10 @@ print('PASS reconnect retains VM files and rejects the previous placeholder')
                 "--",
                 "sudo",
                 "-n",
-                "rm",
-                "-rf",
+                "bash",
+                "-ec",
+                "if mountpoint -q \"$1\"; then umount \"$1\"; fi; rm -rf -- \"$1\" \"$1.xfs\" \"$1.storage.lock\"",
+                "cleanup-test-state",
                 &state_root,
             ])
             .status()
@@ -1587,6 +1628,111 @@ async fn proxy_starts_without_a_sandbox_backend() -> Result<()> {
     assert!(proxy.environment()["TEST_API_KEY"].starts_with(PLACEHOLDER_PREFIX));
     proxy.shutdown().await?;
     assert!(transport.is_closed());
+    Ok(())
+}
+
+#[tokio::test]
+async fn transparent_unrestricted_egress_intercepts_credentials_and_preserves_public_tls()
+-> Result<()> {
+    let upstream = Upstream::start().await?;
+    let resolver = TestResolver::new();
+    let mut config = policy();
+    config.networking = SandboxNetworkPolicy::Unrestricted;
+    let proxy = upstream
+        .proxy_with_policy(host_ip()?, "one", resolver.clone(), config.clone())
+        .await?;
+    let other = upstream
+        .proxy_with_policy(host_ip()?, "two", resolver.clone(), config)
+        .await?;
+    proxy.bind_source(host_ip()?).await?;
+    other.bind_source(host_ip()?).await?;
+    let first_client = client(&proxy)?;
+    let placeholder = &proxy.environment()["TEST_API_KEY"];
+    assert!(
+        !proxy
+            .environment()
+            .keys()
+            .any(|key| key.to_ascii_uppercase().ends_with("_PROXY"))
+    );
+    for (value, expected) in [
+        ("canary-v1", "authenticated-v1"),
+        ("canary-v2", "authenticated-v2"),
+    ] {
+        *resolver.value.write().await = Some(value.into());
+        assert_eq!(
+            first_client
+                .get("https://api.test/auth")
+                .bearer_auth(placeholder)
+                .send()
+                .await?
+                .text()
+                .await?,
+            expected
+        );
+    }
+    assert_eq!(
+        client(&other)?
+            .get("https://api.test/auth")
+            .bearer_auth(placeholder)
+            .send()
+            .await?
+            .status(),
+        StatusCode::BAD_GATEWAY
+    );
+    *resolver.value.write().await = None;
+    assert_eq!(
+        first_client
+            .get("https://api.test/auth")
+            .bearer_auth(placeholder)
+            .send()
+            .await?
+            .status(),
+        StatusCode::BAD_GATEWAY
+    );
+    // Only the upstream CA is trusted: a public connection must not be intercepted.
+    let public = reqwest::Client::builder()
+        .no_proxy()
+        .add_root_certificate(reqwest::Certificate::from_pem(
+            upstream.config.ca_pem.as_bytes(),
+        )?)
+        .resolve("public.test", proxy.endpoints().https.into())
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    assert_eq!(
+        public
+            .get("https://public.test/auth")
+            .send()
+            .await?
+            .text()
+            .await?,
+        "anonymous"
+    );
+    assert!(
+        first_client
+            .get("https://public.test/auth")
+            .send()
+            .await
+            .is_err()
+    );
+    proxy.shutdown().await?;
+    other.shutdown().await?;
+    Ok(())
+}
+
+#[test]
+fn unrestricted_dns_answers_without_adding_credential_hosts() -> Result<()> {
+    use hickory_proto::op::Query;
+    use hickory_proto::rr::Name;
+    let mut query = Message::new();
+    query.add_query(Query::query(
+        Name::from_ascii("public.test")?,
+        RecordType::A,
+    ));
+    let unrestricted = Message::from_vec(&dns_response(None, &query.to_vec()?)?)?;
+    assert_eq!(unrestricted.answers().len(), 1);
+    let empty = HashSet::new();
+    let restricted = Message::from_vec(&dns_response(Some(&empty), &query.to_vec()?)?)?;
+    assert_eq!(restricted.response_code(), ResponseCode::NXDomain);
     Ok(())
 }
 
@@ -2063,7 +2209,7 @@ async fn hosted_proxy_times_out_authorization_before_accepting_a_tunnel() -> Res
 
 #[tokio::test]
 #[ignore = "requires SmolVM and EXO_SMOLVM_TEST_IMAGE with curl and CA certificates"]
-async fn smolvm_explicit_proxy_live() -> Result<()> {
+async fn smolvm_native_proxy_live() -> Result<()> {
     smolvm_proxy_live(false).await
 }
 
@@ -2085,39 +2231,32 @@ async fn smolvm_proxy_live(with_gh: bool) -> Result<()> {
     let resolver = TestResolver::new();
     let mut config = policy();
     config.networking = SandboxNetworkPolicy::Unrestricted;
+    config.allowed_tcp_ports = Some(vec![443, 8443]);
     if with_gh {
         config.credentials[0].environment_variable = "GH_TOKEN".into();
         config.credentials[0].networking = CredentialNetworkPolicy::Limited {
             allowed_hosts: vec!["api.github.com".into()],
         };
     }
-    let state = State::new(
-        identity("smolvm-proxy"),
-        config,
-        Some(resolver.clone()),
-        Arc::new(upstream.config.clone()),
-    )?;
-    let proxy = explicit::ExplicitProxy::with_listener(
-        state,
-        TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?,
-        "host.smolvm.internal",
-    )
-    .await?;
-    let backend = SmolvmSandboxBackend::from_config(crate::SmolvmBackendConfig {
-        mode: SmolvmExecutionMode::Warm,
-        image_cache: Some(cache.path().to_path_buf()),
-        ..Default::default()
-    });
+    let make_backend = || {
+        SmolvmSandboxBackend::from_config(crate::SmolvmBackendConfig {
+            mode: SmolvmExecutionMode::Warm,
+            image_cache: Some(cache.path().to_path_buf()),
+            ..Default::default()
+        })
+        .with_egress(resolver.clone(), Arc::new(upstream.config.clone()))
+    };
+    let backend = make_backend();
     let request = SandboxRequest {
         sandbox_id: format!("smolvm-proxy-{}", uuid::Uuid::new_v4()),
-        scope: Default::default(),
+        scope: identity("smolvm-proxy").scope,
         provider_state: None,
         spec: SandboxSpec {
             image,
             resources: SandboxResourceShape::new(2, 1024),
             mounts: Vec::new(),
             durable_file_systems: Vec::new(),
-            policy: SandboxNetworkPolicy::Unrestricted.into(),
+            policy: config,
             default_workdir: "/".into(),
         },
         lifecycle: SandboxLifecycleConfig {
@@ -2126,35 +2265,29 @@ async fn smolvm_proxy_live(with_gh: bool) -> Result<()> {
     };
     let result = async {
         let handle = backend.acquire(request.clone()).await?;
+        let reused = backend.acquire(request.clone()).await?;
+        ensure!(handle.id() == reused.id(), "warm sandbox was not reused");
         let mut command = SandboxCommand {
-            argv: vec!["sh".into(), "-ec".into(), PREPARE_TRUST.into()],
-            env: HashMap::from([
-                ("EXO_EGRESS_CA_PATH".into(), proxy.ca_path.clone()),
-                (
-                    "EXO_EGRESS_CA_PEM".into(),
-                    format!("{}\n{}", proxy.ca_pem, upstream.config.ca_pem),
-                ),
-            ]),
+            argv: vec!["sh".into(), "-ec".into(), String::new()],
+            env: HashMap::new(),
             display_argv: None,
             cwd: None,
             timeout: Some(Duration::from_secs(20)),
         };
-        let output = handle.exec(&command).await?;
-        ensure!(output.ok, "trust setup: {}", output.stderr);
         command.env = HashMap::from([(
             if with_gh { "GH_TOKEN" } else { "TEST_API_KEY" }.into(),
             "caller-supplied-secret".into(),
         )]);
         command.argv[2] = r#"
 case "$TEST_API_KEY" in exo_egress_*) ;; *) exit 1;; esac
-case "$(env)" in *canary-v1*|*canary-v2*|*caller-supplied-secret*) exit 1;; esac
-curl -fsS --max-time 10 https://api.test/auth -H "Authorization: Bearer $TEST_API_KEY"
+case "$(env)" in *canary-v1*|*canary-v2*|*caller-supplied-secret*|*HTTPS_PROXY=*|*https_proxy=*|*SMOLVM_INTERCEPTOR_TOKEN=*) exit 1;; esac
+curl --noproxy '*' --resolve api.test:443:93.184.216.34 -fsS --max-time 10 https://api.test/auth -H "Authorization: Bearer $TEST_API_KEY"
 "#
         .into();
         if with_gh {
             command.argv[2] = r#"
 case "$GH_TOKEN" in exo_egress_*) ;; *) exit 1;; esac
-case "$(env)" in *canary-v1*|*canary-v2*|*caller-supplied-secret*) exit 1;; esac
+case "$(env)" in *canary-v1*|*canary-v2*|*caller-supplied-secret*|*HTTPS_PROXY=*|*https_proxy=*|*SMOLVM_INTERCEPTOR_TOKEN=*) exit 1;; esac
 gh api repos/org/repo/pulls/10/reviews --jq '.[0].body'
 "#
             .into();
@@ -2166,7 +2299,7 @@ gh api repos/org/repo/pulls/10/reviews --jq '.[0].body'
             *resolver.value.write().await = Some(secret.into());
             std::fs::write(directory.path().join("expected-token"), secret)?;
             let expected = if with_gh { "private review" } else { expected };
-            let output = handle.exec(&proxy.command(&command)?).await?;
+            let output = handle.exec(&command).await?;
             ensure!(
                 output.ok && output.stdout.trim() == expected,
                 "proxy request: {} {}",
@@ -2174,27 +2307,44 @@ gh api repos/org/repo/pulls/10/reviews --jq '.[0].body'
                 output.stderr
             );
         }
+        let mut save = command.clone();
+        save.argv[2] = "printf '%s' retained > /egress-retained".into();
+        ensure!(handle.exec(&save).await?.ok, "saving reconnect marker");
+        backend.shutdown_egress();
+        let replacement = make_backend();
+        let handle = replacement.acquire(request.clone()).await?;
+        let mut check = command.clone();
+        check.argv[2] = format!("test \"$(cat /egress-retained)\" = retained; {}", command.argv[2]);
+        let output = handle.exec(&check).await?;
+        ensure!(output.ok, "reconnecting sandbox: {}", output.stderr);
         *resolver.value.write().await = None;
-        let output = handle.exec(&proxy.command(&command)?).await?;
+        let output = handle.exec(&command).await?;
         ensure!(!output.ok, "revoked credential was still accepted");
         if !with_gh {
-            command.argv[2] = "curl -fsS --max-time 10 https://public.test/auth".into();
-            let output = handle.exec(&proxy.command(&command)?).await?;
+            command.env.insert("PUBLIC_CA".into(), upstream.config.ca_pem.clone());
+            command.argv[2] = "printf '%s' \"$PUBLIC_CA\" > /tmp/public-ca.pem; curl --noproxy '*' --resolve public.test:443:93.184.216.34 --cacert /tmp/public-ca.pem -fsS --max-time 10 https://public.test/auth".into();
+            let output = handle.exec(&command).await?;
             ensure!(
                 output.ok && output.stdout == "anonymous",
                 "anonymous HTTPS failed: {}",
                 output.stderr
             );
+            command.argv[2] = "curl --noproxy '*' --resolve public.test:8443:93.184.216.34 --cacert /tmp/public-ca.pem -fsS --max-time 10 https://public.test:8443/auth".into();
+            let output = handle.exec(&command).await?;
+            ensure!(
+                output.ok && output.stdout == "anonymous",
+                "opaque TCP relay failed: {}",
+                output.stderr
+            );
+            command.argv[2] = "curl --noproxy '*' --resolve public.test:8444:93.184.216.34 --cacert /tmp/public-ca.pem -fsS --max-time 10 https://public.test:8444/auth".into();
+            ensure!(!handle.exec(&command).await?.ok, "blocked TCP port was accepted");
         }
-        proxy.close();
-        ensure!(
-            proxy.command(&command).is_err(),
-            "closed proxy still supplies commands"
-        );
+        replacement.shutdown_egress();
+        ensure!(handle.exec(&command).await.is_err(), "closed proxy still supplies commands");
         Ok::<_, anyhow::Error>(())
     }
     .await;
-    proxy.close();
+    backend.shutdown_egress();
     let cleanup = backend.terminate(request).await;
     cleanup?;
     #[cfg(target_os = "macos")]

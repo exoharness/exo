@@ -27,6 +27,7 @@ use crate::{
 
 fn policy(name: &str) -> EgressPolicy {
     EgressPolicy {
+        allowed_tcp_ports: None,
         networking: SandboxNetworkPolicy::Limited {
             allowed_hosts: vec!["api.test".into()],
         },
@@ -647,5 +648,48 @@ async fn mcp_credentials_refresh_persist_and_remain_destination_scoped() -> Resu
             .is_err()
     );
     oauth.verify().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn container_registrations_reject_credentials_before_launch() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let harness =
+        BasicExoHarness::in_memory(crate::test_support::local_test_config(temp.path())).await?;
+    let mut policy = policy("api");
+    policy.networking = SandboxNetworkPolicy::Unrestricted;
+    let request = crate::SandboxRequest {
+        sandbox_id: "native-egress-required".into(),
+        scope: ResourceScope::Global,
+        provider_state: None,
+        spec: crate::SandboxSpec {
+            image: "must-not-be-launched".into(),
+            resources: crate::SandboxResourceShape::new(1, 512),
+            mounts: vec![],
+            durable_file_systems: vec![],
+            policy,
+            default_workdir: "/".into(),
+        },
+        lifecycle: crate::SandboxLifecycleConfig {
+            idle_ttl: Some(std::time::Duration::from_secs(60)),
+        },
+    };
+    for registration in [
+        SandboxBackendRegistration::docker(),
+        SandboxBackendRegistration::apple_container(),
+    ] {
+        let backend = (registration.factory)(&harness.inner).await?;
+        let error = backend
+            .acquire(request.clone())
+            .await
+            .err()
+            .context("unenforced credential policy was accepted")?;
+        assert!(
+            error
+                .to_string()
+                .contains("does not support policy.credentials"),
+            "{error:#}"
+        );
+    }
     Ok(())
 }

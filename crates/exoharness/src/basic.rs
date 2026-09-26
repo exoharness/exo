@@ -135,30 +135,17 @@ impl SandboxBackendRegistration {
     }
 
     pub fn apple_container() -> Self {
-        Self::credential_container(SandboxProvider::AppleContainer)
+        Self::from_backend(
+            SandboxProvider::AppleContainer,
+            Arc::new(crate::CliContainerSandboxBackend::apple_container()),
+        )
     }
 
     pub fn docker() -> Self {
-        Self::credential_container(SandboxProvider::Docker)
-    }
-
-    fn credential_container(provider: SandboxProvider) -> Self {
-        Self::from_factory(provider.clone(), true, move |inner| {
-            let resolver = Arc::new(LocalEgressResolver {
-                harness: Arc::downgrade(inner),
-            });
-            let backend = if provider == SandboxProvider::Docker {
-                crate::CliContainerSandboxBackend::docker()
-            } else {
-                crate::CliContainerSandboxBackend::apple_container()
-            };
-            let backend = crate::egress::CredentialProxyBackend::new(
-                provider.clone(),
-                Arc::new(backend),
-                resolver,
-            );
-            Box::pin(async move { Ok(Arc::new(backend) as Arc<dyn ManagedSandboxBackend>) })
-        })
+        Self::from_backend(
+            SandboxProvider::Docker,
+            Arc::new(crate::CliContainerSandboxBackend::docker()),
+        )
     }
 
     #[cfg(feature = "firecracker")]
@@ -212,11 +199,9 @@ impl SandboxBackendRegistration {
                 let resolver = Arc::new(LocalEgressResolver {
                     harness: Arc::downgrade(inner),
                 });
-                Ok(Arc::new(crate::egress::CredentialProxyBackend::new(
-                    SandboxProvider::Smolvm,
-                    Arc::new(crate::SmolvmSandboxBackend::from_config(config)),
-                    resolver,
-                )) as Arc<dyn ManagedSandboxBackend>)
+                Ok(Arc::new(
+                    crate::SmolvmSandboxBackend::from_config(config).with_credentials(resolver),
+                ) as Arc<dyn ManagedSandboxBackend>)
             })
         })
     }

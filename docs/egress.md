@@ -7,9 +7,9 @@ Unsupported policies fail with an error identifying the unsupported field.
 The basic runtime includes the credential proxy; the `egress` feature also exposes
 it without a VM backend. Programs receive placeholder
 environment variables; the proxy resolves credentials outside the sandbox and
-substitutes them on authorized requests. Firecracker uses transparent network
-interception. Apple Containers, Docker, and SmolVM use an authenticated HTTP
-CONNECT transport into the same credential resolver and request forwarding code.
+substitutes them on authorized requests. Firecracker and SmolVM enforce network
+interception outside the guest and share the credential resolver and HTTP/TLS
+forwarding code. Clients use ordinary destination URLs without proxy variables.
 
 On macOS, TLS and credential resolution run in the native Exo process. The
 existing Lima bridge carries streams and DNS configuration, without receiving
@@ -115,23 +115,15 @@ select the same secret and permit its endpoint. Conflicts fail before startup.
 Limited network policies must already allow the model host; model selection does
 not expand them. Model endpoints currently require HTTPS on port 443.
 
-Apple container and Docker support model credentials with
-`networking: { type: unrestricted }`. The runtime supplies `HTTPS_PROXY`, HTTP
-proxy authentication, and the CA bundle. Node clients use `NODE_USE_ENV_PROXY=1`
-(requires Node 22.21 or later; the supplied images include it). This protects
-credentials while leaving the sandbox's general networking unrestricted. These
-backends still reject limited networking. Firecracker enforces limited networking
-through its existing transparent proxy and requires an explicit host allowlist.
-
-The authenticated proxy listens only on the sandbox network's host gateway
-(Apple container and native Docker), or host loopback (Docker Desktop). Its
-credentials authorize the sandbox's selected endpoints for the proxy session.
+Firecracker and SmolVM supply placeholder credentials and a CA bundle. Credentials
+stay in the runtime, and the sandbox network sends HTTP/TLS connections through
+Exo regardless of the client's proxy settings. Other sandbox backends reject
+credential policies until they provide an enforced network adapter.
 
 Clients must restart after the runtime restarts to receive a fresh proxy session.
 Exo launches the wrappers with the current session when resuming a saved thread.
-Proxy credentials grant use of the selected model endpoint while the sandbox is
-active; they do not prevent sandbox code from making its own authorized model
-requests.
+Credential grants permit requests to their authorized endpoints; they do not
+prevent sandbox code from making its own authorized model requests.
 
 ## Native MCP credentials
 
@@ -307,10 +299,37 @@ uses no credential.
 A hosted backend can implement `ManagedSandboxBackend::acquire` itself: choose
 the sandbox node, establish an authenticated relay to the credential service,
 install routing, and only then return a handle. No proxy hooks are required on
-the shared sandbox traits. The credential service can run inside Loop while
+the shared sandbox traits. The credential service can run inside the runtime while
 the node relays opaque streams. Relay authorization must bind the stream to the
 sandbox allocation and its generation; raw source-IP binding is only suitable
 before NAT on a trusted local host. The production relay is not implemented here.
+
+## SmolVM
+
+SmolVM requires a binary supporting `machine start --egress-interceptor`; this
+currently needs the external-interceptor patch. Set `--smolvm-binary` on the
+sandbox provider binding to select that binary. Unsupported versions fail before
+preparing an image. Protected sandboxes require a managed warm lifetime and
+unrestricted networking. SmolVM's DNS allowlist also permits subdomains, so Exo
+rejects limited networking until an adapter can enforce its exact-host contract.
+
+Exo creates a loopback listener and a fresh token for each sandbox. It passes the
+listener address as a CLI flag and the token in the host-only
+`SMOLVM_INTERCEPTOR_TOKEN` environment variable. Neither the token nor proxy
+variables enter the guest. The native transport identifies each stream using
+that token and carries its original destination; Exo checks the destination and
+then uses the shared HTTP/TLS policy and credential resolver. Stopping or
+terminating a sandbox revokes its proxy. Protected snapshots are unsupported.
+
+```bash
+SMOLVM_BIN=/path/to/patched/smolvm EXO_SMOLVM_TEST_IMAGE=/path/to/image.tar \
+  cargo test -p exoharness --features egress --lib smolvm_native_proxy_live -- --ignored
+```
+
+The test image needs a shell, curl, and `/etc/ssl/certs/ca-certificates.crt`.
+It uses a local mock upstream and canary credentials, exercises warm reuse,
+reconnect with retained files, rotation and revocation, and makes direct requests
+with `--noproxy '*'`.
 
 ## Other backends
 
@@ -324,36 +343,40 @@ bindings are rejected: native header transforms set whole values and do not
 implement Exo's per-request credential resolution. A Vercel forwarding adapter
 would be a separate implementation.
 
-Docker, Apple Containers, and SmolVM support credential bindings on managed
-sandboxes with unrestricted networking. They reject limited networking,
-credential-protected attachments, and restoring credential-protected snapshots.
-Credential proxies
-close when the sandbox stops or the runtime exits. SmolVM uses `virtio-net` and
-`host.smolvm.internal` to reach a proxy bound to host loopback. It uses the normal
-Codex, Claude Code, and Pi harnesses; no direct-key wrapper is needed. Clients
-must honor `HTTPS_PROXY` and the configured CA trust. E2B and Daytona retain
-their enabled / disabled networking support and reject credential bindings and
-limited networking. Local processes, Sprites, and AWS AgentCore only accept unrestricted
-networking. Docker attachments also reject disabled networking because Exo does
-not control the attached container's network.
+Docker and Apple Containers currently reject credential bindings.
+Protected credentials require a backend adapter that enforces interception
+outside the guest. Exo does not configure `HTTPS_PROXY` as a substitute for that
+adapter. E2B and Daytona retain their enabled / disabled networking support and
+reject credential bindings and limited networking. Local processes, Sprites,
+and AWS AgentCore only accept unrestricted networking. Docker attachments also
+reject disabled networking because Exo does not control the attached container's
+network.
 
 ## Current scope
 
-The transparent proxy supports limited networking with exact hosts and HTTPS
-header substitution. The HTTP CONNECT transport supports credential
-substitution with unrestricted networking; other public HTTPS destinations pass
-through without interception. Firecracker still rejects unrestricted networking
-with credential bindings. Body substitution is not part of the policy yet.
-Standard ports 80/443 are supported; local gateways on other ports need
-additional transport support.
+Firecracker supports limited networking with exact hosts. Both Firecracker and
+SmolVM support unrestricted networking with credential bindings. For unrestricted networking,
+HTTPS destinations outside the credential host list retain their original TLS
+connection. Credentials remain scoped to their own exact host lists. DNS is
+answered locally; the proxy resolves and validates the destination when
+forwarding a request.
 
-Firecracker proxy policies do not yet support snapshots/forks, external
-attachments, or one-shot sandboxes. HTTP/2, WebSockets, arbitrary TCP, and signed
-requests are also outside this initial implementation.
+Firecracker routes HTTP, HTTPS, and DNS through the proxy. SmolVM redirects all
+outbound TCP to an authenticated host listener and keeps DNS in its host network
+stack. Exo admits public IPv4 HTTP/HTTPS destinations on ports 80/443, and rejects
+other TCP ports and IPv6; non-DNS UDP is blocked by the sandbox network. Interception
+does not mean arbitrary network protocols are supported. These proxy policies
+do not yet support snapshots/forks,
+external attachments, or one-shot sandboxes. Intercepted traffic supports
+HTTP/1.1; body substitution, WebSocket upgrades, and signed requests are outside
+the current implementation.
+
+The public CONNECT server remains available for callers that manage their own
+network enforcement and authenticated transport.
 
 ## Git over HTTPS
 
-Git can use its normal HTTPS URL through `HTTPS_PROXY`. For Basic authentication,
+Git uses its normal HTTPS URL through the sandbox network adapter. For Basic authentication,
 Exo decodes the username/password, substitutes any credential placeholder with
 the token returned by the resolver, and re-encodes the header before forwarding it.
 

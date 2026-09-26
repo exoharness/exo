@@ -2136,6 +2136,7 @@ async fn sandbox_provider_state_persists_through_events_after_harness_reload() {
     });
     let first_backend = Arc::new(TestProviderStateBackend::new(state.clone()));
     let policy = crate::EgressPolicy {
+        allowed_tcp_ports: None,
         networking: SandboxNetworkPolicy::Limited {
             allowed_hosts: vec!["api.example.com".into()],
         },

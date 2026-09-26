@@ -97,7 +97,7 @@ impl LimaFirecrackerSandboxBackend {
 
     async fn egress_transport(
         &self,
-        allowed_hosts: &[String],
+        policy: &crate::SandboxNetworkPolicy,
     ) -> Result<Arc<dyn crate::egress::EgressTransport>> {
         let connection = self.bridge.connection().await?;
         let FirecrackerBridgeResponse::Egress {
@@ -106,7 +106,7 @@ impl LimaFirecrackerSandboxBackend {
         } = connection
             .request(FirecrackerBridgeRequest::EgressCreate {
                 listen: self.config.egress_listen,
-                allowed_hosts: allowed_hosts.to_vec(),
+                networking: policy.clone(),
             })
             .await?
         else {
@@ -281,7 +281,7 @@ impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
         self.egress
             .acquire(
                 request.clone(),
-                |hosts| async move { self.egress_transport(&hosts).await },
+                |policy| async move { self.egress_transport(&policy).await },
                 |egress| async move {
                     let mut handle = self
                         .acquire_request(FirecrackerRequest {

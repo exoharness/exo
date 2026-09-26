@@ -803,6 +803,10 @@ pub enum SandboxNetworkPolicy {
 #[serde(deny_unknown_fields)]
 pub struct EgressPolicy {
     pub networking: SandboxNetworkPolicy,
+    /// Outbound TCP ports. Omitted allows all ports; an empty list denies all.
+    /// Host-managed DNS is separate from application TCP connections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_tcp_ports: Option<Vec<u16>>,
     #[serde(default)]
     pub credentials: Vec<EgressCredentialBinding>,
 }
@@ -832,12 +836,24 @@ pub struct CredentialInjectionLocation {
 }
 
 impl EgressPolicy {
+    pub fn allows_tcp_port(&self, port: u16) -> bool {
+        port != 0
+            && self
+                .allowed_tcp_ports
+                .as_ref()
+                .is_none_or(|ports| ports.contains(&port))
+    }
+
     pub fn networking_enabled(&self) -> bool {
         self.networking != SandboxNetworkPolicy::Disabled
     }
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
     pub(crate) fn validate_basic(&self, provider: &str) -> Result<()> {
+        anyhow::ensure!(
+            self.allowed_tcp_ports.is_none(),
+            "{provider} does not support policy.allowed_tcp_ports"
+        );
         if !self.credentials.is_empty() {
             anyhow::bail!("{provider} does not support policy.credentials");
         }
@@ -847,9 +863,10 @@ impl EgressPolicy {
         Ok(())
     }
 
-    #[cfg(feature = "firecracker")]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
     pub(crate) fn requires_proxy(&self) -> bool {
         !self.credentials.is_empty()
+            || self.allowed_tcp_ports.is_some()
             || matches!(self.networking, SandboxNetworkPolicy::Limited { .. })
     }
 }
@@ -858,6 +875,7 @@ impl From<SandboxNetworkPolicy> for EgressPolicy {
     fn from(networking: SandboxNetworkPolicy) -> Self {
         Self {
             networking,
+            allowed_tcp_ports: None,
             credentials: Vec::new(),
         }
     }
