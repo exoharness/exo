@@ -354,19 +354,20 @@ never print credential values.
 
 ```sh
 exo vault create personal
-exo vault login personal --preset github
-exo vault login personal --url https://mcp.notion.com/mcp --name notion
+exo vault secret create personal --preset github
+exo vault secret create personal notion --url https://mcp.notion.com/mcp
 ```
 
 A preset supplies login settings, credential policy, and a default secret name.
-`--name` overrides that name. Without a preset, `--name` is required. To replace
-an existing credential after a successful login, use `--replace`. This preserves
-the saved policy unless you explicitly supply a new policy.
+An explicit secret name overrides the preset's default; without a preset, the
+name is required. Import an existing token with `--token-env`, or omit it to log
+in. To rotate or reauthorize an existing credential, use `secret update` with the
+same options; its identity and policy are preserved unless explicitly changed.
 
 The GitHub preset imports the token from GitHub CLI (`gh`), prompting for login
 if needed. Imported tokens do not include refresh credentials; reconnect with
-`--replace` if one expires or is revoked. Supply `--client-id` to use your own
-GitHub application's device flow instead. The application must enable device
+`exo vault secret update personal github --preset github` if one expires or is
+revoked. Supply `--client-id` to use your own GitHub application's device flow instead. The application must enable device
 flow and have the permissions and repository access you need.
 
 OAuth settings are shared options, not custom preset definitions: `--client-id`,

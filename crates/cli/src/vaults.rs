@@ -21,16 +21,15 @@ pub enum VaultCommands {
     },
     /// Delete a vault and its secrets.
     Delete { vault: String },
-    /// Log in and save a credential in a vault.
-    Login(login::LoginArgs),
     /// Import, update, or delete credentials in a vault.
     Secret {
         #[command(subcommand)]
-        command: SecretCommands,
+        command: Box<SecretCommands>,
     },
 }
 
 #[derive(Debug, Args, Default)]
+#[command(next_help_heading = "Credential permissions")]
 pub(super) struct PolicyArgs {
     /// Permit credential use on this HTTPS origin (HTTP allowed on loopback). Repeat for multiple origins.
     #[arg(long)]
@@ -65,25 +64,27 @@ impl PolicyArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum SecretCommands {
-    /// Import a token from an environment variable.
+    /// Create a secret by importing a token or logging in.
+    #[command(group(clap::ArgGroup::new("source").required(true).multiple(true)
+        .args(["token_env", "preset", "url", "client_id"])))]
     Create {
         vault: String,
-        name: String,
+        /// Secret name; defaults to the preset name.
+        #[arg(required_unless_present = "preset")]
+        name: Option<String>,
+        #[command(flatten)]
+        credential: login::CredentialArgs,
         #[command(flatten)]
         policy: PolicyArgs,
-        /// Read the secret value from this environment variable.
-        #[arg(long, value_parser = crate::parse_env_var_name)]
-        token_env: String,
     },
-    /// Rotate a token or replace its policy; omitted fields are preserved.
+    /// Rotate a token, log in again, or change permissions; omitted fields are preserved.
     Update {
         vault: String,
         secret: String,
         #[command(flatten)]
+        credential: login::CredentialArgs,
+        #[command(flatten)]
         policy: PolicyArgs,
-        /// Read the new secret value from this environment variable.
-        #[arg(long, value_parser = crate::parse_env_var_name)]
-        token_env: Option<String>,
     },
     /// Delete a secret from the vault.
     Delete { vault: String, secret: String },
@@ -121,8 +122,7 @@ pub async fn run(
             let secrets = vault.list_secrets().await?;
             if secrets.is_empty() {
                 println!(
-                    "No secrets. Use `exo vault login {}` or `exo vault secret create {}`.",
-                    vault.record().name,
+                    "No secrets. Use `exo vault secret create {}`.",
                     vault.record().name
                 );
             } else {
@@ -179,8 +179,8 @@ pub async fn run(
                 vault.record().id
             );
         }
-        VaultCommands::Login(args) => login::run(store, args, env).await?,
         VaultCommands::Secret { command } => {
+            let command = command.as_ref();
             let vault = match command {
                 SecretCommands::Create { vault, .. }
                 | SecretCommands::Update { vault, .. }
@@ -191,14 +191,31 @@ pub async fn run(
                 SecretCommands::Create {
                     name,
                     policy,
-                    token_env,
+                    credential,
                     ..
                 } => {
+                    let name = name
+                        .as_deref()
+                        .or(credential.default_name())
+                        .context("provide a secret name")?;
+                    ensure!(!name.trim().is_empty(), "secret name must not be empty");
+                    ensure!(
+                        !vault
+                            .list_secrets()
+                            .await?
+                            .iter()
+                            .any(|secret| secret.name == name),
+                        "secret {name:?} already exists; use `exo vault secret update`"
+                    );
+                    let policy = policy.resolve()?.or(credential.default_policy()?);
+                    let secret = credential.read(env, policy.as_ref()).await?.context(
+                        "provide --token-env, --preset, --url, or OAuth device endpoints",
+                    )?;
                     let id = vault
                         .put_secret(PutSecretRequest {
-                            name: name.clone(),
-                            policy: policy.resolve()?,
-                            secret: token(token_env, env)?,
+                            name: name.into(),
+                            policy,
+                            secret,
                         })
                         .await?;
                     println!("created secret {name} ({id})");
@@ -206,18 +223,21 @@ pub async fn run(
                 SecretCommands::Update {
                     secret,
                     policy,
-                    token_env,
+                    credential,
                     ..
                 } => {
                     let record = find_secret(vault.list_secrets().await?, secret)?;
-                    let policy = policy.resolve()?;
-                    let secret = token_env
-                        .as_deref()
-                        .map(|variable| token(variable, env))
-                        .transpose()?;
+                    let policy = policy.resolve()?.or(if record.policy.is_none() {
+                        credential.default_policy()?
+                    } else {
+                        None
+                    });
+                    let secret = credential
+                        .read(env, policy.as_ref().or(record.policy.as_ref()))
+                        .await?;
                     ensure!(
                         secret.is_some() || policy.is_some(),
-                        "provide --token-env or a policy to update; use `exo vault login --replace` to log in again"
+                        "provide --token-env to rotate, --preset or --url to log in again, or a policy to update"
                     );
                     let record = vault
                         .update_secret(

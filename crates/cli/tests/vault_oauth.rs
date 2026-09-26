@@ -128,19 +128,16 @@ impl Fixture {
 
     async fn login(&self, update: bool, denied: bool) -> Result<()> {
         let url = format!("{}/mcp/", self.server.uri());
-        let mut args = vec![
+        let args = vec![
             "vault",
-            "login",
+            "secret",
+            if update { "update" } else { "create" },
             "global",
-            "--name",
             "notion",
             "--url",
             &url,
             "--no-browser",
         ];
-        if update {
-            args.push("--replace");
-        }
         let mut child = self
             .command(&args)
             .stdout(Stdio::piped())
@@ -953,7 +950,8 @@ async fn device_login_preserves_oauth_refresh_and_policy_over_http() -> Result<(
         .await;
     let args = vec![
         "vault",
-        "login",
+        "secret",
+        "create",
         "global",
         "--preset",
         "github",
@@ -966,7 +964,7 @@ async fn device_login_preserves_oauth_refresh_and_policy_over_http() -> Result<(
         "--no-browser",
     ];
     let output = f.cli(&args).await?;
-    assert!(output.contains("ABCD-EFGH") && output.contains("saved secret github"));
+    assert!(output.contains("ABCD-EFGH") && output.contains("created secret github"));
     assert!(!output.contains("device-access") && !output.contains("device-secret"));
     let metadata = f
         .vault
@@ -986,11 +984,11 @@ async fn device_login_preserves_oauth_refresh_and_policy_over_http() -> Result<(
         );
     }
     let duplicate = f
-        .command(&["vault", "login", "global", "--preset", "github"])
+        .command(&["vault", "secret", "create", "global", "--preset", "github"])
         .output()
         .await?;
     assert!(!duplicate.status.success());
-    assert!(String::from_utf8(duplicate.stderr)?.contains("--replace"));
+    assert!(String::from_utf8(duplicate.stderr)?.contains("vault secret update"));
     f.expire(&metadata.id).await?;
     Mock::given(path("/device-token"))
         .and(body_string_contains("grant_type=refresh_token"))
@@ -1049,7 +1047,8 @@ async fn device_login_preserves_oauth_refresh_and_policy_over_http() -> Result<(
         )
         .await?;
     let mut replacement = args.clone();
-    replacement.push("--replace");
+    replacement[2] = "update";
+    replacement.insert(4, "github");
     f.cli(&replacement).await?;
     let relogged = vault
         .list_secrets()
@@ -1081,12 +1080,20 @@ async fn github_preset_imports_with_an_overridable_name_and_lists_vault_contents
         "#!/bin/sh\ncase \"$1 $2\" in\n  'auth status') exit 0 ;;\n  'auth token') printf 'fixture-github-token\\n' ;;\n  *) exit 1 ;;\nesac\n",
     )?;
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
-    for name in [None, Some("github-work")] {
-        let mut args = vec!["vault", "login", "global", "--preset", "github"];
+    for (name, token) in [
+        (None, None),
+        (Some("github-work"), None),
+        (Some("github-token"), Some("imported-token")),
+    ] {
+        let mut args = vec!["vault", "secret", "create", "global", "--preset", "github"];
         if let Some(name) = name {
-            args.extend(["--name", name]);
+            args.push(name);
         }
-        let output = f.command(&args).env("PATH", f.temp.path()).output().await?;
+        let mut command = f.command(&args);
+        if let Some(token) = token {
+            command.args(["--token-env", "TOKEN"]).env("TOKEN", token);
+        }
+        let output = command.env("PATH", f.temp.path()).output().await?;
         assert!(
             output.status.success(),
             "{}",
@@ -1100,16 +1107,30 @@ async fn github_preset_imports_with_an_overridable_name_and_lists_vault_contents
     assert!(listed.contains("Secrets in vault global:") && listed.contains("github-work"));
     assert!(!listed.contains("fixture-github-token"));
     let secrets = f.vault.list_secrets().await?;
-    assert_eq!(secrets.len(), 2);
+    assert_eq!(secrets.len(), 3);
     assert!(
         secrets
             .iter()
             .all(|s| s.r#type == exoharness::SecretType::Key)
     );
+    let imported = secrets.iter().find(|s| s.name == "github-token").unwrap();
+    assert_eq!(
+        f.vault.get_secret(&imported.id).await?,
+        Some(Secret::Key {
+            value: "imported-token".into()
+        })
+    );
+    let no_change = f
+        .command(&["vault", "secret", "update", "global", "github"])
+        .output()
+        .await?;
+    assert!(!no_change.status.success());
+    assert_eq!(f.vault.list_secrets().await?, secrets);
     let missing_name = f
         .command(&[
             "vault",
-            "login",
+            "secret",
+            "create",
             "global",
             "--url",
             "https://example.com/mcp",
@@ -1117,6 +1138,6 @@ async fn github_preset_imports_with_an_overridable_name_and_lists_vault_contents
         .output()
         .await?;
     assert!(!missing_name.status.success());
-    assert!(String::from_utf8(missing_name.stderr)?.contains("--name"));
+    assert!(String::from_utf8(missing_name.stderr)?.contains("<NAME>"));
     Ok(())
 }

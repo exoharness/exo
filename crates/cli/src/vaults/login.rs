@@ -15,20 +15,20 @@ pub enum Preset {
 }
 
 #[derive(Debug, Args)]
-pub struct LoginArgs {
-    vault: String,
+#[group(skip)]
+#[command(next_help_heading = "Credential source")]
+#[command(group(clap::ArgGroup::new("login_source").multiple(true).args(["preset", "url", "client_id"])))]
+pub struct CredentialArgs {
+    /// Read an existing token from this environment variable instead of logging in.
+    #[arg(long, value_parser = crate::parse_env_var_name,
+        conflicts_with_all = ["url", "client_id", "scope", "device_url", "token_url", "no_browser"])]
+    token_env: Option<String>,
     /// Supply login, credential policy, and secret-name defaults.
     #[arg(long, conflicts_with = "url")]
     preset: Option<Preset>,
     /// Discover OAuth from an MCP resource URL.
     #[arg(long)]
     url: Option<String>,
-    /// Secret name; defaults to the preset name.
-    #[arg(long, required_unless_present = "preset")]
-    name: Option<String>,
-    /// Replace an existing secret with this name after a successful login.
-    #[arg(long)]
-    replace: bool,
     /// OAuth client ID; skips registration (and uses OAuth directly for GitHub).
     #[arg(long)]
     client_id: Option<String>,
@@ -36,7 +36,7 @@ pub struct LoginArgs {
     #[arg(long, requires = "client_id", value_parser = crate::parse_env_var_name)]
     client_secret_env: Option<String>,
     /// OAuth scopes to request. Repeat for multiple scopes.
-    #[arg(long)]
+    #[arg(long, requires = "login_source")]
     scope: Vec<String>,
     /// OAuth device authorization endpoint; requires --token-url and --client-id.
     #[arg(long, requires_all = ["token_url", "client_id"], conflicts_with = "url")]
@@ -45,100 +45,64 @@ pub struct LoginArgs {
     #[arg(long, requires = "client_id", conflicts_with = "url")]
     token_url: Option<String>,
     /// Print login instructions without opening a browser.
-    #[arg(long)]
+    #[arg(long, requires = "login_source")]
     no_browser: bool,
-    #[command(flatten)]
-    policy: PolicyArgs,
 }
 
-pub(super) async fn run(
-    store: &dyn ExoHarness,
-    args: &LoginArgs,
-    env: &HashMap<String, String>,
-) -> Result<()> {
-    let vault = find_vault(store, &args.vault).await?;
-    let name = args
-        .name
-        .as_deref()
-        .or(args.preset.map(|_| "github"))
-        .context("provide --name")?;
-    ensure!(!name.trim().is_empty(), "secret name must not be empty");
-    let existing = vault
-        .list_secrets()
-        .await?
-        .into_iter()
-        .find(|secret| secret.name == name);
-    ensure!(
-        existing.is_none() || args.replace,
-        "secret {name:?} already exists; use --replace to log in again"
-    );
-    ensure!(
-        existing.is_some() || !args.replace,
-        "secret {name:?} does not exist; omit --replace to create it"
-    );
-    let policy = args
-        .policy
-        .resolve()?
-        .or_else(|| existing.as_ref().and_then(|secret| secret.policy.clone()))
-        .or(match args.preset {
-            Some(Preset::Github) => Some(CredentialPolicy::destinations(vec![
+impl CredentialArgs {
+    pub(super) fn default_name(&self) -> Option<&'static str> {
+        self.preset.map(|_| "github")
+    }
+
+    pub(super) fn default_policy(&self) -> Result<Option<CredentialPolicy>> {
+        match self.preset {
+            Some(Preset::Github) => Ok(Some(CredentialPolicy::destinations(vec![
                 CredentialDestination::origin("https://github.com")?,
                 CredentialDestination::origin("https://api.github.com")?,
-            ])),
-            None => args
+            ]))),
+            None => self
                 .url
                 .as_deref()
                 .map(CredentialDestination::url)
-                .transpose()?
-                .map(Into::into),
-        })
-        .context("provide a credential policy with --allow-origin, --allow-url, or --policy")?;
-    let client_secret = args
-        .client_secret_env
-        .as_deref()
-        .map(|variable| crate::env_value_from_arg("--client-secret-env", variable, env))
-        .transpose()?;
-    let secret = if let Some(resource) = &args.url {
-        discover(args, resource, client_secret).await?
-    } else if args.client_id.is_some() {
-        device(args, client_secret).await?
-    } else {
+                .transpose()
+                .map(|destination| destination.map(Into::into)),
+        }
+    }
+
+    pub(super) async fn read(
+        &self,
+        env: &HashMap<String, String>,
+        policy: Option<&CredentialPolicy>,
+    ) -> Result<Option<Secret>> {
+        if let Some(variable) = &self.token_env {
+            return token(variable, env).map(Some);
+        }
+        if self.preset.is_none() && self.url.is_none() && self.client_id.is_none() {
+            return Ok(None);
+        }
         ensure!(
-            args.preset.is_some(),
-            "provide --preset, --url, or OAuth device endpoints"
+            policy.is_some(),
+            "provide a credential policy with --allow-origin, --allow-url, or --policy"
         );
-        github_cli(args, env).await?
-    };
-    exoharness::vault::validate_secret(&secret, Some(&policy))?;
-    let id = if let Some(existing) = existing {
-        vault
-            .update_secret(
-                &existing.id,
-                exoharness::UpdateSecretRequest {
-                    secret: Some(secret),
-                    policy: Some(policy),
-                },
-            )
-            .await?
-            .id
-    } else {
-        vault
-            .put_secret(PutSecretRequest {
-                name: name.into(),
-                policy: Some(policy),
-                secret,
-            })
-            .await?
-    };
-    println!(
-        "saved secret {name} ({id}) in vault {}",
-        vault.record().name
-    );
-    Ok(())
+        let client_secret = self
+            .client_secret_env
+            .as_deref()
+            .map(|variable| crate::env_value_from_arg("--client-secret-env", variable, env))
+            .transpose()?;
+        let secret = if let Some(resource) = &self.url {
+            discover(self, resource, client_secret).await?
+        } else if self.client_id.is_some() {
+            device(self, client_secret).await?
+        } else {
+            github_cli(self, env).await?
+        };
+        exoharness::vault::validate_secret(&secret, policy)?;
+        Ok(Some(secret))
+    }
 }
 
 async fn discover(
-    args: &LoginArgs,
+    args: &CredentialArgs,
     resource: &str,
     client_secret: Option<String>,
 ) -> Result<Secret> {
@@ -196,7 +160,7 @@ async fn discover(
     ))
 }
 
-async fn device(args: &LoginArgs, client_secret: Option<String>) -> Result<Secret> {
+async fn device(args: &CredentialArgs, client_secret: Option<String>) -> Result<Secret> {
     let device_url = args
         .device_url
         .as_deref()
@@ -271,7 +235,7 @@ fn oauth_secret(
     }
 }
 
-async fn github_cli(args: &LoginArgs, env: &HashMap<String, String>) -> Result<Secret> {
+async fn github_cli(args: &CredentialArgs, env: &HashMap<String, String>) -> Result<Secret> {
     let command = || {
         let mut command = Command::new("gh");
         command.envs(env).kill_on_drop(true);
@@ -312,7 +276,7 @@ async fn github_cli(args: &LoginArgs, env: &HashMap<String, String>) -> Result<S
         "could not read the GitHub CLI credential; run `gh auth login`"
     );
     eprintln!(
-        "Importing the GitHub CLI token. Re-run this login with --replace if it expires or is revoked."
+        "Importing the GitHub CLI token. Use `exo vault secret update <vault> <secret> --preset github` if it expires or is revoked."
     );
     Ok(Secret::Key {
         value: String::from_utf8(token.stdout)

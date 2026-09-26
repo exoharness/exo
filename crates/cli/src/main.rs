@@ -2393,6 +2393,23 @@ mod command_tests {
             Cli::try_parse_from(["exo"].into_iter().chain(args)).unwrap();
         }
         for args in [
+            vec!["vault", "login", "team", "--preset", "github"],
+            vec!["vault", "secret", "create", "team", "github"],
+            vec!["vault", "secret", "create", "team", "--token-env", "TOKEN"],
+            vec![
+                "vault",
+                "secret",
+                "create",
+                "team",
+                "notion",
+                "--token-env",
+                "TOKEN",
+                "--url",
+                "https://mcp.notion.com/mcp",
+            ],
+            vec![
+                "vault", "secret", "update", "team", "github", "--scope", "repo",
+            ],
             vec!["agent", "serve", "support"],
             vec!["agent", "create", "support", "--model", "test"],
             vec!["agent", "--exoharness-url", "http://localhost", "list"],

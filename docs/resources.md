@@ -76,7 +76,7 @@ Caches are partitioned by URL, checkout and vault credential identity.
 Git commands inside the sandbox use a placeholder credential through Exo's
 egress proxy; the real credential stays outside the sandbox. GitHub resources
 also expose a placeholder as `GH_TOKEN` for `gh` when the credential policy
-permits `https://api.github.com`. `exo vault login personal --preset github`
+permits `https://api.github.com`. `exo vault secret create personal --preset github`
 authorizes both GitHub origins. The credential's permissions
 control repository access; this does not add a separate Git push approval policy.
 
