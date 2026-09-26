@@ -917,7 +917,6 @@ async fn switching_callers_stops_old_sandboxes_and_does_not_reuse_them() -> Resu
         provider: exoharness::SandboxProvider::LocalProcess,
         name: Some("warm".into()),
         image: "local".into(),
-
         resources: None,
         default_workdir: None,
         file_system_mounts: None,
@@ -1020,13 +1019,39 @@ async fn shared_vaults_require_attachment_and_keep_writes_with_the_owner() -> Re
         None,
     )?;
     let resolved = crate::harness_helpers::resolve_model(thread.as_ref(), &model).await?;
-    assert_eq!(resolved.api_key.as_deref(), Some("rotated"));
+    assert_eq!(resolved.api_key, "rotated");
     model.base_url = Some("https://attacker.example".into());
     assert!(
         crate::harness_helpers::resolve_model(thread.as_ref(), &model)
             .await
             .is_err()
     );
+    model.base_url = None;
+    let unscoped = ac
+        .put_secret(
+            ResourceScope::Global,
+            team.record().id,
+            &PutSecretRequest {
+                name: "unscoped".into(),
+                policy: None,
+                secret: Secret::Key {
+                    value: "owner-only".into(),
+                },
+            },
+        )
+        .await?;
+    model.credential = Some("unscoped".into());
+    model.base_url = Some("https://attacker.example".into());
+    assert!(
+        crate::harness_helpers::resolve_model(thread.as_ref(), &model)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("vault is unavailable")
+    );
+    ac.delete_secret(ResourceScope::Global, team.record().id, unscoped)
+        .await?;
+    model.credential = Some("key".into());
     model.base_url = None;
     assert!(ac.delete_vault(team.record().id).await.is_err());
     ac.delete_secret(ResourceScope::Global, team.record().id, secret)

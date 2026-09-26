@@ -13,3 +13,44 @@ pub(crate) fn local_test_config(root: impl Into<PathBuf>) -> BasicExoHarnessConf
         sandbox_backends: vec![SandboxBackendRegistration::local_process()],
     }
 }
+
+pub(crate) fn agent_request(
+    slug: impl Into<String>,
+    harness: crate::AgentHarnessKind,
+) -> crate::CreateAgentRequest {
+    crate::CreateAgentRequest {
+        slug: slug.into(),
+        name: None,
+        harness,
+        typescript: None,
+        enable_agent_tool_creation: true,
+        sandbox_image: None,
+        sandbox_provider: SandboxProvider::LocalProcess,
+        sandbox_scope: None,
+        enable_networking: false,
+        model: "gpt-5.4".into(),
+        credential: Some("test-openai".into()),
+        base_url: None,
+        max_output_tokens: None,
+        max_tool_round_trips: None,
+        braintrust: None,
+    }
+}
+
+pub(crate) async fn create_test_credential(exoharness: &dyn exoharness::ExoHarness) {
+    exoharness::vault::global_vault(exoharness)
+        .await
+        .expect("runtime vault")
+        .put_secret(exoharness::PutSecretRequest {
+            policy: Some(exoharness::CredentialPolicy::destinations(vec![
+                exoharness::CredentialDestination::origin("https://api.openai.com").unwrap(),
+                exoharness::CredentialDestination::origin("https://api.anthropic.com").unwrap(),
+            ])),
+            name: "test-openai".to_string(),
+            secret: exoharness::Secret::Key {
+                value: "test-key".to_string(),
+            },
+        })
+        .await
+        .expect("test secret should register");
+}

@@ -669,7 +669,7 @@ async fn build_model_request(
     let model_binding = resolve_model(conversation, agent_config).await?;
     Ok(ModelRequest {
         model: model_binding.model,
-        api_key: model_binding.api_key,
+        api_key: Some(model_binding.api_key),
         base_url: model_binding.base_url,
         messages,
         tools: build_tool_definitions(conversation_config),

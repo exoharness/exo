@@ -24,7 +24,7 @@ use wiremock::{
     matchers::{method, path},
 };
 
-pub const SOURCE: &str = "---\nname: Workflow agent\nharness: basic\nconfig:\n  model: gpt-5-mini\n  credential: model-key\n---\nReply to the user.\n";
+const SOURCE: &str = "---\nname: Workflow agent\nharness: basic\nconfig:\n  model: gpt-5-mini\n  credential: model-key\n---\nReply to the user.\n";
 
 type RequestContext = (String, Option<HeaderValue>);
 

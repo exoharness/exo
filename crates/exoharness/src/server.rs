@@ -347,27 +347,6 @@ impl ExoHarnessServer {
                     status: self.cancel_sandbox_process(scope, request).await?,
                 })
             }
-            Request::AgentListBindings { agent_id } => {
-                let agent = self.require_agent(&agent_id).await?;
-                Ok(Response::Bindings {
-                    bindings: agent.list_bindings().await?,
-                })
-            }
-            Request::AgentPutBinding { agent_id, binding } => {
-                let agent = self.require_agent(&agent_id).await?;
-                Ok(Response::BindingId {
-                    binding_id: agent.put_binding(binding).await?,
-                })
-            }
-            Request::AgentGetBinding {
-                agent_id,
-                binding_id,
-            } => {
-                let agent = self.require_agent(&agent_id).await?;
-                Ok(Response::Binding {
-                    binding: agent.get_binding(&binding_id).await?,
-                })
-            }
             Request::ConversationUpdateEnvironment {
                 agent_id,
                 conversation_id,
@@ -508,35 +487,6 @@ impl ExoHarnessServer {
                 let conversation = self.require_conversation(agent_id, conversation_id).await?;
                 Ok(Response::ArtifactVersion {
                     artifact: conversation.write_artifact(request).await?,
-                })
-            }
-            Request::ConversationListBindings {
-                agent_id,
-                conversation_id,
-            } => {
-                let conversation = self.require_conversation(agent_id, conversation_id).await?;
-                Ok(Response::Bindings {
-                    bindings: conversation.list_bindings().await?,
-                })
-            }
-            Request::ConversationPutBinding {
-                agent_id,
-                conversation_id,
-                binding,
-            } => {
-                let conversation = self.require_conversation(agent_id, conversation_id).await?;
-                Ok(Response::BindingId {
-                    binding_id: conversation.put_binding(binding).await?,
-                })
-            }
-            Request::ConversationGetBinding {
-                agent_id,
-                conversation_id,
-                binding_id,
-            } => {
-                let conversation = self.require_conversation(agent_id, conversation_id).await?;
-                Ok(Response::Binding {
-                    binding: conversation.get_binding(&binding_id).await?,
                 })
             }
             Request::TurnAddEvents {

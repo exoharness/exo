@@ -45,9 +45,9 @@ impl BasicExoHarness {
                     self.caller_bindings_dir(base).join(format!("{id}.json")),
                 )
                 .await?
-                && !matches!(stored.record.binding, Binding::Llm { .. })
+                && let Some(record) = stored.into_active_record()
             {
-                return Ok(Some(stored.record.binding));
+                return Ok(Some(record.binding));
             }
         }
         Ok(None)

@@ -122,6 +122,7 @@ impl CredentialPolicy {
 
     pub fn binding(&self, name: String, environment_variable: String) -> EgressCredentialBinding {
         EgressCredentialBinding {
+            model: None,
             name,
             environment_variable,
             networking: self.networking.clone(),

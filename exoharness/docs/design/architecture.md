@@ -30,7 +30,7 @@ The core API is intentionally small. Most operations are scoped to one of four
 handle types:
 
 - `ExoHarness`: root handle for global agents, bindings, and secrets.
-- `AgentHandle`: per-agent conversations, artifacts, bindings, and secrets.
+- `AgentHandle`: per-agent conversations, artifacts, and attached vaults.
 - `ConversationHandle`: per-conversation event log, artifacts, sandboxes,
   bindings, and secrets.
 - `TurnHandle`: active-turn-only writes that must preserve turn consistency.

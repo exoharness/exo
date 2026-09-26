@@ -306,8 +306,7 @@ before NAT on a trusted local host. The production relay is not implemented here
 
 ## SmolVM
 
-SmolVM requires a binary supporting `machine start --egress-interceptor`; this
-currently needs the external-interceptor patch. Set `--smolvm-binary` on the
+SmolVM requires version 1.19.0 or newer with `machine start --egress-interceptor`. Set `--smolvm-binary` on the
 environment provider binding (`exo environment provider create --backend smolvm
 --smolvm-binary /path/to/smolvm`) to select that binary. Unsupported versions fail before
 preparing an image. Protected sandboxes require a managed warm lifetime and

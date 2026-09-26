@@ -185,20 +185,6 @@ async fn basic_backend_contract_turn_events_continue_after_artifact_writes() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn basic_backend_contract_conversation_scope_overrides_and_forks() {
-    let tempdir = TempDir::new().expect("tempdir");
-    let harness: std::sync::Arc<dyn ExoHarness> = std::sync::Arc::new(
-        BasicExoHarness::new(local_test_config(tempdir.path()))
-            .await
-            .expect("harness should initialize"),
-    );
-    crate::contract_tests::conversation_scope_overrides_agent_scope_and_fork_copies_bindings(
-        harness,
-    )
-    .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn local_process_sandbox_contract_start_process_stdio_and_env() {
     let tempdir = TempDir::new().expect("tempdir");
     let handle = local_process_contract_handle(&tempdir, "stdio-and-env").await;
@@ -2131,6 +2117,7 @@ async fn sandbox_provider_state_persists_through_events_after_harness_reload() {
             allowed_hosts: vec!["api.example.com".into()],
         },
         credentials: vec![crate::EgressCredentialBinding {
+            model: None,
             name: "thread-credential".into(),
             environment_variable: "API_KEY".into(),
             networking: crate::CredentialNetworkPolicy::Limited {

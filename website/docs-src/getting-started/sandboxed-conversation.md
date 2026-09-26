@@ -19,15 +19,19 @@ harness: basic
 config:
   model: gpt-5.5
   credential: openai
-sandbox:
-  provider: docker
-  enable_networking: true
 ---
 Help the user with their task.
 EOF
 exo agent create sandbox-example --file sandbox-example.md
 exo thread create sandbox-example "Local Dev"
-exo agent run --agent sandbox-example --thread local-dev
+cat > sandbox-environment.yaml <<'EOF'
+name: dev
+config:
+  provider: docker
+  image: ubuntu:24.04
+  enable_networking: true
+EOF
+exo agent run --agent sandbox-example --thread local-dev --environment-file sandbox-environment.yaml
 ```
 
 The agent can now execute commands in the conversation's sandbox via the
@@ -35,13 +39,13 @@ shell tool.
 
 ## Choosing a sandbox backend
 
-Local providers are selected with `--sandbox`:
+Set `config.provider` in the environment file to choose a backend:
 
 | Backend | Isolation | Notes |
 |:--------|:----------|:------|
 | `docker` | Container | Default choice; requires Docker |
-| `apple-container` | Container | macOS |
-| `local-process` | **None** | Runs directly on the host |
+| `apple_container` | Container | macOS |
+| `local_process` | **None** | Runs directly on the host |
 
 ::: warning
   `local-process` gives the model unrestricted shell access to your machine.
@@ -58,11 +62,9 @@ exo environment provider create --backend daytona --secret daytona
 
 ## Sandbox scope and image
 
-`conversation create` accepts:
-
-- `--sandbox-scope <agent|conversation>` — whether the sandbox is shared by
-  all of the agent's conversations or owned by this one.
-- `--sandbox-image <image>` — the container image to boot.
+Environments give each thread its own sandbox. Set `config.image` in the
+file to choose the container image. The thread saves its environment, so later
+runs can resume without passing the file again.
 
 You can also run one-off commands in a conversation's sandbox from the CLI:
 

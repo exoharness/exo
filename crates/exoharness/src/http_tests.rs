@@ -108,15 +108,6 @@ async fn http_exoharness_turn_events_continue_after_artifact_writes() {
 }
 
 #[actix_web::test]
-async fn http_exoharness_conversation_scope_overrides_and_forks() {
-    let fixture = http_harness().await;
-    crate::contract_tests::conversation_scope_overrides_agent_scope_and_fork_copies_bindings(
-        Arc::clone(&fixture.harness),
-    )
-    .await;
-}
-
-#[actix_web::test]
 #[ignore = "set EXO_CONTRACT_TEST_URL and optional EXO_CONTRACT_TEST_BEARER or EXO_CONTRACT_TEST_BEARER_ENV"]
 async fn hosted_http_exoharness_core_contract() {
     let harness = hosted_harness_from_env();

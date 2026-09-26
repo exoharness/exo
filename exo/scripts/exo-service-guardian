@@ -214,7 +214,10 @@ process_running() {
 }
 
 exo_global_args() {
-  printf '%s\0' --root "$EXO_ROOT" --env-file-if-exists "$ENV_FILE"
+  printf '%s\0' --root "$EXO_ROOT"
+  if [[ -f "$ENV_FILE" ]]; then
+    printf '%s\0' --env-file "$ENV_FILE"
+  fi
 }
 
 read_exo_global_args() {
@@ -268,8 +271,7 @@ start_adapters() {
   rm -f "$(adapters_restart_file)"
   read_exo_global_args
   echo "Starting adapter runner..."
-  nohup "$EXO_BIN" agent "${EXO_GLOBAL_ARGS[@]}" --harness "$HARNESS" \
-    serve \
+  nohup "$EXO_BIN" serve "${EXO_GLOBAL_ARGS[@]}" --harness "$HARNESS" \
       --adapters-only \
       --adapter-limit "$ADAPTER_LIMIT" \
       --drain-marker "$(adapters_restart_file)" \

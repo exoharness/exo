@@ -11,8 +11,6 @@ import {
   type AgentRecord,
   type Artifact,
   type ArtifactVersion,
-  type Binding,
-  type BindingRecord,
   type Conversation,
   type ConversationConfig,
   type ConversationRecord,
@@ -37,7 +35,6 @@ import {
   type CredentialPolicy,
   type Vault,
   type VaultContext,
-  type SecretReference,
   type ToolDefinition,
   type ToolRequest,
   type ToolResult,
@@ -140,33 +137,6 @@ interface RawArtifactVersion {
 
 interface RawArtifact extends RawArtifactVersion {
   contents: number[];
-}
-
-interface RawSecretReference {
-  vault_id: string;
-  secret_id: string;
-}
-
-type RawBinding =
-  | {
-      type: "env";
-      name: string;
-      env_var: string;
-      secret: RawSecretReference;
-    }
-  | {
-      type: "mcp";
-      name: string;
-      server_url: string;
-      secret?: RawSecretReference | null;
-    };
-
-interface RawBindingRecord {
-  id: string;
-  type: "env" | "mcp";
-  name: string;
-  created_at: string;
-  binding: RawBinding;
 }
 
 type RawSecret =
@@ -356,8 +326,6 @@ type RawExoRequest =
       request: { slug: string; name: string; vaults?: string[] };
     }
   | { type: "delete_agent"; agent_id: string }
-  | { type: "list_bindings" }
-  | { type: "get_binding"; binding_id: string }
   | { type: "list_conversations"; agent_id: string }
   | { type: "get_conversation"; agent_id: string; conversation_id: string }
   | {
@@ -381,8 +349,6 @@ type RawExoRequest =
       agent_id: string;
       request: { path: string; contents: number[] };
     }
-  | { type: "agent_list_bindings"; agent_id: string }
-  | { type: "agent_get_binding"; agent_id: string; binding_id: string }
   | {
       type: "conversation_start_session";
       agent_id: string;
@@ -451,17 +417,6 @@ type RawExoRequest =
       request: { path: string; contents: number[] };
     }
   | {
-      type: "conversation_list_bindings";
-      agent_id: string;
-      conversation_id: string;
-    }
-  | {
-      type: "conversation_get_binding";
-      agent_id: string;
-      conversation_id: string;
-      binding_id: string;
-    }
-  | {
       type: "turn_add_events";
       agent_id: string;
       conversation_id: string;
@@ -498,8 +453,6 @@ type RawExoResponse =
   | { type: "artifact_versions"; artifacts: RawArtifactVersion[] }
   | { type: "artifact"; artifact: RawArtifact | null }
   | { type: "artifact_version"; artifact: RawArtifactVersion }
-  | { type: "bindings"; bindings: RawBindingRecord[] }
-  | { type: "binding"; binding: RawBinding | null }
   | { type: "resolved_secret"; secret: RawSecret; revision: number }
   | { type: "vault"; vault: RawVaultRecord | null }
   | { type: "vaults"; vaults: RawVaultRecord[] }
@@ -1029,37 +982,6 @@ function toArtifact(raw: RawArtifact): Artifact {
   };
 }
 
-function toBindingRecord(raw: RawBindingRecord): BindingRecord {
-  return {
-    id: raw.id,
-    type: raw.type,
-    name: raw.name,
-    createdAt: raw.created_at,
-    binding: toBinding(raw.binding),
-  };
-}
-
-function toSecretReference(raw: RawSecretReference): SecretReference {
-  return { vaultId: raw.vault_id, secretId: raw.secret_id };
-}
-
-function toBinding(raw: RawBinding): Binding {
-  if (raw.type === "env") {
-    return {
-      type: "env",
-      name: raw.name,
-      envVar: raw.env_var,
-      secret: toSecretReference(raw.secret),
-    };
-  }
-  return {
-    type: "mcp",
-    name: raw.name,
-    serverUrl: raw.server_url,
-    secret: raw.secret ? toSecretReference(raw.secret) : null,
-  };
-}
-
 function toSecretMetadata(raw: RawSecretMetadata): SecretMetadata {
   return {
     revision: raw.revision,
@@ -1346,29 +1268,6 @@ function createAgent(client: ProtocolClient, raw: RawAgentRecord): Agent {
         contents: JSON.stringify(args.value, null, 2),
       });
     },
-
-    async listBindings(): Promise<BindingRecord[]> {
-      const payload = await client.requestExo({
-        type: "agent_list_bindings",
-        agent_id: record.id,
-      });
-      if (payload.type !== "bindings") {
-        throw new Error(`expected bindings payload, got ${payload.type}`);
-      }
-      return payload.bindings.map(toBindingRecord);
-    },
-
-    async getBinding(id: string): Promise<Binding | null> {
-      const payload = await client.requestExo({
-        type: "agent_get_binding",
-        agent_id: record.id,
-        binding_id: id,
-      });
-      if (payload.type !== "binding") {
-        throw new Error(`expected binding payload, got ${payload.type}`);
-      }
-      return payload.binding ? toBinding(payload.binding) : null;
-    },
   };
   return agent;
 }
@@ -1420,25 +1319,6 @@ function createExoHarness(
         throw new Error(`expected bool payload, got ${payload.type}`);
       }
       return payload.value;
-    },
-
-    async listBindings(): Promise<BindingRecord[]> {
-      const payload = await client.requestExo({ type: "list_bindings" });
-      if (payload.type !== "bindings") {
-        throw new Error(`expected bindings payload, got ${payload.type}`);
-      }
-      return payload.bindings.map(toBindingRecord);
-    },
-
-    async getBinding(id: string): Promise<Binding | null> {
-      const payload = await client.requestExo({
-        type: "get_binding",
-        binding_id: id,
-      });
-      if (payload.type !== "binding") {
-        throw new Error(`expected binding payload, got ${payload.type}`);
-      }
-      return payload.binding ? toBinding(payload.binding) : null;
     },
 
     async createVault(name: string): Promise<Vault> {
@@ -1621,31 +1501,6 @@ function createConversation(
         path: args.path,
         contents: JSON.stringify(args.value, null, 2),
       });
-    },
-
-    async listBindings(): Promise<BindingRecord[]> {
-      const payload = await client.requestExo({
-        type: "conversation_list_bindings",
-        agent_id: raw.agent_id,
-        conversation_id: record.id,
-      });
-      if (payload.type !== "bindings") {
-        throw new Error(`expected bindings payload, got ${payload.type}`);
-      }
-      return payload.bindings.map(toBindingRecord);
-    },
-
-    async getBinding(id: string): Promise<Binding | null> {
-      const payload = await client.requestExo({
-        type: "conversation_get_binding",
-        agent_id: raw.agent_id,
-        conversation_id: record.id,
-        binding_id: id,
-      });
-      if (payload.type !== "binding") {
-        throw new Error(`expected binding payload, got ${payload.type}`);
-      }
-      return payload.binding ? toBinding(payload.binding) : null;
     },
   };
   return conversation;

@@ -117,7 +117,7 @@ Options:
   --agent-cli-mount-path <path> Sandbox path for the agent-cli mount (default: /agent-cli)
   --networking <mode>          enabled or disabled (default: enabled)
   --shell-program <path>       Shell in the sandbox (default: /bin/bash)
-  --sandbox-scope <scope>      agent or conversation (default: Exo agent)
+  --sandbox-scope <scope>      conversation (environments use one sandbox per thread)
   --scheduler-interval <secs>  Scheduler polling interval (default: 10)
   --no-scheduler               Do not start the local scheduled task runner
   --scheduler                  Start the local scheduled task runner
@@ -414,7 +414,7 @@ adapters_process_running() {
     return 1
   fi
   command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-  [[ "$command_line" == *"agent "*"serve"* ]]
+  [[ "$command_line" == "$EXO_BIN serve "* && "$command_line" == *" --adapters-only"* ]]
 }
 
 adapter_source_newer_than() {
@@ -552,54 +552,58 @@ ensure_agent() {
     return
   fi
 
+  if ! exo vault secret get global "$MODEL_CREDENTIAL" >/dev/null; then
+    local origin token_env="OPENAI_API_KEY" endpoint="${MODEL_BASE_URL:-https://api.openai.com}"
+    if [[ "$MODEL" == claude* ]]; then
+      token_env="ANTHROPIC_API_KEY"
+      endpoint="${MODEL_BASE_URL:-https://api.anthropic.com}"
+    fi
+    origin="$(python3 - "$endpoint" <<'PYTHON'
+import sys, urllib.parse
+endpoint = urllib.parse.urlsplit(sys.argv[1])
+print(f"{endpoint.scheme}://{endpoint.netloc}")
+PYTHON
+)"
+    echo "Create the model credential before starting Exo:" >&2
+    printf '  %q' "$EXO_BIN" vault secret create global "$MODEL_CREDENTIAL" \
+      --token-env "$token_env" --http-origin "$origin" >&2
+    printf '\n' >&2
+    exit 1
+  fi
+
   echo "Creating agent $AGENT..."
   mkdir -p "$ROOT_DIR/.exo"
   local spec="$ROOT_DIR/.exo/launch-agent.md"
-  python3 - "$spec" "$AGENT_NAME" "$HARNESS" "$MODULE" "$MODEL" "$USE_SANDBOX" "$SANDBOX_IMAGE" "$PROVIDER" "${SANDBOX_SCOPE:-agent}" "$NETWORKING" "$MODEL_CREDENTIAL" "$MODEL_BASE_URL" <<'PYTHON'
+  python3 - "$spec" "$AGENT_NAME" "$HARNESS" "$MODULE" "$MODEL" "$MODEL_CREDENTIAL" "$MODEL_BASE_URL" <<'PYTHON'
 import json, pathlib, sys
-path, name, harness, module, model, sandbox, image, provider, scope, networking, credential, base_url = sys.argv[1:]
+path, name, harness, module, model, credential, base_url = sys.argv[1:]
 config = {"name": name, "harness": harness, "config": {"model": model, "credential": credential, "base_url": base_url or None, "module": str(pathlib.Path(module).resolve())}}
-if sandbox == "true":
-    provider = {"apple-container": "apple_container", "local-process": "local_process"}.get(provider, provider)
-    config["sandbox"] = {"image": image, "provider": provider or "docker", "scope": scope, "enable_networking": networking == "enabled"}
 pathlib.Path(path).write_text("---\n" + json.dumps(config) + "\n---\nFollow the Exo harness instructions.\n")
 PYTHON
   exo agent create "$AGENT_NAME" --slug "$AGENT" --file "$spec"
 }
 
 ensure_conversation() {
-  if conversation_exists; then
-    if [[ "$USE_SANDBOX" == true && ( -n "$SANDBOX_SCOPE" || -n "$PROVIDER" ) ]]; then
-      local update_args=(conversation update "$AGENT" "$CONVERSATION")
-      if [[ -n "$SANDBOX_SCOPE" ]]; then
-        update_args+=(--sandbox-scope "$SANDBOX_SCOPE")
-      fi
-      if [[ -n "$PROVIDER" ]]; then
-        update_args+=(--sandbox "$PROVIDER")
-      fi
-      exo "${update_args[@]}" >/dev/null
-    fi
-    return
+  if ! conversation_exists; then
+    echo "Creating conversation $CONVERSATION..."
+    exo thread create "$AGENT" "$CONVERSATION_NAME" --slug "$CONVERSATION"
   fi
-
-  echo "Creating conversation $CONVERSATION..."
-  local args=(conversation create "$AGENT" "$CONVERSATION_NAME" --slug "$CONVERSATION")
-  if [[ -n "$SANDBOX_SCOPE" ]]; then
-    args+=(--sandbox-scope "$SANDBOX_SCOPE")
-  fi
-  if [[ -n "$PROVIDER" ]]; then
-    args+=(--sandbox "$PROVIDER")
-  fi
-  exo "${args[@]}"
   if [[ "$USE_SANDBOX" == true ]]; then
-    local update_args=(conversation update "$AGENT" "$CONVERSATION" --shell-program "$SHELL_PROGRAM")
-    if [[ -n "$SANDBOX_SCOPE" ]]; then
-      update_args+=(--sandbox-scope "$SANDBOX_SCOPE")
-    fi
-    if [[ -n "$PROVIDER" ]]; then
-      update_args+=(--sandbox "$PROVIDER")
-    fi
-    exo "${update_args[@]}" >/dev/null
+    [[ "${SANDBOX_SCOPE:-conversation}" == conversation ]] || die "launch environments use conversation sandbox scope"
+    local environment="$ROOT_DIR/.exo/launch-environment.json"
+    mkdir -p "$ROOT_DIR/.exo"
+    python3 - "$environment" "${PROVIDER:-docker}" "$SANDBOX_IMAGE" "$NETWORKING" <<'PYTHON'
+import json, pathlib, sys
+path, provider, image, networking = sys.argv[1:]
+provider = {"apple-container": "apple_container", "local-process": "local_process"}.get(provider, provider)
+environment = {"name": "launch", "config": {"provider": provider, "image": image, "enable_networking": networking == "enabled"}}
+pathlib.Path(path).write_text(json.dumps(environment) + "\n")
+PYTHON
+    exo thread update "$AGENT" "$CONVERSATION" --shell-program "$SHELL_PROGRAM" >/dev/null
+    # Opening with EOF saves the environment without submitting a model turn,
+    # so startup prompts, adapters, and later CLI calls use the same settings.
+    exo agent run --agent "$AGENT" --thread "$CONVERSATION" \
+      --environment-file "$environment" </dev/null >/dev/null
   fi
 }
 
@@ -614,8 +618,8 @@ ensure_self_repo_mount() {
     die "Exo self map is missing: exo/SELF.md"
   fi
 
-  # Agent-level mounts apply to the shared agent sandbox for every
-  # conversation, so adapter conversations see the repo too.
+  # Agent-level mounts are inherited by each thread's sandbox, including
+  # adapter conversations.
   exo agent mount create "$AGENT" "$ROOT_DIR" "$SELF_REPO_MOUNT_PATH" --rw >/dev/null
 }
 
@@ -691,7 +695,7 @@ stop_adapters() {
       terminate_process_tree "$pid"
     fi
   fi
-  pkill -f "exo .*agent .*serve" >/dev/null 2>&1 || true
+  pkill -f '(^|/)exo serve .*--adapters-only([[:space:]]|$)' >/dev/null 2>&1 || true
   pkill -f "tsx exo/adapters/.*/worker.ts" >/dev/null 2>&1 || true
   rm -f "$pid_file"
 }
@@ -1357,7 +1361,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --sandbox-scope)
       SANDBOX_SCOPE="${2:-}"
-      [[ "$SANDBOX_SCOPE" == "agent" || "$SANDBOX_SCOPE" == "conversation" ]] || die "--sandbox-scope must be agent or conversation"
+      [[ "$SANDBOX_SCOPE" == "conversation" ]] || die "--sandbox-scope must be conversation; environments use one sandbox per thread"
       shift 2
       ;;
     --scheduler-interval)

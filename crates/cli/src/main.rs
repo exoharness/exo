@@ -1,4 +1,3 @@
-use exoharness::vault::SecretReference;
 mod env;
 #[cfg(test)]
 mod env_tests;
@@ -35,7 +34,7 @@ use executor::{
     AgentHandle, AgentHarnessKind, AttachSandboxRequest, BasicExoHarnessConfig, BasicToolRuntime,
     BraintrustProject, BraintrustTracingConfig, ConversationHandle, ConversationModelConfig,
     CreateConversationRequest, DaytonaBackendSpec, E2bBackendSpec, EventKind, EventQuery,
-    EventQueryDirection, ExoHarness, FileSystemMount, FileSystemMountMode, FirecrackerBackendSpec,
+    EventQueryDirection, FileSystemMount, FileSystemMountMode, FirecrackerBackendSpec,
     ForkConversationRequest, HOST_EVENT_REBUILD_AND_RESTART, Runtime, SANDBOX_MAIN_MOUNT_DIR,
     SandboxAttachment, SandboxBackendRegistration, SandboxProvider, SandboxScope,
     SecretBackendChoice, SpritesBackendSpec, ToolRequest, ToolRuntime, Uuid7, VercelBackendSpec,
@@ -1116,6 +1115,7 @@ async fn run_selected(
                     &["AGENT", "ID", "NAME"],
                     agents
                         .into_iter()
+                        // Hide state left by the removed sandbox CLI.
                         .filter(|agent| agent.slug != "__exo_sandbox_cli")
                         .map(|agent| vec![agent.slug, agent.id.to_string(), agent.name])
                         .collect(),
@@ -1826,7 +1826,6 @@ async fn run_selected(
                 }
             }
         },
-
     }
 
     Ok(())
@@ -2063,24 +2062,6 @@ fn write_table_row<T: AsRef<str>, W: Write>(writer: &mut W, values: &[T]) -> io:
     writeln!(writer)
 }
 
-async fn find_secret_id(
-    exoharness: &dyn ExoHarness,
-    vault: &str,
-    name: &str,
-) -> Result<Option<SecretReference>> {
-    let vault = exo_managed_agents::vaults::find_vault(exoharness, vault).await?;
-    Ok(vault
-        .list_secrets()
-        .await?
-        .into_iter()
-        .rev()
-        .find(|secret| secret.name == name)
-        .map(|secret| SecretReference {
-            vault_id: vault.record().id,
-            secret_id: secret.id,
-        }))
-}
-
 fn format_braintrust_tracing_config(config: Option<&BraintrustTracingConfig>) -> String {
     let Some(config) = config else {
         return "none".to_string();
@@ -2109,7 +2090,7 @@ fn parse_optional_uuid7(value: Option<&str>, field: &str) -> Result<Option<Uuid7
 }
 
 fn parse_sandbox_mount(value: &str) -> std::result::Result<FileSystemMount, String> {
-    let (host_path, mount_path, mode) = parse_mount_spec(value, "host path")?;
+    let (host_path, mount_path, mode) = parse_mount_spec(value)?;
     Ok(FileSystemMount {
         host_path: host_path.to_string(),
         mount_path: mount_path.to_string(),
@@ -2118,15 +2099,12 @@ fn parse_sandbox_mount(value: &str) -> std::result::Result<FileSystemMount, Stri
     })
 }
 
-fn parse_mount_spec<'a>(
-    value: &'a str,
-    source_label: &str,
-) -> std::result::Result<(&'a str, &'a str, FileSystemMountMode), String> {
+fn parse_mount_spec(value: &str) -> std::result::Result<(&str, &str, FileSystemMountMode), String> {
     let (source, target) = value
         .split_once(':')
-        .ok_or_else(|| format!("expected {source_label}:GUEST_PATH[:ro|rw]"))?;
+        .ok_or_else(|| "expected host path:GUEST_PATH[:ro|rw]".to_string())?;
     if source.is_empty() {
-        return Err(format!("{source_label} must not be empty"));
+        return Err("host path must not be empty".to_string());
     }
     let (mount_path, mode) = match target.rsplit_once(':') {
         Some((mount_path, "ro")) => (mount_path, FileSystemMountMode::ReadOnly),

@@ -16,7 +16,7 @@ use lingua::{Message, UniversalStreamChunk, UniversalUsage};
 use serde_json::{Map, Value};
 use tempfile::TempDir;
 
-use crate::test_support::local_test_config;
+use crate::test_support::{create_test_credential, local_test_config};
 use crate::{
     BasicToolRuntime, ConversationModelConfig, CreateAgentRequest, CreateConversationRequest,
     LocalProvider, Runtime, harness_tool::ensure_shell_sandbox,
@@ -43,21 +43,12 @@ async fn creates_agents_and_conversations_with_persisted_config() {
 
     let agent = harness
         .create_agent(CreateAgentRequest {
-            credential: Some("test-openai".into()),
-            base_url: None,
-            slug: "demo".to_string(),
             name: Some("Demo".to_string()),
-            harness: crate::AgentHarnessKind::Basic,
-            typescript: None,
-            enable_agent_tool_creation: true,
             sandbox_image: Some("agent-image".to_string()),
             sandbox_provider: SandboxProvider::Docker,
-            sandbox_scope: None,
-            enable_networking: false,
-            model: "gpt-5.4".to_string(),
             max_output_tokens: Some(512),
             max_tool_round_trips: Some(3),
-            braintrust: None,
+            ..crate::test_support::agent_request("demo", crate::AgentHarnessKind::Basic)
         })
         .await
         .expect("agent should be created");
@@ -140,21 +131,8 @@ async fn send_persists_messages_through_harness() {
 
     let agent = harness
         .create_agent(CreateAgentRequest {
-            credential: Some("test-openai".into()),
-            base_url: None,
-            slug: "demo".to_string(),
-            name: None,
-            harness: crate::AgentHarnessKind::Basic,
-            typescript: None,
-            enable_agent_tool_creation: true,
-            sandbox_image: None,
-            sandbox_provider: SandboxProvider::LocalProcess,
-            sandbox_scope: None,
-            enable_networking: false,
-            model: "gpt-5.4".to_string(),
-            max_output_tokens: None,
             max_tool_round_trips: Some(2),
-            braintrust: None,
+            ..crate::test_support::agent_request("demo", crate::AgentHarnessKind::Basic)
         })
         .await
         .expect("agent should be created");
@@ -643,21 +621,8 @@ async fn close_session_appends_session_ended_event() {
 
     let agent = harness
         .create_agent(CreateAgentRequest {
-            credential: Some("test-openai".into()),
-            base_url: None,
-            slug: "demo".to_string(),
-            name: None,
-            harness: crate::AgentHarnessKind::Basic,
-            typescript: None,
-            enable_agent_tool_creation: true,
-            sandbox_image: None,
-            sandbox_provider: SandboxProvider::LocalProcess,
-            sandbox_scope: None,
-            enable_networking: false,
-            model: "gpt-5.4".to_string(),
-            max_output_tokens: None,
             max_tool_round_trips: Some(2),
-            braintrust: None,
+            ..crate::test_support::agent_request("demo", crate::AgentHarnessKind::Basic)
         })
         .await
         .expect("agent should be created");
@@ -746,21 +711,9 @@ async fn updating_agent_config_refreshes_executor_cache() {
 
     let agent = harness
         .create_agent(CreateAgentRequest {
-            credential: Some("test-openai".into()),
-            base_url: None,
-            slug: "demo".to_string(),
             name: Some("Demo".to_string()),
-            harness: crate::AgentHarnessKind::Basic,
-            typescript: None,
-            enable_agent_tool_creation: true,
-            sandbox_image: None,
-            sandbox_provider: SandboxProvider::LocalProcess,
-            sandbox_scope: None,
-            enable_networking: false,
-            model: "gpt-5.4".to_string(),
-            max_output_tokens: None,
             max_tool_round_trips: Some(2),
-            braintrust: None,
+            ..crate::test_support::agent_request("demo", crate::AgentHarnessKind::Basic)
         })
         .await
         .expect("agent should be created");
@@ -858,21 +811,11 @@ async fn send_executes_shell_tool_when_enabled() {
 
     let agent = harness
         .create_agent(CreateAgentRequest {
-            credential: Some("test-openai".into()),
-            base_url: None,
-            slug: "demo".to_string(),
             name: Some("Demo".to_string()),
-            harness: crate::AgentHarnessKind::Basic,
-            typescript: None,
-            enable_agent_tool_creation: true,
             sandbox_image: Some("agent-image".to_string()),
-            sandbox_provider: SandboxProvider::LocalProcess,
-            sandbox_scope: None,
             enable_networking: true,
-            model: "gpt-5.4".to_string(),
-            max_output_tokens: None,
             max_tool_round_trips: Some(2),
-            braintrust: None,
+            ..crate::test_support::agent_request("demo", crate::AgentHarnessKind::Basic)
         })
         .await
         .expect("agent should be created");
@@ -965,21 +908,8 @@ async fn harness_exposes_raw_exoharness_handles() {
 
     let agent = harness
         .create_agent(CreateAgentRequest {
-            credential: Some("test-openai".into()),
-            base_url: None,
-            slug: "demo".to_string(),
             name: Some("Demo".to_string()),
-            harness: crate::AgentHarnessKind::Basic,
-            typescript: None,
-            enable_agent_tool_creation: true,
-            sandbox_image: None,
-            sandbox_provider: SandboxProvider::LocalProcess,
-            sandbox_scope: None,
-            enable_networking: false,
-            model: "gpt-5.4".to_string(),
-            max_output_tokens: None,
-            max_tool_round_trips: None,
-            braintrust: None,
+            ..crate::test_support::agent_request("demo", crate::AgentHarnessKind::Basic)
         })
         .await
         .expect("agent should be created");
@@ -1098,21 +1028,10 @@ async fn updating_mounts_recreates_conversation_sandbox() {
 
     let agent = harness
         .create_agent(CreateAgentRequest {
-            credential: Some("test-openai".into()),
-            base_url: None,
-            slug: "demo".to_string(),
             name: Some("Demo".to_string()),
-            harness: crate::AgentHarnessKind::Basic,
-            typescript: None,
-            enable_agent_tool_creation: true,
-            sandbox_image: None,
-            sandbox_provider: SandboxProvider::LocalProcess,
-            sandbox_scope: None,
             enable_networking: true,
-            model: "gpt-5.4".to_string(),
-            max_output_tokens: None,
             max_tool_round_trips: Some(1),
-            braintrust: None,
+            ..crate::test_support::agent_request("demo", crate::AgentHarnessKind::Basic)
         })
         .await
         .expect("agent should be created");
@@ -1221,21 +1140,10 @@ async fn updating_sandbox_image_recreates_shell_sandbox_without_shell_program() 
 
     let agent = harness
         .create_agent(CreateAgentRequest {
-            credential: Some("test-openai".into()),
-            base_url: None,
-            slug: "demo".to_string(),
             name: Some("Demo".to_string()),
-            harness: crate::AgentHarnessKind::Basic,
-            typescript: None,
-            enable_agent_tool_creation: true,
-            sandbox_image: None,
-            sandbox_provider: SandboxProvider::LocalProcess,
-            sandbox_scope: None,
             enable_networking: true,
-            model: "gpt-5.4".to_string(),
-            max_output_tokens: None,
             max_tool_round_trips: Some(1),
-            braintrust: None,
+            ..crate::test_support::agent_request("demo", crate::AgentHarnessKind::Basic)
         })
         .await
         .expect("agent should be created");
@@ -1411,21 +1319,9 @@ async fn conversation_model_override_changes_effective_model() {
 
     let agent = harness
         .create_agent(CreateAgentRequest {
-            credential: Some("test-openai".into()),
-            base_url: None,
-            slug: "demo".to_string(),
-            name: None,
-            harness: crate::AgentHarnessKind::Basic,
-            typescript: None,
-            enable_agent_tool_creation: true,
-            sandbox_image: None,
-            sandbox_provider: SandboxProvider::LocalProcess,
-            sandbox_scope: None,
-            enable_networking: false,
-            model: "gpt-5.4".to_string(),
             max_output_tokens: Some(512),
             max_tool_round_trips: Some(2),
-            braintrust: None,
+            ..crate::test_support::agent_request("demo", crate::AgentHarnessKind::Basic)
         })
         .await
         .expect("agent should be created");
@@ -1612,24 +1508,6 @@ fn shell_command_arguments(command: &str) -> Map<String, Value> {
     Map::from_iter([(String::from("command"), Value::String(command.to_string()))])
 }
 
-async fn create_test_credential(exoharness: &dyn ExoHarness) {
-    exoharness::vault::global_vault(exoharness)
-        .await
-        .expect("runtime vault")
-        .put_secret(PutSecretRequest {
-            policy: Some(exoharness::CredentialPolicy::destinations(vec![
-                exoharness::CredentialDestination::origin("https://api.openai.com").unwrap(),
-                exoharness::CredentialDestination::origin("https://api.anthropic.com").unwrap(),
-            ])),
-            name: "test-openai".to_string(),
-            secret: Secret::Key {
-                value: "test-key".to_string(),
-            },
-        })
-        .await
-        .expect("test secret should register");
-}
-
 #[tokio::test]
 async fn remote_threads_paginate_and_failed_creation_only_deletes_the_new_thread() -> Result<()> {
     use exoharness::protocol::{
@@ -1650,21 +1528,9 @@ async fn remote_threads_paginate_and_failed_creation_only_deletes_the_new_thread
     );
     let agent = local
         .create_agent(CreateAgentRequest {
-            credential: Some("test-openai".into()),
-            base_url: None,
-            slug: "support".to_string(),
-            name: None,
-            harness: crate::AgentHarnessKind::Basic,
-            typescript: None,
             enable_agent_tool_creation: false,
-            sandbox_image: None,
-            sandbox_provider: SandboxProvider::LocalProcess,
-            sandbox_scope: None,
-            enable_networking: false,
             model: "gpt-test".to_string(),
-            max_output_tokens: None,
-            max_tool_round_trips: None,
-            braintrust: None,
+            ..crate::test_support::agent_request("support", crate::AgentHarnessKind::Basic)
         })
         .await?;
     let config = local.get_agent_config(agent.as_ref()).await?;
@@ -1886,21 +1752,10 @@ async fn basic_and_rlm_models_receive_mcp_errors_and_can_continue() -> Result<()
         create_test_credential(harness.exoharness_handle().as_ref()).await;
         let agent = harness
             .create_agent(CreateAgentRequest {
-                credential: Some("test-openai".into()),
-                base_url: None,
-                slug: "mcp-errors".into(),
-                name: None,
-                harness: kind,
-                typescript: None,
                 enable_agent_tool_creation: false,
-                sandbox_image: None,
-                sandbox_provider: SandboxProvider::LocalProcess,
-                sandbox_scope: None,
                 enable_networking: true,
-                model: "gpt-5.4".into(),
-                max_output_tokens: None,
                 max_tool_round_trips: Some(1),
-                braintrust: None,
+                ..crate::test_support::agent_request("mcp-errors", kind)
             })
             .await?;
         let thread = harness

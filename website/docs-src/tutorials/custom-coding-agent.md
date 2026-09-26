@@ -231,22 +231,24 @@ harness: exoharness/examples/typescript/coding-agent-harness.ts
 config:
   model: gpt-5.5
   credential: openai
-sandbox:
-  provider: docker
-  image: python:3.12-slim
-  enable_networking: true
 ---
 Help the user with their task.
 EOF
 exo agent create coder --file coder.md
-exo thread create coder "Build"
-exo agent run --agent coder --thread coder-build
+exo thread create coder "Build" --slug coder-build
+cat > coding-environment.yaml <<'EOF'
+name: coding
+config:
+  provider: docker
+  image: python:3.12-slim
+  enable_networking: true
+EOF
+exo agent run --agent coder --thread coder-build --environment-file coding-environment.yaml
 ```
 
 The default sandbox image is `ubuntu:24.04`, which is bare — no Python,
-Node, etc. Setting `sandbox.image` in the *agent spec* makes every
-conversation it owns boot that image; the model installs anything else it
-needs with the shell tool.
+Node, etc. Setting `config.image` in the environment file chooses the image
+for this thread; the model installs anything else it needs with the shell tool.
 
 A real run (via `conversation send`), asking it to write a buggy
 `fizzbuzz.py`, find the bug, and fix it — abbreviated to show the shape:
