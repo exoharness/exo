@@ -42,6 +42,14 @@ pub(crate) enum ExecutorStreamMode<'a> {
 
 #[async_trait]
 pub(crate) trait HarnessExecutor: Send + Sync + 'static {
+    fn with_state(&self, _state: Arc<dyn ExoHarness>) -> Result<Arc<dyn HarnessExecutor>> {
+        anyhow::bail!("this executor does not support caller-scoped execution")
+    }
+
+    async fn reset_thread(&self, _thread: exoharness::ThreadId) -> Result<()> {
+        Ok(())
+    }
+
     fn name(&self) -> &'static str;
 
     fn agent_config(
@@ -108,6 +116,14 @@ pub struct Runtime {
 }
 
 impl Runtime {
+    pub fn with_caller(&self, caller: exoharness::access::Caller) -> Result<Self> {
+        let mut scoped = self.clone();
+        scoped.provider = self.provider.with_caller(caller)?;
+        scoped.initialized = Arc::default();
+        scoped.finalizers = Arc::default();
+        Ok(scoped)
+    }
+
     pub fn new(
         provider: impl Provider + 'static,
         runtime_config: Option<BraintrustRuntimeConfig>,
@@ -257,6 +273,9 @@ impl Runtime {
         let guard = conversation_send_lock(&thread.record().id.to_string())
             .lock_owned()
             .await;
+        if thread.activate_caller().await? {
+            provider.executor.reset_thread(thread.record().id).await?;
+        }
         let (mut agent_config, mut thread_config) = tokio::try_join!(
             async {
                 if let Some(config) = config_override {
@@ -273,6 +292,9 @@ impl Runtime {
         )?;
         if let Some(definition) = exo_managed_agents::load_definition(agent.as_ref()).await? {
             thread_config.permissions = definition.permissions();
+        }
+        if thread.caller().is_some() {
+            thread_config.sandbox_scope = Some(crate::SandboxScope::Conversation);
         }
         if !thread_config.resources.is_empty() {
             thread_config.resource_mounts = thread

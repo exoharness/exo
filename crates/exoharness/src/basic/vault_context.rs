@@ -73,7 +73,7 @@ impl VaultContext for ScopedVaultContext<'_> {
     async fn list_vaults(&self) -> Result<Vec<Arc<dyn VaultHandle>>> {
         match self.resource().await? {
             Some(context) => context.list_vaults().await,
-            None => Ok(vec![global_vault(self.harness).await?]),
+            None => Ok(vec![self.harness.default_vault().await?]),
         }
     }
 
@@ -81,7 +81,7 @@ impl VaultContext for ScopedVaultContext<'_> {
         match self.resource().await? {
             Some(context) => context.get_vault(id).await,
             None => {
-                let vault = global_vault(self.harness).await?;
+                let vault = self.harness.default_vault().await?;
                 Ok((vault.record().id == *id).then_some(vault))
             }
         }

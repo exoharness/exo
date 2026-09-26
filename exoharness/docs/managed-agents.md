@@ -146,7 +146,7 @@ See the [remote server plan](design/remote-server.md) for personal/team login,
 vault ownership, multiplayer sharing, and the web UI.
 
 ```sh
-exo agent serve support --bind 127.0.0.1:8080
+exo serve --agent support --bind 127.0.0.1:8080
 # In another terminal:
 exo provider create served --url http://127.0.0.1:8080/exo
 exo --provider served agent run --agent support --prompt "Summarize today's tickets"
@@ -154,12 +154,12 @@ exo --provider served agent run --agent support --prompt "Summarize today's tick
 
 The server uses the existing managed-agent HTTP API: agent discovery, saved
 threads, turns, event streaming, cancellation, approval responses, and reconnect.
-With an agent argument, only that agent is visible and other agents are inaccessible.
-Omit the argument to serve the local provider, including agent creation. This does not expose the raw ExoHarness `/request` transport.
+With `--agent NAME`, only that agent is visible and other agents are inaccessible.
+Omit `--agent` to serve the local provider, including agent creation. This does not expose the raw ExoHarness `/request` transport.
 
 Declare adapter attachment names in the agent spec, for example
 `adapters: [support-slack]`. Pass deployment definitions as
-`exo agent serve support --adapters-file adapters.yaml`.
+`exo serve --agent support --adapters-file adapters.yaml`.
 Each YAML key is an attachment name; its value is an `AdapterConfig` with
 `adapterType`, `workerCommand`, optional `initialization`, `stateDir`, and
 `secretEnv: [{env: SLACK_BOT_TOKEN, vault: team, secretId: slack-token}]`.
@@ -169,7 +169,7 @@ The service supervises the attached workers. Restart it after changing adapter
 attachments or deployment configuration; existing adapter IDs, threads, and
 queued deliveries survive a restart. Removed spec attachments are disabled.
 
-TODO: Design vault-based authentication for `agent serve`. The CLI server currently serves without authentication.
+Use `--auth-file` for Google/OIDC login and `--multiplayer` to share agents and threads. Personal vaults remain private. See the [setup instructions](design/remote-server.md#google-setup). Without auth, the listener must be loopback.
 
 ## MCP
 

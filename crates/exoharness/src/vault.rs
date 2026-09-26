@@ -78,6 +78,10 @@ pub struct SecretReference {
 
 #[async_trait]
 pub trait VaultContext: Send + Sync {
+    fn caller(&self) -> Option<&crate::access::Caller> {
+        None
+    }
+
     async fn list_vaults(&self) -> Result<Vec<Arc<dyn VaultHandle>>>;
     async fn get_vault(&self, id: &VaultId) -> Result<Option<Arc<dyn VaultHandle>>> {
         Ok(self
@@ -225,10 +229,7 @@ pub async fn find_secret(
         }))
 }
 
-pub(crate) fn model_endpoint(
-    base_url: Option<&str>,
-    environment_variable: &str,
-) -> Result<url::Url> {
+pub fn model_endpoint(base_url: Option<&str>, environment_variable: &str) -> Result<url::Url> {
     let default_url = match environment_variable {
         "OPENAI_API_KEY" => "https://api.openai.com/v1",
         "ANTHROPIC_API_KEY" => "https://api.anthropic.com",
@@ -249,11 +250,11 @@ pub(crate) fn model_endpoint(
     Ok(url)
 }
 
-pub(crate) async fn model_credential_vault(
+pub async fn resolve_model_key(
     context: &dyn VaultContext,
     reference: &SecretReference,
     endpoint: &url::Url,
-) -> Result<Arc<dyn VaultHandle>> {
+) -> Result<String> {
     let vault = require_vault(context, &reference.vault_id).await?;
     let metadata = vault
         .list_secrets()
@@ -265,11 +266,23 @@ pub(crate) async fn model_credential_vault(
         metadata.r#type == crate::SecretType::Key,
         "sandbox model credentials currently require an API key"
     );
-    if let Some(target) = metadata.target {
+    let secret = if let Some(target) = metadata.target {
         anyhow::ensure!(
             target == SecretTarget::http(&endpoint.origin().ascii_serialization())?,
             "model credential is not authorized for this endpoint"
         );
+        vault
+            .resolve_secret(&reference.secret_id, &target)
+            .await?
+            .secret
+    } else {
+        vault
+            .get_secret(&reference.secret_id)
+            .await?
+            .context("model credential is unavailable")?
+    };
+    match secret {
+        Secret::Key { value } => Ok(value),
+        Secret::Oauth { .. } => bail!("model credentials currently require an API key"),
     }
-    Ok(vault)
 }

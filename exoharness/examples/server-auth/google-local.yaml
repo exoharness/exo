@@ -1,0 +1,9 @@
+public_url: http://127.0.0.1:4766
+oidc:
+  issuer: https://accounts.google.com
+  client_id: YOUR_GOOGLE_CLIENT_ID
+  client_secret:
+    vault: server-auth
+    secret: google-client
+owner_email: you@example.com
+allowed_emails: []

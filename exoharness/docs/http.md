@@ -89,7 +89,7 @@ Executor/model streaming is outside this transport.
 
 ## Managed-agent CLI service
 
-`exo agent serve` exposes the managed-agent runtime API used by `RuntimeClient`,
+`exo serve` exposes the managed-agent runtime API used by `RuntimeClient`,
 not this lower-level transport. See [Serve over HTTP](managed-agents.md#serve-over-http)
 for setup and agent scoping. Embedders can still use the
 ExoHarness HTTP library directly.

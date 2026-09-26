@@ -7,7 +7,7 @@ use support::{Fixture, success};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 #[actix_web::test]
-async fn agent_serve_exposes_the_shared_client_api_and_isolates_the_selected_agent() -> Result<()> {
+async fn serve_exposes_the_shared_client_api_and_isolates_the_selected_agent() -> Result<()> {
     let f = Fixture::new().await?;
     let file = f.agent_file.to_str().context("agent file")?;
     for name in ["served", "other"] {
@@ -17,7 +17,7 @@ async fn agent_serve_exposes_the_shared_client_api_and_isolates_the_selected_age
     let selected = exo_managed_agents::find_agent(state.as_ref(), "served").await?;
     let other = exo_managed_agents::find_agent(state.as_ref(), "other").await?;
     let mut child = f
-        .command(&["agent", "serve", "served", "--bind", "127.0.0.1:0"])
+        .command(&["serve", "--agent", "served", "--bind", "127.0.0.1:0"])
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()?;
@@ -28,7 +28,7 @@ async fn agent_serve_exposes_the_shared_client_api_and_isolates_the_selected_age
                 return Ok::<_, anyhow::Error>(url.to_owned());
             }
         }
-        anyhow::bail!("agent serve exited before listening")
+        anyhow::bail!("serve exited before listening")
     })
     .await??;
     let client = RuntimeClient::new(&endpoint)?;
@@ -126,12 +126,15 @@ async fn agent_serve_exposes_the_shared_client_api_and_isolates_the_selected_age
 }
 
 #[actix_web::test]
-async fn agent_serve_rejects_non_loopback_bind_addresses() -> Result<()> {
+async fn serve_rejects_non_loopback_bind_addresses() -> Result<()> {
     let f = Fixture::new().await?;
     let output = f
-        .output(&["agent", "serve", "--bind", "0.0.0.0:0"], None, None)
+        .output(&["serve", "--bind", "0.0.0.0:0"], None, None)
         .await?;
     ensure!(!output.status.success());
-    ensure!(String::from_utf8_lossy(&output.stderr).contains("only binds loopback addresses"));
+    ensure!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("non-loopback serving requires --auth-file")
+    );
     f.stop().await
 }

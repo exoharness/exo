@@ -92,8 +92,14 @@ impl KeychainStore {
         .await?
     }
 
-    async fn logout(&self) -> Result<()> {
+    async fn logout(&self, profile: &Profile) -> Result<()> {
         let _guard = self.lock().await?;
+        if let Some(credentials) = self.read()? {
+            let (_, revocation) = discover(profile, credentials.issuer.as_deref()).await?;
+            if let Some(endpoint) = revocation {
+                revoke_credentials(&endpoint, &credentials).await?;
+            }
+        }
         self.delete()
     }
 }
@@ -121,10 +127,19 @@ pub(super) async fn clear(profile: &Profile, directory: &Path) -> Result<()> {
     if !profile.stored_credentials {
         return Ok(());
     }
-    KeychainStore::new(profile, directory)?.logout().await
+    KeychainStore::new(profile, directory)?
+        .logout(profile)
+        .await
 }
 
 async fn manager(profile: &Profile) -> Result<AuthorizationManager> {
+    Ok(discover(profile, None).await?.0)
+}
+
+async fn discover(
+    profile: &Profile,
+    expected_issuer: Option<&str>,
+) -> Result<(AuthorizationManager, Option<url::Url>)> {
     let Connection::Http { endpoint, .. } = &profile.connection else {
         bail!("local providers do not require login");
     };
@@ -156,8 +171,56 @@ async fn manager(profile: &Profile) -> Result<AuthorizationManager> {
             "provider at {identity_url} does not advertise OAuth metadata; configure an API key instead"
         );
     }
+    if let Some(expected) = expected_issuer {
+        anyhow::ensure!(
+            resolution.metadata.issuer.as_deref() == Some(expected),
+            "provider OAuth issuer changed; refusing to send saved credentials"
+        );
+    }
+    #[derive(Deserialize)]
+    struct RevocationMetadata {
+        revocation_endpoint: Option<url::Url>,
+    }
+    let metadata: RevocationMetadata =
+        serde_json::from_value(serde_json::to_value(&resolution.metadata)?)?;
     manager.set_metadata(resolution.metadata);
-    Ok(manager)
+    Ok((manager, metadata.revocation_endpoint))
+}
+
+async fn revoke_credentials(endpoint: &url::Url, credentials: &StoredCredentials) -> Result<()> {
+    let Some(tokens) = &credentials.token_response else {
+        return Ok(());
+    };
+    let loopback = endpoint.host_str().is_some_and(|host| {
+        host == "localhost"
+            || host
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    });
+    anyhow::ensure!(
+        endpoint.scheme() == "https" || endpoint.scheme() == "http" && loopback,
+        "revocation requires HTTPS outside loopback"
+    );
+    let (token, hint) = match tokens.refresh_token() {
+        Some(refresh) => (refresh.secret(), "refresh_token"),
+        None => (tokens.access_token().secret(), "access_token"),
+    };
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(30))
+        .build()?
+        .post(endpoint.clone())
+        .form(&[
+            ("token", token.as_str()),
+            ("token_type_hint", hint),
+            ("client_id", credentials.client_id.as_str()),
+        ])
+        .send()
+        .await
+        .context("revoking provider session")?
+        .error_for_status()?;
+    Ok(())
 }
 
 struct TokenState {

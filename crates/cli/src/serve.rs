@@ -15,8 +15,15 @@ use executor::{
 #[derive(Debug, Args)]
 pub struct ServeArgs {
     /// Serve only this saved agent; omit to serve the local provider.
+    #[arg(long)]
     pub agent: Option<String>,
-    /// Loopback address for the unauthenticated HTTP server.
+    /// OIDC login configuration; required for a non-loopback listener.
+    #[arg(long)]
+    auth_file: Option<PathBuf>,
+    /// Share agents and threads among admitted users; keep vaults private.
+    #[arg(long, requires = "auth_file")]
+    multiplayer: bool,
+    /// Address for the HTTP server.
     #[arg(long, default_value = "127.0.0.1:4766")]
     bind: SocketAddr,
     /// Deployment configuration for adapters named in agent specs.
@@ -39,15 +46,37 @@ pub struct ServeArgs {
 
 pub async fn run(runtime: Arc<Runtime>, root: &Path, args: ServeArgs) -> Result<()> {
     anyhow::ensure!(
-        args.adapters_only || args.bind.ip().is_loopback(),
-        "agent serve only binds loopback addresses because authentication is disabled"
+        args.adapters_only || args.bind.ip().is_loopback() || args.auth_file.is_some(),
+        "non-loopback serving requires --auth-file"
     );
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_max_level(tracing::Level::INFO)
         .try_init()
         .map_err(|error| anyhow::anyhow!("initializing service logging: {error}"))?;
+    std::fs::create_dir_all(root)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(root.join("service.lock"))?;
+    lock.try_lock()
+        .context("another agent service is using this root")?;
+    let auth = if let Some(path) = &args.auth_file {
+        let config: executor::remote::AuthConfig = crate::read_config_file(path)?;
+        eprintln!("OIDC callback: {}", config.callback_url());
+        let auth =
+            Arc::new(executor::remote::AuthServer::new(config, runtime.exoharness_handle()).await?);
+        auth.adopt_local_state(runtime.exoharness_handle().as_ref())
+            .await?;
+        Some(auth)
+    } else {
+        None
+    };
     let mut service = RuntimeHttpService::new(runtime.clone(), None)?;
+    if let Some(auth) = &auth {
+        service = service.with_auth(auth.clone(), args.multiplayer);
+    }
     let mut store = executor::AdapterStore::new(root.join("adapters"));
     if let Some(reference) = args.agent {
         let agent = crate::must_get_agent(&runtime, &reference).await?;
@@ -60,15 +89,11 @@ pub async fn run(runtime: Arc<Runtime>, root: &Path, args: ServeArgs) -> Result<
         .map(crate::read_config_file::<BTreeMap<String, executor::AdapterConfig>>)
         .transpose()?
         .unwrap_or_default();
-    std::fs::create_dir_all(root)?;
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(root.join("service.lock"))?;
-    lock.try_lock()
-        .context("another agent service is using this root")?;
-    configure_adapters(&runtime, &store, &definitions).await?;
+    let adapter_runtime = if let Some(auth) = &auth {
+        service.caller_runtime(auth.owner().await)?
+    } else {
+        runtime.clone()
+    };
     let shutdown = tokio_util::sync::CancellationToken::new();
     let adapter_options = executor::AdapterRunOptions {
         shutdown: shutdown.clone(),
@@ -76,8 +101,24 @@ pub async fn run(runtime: Arc<Runtime>, root: &Path, args: ServeArgs) -> Result<
         drain_marker: args.drain_marker,
         reboot_notice: args.reboot_notice,
     };
+    let adapters = async {
+        if let Some(auth) = &auth {
+            tokio::select! {
+                () = auth.wait_for_owner() => {},
+                () = shutdown.cancelled() => return Ok(()),
+            }
+        }
+        configure_adapters(&adapter_runtime, &store, &definitions).await?;
+        executor::run_adapters_watch(adapter_runtime.clone(), store, adapter_options).await
+    };
     if args.adapters_only {
-        return executor::run_adapters_watch(runtime, store, adapter_options).await;
+        if let Some(auth) = &auth {
+            let caller = auth.caller(auth.owner().await, args.multiplayer);
+            caller.policy.default_vault(&caller.principal).await?;
+        }
+        let result = adapters.await;
+        service.shutdown_callers().await?;
+        return result;
     }
     let listener = TcpListener::bind(args.bind)?;
     println!(
@@ -85,11 +126,11 @@ pub async fn run(runtime: Arc<Runtime>, root: &Path, args: ServeArgs) -> Result<
         listener.local_addr()?,
         exo_managed_agents::http::RUNTIME_PATH
     );
-    let server = server(listener, Arc::new(service))?;
+    let service = Arc::new(service);
+    let server = server(listener, service.clone())?;
     let handle = server.handle();
-    let adapters = executor::run_adapters_watch(runtime, store, adapter_options);
     tokio::pin!(server, adapters);
-    tokio::select! {
+    let result = tokio::select! {
         result = &mut server => {
             shutdown.cancel();
             adapters.await?;
@@ -100,7 +141,9 @@ pub async fn run(runtime: Arc<Runtime>, root: &Path, args: ServeArgs) -> Result<
             server.await?;
             result
         }
-    }
+    };
+    service.shutdown_callers().await?;
+    result
 }
 
 async fn configure_adapters(

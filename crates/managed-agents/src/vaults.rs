@@ -9,7 +9,12 @@ use exoharness::vault::{
 use exoharness::{ReadArtifactRequest, Secret, ThreadHandle, WriteArtifactRequest};
 use serde::{Deserialize, Serialize};
 
-const VAULT_SELECTION_PATH: &str = "managed-agents/vault.json";
+fn selection_path(thread: &dyn ThreadHandle) -> String {
+    match thread.caller() {
+        Some(caller) => format!("managed-agents/vault/{}.json", caller.principal),
+        None => "managed-agents/vault.json".into(),
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpCredentialBinding {
@@ -121,7 +126,7 @@ impl VaultSelection {
         self.validate_context(thread).await?;
         thread
             .write_artifact(WriteArtifactRequest {
-                path: VAULT_SELECTION_PATH.into(),
+                path: selection_path(thread),
                 contents: serde_json::to_vec(self)?,
             })
             .await?;
@@ -134,7 +139,7 @@ pub async fn load_selection(thread: &dyn ThreadHandle) -> Result<Option<VaultSel
         .list_artifacts()
         .await?
         .into_iter()
-        .filter(|v| v.path == VAULT_SELECTION_PATH)
+        .filter(|v| v.path == selection_path(thread))
         .max_by_key(|v| v.version)
     else {
         return Ok(None);

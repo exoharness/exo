@@ -128,6 +128,27 @@ impl ManagedExecutor {
 
 #[async_trait]
 impl HarnessExecutor for ManagedExecutor {
+    async fn reset_thread(&self, thread: ThreadId) -> Result<()> {
+        let executor = self
+            .threads
+            .lock()
+            .expect("managed executors poisoned")
+            .remove(&thread);
+        if let Some(executor) = executor.and_then(|cell| cell.get().map(|t| t.executor.clone())) {
+            executor.shutdown().await?;
+        }
+        Ok(())
+    }
+
+    fn with_state(&self, state: Arc<dyn ExoHarness>) -> Result<Arc<dyn HarnessExecutor>> {
+        Ok(Arc::new(Self::new(
+            state,
+            self.config.clone(),
+            self.env.clone(),
+            self.pricing.clone(),
+        )?))
+    }
+
     fn name(&self) -> &'static str {
         "local"
     }

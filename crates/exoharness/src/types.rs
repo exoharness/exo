@@ -45,6 +45,10 @@ impl ResourceScope {
 
 #[async_trait]
 pub trait ExoHarness: VaultContext {
+    fn with_caller(&self, _caller: crate::access::Caller) -> Result<Arc<dyn ExoHarness>> {
+        anyhow::bail!("this provider does not support caller-scoped execution")
+    }
+
     async fn list_environments(&self) -> Result<Vec<crate::EnvironmentDefinition>>;
     async fn put_environment(&self, environment: crate::EnvironmentDefinition) -> Result<()>;
     async fn delete_environment(&self, name: &str) -> Result<bool>;
@@ -176,6 +180,10 @@ pub trait AgentHandle: SandboxHandle + VaultContext {
 
 #[async_trait]
 pub trait ThreadHandle: SandboxHandle + VaultContext {
+    async fn activate_caller(&self) -> Result<bool> {
+        Ok(false)
+    }
+
     fn record(&self) -> &ThreadRecord;
 
     async fn update_environment(

@@ -71,7 +71,7 @@ fn http_commands_reject_local_execution_options() -> Result<()> {
             "--sandbox",
             "local-process",
         ],
-        vec!["exo", "agent", "serve", "support"],
+        vec!["exo", "serve", "--agent", "support"],
         vec![
             "exo", "thread", "update", "support", "thread", "--vault", "personal", "--model",
             "other",

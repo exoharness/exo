@@ -53,6 +53,8 @@ use crate::{
     WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
 
+#[path = "basic/access.rs"]
+mod access;
 #[path = "basic/migration.rs"]
 mod migration;
 #[path = "basic/vault_context.rs"]
@@ -448,9 +450,11 @@ pub struct BasicExoHarnessConfig {
 #[derive(Clone)]
 pub struct BasicExoHarness {
     inner: Arc<BasicExoHarnessInner>,
+    caller: Option<crate::access::Caller>,
 }
 
 struct BasicExoHarnessInner {
+    access_policy: std::sync::OnceLock<Arc<dyn crate::access::AccessPolicy>>,
     cache_root: PathBuf,
     resources: crate::resources::ResourceStore,
     storage: BasicObjectStore,
@@ -1001,7 +1005,9 @@ impl BasicExoHarness {
             secret_cipher.clone(),
         )?;
         Ok(Self {
+            caller: None,
             inner: Arc::new(BasicExoHarnessInner {
+                access_policy: std::sync::OnceLock::new(),
                 cache_root: root.join("cache"),
                 resources: crate::resources::ResourceStore::new(&root)?
                     .excluding_master_key(resource_master_key)?,
@@ -1085,7 +1091,18 @@ impl BasicExoHarness {
 
 #[async_trait]
 impl ExoHarness for BasicExoHarness {
+    fn with_caller(&self, caller: crate::access::Caller) -> Result<Arc<dyn ExoHarness>> {
+        self.inner
+            .access_policy
+            .get_or_init(|| caller.policy.clone());
+        Ok(Arc::new(Self {
+            inner: self.inner.clone(),
+            caller: Some(caller),
+        }))
+    }
+
     async fn list_environments(&self) -> Result<Vec<crate::EnvironmentDefinition>> {
+        self.check(ResourceScope::Global).await?;
         let mut definitions: Vec<crate::EnvironmentDefinition> = self
             .inner
             .storage
@@ -1096,6 +1113,9 @@ impl ExoHarness for BasicExoHarness {
     }
 
     async fn put_environment(&self, environment: crate::EnvironmentDefinition) -> Result<()> {
+        if let Some(caller) = &self.caller {
+            caller.policy.check_operator(&caller.principal).await?;
+        }
         environment.validate()?;
         let _guard = self.inner.write_lock.lock().await;
         self.inner
@@ -1108,6 +1128,9 @@ impl ExoHarness for BasicExoHarness {
     }
 
     async fn delete_environment(&self, name: &str) -> Result<bool> {
+        if let Some(caller) = &self.caller {
+            caller.policy.check_operator(&caller.principal).await?;
+        }
         crate::EnvironmentDefinition::validate_name(name)?;
         let _guard = self.inner.write_lock.lock().await;
         let path = Path::new("environments").join(format!("{name}.json"));
@@ -1125,8 +1148,18 @@ impl ExoHarness for BasicExoHarness {
     }
 
     async fn list_agents(&self) -> Result<Vec<Arc<dyn AgentHandle>>> {
+        self.check(ResourceScope::Global).await?;
         let mut handles: Vec<Arc<dyn AgentHandle>> = Vec::new();
         for record in self.list_agent_records().await? {
+            if self
+                .check(ResourceScope::Agent {
+                    agent_id: record.id,
+                })
+                .await
+                .is_err()
+            {
+                continue;
+            }
             handles.push(Arc::new(BasicAgentHandle {
                 harness: self.clone(),
                 record,
@@ -1136,6 +1169,14 @@ impl ExoHarness for BasicExoHarness {
     }
 
     async fn get_agent(&self, id: &AgentId) -> Result<Option<Arc<dyn AgentHandle>>> {
+        self.check(ResourceScope::Global).await?;
+        if self
+            .check(ResourceScope::Agent { agent_id: *id })
+            .await
+            .is_err()
+        {
+            return Ok(None);
+        }
         let record_path = self.agents_dir().join(id.to_string()).join("record.json");
         let Some(record) = self
             .inner
@@ -1152,6 +1193,7 @@ impl ExoHarness for BasicExoHarness {
     }
 
     async fn new_agent(&self, request: NewAgentRequest) -> Result<Arc<dyn AgentHandle>> {
+        self.check(ResourceScope::Global).await?;
         let _guard = self.inner.write_lock.lock().await;
         // TODO: claim the marker with a conditional put (put_json_if_absent,
         // arriving in PR #113) to close the cross-process create race.
@@ -1173,6 +1215,10 @@ impl ExoHarness for BasicExoHarness {
             slug: request.slug,
             name: request.name,
         };
+        self.claim(ResourceScope::Agent {
+            agent_id: record.id,
+        })
+        .await?;
         let agent_dir = self.agents_dir().join(record.id.to_string());
         self.inner
             .storage
@@ -1186,6 +1232,8 @@ impl ExoHarness for BasicExoHarness {
     }
 
     async fn delete_agent(&self, id: &AgentId) -> Result<bool> {
+        self.check(ResourceScope::Global).await?;
+        self.check(ResourceScope::Agent { agent_id: *id }).await?;
         let agent_dir = self.agents_dir().join(id.to_string());
         if self.inner.storage.list_keys(&agent_dir).await?.is_empty() {
             return Ok(false);
@@ -1253,40 +1301,87 @@ impl ExoHarness for BasicExoHarness {
     }
 
     async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
-        list_binding_records(&self.inner.storage, &self.bindings_dir()).await
+        self.check(ResourceScope::Global).await?;
+        self.binding_records(&self.bindings_dir()).await
     }
 
     async fn put_binding(&self, binding: Binding) -> Result<BindingId> {
+        self.check_binding(&binding).await?;
+        self.check(ResourceScope::Global).await?;
         let _guard = self.inner.write_lock.lock().await;
         let id = Uuid7::now();
         let record = stored_binding(id, binding);
         self.inner
             .storage
-            .put_json(self.bindings_dir().join(format!("{id}.json")), &record)
+            .put_json(
+                self.caller_bindings_dir(&self.bindings_dir())
+                    .join(format!("{id}.json")),
+                &record,
+            )
             .await?;
         Ok(id)
     }
 
     async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>> {
-        let path = self.bindings_dir().join(format!("{id}.json"));
-        Ok(self
-            .inner
-            .storage
-            .get_json_if_exists::<StoredBinding>(&path)
-            .await?
-            .map(|record| record.record.binding))
+        self.check(ResourceScope::Global).await?;
+        self.find_binding(&[self.bindings_dir()], id).await
     }
 
     async fn create_vault(&self, name: &str) -> Result<Arc<dyn VaultHandle>> {
-        self.inner.vaults.create_vault(name).await
+        self.check(ResourceScope::Global).await?;
+        let stored_name = if let Some(caller) = &self.caller {
+            anyhow::ensure!(
+                !self
+                    .list_vaults()
+                    .await?
+                    .iter()
+                    .any(|v| v.record().name == name),
+                "vault already exists: {name}"
+            );
+            format!("{}:{name}", caller.principal)
+        } else {
+            name.to_owned()
+        };
+        let vault = self.inner.vaults.create_vault(&stored_name).await?;
+        if let Some(caller) = &self.caller
+            && let Err(error) = caller
+                .policy
+                .vault_created(&caller.principal, vault.record().id, name)
+                .await
+        {
+            self.inner.vaults.delete_vault(&vault.record().id).await?;
+            return Err(error);
+        }
+        self.scoped_vault(vault)
+            .await?
+            .context("new vault is unavailable")
     }
     async fn delete_vault(&self, id: &VaultId) -> Result<()> {
+        let vault = crate::vault::require_vault(self, id).await?;
+        if let Some(caller) = &self.caller {
+            anyhow::ensure!(
+                caller.policy.default_vault(&caller.principal).await? != *id,
+                "the personal vault cannot be deleted"
+            );
+            anyhow::ensure!(
+                caller
+                    .policy
+                    .vault(&caller.principal, vault.record(), true)
+                    .await?
+                    .is_some(),
+                "vault is read-only"
+            );
+        }
+        self.check(ResourceScope::Global).await?;
         let _guard = self.inner.write_lock.lock().await;
-        for agent in self.list_agents().await? {
+        let operator = Self {
+            inner: self.inner.clone(),
+            caller: None,
+        };
+        for agent in operator.list_agents().await? {
             anyhow::ensure!(
                 !agent.record().vaults.contains(id),
-                "vault is attached to agent {}",
-                agent.record().slug
+                "vault is still attached to an agent"
             );
             for thread in agent
                 .list_conversations(ListConversationsRequest::default())
@@ -1295,9 +1390,7 @@ impl ExoHarness for BasicExoHarness {
             {
                 anyhow::ensure!(
                     !thread.record().vaults.contains(id),
-                    "vault is attached to thread {} of agent {}",
-                    thread.record().slug,
-                    agent.record().slug
+                    "vault is still attached to a thread"
                 );
             }
         }
@@ -1441,6 +1534,16 @@ impl AgentHandle for BasicAgentHandle {
         &self,
         resources: Vec<crate::resources::ResourceDefinition>,
     ) -> Result<Vec<crate::resources::PreparedResource>> {
+        self.harness
+            .check(ResourceScope::Agent {
+                agent_id: self.record.id,
+            })
+            .await?;
+        if !resources.is_empty()
+            && let Some(caller) = &self.harness.caller
+        {
+            caller.policy.check_operator(&caller.principal).await?;
+        }
         let store = self.harness.inner.resources.clone();
         tokio::task::spawn_blocking(move || store.prepare(resources)).await?
     }
@@ -1453,9 +1556,25 @@ impl AgentHandle for BasicAgentHandle {
         &self,
         request: ListConversationsRequest,
     ) -> Result<ListConversationsResult<Arc<dyn ConversationHandle>>> {
+        self.harness
+            .check(ResourceScope::Agent {
+                agent_id: self.record.id,
+            })
+            .await?;
         let mut handles: Vec<Arc<dyn ConversationHandle>> = Vec::new();
         let result = self.list_conversation_records(request).await?;
         for record in result.conversations {
+            if self
+                .harness
+                .check(ResourceScope::Thread {
+                    agent_id: self.record.id,
+                    thread_id: record.id,
+                })
+                .await
+                .is_err()
+            {
+                continue;
+            }
             handles.push(Arc::new(BasicConversationHandle {
                 harness: self.harness.clone(),
                 agent_id: self.record.id,
@@ -1472,6 +1591,22 @@ impl AgentHandle for BasicAgentHandle {
         &self,
         id: &ConversationId,
     ) -> Result<Option<Arc<dyn ConversationHandle>>> {
+        self.harness
+            .check(ResourceScope::Agent {
+                agent_id: self.record.id,
+            })
+            .await?;
+        if self
+            .harness
+            .check(ResourceScope::Thread {
+                agent_id: self.record.id,
+                thread_id: *id,
+            })
+            .await
+            .is_err()
+        {
+            return Ok(None);
+        }
         let record_path = self
             .conversations_dir()
             .join(id.to_string())
@@ -1496,6 +1631,11 @@ impl AgentHandle for BasicAgentHandle {
         &self,
         request: NewConversationRequest,
     ) -> Result<Arc<dyn ConversationHandle>> {
+        self.harness
+            .check(ResourceScope::Agent {
+                agent_id: self.record.id,
+            })
+            .await?;
         let _guard = self.harness.inner.write_lock.lock().await;
         let existing = self
             .list_conversation_records(ListConversationsRequest::default())
@@ -1515,6 +1655,7 @@ impl AgentHandle for BasicAgentHandle {
         };
         if let Some(environment) = &request.environment {
             environment.validate()?;
+            self.harness.check_environment(environment).await?;
         }
         require_vaults(&self.harness, &request.vaults).await?;
         let record = ConversationRecord {
@@ -1525,6 +1666,12 @@ impl AgentHandle for BasicAgentHandle {
             name: request.name.unwrap_or_else(|| slug_to_name(&slug)),
             latest_event_id: None,
         };
+        self.harness
+            .claim(ResourceScope::Thread {
+                agent_id: self.record.id,
+                thread_id: record.id,
+            })
+            .await?;
         let conversation_dir = self.conversations_dir().join(record.id.to_string());
         let mut record = record;
         append_events_to_conversation(
@@ -1554,6 +1701,17 @@ impl AgentHandle for BasicAgentHandle {
     }
 
     async fn delete_conversation(&self, id: &ConversationId) -> Result<bool> {
+        self.harness
+            .check(ResourceScope::Thread {
+                agent_id: self.record.id,
+                thread_id: *id,
+            })
+            .await?;
+        self.harness
+            .check(ResourceScope::Agent {
+                agent_id: self.record.id,
+            })
+            .await?;
         let conversation_dir = self.conversations_dir().join(id.to_string());
         if self
             .harness
@@ -1628,44 +1786,69 @@ impl AgentHandle for BasicAgentHandle {
     }
 
     async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
+        self.harness
+            .check(ResourceScope::Agent {
+                agent_id: self.record.id,
+            })
+            .await?;
         Ok(merge_binding_records(vec![
-            list_binding_records(&self.harness.inner.storage, &self.harness.bindings_dir()).await?,
-            list_binding_records(&self.harness.inner.storage, &self.bindings_dir()).await?,
+            self.harness
+                .binding_records(&self.harness.bindings_dir())
+                .await?,
+            self.harness.binding_records(&self.bindings_dir()).await?,
         ]))
     }
 
     async fn put_binding(&self, binding: Binding) -> Result<BindingId> {
+        self.harness.check_binding(&binding).await?;
+        self.harness
+            .check(ResourceScope::Agent {
+                agent_id: self.record.id,
+            })
+            .await?;
         let _guard = self.harness.inner.write_lock.lock().await;
         let id = Uuid7::now();
         let record = stored_binding(id, binding);
         self.harness
             .inner
             .storage
-            .put_json(self.bindings_dir().join(format!("{id}.json")), &record)
+            .put_json(
+                self.harness
+                    .caller_bindings_dir(&self.bindings_dir())
+                    .join(format!("{id}.json")),
+                &record,
+            )
             .await?;
         Ok(id)
     }
 
     async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>> {
-        let path = self.bindings_dir().join(format!("{id}.json"));
-        if let Some(record) = self
-            .harness
-            .inner
-            .storage
-            .get_json_if_exists::<StoredBinding>(&path)
-            .await?
-        {
-            return Ok(Some(record.record.binding));
-        }
-        self.harness.get_binding(id).await
+        self.harness
+            .check(ResourceScope::Agent {
+                agent_id: self.record.id,
+            })
+            .await?;
+        self.harness
+            .find_binding(&[self.bindings_dir(), self.harness.bindings_dir()], id)
+            .await
     }
 
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion> {
+        self.harness
+            .check(ResourceScope::Agent {
+                agent_id: self.record.id,
+            })
+            .await?;
         let _guard = self.harness.inner.write_lock.lock().await;
         write_artifact_version(&self.harness.inner, &self.artifacts_dir(), request).await
     }
 
     async fn read_artifact(&self, request: ReadArtifactRequest) -> Result<Option<Artifact>> {
+        self.harness
+            .check(ResourceScope::Agent {
+                agent_id: self.record.id,
+            })
+            .await?;
         let versions =
             load_artifact_versions(&self.harness.inner.storage, &self.artifacts_dir()).await?;
         let selected = versions
@@ -1691,6 +1874,11 @@ impl AgentHandle for BasicAgentHandle {
     }
 
     async fn list_artifacts(&self) -> Result<Vec<ArtifactVersion>> {
+        self.harness
+            .check(ResourceScope::Agent {
+                agent_id: self.record.id,
+            })
+            .await?;
         load_artifact_versions(&self.harness.inner.storage, &self.artifacts_dir()).await
     }
 }
@@ -1942,6 +2130,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
     }
 
     async fn list_sandboxes(&self) -> Result<Vec<SandboxRecord>> {
+        self.harness.check(self.owner).await?;
         let mut sandboxes = self
             .harness
             .inner
@@ -1949,6 +2138,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
             .list_json_matching_suffix::<StoredSandbox>(self.sandboxes_dir(), ".json")
             .await?
             .into_iter()
+            .filter(|sandbox| self.harness.check_sandbox(sandbox).is_ok())
             .map(SandboxRecord::from)
             .collect::<Vec<_>>();
         sandboxes.sort_unstable_by(|left, right| right.id.cmp(&left.id));
@@ -1956,6 +2146,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
     }
 
     async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
+        self.harness.check(self.owner).await?;
         self.ensure_full_sandbox_scope("create_sandbox")?;
         if request.name.is_none() {
             return self.create_new_sandbox(request).await;
@@ -1980,6 +2171,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
     }
 
     async fn fork_sandbox(&self, request: ForkSandboxRequest) -> Result<SandboxId> {
+        self.harness.check(self.owner).await?;
         self.ensure_full_sandbox_scope("fork_sandbox")?;
         let source = self.load_sandbox(&request.source_id).await?;
         if source.attachment.is_some() {
@@ -2019,6 +2211,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
     }
 
     async fn restore_sandbox(&self, request: RestoreSandboxRequest) -> Result<SandboxId> {
+        self.harness.check(self.owner).await?;
         self.ensure_full_sandbox_scope("restore_sandbox")?;
         let payload =
             load_snapshot_payload(self.harness, &self.owner_dir, request.snapshot_id).await?;
@@ -2057,12 +2250,14 @@ impl<'a> BasicScopedSandboxHandle<'a> {
     }
 
     async fn terminate_sandbox(&self, id: SandboxId) -> Result<()> {
+        self.harness.check(self.owner).await?;
         self.ensure_full_sandbox_scope("terminate_sandbox")?;
         let _guard = self.harness.inner.write_lock.lock().await;
         self.terminate_sandbox_locked(id).await
     }
 
     async fn terminate_sandbox_locked(&self, id: SandboxId) -> Result<()> {
+        self.harness.check(self.owner).await?;
         let sandbox = self.load_sandbox(&id).await?;
         if sandbox.attachment.is_some() {
             bail!("attached sandboxes cannot be terminated");
@@ -2106,10 +2301,12 @@ impl<'a> BasicScopedSandboxHandle<'a> {
     }
 
     async fn attach_sandbox(&self, request: AttachSandboxRequest) -> Result<SandboxId> {
+        self.harness.check(self.owner).await?;
         self.ensure_full_sandbox_scope("attach_sandbox")?;
         let sandbox_id = format!("sandbox-{}", Uuid7::now());
         let provider = request.attachment.provider();
         let sandbox = StoredSandbox {
+            principal: None,
             credentials: BTreeMap::new(),
             id: sandbox_id.clone(),
             name: None,
@@ -2147,6 +2344,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
     }
 
     async fn detach_sandbox(&self, sandbox_id: SandboxId) -> Result<SandboxAttachment> {
+        self.harness.check(self.owner).await?;
         self.ensure_full_sandbox_scope("detach_sandbox")?;
         let sandbox = self.load_sandbox(&sandbox_id).await?;
         if !sandbox.running {
@@ -2201,6 +2399,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
     }
 
     async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
+        self.harness.check(self.owner).await?;
         let (snapshot_id, event) =
             snapshot_sandbox_side_effect(self.harness, &self.owner_dir, id).await?;
         self.append_events(vec![event]).await?;
@@ -2208,6 +2407,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
     }
 
     async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
+        self.harness.check(self.owner).await?;
         let event =
             start_sandbox_side_effect(self.harness, &self.owner_dir, self.owner, request).await?;
         self.append_events(vec![event]).await?;
@@ -2215,6 +2415,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
     }
 
     async fn stop_sandbox(&self, id: SandboxId) -> Result<()> {
+        self.harness.check(self.owner).await?;
         self.ensure_full_sandbox_scope("stop_sandbox")?;
         let _guard = self.harness.inner.write_lock.lock().await;
         let mut sandbox = self.load_sandbox(&id).await?;
@@ -2257,6 +2458,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         id: SandboxId,
         port: u16,
     ) -> Result<Option<BoxSandboxTcpStream>> {
+        self.harness.check(self.owner).await?;
         self.ensure_full_sandbox_scope("connect_sandbox_tcp")?;
         let sandbox = self.load_sandbox(&id).await?;
         if !sandbox.running {
@@ -2267,6 +2469,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
     }
 
     async fn sandbox_supports_tcp(&self, id: SandboxId) -> Result<bool> {
+        self.harness.check(self.owner).await?;
         self.ensure_full_sandbox_scope("sandbox_supports_tcp")?;
         let sandbox = self.load_sandbox(&id).await?;
         if !sandbox.running {
@@ -2280,6 +2483,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         &self,
         request: StartSandboxProcessRequest,
     ) -> Result<SandboxProcessRecord> {
+        self.harness.check(self.owner).await?;
         self.ensure_full_sandbox_scope("start_sandbox_process")?;
         let pending = prepare_sandbox_process(
             self.harness,
@@ -2302,6 +2506,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         &self,
         request: WriteSandboxProcessInputRequest,
     ) -> Result<()> {
+        self.harness.check(self.owner).await?;
         self.ensure_full_sandbox_scope("write_sandbox_process_input")?;
         let process = self
             .require_sandbox_process(&request.sandbox_id, &request.process_id)
@@ -2322,6 +2527,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         &self,
         request: CloseSandboxProcessInputRequest,
     ) -> Result<()> {
+        self.harness.check(self.owner).await?;
         self.ensure_full_sandbox_scope("close_sandbox_process_input")?;
         let process = self
             .require_sandbox_process(&request.sandbox_id, &request.process_id)
@@ -2334,6 +2540,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         &self,
         query: SandboxProcessEventQuery,
     ) -> Result<GetSandboxProcessEventsResult> {
+        self.harness.check(self.owner).await?;
         self.ensure_full_sandbox_scope("get_sandbox_process_events")?;
         let process = self
             .require_sandbox_process(&query.sandbox_id, &query.process_id)
@@ -2364,6 +2571,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         &self,
         request: WaitSandboxProcessRequest,
     ) -> Result<SandboxProcessStatus> {
+        self.harness.check(self.owner).await?;
         self.ensure_full_sandbox_scope("wait_sandbox_process")?;
         let process = self
             .require_sandbox_process(&request.sandbox_id, &request.process_id)
@@ -2375,6 +2583,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         &self,
         request: CancelSandboxProcessRequest,
     ) -> Result<SandboxProcessStatus> {
+        self.harness.check(self.owner).await?;
         self.ensure_full_sandbox_scope("cancel_sandbox_process")?;
         let process = self
             .require_sandbox_process(&request.sandbox_id, &request.process_id)
@@ -2394,6 +2603,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         &self,
         request: RunInSandboxRequest,
     ) -> Result<Box<dyn SandboxProcess>> {
+        self.harness.check(self.owner).await?;
         self.ensure_full_sandbox_scope("run_in_sandbox")?;
         let sandbox = self.load_sandbox(&request.id).await?;
         if !sandbox.running {
@@ -2438,6 +2648,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
     }
 
     async fn create_new_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
+        self.harness.check(self.owner).await?;
         let prepared = prepare_sandbox_request(self.harness, self.owner, request).await?;
         let sandbox_id = format!("sandbox-{}", Uuid7::now());
         let sandbox = prepared.stored_sandbox(sandbox_id.clone());
@@ -2458,6 +2669,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         &self,
         request: PreparedSandboxRequest,
     ) -> Result<SandboxId> {
+        self.harness.check(self.owner).await?;
         let sandbox_id = format!("sandbox-{}", Uuid7::now());
         let sandbox = request.stored_sandbox(sandbox_id.clone());
         let (sandbox_handle, provider_state_event) = create_sandbox_handle(
@@ -2478,6 +2690,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
     // prefix and leave a live VM whose record no listing or reaper would ever
     // see again.
     async fn owner_exists_locked(&self) -> Result<bool> {
+        self.harness.check(self.owner).await?;
         Ok(self
             .harness
             .inner
@@ -2489,10 +2702,12 @@ impl<'a> BasicScopedSandboxHandle<'a> {
 
     async fn persist_created_sandbox_locked(
         &self,
-        sandbox: StoredSandbox,
+        mut sandbox: StoredSandbox,
         sandbox_handle: Arc<dyn ManagedSandboxHandle>,
         provider_state_event: Option<EventData>,
     ) -> Result<SandboxId> {
+        sandbox.principal = self.harness.caller.as_ref().map(|c| c.principal.clone());
+        self.harness.check(self.owner).await?;
         let sandbox_id = sandbox.id.clone();
         let latest_snapshot_id = sandbox.latest_snapshot_id;
         if !self.owner_exists_locked().await? {
@@ -2546,10 +2761,12 @@ impl<'a> BasicScopedSandboxHandle<'a> {
 
     async fn persist_attached_sandbox_locked(
         &self,
-        sandbox: StoredSandbox,
+        mut sandbox: StoredSandbox,
         sandbox_handle: Arc<dyn ManagedSandboxHandle>,
         provider_state_event: Option<EventData>,
     ) -> Result<SandboxId> {
+        sandbox.principal = self.harness.caller.as_ref().map(|c| c.principal.clone());
+        self.harness.check(self.owner).await?;
         let sandbox_id = sandbox.id.clone();
         if !self.owner_exists_locked().await? {
             // An attached sandbox belongs to its external owner and keeps
@@ -2591,12 +2808,14 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         &self,
         request: &PreparedSandboxRequest,
     ) -> Result<Option<(SandboxId, StoredSandbox)>> {
+        self.harness.check(self.owner).await?;
         match self.event_sink {
             BasicSandboxEventSink::None => {
                 find_matching_stored_sandbox(
                     &self.harness.inner.storage,
                     &self.sandboxes_dir(),
                     request,
+                    self.harness.caller.as_ref().map(|c| c.principal.as_str()),
                 )
                 .await
             }
@@ -2613,6 +2832,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         &self,
         request: &PreparedSandboxRequest,
     ) -> Result<Option<(SandboxId, StoredSandbox)>> {
+        self.harness.check(self.owner).await?;
         let Some(name) = &request.name else {
             return Ok(None);
         };
@@ -2641,7 +2861,20 @@ impl<'a> BasicScopedSandboxHandle<'a> {
             if event_name.as_ref() != Some(name) {
                 continue;
             }
-            let sandbox = self.load_sandbox(&sandbox_id).await?;
+            let Some(sandbox) = self
+                .harness
+                .inner
+                .storage
+                .get_json_if_exists::<StoredSandbox>(
+                    self.sandboxes_dir().join(format!("{sandbox_id}.json")),
+                )
+                .await?
+            else {
+                continue;
+            };
+            if self.harness.check_sandbox(&sandbox).is_err() {
+                continue;
+            }
             if !sandbox.running {
                 continue;
             }
@@ -2662,7 +2895,10 @@ impl<'a> BasicScopedSandboxHandle<'a> {
     }
 
     async fn load_sandbox(&self, id: &str) -> Result<StoredSandbox> {
-        load_stored_sandbox(self.harness, &self.owner_dir, id).await
+        self.harness.check(self.owner).await?;
+        let sandbox = load_stored_sandbox(self.harness, &self.owner_dir, id).await?;
+        self.harness.check_sandbox(&sandbox)?;
+        Ok(sandbox)
     }
 
     async fn active_sandbox_handle(
@@ -2670,6 +2906,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         id: &SandboxId,
         sandbox: &StoredSandbox,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
+        self.harness.check(self.owner).await?;
         let (handle, provider_state_event) =
             active_sandbox_handle(self.harness, &self.owner_dir, self.owner, id, sandbox).await?;
         if let Some(event) = provider_state_event {
@@ -2683,6 +2920,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         sandbox_id: &str,
         process_id: &str,
     ) -> Result<Arc<RunningSandboxProcess>> {
+        self.harness.check(self.owner).await?;
         require_running_sandbox_process(self.harness, sandbox_id, process_id).await
     }
 
@@ -2700,6 +2938,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
     }
 
     async fn append_events(&self, data: Vec<EventData>) -> Result<()> {
+        self.harness.check(self.owner).await?;
         if matches!(self.event_sink, BasicSandboxEventSink::None) {
             return Ok(());
         }
@@ -2708,6 +2947,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
     }
 
     async fn append_events_locked(&self, data: Vec<EventData>) -> Result<()> {
+        self.harness.check(self.owner).await?;
         match self.event_sink {
             BasicSandboxEventSink::None => Ok(()),
             BasicSandboxEventSink::Conversation { conversation_id } => {
@@ -2780,11 +3020,49 @@ struct BasicConversationHandle {
 
 #[async_trait]
 impl ConversationHandle for BasicConversationHandle {
+    async fn activate_caller(&self) -> Result<bool> {
+        let Some(caller) = &self.harness.caller else {
+            return Ok(false);
+        };
+        caller
+            .check(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
+        let path = self.conversation_dir().join("caller.json");
+        let active: Option<String> = self.harness.inner.storage.get_json_if_exists(&path).await?;
+        if active.as_deref() == Some(&caller.principal) {
+            return Ok(false);
+        }
+        let operator = BasicExoHarness {
+            inner: self.harness.inner.clone(),
+            caller: None,
+        };
+        let scope =
+            BasicScopedSandboxHandle::conversation(&operator, self.agent_id, self.record.id);
+        let reset = active.is_some() || !scope.list_sandboxes().await?.is_empty();
+        terminate_running_sandboxes(&scope).await?;
+        self.harness
+            .inner
+            .storage
+            .put_json(path, &caller.principal)
+            .await?;
+        Ok(reset)
+    }
+
     async fn update_environment(
         &self,
         environment: crate::EnvironmentDefinition,
     ) -> Result<Arc<dyn ConversationHandle>> {
+        self.harness
+            .check(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
         environment.validate()?;
+        self.harness.check_environment(&environment).await?;
         let _guard = self.harness.inner.write_lock.lock().await;
         let mut record = self.load_record().await?;
         if record.environment.as_ref() != Some(&environment) {
@@ -2824,6 +3102,12 @@ impl ConversationHandle for BasicConversationHandle {
     }
 
     async fn attach_vaults(&self, vaults: Vec<VaultId>) -> Result<Arc<dyn ConversationHandle>> {
+        self.harness
+            .check(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
         let _guard = self.harness.inner.write_lock.lock().await;
         let mut record = self.load_record().await?;
         require_vaults(&self.harness, &vaults).await?;
@@ -2849,6 +3133,12 @@ impl ConversationHandle for BasicConversationHandle {
         resources: Vec<crate::resources::PreparedResource>,
         provider: SandboxProvider,
     ) -> Result<Vec<FileSystemMount>> {
+        self.harness
+            .check(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
         if resources.is_empty() {
             return Ok(Vec::new());
         }
@@ -2962,6 +3252,12 @@ impl ConversationHandle for BasicConversationHandle {
         &self.record
     }
     async fn start_session(&self) -> Result<SessionId> {
+        self.harness
+            .check(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
         let session_id = Uuid7::now();
         self.append_events_internal(
             Some(session_id),
@@ -2974,12 +3270,24 @@ impl ConversationHandle for BasicConversationHandle {
     }
 
     async fn end_session(&self, id: SessionId) -> Result<()> {
+        self.harness
+            .check(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
         self.append_events_internal(Some(id), None, None, vec![EventData::SessionEnded])
             .await?;
         Ok(())
     }
 
     async fn begin_turn(&self, request: BeginTurnRequest) -> Result<Arc<dyn TurnHandle>> {
+        self.harness
+            .check(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
         let _guard = self.harness.inner.write_lock.lock().await;
         let mut record = self.load_record().await?;
         let conversation_dir = self.conversation_dir();
@@ -2994,7 +3302,9 @@ impl ConversationHandle for BasicConversationHandle {
         if request.session_id.is_none() {
             events_to_append.push(EventData::SessionStarted);
         }
-        events_to_append.push(EventData::TurnStarted { user_id: None });
+        events_to_append.push(EventData::TurnStarted {
+            user_id: self.harness.caller.as_ref().map(|c| c.principal.clone()),
+        });
         if !request.input.is_empty() {
             events_to_append.push(EventData::Messages {
                 messages: request.input,
@@ -3034,6 +3344,12 @@ impl ConversationHandle for BasicConversationHandle {
     }
 
     async fn turn_handle(&self, record: TurnRecord) -> Result<Arc<dyn TurnHandle>> {
+        self.harness
+            .check(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
         let events = load_events(&self.harness.inner.storage, &self.events_dir()).await?;
         let mut latest_event_id = None;
         let mut finished = false;
@@ -3066,6 +3382,12 @@ impl ConversationHandle for BasicConversationHandle {
     }
 
     async fn get_events(&self, query: Option<EventQuery>) -> Result<GetEventsResult> {
+        self.harness
+            .check(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
         let mut events = load_events(&self.harness.inner.storage, &self.events_dir()).await?;
         if let Some(query) = query {
             if let Some(session_id) = query.session_id {
@@ -3105,6 +3427,12 @@ impl ConversationHandle for BasicConversationHandle {
     }
 
     async fn watch_events(&self, after_exclusive: Bound<EventId>) -> Result<EventStream> {
+        self.harness
+            .check(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
         let _guard = self.harness.inner.write_lock.lock().await;
         let existing = match after_exclusive {
             Bound::Unbounded => Vec::new(),
@@ -3132,16 +3460,34 @@ impl ConversationHandle for BasicConversationHandle {
     }
 
     async fn get_event(&self, id: EventId) -> Result<Option<Event>> {
+        self.harness
+            .check(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
         let path = self.events_dir().join(format!("{id}.json"));
         self.harness.inner.storage.get_json_if_exists(&path).await
     }
 
     async fn add_events(&self, request: AddEventsRequest) -> Result<AddEventsResult> {
+        self.harness
+            .check(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
         self.append_events_internal(request.session_id, request.turn_id, None, request.data)
             .await
     }
 
     async fn fork(&self, request: ForkConversationRequest) -> Result<Arc<dyn ConversationHandle>> {
+        self.harness
+            .check(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
         let _guard = self.harness.inner.write_lock.lock().await;
         anyhow::ensure!(
             !self
@@ -3188,6 +3534,12 @@ impl ConversationHandle for BasicConversationHandle {
             name: request.name.unwrap_or_else(|| slug_to_name(&slug)),
             latest_event_id: None,
         };
+        self.harness
+            .claim(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: record.id,
+            })
+            .await?;
         let conversation_dir = agent.conversations_dir().join(record.id.to_string());
         self.harness
             .inner
@@ -3253,6 +3605,12 @@ impl ConversationHandle for BasicConversationHandle {
     }
 
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion> {
+        self.harness
+            .check(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
         let _guard = self.harness.inner.write_lock.lock().await;
         let artifact_version =
             write_artifact_version(&self.harness.inner, &self.artifacts_dir(), request).await?;
@@ -3282,6 +3640,12 @@ impl ConversationHandle for BasicConversationHandle {
     }
 
     async fn read_artifact(&self, request: ReadArtifactRequest) -> Result<Option<Artifact>> {
+        self.harness
+            .check(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
         let versions =
             load_artifact_versions(&self.harness.inner.storage, &self.artifacts_dir()).await?;
         let selected = versions
@@ -3307,56 +3671,74 @@ impl ConversationHandle for BasicConversationHandle {
     }
 
     async fn list_artifacts(&self) -> Result<Vec<ArtifactVersion>> {
+        self.harness
+            .check(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
         load_artifact_versions(&self.harness.inner.storage, &self.artifacts_dir()).await
     }
 
     async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
+        self.harness
+            .check(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
         Ok(merge_binding_records(vec![
-            list_binding_records(&self.harness.inner.storage, &self.harness.bindings_dir()).await?,
-            list_binding_records(
-                &self.harness.inner.storage,
-                &agent_bindings_dir(&self.harness, self.agent_id),
-            )
-            .await?,
-            list_binding_records(&self.harness.inner.storage, &self.bindings_dir()).await?,
+            self.harness
+                .binding_records(&self.harness.bindings_dir())
+                .await?,
+            self.harness
+                .binding_records(&agent_bindings_dir(&self.harness, self.agent_id))
+                .await?,
+            self.harness.binding_records(&self.bindings_dir()).await?,
         ]))
     }
 
     async fn put_binding(&self, binding: Binding) -> Result<BindingId> {
+        self.harness.check_binding(&binding).await?;
+        self.harness
+            .check(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
         let _guard = self.harness.inner.write_lock.lock().await;
         let id = Uuid7::now();
         let record = stored_binding(id, binding);
         self.harness
             .inner
             .storage
-            .put_json(self.bindings_dir().join(format!("{id}.json")), &record)
+            .put_json(
+                self.harness
+                    .caller_bindings_dir(&self.bindings_dir())
+                    .join(format!("{id}.json")),
+                &record,
+            )
             .await?;
         Ok(id)
     }
 
     async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>> {
-        let local_path = self.bindings_dir().join(format!("{id}.json"));
-        if let Some(record) = self
-            .harness
-            .inner
-            .storage
-            .get_json_if_exists::<StoredBinding>(&local_path)
-            .await?
-        {
-            return Ok(Some(record.record.binding));
-        }
-        let agent_path =
-            agent_bindings_dir(&self.harness, self.agent_id).join(format!("{id}.json"));
-        if let Some(record) = self
-            .harness
-            .inner
-            .storage
-            .get_json_if_exists::<StoredBinding>(&agent_path)
-            .await?
-        {
-            return Ok(Some(record.record.binding));
-        }
-        self.harness.get_binding(id).await
+        self.harness
+            .check(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
+        self.harness
+            .find_binding(
+                &[
+                    self.bindings_dir(),
+                    agent_bindings_dir(&self.harness, self.agent_id),
+                    self.harness.bindings_dir(),
+                ],
+                id,
+            )
+            .await
     }
 }
 
@@ -3769,7 +4151,7 @@ async fn prepare_sandbox_request(
                 let Some(reference) = model.secret else {
                     bail!("sandbox model binding has no credential");
                 };
-                crate::vault::model_credential_vault(context, &reference, &endpoint).await?;
+                crate::vault::resolve_model_key(context, &reference, &endpoint).await?;
                 reference
             } else {
                 crate::vault::find_secret(context, &binding.name)
@@ -3800,6 +4182,7 @@ async fn find_matching_stored_sandbox(
     storage: &BasicObjectStore,
     sandboxes_dir: &Path,
     request: &PreparedSandboxRequest,
+    principal: Option<&str>,
 ) -> Result<Option<(SandboxId, StoredSandbox)>> {
     let Some(name) = &request.name else {
         return Ok(None);
@@ -3809,6 +4192,9 @@ async fn find_matching_stored_sandbox(
         .await?;
     sandboxes.sort_by_key(|sandbox| sandbox.id.clone());
     for sandbox in sandboxes.into_iter().rev() {
+        if principal.is_some_and(|p| sandbox.principal.as_deref() != Some(p)) {
+            continue;
+        }
         if sandbox.name.as_ref() != Some(name) {
             continue;
         }
@@ -4216,6 +4602,8 @@ struct StoredArtifactMetadata {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredSandbox {
+    #[serde(default)]
+    principal: Option<String>,
     id: SandboxId,
     #[serde(default)]
     name: Option<String>,
@@ -4294,6 +4682,7 @@ struct PreparedSandboxRequest {
 impl PreparedSandboxRequest {
     fn stored_sandbox(&self, id: SandboxId) -> StoredSandbox {
         StoredSandbox {
+            principal: None,
             id,
             name: self.name.clone(),
             provider: self.provider.clone(),
@@ -5199,64 +5588,6 @@ impl BasicExoHarnessConfig {
             }
         }
         Ok(())
-    }
-}
-
-#[async_trait]
-impl VaultContext for BasicExoHarness {
-    async fn list_vaults(&self) -> Result<Vec<Arc<dyn VaultHandle>>> {
-        self.inner.vaults.global_vault().await?;
-        self.inner.vaults.list_vaults().await
-    }
-    async fn get_vault(&self, id: &VaultId) -> Result<Option<Arc<dyn VaultHandle>>> {
-        self.inner.vaults.get_vault(id).await
-    }
-}
-
-#[async_trait]
-impl VaultContext for BasicAgentHandle {
-    async fn get_vault(&self, id: &VaultId) -> Result<Option<Arc<dyn VaultHandle>>> {
-        if self.record.vaults.contains(id) {
-            return self.harness.get_vault(id).await;
-        }
-        let global = global_vault(&self.harness).await?;
-        Ok((global.record().id == *id).then_some(global))
-    }
-    async fn list_vaults(&self) -> Result<Vec<Arc<dyn VaultHandle>>> {
-        compose_vaults(
-            &self.harness,
-            vec![global_vault(&self.harness).await?],
-            &self.record.vaults,
-        )
-        .await
-    }
-}
-
-#[async_trait]
-impl VaultContext for BasicConversationHandle {
-    async fn get_vault(&self, id: &VaultId) -> Result<Option<Arc<dyn VaultHandle>>> {
-        if self.record.vaults.contains(id) {
-            return self.harness.get_vault(id).await;
-        }
-        self.harness
-            .get_agent(&self.agent_id)
-            .await?
-            .context("agent is unavailable")?
-            .get_vault(id)
-            .await
-    }
-    async fn list_vaults(&self) -> Result<Vec<Arc<dyn VaultHandle>>> {
-        let agent = self
-            .harness
-            .get_agent(&self.agent_id)
-            .await?
-            .context("agent is unavailable")?;
-        compose_vaults(
-            &self.harness,
-            agent.list_vaults().await?,
-            &self.record.vaults,
-        )
-        .await
     }
 }
 

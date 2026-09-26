@@ -365,3 +365,8 @@ pub enum ProviderError {
         context: BTreeMap<String, String>,
     },
 }
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CreateVaultBody {
+    pub name: String,
+}

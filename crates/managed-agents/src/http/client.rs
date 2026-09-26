@@ -153,6 +153,80 @@ impl RuntimeClient {
             .await
     }
 
+    pub async fn list_models(&self) -> Result<Vec<exoharness::BindingRecord>> {
+        self.http
+            .json(self.http.request(Method::GET, "model")?)
+            .await
+    }
+    pub async fn put_model(&self, binding: &exoharness::Binding) -> Result<exoharness::BindingId> {
+        self.http
+            .json(self.http.request(Method::POST, "model")?.json(binding))
+            .await
+    }
+
+    pub async fn create_vault(&self, name: &str) -> Result<exoharness::vault::VaultRecord> {
+        self.http
+            .json(
+                self.http
+                    .request(Method::POST, "vault")?
+                    .json(&CreateVaultBody { name: name.into() }),
+            )
+            .await
+    }
+    pub async fn delete_vault(&self, id: exoharness::vault::VaultId) -> Result<bool> {
+        self.http
+            .json(self.http.request(Method::DELETE, &format!("vault/{id}"))?)
+            .await
+    }
+    pub async fn put_secret(
+        &self,
+        scope: exoharness::ResourceScope,
+        id: exoharness::vault::VaultId,
+        request: &exoharness::PutSecretRequest,
+    ) -> Result<exoharness::SecretId> {
+        self.http
+            .json(
+                self.http
+                    .request(
+                        Method::POST,
+                        &format!("{}vault/{id}/secret", scope_path(scope)),
+                    )?
+                    .json(request),
+            )
+            .await
+    }
+    pub async fn update_secret(
+        &self,
+        scope: exoharness::ResourceScope,
+        id: exoharness::vault::VaultId,
+        secret_id: exoharness::SecretId,
+        secret: &exoharness::Secret,
+    ) -> Result<exoharness::SecretMetadata> {
+        self.http
+            .json(
+                self.http
+                    .request(
+                        Method::PUT,
+                        &format!("{}vault/{id}/secret/{secret_id}", scope_path(scope)),
+                    )?
+                    .json(secret),
+            )
+            .await
+    }
+    pub async fn delete_secret(
+        &self,
+        scope: exoharness::ResourceScope,
+        id: exoharness::vault::VaultId,
+        secret_id: exoharness::SecretId,
+    ) -> Result<bool> {
+        self.http
+            .json(self.http.request(
+                Method::DELETE,
+                &format!("{}vault/{id}/secret/{secret_id}", scope_path(scope)),
+            )?)
+            .await
+    }
+
     pub async fn list_vaults(
         &self,
         scope: exoharness::ResourceScope,

@@ -193,7 +193,7 @@ async fn vault_contexts_compose_without_exposing_unattached_vaults() -> Result<(
             .await
             .unwrap_err()
             .to_string()
-            .contains("attached to thread")
+            .contains("attached to a thread")
     );
     assert!(
         harness
@@ -201,7 +201,7 @@ async fn vault_contexts_compose_without_exposing_unattached_vaults() -> Result<(
             .await
             .unwrap_err()
             .to_string()
-            .contains("attached to agent")
+            .contains("attached to an agent")
     );
     assert_eq!(resumed.list_vaults().await?.len(), 3);
     assert!(resumed.get_vault(&global.record().id).await?.is_some());

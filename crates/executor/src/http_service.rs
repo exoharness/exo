@@ -12,7 +12,7 @@ use actix_web::{
     middleware::{Next, from_fn},
     web,
 };
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use exo_managed_agents::http::{RUNTIME_PATH, protocol::*, sse};
 use exoharness::{
     AgentHandle, AgentId, Event, EventData, EventQuery, EventQueryDirection, EventStream,
@@ -27,12 +27,18 @@ use crate::{
     SendRequest, harness::HarnessTurnKey,
 };
 
+#[derive(Clone)]
 pub struct RuntimeHttpService {
     runtime: Arc<Runtime>,
     agent_id: Option<AgentId>,
     authorization: Option<HeaderValue>,
     progress: broadcast::Sender<Event>,
-    definition_updates: tokio::sync::Mutex<()>,
+    definition_updates: Arc<tokio::sync::Mutex<()>>,
+    auth: Option<Arc<crate::remote::AuthServer>>,
+    multiplayer: bool,
+    callers: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<Runtime>>>>,
+    account_id: String,
+    session: Option<String>,
 }
 
 impl RuntimeHttpService {
@@ -42,6 +48,11 @@ impl RuntimeHttpService {
         }
         Ok(Self {
             runtime,
+            auth: None,
+            multiplayer: false,
+            callers: Arc::default(),
+            account_id: "local".into(),
+            session: None,
             agent_id: None,
             authorization: token
                 .map(|token| HeaderValue::from_str(&format!("Bearer {token}")))
@@ -49,6 +60,43 @@ impl RuntimeHttpService {
             progress: broadcast::channel(1024).0,
             definition_updates: Default::default(),
         })
+    }
+
+    pub fn with_auth(mut self, auth: Arc<crate::remote::AuthServer>, multiplayer: bool) -> Self {
+        self.auth = Some(auth);
+        self.multiplayer = multiplayer;
+        self
+    }
+
+    pub fn caller_runtime(&self, principal: String) -> Result<Arc<Runtime>> {
+        let mut callers = self.callers.lock().expect("caller runtimes poisoned");
+        if let Some(runtime) = callers.get(&principal) {
+            return Ok(runtime.clone());
+        }
+        let auth = self
+            .auth
+            .as_ref()
+            .context("authentication is not configured")?;
+        let runtime = Arc::new(
+            self.runtime
+                .with_caller(auth.caller(principal.clone(), self.multiplayer))?,
+        );
+        callers.insert(principal, runtime.clone());
+        Ok(runtime)
+    }
+
+    pub async fn shutdown_callers(&self) -> Result<()> {
+        let runtimes: Vec<_> = self
+            .callers
+            .lock()
+            .expect("caller runtimes poisoned")
+            .drain()
+            .map(|(_, r)| r)
+            .collect();
+        futures::future::join_all(runtimes.iter().map(|runtime| runtime.shutdown()))
+            .await
+            .into_iter()
+            .collect()
     }
 
     pub fn for_agent(mut self, agent_id: AgentId) -> Self {
@@ -92,9 +140,15 @@ impl RuntimeHttpService {
 
 pub fn server(listener: TcpListener, service: Arc<RuntimeHttpService>) -> std::io::Result<Server> {
     Ok(HttpServer::new(move || {
-        App::new()
-            .app_data(web::Data::new(Arc::clone(&service)))
-            .configure(configure)
+        let app = App::new().app_data(web::Data::new(Arc::clone(&service)));
+        let auth = service.auth.clone();
+        app.configure(move |cfg| {
+            if let Some(auth) = auth {
+                cfg.app_data(web::Data::new(auth));
+                crate::remote::configure(cfg);
+            }
+            configure(cfg);
+        })
     })
     .listen(listener)?
     .run())
@@ -105,6 +159,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         web::scope(RUNTIME_PATH)
             .wrap(from_fn(authorize))
             .route("/identity", web::get().to(identity))
+            .route("/model", web::get().to(list_models))
+            .route("/model", web::post().to(put_model))
             .route(
                 "/agent/{agent_id}/thread/{thread_id}/environment",
                 web::put().to(update_thread_environment),
@@ -112,25 +168,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/environment", web::get().to(list_environments))
             .route("/environment", web::put().to(put_environment))
             .route("/environment/{name}", web::delete().to(delete_environment))
-            .route("/vault", web::get().to(list_vaults))
-            .route("/vault/{vault_id}/secret", web::get().to(list_secrets))
-            .route("/agent/{agent_id}/vault", web::get().to(list_vaults))
-            .route(
-                "/agent/{agent_id}/vault/{vault_id}/secret",
-                web::get().to(list_secrets),
-            )
-            .route(
-                "/agent/{agent_id}/thread/{thread_id}/vault",
-                web::get().to(list_vaults),
-            )
-            .route(
-                "/agent/{agent_id}/thread/{thread_id}/vault",
-                web::post().to(attach_thread_vaults),
-            )
-            .route(
-                "/agent/{agent_id}/thread/{thread_id}/vault/{vault_id}/secret",
-                web::get().to(list_secrets),
-            )
+            .configure(configure_vaults)
             .route("/agent", web::get().to(list_agents))
             .route("/agent", web::post().to(create_agent))
             .route("/agent/{agent_id}", web::get().to(get_agent))
@@ -194,6 +232,28 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     );
 }
 
+fn configure_vaults(cfg: &mut web::ServiceConfig) {
+    for prefix in [
+        "/vault",
+        "/agent/{agent_id}/vault",
+        "/agent/{agent_id}/thread/{thread_id}/vault",
+    ] {
+        let secrets = format!("{prefix}/{{vault_id}}/secret");
+        let secret = format!("{secrets}/{{secret_id}}");
+        cfg.route(prefix, web::get().to(list_vaults))
+            .route(&secrets, web::get().to(list_secrets))
+            .route(&secrets, web::post().to(put_secret))
+            .route(&secret, web::put().to(update_secret))
+            .route(&secret, web::delete().to(delete_secret));
+    }
+    cfg.route("/vault", web::post().to(create_vault))
+        .route("/vault/{vault_id}", web::delete().to(delete_vault))
+        .route(
+            "/agent/{agent_id}/thread/{thread_id}/vault",
+            web::post().to(attach_thread_vaults),
+        );
+}
+
 async fn authorize(
     req: ServiceRequest,
     next: Next<impl MessageBody>,
@@ -207,6 +267,61 @@ async fn authorize(
         return Err(ErrorUnauthorized("runtime bearer token required"));
     }
     next.call(req).await
+}
+
+struct Service(Arc<RuntimeHttpService>);
+impl std::ops::Deref for Service {
+    type Target = RuntimeHttpService;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl actix_web::FromRequest for Service {
+    type Error = Error;
+    type Future = futures::future::LocalBoxFuture<'static, Result<Self, Error>>;
+    fn from_request(req: &actix_web::HttpRequest, _: &mut actix_web::dev::Payload) -> Self::Future {
+        let req = req.clone();
+        Box::pin(async move {
+            let service = req
+                .app_data::<web::Data<Arc<RuntimeHttpService>>>()
+                .ok_or_else(|| ErrorInternalServerError("runtime service missing"))?
+                .get_ref()
+                .clone();
+            let Some(auth) = &service.auth else {
+                return Ok(Self(service));
+            };
+            let (principal, session) = auth.authenticate(&req).await.map_err(|_| {
+                #[derive(Debug)]
+                struct Required(String);
+                impl std::fmt::Display for Required {
+                    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        f.write_str("Exo login required")
+                    }
+                }
+                impl actix_web::ResponseError for Required {
+                    fn status_code(&self) -> actix_web::http::StatusCode {
+                        actix_web::http::StatusCode::UNAUTHORIZED
+                    }
+                    fn error_response(&self) -> HttpResponse {
+                        HttpResponse::Unauthorized()
+                            .insert_header((
+                                "WWW-Authenticate",
+                                format!("Bearer resource_metadata=\"{}\"", self.0),
+                            ))
+                            .body("Exo login required")
+                    }
+                }
+                Error::from(Required(auth.metadata_url()))
+            })?;
+            let mut scoped = (*service).clone();
+            scoped.runtime = service
+                .caller_runtime(principal.clone())
+                .map_err(ErrorInternalServerError)?;
+            scoped.account_id = principal;
+            scoped.session = Some(session);
+            Ok(Self(Arc::new(scoped)))
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -226,7 +341,7 @@ struct TurnPath {
 }
 
 async fn list_agents(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     query: web::Query<AgentsQuery>,
 ) -> Result<web::Json<ListAgentsResult>, Error> {
     let mut agents = service
@@ -241,9 +356,9 @@ async fn list_agents(
     Ok(web::Json(ListAgentsResult { agents }))
 }
 
-async fn identity() -> web::Json<ProviderIdentity> {
+async fn identity(service: Service) -> web::Json<ProviderIdentity> {
     web::Json(ProviderIdentity {
-        account_id: "local".to_owned(),
+        account_id: service.account_id.clone(),
     })
 }
 
@@ -252,6 +367,7 @@ struct VaultPath {
     agent_id: Option<AgentId>,
     thread_id: Option<ThreadId>,
     vault_id: Option<exoharness::vault::VaultId>,
+    secret_id: Option<exoharness::SecretId>,
 }
 
 async fn scoped_vaults(
@@ -279,7 +395,7 @@ async fn scoped_vaults(
 }
 
 async fn list_environments(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
 ) -> Result<web::Json<Vec<exoharness::EnvironmentDefinition>>, Error> {
     Ok(web::Json(
         service
@@ -291,7 +407,7 @@ async fn list_environments(
     ))
 }
 async fn put_environment(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     body: web::Json<exoharness::EnvironmentDefinition>,
 ) -> Result<web::Json<bool>, Error> {
     service.require_full_provider()?;
@@ -304,7 +420,7 @@ async fn put_environment(
     Ok(web::Json(true))
 }
 async fn delete_environment(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     name: web::Path<String>,
 ) -> Result<web::Json<bool>, Error> {
     service.require_full_provider()?;
@@ -319,7 +435,7 @@ async fn delete_environment(
 }
 
 async fn list_vaults(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     path: web::Path<VaultPath>,
 ) -> Result<web::Json<Vec<exoharness::vault::VaultRecord>>, Error> {
     Ok(web::Json(
@@ -331,8 +447,129 @@ async fn list_vaults(
     ))
 }
 
+async fn list_models(service: Service) -> Result<web::Json<Vec<exoharness::BindingRecord>>, Error> {
+    service.require_full_provider()?;
+    let bindings = service
+        .runtime
+        .exoharness_handle()
+        .list_bindings()
+        .await
+        .map_err(ErrorBadRequest)?;
+    Ok(web::Json(
+        bindings
+            .into_iter()
+            .filter(|r| matches!(r.binding, exoharness::Binding::Llm { .. }))
+            .collect(),
+    ))
+}
+async fn put_model(
+    service: Service,
+    body: web::Json<exoharness::Binding>,
+) -> Result<web::Json<exoharness::BindingId>, Error> {
+    service.require_full_provider()?;
+    if !matches!(&*body, exoharness::Binding::Llm { .. }) {
+        return Err(ErrorBadRequest("expected a model binding"));
+    }
+    Ok(web::Json(
+        service
+            .runtime
+            .exoharness_handle()
+            .put_binding(body.into_inner())
+            .await
+            .map_err(ErrorBadRequest)?,
+    ))
+}
+
+async fn create_vault(
+    service: Service,
+    body: web::Json<CreateVaultBody>,
+) -> Result<web::Json<exoharness::vault::VaultRecord>, Error> {
+    service.require_full_provider()?;
+    let vault = service
+        .runtime
+        .exoharness_handle()
+        .create_vault(&body.name)
+        .await
+        .map_err(ErrorBadRequest)?;
+    Ok(web::Json(vault.record().clone()))
+}
+async fn delete_vault(
+    service: Service,
+    path: web::Path<VaultPath>,
+) -> Result<web::Json<bool>, Error> {
+    service.require_full_provider()?;
+    service
+        .runtime
+        .exoharness_handle()
+        .delete_vault(
+            &path
+                .vault_id
+                .ok_or_else(|| ErrorBadRequest("vault ID missing"))?,
+        )
+        .await
+        .map_err(ErrorBadRequest)?;
+    Ok(web::Json(true))
+}
+async fn writable_vault(
+    service: &RuntimeHttpService,
+    path: &VaultPath,
+) -> Result<Arc<dyn exoharness::vault::VaultHandle>, Error> {
+    service.require_full_provider()?;
+    scoped_vaults(service, path)
+        .await?
+        .into_iter()
+        .find(|v| Some(v.record().id) == path.vault_id)
+        .ok_or_else(|| ErrorNotFound("vault is unavailable"))
+}
+async fn put_secret(
+    service: Service,
+    path: web::Path<VaultPath>,
+    body: web::Json<exoharness::PutSecretRequest>,
+) -> Result<web::Json<exoharness::SecretId>, Error> {
+    let vault = writable_vault(&service, &path).await?;
+    Ok(web::Json(
+        vault
+            .put_secret(body.into_inner())
+            .await
+            .map_err(ErrorBadRequest)?,
+    ))
+}
+async fn update_secret(
+    service: Service,
+    path: web::Path<VaultPath>,
+    body: web::Json<exoharness::Secret>,
+) -> Result<web::Json<exoharness::SecretMetadata>, Error> {
+    let vault = writable_vault(&service, &path).await?;
+    Ok(web::Json(
+        vault
+            .update_secret(
+                &path
+                    .secret_id
+                    .ok_or_else(|| ErrorBadRequest("secret ID missing"))?,
+                body.into_inner(),
+            )
+            .await
+            .map_err(ErrorBadRequest)?,
+    ))
+}
+async fn delete_secret(
+    service: Service,
+    path: web::Path<VaultPath>,
+) -> Result<web::Json<bool>, Error> {
+    let vault = writable_vault(&service, &path).await?;
+    vault
+        .delete_secret(
+            &path
+                .secret_id
+                .ok_or_else(|| ErrorBadRequest("secret ID missing"))?,
+        )
+        .await
+        .map_err(ErrorBadRequest)?;
+    Ok(web::Json(true))
+}
+
 async fn list_secrets(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     path: web::Path<VaultPath>,
 ) -> Result<web::Json<Vec<exoharness::SecretMetadata>>, Error> {
     let vault = scoped_vaults(&service, &path)
@@ -346,7 +583,7 @@ async fn list_secrets(
 }
 
 async fn create_agent(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     body: web::Json<exoharness::NewAgentRequest>,
 ) -> Result<web::Json<exoharness::AgentRecord>, Error> {
     service.require_full_provider()?;
@@ -360,7 +597,7 @@ async fn create_agent(
 }
 
 async fn get_agent(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     path: web::Path<AgentPath>,
 ) -> Result<web::Json<Option<exoharness::AgentRecord>>, Error> {
     if service
@@ -381,7 +618,7 @@ async fn get_agent(
 }
 
 async fn delete_agent(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     path: web::Path<AgentPath>,
 ) -> Result<web::Json<bool>, Error> {
     service.require_full_provider()?;
@@ -396,7 +633,7 @@ async fn delete_agent(
 }
 
 async fn list_artifacts(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     path: web::Path<AgentPath>,
 ) -> Result<web::Json<Vec<exoharness::ArtifactVersion>>, Error> {
     Ok(web::Json(
@@ -410,7 +647,7 @@ async fn list_artifacts(
 }
 
 async fn read_artifact(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     path: web::Path<AgentPath>,
     query: web::Query<exoharness::ReadArtifactRequest>,
 ) -> Result<web::Json<Option<exoharness::Artifact>>, Error> {
@@ -425,7 +662,7 @@ async fn read_artifact(
 }
 
 async fn list_thread_artifacts(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     path: web::Path<ThreadPath>,
 ) -> Result<web::Json<Vec<exoharness::ArtifactVersion>>, Error> {
     let agent = service.agent(path.agent_id).await?;
@@ -436,7 +673,7 @@ async fn list_thread_artifacts(
 }
 
 async fn read_thread_artifact(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     path: web::Path<ThreadPath>,
     query: web::Query<exoharness::ReadArtifactRequest>,
 ) -> Result<web::Json<Option<exoharness::Artifact>>, Error> {
@@ -451,7 +688,7 @@ async fn read_thread_artifact(
 }
 
 async fn write_artifact(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     path: web::Path<AgentPath>,
     body: web::Json<exoharness::WriteArtifactRequest>,
 ) -> Result<web::Json<exoharness::ArtifactVersion>, Error> {
@@ -477,7 +714,7 @@ async fn write_artifact(
 }
 
 async fn get_thread(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     path: web::Path<ThreadPath>,
 ) -> Result<web::Json<ThreadResult>, Error> {
     let agent = service.agent(path.agent_id).await?;
@@ -489,7 +726,7 @@ async fn get_thread(
 }
 
 async fn list_threads(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     path: web::Path<AgentPath>,
     query: web::Query<ThreadsQuery>,
 ) -> Result<web::Json<ListThreadsResult>, Error> {
@@ -556,7 +793,7 @@ async fn check_harness(
 }
 
 async fn create_thread(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     path: web::Path<AgentPath>,
     body: Option<web::Json<CreateThreadBody>>,
 ) -> Result<web::Json<CreateThreadResult>, Error> {
@@ -612,7 +849,7 @@ async fn create_thread(
 }
 
 async fn update_thread_environment(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     path: web::Path<ThreadPath>,
     body: web::Json<exoharness::EnvironmentDefinition>,
 ) -> Result<web::Json<ThreadResult>, Error> {
@@ -636,7 +873,7 @@ async fn update_thread_environment(
 }
 
 async fn attach_thread_vaults(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     path: web::Path<ThreadPath>,
     body: web::Json<AttachThreadVaultsBody>,
 ) -> Result<web::Json<ThreadResult>, Error> {
@@ -654,7 +891,7 @@ async fn attach_thread_vaults(
 }
 
 async fn delete_thread(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     path: web::Path<ThreadPath>,
 ) -> Result<web::Json<DeleteThreadResult>, Error> {
     let agent = service.agent(path.agent_id).await?;
@@ -670,7 +907,7 @@ async fn delete_thread(
 }
 
 async fn fork_thread(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     path: web::Path<ThreadPath>,
     body: Option<web::Json<ForkThreadBody>>,
 ) -> Result<web::Json<ThreadResult>, Error> {
@@ -690,7 +927,7 @@ async fn fork_thread(
 }
 
 async fn submit_turn(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     path: web::Path<ThreadPath>,
     body: web::Json<SubmitTurnBody>,
 ) -> Result<HttpResponse, Error> {
@@ -795,7 +1032,7 @@ async fn submit_turn(
 }
 
 async fn turn_status(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     path: web::Path<TurnPath>,
 ) -> Result<web::Json<TurnStatusResult>, Error> {
     let agent = service.agent(path.agent_id).await?;
@@ -809,13 +1046,26 @@ async fn turn_status(
 }
 
 async fn cancel_turn(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     path: web::Path<TurnPath>,
 ) -> Result<web::Json<CancelTurnResult>, Error> {
     let agent = service.agent(path.agent_id).await?;
-    service.thread(agent.as_ref(), path.thread_id).await?;
-    let canceled_active_turn = service
-        .runtime
+    let thread = service.thread(agent.as_ref(), path.thread_id).await?;
+    let runtime = if service.auth.is_some() {
+        if let Some(principal) = crate::permissions::turn_caller(thread.as_ref(), path.turn_id)
+            .await
+            .map_err(ErrorInternalServerError)?
+        {
+            service
+                .caller_runtime(principal)
+                .map_err(ErrorInternalServerError)?
+        } else {
+            service.runtime.clone()
+        }
+    } else {
+        service.runtime.clone()
+    };
+    let canceled_active_turn = runtime
         .cancel_turn(HarnessTurnKey::new(path.thread_id, path.turn_id))
         .await
         .map_err(ErrorBadRequest)?;
@@ -826,7 +1076,7 @@ async fn cancel_turn(
 }
 
 async fn approval_response(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     path: web::Path<TurnPath>,
     body: web::Json<ApprovalResponseBody>,
 ) -> Result<web::Json<EventResult>, Error> {
@@ -840,14 +1090,14 @@ async fn approval_response(
     Ok(web::Json(EventResult { event_id }))
 }
 
-async fn unsupported_interaction() -> Result<HttpResponse, Error> {
+async fn unsupported_interaction(_service: Service) -> Result<HttpResponse, Error> {
     Err(ErrorNotImplemented(
         "this runtime does not execute frontend tools",
     ))
 }
 
 async fn events(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     path: web::Path<ThreadPath>,
     query: web::Query<EventsQuery>,
 ) -> Result<web::Json<exoharness::GetEventsResult>, Error> {
@@ -875,7 +1125,7 @@ async fn events(
 }
 
 async fn watch(
-    service: web::Data<Arc<RuntimeHttpService>>,
+    service: Service,
     path: web::Path<ThreadPath>,
     query: web::Query<WatchQuery>,
 ) -> Result<HttpResponse, Error> {
@@ -890,7 +1140,32 @@ async fn watch(
         ))
         .await
         .map_err(ErrorBadRequest)?;
-    let stream = futures::stream::select(durable, progress_stream(receiver, thread_id));
+    let mut stream: EventStream = Box::pin(futures::stream::select(
+        durable,
+        progress_stream(receiver, thread_id),
+    ));
+    if let Some(auth) = service.auth.clone() {
+        let session = service
+            .session
+            .clone()
+            .ok_or_else(|| ErrorUnauthorized("session missing"))?;
+        stream = Box::pin(futures::stream::unfold(
+            (
+                stream,
+                auth,
+                session,
+                tokio::time::interval(std::time::Duration::from_secs(1)),
+            ),
+            |(mut events, auth, session, mut timer)| async move {
+                loop {
+                    tokio::select! {
+                        event = events.next() => return event.map(|event| (event, (events, auth, session, timer))),
+                        _ = timer.tick() => if auth.session_principal(&session).await.is_err() { return None; },
+                    }
+                }
+            },
+        ));
+    }
     Ok(HttpResponse::Ok()
         .insert_header(("content-type", "text/event-stream; charset=utf-8"))
         .insert_header(("cache-control", "no-cache, no-transform"))
