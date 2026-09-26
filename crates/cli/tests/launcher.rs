@@ -145,14 +145,10 @@ fn launcher_creates_and_updates_a_thread_environment_with_the_current_cli() -> R
             Some(&mounts)
         );
         // A normal resume must retain the saved mounts without launch overrides.
-        run(Command::new(&wrapper).current_dir(&launch).args([
-            "agent",
-            "run",
-            "--agent",
-            "exo-agent",
-            "--thread",
-            "dev",
-        ]))?;
+        run(Command::new(&wrapper)
+            .current_dir(&launch)
+            .env("PATH", &path)
+            .args(["agent", "run", "--agent", "exo-agent", "--thread", "dev"]))?;
         let state = exoharness::BasicExoHarnessConfig {
             root: temp.path().join("state/exoharness"),
             secret_backend: exoharness::SecretBackendChoice::File {

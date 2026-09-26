@@ -60,7 +60,13 @@ dev> hello! what can you do?
 ln -s "$PWD/exo/scripts/exo-cli" ~/bin/exo-cli
 ```
 
-Then from any directory under `~/projects`:
+Relaunch the stack with your workspace mounted:
+
+```bash
+./exo.sh --agent-cli-mount "$HOME/projects"
+```
+
+Keep that flag on subsequent launches. Then from any directory under `~/projects`:
 
 ```bash
 cd ~/projects/some-repo
