@@ -203,7 +203,7 @@ async function main(): Promise<void> {
 async function runHarnessChecks(
   harness: HarnessDefinition,
 ): Promise<HarnessCheckResult> {
-  registerSecretAndModel(harness);
+  createCredential(harness);
   const agent = createAgent(harness);
   const history = runHistoryReplayCheck(harness, agent);
   const sandbox = args.sandbox ? runSandboxEscapeCheck(harness, agent) : null;
@@ -213,7 +213,7 @@ async function runHarnessChecks(
   return { agent, history, sandbox, braintrust };
 }
 
-function registerSecretAndModel(harness: HarnessDefinition): void {
+function createCredential(harness: HarnessDefinition): void {
   runExo([
     "vault",
     "secret",
@@ -222,8 +222,13 @@ function registerSecretAndModel(harness: HarnessDefinition): void {
     harness.secret,
     "--token-env",
     harness.envName,
+    "--http-origin",
+    harness.secret === "anthropic"
+      ? "https://api.anthropic.com"
+      : harness.secret === "cursor"
+        ? "https://api.cursor.com"
+        : "https://api.openai.com",
   ]);
-  runExo(["model", "create", harness.model, "--secret", harness.secret]);
 }
 
 function saveAgentSpec(
@@ -237,6 +242,7 @@ function saveAgentSpec(
     harness: resolve(repoRoot, harness.module),
     config: {
       model: harness.model,
+      credential: harness.secret,
       braintrust: tracing
         ? {
             org_name: tracing.org,

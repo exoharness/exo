@@ -15,7 +15,7 @@ script, then learn what to do with it.
 
 Building from primitives instead of using the canonical agent:
 
-3. [Using the CLI Directly](./quick-start) — secrets, model bindings,
+3. [Using the CLI Directly](./quick-start) — vault secrets, agent specs,
    and a bare REPL.
 4. [A Sandboxed Conversation](./sandboxed-conversation) — give a bare
    agent a shell in an isolated sandbox.

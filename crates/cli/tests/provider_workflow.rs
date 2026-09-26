@@ -34,7 +34,7 @@ async fn local_and_http_cli_workflows() -> Result<()> {
         if provider == "remote" {
             for (name, source) in [(
                 "wrong-harness",
-                support::SOURCE.replace("harness: basic", "harness: unknown"),
+                f.source().replace("harness: basic", "harness: unknown"),
             )] {
                 let invalid = f.temp.path().join(format!("{name}.md"));
                 std::fs::write(&invalid, source)?;
@@ -248,7 +248,9 @@ async fn local_and_http_file_runs_sync_saved_agents_and_preserve_history() -> Re
         let f = Fixture::new().await?;
         f.cli(&["provider", "switch", provider]).await?;
         let file = f.agent_file.to_str().context("agent file")?;
-        let original = support::SOURCE.replace("config:", "config:\n  max_tool_round_trips: 17");
+        let original = f
+            .source()
+            .replace("config:", "config:\n  max_tool_round_trips: 17");
         std::fs::write(&f.agent_file, &original)?;
         let first = f
             .cli(&[
@@ -277,7 +279,8 @@ async fn local_and_http_file_runs_sync_saved_agents_and_preserve_history() -> Re
             Some(17)
         );
 
-        let updated = support::SOURCE
+        let updated = f
+            .source()
             .replace("Workflow agent", "Renamed file agent")
             .replace("Reply to the user.", "Follow the updated instructions.");
         std::fs::write(&f.agent_file, &updated)?;
@@ -842,7 +845,9 @@ async fn local_and_http_providers_configure_named_harnesses() -> Result<()> {
     for provider in ["local", "remote"] {
         f.cli(&["provider", "switch", provider]).await?;
         for harness in ["rlm", "codex", "claude-code", "cursor", "pi"] {
-            let source = support::SOURCE.replace("harness: basic", &format!("harness: {harness}"));
+            let source = f
+                .source()
+                .replace("harness: basic", &format!("harness: {harness}"));
             std::fs::write(&f.agent_file, &source)?;
             let name = format!("{provider}-{harness}");
             f.cli(&[
@@ -1556,7 +1561,7 @@ async fn provider_errors_explain_how_to_set_context_and_creation_is_offline() ->
 }
 
 #[actix_web::test]
-async fn model_and_sandbox_bindings_keep_the_explicit_vault() -> Result<()> {
+async fn sandbox_bindings_keep_the_explicit_vault() -> Result<()> {
     let f = Fixture::new().await?;
     f.cli(&["vault", "create", "team"]).await?;
     f.cli(&[
@@ -1570,20 +1575,10 @@ async fn model_and_sandbox_bindings_keep_the_explicit_vault() -> Result<()> {
     ])
     .await?;
     f.cli(&[
-        "model",
-        "create",
-        "team-model",
-        "--vault",
-        "team",
-        "--secret",
-        "model-key",
-    ])
-    .await?;
-    f.cli(&[
-        "sandbox",
+        "environment",
         "provider",
         "create",
-        "--sandbox",
+        "--backend",
         "daytona",
         "--vault",
         "team",
@@ -1593,18 +1588,6 @@ async fn model_and_sandbox_bindings_keep_the_explicit_vault() -> Result<()> {
     .await?;
     let state = f.runtime.exoharness_handle();
     let team = exo_managed_agents::vaults::find_vault(state.as_ref(), "team").await?;
-    let model = state
-        .list_bindings()
-        .await?
-        .into_iter()
-        .find_map(|record| match record.binding {
-            exoharness::Binding::Llm { name, secret, .. } if name == "team-model" => secret,
-            _ => None,
-        })
-        .context("model binding")?;
-    assert_eq!(model.vault_id, team.record().id);
-    let listing = f.cli(&["model", "list"]).await?;
-    assert!(listing.contains("team/model-key"), "{listing}");
     let bindings = state.list_bindings().await?;
     let sandbox = bindings.iter().find(|record| matches!(&record.binding, exoharness::Binding::Sandbox { name, .. } if name == "daytona")).context("sandbox binding")?;
     assert!(serde_json::to_string(&sandbox.binding)?.contains(&team.record().id.to_string()));
@@ -1665,4 +1648,186 @@ async fn provider_selection_is_visible_and_clearable() -> Result<()> {
     );
     assert_eq!(f.cli(&["provider", "get", "remote"]).await?, profile);
     f.stop().await
+}
+
+#[actix_web::test]
+async fn secret_destination_updates_preserve_identity_locally_and_over_http() -> Result<()> {
+    for provider in ["local", "remote"] {
+        let f = Fixture::new().await?;
+        f.cli(&["provider", "switch", provider]).await?;
+        f.cli(&[
+            "vault",
+            "secret",
+            "create",
+            "global",
+            "github-git",
+            "--token-env",
+            "SMOKE_API_KEY",
+        ])
+        .await?;
+        let vault = exo_managed_agents::vaults::find_vault(
+            f.runtime.exoharness_handle().as_ref(),
+            "global",
+        )
+        .await?;
+        let before = vault
+            .list_secrets()
+            .await?
+            .into_iter()
+            .find(|s| s.name == "github-git")
+            .context("Git secret")?;
+        let original = vault.get_secret(&before.id).await?;
+        let target = exoharness::vault::SecretTarget::http("https://github.com")?;
+        let error = vault
+            .resolve_secret(&before.id, &target)
+            .await
+            .err()
+            .context("missing grant must fail")?;
+        assert!(error.to_string().contains("github-git"));
+        assert!(
+            error
+                .to_string()
+                .contains("--http-origin https://github.com")
+        );
+        f.cli(&[
+            "vault",
+            "secret",
+            "update",
+            "global",
+            "github-git",
+            "--http-origin",
+            "https://github.com",
+        ])
+        .await?;
+        let saved: exoharness::SecretMetadata = serde_json::from_str(
+            &f.cli(&["vault", "secret", "get", "global", "github-git"])
+                .await?,
+        )?;
+        assert_eq!(saved.id, before.id);
+        assert_eq!(saved.revision, before.revision + 1);
+        assert_eq!(saved.target, Some(target.clone()));
+        assert_eq!(vault.get_secret(&saved.id).await?, original);
+        assert!(vault.resolve_secret(&saved.id, &target).await.is_ok());
+        assert!(
+            vault
+                .resolve_secret(
+                    &saved.id,
+                    &exoharness::vault::SecretTarget::http("https://other.example")?
+                )
+                .await
+                .is_err()
+        );
+        // Value-only rotation must retain the grant, including over HTTP.
+        f.cli(&[
+            "vault",
+            "secret",
+            "update",
+            "global",
+            "github-git",
+            "--token-env",
+            "SMOKE_API_KEY",
+        ])
+        .await?;
+        assert!(vault.resolve_secret(&saved.id, &target).await.is_ok());
+        let rejected = f
+            .output(
+                &[
+                    "vault",
+                    "secret",
+                    "update",
+                    "global",
+                    "github-git",
+                    "--http-origin",
+                    "http://github.com",
+                    "--token-env",
+                    "SMOKE_API_KEY",
+                ],
+                None,
+                None,
+            )
+            .await?;
+        assert!(!rejected.status.success());
+        assert!(vault.resolve_secret(&saved.id, &target).await.is_ok());
+        f.stop().await?;
+    }
+    Ok(())
+}
+
+#[actix_web::test]
+async fn models_use_spec_names_and_selected_vault_credentials_locally_and_over_http() -> Result<()>
+{
+    use wiremock::{
+        Mock,
+        matchers::{body_partial_json, header, method, path},
+    };
+    for provider in ["local", "remote"] {
+        let f = Fixture::new().await?;
+        f.cli(&["provider", "switch", provider]).await?;
+        f.cli(&["vault", "create", "personal"]).await?;
+        success(
+            f.command(&[
+                "vault",
+                "secret",
+                "create",
+                "personal",
+                "model-key",
+                "--token-env",
+                "PERSONAL_KEY",
+            ])
+            .env("PERSONAL_KEY", "personal-model-key")
+            .output()
+            .await?,
+        )?;
+        std::fs::write(
+            &f.agent_file,
+            f.source().replace("gpt-5-mini", "gpt-5-unregistered"),
+        )?;
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .and(header("authorization", "Bearer personal-model-key"))
+            .and(body_partial_json(
+                serde_json::json!({"model": "gpt-5-unregistered"}),
+            ))
+            .respond_with(support::model_response())
+            .with_priority(1)
+            .expect(1)
+            .mount(&f.model)
+            .await;
+        let result = f
+            .cli(&[
+                "agent",
+                "run",
+                "--agent-file",
+                f.agent_file.to_str().unwrap(),
+                "--vault",
+                "personal",
+                "--prompt",
+                "hello",
+            ])
+            .await?;
+        assert!(result.contains("Workflow reply."), "{result}");
+        f.model.verify().await;
+        let missing = f
+            .source()
+            .replace("credential: model-key", "credential: missing");
+        std::fs::write(&f.agent_file, missing)?;
+        let failed = f
+            .command(&[
+                "agent",
+                "run",
+                "--agent-file",
+                f.agent_file.to_str().unwrap(),
+                "--prompt",
+                "hello",
+            ])
+            .env("OPENAI_API_KEY", "must-not-be-used")
+            .output()
+            .await?;
+        assert!(!failed.status.success());
+        assert!(
+            String::from_utf8_lossy(&failed.stderr).contains("not found in the selected vaults")
+        );
+        f.stop().await?;
+    }
+    Ok(())
 }

@@ -1037,6 +1037,7 @@ name: "IRC Agent"
 harness: basic
 config:
   model: gpt-5.4
+  credential: openai
 ---
 Help the user with their task.
 EOF

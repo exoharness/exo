@@ -2,9 +2,11 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use anyhow::Context;
+
 use exoharness::{
-    AddEventsRequest, AgentHandle, Binding, ConversationHandle, EventData, EventKind, EventQuery,
-    EventQueryDirection, ExoHarness, Result, Secret, ToolCallId, Uuid7,
+    AddEventsRequest, AgentHandle, ConversationHandle, EventData, EventKind, EventQuery,
+    EventQueryDirection, ExoHarness, Result, ToolCallId, Uuid7,
 };
 use lingua::Message;
 use lingua::universal::{
@@ -187,71 +189,46 @@ pub async fn put_conversation_model_override(
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ResolvedModelBinding {
+pub(crate) struct ResolvedModel {
     pub(crate) model: String,
     pub(crate) api_key: Option<String>,
     pub(crate) base_url: Option<String>,
 }
 
-pub(crate) async fn resolve_model_binding(
+pub(crate) async fn model_credential(
     conversation: &dyn ConversationHandle,
-    name: &str,
-) -> Result<ResolvedModelBinding> {
-    let binding_record = conversation
-        .list_bindings()
+    config: &crate::AgentConfig,
+) -> Result<exoharness::vault::SecretReference> {
+    let name = config
+        .credential
+        .as_deref()
+        .context("agent config.credential must name a credential in a selected vault")?;
+    exoharness::vault::find_secret(conversation, name)
         .await?
-        .into_iter()
-        .find(|binding| binding.name == name)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "model is not registered: {name}; run `exo model create {name} --secret <secret>`"
-            )
-        })?;
-    let Binding::Llm {
-        model,
-        mut base_url,
-        secret,
-        ..
-    } = binding_record.binding
-    else {
-        return Err(anyhow::anyhow!("binding is not a model: {name}"));
-    };
-    anyhow::ensure!(
-        conversation.caller().is_none() || secret.is_some(),
-        "authenticated runs require a model credential from a selected vault; register the model with --secret"
-    );
-    let api_key = match secret {
-        Some(reference) if conversation.caller().is_some() => {
-            let variable = if crate::harness_runtime::is_anthropic_model(&model) {
+        .with_context(|| format!("model credential {name:?} was not found in the selected vaults"))
+}
+
+pub(crate) async fn resolve_model(
+    conversation: &dyn ConversationHandle,
+    config: &crate::AgentConfig,
+) -> Result<ResolvedModel> {
+    let reference = model_credential(conversation, config).await?;
+    let endpoint = match &config.base_url {
+        Some(url) => url::Url::parse(url)?,
+        None => exoharness::vault::model_endpoint(
+            None,
+            if crate::harness_runtime::is_anthropic_model(&config.model) {
                 "ANTHROPIC_API_KEY"
             } else {
                 "OPENAI_API_KEY"
-            };
-            let endpoint = exoharness::vault::model_endpoint(base_url.as_deref(), variable)?;
-            base_url = Some(endpoint.to_string());
-            Some(exoharness::vault::resolve_model_key(conversation, &reference, &endpoint).await?)
-        }
-        Some(reference) => {
-            let secret = exoharness::vault::require_vault(conversation, &reference.vault_id)
-                .await?
-                .get_secret(&reference.secret_id)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("model secret does not exist for {name}"))?;
-            match secret {
-                Secret::Key { value } => Some(value),
-                Secret::Oauth { .. } => {
-                    return Err(anyhow::anyhow!(
-                        "model secret must be a key secret, got oauth for {name}"
-                    ));
-                }
-            }
-        }
-        None => None,
+            },
+        )?,
     };
-    Ok(ResolvedModelBinding {
-        model,
-        api_key,
-        base_url,
+    let api_key = exoharness::vault::resolve_model_key(conversation, &reference, &endpoint).await?;
+    Ok(ResolvedModel {
+        model: config.model.clone(),
+        api_key: Some(api_key),
+        base_url: config.base_url.clone(),
     })
 }
 
@@ -496,14 +473,13 @@ mod tests {
 #[cfg(test)]
 mod vault_tests {
     use super::*;
-    use exoharness::vault::SecretReference;
     use exoharness::{
         BasicExoHarness, BasicExoHarnessConfig, NewAgentRequest, NewThreadRequest,
-        PutSecretRequest, SandboxBackendRegistration, SandboxProvider, SecretBackendChoice,
+        PutSecretRequest, SandboxBackendRegistration, SandboxProvider, Secret, SecretBackendChoice,
     };
 
     #[tokio::test]
-    async fn model_auth_uses_the_runtime_vault_even_when_user_secret_names_match() -> Result<()> {
+    async fn model_credentials_resolve_only_from_the_selected_vaults() -> Result<()> {
         let harness = BasicExoHarness::in_memory(BasicExoHarnessConfig {
             root: Default::default(),
             secret_backend: SecretBackendChoice::Static([1; 32]),
@@ -514,7 +490,7 @@ mod vault_tests {
         .await?;
         let runtime = exoharness::vault::global_vault(&harness).await?;
         let user = harness.create_vault("alice").await?;
-        let model_secret = runtime
+        runtime
             .put_secret(PutSecretRequest {
                 name: "provider".into(),
                 target: None,
@@ -532,17 +508,6 @@ mod vault_tests {
                 },
             })
             .await?;
-        harness
-            .put_binding(Binding::Llm {
-                name: "model".into(),
-                model: "gpt-5.6-sol".into(),
-                base_url: None,
-                secret: Some(SecretReference {
-                    vault_id: runtime.record().id,
-                    secret_id: model_secret,
-                }),
-            })
-            .await?;
         let agent = harness
             .new_agent(NewAgentRequest {
                 vaults: vec![],
@@ -556,37 +521,51 @@ mod vault_tests {
                 ..Default::default()
             })
             .await?;
-        let model = resolve_model_binding(thread.as_ref(), "model").await?;
-        assert_eq!(model.api_key.as_deref(), Some("runtime-key"));
+        let definition = exo_managed_agents::AgentDefinition::parse("---\nname: test\nharness: basic\nconfig:\n  model: gpt-5.6-sol\n  credential: provider\n---\nTest.".into())?;
+        let mut config = crate::managed_agents::agent_config(
+            &definition,
+            SandboxProvider::LocalProcess,
+            None,
+            None,
+        )?;
+        let model = resolve_model(thread.as_ref(), &config).await?;
+        assert_eq!(model.api_key.as_deref(), Some("user-key"));
         user.update_secret(
             &user_secret,
             Secret::Key {
                 value: "rotated-user-key".into(),
-            },
+            }
+            .into(),
         )
         .await?;
         assert_eq!(
-            resolve_model_binding(thread.as_ref(), "model")
+            resolve_model(thread.as_ref(), &config)
+                .await?
+                .api_key
+                .as_deref(),
+            Some("rotated-user-key")
+        );
+        let global_thread = agent.new_thread(Default::default()).await?;
+        assert_eq!(
+            resolve_model(global_thread.as_ref(), &config)
                 .await?
                 .api_key
                 .as_deref(),
             Some("runtime-key")
         );
-        harness
-            .put_binding(Binding::Llm {
-                name: "user-secret-model".into(),
-                model: "gpt-5.6-sol".into(),
-                base_url: None,
-                secret: Some(SecretReference {
-                    vault_id: runtime.record().id,
-                    secret_id: user_secret,
-                }),
-            })
-            .await?;
+        config.credential = Some(user_secret.to_string());
         assert!(
-            resolve_model_binding(thread.as_ref(), "user-secret-model")
+            resolve_model(global_thread.as_ref(), &config)
                 .await
                 .is_err()
+        );
+        config.credential = None;
+        assert!(
+            resolve_model(thread.as_ref(), &config)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("config.credential")
         );
         Ok(())
     }

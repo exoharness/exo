@@ -237,7 +237,7 @@ impl SmolvmSandboxBackend {
                         format!(
                             "could not run {} --version. Install SmolVM with \
                          `curl -sSL https://smolmachines.com/install.sh | bash`, \
-                         or configure its path with `exo sandbox provider create --sandbox smolvm \
+                         or configure its path with `exo environment provider create --backend smolvm \
                          --smolvm-binary /path/to/smolvm`",
                             binary.display()
                         )
@@ -590,7 +590,8 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             );
             ensure!(
                 self.capabilities().await?.interceptor,
-                "smolvm proxy egress requires a binary with --egress-interceptor support; configure --smolvm-binary"
+                "{} lacks --egress-interceptor support required for credential proxying; select a compatible build with `exo environment provider create --backend smolvm --smolvm-binary <path>`",
+                self.binary().await?.display()
             );
         }
         let binary = self.binary().await?;
@@ -1209,7 +1210,7 @@ esac"#,
             .credentials
             .push(crate::EgressCredentialBinding {
                 name: "key".into(),
-                model: None,
+
                 environment_variable: "API_KEY".into(),
                 networking: crate::CredentialNetworkPolicy::Limited {
                     allowed_hosts: vec!["api.test".into()],

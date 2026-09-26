@@ -174,6 +174,8 @@ pub fn agent_config(
             enable_networking: true,
         },
         model: model.into(),
+        credential: definition.frontmatter.config.credential.clone(),
+        base_url: definition.frontmatter.config.base_url.clone(),
         max_output_tokens: definition.frontmatter.config.max_output_tokens,
         max_tool_round_trips: definition.frontmatter.config.max_tool_round_trips,
         braintrust: definition.frontmatter.config.braintrust.clone(),

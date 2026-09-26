@@ -52,8 +52,7 @@ its context-size estimates are excluded from token and cost totals.
 Register an OpenAI model:
 
 ```bash
-./target/debug/exo vault secret create global openai --token-env OPENAI_API_KEY
-./target/debug/exo model create gpt-5.5 --secret openai
+./target/debug/exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com
 ```
 
 Build the sandbox image:
@@ -74,6 +73,7 @@ name: "TS Codex"
 harness: codex
 config:
   model: gpt-5.5
+  credential: openai
 ---
 Help the user with their task.
 EOF
@@ -89,8 +89,7 @@ EOF
 Register an Anthropic model:
 
 ```bash
-./target/debug/exo vault secret create global anthropic --token-env ANTHROPIC_API_KEY
-./target/debug/exo model create claude-sonnet-4-6 --secret anthropic
+./target/debug/exo vault secret create global anthropic --token-env ANTHROPIC_API_KEY --http-origin https://api.anthropic.com
 ```
 
 Build the sandbox image:
@@ -111,6 +110,7 @@ name: "TS Claude Code"
 harness: claude-code
 config:
   model: claude-sonnet-4-6
+  credential: anthropic
 ---
 Help the user with their task.
 EOF
@@ -127,7 +127,6 @@ Register a Cursor model:
 
 ```bash
 ./target/debug/exo vault secret create global cursor --token-env CURSOR_API_KEY
-./target/debug/exo model create auto --secret cursor
 ```
 
 Build the sandbox image:
@@ -149,6 +148,7 @@ name: "TS Cursor"
 harness: cursor
 config:
   model: auto
+  credential: cursor
 ---
 Help the user with their task.
 EOF
@@ -167,8 +167,7 @@ Register a model Pi supports. Pi reads the provider key from the sandbox
 environment, so the same variable has to be set where exo runs:
 
 ```bash
-./target/debug/exo vault secret create global openai --token-env OPENAI_API_KEY
-./target/debug/exo model create gpt-5.5 --secret openai
+./target/debug/exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com
 ```
 
 Build the sandbox image:
@@ -189,6 +188,7 @@ name: "TS Pi"
 harness: pi
 config:
   model: gpt-5.5
+  credential: openai
 ---
 Help the user with their task.
 EOF

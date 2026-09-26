@@ -16,14 +16,14 @@ import {
 import {
   responseToLinguaEvents,
   responseToolCalls,
-  runtimeFromModelBinding,
+  runtimeFromModelConfig,
   type NativeResponsesRequest,
   type ResponsesRuntimeLike,
   type TraceParent,
 } from "@exo/model-runtime/responses";
 import { ensureTable } from "@exo/model-runtime/cost";
 
-import { resolveLlmBinding } from "./shared";
+import { resolveModel } from "./shared";
 
 export interface ResponsesTurnLoopOptions {
   instructions?: (context: TurnContext) => Message[] | Promise<Message[]>;
@@ -38,8 +38,8 @@ export async function runResponsesHarnessTurn(
   options: ResponsesTurnLoopOptions = {},
 ): Promise<void> {
   await ensureTable(); // load the price table once so cost is ready when events are built
-  const modelBinding = await resolveLlmBinding(context);
-  const runtime = runtimeFromModelBinding(context.agentConfig, modelBinding);
+  const modelBinding = await resolveModel(context);
+  const runtime = runtimeFromModelConfig(context.agentConfig, modelBinding);
   await runtime.runTurn(context, (turnParent) =>
     runResponsesTurnLoop(
       runtime,

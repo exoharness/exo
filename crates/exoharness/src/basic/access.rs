@@ -29,25 +29,7 @@ impl BasicExoHarness {
     }
 
     pub(super) async fn binding_records(&self, base: &Path) -> Result<Vec<BindingRecord>> {
-        let inherited = list_binding_records(&self.inner.storage, base).await?;
-        if self.caller.is_none() {
-            return Ok(inherited);
-        }
-        let mut visible = Vec::new();
-        for record in inherited {
-            if let Binding::Llm { secret, .. } = &record.binding
-                && match secret {
-                    None => true,
-                    Some(reference) => self.get_vault(&reference.vault_id).await?.is_some(),
-                }
-            {
-                visible.push(record);
-            }
-        }
-        Ok(merge_binding_records(vec![
-            visible,
-            list_binding_records(&self.inner.storage, &self.caller_bindings_dir(base)).await?,
-        ]))
+        list_binding_records(&self.inner.storage, &self.caller_bindings_dir(base)).await
     }
 
     pub(super) async fn find_binding(
@@ -56,32 +38,15 @@ impl BasicExoHarness {
         id: &BindingId,
     ) -> Result<Option<Binding>> {
         for base in paths {
-            if self.caller.is_some() {
-                let path = self.caller_bindings_dir(base).join(format!("{id}.json"));
-                if let Some(stored) = self
-                    .inner
-                    .storage
-                    .get_json_if_exists::<StoredBinding>(path)
-                    .await?
-                {
-                    return Ok(Some(stored.record.binding));
-                }
-            }
             if let Some(stored) = self
                 .inner
                 .storage
-                .get_json_if_exists::<StoredBinding>(base.join(format!("{id}.json")))
+                .get_json_if_exists::<StoredBinding>(
+                    self.caller_bindings_dir(base).join(format!("{id}.json")),
+                )
                 .await?
             {
-                if self.caller.is_none() {
-                    return Ok(Some(stored.record.binding));
-                }
-                if let Binding::Llm { secret, .. } = &stored.record.binding
-                    && match secret {
-                        None => true,
-                        Some(reference) => self.get_vault(&reference.vault_id).await?.is_some(),
-                    }
-                {
+                if !matches!(stored.record.binding, Binding::Llm { .. }) {
                     return Ok(Some(stored.record.binding));
                 }
             }
@@ -90,15 +55,14 @@ impl BasicExoHarness {
     }
 
     pub(super) async fn check_binding(&self, binding: &Binding) -> Result<()> {
-        if self.caller.is_none() {
-            return Ok(());
-        }
-        let Binding::Llm { secret, .. } = binding else {
-            bail!("server callers may register model bindings only");
-        };
-        if let Some(secret) = secret {
-            crate::vault::require_vault(self, &secret.vault_id).await?;
-        }
+        anyhow::ensure!(
+            !matches!(binding, Binding::Llm { .. }),
+            "model bindings are no longer supported; configure the model and vault credential in the agent spec"
+        );
+        anyhow::ensure!(
+            self.caller.is_none(),
+            "bindings must be configured on the runtime host"
+        );
         Ok(())
     }
 
@@ -201,9 +165,13 @@ impl VaultHandle for CallerVault {
         self.check(true).await?;
         self.vault.get_secret(id).await
     }
-    async fn update_secret(&self, id: &SecretId, secret: Secret) -> Result<SecretMetadata> {
+    async fn update_secret(
+        &self,
+        id: &SecretId,
+        request: crate::UpdateSecretRequest,
+    ) -> Result<SecretMetadata> {
         self.check(true).await?;
-        self.vault.update_secret(id, secret).await
+        self.vault.update_secret(id, request).await
     }
     async fn delete_secret(&self, id: &SecretId) -> Result<()> {
         self.check(true).await?;

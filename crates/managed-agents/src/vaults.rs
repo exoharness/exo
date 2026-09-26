@@ -376,7 +376,8 @@ mod tests {
             &id,
             Secret::Key {
                 value: "rotated".into(),
-            },
+            }
+            .into(),
         )
         .await?;
         let second = provider.resolve(&servers[0]).await?.unwrap();

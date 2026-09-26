@@ -340,21 +340,52 @@ impl VaultHandle for BasicVaultHandle {
             .await
     }
 
-    async fn update_secret(&self, id: &SecretId, secret: Secret) -> Result<SecretMetadata> {
+    async fn update_secret(
+        &self,
+        id: &SecretId,
+        request: crate::UpdateSecretRequest,
+    ) -> Result<SecretMetadata> {
+        anyhow::ensure!(
+            request.secret.is_some() || request.target.is_some(),
+            "provide a secret value or destination to update"
+        );
         let vault_id = self.record.id;
         let id = *id;
         self.store
             .access(true, move |catalog, cipher| {
-                let stored = vault(catalog, vault_id)?
+                let vault = vault(catalog, vault_id)?;
+                let target = request
+                    .target
+                    .map(|target| target.normalized())
+                    .transpose()?;
+                if matches!(target, Some(SecretTarget::Mcp { .. }))
+                    && vault
+                        .secrets
+                        .iter()
+                        .any(|stored| stored.metadata.id != id && stored.metadata.target == target)
+                {
+                    bail!("a secret for this MCP destination already exists in the vault");
+                }
+                let stored = vault
                     .secrets
                     .iter_mut()
                     .find(|s| s.metadata.id == id)
                     .context("secret is unavailable")?;
+                let secret = match request.secret {
+                    Some(secret) => secret,
+                    None => cipher.decrypt_bound(
+                        &stored.secret,
+                        &serde_json::to_vec(&(vault_id, &stored.metadata))?,
+                    )?,
+                };
                 let mut metadata = stored.metadata.clone();
                 metadata.revision = metadata
                     .revision
                     .checked_add(1)
                     .context("secret revision overflow")?;
+                if let Some(target) = target {
+                    metadata.target = Some(target);
+                }
                 metadata.r#type = secret_type(&secret);
                 let encrypted = encrypt(cipher, vault_id, &metadata, &secret)?;
                 stored.metadata = metadata.clone();
@@ -503,7 +534,10 @@ impl BasicVaultHandle {
                     .find(|s| s.metadata.id == id)
                     .context("secret is unavailable")?;
                 if stored.metadata.target.as_ref() != Some(&target) {
-                    bail!("secret {id} is not authorized for this destination");
+                    if let SecretTarget::Http { origin } = &target {
+                        bail!("secret {:?} is not authorized for {origin}; set its HTTP destination with --http-origin {origin}", stored.metadata.name);
+                    }
+                    bail!("secret {:?} is not authorized for this MCP destination", stored.metadata.name);
                 }
                 let secret = cipher.decrypt_bound(
                     &stored.secret,

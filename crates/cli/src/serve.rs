@@ -14,6 +14,8 @@ use executor::{
 
 #[derive(Debug, Args)]
 pub struct ServeArgs {
+    #[command(flatten)]
+    pub(crate) execution: crate::ExecutionArgs,
     /// Serve only this saved agent; omit to serve the local provider.
     #[arg(long)]
     pub agent: Option<String>,

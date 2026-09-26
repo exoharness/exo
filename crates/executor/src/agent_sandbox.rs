@@ -111,7 +111,6 @@ async fn attach_agent_sandbox(
 ) -> Result<AgentSandboxHandle> {
     let sandbox_id = agent
         .create_sandbox(CreateSandboxRequest {
-            model: None,
             name: Some(sandbox_name),
             provider: spec.provider.clone(),
             image: spec.image.clone(),
@@ -197,6 +196,8 @@ mod tests {
 
     fn test_agent_config(sandbox: AgentSandboxConfig) -> AgentConfig {
         AgentConfig {
+            credential: Some("test-openai".into()),
+            base_url: None,
             resources: Vec::new(),
             instructions: vec![],
             harness: AgentHarnessKind::Exo,

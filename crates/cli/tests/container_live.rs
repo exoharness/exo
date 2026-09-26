@@ -123,8 +123,7 @@ async fn with_live_fixture(
 async fn pi_managed_local_and_http() -> Result<()> {
     let api_key = std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY is required")?;
     with_live_fixture(exoharness::SandboxProvider::AppleContainer, async |f| {
-            success(f.command(&["--provider", "local", "vault", "secret", "create", "global", "live-openai", "--token-env", "LIVE_OPENAI_API_KEY"]).env("LIVE_OPENAI_API_KEY", &api_key).output().await?)?;
-            f.cli(&["--provider", "local", "model", "create", "gpt-5-mini", "--secret", "live-openai"]).await?;
+            success(f.command(&["--provider", "local", "vault", "secret", "create", "global", "live-openai", "--token-env", "LIVE_OPENAI_API_KEY", "--http-origin", "https://api.openai.com"]).env("LIVE_OPENAI_API_KEY", &api_key).output().await?)?;
             let mcp = MockServer::start().await;
             for verb in ["GET", "DELETE"] {
                 Mock::given(method(verb)).and(path("/mcp")).respond_with(ResponseTemplate::new(405)).mount(&mcp).await;
@@ -142,7 +141,7 @@ async fn pi_managed_local_and_http() -> Result<()> {
                 };
                 ResponseTemplate::new(200).insert_header("mcp-session-id","pi-session").set_body_json(json!({"jsonrpc":"2.0","id":rpc.id,"result":result}))
             }).mount(&mcp).await;
-            std::fs::write(&f.agent_file, format!("---\nname: pi-live\nharness: pi\nconfig:\n  model: gpt-5-mini\npermission_policy: {{type: always_ask}}\nmcp_servers:\n  - type: url\n    name: verifier\n    url: {}/mcp\n---\nStart final replies with PI-READY. Use the requested tools and report their real results.\n", mcp.uri()))?;
+            std::fs::write(&f.agent_file, format!("---\nname: pi-live\nharness: pi\nconfig:\n  model: gpt-5-mini\n  credential: live-openai\npermission_policy: {{type: always_ask}}\nmcp_servers:\n  - type: url\n    name: verifier\n    url: {}/mcp\n---\nStart final replies with PI-READY. Use the requested tools and report their real results.\n", mcp.uri()))?;
             let environment = f.temp.path().join("pi.yaml");
             std::fs::write(&environment, "name: pi\nconfig:\n  provider: apple_container\n  image: exo-pi-sandbox:latest\n  default_workdir: /home/exo/workspace\n  resources: {vcpu_count: 2, memory_mib: 2048}\n  policy:\n    networking: {type: unrestricted}\n  idle_seconds: 600\n")?;
             f.cli(&["environment", "create", "pi", "--file", environment.to_str().unwrap()]).await?;
@@ -382,9 +381,8 @@ for (const dir of ['/tmp/exo-codex-home', '/home/exo/.codex', '/home/exo/.claude
             "{type: unrestricted}".into()
         };
         with_live_fixture(backend.clone(), async |f| {
-                    success(f.command(&["--provider", "local", "vault", "secret", "create", "global", "live-model", "--token-env", "LIVE_MODEL_KEY"]).env("LIVE_MODEL_KEY", &key).output().await?)?;
-                    f.cli(&["--provider", "local", "model", "create", model, "--secret", "live-model"]).await?;
-                    std::fs::write(&f.agent_file, format!("---\nname: credential-test\nharness: {harness}\nconfig:\n  model: {model}\n---\nFollow the user request.\n"))?;
+                    success(f.command(&["--provider", "local", "vault", "secret", "create", "global", "live-model", "--token-env", "LIVE_MODEL_KEY", "--http-origin", if variable == "ANTHROPIC_API_KEY" { "https://api.anthropic.com" } else { "https://api.openai.com" }]).env("LIVE_MODEL_KEY", &key).output().await?)?;
+                    std::fs::write(&f.agent_file, format!("---\nname: credential-test\nharness: {harness}\nconfig:\n  model: {model}\n  credential: live-model\n---\nFollow the user request.\n"))?;
                     let environment = f.temp.path().join("environment.yaml");
                     std::fs::write(&environment, format!("name: credential-test\nconfig:\n  provider: {backend}\n  image: {image}\n  default_workdir: /home/exo/workspace\n  resources: {{vcpu_count: 2, memory_mib: 2048}}\n  policy:\n    networking: {network}\n  idle_seconds: 600\n"))?;
                     f.cli(&["agent", "create", "credential-test", "--file", f.agent_file.to_str().context("agent path")?]).await?;
@@ -442,9 +440,8 @@ async fn native_mcp_workflow(
 ) -> Result<()> {
     let key = std::env::var(variable).with_context(|| format!("{variable} is required"))?;
     with_live_fixture(exoharness::SandboxProvider::AppleContainer, async |f| {
-            success(f.command(&["--provider", "local", "vault", "secret", "create", "global", "native-key", "--token-env", "NATIVE_API_KEY"]).env("NATIVE_API_KEY", &key).output().await?)?;
-            f.cli(&["--provider", "local", "model", "create", model, "--secret", "native-key"]).await?;
-            std::fs::write(&f.agent_file, format!("---\nname: native-mcp\nharness: {harness}\nconfig:\n  model: {model}\nmcp_servers:\n  - type: url\n    name: wiki\n    url: https://mcp.deepwiki.com/mcp\n    allowed_tools: [read_wiki_structure]\n---\nUse the requested MCP tool. If permission is denied, stop; do not use another tool or retry.\n"))?;
+            success(f.command(&["--provider", "local", "vault", "secret", "create", "global", "native-key", "--token-env", "NATIVE_API_KEY", "--http-origin", if variable == "ANTHROPIC_API_KEY" { "https://api.anthropic.com" } else { "https://api.openai.com" }]).env("NATIVE_API_KEY", &key).output().await?)?;
+            std::fs::write(&f.agent_file, format!("---\nname: native-mcp\nharness: {harness}\nconfig:\n  model: {model}\n  credential: native-key\nmcp_servers:\n  - type: url\n    name: wiki\n    url: https://mcp.deepwiki.com/mcp\n    allowed_tools: [read_wiki_structure]\n---\nUse the requested MCP tool. If permission is denied, stop; do not use another tool or retry.\n"))?;
             let environment = f.temp.path().join("native.yaml");
             std::fs::write(&environment, format!("name: native\nconfig:\n  provider: apple_container\n  image: {image}\n  default_workdir: /home/exo/workspace\n  resources: {{vcpu_count: 2, memory_mib: 2048}}\n  policy:\n    networking: {{type: unrestricted}}\n"))?;
             f.cli(&["agent", "create", "native-mcp", "--file", f.agent_file.to_str().context("agent path")?]).await?;
@@ -488,7 +485,7 @@ async fn filesystem_resources_local_and_http() -> Result<()> {
         std::fs::create_dir(&fixture)?;
         std::fs::write(fixture.join("data"), "read only")?;
         std::fs::write(&f.agent_file, format!(
-            "---\nname: coder\nharness: basic\nconfig:\n  model: gpt-5-mini\nresources:\n  - name: code\n    type: git_repository\n    path: {}\n    mount_path: /workspace\n  - name: fixtures\n    type: directory\n    path: {}\n    mount_path: /fixtures\n    mode: ro\n---\nHelp with the code in /workspace.\n", source.display(), fixture.display()
+            "---\nname: coder\nharness: basic\nconfig:\n  model: gpt-5-mini\n  credential: live-openai\nresources:\n  - name: code\n    type: git_repository\n    path: {}\n    mount_path: /workspace\n  - name: fixtures\n    type: directory\n    path: {}\n    mount_path: /fixtures\n    mode: ro\n---\nHelp with the code in /workspace.\n", source.display(), fixture.display()
         ))?;
         let environment = f.temp.path().join("environment.yaml");
         std::fs::write(&environment, "name: coder\nconfig:\n  provider: apple_container\n  image: exo-codex-sandbox:latest\n  enable_networking: true\n")?;

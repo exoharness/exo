@@ -188,7 +188,7 @@ impl SandboxBackendRegistration {
     /// is not macOS-only.
     pub fn smolvm() -> Self {
         // A factory, not a fixed backend: the binary paths are configured per
-        // binding (`exo sandbox provider create --sandbox smolvm --smolvm-binary`),
+        // binding (`exo environment provider create --backend smolvm --smolvm-binary`),
         // so they have to be read when a request arrives rather than at startup —
         // the same shape daytona/e2b use for their credentials. The result is
         // cached per provider by `sandbox_backend_for_provider`, so this runs
@@ -269,7 +269,7 @@ impl SandboxBackendRegistration {
                 {
                     let config = _inner.aws_agentcore_config_from_binding().await?.ok_or_else(|| {
                         anyhow!(
-                            "aws-agentcore sandbox requested but no sandbox provider binding is configured; run `exo sandbox provider create --sandbox aws-agentcore --runtime-arn <arn>`"
+                            "aws-agentcore sandbox requested but no sandbox provider binding is configured; run `exo environment provider create --backend aws-agentcore --runtime-arn <arn>`"
                         )
                     })?;
                     Ok(
@@ -4060,7 +4060,7 @@ async fn prepare_sandbox_request(
         request.image.clone()
     };
 
-    let mut policy = request
+    let policy = request
         .policy
         .or_else(|| harness.inner.sandbox_policy.clone())
         .unwrap_or_else(|| {
@@ -4071,78 +4071,12 @@ async fn prepare_sandbox_request(
             }
         });
     let context = ScopedVaultContext { harness, scope };
-    if let Some(model) = request.model {
-        let binding = context.model_binding(&model.id).await?;
-        let endpoint =
-            crate::vault::model_endpoint(binding.base_url.as_deref(), &model.environment_variable)?;
-        let Some(reference) = binding.secret else {
-            bail!("sandbox model binding has no API key; register the model with --secret");
-        };
-        let host = endpoint
-            .host_str()
-            .context("model endpoint has no host")?
-            .to_owned();
-        if let SandboxNetworkPolicy::Limited { allowed_hosts } = &policy.networking {
-            anyhow::ensure!(
-                crate::types::canonical_egress_hosts(allowed_hosts)?.contains(&host),
-                "model endpoint {host} is not allowed by the environment network policy"
-            );
-        }
-        anyhow::ensure!(
-            policy.networking_enabled(),
-            "sandbox models require networking"
-        );
-        if let Some(existing) = policy
-            .credentials
-            .iter_mut()
-            .find(|binding| binding.environment_variable == model.environment_variable)
-        {
-            let selected = crate::vault::find_secret(&context, &existing.name).await?;
-            anyhow::ensure!(
-                existing.model == Some(model.id)
-                    || (existing.model.is_none() && selected.as_ref() == Some(&reference)),
-                "environment credential {} conflicts with the selected model",
-                model.environment_variable
-            );
-            let crate::CredentialNetworkPolicy::Limited { allowed_hosts } = &existing.networking;
-            anyhow::ensure!(
-                crate::types::canonical_egress_hosts(allowed_hosts)?.contains(&host)
-                    && existing.injection_location.header,
-                "environment credential does not permit the model endpoint"
-            );
-            existing.model = Some(model.id);
-        } else {
-            policy.credentials.push(crate::EgressCredentialBinding {
-                name: format!("model:{}", model.id),
-                model: Some(model.id),
-                environment_variable: model.environment_variable,
-                networking: crate::CredentialNetworkPolicy::Limited {
-                    allowed_hosts: vec![host],
-                },
-                injection_location: crate::CredentialInjectionLocation { header: true },
-            });
-        }
-    }
-
     let credentials = futures::future::try_join_all(policy.credentials.iter().map(|binding| {
         let context = &context;
         async move {
-            let reference = if let Some(model_id) = binding.model {
-                let model = context.model_binding(&model_id).await?;
-                let endpoint = crate::vault::model_endpoint(
-                    model.base_url.as_deref(),
-                    &binding.environment_variable,
-                )?;
-                let Some(reference) = model.secret else {
-                    bail!("sandbox model binding has no credential");
-                };
-                crate::vault::resolve_model_key(context, &reference, &endpoint).await?;
-                reference
-            } else {
-                crate::vault::find_secret(context, &binding.name)
-                    .await?
-                    .with_context(|| format!("egress credential not found: {}", binding.name))?
-            };
+            let reference = crate::vault::find_secret(context, &binding.name)
+                .await?
+                .with_context(|| format!("egress credential not found: {}", binding.name))?;
             Ok::<_, anyhow::Error>((binding.name.clone(), reference))
         }
     }))
@@ -5394,6 +5328,7 @@ async fn list_binding_records(
         .await?
         .into_iter()
         .map(|stored| stored.record)
+        .filter(|record| !matches!(record.binding, Binding::Llm { .. }))
         .collect::<Vec<_>>();
     bindings.sort_by_key(|metadata| metadata.id);
     Ok(bindings)
@@ -5625,7 +5560,6 @@ mod egress_resolution_tests {
         config.sandbox_policy = Some(limited.clone());
         let harness = BasicExoHarness::new(config).await?;
         let request = CreateSandboxRequest {
-            model: None,
             name: None,
             provider: SandboxProvider::LocalProcess,
             image: "".into(),

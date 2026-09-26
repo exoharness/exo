@@ -671,6 +671,8 @@ impl Runtime {
                 scope: request.sandbox_scope.unwrap_or_default(),
             },
             model: request.model,
+            credential: request.credential,
+            base_url: request.base_url,
             max_output_tokens: request.max_output_tokens,
             max_tool_round_trips: request.max_tool_round_trips,
             braintrust: request.braintrust,

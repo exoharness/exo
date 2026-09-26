@@ -16,7 +16,7 @@ import {
 import {
   appendEvents,
   asRecord,
-  resolveSandboxLlmBinding,
+  resolveSandboxModel,
   WarmJsonlSandboxWorker,
 } from "@exo/model-runtime/shared";
 
@@ -114,7 +114,7 @@ export default defineHarness({
         (message) => message.role !== "system" && message.role !== "developer",
       ),
     );
-    const binding = await resolveSandboxLlmBinding(context);
+    const binding = resolveSandboxModel(context);
     const slash = binding.model.indexOf("/");
     const provider = slash < 0 ? "openai" : binding.model.slice(0, slash);
     const model = slash < 0 ? binding.model : binding.model.slice(slash + 1);

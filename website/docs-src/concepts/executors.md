@@ -46,6 +46,7 @@ name: "TS Basic"
 harness: exoharness/examples/typescript/basic-harness.ts
 config:
   model: gpt-5.5
+  credential: openai
 ---
 Help the user with their task.
 EOF

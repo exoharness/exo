@@ -84,8 +84,7 @@ async fn vault_credentials_stay_host_side_and_typescript_preserves_oauth_refresh
             .args(["--secret-backend", "file"])
             .arg("--master-key-path")
             .arg(temp.path().join("master.key"))
-            .arg("--pricing-path")
-            .arg(&prices)
+            .env("EXO_LITELLM_PRICES_PATH", &prices)
             .env("EXO_TEST_VISIBLE", "yes");
         cmd
     };
@@ -99,7 +98,6 @@ async fn vault_credentials_stay_host_side_and_typescript_preserves_oauth_refresh
             "--token-env",
             "EXO_TEST_VISIBLE",
         ],
-        vec!["model", "create", "fixture", "--secret", "model-key"],
         vec![
             "agent",
             "create",

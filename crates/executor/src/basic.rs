@@ -17,7 +17,7 @@ use serde_json::json;
 
 use crate::execution_tracing::TurnExecutionTrace;
 use crate::harness_executor::{ExecutorStreamMode, HarnessExecutor};
-use crate::harness_helpers::{resolve_model_binding, to_lingua_value};
+use crate::harness_helpers::{resolve_model, to_lingua_value};
 use crate::shared::{HISTORY_CACHE_NAME, try_send_stream_event};
 use crate::{
     AgentConfig, ConversationConfig, ExecutionStreamEvent, ModelClient, ModelRequest,
@@ -666,7 +666,7 @@ async fn build_model_request(
     conversation_config: &ConversationConfig,
     messages: Vec<Message>,
 ) -> Result<ModelRequest> {
-    let model_binding = resolve_model_binding(conversation, &agent_config.model).await?;
+    let model_binding = resolve_model(conversation, agent_config).await?;
     Ok(ModelRequest {
         model: model_binding.model,
         api_key: model_binding.api_key,

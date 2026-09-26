@@ -153,17 +153,6 @@ impl RuntimeClient {
             .await
     }
 
-    pub async fn list_models(&self) -> Result<Vec<exoharness::BindingRecord>> {
-        self.http
-            .json(self.http.request(Method::GET, "model")?)
-            .await
-    }
-    pub async fn put_model(&self, binding: &exoharness::Binding) -> Result<exoharness::BindingId> {
-        self.http
-            .json(self.http.request(Method::POST, "model")?.json(binding))
-            .await
-    }
-
     pub async fn create_vault(&self, name: &str) -> Result<exoharness::vault::VaultRecord> {
         self.http
             .json(
@@ -200,7 +189,7 @@ impl RuntimeClient {
         scope: exoharness::ResourceScope,
         id: exoharness::vault::VaultId,
         secret_id: exoharness::SecretId,
-        secret: &exoharness::Secret,
+        request: &exoharness::UpdateSecretRequest,
     ) -> Result<exoharness::SecretMetadata> {
         self.http
             .json(
@@ -209,7 +198,7 @@ impl RuntimeClient {
                         Method::PUT,
                         &format!("{}vault/{id}/secret/{secret_id}", scope_path(scope)),
                     )?
-                    .json(secret),
+                    .json(request),
             )
             .await
     }

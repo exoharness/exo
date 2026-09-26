@@ -2,7 +2,7 @@ use exoharness::vault::SecretReference;
 mod env;
 #[cfg(test)]
 mod env_tests;
-mod environments;
+mod environment;
 mod managed_agents;
 #[cfg(test)]
 mod mount_tests;
@@ -20,7 +20,7 @@ mod turn_display;
 mod vaults;
 
 use std::collections::HashMap;
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, IsTerminal, Write};
 #[cfg(feature = "firecracker")]
 use std::net::Ipv4Addr;
 #[cfg(feature = "firecracker")]
@@ -33,22 +33,17 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use executor::{
     AgentHandle, AgentHarnessKind, AttachSandboxRequest, BasicExoHarnessConfig, BasicToolRuntime,
-    Binding, BraintrustProject, BraintrustTracingConfig, ConversationHandle,
-    ConversationModelConfig, CreateConversationRequest, CreateSandboxRequest,
-    DEFAULT_SANDBOX_MEMORY_MIB, DEFAULT_SANDBOX_VCPU_COUNT, DaytonaBackendSpec, DurableFileSystem,
-    E2bBackendSpec, EventKind, EventQuery, EventQueryDirection, ExoHarness, FileSystemMount,
-    FileSystemMountMode, FirecrackerBackendSpec, ForkConversationRequest,
-    HOST_EVENT_REBUILD_AND_RESTART, NewAgentRequest, RunInSandboxRequest, Runtime,
-    SANDBOX_MAIN_MOUNT_DIR, SandboxAttachment, SandboxBackendRegistration, SandboxProcess,
-    SandboxProvider, SandboxProviderConfig, SandboxResourceShape, SandboxScope,
+    BraintrustProject, BraintrustTracingConfig, ConversationHandle, ConversationModelConfig,
+    CreateConversationRequest, DaytonaBackendSpec, E2bBackendSpec, EventKind, EventQuery,
+    EventQueryDirection, ExoHarness, FileSystemMount, FileSystemMountMode, FirecrackerBackendSpec,
+    ForkConversationRequest, HOST_EVENT_REBUILD_AND_RESTART, Runtime, SANDBOX_MAIN_MOUNT_DIR,
+    SandboxAttachment, SandboxBackendRegistration, SandboxProvider, SandboxScope,
     SecretBackendChoice, SpritesBackendSpec, ToolRequest, ToolRuntime, Uuid7, VercelBackendSpec,
-    default_aws_agentcore_image, default_daytona_image, default_docker_image, default_e2b_template,
-    default_firecracker_image, default_vercel_image, effective_sandbox_scope,
-    finalize_rebuild_update_file, record_host_event, send_conversation_wakeup,
+    effective_sandbox_scope, finalize_rebuild_update_file, record_host_event,
+    send_conversation_wakeup,
 };
 use serde::Deserialize;
 use tabwriter::TabWriter;
-use tokio_util::compat::{FuturesAsyncReadCompatExt, FuturesAsyncWriteCompatExt};
 #[cfg(feature = "firecracker")]
 use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -64,8 +59,6 @@ use crate::env::CliEnvironment;
 use crate::render::{Verbosity, print_message};
 use executor::managed_agents::TypeScriptHarnessPreset;
 use tui::run_chat_repl;
-
-const SANDBOX_CLI_AGENT_SLUG: &str = "__exo_sandbox_cli";
 
 #[derive(Debug, Parser)]
 #[command(name = "exo")]
@@ -86,34 +79,39 @@ struct Cli {
 
 #[derive(Debug, Args)]
 struct RuntimeArgs {
-    /// JSON, YAML, or TOML policy for sandbox hosts and credential substitution.
-    #[arg(long, global = true)]
-    egress_policy: Option<PathBuf>,
-
+    /// Directory containing local Exo state.
     #[arg(long, global = true, default_value = ".exo")]
     root: PathBuf,
-    /// Harness: basic, rlm, exo, typescript, codex, claude-code, cursor, pi, or a TypeScript module path.
-    #[arg(long, global = true, value_name = "HARNESS")]
-    harness: Option<HarnessSelection>,
+    /// Store used to protect vault credentials.
     #[arg(long, global = true, value_enum, env = "EXO_SECRET_BACKEND")]
     secret_backend: Option<SecretBackendArg>,
+    /// Encryption key for the file secret backend.
     #[arg(long, global = true, env = "EXO_MASTER_KEY_PATH")]
     master_key_path: Option<PathBuf>,
+    /// Load environment variables from a file.
     #[arg(long, global = true)]
     env_file: Option<PathBuf>,
-    #[arg(long, global = true)]
-    env_file_if_exists: Option<PathBuf>,
-    #[arg(long, global = true, env = "BRAINTRUST_API_KEY", hide = true)]
+}
+
+#[derive(Debug, Args)]
+struct ExecutionArgs {
+    /// JSON, YAML, or TOML policy for outbound connections and credentials.
+    #[arg(long)]
+    egress_policy: Option<PathBuf>,
+    /// Harness: basic, rlm, exo, typescript, codex, claude-code, cursor, pi, or a TypeScript module path.
+    #[arg(long, value_name = "HARNESS")]
+    harness: Option<HarnessSelection>,
+    #[arg(long, env = "BRAINTRUST_API_KEY", hide = true)]
     braintrust_api_key: Option<String>,
-    #[arg(long, global = true, env = "BRAINTRUST_APP_URL", hide = true)]
+    #[arg(long, env = "BRAINTRUST_APP_URL", hide = true)]
     braintrust_app_url: Option<String>,
-    #[arg(long, global = true, env = "BRAINTRUST_API_URL", hide = true)]
+    #[arg(long, env = "BRAINTRUST_API_URL", hide = true)]
     braintrust_api_url: Option<String>,
-    /// Path to a LiteLLM price JSON for cost tracking (overrides fetch/cache).
-    #[arg(long, global = true, env = "EXO_LITELLM_PRICES_PATH")]
+    /// Local LiteLLM price JSON used for cost reporting.
+    #[arg(long, env = "EXO_LITELLM_PRICES_PATH")]
     pricing_path: Option<PathBuf>,
-    /// URL to fetch the LiteLLM price JSON from (overrides the default source).
-    #[arg(long, global = true, env = "EXO_LITELLM_PRICES_URL")]
+    /// URL of the LiteLLM price JSON used for cost reporting.
+    #[arg(long, env = "EXO_LITELLM_PRICES_URL")]
     pricing_url: Option<String>,
 }
 
@@ -256,9 +254,10 @@ impl FirecrackerArgs {
                     .map_err(|error| anyhow!("invalid Firecracker egress CIDR {cidr}: {error}"))
             })
             .collect::<Result<Vec<_>>>()?;
-        let allowed_local_images = std::iter::once(PathBuf::from(default_firecracker_image()))
-            .chain(self.allowed_local_images.iter().cloned())
-            .collect();
+        let allowed_local_images =
+            std::iter::once(PathBuf::from(exoharness::default_firecracker_image()))
+                .chain(self.allowed_local_images.iter().cloned())
+                .collect();
         let config = FirecrackerConfig {
             egress_listen: None,
             firecracker_bin: self.firecracker_bin.clone(),
@@ -421,9 +420,8 @@ fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
     let firecracker_spec = FirecrackerBackendSpec::default();
     let sandbox_backends = default_sandbox_backends(firecracker_spec);
     let sandbox_policy = cli
-        .runtime()
-        .egress_policy
-        .as_ref()
+        .execution()
+        .and_then(|args| args.egress_policy.as_ref())
         .map(|path| read_config_file(path))
         .transpose()?;
     Ok(BasicExoHarnessConfig {
@@ -438,14 +436,6 @@ fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
 #[cfg(feature = "firecracker")]
 fn command_firecracker_args(command: &Commands) -> Option<&FirecrackerArgs> {
     match command {
-        Commands::Sandbox {
-            command: SandboxCommands::Create(args),
-            ..
-        } => Some(&args.firecracker),
-        Commands::Sandbox {
-            command: SandboxCommands::Play(args),
-            ..
-        } => Some(&args.firecracker),
         Commands::Serve { args, .. } => Some(&args.firecracker),
         _ => None,
     }
@@ -470,18 +460,6 @@ fn default_sandbox_backends(
     ]
 }
 
-fn aws_region_from_arn(resource_arn: &str, expected_service: &str) -> Option<String> {
-    let mut parts = resource_arn.split(':');
-    let arn = parts.next()?;
-    let _partition = parts.next()?;
-    let service = parts.next()?;
-    let region = parts.next()?;
-    if arn == "arn" && service == expected_service && !region.is_empty() {
-        return Some(region.to_string());
-    }
-    None
-}
-
 #[cfg(target_os = "macos")]
 fn default_secret_backend() -> SecretBackendArg {
     SecretBackendArg::AppleKeychain
@@ -500,18 +478,6 @@ fn default_local_sandbox_provider() -> SandboxProvider {
 #[cfg(not(target_os = "macos"))]
 fn default_local_sandbox_provider() -> SandboxProvider {
     SandboxProvider::Docker
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum EnabledDisabled {
-    Enabled,
-    Disabled,
-}
-
-impl EnabledDisabled {
-    fn enabled(self) -> bool {
-        matches!(self, Self::Enabled)
-    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -539,8 +505,6 @@ macro_rules! runtime_accessor {
                 | Commands::Serve { runtime, .. }
                 | Commands::Agent { runtime, .. }
                 | Commands::Conversation { runtime, .. }
-                | Commands::Model { runtime, .. }
-                | Commands::Sandbox { runtime, .. }
                 => runtime,
                 Commands::Provider { .. } | Commands::FirecrackerBridge => {
                     unreachable!("command does not use runtime options")
@@ -553,16 +517,31 @@ macro_rules! runtime_accessor {
 impl Cli {
     runtime_accessor!(runtime);
     runtime_accessor!(runtime_mut, mut);
+
+    fn execution(&self) -> Option<&ExecutionArgs> {
+        match &self.command {
+            Commands::Agent {
+                command: AgentCommands::Run { execution, .. },
+                ..
+            }
+            | Commands::Conversation {
+                command: ConversationCommands::Send { execution, .. },
+                ..
+            } => Some(execution),
+            Commands::Serve { args, .. } => Some(&args.execution),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Manage reusable sandbox environments.
+    /// Configure reusable agent environments and their backends.
     Environment {
         #[command(flatten)]
         runtime: RuntimeArgs,
         #[command(subcommand)]
-        command: environments::EnvironmentCommands,
+        command: environment::EnvironmentCommands,
     },
     /// Manage vaults and their credentials, including MCP login.
     Vault {
@@ -573,7 +552,7 @@ enum Commands {
     },
     #[command(hide = true)]
     FirecrackerBridge,
-    /// Serve the local Exo provider over HTTP and supervise adapters.
+    /// Serve agents and vaults over HTTP.
     Serve {
         #[command(flatten)]
         runtime: RuntimeArgs,
@@ -595,24 +574,10 @@ enum Commands {
         #[command(subcommand)]
         command: ConversationCommands,
     },
-    /// Configure model names, endpoints, and vault credentials.
-    Model {
-        #[command(flatten)]
-        runtime: RuntimeArgs,
-        #[command(subcommand)]
-        command: ModelCommands,
-    },
-    /// Configure managed-agent providers and log in.
+    /// Connect to local or remote Exo providers and log in.
     Provider {
         #[command(subcommand)]
         command: Option<providers::ProviderCommands>,
-    },
-    /// Manage sandboxes and their provider bindings.
-    Sandbox {
-        #[command(flatten)]
-        runtime: RuntimeArgs,
-        #[command(subcommand)]
-        command: SandboxCommands,
     },
 }
 
@@ -636,7 +601,9 @@ enum AgentCommands {
     /// Run interactively, or execute one prompt with --prompt.
     Run {
         #[command(flatten)]
-        thread: managed_agents::ThreadArgs,
+        execution: ExecutionArgs,
+        #[command(flatten)]
+        thread: Box<managed_agents::ThreadArgs>,
         #[arg(long, conflicts_with = "tui")]
         prompt: Option<String>,
         /// Use the full-screen TUI.
@@ -771,6 +738,8 @@ enum ConversationCommands {
         completed_at: String,
     },
     Send {
+        #[command(flatten)]
+        execution: ExecutionArgs,
         agent: String,
         #[arg(value_name = "THREAD")]
         conversation: String,
@@ -808,225 +777,6 @@ enum ConversationSandboxCommands {
         conversation: String,
         command: String,
     },
-}
-
-#[derive(Debug, Subcommand)]
-enum SandboxCommands {
-    /// Configure sandbox backends and their vault credentials.
-    Provider {
-        #[command(subcommand)]
-        command: ProviderCommands,
-    },
-    /// Create and start a sandbox.
-    #[command(alias = "start")]
-    Create(Box<SandboxStartArgs>),
-    /// Start a sandbox, enter a shell, and destroy it when the shell exits.
-    Play(Box<SandboxPlayArgs>),
-    /// List sandboxes. Running only unless --all is passed.
-    #[command(alias = "ps")]
-    List {
-        #[command(flatten)]
-        owner: SandboxOwnerArgs,
-        /// Include stopped sandboxes.
-        #[arg(short, long)]
-        all: bool,
-        /// Print only sandbox IDs.
-        #[arg(short, long)]
-        quiet: bool,
-    },
-    /// Run a command and stream its output.
-    Exec {
-        #[command(flatten)]
-        owner: SandboxOwnerArgs,
-        sandbox_id: String,
-        #[arg(long = "env", value_name = "NAME=VALUE")]
-        env: Vec<String>,
-        #[arg(required = true, trailing_var_arg = true)]
-        command: Vec<String>,
-    },
-    /// Connect stdin/stdout/stderr to an interactive shell (without a PTY).
-    Connect {
-        #[command(flatten)]
-        owner: SandboxOwnerArgs,
-        sandbox_id: String,
-        #[arg(long, default_value = "/bin/bash")]
-        shell: String,
-        #[arg(long = "env", value_name = "NAME=VALUE")]
-        env: Vec<String>,
-    },
-    /// Stop a sandbox while retaining its stored record.
-    Stop {
-        #[command(flatten)]
-        owner: SandboxOwnerArgs,
-        /// Sandbox IDs; when omitted, read whitespace-delimited IDs from stdin.
-        #[arg(value_name = "SANDBOX_ID")]
-        sandbox_ids: Vec<String>,
-    },
-    /// Destroy sandboxes and remove their retained records.
-    #[command(alias = "terminate")]
-    Delete {
-        #[command(flatten)]
-        owner: SandboxOwnerArgs,
-        /// Sandbox IDs; when omitted, read whitespace-delimited IDs from stdin.
-        #[arg(value_name = "SANDBOX_ID")]
-        sandbox_ids: Vec<String>,
-    },
-}
-
-#[derive(Debug, Args)]
-struct SandboxOwnerArgs {
-    /// Agent that owns the sandbox; omitted uses the shared CLI owner.
-    #[arg(long, value_name = "AGENT")]
-    agent: Option<String>,
-}
-
-#[derive(Debug, Args)]
-struct SandboxStartArgs {
-    #[command(flatten)]
-    owner: SandboxOwnerArgs,
-    #[arg(long)]
-    name: Option<String>,
-    #[command(flatten)]
-    sandbox: SandboxCreateArgs,
-    #[cfg(feature = "firecracker")]
-    #[command(flatten, next_help_heading = "Firecracker backend options")]
-    firecracker: FirecrackerArgs,
-}
-
-#[derive(Debug, Args)]
-struct SandboxCreateArgs {
-    #[arg(long = "sandbox", value_enum)]
-    provider: SandboxProviderArg,
-    /// Image, template, or root filesystem understood by the provider.
-    /// Omitting it uses the provider binding's default.
-    #[arg(long, default_value = "")]
-    image: String,
-    /// Virtual CPUs requested for the sandbox.
-    #[arg(
-        long,
-        alias = "firecracker-vcpu-count",
-        env = "EXO_FIRECRACKER_VCPU_COUNT"
-    )]
-    vcpu_count: Option<u8>,
-    /// Memory requested for the sandbox, in MiB.
-    #[arg(
-        long,
-        alias = "firecracker-memory-mib",
-        env = "EXO_FIRECRACKER_MEMORY_MIB"
-    )]
-    memory_mib: Option<u32>,
-    #[arg(long)]
-    workdir: Option<String>,
-    #[arg(long, value_enum)]
-    networking: Option<EnabledDisabled>,
-    #[arg(long)]
-    idle_seconds: Option<u64>,
-    /// Host directory mount: HOST_PATH:GUEST_PATH[:ro|rw].
-    #[arg(long = "mount", value_name = "MOUNT", value_parser = parse_sandbox_mount)]
-    mounts: Vec<FileSystemMount>,
-    /// Internal host directory mount: HOST_PATH:GUEST_PATH[:ro|rw].
-    #[arg(
-        long = "internal-mount",
-        value_name = "MOUNT",
-        value_parser = parse_sandbox_mount
-    )]
-    internal_mounts: Vec<FileSystemMount>,
-    /// Durable filesystem: NAME:GUEST_PATH[:ro|rw].
-    #[arg(long = "durable", value_name = "MOUNT", value_parser = parse_durable_mount)]
-    durable_file_systems: Vec<DurableFileSystem>,
-}
-
-#[derive(Debug, Args)]
-struct SandboxPlayArgs {
-    #[command(flatten)]
-    owner: SandboxOwnerArgs,
-    #[command(flatten)]
-    sandbox: SandboxCreateArgs,
-    #[arg(long, default_value = "/bin/bash")]
-    shell: String,
-    #[arg(long = "env", value_name = "NAME=VALUE")]
-    env: Vec<String>,
-    #[cfg(feature = "firecracker")]
-    #[command(flatten, next_help_heading = "Firecracker backend options")]
-    firecracker: FirecrackerArgs,
-}
-
-#[derive(Debug, Subcommand)]
-enum ModelCommands {
-    List,
-    #[command(alias = "register")]
-    Create {
-        name: String,
-        #[arg(long)]
-        model: Option<String>,
-        #[arg(long)]
-        secret: String,
-        #[arg(long, default_value = "global")]
-        vault: String,
-        #[arg(long)]
-        base_url: Option<String>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum ProviderCommands {
-    /// List configured sandbox provider bindings.
-    List,
-    /// Configure a sandbox provider (writes a Binding::Sandbox).
-    #[command(alias = "configure")]
-    Create(Box<ProviderConfigureArgs>),
-}
-
-#[derive(Debug, Args)]
-struct ProviderConfigureArgs {
-    #[arg(long = "sandbox", value_enum)]
-    provider: SandboxProviderArg,
-    /// Binding name (default: the provider name).
-    #[arg(long)]
-    name: Option<String>,
-    /// Secret (by name) holding the provider's API key/token. Required for remote providers.
-    #[arg(long)]
-    secret: Option<String>,
-    /// Vault containing the backend credential.
-    #[arg(long, default_value = "global")]
-    vault: String,
-    /// Region/target. Daytona: us | eu | experimental.
-    #[arg(long)]
-    region: Option<String>,
-    /// Daytona organization id, or Sprites organization slug.
-    #[arg(long)]
-    organization_id: Option<String>,
-    #[arg(long)]
-    project_id: Option<String>,
-    #[arg(long)]
-    api_url: Option<String>,
-    #[arg(long = "runtime-arn")]
-    runtime_arn: Option<String>,
-    #[arg(long)]
-    qualifier: Option<String>,
-    /// AgentCore managed session storage mount path configured on the runtime.
-    #[arg(long = "session-storage-mount-path")]
-    session_storage_mount_path: Option<String>,
-    /// Default base image for sandboxes that don't request one.
-    #[arg(long)]
-    default_image: Option<String>,
-    /// smolvm: path to the `smolvm` binary, for an install that is not on PATH.
-    /// Declared here rather than read from the environment inside the backend so
-    /// it appears in `--help` and is persisted with the binding; the `env`
-    /// fallback keeps existing `SMOLVM_BIN` setups working.
-    #[arg(long = "smolvm-binary", env = "SMOLVM_BIN")]
-    smolvm_binary: Option<PathBuf>,
-    /// smolvm: binary to exec when booting a VM, for installs where the entry
-    /// point is a wrapper script. Defaults to the `smolvm-bin` beside
-    /// `--smolvm-binary`, else that binary itself.
-    #[arg(long = "smolvm-boot-binary", env = "SMOLVM_BOOT_BINARY")]
-    smolvm_boot_binary: Option<PathBuf>,
-    /// Sprites sprite HTTP URL auth: sprite | public.
-    #[arg(long)]
-    url_auth: Option<String>,
-    /// Extra Sprites labels (repeatable). Exo resume labels are added on create.
-    #[arg(long = "label")]
-    labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Args)]
@@ -1258,8 +1008,11 @@ async fn run_selected(
         if !matches!(
             cli.command,
             Commands::Environment {
-                command: environments::EnvironmentCommands::List
-                    | environments::EnvironmentCommands::Get { .. },
+                command: environment::EnvironmentCommands::List
+                    | environment::EnvironmentCommands::Get { .. }
+                    | environment::EnvironmentCommands::Provider {
+                        command: environment::ProviderCommands::List
+                    },
                 ..
             } | Commands::Agent {
                 command: AgentCommands::List
@@ -1282,15 +1035,6 @@ async fn run_selected(
                     | vaults::VaultCommands::Secret {
                         command: vaults::SecretCommands::List { .. }
                             | vaults::SecretCommands::Get { .. }
-                    },
-                ..
-            } | Commands::Model {
-                command: ModelCommands::List,
-                ..
-            } | Commands::Sandbox {
-                command: SandboxCommands::List { .. }
-                    | SandboxCommands::Provider {
-                        command: ProviderCommands::List
                     },
                 ..
             }
@@ -1316,24 +1060,15 @@ async fn run_selected(
     let http_client = selected_provider
         .as_ref()
         .and_then(|provider| provider.client.clone());
-    let env = CliEnvironment::load(
-        cli.runtime().env_file_if_exists.as_deref(),
-        cli.runtime().env_file.as_deref(),
-    )?;
+    let env = CliEnvironment::load(cli.runtime().env_file.as_deref())?;
     let definition = managed_agents::load_definition(&cli.command)?;
-    if http_client.is_none() && cli.runtime().harness.is_none() {
-        cli.runtime_mut().harness = definition
-            .as_ref()
-            .map(managed_agents::harness_selection)
-            .transpose()?;
-    }
 
     let harness = providers::runtime(&cli, http_client, definition.as_ref(), &env).await?;
     let env_vars = env.into_vars();
     let root = cli.runtime().root.clone();
     let result: Result<()> = async {
     match cli.command {
-        Commands::Environment { command, .. } => environments::run(harness.exoharness_handle().as_ref(), command).await?,
+        Commands::Environment { command, .. } => environment::run(harness.exoharness_handle().as_ref(), command).await?,
         Commands::FirecrackerBridge => {
             unreachable!("Firecracker bridge returns before harness startup")
         }
@@ -1341,7 +1076,7 @@ async fn run_selected(
             unreachable!("management commands return before harness startup")
         }
         Commands::Vault { command, .. } => vaults::run(harness.exoharness_handle().as_ref(), &command, &env_vars).await?,
-        Commands::Agent { command: AgentCommands::Run { thread, tui, prompt }, .. } => {
+        Commands::Agent { command: AgentCommands::Run { thread, tui, prompt, .. }, .. } => {
             let (agent, conversation) = managed_agents::open_thread(
                 harness.as_ref(),
                 definition.as_ref(),
@@ -1385,7 +1120,7 @@ async fn run_selected(
                     &["AGENT", "ID", "NAME"],
                     agents
                         .into_iter()
-                        .filter(|agent| agent.slug != SANDBOX_CLI_AGENT_SLUG)
+                        .filter(|agent| agent.slug != "__exo_sandbox_cli")
                         .map(|agent| vec![agent.slug, agent.id.to_string(), agent.name])
                         .collect(),
                 )?;
@@ -2065,6 +1800,7 @@ async fn run_selected(
                 agent,
                 conversation,
                 prompt,
+                ..
             } => {
                 let conversation =
                     must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
@@ -2094,192 +1830,7 @@ async fn run_selected(
                 }
             }
         },
-        Commands::Model { command, .. } => match command {
-            ModelCommands::List => {
-                let models = list_model_bindings(harness.exoharness_handle().as_ref()).await?;
-                print_table(
-                    &["MODEL", "UPSTREAM_MODEL", "SECRET", "BASE_URL"],
-                    models
-                        .into_iter()
-                        .map(|model| {
-                            vec![
-                                model.name,
-                                model.model,
-                                model.secret_name.unwrap_or_else(|| "none".to_string()),
-                                model.base_url.unwrap_or_else(|| "default".to_string()),
-                            ]
-                        })
-                        .collect(),
-                )?;
-            }
-            ModelCommands::Create {
-                name,
-                model,
-                secret,
-                vault,
-                base_url,
-            } => {
-                let secret_id = find_secret_id(harness.exoharness_handle().as_ref(), &vault, &secret)
-                    .await?
-                    .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
-                let upstream_model = model.unwrap_or_else(|| name.clone());
-                let id = harness
-                    .exoharness_handle()
-                    .put_binding(Binding::Llm {
-                        name: name.clone(),
-                        model: upstream_model,
-                        base_url,
-                        secret: Some(secret_id),
-                    })
-                    .await?;
-                println!("created model {} ({})", name, id);
-            }
-        },
-        Commands::Sandbox { command: SandboxCommands::Provider { command }, .. } => match command {
-            ProviderCommands::List => {
-                for record in harness.exoharness_handle().list_bindings().await? {
-                    if let Binding::Sandbox { name, config } = record.binding {
-                        println!("{name}\t{config:?}");
-                    }
-                }
-            }
-            ProviderCommands::Create(args) => {
-                let ProviderConfigureArgs {
-                    provider,
-                    name,
-                    secret,
-                    vault,
-                    region,
-                    organization_id,
-                    project_id,
-                    api_url,
-                    runtime_arn,
-                    qualifier,
-                    session_storage_mount_path,
-                    default_image,
-                    smolvm_binary,
-                    smolvm_boot_binary,
-                    url_auth,
-                    labels,
-                } = *args;
-                let binding_name =
-                    name.unwrap_or_else(|| SandboxProvider::from(provider).as_str().to_string());
-                if !matches!(provider, SandboxProviderArg::AwsAgentCore)
-                    && session_storage_mount_path.is_some()
-                {
-                    bail!("--session-storage-mount-path is only valid for aws-agentcore");
-                }
-                let config = match provider {
-                    SandboxProviderArg::Daytona => {
-                        let secret =
-                            secret.ok_or_else(|| anyhow!("--secret is required for daytona"))?;
-                        let secret_id =
-                            find_secret_id(harness.exoharness_handle().as_ref(), &vault, &secret)
-                                .await?
-                                .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
-                        SandboxProviderConfig::Daytona {
-                            api_key_secret: secret_id,
-                            region,
-                            organization_id,
-                            api_url,
-                            default_image: default_image.unwrap_or_else(default_daytona_image),
-                        }
-                    }
-                    SandboxProviderArg::Vercel => {
-                        let secret =
-                            secret.ok_or_else(|| anyhow!("--secret is required for vercel"))?;
-                        let secret_id =
-                            find_secret_id(harness.exoharness_handle().as_ref(), &vault, &secret)
-                                .await?
-                                .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
-                        let team_id = organization_id
-                            .ok_or_else(|| anyhow!("--organization-id is required for vercel"))?;
-                        let project_id = project_id
-                            .ok_or_else(|| anyhow!("--project-id is required for vercel"))?;
-                        SandboxProviderConfig::Vercel {
-                            api_token_secret: secret_id,
-                            team_id,
-                            project_id,
-                            api_url,
-                            default_image: default_image.unwrap_or_else(default_vercel_image),
-                        }
-                    }
-                    SandboxProviderArg::AwsAgentCore => {
-                        let runtime_arn = runtime_arn.ok_or_else(|| {
-                            anyhow!("--runtime-arn is required for aws-agentcore")
-                        })?;
-                        let region = match region {
-                            Some(region) => region,
-                            None => aws_region_from_arn(&runtime_arn, "bedrock-agentcore").ok_or_else(|| {
-                                anyhow!(
-                                    "--region is required when the AgentCore runtime ARN does not include a region"
-                                )
-                            })?,
-                        };
-                        SandboxProviderConfig::AwsAgentCore {
-                            runtime_arn,
-                            region,
-                            qualifier,
-                            endpoint_url: api_url,
-                            session_storage_mount_path,
-                            default_image: default_image
-                                .unwrap_or_else(default_aws_agentcore_image),
-                        }
-                    }
-                    SandboxProviderArg::Docker => SandboxProviderConfig::Docker {
-                        default_image: default_image.unwrap_or_else(default_docker_image),
-                    },
-                    SandboxProviderArg::Smolvm => SandboxProviderConfig::Smolvm {
-                        default_image: default_image.unwrap_or_else(default_docker_image),
-                        binary: smolvm_binary,
-                        boot_binary: smolvm_boot_binary,
-                    },
-                    SandboxProviderArg::Firecracker => SandboxProviderConfig::Firecracker {
-                        default_image: default_image.unwrap_or_else(default_firecracker_image),
-                    },
-                    SandboxProviderArg::E2b => {
-                        let secret =
-                            secret.ok_or_else(|| anyhow!("--secret is required for e2b"))?;
-                        let secret_id =
-                            find_secret_id(harness.exoharness_handle().as_ref(), &vault, &secret)
-                                .await?
-                                .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
-                        SandboxProviderConfig::E2b {
-                            api_key_secret: secret_id,
-                            api_url,
-                            default_image: default_image.unwrap_or_else(default_e2b_template),
-                        }
-                    }
-                    SandboxProviderArg::Sprites => {
-                        let secret =
-                            secret.ok_or_else(|| anyhow!("--secret is required for sprites"))?;
-                        let secret_id =
-                            find_secret_id(harness.exoharness_handle().as_ref(), &vault, &secret)
-                                .await?
-                                .ok_or_else(|| anyhow!("secret not found: {secret}"))?;
-                        SandboxProviderConfig::Sprites {
-                            token_secret: secret_id,
-                            api_url,
-                            url_auth,
-                            organization: organization_id,
-                            labels,
-                        }
-                    }
-                    other => bail!("provider {other:?} has no binding-based config yet"),
-                };
-                let id = harness
-                    .exoharness_handle()
-                    .put_binding(Binding::Sandbox {
-                        name: binding_name.clone(),
-                        config,
-                    })
-                    .await?;
-                println!("configured sandbox provider {binding_name} ({id})");
-            }
-        },
-        Commands::Sandbox { command, .. } => {
-            handle_sandbox_command(harness.as_ref(), command).await?;
-        }
+
     }
 
     Ok(())
@@ -2287,346 +1838,6 @@ async fn run_selected(
     let shutdown = harness.shutdown().await;
     result?;
     shutdown
-}
-
-async fn handle_sandbox_command(harness: &Runtime, command: SandboxCommands) -> Result<()> {
-    match command {
-        SandboxCommands::Provider { .. } => {
-            unreachable!("provider commands are handled separately")
-        }
-        SandboxCommands::Create(args) => {
-            let SandboxStartArgs {
-                owner,
-                name,
-                sandbox,
-                ..
-            } = *args;
-            let (_, sandbox_id) = start_sandbox(harness, owner.agent, name, sandbox).await?;
-            println!("{sandbox_id}");
-        }
-        SandboxCommands::Play(args) => {
-            let SandboxPlayArgs {
-                owner,
-                sandbox,
-                shell,
-                env,
-                ..
-            } = *args;
-            let env = parse_environment(env)?;
-            let (agent, sandbox_id) = start_sandbox(harness, owner.agent, None, sandbox).await?;
-            println!("started {sandbox_id}");
-            let shell_result = tokio::select! {
-                result = run_sandbox_process(
-                    agent.as_ref(),
-                    sandbox_id.clone(),
-                    vec![shell, "-i".to_string()],
-                    env,
-                    true,
-                ) => result,
-                result = tokio::signal::ctrl_c() => {
-                    result?;
-                    Ok(130)
-                }
-            };
-            let cleanup_result = agent.terminate_sandbox(sandbox_id).await;
-            match (shell_result, cleanup_result) {
-                (Ok(0), Ok(())) => {}
-                (Ok(exit_code), Ok(())) => {
-                    bail!("sandbox shell exited with status {exit_code}");
-                }
-                (Err(error), Ok(())) => return Err(error),
-                (Ok(_), Err(cleanup_error)) => return Err(cleanup_error),
-                (Err(error), Err(cleanup_error)) => {
-                    return Err(error).context(format!(
-                        "also failed to terminate the sandbox: {cleanup_error:#}"
-                    ));
-                }
-            }
-        }
-        SandboxCommands::List { owner, all, quiet } => {
-            let mut sandboxes = sandbox_owner(harness, owner.agent.as_deref())
-                .await?
-                .list_sandboxes()
-                .await?;
-            if !all {
-                sandboxes.retain(|sandbox| sandbox.running);
-            }
-            if quiet {
-                write_sandbox_ids(sandboxes.into_iter().map(|sandbox| sandbox.id))?;
-            } else {
-                print_table(
-                    &["ID", "NAME", "PROVIDER", "STATE", "IMAGE"],
-                    sandboxes
-                        .into_iter()
-                        .map(|sandbox| {
-                            vec![
-                                sandbox.id,
-                                sandbox
-                                    .name
-                                    .filter(|name| !name.trim().is_empty())
-                                    .unwrap_or_else(|| "<none>".to_string()),
-                                sandbox.provider.to_string(),
-                                if sandbox.running {
-                                    "running"
-                                } else {
-                                    "stopped"
-                                }
-                                .to_string(),
-                                sandbox.image,
-                            ]
-                        })
-                        .collect(),
-                )?;
-            }
-        }
-        SandboxCommands::Exec {
-            owner,
-            sandbox_id,
-            env,
-            command,
-        } => {
-            let agent = sandbox_owner(harness, owner.agent.as_deref()).await?;
-            let exit_code = run_sandbox_process(
-                agent.as_ref(),
-                sandbox_id,
-                command,
-                parse_environment(env)?,
-                false,
-            )
-            .await?;
-            if exit_code != 0 {
-                bail!("sandbox command exited with status {exit_code}");
-            }
-        }
-        SandboxCommands::Connect {
-            owner,
-            sandbox_id,
-            shell,
-            env,
-        } => {
-            let agent = sandbox_owner(harness, owner.agent.as_deref()).await?;
-            let exit_code = run_sandbox_process(
-                agent.as_ref(),
-                sandbox_id,
-                vec![shell, "-i".to_string()],
-                parse_environment(env)?,
-                true,
-            )
-            .await?;
-            if exit_code != 0 {
-                bail!("sandbox shell exited with status {exit_code}");
-            }
-        }
-        SandboxCommands::Stop { owner, sandbox_ids } => {
-            let sandbox_ids = sandbox_ids_or_stdin(sandbox_ids)?;
-            if sandbox_ids.is_empty() {
-                return Ok(());
-            }
-            let agent = sandbox_owner(harness, owner.agent.as_deref()).await?;
-            for sandbox_id in sandbox_ids {
-                agent
-                    .stop_sandbox(sandbox_id.clone())
-                    .await
-                    .with_context(|| format!("stopping sandbox {sandbox_id}"))?;
-            }
-        }
-        SandboxCommands::Delete { owner, sandbox_ids } => {
-            let sandbox_ids = sandbox_ids_or_stdin(sandbox_ids)?;
-            if sandbox_ids.is_empty() {
-                return Ok(());
-            }
-            let agent = sandbox_owner(harness, owner.agent.as_deref()).await?;
-            for sandbox_id in sandbox_ids {
-                agent
-                    .terminate_sandbox(sandbox_id.clone())
-                    .await
-                    .with_context(|| format!("terminating sandbox {sandbox_id}"))?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn sandbox_ids_or_stdin(sandbox_ids: Vec<String>) -> Result<Vec<String>> {
-    if !sandbox_ids.is_empty() {
-        return Ok(sandbox_ids);
-    }
-    if io::stdin().is_terminal() {
-        bail!("provide at least one sandbox ID or pipe IDs on stdin");
-    }
-
-    let mut input = String::new();
-    io::stdin().lock().read_to_string(&mut input)?;
-    let sandbox_ids = input
-        .split_whitespace()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    Ok(sandbox_ids)
-}
-
-fn write_sandbox_ids(ids: impl IntoIterator<Item = String>) -> Result<()> {
-    let mut stdout = io::stdout().lock();
-    for id in ids {
-        if let Err(error) = writeln!(stdout, "{id}") {
-            if error.kind() == io::ErrorKind::BrokenPipe {
-                return Ok(());
-            }
-            return Err(error.into());
-        }
-    }
-    Ok(())
-}
-
-async fn sandbox_owner(harness: &Runtime, agent_ref: Option<&str>) -> Result<Arc<dyn AgentHandle>> {
-    let exoharness = harness.exoharness_handle();
-    if let Some(agent_ref) = agent_ref {
-        return exoharness
-            .list_agents()
-            .await?
-            .into_iter()
-            .find(|agent| {
-                agent.record().slug == agent_ref || agent.record().id.to_string() == agent_ref
-            })
-            .ok_or_else(|| anyhow!("agent not found: {agent_ref}"));
-    }
-
-    if let Some(agent) = exoharness
-        .list_agents()
-        .await?
-        .into_iter()
-        .find(|agent| agent.record().slug == SANDBOX_CLI_AGENT_SLUG)
-    {
-        return Ok(agent);
-    }
-
-    exoharness
-        .new_agent(NewAgentRequest {
-            vaults: vec![],
-            slug: SANDBOX_CLI_AGENT_SLUG.to_string(),
-            name: "Sandbox CLI".to_string(),
-        })
-        .await
-}
-
-async fn start_sandbox(
-    harness: &Runtime,
-    agent: Option<String>,
-    name: Option<String>,
-    args: SandboxCreateArgs,
-) -> Result<(Arc<dyn AgentHandle>, String)> {
-    let SandboxCreateArgs {
-        provider,
-        image,
-        vcpu_count,
-        memory_mib,
-        workdir,
-        networking,
-        idle_seconds,
-        mut mounts,
-        mut internal_mounts,
-        durable_file_systems,
-    } = args;
-    if name.as_ref().is_some_and(|name| name.trim().is_empty()) {
-        bail!("sandbox name must not be empty");
-    }
-    for mount in &mut internal_mounts {
-        mount.internal = Some(true);
-    }
-    mounts.extend(internal_mounts);
-
-    let agent = sandbox_owner(harness, agent.as_deref()).await?;
-    let sandbox_id = agent
-        .create_sandbox(CreateSandboxRequest {
-            model: None,
-            name,
-            provider: provider.into(),
-            image,
-            resources: if vcpu_count.is_some() || memory_mib.is_some() {
-                Some(
-                    SandboxResourceShape::new(
-                        vcpu_count.unwrap_or(DEFAULT_SANDBOX_VCPU_COUNT),
-                        memory_mib.unwrap_or(DEFAULT_SANDBOX_MEMORY_MIB),
-                    )
-                    .context("sandbox vCPU count and memory must be positive")?,
-                )
-            } else {
-                None
-            },
-            default_workdir: workdir,
-            file_system_mounts: (!mounts.is_empty()).then_some(mounts),
-            durable_file_systems: (!durable_file_systems.is_empty())
-                .then_some(durable_file_systems),
-            policy: None,
-            enable_networking: networking.map(EnabledDisabled::enabled),
-            idle_seconds,
-        })
-        .await?;
-    Ok((agent, sandbox_id))
-}
-
-async fn run_sandbox_process(
-    agent: &dyn AgentHandle,
-    sandbox_id: String,
-    command: Vec<String>,
-    env: HashMap<String, String>,
-    connect_stdin: bool,
-) -> Result<i32> {
-    let process = agent
-        .run_in_sandbox(RunInSandboxRequest {
-            id: sandbox_id,
-            command,
-            env,
-        })
-        .await?;
-    stream_sandbox_process(process, connect_stdin).await
-}
-
-async fn stream_sandbox_process(
-    process: Box<dyn SandboxProcess>,
-    connect_stdin: bool,
-) -> Result<i32> {
-    let parts = process.into_parts();
-    let mut stdout_reader = parts.stdout.compat();
-    let mut stderr_reader = parts.stderr.compat();
-    let stdout = async move {
-        let mut stdout = tokio::io::stdout();
-        tokio::io::copy(&mut stdout_reader, &mut stdout).await?;
-        tokio::io::AsyncWriteExt::flush(&mut stdout).await?;
-        Result::<()>::Ok(())
-    };
-    let stderr = async move {
-        let mut stderr = tokio::io::stderr();
-        tokio::io::copy(&mut stderr_reader, &mut stderr).await?;
-        tokio::io::AsyncWriteExt::flush(&mut stderr).await?;
-        Result::<()>::Ok(())
-    };
-
-    let mut wait = parts.wait;
-    let lifecycle = async move {
-        let exit_code = if connect_stdin {
-            let mut stdin_writer = parts.stdin.compat_write();
-            let stdin = async move {
-                let mut stdin = tokio::io::stdin();
-                tokio::io::copy(&mut stdin, &mut stdin_writer).await?;
-                Result::<()>::Ok(())
-            };
-            tokio::pin!(stdin);
-            tokio::select! {
-                result = &mut wait => result?,
-                result = &mut stdin => {
-                    result?;
-                    wait.await?
-                }
-            }
-        } else {
-            drop(parts.stdin);
-            wait.await?
-        };
-        Result::<i32>::Ok(exit_code)
-    };
-
-    let (exit_code, (), ()) = tokio::try_join!(lifecycle, stdout, stderr)?;
-    Ok(exit_code)
 }
 
 fn command_refs_mut(command: &mut Commands) -> (Option<&mut String>, Option<&mut String>) {
@@ -2710,21 +1921,7 @@ fn command_refs_mut(command: &mut Commands) -> (Option<&mut String>, Option<&mut
             },
             ConversationCommands::CompleteRebuildUpdate { .. } => (None, None),
         },
-        Commands::Sandbox { command, .. } => {
-            let owner = match command {
-                SandboxCommands::Provider { .. } => return (None, None),
-                SandboxCommands::Create(args) => &mut args.owner,
-                SandboxCommands::Play(args) => &mut args.owner,
-                SandboxCommands::List { owner, .. }
-                | SandboxCommands::Exec { owner, .. }
-                | SandboxCommands::Connect { owner, .. }
-                | SandboxCommands::Stop { owner, .. }
-                | SandboxCommands::Delete { owner, .. } => owner,
-            };
-            (owner.agent.as_mut(), None)
-        }
         Commands::FirecrackerBridge
-        | Commands::Model { .. }
         | Commands::Provider { .. }
         | Commands::Environment { .. }
         | Commands::Vault { .. } => (None, None),
@@ -2870,63 +2067,6 @@ fn write_table_row<T: AsRef<str>, W: Write>(writer: &mut W, values: &[T]) -> io:
     writeln!(writer)
 }
 
-struct RegisteredModel {
-    name: String,
-    model: String,
-    secret_name: Option<String>,
-    base_url: Option<String>,
-}
-
-async fn list_model_bindings(exoharness: &dyn ExoHarness) -> Result<Vec<RegisteredModel>> {
-    let mut secrets = HashMap::new();
-    for vault in exoharness.list_vaults().await? {
-        let vault_name = vault.record().name.clone();
-        let vault_id = vault.record().id;
-        for secret in vault.list_secrets().await? {
-            secrets.insert(
-                (vault_id, secret.id),
-                format!("{vault_name}/{}", secret.name),
-            );
-        }
-    }
-    let mut models = Vec::new();
-    for metadata in exoharness.list_bindings().await? {
-        let Binding::Llm {
-            name,
-            model,
-            base_url,
-            secret,
-        } = metadata.binding
-        else {
-            continue;
-        };
-        let secret_name = secret.map(|reference| {
-            secrets
-                .get(&(reference.vault_id, reference.secret_id))
-                .cloned()
-                .unwrap_or_else(|| "<missing vault or secret>".to_string())
-        });
-        models.push(RegisteredModel {
-            name,
-            model,
-            secret_name,
-            base_url,
-        });
-    }
-    let mut deduped = Vec::<RegisteredModel>::new();
-    for model in models {
-        if let Some(existing) = deduped
-            .iter_mut()
-            .find(|existing| existing.name == model.name)
-        {
-            *existing = model;
-        } else {
-            deduped.push(model);
-        }
-    }
-    Ok(deduped)
-}
-
 async fn find_secret_id(
     exoharness: &dyn ExoHarness,
     vault: &str,
@@ -2982,15 +2122,6 @@ fn parse_sandbox_mount(value: &str) -> std::result::Result<FileSystemMount, Stri
     })
 }
 
-fn parse_durable_mount(value: &str) -> std::result::Result<DurableFileSystem, String> {
-    let (name, mount_path, mode) = parse_mount_spec(value, "filesystem name")?;
-    Ok(DurableFileSystem {
-        name: name.to_string(),
-        mount_path: mount_path.to_string(),
-        mode,
-    })
-}
-
 fn parse_mount_spec<'a>(
     value: &'a str,
     source_label: &str,
@@ -3008,19 +2139,6 @@ fn parse_mount_spec<'a>(
     };
     validate_mount_path(mount_path).map_err(|error| error.to_string())?;
     Ok((source, mount_path, mode))
-}
-
-fn parse_environment(values: Vec<String>) -> Result<HashMap<String, String>> {
-    values
-        .into_iter()
-        .map(|value| {
-            let (name, value) = value
-                .split_once('=')
-                .ok_or_else(|| anyhow!("environment value must be NAME=VALUE"))?;
-            let name = parse_env_var_name(name).map_err(|error| anyhow!(error))?;
-            Ok((name, value.to_string()))
-        })
-        .collect()
 }
 
 fn canonicalize_directory(path: &Path) -> Result<PathBuf> {
@@ -3258,7 +2376,10 @@ mod command_tests {
             "chat",
             "run",
             "secret",
+            "model",
             "sandbox-provider",
+            "sandbox",
+            "environments",
             "tools",
             "adapters",
         ] {
@@ -3268,10 +2389,7 @@ mod command_tests {
             vec!["agent", "create", "support", "--file", "agent.md"],
             vec!["agent", "update", "support", "--file", "agent.md"],
             vec!["serve", "--agent", "support"],
-            vec!["sandbox", "provider", "list"],
-            vec![
-                "model", "create", "test", "--secret", "key", "--vault", "team",
-            ],
+            vec!["environment", "provider", "list"],
         ] {
             Cli::try_parse_from(["exo"].into_iter().chain(args)).unwrap();
         }
@@ -3284,6 +2402,74 @@ mod command_tests {
             ],
         ] {
             assert!(Cli::try_parse_from(["exo"].into_iter().chain(args)).is_err());
+        }
+    }
+
+    #[test]
+    fn execution_options_only_belong_to_execution_commands() {
+        for command in [
+            vec![
+                "vault",
+                "secret",
+                "create",
+                "team",
+                "git",
+                "--token-env",
+                "TOKEN",
+            ],
+            vec!["environment", "list"],
+            vec!["environment", "provider", "list"],
+            vec!["agent", "get", "test"],
+            vec!["thread", "list", "test"],
+        ] {
+            let help = Cli::try_parse_from(
+                ["exo"]
+                    .into_iter()
+                    .chain(command.iter().copied())
+                    .chain(["--help"]),
+            )
+            .unwrap_err()
+            .to_string();
+            for option in [
+                "--pricing-path",
+                "--pricing-url",
+                "--egress-policy",
+                "--harness",
+                "--env-file-if-exists",
+            ] {
+                assert!(!help.contains(option), "{help}");
+                let error = Cli::try_parse_from(
+                    ["exo"]
+                        .into_iter()
+                        .chain(command.iter().copied())
+                        .chain([option, "unused"]),
+                )
+                .unwrap_err();
+                assert_eq!(
+                    error.kind(),
+                    clap::error::ErrorKind::UnknownArgument,
+                    "{error}"
+                );
+            }
+            assert!(help.contains("--env-file"), "{help}");
+        }
+        for command in [
+            vec!["agent", "run", "--agent", "test"],
+            vec!["thread", "send", "test", "thread", "hi"],
+            vec!["serve"],
+        ] {
+            let cli = Cli::try_parse_from(["exo"].into_iter().chain(command).chain([
+                "--pricing-path",
+                "prices.json",
+                "--pricing-url",
+                "https://example.com/prices.json",
+                "--egress-policy",
+                "policy.json",
+                "--harness",
+                "codex",
+            ]))
+            .unwrap();
+            assert!(cli.execution().unwrap().pricing_path.is_some());
         }
     }
 

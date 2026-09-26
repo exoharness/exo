@@ -143,7 +143,6 @@ async fn http_exoharness_runs_noninteractive_sandbox_commands() {
         .expect("conversation");
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
-            model: None,
             name: None,
             provider: SandboxProvider::LocalProcess,
             image: "local".to_string(),
@@ -199,7 +198,6 @@ async fn http_exoharness_runs_agent_scoped_sandbox_commands() {
         .expect("conversation");
     let sandbox_id = agent
         .create_sandbox(CreateSandboxRequest {
-            model: None,
             name: Some("agent-http".to_string()),
             provider: SandboxProvider::LocalProcess,
             image: "local".to_string(),
@@ -274,7 +272,6 @@ async fn http_exoharness_supports_sandbox_process_events() {
         .expect("conversation");
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
-            model: None,
             name: None,
             provider: SandboxProvider::LocalProcess,
             image: "local".to_string(),
@@ -365,7 +362,6 @@ async fn http_exoharness_supports_turn_scoped_sandbox_snapshot_and_start() {
         .expect("conversation");
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
-            model: None,
             name: None,
             provider: SandboxProvider::LocalProcess,
             image: "local".to_string(),
@@ -460,7 +456,6 @@ async fn http_exoharness_restores_a_snapshot_into_a_new_sandbox() {
         .expect("conversation");
     let source_id = conversation
         .create_sandbox(CreateSandboxRequest {
-            model: None,
             name: Some("source".to_string()),
             provider: SandboxProvider::LocalProcess,
             image: "local".to_string(),
@@ -482,7 +477,6 @@ async fn http_exoharness_restores_a_snapshot_into_a_new_sandbox() {
         .restore_sandbox(RestoreSandboxRequest {
             snapshot_id,
             sandbox: CreateSandboxRequest {
-                model: None,
                 name: Some("target".to_string()),
                 provider: SandboxProvider::LocalProcess,
                 image: "local".to_string(),
@@ -630,7 +624,8 @@ async fn http_vault_contexts_and_secrets_round_trip() -> crate::Result<()> {
             &id,
             Secret::Key {
                 value: "second".into(),
-            },
+            }
+            .into(),
         )
         .await?;
     let resolved = user.resolve_secret(&id, &target).await?;
@@ -677,7 +672,7 @@ async fn http_vault_contexts_and_secrets_round_trip() -> crate::Result<()> {
             provider: SandboxProvider::LocalProcess,
             image: "local".into(),
             enable_networking: Some(true),
-            model: None,
+
             name: None,
             resources: None,
             default_workdir: None,

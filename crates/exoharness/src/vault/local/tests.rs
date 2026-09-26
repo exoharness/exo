@@ -34,7 +34,9 @@ async fn vault_secrets_share_one_store_and_rotate_without_changing_id() -> Resul
     assert!(
         !std::fs::read_to_string(temp.path().join("vaults/vaults.json"))?.contains("first-secret")
     );
-    let updated = vault.update_secret(&id, key("second-secret")).await?;
+    let updated = vault
+        .update_secret(&id, key("second-secret").into())
+        .await?;
     assert_eq!(updated.id, id);
     assert_eq!(updated.revision, 2);
     let reopened = BasicExoHarness::new(local_test_config(temp.path())).await?;
@@ -244,7 +246,7 @@ async fn destination_checks_and_failed_updates_preserve_the_original_secret() ->
             .is_err()
     );
     for value in ["", "with space", "injected\r\nHeader:value"] {
-        assert!(alice.update_secret(&id, key(value)).await.is_err());
+        assert!(alice.update_secret(&id, key(value).into()).await.is_err());
     }
     let resolved = alice.resolve_secret(&id, &target).await?;
     assert_eq!(resolved.revision, 1);
@@ -471,6 +473,50 @@ fn mounts_protect_a_master_key_before_it_is_created() -> Result<()> {
         config
             .validate_secret_mount(&temp.path().join("link"))
             .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_destination_update_preserves_encrypted_secret_and_metadata() -> Result<()> {
+    let temp = TempDir::new()?;
+    let harness = BasicExoHarness::new(local_test_config(temp.path())).await?;
+    let vault = harness.create_vault("test").await?;
+    let target = SecretTarget::mcp("https://example.com/mcp")?;
+    vault
+        .put_secret(request("mcp", "key", Some(target.clone())))
+        .await?;
+    let id = vault.put_secret(request("other", "original", None)).await?;
+    let before = vault.list_secrets().await?;
+    for (target, value) in [
+        (target, "valid"),
+        (SecretTarget::http("https://example.com")?, "invalid token"),
+    ] {
+        assert!(
+            vault
+                .update_secret(
+                    &id,
+                    crate::UpdateSecretRequest {
+                        secret: Some(key(value)),
+                        target: Some(target)
+                    }
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(vault.list_secrets().await?, before);
+        assert_eq!(vault.get_secret(&id).await?, Some(key("original")));
+    }
+    let update: crate::UpdateSecretRequest =
+        serde_json::from_str(r#"{"target":{"type":"http","origin":"https://example.com"}}"#)?;
+    assert_eq!(update.secret, None);
+    vault.update_secret(&id, update).await?;
+    assert_eq!(vault.get_secret(&id).await?, Some(key("original")));
+    assert!(
+        serde_json::from_str::<crate::UpdateSecretRequest>(
+            r#"{"secret":{"type":"key"},"target":{"type":"http","origin":"https://example.com"}}"#,
+        )
+        .is_err()
     );
     Ok(())
 }

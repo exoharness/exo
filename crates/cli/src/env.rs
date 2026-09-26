@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use executor::BraintrustRuntimeConfig;
 
 #[derive(Debug, Clone, Default)]
@@ -11,20 +11,13 @@ pub(crate) struct CliEnvironment {
 }
 
 impl CliEnvironment {
-    pub(crate) fn load(env_file_if_exists: Option<&Path>, env_file: Option<&Path>) -> Result<Self> {
-        let mut vars = HashMap::new();
-
-        if let Some(path) = env_file_if_exists
-            && path.exists()
-        {
-            vars.extend(parse_env_file(path)?);
-        }
-
-        if let Some(path) = env_file {
-            vars.extend(parse_env_file(path)?);
-        }
-
-        Ok(Self { vars })
+    pub(crate) fn load(env_file: Option<&Path>) -> Result<Self> {
+        Ok(Self {
+            vars: env_file
+                .map(parse_env_file)
+                .transpose()?
+                .unwrap_or_default(),
+        })
     }
 
     pub(crate) fn into_vars(self) -> HashMap<String, String> {
@@ -51,7 +44,8 @@ impl CliEnvironment {
 }
 
 fn parse_env_file(path: &Path) -> Result<HashMap<String, String>> {
-    let contents = fs::read_to_string(path)?;
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("reading environment file {}", path.display()))?;
     let mut vars = HashMap::new();
 
     for (index, raw_line) in contents.lines().enumerate() {

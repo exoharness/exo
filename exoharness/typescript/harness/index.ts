@@ -35,6 +35,8 @@ export interface AgentConfig {
   enableAgentToolCreation: boolean;
   sandbox: AgentSandboxConfig;
   model: string;
+  credential?: string | null;
+  baseUrl?: string | null;
   maxOutputTokens?: number | null;
   maxToolRoundTrips?: number | null;
   braintrust?: unknown;
@@ -60,18 +62,11 @@ export type Binding =
       name: string;
       serverUrl: string;
       secret?: SecretReference | null;
-    }
-  | {
-      type: "llm";
-      name: string;
-      model: string;
-      baseUrl?: string | null;
-      secret?: SecretReference | null;
     };
 
 export interface BindingRecord {
   id: string;
-  type: "env" | "mcp" | "llm";
+  type: "env" | "mcp";
   name: string;
   createdAt: string;
   binding: Binding;

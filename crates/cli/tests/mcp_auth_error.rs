@@ -11,28 +11,6 @@ async fn chat_shows_one_line_for_auth_errors_unless_full_verbosity_is_requested(
         .mount(&server)
         .await;
     let temp = TempDir::new()?;
-    use exoharness::{
-        BasicExoHarness, BasicExoHarnessConfig, ExoHarness, SandboxBackendRegistration,
-        SandboxProvider, SecretBackendChoice,
-    };
-    let state = BasicExoHarness::new(BasicExoHarnessConfig {
-        root: temp.path().join("state/exoharness"),
-        secret_backend: SecretBackendChoice::File {
-            path: Some(temp.path().join("master-key")),
-        },
-        sandbox_default: SandboxProvider::LocalProcess,
-        sandbox_policy: None,
-        sandbox_backends: vec![SandboxBackendRegistration::local_process()],
-    })
-    .await?;
-    state
-        .put_binding(exoharness::Binding::Llm {
-            name: "gpt-5.6-sol".into(),
-            model: "gpt-5.6-sol".into(),
-            base_url: None,
-            secret: None,
-        })
-        .await?;
     let agent = temp.path().join("github.md");
     std::fs::write(
         &agent,

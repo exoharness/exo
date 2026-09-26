@@ -56,16 +56,16 @@ export interface NativeBraintrustOptions {
 }
 
 export interface ResponsesRuntimeOptions {
-  apiKey?: string;
+  apiKey: string;
   baseURL?: string;
   organization?: string;
   project?: string;
   braintrust?: NativeBraintrustOptions | null;
 }
 
-export interface ResponsesModelBinding {
+export interface ResponsesModelConfig {
   model?: string;
-  apiKey?: string;
+  apiKey: string;
   baseUrl?: string | null;
 }
 
@@ -127,7 +127,7 @@ interface NativeLlmTraceOptions extends NativeTraceOptions {
 export class ResponsesRuntime implements ResponsesRuntimeLike {
   private readonly client: OpenAI;
 
-  constructor(options: ResponsesRuntimeOptions = {}) {
+  constructor(options: ResponsesRuntimeOptions) {
     ensureBraintrustLogger(options.braintrust ?? null);
     // wrapOpenAI auto-instruments chat.completions/responses calls with a
     // braintrust LLM span. Also covers the OpenRouter path (same OpenAI client,
@@ -136,26 +136,16 @@ export class ResponsesRuntime implements ResponsesRuntimeLike {
     this.client = wrapOpenAI(
       new OpenAI({
         apiKey: options.apiKey,
-        baseURL: options.baseURL,
+        baseURL: options.baseURL ?? "https://api.openai.com/v1",
         organization: options.organization,
         project: options.project,
       }),
     );
   }
 
-  static fromEnvironment(agentConfig?: AgentConfig): ResponsesRuntime {
-    return new ResponsesRuntime({
-      apiKey: process.env.OPENAI_API_KEY,
-      baseURL: process.env.OPENAI_BASE_URL,
-      organization: process.env.OPENAI_ORG_ID,
-      project: process.env.OPENAI_PROJECT,
-      braintrust: braintrustOptionsFromAgentConfig(agentConfig),
-    });
-  }
-
-  static fromModelBinding(
+  static fromModelConfig(
     agentConfig: AgentConfig | undefined,
-    binding: ResponsesModelBinding,
+    binding: ResponsesModelConfig,
   ): ResponsesRuntime {
     return new ResponsesRuntime({
       apiKey: binding.apiKey,
@@ -284,25 +274,25 @@ export class ResponsesRuntime implements ResponsesRuntimeLike {
   }
 }
 
-export function runtimeFromModelBinding(
+export function runtimeFromModelConfig(
   agentConfig: AgentConfig | undefined,
-  binding: ResponsesModelBinding,
+  binding: ResponsesModelConfig,
 ): ResponsesRuntimeLike {
   const model = binding.model ?? "";
   if (isAnthropicModel(model)) {
-    return AnthropicRuntime.fromModelBinding(agentConfig, binding);
+    return AnthropicRuntime.fromModelConfig(agentConfig, binding);
   }
   // OpenRouter is OpenAI-compatible but Chat Completions only (no Responses
   // API), so force the chat path regardless of how the model name looks.
-  if (isOpenRouterBinding(binding)) {
-    return ChatCompletionsRuntime.fromModelBinding(agentConfig, binding);
+  if (isOpenRouterModel(binding)) {
+    return ChatCompletionsRuntime.fromModelConfig(agentConfig, binding);
   }
   return modelRequiresResponsesApi(model)
-    ? ResponsesRuntime.fromModelBinding(agentConfig, binding)
-    : ChatCompletionsRuntime.fromModelBinding(agentConfig, binding);
+    ? ResponsesRuntime.fromModelConfig(agentConfig, binding)
+    : ChatCompletionsRuntime.fromModelConfig(agentConfig, binding);
 }
 
-// Anthropic model bindings call the native Messages API. We detect them by
+// Anthropic models call the native Messages API. We detect them by
 // model name (`claude*`), mirroring the Rust runtime; Bedrock/Vertex Anthropic
 // ids carry provider prefixes and intentionally don't match here.
 export function isAnthropicModel(model: string): boolean {
@@ -311,7 +301,9 @@ export function isAnthropicModel(model: string): boolean {
 
 // OpenRouter is selected by its base URL (it aggregates many vendors, so the
 // model name isn't a reliable signal), mirroring the Rust runtime.
-export function isOpenRouterBinding(binding: ResponsesModelBinding): boolean {
+export function isOpenRouterModel(
+  binding: Pick<ResponsesModelConfig, "baseUrl">,
+): boolean {
   return (binding.baseUrl ?? "").includes("openrouter.ai");
 }
 
@@ -330,7 +322,7 @@ export function modelRequiresResponsesApi(model: string): boolean {
 export class ChatCompletionsRuntime implements ResponsesRuntimeLike {
   private readonly client: OpenAI;
 
-  constructor(options: ResponsesRuntimeOptions = {}) {
+  constructor(options: ResponsesRuntimeOptions) {
     ensureBraintrustLogger(options.braintrust ?? null);
     // wrapOpenAI auto-instruments chat.completions/responses calls with a
     // braintrust LLM span. Also covers the OpenRouter path (same OpenAI client,
@@ -339,16 +331,16 @@ export class ChatCompletionsRuntime implements ResponsesRuntimeLike {
     this.client = wrapOpenAI(
       new OpenAI({
         apiKey: options.apiKey,
-        baseURL: options.baseURL,
+        baseURL: options.baseURL ?? "https://api.openai.com/v1",
         organization: options.organization,
         project: options.project,
       }),
     );
   }
 
-  static fromModelBinding(
+  static fromModelConfig(
     agentConfig: AgentConfig | undefined,
-    binding: ResponsesModelBinding,
+    binding: ResponsesModelConfig,
   ): ChatCompletionsRuntime {
     return new ChatCompletionsRuntime({
       apiKey: binding.apiKey,
@@ -481,21 +473,22 @@ const DEFAULT_ANTHROPIC_MAX_TOKENS = 4096;
 export class AnthropicRuntime implements ResponsesRuntimeLike {
   private readonly client: Anthropic;
 
-  constructor(options: ResponsesRuntimeOptions = {}) {
+  constructor(options: ResponsesRuntimeOptions) {
     ensureBraintrustLogger(options.braintrust ?? null);
     // wrapAnthropic auto-instruments every messages.create/.stream call with a
     // braintrust LLM span (input/output/usage), so we don't hand-roll spans.
     this.client = wrapAnthropic(
       new Anthropic({
         apiKey: options.apiKey,
-        baseURL: options.baseURL,
+        authToken: null,
+        baseURL: options.baseURL ?? "https://api.anthropic.com",
       }),
     );
   }
 
-  static fromModelBinding(
+  static fromModelConfig(
     agentConfig: AgentConfig | undefined,
-    binding: ResponsesModelBinding,
+    binding: ResponsesModelConfig,
   ): AnthropicRuntime {
     return new AnthropicRuntime({
       apiKey: binding.apiKey,
@@ -703,20 +696,6 @@ function anthropicUsageToResponseUsage(
     input_tokens_details: { cached_tokens: cached },
     output_tokens_details: { reasoning_tokens: 0 },
   };
-}
-
-export async function runResponsesTurn(
-  context: TurnContext,
-  run: (
-    runtime: ResponsesRuntimeLike,
-    context: TurnContext,
-    turnParent: TraceParent,
-  ) => Promise<string | null>,
-): Promise<void> {
-  const runtime = ResponsesRuntime.fromEnvironment(context.agentConfig);
-  await runtime.runTurn(context, (turnParent) =>
-    run(runtime, context, turnParent),
-  );
 }
 
 export async function traceExecutorTurn(

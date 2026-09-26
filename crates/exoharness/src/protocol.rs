@@ -108,7 +108,10 @@ pub enum Request {
         scope: ResourceScope,
         vault_id: VaultId,
         secret_id: SecretId,
-        secret: Secret,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secret: Option<Secret>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<SecretTarget>,
     },
     VaultDeleteSecret {
         #[serde(default)]

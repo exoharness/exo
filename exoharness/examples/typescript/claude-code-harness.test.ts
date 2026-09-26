@@ -4,13 +4,6 @@ import { type EventData, type TurnContext } from "@exo/harness";
 import claude from "./claude-code-harness";
 
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({ query: vi.fn() }));
-vi.mock("@exo/model-runtime/shared", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@exo/model-runtime/shared")>()),
-  resolveSandboxLlmBinding: async () => ({
-    name: "model",
-    model: "claude-sonnet-4-6",
-  }),
-}));
 vi.mock("@exo/model-runtime/responses", () => ({
   errorMessage: (error: unknown) =>
     error instanceof Error ? error.message : String(error),
@@ -52,7 +45,7 @@ function fixture(events: AsyncIterable<unknown>) {
     close,
   } as unknown as Query);
   const context = {
-    agentConfig: { instructions: [] },
+    agentConfig: { model: "claude-sonnet-4-6", instructions: [] },
     conversationConfig: { mounts: [], toolPolicies: {} },
     mcpServers: [],
     exoharness: {

@@ -1915,6 +1915,8 @@ mod tests {
 
     fn test_agent_config() -> AgentConfig {
         AgentConfig {
+            credential: Some("test-openai".into()),
+            base_url: None,
             resources: Vec::new(),
             instructions: Vec::new(),
             harness: AgentHarnessKind::Exo,

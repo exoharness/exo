@@ -43,9 +43,9 @@ import {
   markFirstTextDelta,
   pickEnvFrom,
   projectAnthropicMessageToolEvents,
-  resolveSandboxLlmBinding,
+  resolveSandboxModel,
   sandboxCwd,
-  type ResolvedLlmBinding,
+  type ResolvedModel,
 } from "@exo/model-runtime/shared";
 
 import { claudeToolName } from "../../typescript/harness/native-mcp";
@@ -72,7 +72,7 @@ interface ClaudeTraceState {
 export default defineHarness({
   nativeToolApprovals: true,
   async runTurn(context) {
-    const modelBinding = await resolveSandboxLlmBinding(context);
+    const modelBinding = resolveSandboxModel(context);
     await traceExecutorTurn(context, (turnParent) =>
       runClaudeCodeTurn(context, turnParent, modelBinding),
     );
@@ -82,7 +82,7 @@ export default defineHarness({
 async function runClaudeCodeTurn(
   context: TurnContext,
   turnParent: TraceParent,
-  modelBinding: ResolvedLlmBinding,
+  modelBinding: ResolvedModel,
 ): Promise<string | null> {
   const systemPrompt = claudeSystemPrompt(context);
   const state: ClaudeTraceState = {
@@ -213,7 +213,7 @@ async function traceClaudeLlmTurn(
   turnParent: TraceParent,
   context: TurnContext,
   state: ClaudeTraceState,
-  modelBinding: ResolvedLlmBinding,
+  modelBinding: ResolvedModel,
   run: () => Promise<void>,
 ): Promise<void> {
   await tracedUnderParent(
@@ -256,7 +256,7 @@ async function traceClaudeLlmTurn(
 function claudeOptions(
   context: TurnContext,
   state: ClaudeTraceState,
-  modelBinding: ResolvedLlmBinding,
+  modelBinding: ResolvedModel,
 ): Options {
   const options: Options = {
     model: modelBinding.model,
@@ -767,7 +767,7 @@ function claudeSandboxExecutable(): string {
 }
 
 function claudeSandboxBaseEnv(
-  modelBinding: ResolvedLlmBinding,
+  modelBinding: ResolvedModel,
 ): Record<string, string> {
   const env: Record<string, string> = {};
   if (modelBinding.baseUrl) {

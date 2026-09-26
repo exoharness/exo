@@ -154,7 +154,11 @@ pub trait VaultHandle: Send + Sync {
     async fn list_secrets(&self) -> Result<Vec<SecretMetadata>>;
     async fn put_secret(&self, request: PutSecretRequest) -> Result<SecretId>;
     async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>>;
-    async fn update_secret(&self, id: &SecretId, secret: Secret) -> Result<SecretMetadata>;
+    async fn update_secret(
+        &self,
+        id: &SecretId,
+        request: crate::UpdateSecretRequest,
+    ) -> Result<SecretMetadata>;
     async fn delete_secret(&self, id: &SecretId) -> Result<()>;
     async fn resolve_secret(&self, id: &SecretId, target: &SecretTarget) -> Result<ResolvedSecret>;
     async fn refresh_secret(

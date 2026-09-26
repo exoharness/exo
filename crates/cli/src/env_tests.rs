@@ -14,7 +14,7 @@ fn env_file_parsing_supports_basic_key_values() {
     )
     .expect("env file should write");
 
-    let env = CliEnvironment::load(None, Some(&path)).expect("env should load");
+    let env = CliEnvironment::load(Some(&path)).expect("env should load");
 
     assert_eq!(env.get("BRAINTRUST_API_KEY"), Some("bt_key"));
     assert_eq!(env.get("OPENAI_API_KEY"), Some("openai_key"));
@@ -22,15 +22,10 @@ fn env_file_parsing_supports_basic_key_values() {
 }
 
 #[test]
-fn explicit_env_file_overrides_optional_env_file_if_exists() {
-    let tempdir = TempDir::new().expect("tempdir should exist");
-    let optional_path = tempdir.path().join(".env.local");
-    let explicit_path = tempdir.path().join(".env.override");
-    fs::write(&optional_path, "BRAINTRUST_API_KEY=optional\n").expect("optional env should write");
-    fs::write(&explicit_path, "BRAINTRUST_API_KEY=explicit\n").expect("explicit env should write");
-
-    let env =
-        CliEnvironment::load(Some(&optional_path), Some(&explicit_path)).expect("env should load");
-
-    assert_eq!(env.get("BRAINTRUST_API_KEY"), Some("explicit"));
+fn explicit_env_file_must_exist() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("missing.env");
+    let error = CliEnvironment::load(Some(&path)).unwrap_err();
+    assert!(error.to_string().contains("missing.env"));
+    assert!(CliEnvironment::load(None).unwrap().into_vars().is_empty());
 }

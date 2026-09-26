@@ -2,9 +2,9 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use executor::{
-    BasicExoHarness, BasicExoHarnessConfig, BasicToolRuntime, Binding, ExoHarness, LocalProvider,
-    ModelClient, ModelRequest, ModelResponse, ModelResponseStream, Runtime,
-    SandboxBackendRegistration, SandboxProvider, SecretBackendChoice, SendRequest,
+    BasicExoHarness, BasicExoHarnessConfig, BasicToolRuntime, LocalProvider, ModelClient,
+    ModelRequest, ModelResponse, ModelResponseStream, Runtime, SandboxBackendRegistration,
+    SandboxProvider, SecretBackendChoice, SendRequest,
 };
 use exoharness::ReadArtifactRequest;
 use lingua::Message;
@@ -13,7 +13,7 @@ use tempfile::TempDir;
 
 use super::*;
 
-const SOURCE: &str = "---\nname: support-analyst\nharness: basic\nconfig:\n  model: gpt-5.4\n---\n\nInvestigate support tickets.\n";
+const SOURCE: &str = "---\nname: support-analyst\nharness: basic\nconfig:\n  model: gpt-5.4\n  credential: test-openai\n---\n\nInvestigate support tickets.\n";
 
 #[derive(Default)]
 struct RecordingModel {
@@ -49,14 +49,19 @@ impl ModelClient for RecordingModel {
 
 async fn harness(root: &Path, model: Arc<RecordingModel>) -> Result<Arc<Runtime>> {
     let storage = Arc::new(BasicExoHarness::new(storage_config(root)).await?);
-    storage
-        .put_binding(Binding::Llm {
-            name: "gpt-5.4".to_string(),
-            model: "gpt-5.4".to_string(),
-            base_url: None,
-            secret: None,
-        })
-        .await?;
+
+    let vault = exoharness::vault::global_vault(storage.as_ref()).await?;
+    if vault.list_secrets().await?.is_empty() {
+        vault
+            .put_secret(exoharness::PutSecretRequest {
+                name: "test-openai".into(),
+                target: None,
+                secret: exoharness::Secret::Key {
+                    value: "fixture-key".into(),
+                },
+            })
+            .await?;
+    }
     let definition = AgentDefinition::parse(SOURCE.to_string())?;
     Ok(Arc::new(Runtime::new(
         LocalProvider::basic(
@@ -273,8 +278,7 @@ async fn file_runs_reuse_saved_agents_and_mounts_stay_on_threads() -> Result<()>
 }
 
 #[tokio::test]
-async fn unregistered_file_model_uses_registered_default_but_explicit_model_is_strict() -> Result<()>
-{
+async fn model_names_pass_through_without_registration_or_substitution() -> Result<()> {
     let temp = TempDir::new()?;
     let runtime = harness(
         &temp.path().join("state"),
@@ -290,41 +294,33 @@ async fn unregistered_file_model_uses_registered_default_but_explicit_model_is_s
     let (agent, thread) =
         open_configured_thread(runtime.as_ref(), Some(&definition), &args).await?;
     assert_eq!(
-        executor::load_agent_config(&*agent).await?.model,
+        executor::load_agent_config(agent.as_ref()).await?.model,
         "gpt-5.6-sol"
     );
-    assert_eq!(
+    assert!(
         executor::get_conversation_model_override(thread.as_ref())
             .await?
-            .context("registered fallback model")?
-            .model,
-        "gpt-5.4"
+            .is_none()
     );
-    args.model = Some("gpt-5.4".to_string());
-    let (_, explicit_thread) =
-        open_configured_thread(runtime.as_ref(), Some(&definition), &args).await?;
+    args.model = Some("another-model".into());
+    let (_, explicit) = open_configured_thread(runtime.as_ref(), Some(&definition), &args).await?;
     assert_eq!(
-        executor::get_conversation_model_override(explicit_thread.as_ref())
+        executor::get_conversation_model_override(explicit.as_ref())
             .await?
-            .context("explicit model")?
+            .unwrap()
             .model,
-        "gpt-5.4"
+        "another-model"
     );
-    args.model = Some("missing".to_string());
-    assert!(
-        open_configured_thread(runtime.as_ref(), Some(&definition), &args)
-            .await
-            .is_err()
-    );
-    assert_eq!(runtime.list_agents().await?.len(), 1);
+    args.model = None;
     args.agent_file = None;
     args.agent = Some(agent.record().id.to_string());
+    let (_, saved) = open_configured_thread(runtime.as_ref(), None, &args).await?;
     assert!(
-        open_configured_thread(runtime.as_ref(), None, &args)
-            .await
-            .is_err()
+        executor::get_conversation_model_override(saved.as_ref())
+            .await?
+            .is_none()
     );
-    assert_eq!(managed::list_threads(agent.as_ref()).await?.len(), 2);
+
     Ok(())
 }
 

@@ -412,9 +412,6 @@ fn local_commands_resolve_agent_and_thread_aliases() -> Result<()> {
         "thread update agent thread --model gpt-5-mini",
         "thread mount create agent thread /tmp /work",
         "thread sandbox run agent thread pwd",
-        "sandbox create --agent agent --sandbox local-process",
-        "sandbox list --agent agent",
-        "sandbox exec --agent agent box pwd",
     ] {
         let mut cli =
             crate::Cli::try_parse_from(["exo"].into_iter().chain(args.split_whitespace()))?;

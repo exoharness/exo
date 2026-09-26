@@ -9,6 +9,7 @@ import {
   type Message,
   type PendingToolCall,
   type SandboxProcess,
+  type Secret,
   type TurnContext,
 } from "@exo/harness";
 import {
@@ -25,8 +26,7 @@ export interface TextDeltaTraceState {
   ttftMs: number | null;
 }
 
-export interface ResolvedLlmBinding {
-  name: string;
+export interface ResolvedModel {
   model: string;
   apiKey?: string;
   baseUrl?: string | null;
@@ -225,62 +225,64 @@ export class WarmJsonlSandboxWorker<TRequest, TEvent> {
   }
 }
 
-async function registeredModelBinding(context: TurnContext) {
-  const name = context.agentConfig.model;
-  const metadata = (
-    await context.exoharness.current.conversation.listBindings()
-  )
-    .filter((binding) => binding.type === "llm")
-    .filter((binding) => binding.name === name)
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
-  if (!metadata) {
-    throw new Error(
-      `model is not registered: ${name}; run \`exo model create ${name} --secret <secret>\``,
-    );
-  }
-  const binding = await context.exoharness.current.conversation.getBinding(
-    metadata.id,
-  );
-  if (!binding || binding.type !== "llm") {
-    throw new Error(`registered model binding disappeared: ${name}`);
-  }
-  return { name, binding };
-}
-
-export async function resolveSandboxLlmBinding(
-  context: TurnContext,
-): Promise<ResolvedLlmBinding> {
-  const { name, binding } = await registeredModelBinding(context);
-  return { name, model: binding.model, baseUrl: binding.baseUrl ?? null };
-}
-
-export async function resolveLlmBinding(
-  context: TurnContext,
-): Promise<ResolvedLlmBinding> {
-  const { name, binding } = await registeredModelBinding(context);
-  let apiKey: string | undefined;
-  if (binding.secret) {
-    const vault = await context.exoharness.current.conversation.getVault(
-      binding.secret.vaultId,
-    );
-    if (!vault) {
-      throw new Error("model credential vault is unavailable");
-    }
-    const secret = await vault.getSecret(binding.secret.secretId);
-    if (!secret) {
-      throw new Error(`model secret does not exist for ${name}`);
-    }
-    if (secret.type !== "key") {
-      throw new Error(`model secret must be a key secret for ${name}`);
-    }
-    apiKey = secret.value;
-  }
+export function resolveSandboxModel(context: TurnContext): ResolvedModel {
   return {
-    name,
-    model: binding.model,
-    apiKey,
-    baseUrl: binding.baseUrl ?? null,
+    model: context.agentConfig.model,
+    baseUrl: context.agentConfig.baseUrl,
   };
+}
+
+export async function resolveModel(
+  context: TurnContext,
+  defaultBaseUrl = context.agentConfig.model.toLowerCase().startsWith("claude")
+    ? "https://api.anthropic.com"
+    : "https://api.openai.com/v1",
+): Promise<ResolvedModel & { apiKey: string }> {
+  const name = context.agentConfig.credential;
+  if (!name) {
+    throw new Error(
+      "agent config.credential must name a credential in a selected vault",
+    );
+  }
+  const idText = name.replace(/^urn:uuid:/i, "").replace(/^\{(.*)\}$/, "$1");
+  const id =
+    /^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.test(
+      idText,
+    )
+      ? idText.replaceAll("-", "").toLowerCase()
+      : null;
+  const vaults = await context.exoharness.current.conversation.listVaults();
+  for (const vault of vaults.reverse()) {
+    const metadata = (await vault.listSecrets()).find((secret) =>
+      id === null
+        ? secret.name === name
+        : secret.id.replaceAll("-", "").toLowerCase() === id,
+    );
+    if (!metadata) continue;
+    let secret: Secret | null;
+    if (metadata.target) {
+      const origin = new URL(context.agentConfig.baseUrl ?? defaultBaseUrl)
+        .origin;
+      if (
+        metadata.target.type !== "http" ||
+        metadata.target.origin !== origin
+      ) {
+        throw new Error(
+          `model credential ${name} is not authorized for ${origin}`,
+        );
+      }
+      secret = (await vault.resolveSecret(metadata.id, metadata.target)).secret;
+    } else {
+      secret = await vault.getSecret(metadata.id);
+    }
+    if (!secret || secret.type !== "key") {
+      throw new Error(`model credential ${name} must be an API key`);
+    }
+    return { ...resolveSandboxModel(context), apiKey: secret.value };
+  }
+  throw new Error(
+    `model credential ${name} was not found in the selected vaults`,
+  );
 }
 
 export function markFirstTextDelta(state: TextDeltaTraceState): number | null {

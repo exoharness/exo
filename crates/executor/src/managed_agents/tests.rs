@@ -1,8 +1,9 @@
 use super::*;
 use crate::{Runtime, SandboxProvider, SendRequest};
+use anyhow::Context;
 use exoharness::{
-    BasicExoHarness, BasicExoHarnessConfig, Binding, FileSystemMount, FileSystemMountMode,
-    NewThreadRequest, PutSecretRequest, Secret, WriteArtifactRequest,
+    BasicExoHarness, BasicExoHarnessConfig, FileSystemMount, FileSystemMountMode, NewThreadRequest,
+    PutSecretRequest, Secret, WriteArtifactRequest,
     vault::{SecretTarget, global_vault},
 };
 use tempfile::TempDir;
@@ -23,14 +24,7 @@ fn sandbox_provider_keeps_the_harness_preset_image() -> Result<()> {
 
 async fn state(config: &BasicExoHarnessConfig) -> Result<Arc<dyn ExoHarness>> {
     let state = Arc::new(BasicExoHarness::in_memory(config.clone()).await?);
-    state
-        .put_binding(Binding::Llm {
-            name: "gpt-5.4".into(),
-            model: "gpt-5.4".into(),
-            base_url: None,
-            secret: None,
-        })
-        .await?;
+
     Ok(state)
 }
 

@@ -4,13 +4,7 @@ import {
   type SandboxProcess,
   type TurnContext,
 } from "@exo/harness";
-import { resolveSandboxLlmBinding } from "@exo/model-runtime/shared";
 import pi from "./pi-harness";
-
-vi.mock("@exo/model-runtime/shared", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@exo/model-runtime/shared")>()),
-  resolveSandboxLlmBinding: vi.fn(),
-}));
 
 function fixture(events: unknown[]) {
   const recorded: EventData[] = [];
@@ -31,7 +25,7 @@ function fixture(events: unknown[]) {
     wait: vi.fn(async () => 0),
   };
   const context = {
-    agentConfig: { instructions: [] },
+    agentConfig: { model: "gpt-5-mini", instructions: [] },
     conversationConfig: {
       permissionPolicy: { type: "always_ask" },
       toolPolicies: {},
@@ -54,11 +48,6 @@ function fixture(events: unknown[]) {
     executeTool: vi.fn(async () => ({ ok: true })),
     startSandboxProcess: vi.fn(async () => process),
   } as unknown as TurnContext;
-  vi.mocked(resolveSandboxLlmBinding).mockResolvedValue({
-    name: "model",
-    model: "gpt-5-mini",
-    baseUrl: null,
-  });
   return { context, process, recorded };
 }
 
@@ -87,11 +76,7 @@ it.each([
       },
       { type: "agent_settled" },
     ]);
-    vi.mocked(resolveSandboxLlmBinding).mockResolvedValue({
-      name: "model",
-      model: `${provider}/model`,
-      baseUrl: null,
-    });
+    context.agentConfig.model = `${provider}/model`;
     await pi.runTurn(context);
     expect(recorded).toEqual([
       expect.objectContaining({

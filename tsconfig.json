@@ -34,5 +34,5 @@
     "incremental": true
   },
   "include": ["**/*.ts"],
-  "exclude": ["node_modules", "website/docs-src"]
+  "exclude": ["node_modules", "website/docs-src", ".exo", ".local"]
 }

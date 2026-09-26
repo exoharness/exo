@@ -74,7 +74,6 @@ async fn filesystem_snapshot_and_rewind_round_trip() {
     // ───── Phase 1: create a docker sandbox and write the initial state ─────
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
-            model: None,
             name: None,
             provider: SandboxProvider::Docker,
             image: SANDBOX_IMAGE.into(),

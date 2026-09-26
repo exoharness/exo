@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -27,8 +27,9 @@ import {
   type Tool,
   type ToolResult,
   type TurnContext,
+  type Vault,
 } from "./index";
-import { sandboxCwd } from "../model-runtime/shared";
+import { resolveModel, sandboxCwd } from "../model-runtime/shared";
 import { ircTool } from "../../examples/typescript/tools/irc";
 import { uppercaseTool } from "../../examples/typescript/tools/uppercase";
 import { installToolSource, readToolRegistry } from "./tool-registry";
@@ -1491,4 +1492,78 @@ describe("tool policy validation", () => {
     };
     expect(() => validateToolPolicies(context, ["custom_tool"])).not.toThrow();
   });
+});
+
+it("resolves model credentials from attached vaults without shadowing IDs or ignoring grants", async () => {
+  const context = fakeTurnContext();
+  const originalId = "01900000-0000-7000-8000-000000000001";
+  const resolve = vi.fn(
+    async () =>
+      ({
+        revision: 2,
+        secret: { type: "key", value: "vault-key" },
+      }) satisfies import("./index").ResolvedSecret,
+  );
+  const vault: Vault = {
+    record: { id: "vault", name: "personal", createdAt: "2026-01-01" },
+    listSecrets: async () => [
+      {
+        id: originalId,
+        name: "openai",
+        revision: 2,
+        type: "key",
+        createdAt: "2026-01-01",
+        target: { type: "http", origin: "https://api.openai.com" },
+      },
+    ],
+    resolveSecret: resolve,
+    getSecret: async () => {
+      throw new Error("scoped keys must use resolveSecret");
+    },
+    putSecret: async () => {
+      throw new Error("unexpected write");
+    },
+    updateSecret: async () => {
+      throw new Error("unexpected write");
+    },
+    deleteSecret: async () => {
+      throw new Error("unexpected delete");
+    },
+  };
+  const shadow: Vault = {
+    ...vault,
+    listSecrets: async () => [
+      {
+        id: "01900000-0000-7000-8000-000000000002",
+        name: originalId,
+        revision: 1,
+        type: "key",
+        createdAt: "2026-01-01",
+      },
+    ],
+    getSecret: async () => {
+      throw new Error("ID must not resolve by name");
+    },
+  };
+  context.exoharness.current.conversation.listVaults = async () => [
+    vault,
+    shadow,
+  ];
+  context.agentConfig.model = "gpt-5-unregistered";
+  context.agentConfig.credential = originalId;
+  expect(await resolveModel(context)).toMatchObject({
+    model: "gpt-5-unregistered",
+    apiKey: "vault-key",
+  });
+  expect(resolve).toHaveBeenCalledOnce();
+  context.agentConfig.credential = "openai";
+  expect((await resolveModel(context)).apiKey).toBe("vault-key");
+  context.agentConfig.baseUrl = "https://other.example/v1";
+  await expect(resolveModel(context)).rejects.toThrow("not authorized");
+  context.agentConfig.credential = "missing";
+  await expect(resolveModel(context)).rejects.toThrow(
+    "not found in the selected vaults",
+  );
+  context.agentConfig.credential = null;
+  await expect(resolveModel(context)).rejects.toThrow("config.credential");
 });

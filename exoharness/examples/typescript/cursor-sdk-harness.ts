@@ -33,11 +33,11 @@ import {
 import {
   appendAndTraceObservedToolEvents,
   materializePriorConversationMessages,
-  resolveLlmBinding,
+  resolveModel,
   sandboxCwd,
   WarmJsonlSandboxWorker,
   WarmResourceCache,
-  type ResolvedLlmBinding,
+  type ResolvedModel,
 } from "@exo/model-runtime/shared";
 
 interface CursorTraceState {
@@ -64,7 +64,7 @@ export default defineHarness({
   nativeToolApprovals: false,
   async runTurn(context) {
     validateToolPolicies(context, [], false);
-    const modelBinding = await resolveLlmBinding(context);
+    const modelBinding = await resolveModel(context, "https://api.cursor.com");
     await traceExecutorTurn(context, (turnParent) =>
       runCursorSdkHarnessTurn(context, turnParent, modelBinding),
     );
@@ -74,7 +74,7 @@ export default defineHarness({
 async function runCursorSdkHarnessTurn(
   context: TurnContext,
   turnParent: TraceParent,
-  modelBinding: ResolvedLlmBinding,
+  modelBinding: ResolvedModel,
 ): Promise<string | null> {
   const state: CursorTraceState = {
     finalText: "",
@@ -125,7 +125,7 @@ async function traceCursorSdkRun(
   context: TurnContext,
   state: CursorTraceState,
   prompt: string,
-  modelBinding: ResolvedLlmBinding,
+  modelBinding: ResolvedModel,
 ) {
   return tracedUnderParent(
     turnParent,
@@ -198,7 +198,7 @@ async function runCursorSandboxWorker(
   turnParent: TraceParent,
   state: CursorTraceState,
   prompt: string,
-  modelBinding: ResolvedLlmBinding,
+  modelBinding: ResolvedModel,
 ): Promise<CursorWorkerRunResult> {
   const workerKey = cursorWarmWorkerKey(context, modelBinding);
   const { resource: worker, reused } = await cursorWorkers.get(workerKey, () =>
@@ -233,7 +233,7 @@ async function runCursorSandboxWorker(
 
 async function startCursorSandboxWorker(
   context: TurnContext,
-  modelBinding: ResolvedLlmBinding,
+  modelBinding: ResolvedModel,
 ): Promise<CursorSandboxWorker> {
   return new WarmJsonlSandboxWorker({
     name: "cursor sandbox worker",
@@ -568,9 +568,7 @@ function cursorSandboxCommand(context: TurnContext): string[] {
   return [shell, "-lc", command];
 }
 
-function cursorSandboxEnv(
-  modelBinding: ResolvedLlmBinding,
-): Record<string, string> {
+function cursorSandboxEnv(modelBinding: ResolvedModel): Record<string, string> {
   const env: Record<string, string> = {};
   env.HOME = process.env.EXO_CURSOR_HOME ?? "/home/exo";
   for (const key of [
@@ -597,12 +595,11 @@ function cursorSandboxEnv(
 
 function cursorWarmWorkerKey(
   context: TurnContext,
-  modelBinding: ResolvedLlmBinding,
+  modelBinding: ResolvedModel,
 ): string {
   return JSON.stringify({
     agent_id: context.exoharness.current.agent.record.id,
     conversation_id: context.exoharness.current.conversation.record.id,
-    model_binding: modelBinding.name,
     model: modelBinding.model,
     cwd: sandboxCwd(context),
     command: cursorSandboxCommand(context),

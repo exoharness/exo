@@ -33,32 +33,34 @@ pub(crate) async fn runtime(
         _ => None,
     };
     let model = thread.and_then(|args| args.model.clone());
+    let execution = cli.execution();
+    let selection = execution.and_then(|args| args.harness.as_ref());
     if let Some(client) = client {
         validate_http_command(&cli.command)?;
-        if matches!(
-            cli.runtime().harness,
-            Some(HarnessSelection::TypeScriptModule(_))
-        ) {
+        if matches!(selection, Some(HarnessSelection::TypeScriptModule(_))) {
             bail!("a remote provider cannot load a client-side TypeScript harness module");
         }
         return Ok(Arc::new(executor::Runtime::new(
             executor::HttpProvider::with_options(
                 client,
                 model,
-                cli.runtime()
-                    .harness
-                    .as_ref()
-                    .map(crate::format_harness_selection),
+                selection.map(crate::format_harness_selection),
             ),
             None,
         )));
     }
 
+    let selection = match selection {
+        Some(selection) => Some(selection.clone()),
+        None => definition
+            .map(managed_agents::harness_selection)
+            .transpose()?,
+    };
     let config = crate::build_exo_config(cli)?;
     let env_vars = env.clone().into_vars();
     let state: Arc<dyn ExoHarness> = Arc::new(BasicExoHarness::new(config.clone()).await?);
     if let Some(reference) = thread.and_then(|args| args.agent.as_deref())
-        && let Some(selection) = cli.runtime().harness.as_ref()
+        && let Some(selection) = selection.as_ref()
     {
         let agent = exo_managed_agents::find_agent(state.as_ref(), reference).await?;
         crate::ensure_agent_matches_harness_selection(agent.as_ref(), selection).await?;
@@ -68,8 +70,7 @@ pub(crate) async fn runtime(
             .map(|definition| {
                 managed_agents::local_agent_config(
                     definition,
-                    cli.runtime()
-                        .harness
+                    selection
                         .as_ref()
                         .context("agent definition has no harness")?,
                     None,
@@ -82,42 +83,33 @@ pub(crate) async fn runtime(
             .transpose()?
             .unwrap_or_default(),
     };
-    let pricing = Arc::new(
-        if matches!(
-            cli.command,
-            Commands::Agent {
-                command: AgentCommands::Run { .. },
-                ..
-            } | Commands::Serve { .. }
-                | Commands::Conversation {
-                    command: crate::ConversationCommands::Send { .. },
-                    ..
-                }
-        ) {
-            cost::load(
-                cli.runtime().pricing_path.clone(),
-                cli.runtime().pricing_url.clone(),
-            )
-            .await
-        } else {
-            cost::PricingTable::empty()
-        },
-    );
+    let pricing = Arc::new(match execution {
+        Some(args) => cost::load(args.pricing_path.clone(), args.pricing_url.clone()).await,
+        None => cost::PricingTable::empty(),
+    });
     let provider = executor::LocalProvider::managed(state, config, env_vars, pricing)?
         .with_managed_agents(setup);
     Ok(Arc::new(executor::Runtime::new(
         provider,
-        env.braintrust_runtime_config(
-            cli.runtime().braintrust_api_key.clone(),
-            cli.runtime().braintrust_app_url.clone(),
-            cli.runtime().braintrust_api_url.clone(),
-        ),
+        execution.and_then(|args| {
+            env.braintrust_runtime_config(
+                args.braintrust_api_key.clone(),
+                args.braintrust_app_url.clone(),
+                args.braintrust_api_url.clone(),
+            )
+        }),
     )))
 }
 
 pub(crate) fn validate_http_command(command: &crate::Commands) -> Result<()> {
     use crate::{AgentCommands, Commands, ConversationCommands};
     match command {
+        Commands::Environment {
+            command: crate::environment::EnvironmentCommands::Provider { .. },
+            ..
+        } => {
+            bail!("environment providers must be configured on the runtime host")
+        }
         Commands::Agent {
             command: AgentCommands::Run { tui: true, .. },
             ..
@@ -169,7 +161,6 @@ pub(crate) fn validate_http_command(command: &crate::Commands) -> Result<()> {
             ..
         }
         | Commands::Environment { .. }
-        | Commands::Model { .. }
         | Commands::Vault { .. } => Ok(()),
         _ => bail!("this command is not supported by the managed-agent HTTP provider"),
     }

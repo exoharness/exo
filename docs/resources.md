@@ -60,9 +60,15 @@ exo vault secret create personal github --http-origin https://github.com \
 exo agent run --agent exo-dev --vault personal
 ```
 
-The credential must target the Git server's HTTPS origin. Preparation uses HTTP
-Basic authentication with username `x-access-token`, with host credential helpers
-disabled for that request. Credentials stay on the
+The credential must target the Git server's HTTPS origin. If you created the
+secret without `--http-origin`, update it without changing its ID:
+
+```sh
+exo vault secret update personal github --http-origin https://github.com
+```
+
+Preparation uses HTTP Basic authentication with username `x-access-token`,
+with host credential helpers disabled for that request. Credentials stay on the
 host; they are not saved in Git configuration or copied into thread volumes.
 Caches are partitioned by URL, checkout and vault credential identity.
 Git commands inside the sandbox use a placeholder credential through Exo's

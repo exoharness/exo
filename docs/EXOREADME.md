@@ -67,17 +67,17 @@ cargo build -p exo
 ./target/debug/exo --help
 ```
 
-Register a model, create an agent, then start chatting:
+Store a vault secret, create an agent, then start chatting:
 
 ```bash
-./target/debug/exo vault secret create global openai --token-env OPENAI_API_KEY
-./target/debug/exo model create gpt-5.5 --secret openai
+./target/debug/exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com
 cat > assistant.md <<'EOF'
 ---
 name: "assistant"
 harness: basic
 config:
   model: gpt-5.5
+  credential: openai
 ---
 Help the user with their task.
 EOF
@@ -105,6 +105,7 @@ name: "Sandbox Example"
 harness: basic
 config:
   model: gpt-5.5
+  credential: openai
 ---
 Help the user with their task.
 EOF
@@ -134,6 +135,7 @@ name: "TS Basic"
 harness: exoharness/examples/typescript/basic-harness.ts
 config:
   model: gpt-5.5
+  credential: openai
 ---
 Help the user with their task.
 EOF

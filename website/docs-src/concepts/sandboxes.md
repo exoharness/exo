@@ -35,7 +35,7 @@ exo agent create 'My Agent' --file agent.md
 
 ```bash
 exo vault secret create global <name> --token-env <PROVIDER_API_KEY>
-exo sandbox provider create --sandbox <name> --secret <name>
+exo environment provider create --backend <name> --secret <name>
 ```
 
 Remote backends run the sandbox on hosted infrastructure instead of your

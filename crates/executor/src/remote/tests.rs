@@ -692,19 +692,11 @@ async fn multiplayer_shares_history_but_keeps_vaults_models_and_approvals_privat
             target: None,
         })
         .await?;
-    let binding = exoharness::Binding::Llm {
-        name: "test-model".into(),
-        model: "gpt-5-mini".into(),
-        base_url: None,
-        secret: Some(exoharness::vault::SecretReference {
-            vault_id: av.record().id,
-            secret_id: key,
-        }),
-    };
-    ac.put_model(&binding).await?;
-    assert_eq!(ac.list_models().await?.len(), 1);
-    assert!(bc.list_models().await?.is_empty());
-    assert!(bc.put_model(&binding).await.is_err());
+    assert!(
+        bc.delete_secret(ResourceScope::Global, av.record().id, key)
+            .await
+            .is_err()
+    );
     Ok(())
 }
 
@@ -925,7 +917,7 @@ async fn switching_callers_stops_old_sandboxes_and_does_not_reuse_them() -> Resu
         provider: exoharness::SandboxProvider::LocalProcess,
         name: Some("warm".into()),
         image: "local".into(),
-        model: None,
+
         resources: None,
         default_workdir: None,
         file_system_mounts: None,
@@ -996,8 +988,11 @@ async fn shared_vaults_require_attachment_and_keep_writes_with_the_owner() -> Re
             scope,
             team.record().id,
             secret,
-            &Secret::Key {
-                value: "forbidden".into()
+            &exoharness::UpdateSecretRequest {
+                secret: None,
+                target: Some(exoharness::vault::SecretTarget::http(
+                    "https://example.com"
+                )?),
             }
         )
         .await
@@ -1010,45 +1005,32 @@ async fn shared_vaults_require_attachment_and_keep_writes_with_the_owner() -> Re
         secret,
         &Secret::Key {
             value: "rotated".into(),
-        },
+        }
+        .into(),
     )
     .await?;
     assert!(vault.get_secret(&secret).await.is_err());
-    let reference = exoharness::vault::SecretReference {
-        vault_id: team.record().id,
-        secret_id: secret,
-    };
-    let model = exoharness::Binding::Llm {
-        name: "shared-model".into(),
-        model: "gpt-5-mini".into(),
-        base_url: None,
-        secret: Some(reference.clone()),
-    };
-    bc.put_model(&model).await?;
-    let resolved =
-        crate::harness_helpers::resolve_model_binding(thread.as_ref(), "shared-model").await?;
+    let definition = exo_managed_agents::AgentDefinition::parse("---\nname: shared\nharness: basic\nconfig:\n  model: gpt-5-mini\n  credential: key\n---\nHelp.\n".into())?;
+    let mut model = crate::managed_agents::agent_config(
+        &definition,
+        exoharness::SandboxProvider::LocalProcess,
+        None,
+        None,
+    )?;
+    let resolved = crate::harness_helpers::resolve_model(thread.as_ref(), &model).await?;
     assert_eq!(resolved.api_key.as_deref(), Some("rotated"));
-    assert_eq!(
-        resolved.base_url.as_deref(),
-        Some("https://api.openai.com/v1")
-    );
-    let redirected = exoharness::Binding::Llm {
-        name: "redirected".into(),
-        model: "gpt-5-mini".into(),
-        base_url: Some("https://attacker.example".into()),
-        secret: Some(reference),
-    };
-    bc.put_model(&redirected).await?;
+    model.base_url = Some("https://attacker.example".into());
     assert!(
-        crate::harness_helpers::resolve_model_binding(thread.as_ref(), "redirected")
+        crate::harness_helpers::resolve_model(thread.as_ref(), &model)
             .await
             .is_err()
     );
+    model.base_url = None;
     assert!(ac.delete_vault(team.record().id).await.is_err());
     ac.delete_secret(ResourceScope::Global, team.record().id, secret)
         .await?;
     assert!(
-        crate::harness_helpers::resolve_model_binding(thread.as_ref(), "shared-model")
+        crate::harness_helpers::resolve_model(thread.as_ref(), &model)
             .await
             .is_err()
     );

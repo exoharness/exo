@@ -45,16 +45,14 @@ as `egress.json` (the flag also accepts `.yaml`, `.yml`, and `.toml`):
 ```bash
 exo vault secret create global notion \
   --http-origin https://api.notion.com --token-env NOTION_API_KEY
-exo sandbox --egress-policy egress.json play \
-  --sandbox firecracker --networking enabled --idle-seconds 300
+exo agent run --agent-file agent.md --egress-policy egress.json \
+  --environment-file exoharness/examples/environments/codex-firecracker.yaml
 ```
 
-Inside the sandbox:
+In the agent conversation, use `/sandbox` to run:
 
 ```bash
-curl https://api.notion.com/v1/users/me \
-  -H "Authorization: Bearer $NOTION_API_KEY" \
-  -H "Notion-Version: 2022-06-28"
+/sandbox curl https://api.notion.com/v1/users/me -H "Authorization: Bearer $NOTION_API_KEY" -H "Notion-Version: 2022-06-28"
 ```
 
 The client supplies `Bearer ` or other surrounding syntax. The proxy replaces
@@ -85,30 +83,32 @@ vault.
 
 ## Agent model credentials
 
-The built-in Codex, Claude Code, and Pi wrappers use the registered model binding
-when creating their sandbox. Register the key and model once:
+The built-in Codex, Claude Code, and Pi wrappers select a vault secret from the
+agent spec and add it to the sandbox's ordinary credential policy:
 
-```bash
-exo vault secret create global openai --token-env OPENAI_API_KEY
-exo model create gpt-5-mini --secret openai
-exo agent run --agent-file exoharness/examples/managed-agents/pi-assistant.md --environment-file exoharness/examples/environments/pi-local.yaml
+```yaml
+config:
+  model: gpt-5-mini
+  credential: openai
 ```
 
-The runtime adds the model credential to the selected environment's policy. The
-wrapper reads model metadata; it does not read or forward the vault key. The
-proxy injects a placeholder into the SDK's usual API-key environment variable.
-Codex uses its provider's environment-key setting and needs no login file.
-Model authentication currently supports API keys; OAuth/subscription login
-caches are not passed into the sandbox.
-Its provider is configured for HTTP streaming, which the proxy supports.
+```bash
+exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com
+```
 
-The model binding pins the vault and secret IDs. Same-named secrets in attached
-vaults cannot substitute another account. Keys without a destination are
-permitted through the model binding only at its registered HTTPS endpoint and
-base path. Keys with an explicit destination must match that endpoint. MCP OAuth
-credentials cannot be used as model API keys. Rotation is read on every request;
-deleting the selected secret revokes it, including after a CLI restart. Recreating
-its name does not restore the old binding.
+For an existing key, add the grant without re-entering its value:
+
+```bash
+exo vault secret update global openai --http-origin https://api.openai.com
+```
+
+The wrapper receives the model and optional `config.base_url`. The sandbox
+receives a placeholder in the SDK's API-key variable; the proxy resolves the
+vault key. Model authentication supports API keys, not OAuth/subscription caches.
+
+The sandbox pins the selected secret's ID. Rotation is read on every request;
+deleting the secret revokes access. Recreating its name does not restore access
+for the old sandbox. Destination grants and environment host policies both apply.
 
 An existing environment credential for the model's environment variable must
 select the same secret and permit its endpoint. Conflicts fail before startup.
@@ -308,7 +308,8 @@ before NAT on a trusted local host. The production relay is not implemented here
 
 SmolVM requires a binary supporting `machine start --egress-interceptor`; this
 currently needs the external-interceptor patch. Set `--smolvm-binary` on the
-sandbox provider binding to select that binary. Unsupported versions fail before
+environment provider binding (`exo environment provider create --backend smolvm
+--smolvm-binary /path/to/smolvm`) to select that binary. Unsupported versions fail before
 preparing an image. Protected sandboxes require a managed warm lifetime and
 unrestricted networking. SmolVM's DNS allowlist also permits subdomains, so Exo
 rejects limited networking until an adapter can enforce its exact-host contract.

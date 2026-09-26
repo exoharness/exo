@@ -9,6 +9,7 @@ name: support-analyst
 harness: codex
 config:
   model: gpt-5.6-sol
+  credential: openai
 ---
 
 You investigate support tickets and identify recurring product problems.
@@ -29,13 +30,12 @@ Resource commands use `create`, `list`, `get`, `update`, and `delete` where supp
 | `agent`, `thread`, `provider`, `environment` | `create`, `list`, `get`, `update`, `delete` |
 | `vault`                                      | `create`, `list`, `get`, `delete`           |
 | `vault secret`                               | `create`, `list`, `get`, `update`, `delete` |
-| `sandbox`, `agent mount`, `thread mount`     | `create`, `list`, `delete`                  |
-| `model`, `sandbox provider`                  | `create`, `list`                            |
+| `agent mount`, `thread mount`                | `create`, `list`, `delete`                  |
+| `environment provider`                       | `create`, `list`                            |
 
 Use `exo thread list AGENT` to list saved chats and `exo agent run --agent AGENT --thread THREAD`
-to resume one. `exo sandbox stop` retains a sandbox record; `exo sandbox delete` destroys
-it and deletes the record. `sandbox list` shows running sandboxes; add `--all` to include
-stopped ones. Runtime-specific scope belongs in the provider URL. Exo preserves its path
+to resume one. Environments are reusable configurations; agents and threads manage
+the running instances. Runtime-specific scope belongs in the provider URL. Exo preserves its path
 and query parameters without interpreting them.
 
 ## Setup
@@ -47,16 +47,14 @@ pnpm install --frozen-lockfile
 cargo build -p exo
 export PATH="$PWD/target/debug:$PATH"
 
-exo vault secret create global openai --token-env OPENAI_API_KEY
-exo model create gpt-5.6-sol --secret openai
+exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com
 ```
 
 `OPENAI_API_KEY` must already be set. `--token-env` takes the variable's name.
-The model in the file names an Exo model binding, so it can also point to a
-compatible endpoint using `exo model create --base-url`. If that model isn't
-registered, Exo uses the first registered model and prints which one it selected.
-An explicit `--model` must match a registered binding. With no registered models,
-Exo stops and prints the setup commands.
+Set `config.model` to the upstream model name and `config.credential` to a secret
+name or ID in a selected vault. Set `config.base_url` for a custom endpoint.
+There is no model registration or fallback to another model. `--model` overrides
+the model name for the thread and keeps its credential and endpoint.
 
 For Codex, build the sandbox image with Docker:
 
@@ -123,7 +121,7 @@ Editing or deleting the source Markdown has no effect until it is synced again. 
 harness.
 
 Use `harness: basic` for Exo's native tool loop, or `harness: claude-code` with an
-Anthropic model binding and the Claude Code sandbox image. Custom TypeScript
+Anthropic vault secret and the Claude Code sandbox image. Custom TypeScript
 harness paths are resolved relative to the Markdown file for local execution,
 and relative to the provider's working directory for remote execution. Modules
 must be installed on the provider; the spec does not bundle their code.
@@ -141,9 +139,14 @@ harness's agent-authored tool support. For `harness: exo`, set `config.module`
 to the Exo harness module. Sandbox configuration, including the image, belongs
 in an environment definition, not the agent file.
 
-Model bindings select the upstream model and base URL. Their credentials live
-in vaults: `exo model create MODEL --vault team --secret openai`. Sandbox provider
-bindings likewise accept `--vault team --secret KEY` under `exo sandbox provider`.
+The agent spec selects its model and vault credential. Attach a vault with
+`--vault team`; secrets in later attachments take precedence over same-named
+secrets in earlier attachments, including `global`. Sandbox provider bindings
+accept `--vault team --secret KEY` under `exo environment provider create --backend BACKEND`.
+
+Pricing, harness, and egress overrides belong on `agent run`, `thread send`, or
+`serve`; configuration and vault commands do not accept them. Use `--env-file FILE`
+to load environment variables explicitly; a missing file is an error.
 
 ## Serve over HTTP
 
@@ -324,8 +327,7 @@ that backend's existing lifecycle and durable-file-system support.
 
 ```sh
 container build -t exo-pi-sandbox:latest exoharness/containers/pi-sandbox
-exo vault secret create global openai --token-env OPENAI_API_KEY
-exo model create gpt-5-mini --secret openai
+exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com
 exo agent run --agent-file exoharness/examples/managed-agents/pi-assistant.md \
   --environment-file exoharness/examples/environments/pi-local.yaml
 ```
@@ -415,8 +417,7 @@ records retain vault references, not copies of secret values.
 Model bindings use the global vault unless `--vault` selects a different one:
 
 ```bash
-exo vault secret create global openai --token-env OPENAI_API_KEY
-exo model create gpt-5.6-sol --secret openai
+exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com
 ```
 
 All local secrets live in the harness's encrypted vault store under
@@ -473,7 +474,7 @@ the original connection or explicitly using a remote ID.
 See [Provider configuration](../../docs/providers.md) for context and selection.
 
 The CLI sends the Markdown spec unchanged to the selected HTTP provider. The
-provider selects the harness, connects MCP servers, and resolves model bindings
+provider selects the harness, connects MCP servers, and resolves model credentials from selected vaults
 and vault credentials using its own installation and state. Local Exo uses the
 same setup. The OSS service supports native and TypeScript harnesses, including
 the named presets, with separate MCP connections and credential selections for
