@@ -692,6 +692,10 @@ def create_source_worktree(repo: Path, path: Path) -> None:
             flush=True,
         )
     run(["git", "worktree", "add", "--detach", "-q", str(path), "HEAD"], cwd=repo)
+    # The agent container covers /workspace/exo/.local with an anonymous
+    # volume; Docker cannot create that mountpoint inside a read-only bind
+    # mount, so the directory must already exist (it is gitignored).
+    (path / ".local").mkdir()
     run(["pnpm", "install", "--frozen-lockfile"], cwd=path)
     run(["cargo", "build", "-p", "exo"], cwd=path)
 
