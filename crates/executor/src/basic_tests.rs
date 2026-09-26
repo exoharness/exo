@@ -655,6 +655,7 @@ impl FakeExoHarness {
                 },
                 conversation: FakeConversationState {
                     record: ConversationRecord {
+                        environment: None,
                         vaults: vec![],
                         id: conversation_id,
                         slug: "conversation".to_string(),
@@ -670,6 +671,18 @@ impl FakeExoHarness {
 
 #[async_trait]
 impl ExoHarness for FakeExoHarness {
+    async fn list_environments(&self) -> Result<Vec<exoharness::EnvironmentDefinition>> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn put_environment(&self, _environment: exoharness::EnvironmentDefinition) -> Result<()> {
+        Err(anyhow!("not implemented"))
+    }
+
+    async fn delete_environment(&self, _name: &str) -> Result<bool> {
+        Err(anyhow!("not implemented"))
+    }
+
     async fn list_agents(&self) -> Result<Vec<Arc<dyn AgentHandle>>> {
         let state = self.state.lock().expect("state poisoned");
         Ok(vec![Arc::new(FakeAgentHandle {

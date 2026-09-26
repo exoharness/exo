@@ -148,6 +148,7 @@ export type PermissionPolicy = { type: "always_allow" | "always_ask" };
 export interface ConversationConfig {
   permissionPolicy?: PermissionPolicy;
   toolPolicies?: Record<string, PermissionPolicy>;
+  workdir?: string | null;
   sandboxImage?: string | null;
   sandboxProvider?:
     | "daytona"

@@ -100,6 +100,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         web::scope(RUNTIME_PATH)
             .wrap(from_fn(authorize))
             .route("/identity", web::get().to(identity))
+            .route("/environment", web::get().to(list_environments))
+            .route("/environment", web::put().to(put_environment))
+            .route("/environment/{name}", web::delete().to(delete_environment))
             .route("/vault", web::get().to(list_vaults))
             .route("/vault/{vault_id}/secret", web::get().to(list_secrets))
             .route("/agent/{agent_id}/vault", web::get().to(list_vaults))
@@ -258,6 +261,44 @@ async fn scoped_vaults(
         .list_vaults()
         .await
         .map_err(ErrorBadRequest)
+}
+
+async fn list_environments(
+    service: web::Data<Arc<RuntimeHttpService>>,
+) -> Result<web::Json<Vec<exoharness::EnvironmentDefinition>>, Error> {
+    Ok(web::Json(
+        service
+            .runtime
+            .exoharness_handle()
+            .list_environments()
+            .await
+            .map_err(ErrorBadRequest)?,
+    ))
+}
+async fn put_environment(
+    service: web::Data<Arc<RuntimeHttpService>>,
+    body: web::Json<exoharness::EnvironmentDefinition>,
+) -> Result<web::Json<bool>, Error> {
+    service
+        .runtime
+        .exoharness_handle()
+        .put_environment(body.into_inner())
+        .await
+        .map_err(ErrorBadRequest)?;
+    Ok(web::Json(true))
+}
+async fn delete_environment(
+    service: web::Data<Arc<RuntimeHttpService>>,
+    name: web::Path<String>,
+) -> Result<web::Json<bool>, Error> {
+    Ok(web::Json(
+        service
+            .runtime
+            .exoharness_handle()
+            .delete_environment(&name)
+            .await
+            .map_err(ErrorBadRequest)?,
+    ))
 }
 
 async fn list_vaults(
@@ -542,6 +583,7 @@ async fn create_thread(
             &agent,
             None,
             exoharness::NewThreadRequest {
+                environment: body.environment,
                 vaults: body.vaults,
                 slug: body.thread_slug,
                 name: body.thread_name,

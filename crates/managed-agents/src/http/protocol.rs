@@ -103,6 +103,8 @@ pub struct ThreadsQuery {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CreateThreadBody {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<exoharness::EnvironmentDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vaults: Vec<exoharness::vault::VaultId>,
     #[serde(alias = "conversation_id", skip_serializing_if = "Option::is_none")]

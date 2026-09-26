@@ -1276,6 +1276,25 @@ async fn updating_sandbox_image_recreates_shell_sandbox_without_shell_program() 
             .await
             .expect("first sandbox should be created");
 
+    conversation_config.shell_program = Some("/missing-shell".into());
+    conversation_config.sandbox_scope = Some(crate::SandboxScope::Conversation);
+    let native_tools = crate::ExoToolRuntime::with_roots(
+        tempdir.path().join("scheduler"),
+        tempdir.path().join("adapters"),
+        tempdir.path().join("workers"),
+    );
+    crate::ToolRuntime::prepare_conversation(
+        &native_tools,
+        agent.as_ref(),
+        conversation.as_ref(),
+        &agent_config,
+        &conversation_config,
+    )
+    .await
+    .expect("native sandbox setup must not depend on a configured shell");
+    assert_eq!(conversation.list_sandboxes().await.unwrap().len(), 1);
+    conversation_config.shell_program = None;
+
     conversation_config.sandbox_image = Some("second-image".to_string());
     harness
         .put_conversation_config(&*conversation, conversation_config.clone())

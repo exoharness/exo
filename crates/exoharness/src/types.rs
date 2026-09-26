@@ -45,6 +45,10 @@ impl ResourceScope {
 
 #[async_trait]
 pub trait ExoHarness: VaultContext {
+    async fn list_environments(&self) -> Result<Vec<crate::EnvironmentDefinition>>;
+    async fn put_environment(&self, environment: crate::EnvironmentDefinition) -> Result<()>;
+    async fn delete_environment(&self, name: &str) -> Result<bool>;
+
     async fn list_agents(&self) -> Result<Vec<Arc<dyn AgentHandle>>>;
     async fn get_agent(&self, id: &AgentId) -> Result<Option<Arc<dyn AgentHandle>>>;
     async fn new_agent(&self, request: NewAgentRequest) -> Result<Arc<dyn AgentHandle>>;
@@ -217,6 +221,8 @@ pub struct NewAgentRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ThreadRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<crate::EnvironmentDefinition>,
     pub id: ThreadId,
     pub slug: String,
     pub name: String,
@@ -227,6 +233,8 @@ pub struct ThreadRecord {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NewThreadRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<crate::EnvironmentDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vaults: Vec<VaultId>,
     pub slug: Option<String>,
@@ -812,13 +820,14 @@ impl From<SandboxNetworkPolicy> for EgressPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct CreateSandboxRequest {
     #[serde(default)]
     pub name: Option<String>,
     pub provider: SandboxProvider,
     pub image: String,
-    #[serde(default)]
-    pub resources: SandboxResourceShape,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<SandboxResourceShape>,
     pub default_workdir: Option<String>,
     pub file_system_mounts: Option<Vec<FileSystemMount>>,
     pub durable_file_systems: Option<Vec<DurableFileSystem>>,
@@ -1559,7 +1568,7 @@ mod tests {
     }
 
     #[test]
-    fn create_sandbox_request_defaults_resources_for_older_clients() {
+    fn create_sandbox_request_preserves_omitted_resources() {
         let request: CreateSandboxRequest = serde_json::from_value(serde_json::json!({
             "name": null,
             "provider": "firecracker",
@@ -1571,7 +1580,24 @@ mod tests {
             "idle_seconds": 60
         }))
         .unwrap();
-        assert_eq!(request.resources, SandboxResourceShape::default());
+        assert_eq!(request.resources, None);
+        assert!(
+            serde_json::to_value(&request)
+                .unwrap()
+                .get("resources")
+                .is_none()
+        );
+        let explicit = CreateSandboxRequest {
+            resources: Some(SandboxResourceShape::default()),
+            ..request
+        };
+        assert_eq!(
+            serde_json::from_value::<CreateSandboxRequest>(
+                serde_json::to_value(&explicit).unwrap()
+            )
+            .unwrap(),
+            explicit
+        );
     }
 
     #[test]

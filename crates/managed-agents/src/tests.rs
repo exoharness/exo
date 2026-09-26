@@ -202,6 +202,7 @@ async fn saves_definitions_and_resumes_only_threads_owned_by_the_agent() -> Resu
         &agent,
         None,
         NewThreadRequest {
+            environment: None,
             vaults: vec![],
             slug: Some("tickets".to_string()),
             name: None,

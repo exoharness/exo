@@ -249,6 +249,7 @@ mod tests {
             .unwrap();
         agent
             .new_conversation(NewConversationRequest {
+                environment: None,
                 vaults: vec![],
                 slug: Some("conversation".to_string()),
                 name: Some("Conversation".to_string()),

@@ -92,6 +92,28 @@ impl AgentBackend for LocalProvider {
                 .retain(|other| other.mount_path != mount.mount_path);
             config.mounts.push(mount.clone());
         }
+        if let Some(environment) = &thread.record().environment {
+            anyhow::ensure!(
+                requested.sandbox_provider.is_none()
+                    && requested.sandbox_image.is_none()
+                    && requested.mounts.is_empty(),
+                "an environment fixes the sandbox provider and image; only additional mounts can be set when creating the thread"
+            );
+            config.environment = Some(environment.clone());
+            config.sandbox_provider = Some(environment.config.provider.clone());
+            config.sandbox_image = Some(environment.config.image.clone());
+            config.mounts = environment
+                .config
+                .file_system_mounts
+                .clone()
+                .unwrap_or_default();
+            config.durable_file_systems = environment
+                .config
+                .durable_file_systems
+                .clone()
+                .unwrap_or_default();
+            config.sandbox_scope = Some(crate::SandboxScope::Conversation);
+        }
         let mcp_tools = self
             .executor
             .configure_managed_thread(agent, thread, &agent_config, &config)

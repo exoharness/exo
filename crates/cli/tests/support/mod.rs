@@ -41,6 +41,7 @@ pub struct Fixture {
 }
 
 impl Fixture {
+    #[allow(dead_code)]
     pub async fn new() -> Result<Self> {
         Self::with_sandbox(SandboxProvider::LocalProcess).await
     }
@@ -68,6 +69,7 @@ impl Fixture {
             sandbox_backends: vec![
                 SandboxBackendRegistration::local_process(),
                 SandboxBackendRegistration::docker(),
+                SandboxBackendRegistration::apple_container(),
             ],
         };
         let state = Arc::new(BasicExoHarness::new(config.clone()).await?);

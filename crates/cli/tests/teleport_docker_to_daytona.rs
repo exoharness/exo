@@ -74,6 +74,7 @@ async fn teleport_docker_sandbox_to_daytona_keeps_files() {
         .expect("agent");
     let conv = agent
         .new_conversation(NewConversationRequest {
+            environment: None,
             vaults: vec![],
             slug: Some("teleport-conv".into()),
             name: Some("teleport".into()),

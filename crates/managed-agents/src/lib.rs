@@ -273,12 +273,16 @@ pub async fn open_thread(
     reference: Option<&str>,
     new_thread: NewThreadRequest,
 ) -> Result<OpenedThread> {
+    let environment = new_thread.environment.clone();
     let vaults = new_thread.vaults.clone();
     let created = reference.is_none();
     let thread = match reference {
         Some(reference) => find_thread(agent.as_ref(), reference).await?,
         None => agent.new_thread(new_thread).await?,
     };
+    if !created && environment.is_some() && thread.record().environment != environment {
+        bail!("cannot change the environment of a saved thread; start a new thread");
+    }
     if !vaults.is_empty() && thread.record().vaults != vaults {
         bail!("cannot switch vaults on an existing thread; start a new thread");
     }

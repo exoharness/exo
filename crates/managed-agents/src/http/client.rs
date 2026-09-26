@@ -53,6 +53,33 @@ impl RuntimeClient {
         self.http.endpoint()
     }
 
+    pub async fn list_environments(&self) -> Result<Vec<exoharness::EnvironmentDefinition>> {
+        self.http
+            .json(self.http.request(Method::GET, "environment")?)
+            .await
+    }
+    pub async fn put_environment(
+        &self,
+        environment: &exoharness::EnvironmentDefinition,
+    ) -> Result<bool> {
+        self.http
+            .json(
+                self.http
+                    .request(Method::PUT, "environment")?
+                    .json(environment),
+            )
+            .await
+    }
+    pub async fn delete_environment(&self, name: &str) -> Result<bool> {
+        exoharness::EnvironmentDefinition::validate_name(name)?;
+        self.http
+            .json(
+                self.http
+                    .request(Method::DELETE, &format!("environment/{name}"))?,
+            )
+            .await
+    }
+
     pub fn identity_url(&self) -> Result<Url> {
         Ok(self
             .http

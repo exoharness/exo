@@ -281,7 +281,11 @@ export function markFirstTextDelta(state: TextDeltaTraceState): number | null {
 }
 
 export function sandboxCwd(context: TurnContext): string {
-  return context.conversationConfig.mounts[0]?.mountPath ?? "/";
+  return (
+    context.conversationConfig.workdir ??
+    context.conversationConfig.mounts[0]?.mountPath ??
+    "/"
+  );
 }
 
 export function mountSummary(context: TurnContext): string {

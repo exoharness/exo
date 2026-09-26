@@ -74,6 +74,11 @@ interface RawConversationConfig {
     permission_policy: PermissionPolicy;
     tool_policies: Record<string, PermissionPolicy>;
   };
+  environment?: {
+    config: {
+      default_workdir?: string;
+    };
+  };
   sandbox_image?: string | null;
   sandbox_provider?:
     | "daytona"
@@ -932,6 +937,7 @@ function toConversationConfig(raw: RawConversationConfig): ConversationConfig {
   return {
     permissionPolicy: raw.permissions.permission_policy,
     toolPolicies: raw.permissions.tool_policies,
+    workdir: raw.environment?.config.default_workdir,
     sandboxImage: raw.sandbox_image ?? null,
     sandboxProvider: raw.sandbox_provider ?? null,
     shellProgram: raw.shell_program ?? null,

@@ -28,9 +28,24 @@ import {
   type ToolResult,
   type TurnContext,
 } from "./index";
+import { sandboxCwd } from "../model-runtime/shared";
 import { ircTool } from "../../examples/typescript/tools/irc";
 import { uppercaseTool } from "../../examples/typescript/tools/uppercase";
 import { installToolSource, readToolRegistry } from "./tool-registry";
+
+it("uses the environment working directory before the first mount", () => {
+  const context = fakeTurnContext({
+    conversationConfig: {
+      workdir: "/environment",
+      mounts: [{ hostPath: "/host", mountPath: "/mounted", mode: "rw" }],
+    },
+  });
+  expect(sandboxCwd(context)).toBe("/environment");
+  context.conversationConfig.workdir = null;
+  expect(sandboxCwd(context)).toBe("/mounted");
+  context.conversationConfig.mounts = [];
+  expect(sandboxCwd(context)).toBe("/");
+});
 
 describe("HarnessToolRegistry", () => {
   it("returns registered tool definitions", () => {

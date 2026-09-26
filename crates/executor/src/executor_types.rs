@@ -74,6 +74,8 @@ pub fn default_enable_agent_tool_creation() -> bool {
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct ConversationConfig {
     #[serde(default)]
+    pub environment: Option<exoharness::EnvironmentDefinition>,
+    #[serde(default)]
     pub permissions: exo_managed_agents::permissions::PermissionPolicies,
     #[serde(default)]
     pub sandbox_image: Option<String>,
@@ -119,6 +121,7 @@ impl Default for ConversationConfig {
     fn default() -> Self {
         Self {
             permissions: Default::default(),
+            environment: None,
             sandbox_image: None,
             sandbox_provider: None,
             shell_program: Some("/bin/bash".to_string()),

@@ -83,8 +83,8 @@ impl SandboxEgressProxy {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SandboxSpec {
     pub image: String,
-    #[serde(default)]
-    pub resources: crate::SandboxResourceShape,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<crate::SandboxResourceShape>,
     pub mounts: Vec<SandboxMount>,
     pub durable_file_systems: Vec<DurableFileSystem>,
     pub policy: EgressPolicy,
@@ -458,6 +458,7 @@ const DEFAULT_ENABLED_NETWORK_NAME: &str = "exo-default";
 const WARM_SANDBOX_KEEPALIVE_ARGV: &[&str] = &["sleep", "infinity"];
 const WARM_SANDBOX_HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(3);
 const WARM_SANDBOX_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+const APPLE_CONTAINER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const ORPHANED_WARM_SANDBOX_MIN_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const DEFAULT_NETWORK_CREATE_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_NETWORK_CREATE_RETRY_DELAY: Duration = Duration::from_millis(200);
@@ -1485,6 +1486,7 @@ async fn create_named_warm_sandbox(
         &request.spec.policy.networking,
         Some(DEFAULT_ENABLED_NETWORK_NAME),
     );
+    configure_resource_args(&mut process, request.spec.resources);
     configure_mount_args(&mut process, &request.spec.mounts);
 
     process.arg(&request.spec.image);
@@ -1784,6 +1786,7 @@ async fn exec_one_shot(
     let mut process = Command::new(container_bin);
     process.arg("run").arg("--rm").arg("--workdir").arg(&cwd);
     configure_network_args(&mut process, &spec.policy.networking, network_name);
+    configure_resource_args(&mut process, spec.resources);
     configure_mount_args(&mut process, &spec.mounts);
     configure_env_args(&mut process, &command.env);
     process.arg(&spec.image);
@@ -1816,6 +1819,7 @@ async fn start_one_shot_process(
         .arg("--workdir")
         .arg(&cwd);
     configure_network_args(&mut process, &spec.policy.networking, network_name);
+    configure_resource_args(&mut process, spec.resources);
     configure_mount_args(&mut process, &spec.mounts);
     configure_env_args(&mut process, &command.env);
     process.arg(&spec.image);
@@ -1980,6 +1984,16 @@ fn configure_network_args(
     }
 }
 
+fn configure_resource_args(process: &mut Command, resources: Option<crate::SandboxResourceShape>) {
+    if let Some(resources) = resources {
+        process
+            .arg("--cpus")
+            .arg(resources.vcpu_count.to_string())
+            .arg("--memory")
+            .arg(format!("{}M", resources.memory_mib));
+    }
+}
+
 fn configure_mount_args(process: &mut Command, mounts: &[SandboxMount]) {
     for mount in mounts {
         let mut volume = format!("{}:{}", mount.host_path.display(), mount.guest_path);
@@ -2048,9 +2062,13 @@ async fn cleanup_named_container(
 }
 
 async fn kill_named_container_if_present(container_bin: &Path, name: &str) -> Result<()> {
-    let kill =
-        run_container_admin_command(container_bin, WARM_SANDBOX_CLEANUP_TIMEOUT, ["kill", name])
-            .await?;
+    // Apple container kill waits for VM teardown; delete only removes its metadata.
+    let kill = run_container_admin_command(
+        container_bin,
+        APPLE_CONTAINER_SHUTDOWN_TIMEOUT,
+        ["kill", name],
+    )
+    .await?;
     if !kill.status.success() {
         let stderr = String::from_utf8_lossy(&kill.stderr).trim().to_string();
         if !is_missing_container_error(&stderr) && !is_container_not_running_error(&stderr) {
@@ -2466,6 +2484,72 @@ async fn docker_load_image(container_bin: &Path, payload: &Bytes) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn container_creation_preserves_omitted_and_explicit_resources() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir()?;
+        let cli = temp.path().join("container");
+        let args = temp.path().join("container.args");
+        std::fs::write(&cli, "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$0.args\"\n")?;
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755))?;
+        for resources in [None, Some(crate::SandboxResourceShape::default())] {
+            let request = SandboxRequest {
+                sandbox_id: "sandbox".into(),
+                scope: ResourceScope::Global,
+                spec: SandboxSpec {
+                    image: "image".into(),
+                    resources,
+                    mounts: vec![],
+                    durable_file_systems: vec![],
+                    policy: SandboxNetworkPolicy::Unrestricted.into(),
+                    default_workdir: "/".into(),
+                },
+                lifecycle: SandboxLifecycleConfig::default(),
+                provider_state: None,
+            };
+            let command = SandboxCommand {
+                argv: vec!["true".into()],
+                env: HashMap::new(),
+                display_argv: None,
+                cwd: None,
+                timeout: None,
+            };
+            std::fs::write(&args, "")?;
+            create_named_warm_sandbox(&cli, &request, "name").await?;
+            assert!(exec_one_shot(&cli, &request.spec, None, &command).await?.ok);
+            assert_eq!(
+                start_one_shot_process(&cli, &request.spec, None, &command)
+                    .await?
+                    .wait
+                    .await?,
+                0
+            );
+            let args = std::fs::read_to_string(&args)?;
+            let expected_count = if resources.is_some() { 3 } else { 0 };
+            assert_eq!(
+                args.lines().filter(|arg| *arg == "--cpus").count(),
+                expected_count
+            );
+            assert_eq!(
+                args.lines().filter(|arg| *arg == "--memory").count(),
+                expected_count
+            );
+            if let Some(resources) = resources {
+                assert_eq!(
+                    args.matches(&format!(
+                        "--cpus\n{}\n--memory\n{}M\n",
+                        resources.vcpu_count, resources.memory_mib
+                    ))
+                    .count(),
+                    3
+                );
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn thread_resource_scope_round_trips() {

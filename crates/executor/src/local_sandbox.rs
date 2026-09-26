@@ -169,6 +169,16 @@ impl Drop for UncommittedLocalSandbox {
 
 #[async_trait]
 impl ExoHarness for LocalSandboxExoHarness {
+    async fn list_environments(&self) -> Result<Vec<exoharness::EnvironmentDefinition>> {
+        self.state.remote.list_environments().await
+    }
+    async fn put_environment(&self, environment: exoharness::EnvironmentDefinition) -> Result<()> {
+        self.state.remote.put_environment(environment).await
+    }
+    async fn delete_environment(&self, name: &str) -> Result<bool> {
+        self.state.remote.delete_environment(name).await
+    }
+
     async fn list_agents(&self) -> Result<Vec<Arc<dyn AgentHandle>>> {
         Ok(self
             .state
@@ -626,6 +636,7 @@ async fn local_conversation_for(
         None => {
             local_agent
                 .new_conversation(NewConversationRequest {
+                    environment: None,
                     vaults: vec![],
                     slug: Some(slug),
                     name: Some(format!("Local sandbox for {remote_slug}")),
@@ -1388,6 +1399,7 @@ mod tests {
             .expect("agent should be created");
         let conversation = agent
             .new_conversation(NewConversationRequest {
+                environment: None,
                 vaults: vec![],
                 slug: Some("session".to_string()),
                 name: Some("Session".to_string()),
