@@ -380,7 +380,16 @@ async fn local_and_http_live_cancellation_finalizes_and_allows_resume() -> Resul
         }
         let stdout = String::from_utf8(output.stdout)?;
         let thread = thread_slug(&stdout)?;
-        let events = f.cli(&["thread", "events", "saved", thread]).await?;
+        let events = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let events = f.cli(&["thread", "events", "saved", thread]).await?;
+                if events.contains("turn_ended") {
+                    return Ok::<_, anyhow::Error>(events);
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await??;
         assert!(
             events.contains("turn_ended") && events.contains("cancelled"),
             "{events}"

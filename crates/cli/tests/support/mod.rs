@@ -70,6 +70,15 @@ impl Fixture {
                 SandboxBackendRegistration::local_process(),
                 SandboxBackendRegistration::docker(),
                 SandboxBackendRegistration::apple_container(),
+                #[cfg(feature = "firecracker")]
+                SandboxBackendRegistration::firecracker(exoharness::FirecrackerBackendSpec {
+                    config: exoharness::FirecrackerConfig::default(),
+                    lima: exoharness::FirecrackerLimaConfig {
+                        bridge_binary: std::env::var_os("EXO_EGRESS_BRIDGE_BINARY")
+                            .map(PathBuf::from),
+                        ..Default::default()
+                    },
+                }),
             ],
         };
         let state = Arc::new(BasicExoHarness::new(config.clone()).await?);
@@ -152,7 +161,9 @@ impl Fixture {
     }
 
     pub fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_exo"));
+        let binary =
+            std::env::var_os("EXO_TEST_BINARY").unwrap_or_else(|| env!("CARGO_BIN_EXE_exo").into());
+        let mut command = Command::new(binary);
         command
             .env_clear()
             .env("EXO_CONFIG_DIR", self.temp.path().join("config"))
@@ -161,6 +172,15 @@ impl Fixture {
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .current_dir(self.temp.path())
             .kill_on_drop(true);
+        if let Some(bridge) = std::env::var_os("EXO_EGRESS_BRIDGE_BINARY") {
+            command.env("EXO_FIRECRACKER_LIMA_EXO_BINARY", bridge);
+        }
+        #[cfg(feature = "firecracker")]
+        for name in ["HOME", "LIMA_HOME"] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
         let command_index = if args.first() == Some(&"--provider") {
             2
         } else {

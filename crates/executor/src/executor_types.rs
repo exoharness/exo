@@ -177,6 +177,13 @@ pub trait ToolRuntime: Send + Sync {
         policies.for_tool(name)
     }
 
+    async fn mcp_servers(
+        &self,
+        _conversation: &dyn ConversationHandle,
+    ) -> Result<Vec<crate::NativeMcpServer>> {
+        Ok(Vec::new())
+    }
+
     fn definitions(&self) -> Vec<ToolDefinition> {
         Vec::new()
     }

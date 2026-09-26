@@ -9,6 +9,12 @@ rust-version.workspace = true
 default = []
 http-client = ["dep:reqwest"]
 basic-backend = [
+  "dep:tokio-rustls",
+  "dep:rcgen",
+  "dep:hyper-util",
+  "dep:hyper",
+  "dep:http-body-util",
+  "dep:hickory-proto",
   "http-client",
   "dep:aes-gcm",
   "dep:actix-web",
@@ -22,15 +28,7 @@ basic-backend = [
   "dep:tracing",
   "dep:tempfile",
 ]
-egress = [
-  "basic-backend",
-  "dep:hickory-proto",
-  "dep:http-body-util",
-  "dep:hyper",
-  "dep:hyper-util",
-  "dep:rcgen",
-  "dep:tokio-rustls",
-]
+egress = ["basic-backend"]
 firecracker = [
   "egress",
   "dep:docker_credential",
@@ -117,8 +115,8 @@ uuid = { workspace = true, features = ["serde", "v4", "v7", "js"] }
 zstd = { workspace = true, optional = true }
 
 [dev-dependencies]
-sha2.workspace = true
 wiremock = "0.6"
+sha2.workspace = true
 tempfile = "3.23.0"
 tokio = { version = "1.52.1", features = [
   "fs",

@@ -544,6 +544,7 @@ async fn unsupported_credentials_fail_before_any_provider_request() {
         .policy
         .credentials
         .push(exoharness::EgressCredentialBinding {
+            model: None,
             name: "braintrust".into(),
             environment_variable: "BRAINTRUST_API_KEY".into(),
             networking: exoharness::CredentialNetworkPolicy::Limited {

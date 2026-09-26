@@ -14,11 +14,7 @@ use super::{
 };
 use crate::{ManagedSandboxHandle, SandboxCommand, SandboxRequest};
 
-const PREPARE_TRUST: &str = r#"set -eu
-umask 077
-cat /etc/ssl/certs/ca-certificates.crt > "$EXO_EGRESS_CA_PATH"
-printf '\n%s\n' "$EXO_EGRESS_CA_PEM" >> "$EXO_EGRESS_CA_PATH"
-"#;
+use super::PREPARE_TRUST;
 
 // Proxy and guest-side settings for one VM allocation. The handle uses this to
 // add placeholders and the CA path to commands; it never passes real secrets.
@@ -208,6 +204,13 @@ impl<H: ManagedSandboxHandle + 'static> EgressRuntime<H> {
         ensure!(
             request.lifecycle.idle_ttl.is_some(),
             "proxy egress requires a managed sandbox lifecycle"
+        );
+        ensure!(
+            matches!(
+                request.spec.policy.networking,
+                crate::SandboxNetworkPolicy::Limited { .. }
+            ),
+            "Firecracker credential proxy requires policy.networking.limited"
         );
         let state = State::new(
             EgressIdentity {

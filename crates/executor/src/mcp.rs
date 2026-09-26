@@ -6,6 +6,27 @@ use exoharness::{AgentHandle, ConversationHandle, Result, ToolRequest, ToolResul
 
 use crate::{AgentConfig, ConversationConfig, ToolDefinition, ToolRuntime};
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeMcpServer {
+    pub name: String,
+    pub url: String,
+    pub environment_variable: Option<String>,
+    pub tools: Vec<NativeMcpTool>,
+    pub disabled_tools: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeMcpTool {
+    pub name: String,
+    pub exposed_name: String,
+}
+
+pub(crate) fn credential_variable(id: &exoharness::SecretId) -> String {
+    format!("EXO_MCP_{}", id.to_string().replace('-', "_"))
+}
+
 pub struct McpToolRuntime<T> {
     inner: T,
     mcp: Arc<McpToolSet>,
@@ -43,6 +64,47 @@ impl<T: ToolRuntime> ToolRuntime for McpToolRuntime<T> {
             Some(tool) => policies.for_mcp_tool(tool),
             None => self.inner.permission_policy(policies, name),
         }
+    }
+
+    async fn mcp_servers(
+        &self,
+        conversation: &dyn ConversationHandle,
+    ) -> Result<Vec<NativeMcpServer>> {
+        use anyhow::Context;
+        let mut servers = self.inner.mcp_servers(conversation).await?;
+        if self.mcp.servers().next().is_none() {
+            return Ok(servers);
+        }
+        let selection = exo_managed_agents::vaults::load_selection(conversation)
+            .await?
+            .context("MCP vault selection is missing")?;
+        for (server, disabled_tools) in self.mcp.servers() {
+            let selected = selection
+                .bindings
+                .iter()
+                .find(|binding| binding.server_name == server.name)
+                .context("MCP vault selection is missing")?;
+            servers.push(NativeMcpServer {
+                name: server.name.clone(),
+                disabled_tools: disabled_tools.to_vec(),
+                url: server.url.clone(),
+                environment_variable: selected
+                    .secret
+                    .as_ref()
+                    .map(|secret| credential_variable(&secret.secret_id)),
+                tools: self
+                    .mcp
+                    .tools()
+                    .iter()
+                    .filter(|tool| tool.server_name == server.name)
+                    .map(|tool| NativeMcpTool {
+                        name: tool.tool_name.clone(),
+                        exposed_name: tool.name.clone(),
+                    })
+                    .collect(),
+            });
+        }
+        Ok(servers)
     }
 
     fn definitions(&self) -> Vec<ToolDefinition> {

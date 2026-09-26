@@ -4,12 +4,12 @@ import {
   type SandboxProcess,
   type TurnContext,
 } from "@exo/harness";
-import { resolveLlmBinding } from "@exo/model-runtime/shared";
+import { resolveSandboxLlmBinding } from "@exo/model-runtime/shared";
 import pi from "./pi-harness";
 
 vi.mock("@exo/model-runtime/shared", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@exo/model-runtime/shared")>()),
-  resolveLlmBinding: vi.fn(),
+  resolveSandboxLlmBinding: vi.fn(),
 }));
 
 function fixture(events: unknown[]) {
@@ -54,7 +54,7 @@ function fixture(events: unknown[]) {
     executeTool: vi.fn(async () => ({ ok: true })),
     startSandboxProcess: vi.fn(async () => process),
   } as unknown as TurnContext;
-  vi.mocked(resolveLlmBinding).mockResolvedValue({
+  vi.mocked(resolveSandboxLlmBinding).mockResolvedValue({
     name: "model",
     model: "gpt-5-mini",
     baseUrl: null,
@@ -87,7 +87,7 @@ it.each([
       },
       { type: "agent_settled" },
     ]);
-    vi.mocked(resolveLlmBinding).mockResolvedValue({
+    vi.mocked(resolveSandboxLlmBinding).mockResolvedValue({
       name: "model",
       model: `${provider}/model`,
       baseUrl: null,

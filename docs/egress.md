@@ -4,10 +4,12 @@ Sandbox policy is part of `SandboxSpec`. Each backend enforces the policy when
 it acquires, attaches, or restores a sandbox, before returning a usable handle.
 Unsupported policies fail with an error identifying the unsupported field.
 
-The `egress` build feature includes transparent and explicit HTTP/HTTPS proxies
-without a VM backend. The `firecracker` feature includes `egress` and adds VM integration.
-Programs receive placeholder environment variables; the proxy resolves
-credentials outside the VM and substitutes them on authorized requests.
+The basic runtime includes the credential proxy; the `egress` feature also exposes
+it without a VM backend. Programs receive placeholder
+environment variables; the proxy resolves credentials outside the sandbox and
+substitutes them on authorized requests. Firecracker uses transparent network
+interception. Apple container and Docker use an authenticated HTTP CONNECT
+transport into the same credential resolver and request forwarding code.
 
 On macOS, TLS and credential resolution run in the native Exo process. The
 existing Lima bridge carries streams and DNS configuration, without receiving
@@ -66,7 +68,8 @@ with the same name. Recreating a secret requires a new sandbox selection.
 
 HTTP credentials authorize one exact HTTPS origin, including its port. The
 `--http-origin` grant allows header substitution on requests to that origin;
-MCP credentials and keys without a destination do not grant HTTP access.
+MCP credentials authorize only their exact MCP endpoint, including path and query.
+Keys without a destination do not grant HTTP access.
 Sandbox and credential host policies still apply. The same policy flag
 works with `exo chat` and a managed Firecracker sandbox. Tell the agent which
 variables it can use; the runtime currently injects the environment without
@@ -76,6 +79,84 @@ For a managed agent, use `exo chat --agent-file agent.md --sandbox firecracker
 --vault alice --egress-policy egress.json` to attach a named vault to the thread.
 `--agent-file` keeps the agent, thread, and sandbox selection temporary while
 credential rotation still reads the live vault.
+
+## Agent model credentials
+
+The built-in Codex, Claude Code, and Pi wrappers use the registered model binding
+when creating their sandbox. Register the key and model once:
+
+```bash
+exo vault secret create global openai --token-env OPENAI_API_KEY
+exo model create gpt-5-mini --secret openai
+exo chat --agent-file exoharness/examples/managed-agents/pi-assistant.md --environment-file exoharness/examples/environments/pi-local.yaml
+```
+
+The runtime adds the model credential to the selected environment's policy. The
+wrapper reads model metadata; it does not read or forward the vault key. The
+proxy injects a placeholder into the SDK's usual API-key environment variable.
+Codex uses its provider's environment-key setting and needs no login file.
+Model authentication currently supports API keys; OAuth/subscription login
+caches are not passed into the sandbox.
+Its provider is configured for HTTP streaming, which the proxy supports.
+
+The model binding pins the vault and secret IDs. Same-named secrets in attached
+vaults cannot substitute another account. Keys without a destination are
+permitted through the model binding only at its registered HTTPS endpoint and
+base path. Keys with an explicit destination must match that endpoint. MCP OAuth
+credentials cannot be used as model API keys. Rotation is read on every request;
+deleting the selected secret revokes it, including after a CLI restart. Recreating
+its name does not restore the old binding.
+
+An existing environment credential for the model's environment variable must
+select the same secret and permit its endpoint. Conflicts fail before startup.
+Limited network policies must already allow the model host; model selection does
+not expand them. Model endpoints currently require HTTPS on port 443.
+
+Apple container and Docker support model credentials with
+`networking: { type: unrestricted }`. The runtime supplies `HTTPS_PROXY`, HTTP
+proxy authentication, and the CA bundle. Node clients use `NODE_USE_ENV_PROXY=1`
+(requires Node 22.21 or later; the supplied images include it). This protects
+credentials while leaving the sandbox's general networking unrestricted. These
+backends still reject limited networking. Firecracker enforces limited networking
+through its existing transparent proxy and requires an explicit host allowlist.
+
+The authenticated proxy listens only on the sandbox network's host gateway
+(Apple container and native Docker), or host loopback (Docker Desktop). Its
+credentials authorize the sandbox's selected endpoints for the proxy session.
+
+Clients must restart after the runtime restarts to receive a fresh proxy session.
+Exo launches the wrappers with the current session when resuming a saved thread.
+Proxy credentials grant use of the selected model endpoint while the sandbox is
+active; they do not prevent sandbox code from making its own authorized model
+requests.
+
+## Native MCP credentials
+
+Codex and Claude Code use their native MCP clients for servers declared in the
+agent definition. Exo supplies the server URLs and tool filters, reusing the
+thread's saved vault selection. Basic, RLM, and Pi retain the host MCP tool bridge.
+
+Authenticated native servers receive an `EXO_MCP_...` environment variable with a
+placeholder. The existing proxy resolves the selected vault secret for each
+request, restricted to the exact MCP endpoint. Rotation and revocation apply to
+saved threads without switching accounts. OAuth expiry refresh happens in the
+runtime; after an upstream 401, the proxy refreshes and retries once if the token
+changed, preserving the request body and MCP session header. It does not retry
+403 responses. Refreshed tokens are saved in the vault.
+
+Authenticated MCP endpoints require HTTPS on port 443. A limited environment
+network policy must already allow each MCP host; declaring a server does not
+expand the network policy. Public servers need no credential.
+
+Native MCP permission hooks call the shared Harness authorization mechanism.
+The same CLI allow/deny responder works locally and over HTTP, using canonical
+`exo_mcp__<server>__<tool>` names. Codex supports these MCP approvals but rejects
+default/native `always_ask` policies because its hooks do not cover every native
+tool. Codex resource listing, resource-template listing, and resource reads do not
+request per-tool approval. Declared MCP tool calls use the configured tool policies.
+Tool approvals control harness calls; credential grants authorize requests
+to the endpoint and do not enforce tool-level permissions on arbitrary sandbox
+code.
 
 ## Policy and credentials
 
@@ -109,7 +190,7 @@ includes the sandbox ID and `ResourceScope`; destination includes the host,
 port, method, and normalized path/query. The local resolver loads the saved
 vault/secret reference and checks the current scope before each use.
 `egress::vault::resolve_credential` resolves that reference through `VaultHandle`
-with an HTTP target. Hosted resolvers can use the same helper with their
+with the matching HTTP or MCP target. Hosted resolvers can use the same helper with their
 authenticated vault context. The local CLI assumes one user owns its vault
 catalog. Resolver failures are sanitized
 before returning them to the guest.
@@ -124,7 +205,7 @@ let output = sandbox.exec(&command).await?;
 The sandbox handle injects placeholders into `exec`, `start_process`, and terminals,
 overriding caller-supplied values. It also configures TLS trust for curl, Git,
 Python requests, Node, and clients that use `SSL_CERT_FILE`. Images need
-`/bin/sh`, `cat`, and `/etc/ssl/certs/ca-certificates.crt`. Separate trust stores
+`/bin/sh`, `cat`, `mktemp`, `mv`, `rm`, and `/etc/ssl/certs/ca-certificates.crt`. Separate trust stores
 need their own integration. Callers must avoid passing other real credentials
 or credential files into the sandbox.
 
@@ -240,21 +321,24 @@ bindings are rejected: native header transforms set whole values and do not
 implement Exo's per-request credential resolution. A Vercel forwarding adapter
 would be a separate implementation.
 
-Docker, Apple Containers, smolvm, E2B, and Daytona retain their existing enabled /
-disabled networking support. They reject limited networking and credential
-bindings. Local processes, Sprites, and AWS AgentCore only accept unrestricted
+Docker and Apple Containers support credential bindings on managed sandboxes
+with unrestricted networking. They reject limited networking, credential-protected
+attachments, and restoring credential-protected snapshots. Credential proxies
+close when the sandbox stops or the runtime exits. Smolvm, E2B, and Daytona retain
+their enabled / disabled networking support and reject credential bindings and
+limited networking. Local processes, Sprites, and AWS AgentCore only accept unrestricted
 networking. Docker attachments also reject disabled networking because Exo does
 not control the attached container's network.
 
 ## Current scope
 
 The transparent proxy supports limited networking with exact hosts and HTTPS
-header substitution. The explicit proxy also supports unrestricted networking
-with credential substitution restricted to each binding's allowed hosts.
-Body substitution is not part of the policy yet.
+header substitution. The container CONNECT transport supports credential
+substitution with unrestricted networking; other public HTTPS destinations pass
+through without interception. Firecracker still rejects unrestricted networking
+with credential bindings. Body substitution is not part of the policy yet.
 Standard ports 80/443 are supported; local gateways on other ports need
-additional transport support. Model credential bindings are not inferred
-automatically.
+additional transport support.
 
 Firecracker proxy policies do not yet support snapshots/forks, external
 attachments, or one-shot sandboxes. HTTP/2, WebSockets, arbitrary TCP, and signed
@@ -311,3 +395,15 @@ and shutdown. The managed test covers automatic trust, process environments,
 and reacquiring the same VM with fresh bindings. On macOS it crosses the real
 Lima bridge with an isolated test executable. Set
 `EXO_FIRECRACKER_LIMA_INSTANCE` to use a different Lima instance.
+
+The macOS agent workflow tests run Codex, Claude Code, and Pi through both the
+local CLI and HTTP runtime, including saved-thread resume and credential
+inspection inside the guest. It requires `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+and `/var/lib/exo/firecracker/rootfs.ext4` containing the pinned binaries from
+the three sandbox images. Set `EXO_EGRESS_BRIDGE_BINARY` to a prebuilt bridge
+inside Lima to reuse it:
+
+```bash
+cargo test -p exo --features firecracker --test container_live \
+  firecracker_ -- --ignored --nocapture --test-threads=1
+```

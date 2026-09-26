@@ -26,16 +26,49 @@ impl LocalEgressResolver {
             .credentials
             .get(binding_name)
             .context("sandbox credential is unavailable")?;
-        crate::egress::vault::resolve_credential(
-            &ScopedVaultContext {
-                harness: &harness,
-                scope: identity.scope,
-            },
-            reference,
-            destination,
-            rejected,
-        )
-        .await
+        let context = ScopedVaultContext {
+            harness: &harness,
+            scope: identity.scope,
+        };
+        let policy = sandbox.policy();
+        let credential = policy
+            .credentials
+            .iter()
+            .find(|binding| binding.name == binding_name)
+            .context("sandbox credential policy is unavailable")?;
+        if let Some(model_id) = credential.model {
+            let model = context.model_binding(&model_id).await?;
+            let endpoint = crate::vault::model_endpoint(
+                model.base_url.as_deref(),
+                &credential.environment_variable,
+            )?;
+            anyhow::ensure!(
+                model.secret.as_ref() == Some(reference),
+                "sandbox model credential changed; create a new sandbox"
+            );
+            let path = endpoint.path().trim_end_matches('/');
+            anyhow::ensure!(
+                endpoint.host_str() == Some(destination.host.as_str())
+                    && endpoint.port_or_known_default() == Some(destination.port)
+                    && (path.is_empty()
+                        || destination.path == path
+                        || destination.path.starts_with(&format!("{path}/"))),
+                "request is outside the model endpoint"
+            );
+            let vault =
+                crate::vault::model_credential_vault(&context, reference, &endpoint).await?;
+            return match vault
+                .get_secret(&reference.secret_id)
+                .await?
+                .context("sandbox model credential is unavailable")?
+            {
+                Secret::Key { value } => Ok(value),
+                Secret::Oauth { .. } => {
+                    bail!("sandbox model credentials currently require an API key")
+                }
+            };
+        }
+        crate::egress::vault::resolve_credential(&context, reference, destination, rejected).await
     }
 }
 

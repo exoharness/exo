@@ -37,6 +37,8 @@ use crate::{
     SandboxNetworkPolicy,
 };
 
+mod container;
+pub(crate) use container::CredentialContainerBackend;
 mod explicit;
 pub use explicit::{ExplicitProxy, ProxyAuthorizer, ProxySession, serve_connect_proxy};
 mod transport;
@@ -871,3 +873,12 @@ async fn serve(
 
 #[cfg(test)]
 mod tests;
+
+pub(super) const PREPARE_TRUST: &str = r#"set -eu
+umask 077
+bundle=$(mktemp "$EXO_EGRESS_CA_PATH.XXXXXX")
+trap 'rm -f "$bundle"' EXIT
+cat /etc/ssl/certs/ca-certificates.crt > "$bundle"
+printf '\n%s\n' "$EXO_EGRESS_CA_PEM" >> "$bundle"
+mv -f "$bundle" "$EXO_EGRESS_CA_PATH"
+"#;

@@ -415,7 +415,16 @@ export interface Turn {
   }): Promise<ArtifactVersion>;
 }
 
+export interface NativeMcpServer {
+  name: string;
+  url: string;
+  environmentVariable: string | null;
+  disabledTools: string[];
+  tools: { name: string; exposedName: string }[];
+}
+
 export interface TurnContext {
+  readonly mcpServers: NativeMcpServer[];
   readonly tools: ToolDefinition[];
   readonly agentConfig: AgentConfig;
   readonly conversationConfig: ConversationConfig;
@@ -560,7 +569,9 @@ export function toolResultEvent(
 
 export function projectAnthropicMessageToolEvents(
   message: unknown,
-  options: { toolNamePrefix?: string } = {},
+  options: {
+    toolName?: (name: string) => string;
+  } = {},
 ): EventData[] {
   const record = recordOrEmpty(message);
   const payload = recordOrEmpty(record.message);
@@ -579,7 +590,7 @@ export function projectAnthropicMessageToolEvents(
           toolRequestedEvent({
             toolCallId: toolUse.id,
             request: {
-              functionName: `${options.toolNamePrefix ?? ""}${toolUse.name}`,
+              functionName: options.toolName?.(toolUse.name) ?? toolUse.name,
               arguments: isRecord(toolUse.input)
                 ? (toJsonValue(toolUse.input) as JsonObject)
                 : {},

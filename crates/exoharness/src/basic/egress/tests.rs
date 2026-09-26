@@ -31,6 +31,7 @@ fn policy(name: &str) -> EgressPolicy {
             allowed_hosts: vec!["api.test".into()],
         },
         credentials: vec![EgressCredentialBinding {
+            model: None,
             name: name.into(),
             environment_variable: "API_KEY".into(),
             networking: CredentialNetworkPolicy::Limited {
@@ -73,10 +74,11 @@ async fn bind(
     scope: ResourceScope,
     name: &str,
 ) -> Result<EgressIdentity> {
-    let prepared = prepare_sandbox_request(
+    bind_request(
         harness,
         scope,
         CreateSandboxRequest {
+            model: None,
             name: None,
             provider: SandboxProvider::Firecracker,
             image: "test-image".into(),
@@ -89,7 +91,15 @@ async fn bind(
             idle_seconds: None,
         },
     )
-    .await?;
+    .await
+}
+
+async fn bind_request(
+    harness: &BasicExoHarness,
+    scope: ResourceScope,
+    request: CreateSandboxRequest,
+) -> Result<EgressIdentity> {
+    let prepared = prepare_sandbox_request(harness, scope, request).await?;
     let sandbox_id = format!("sandbox-{}", Uuid7::now());
     let owner_dir = harness.owner_dir(scope);
     harness
@@ -325,6 +335,158 @@ async fn temporary_sandboxes_use_live_vaults_and_require_http_authorization() ->
     assert!(
         resolver(&saved)
             .resolve(&identity, "token", &destination("api.test"))
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn model_credentials_pin_the_binding_and_respect_scope_and_destinations() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let mut config = crate::test_support::local_test_config(directory.path());
+    config.sandbox_policy = Some(
+        SandboxNetworkPolicy::Limited {
+            allowed_hosts: vec!["api.test".into()],
+        }
+        .into(),
+    );
+    let harness = BasicExoHarness::new(config.clone()).await?;
+    let global = global_vault(&harness).await?;
+    let selected = global
+        .put_secret(PutSecretRequest {
+            name: "shared".into(),
+            target: None,
+            secret: Secret::Key {
+                value: "model-v1".into(),
+            },
+        })
+        .await?;
+    let model_id = harness
+        .put_binding(Binding::Llm {
+            name: "model".into(),
+            model: "gpt-5-mini".into(),
+            base_url: Some("https://api.test/v1".into()),
+            secret: Some(SecretReference {
+                vault_id: global.record().id,
+                secret_id: selected,
+            }),
+        })
+        .await?;
+    let nearer = harness.create_vault("nearer").await?;
+    secret(nearer.as_ref(), "shared", "wrong-account").await?;
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            name: "agent".into(),
+            slug: "agent".into(),
+            vaults: vec![nearer.record().id],
+        })
+        .await?;
+    let scope = ResourceScope::Agent {
+        agent_id: agent.record().id,
+    };
+    let request = CreateSandboxRequest {
+        name: None,
+        model: Some(crate::SandboxModelBinding {
+            id: model_id,
+            environment_variable: "OPENAI_API_KEY".into(),
+        }),
+        provider: SandboxProvider::AppleContainer,
+        image: "test".into(),
+        resources: Default::default(),
+        default_workdir: None,
+        file_system_mounts: None,
+        durable_file_systems: None,
+        policy: None,
+        enable_networking: None,
+        idle_seconds: Some(300),
+    };
+    let identity = bind_request(&harness, scope, request.clone()).await?;
+    let name = format!("model:{model_id}");
+    assert_eq!(
+        resolver(&harness)
+            .resolve(&identity, &name, &destination("api.test"))
+            .await?,
+        "model-v1"
+    );
+    let restarted = BasicExoHarness::new(config).await?;
+    global
+        .update_secret(
+            &selected,
+            Secret::Key {
+                value: "model-v2".into(),
+            },
+        )
+        .await?;
+    assert_eq!(
+        resolver(&restarted)
+            .resolve(&identity, &name, &destination("api.test"))
+            .await?,
+        "model-v2"
+    );
+    assert!(
+        resolver(&harness)
+            .resolve(&identity, &name, &destination("other.test"))
+            .await
+            .is_err()
+    );
+    let mut wrong_path = destination("api.test");
+    wrong_path.path = "/outside".into();
+    assert!(
+        resolver(&harness)
+            .resolve(&identity, &name, &wrong_path)
+            .await
+            .is_err()
+    );
+    let mut disabled = request.clone();
+    disabled.policy = Some(SandboxNetworkPolicy::Disabled.into());
+    assert!(bind_request(&harness, scope, disabled).await.is_err());
+    let mut disallowed = request.clone();
+    disallowed.policy = Some(
+        SandboxNetworkPolicy::Limited {
+            allowed_hosts: vec!["other.test".into()],
+        }
+        .into(),
+    );
+    assert!(bind_request(&harness, scope, disallowed).await.is_err());
+    let mut conflict = request.clone();
+    let mut conflicting_policy = policy("shared");
+    conflicting_policy.credentials[0].environment_variable = "OPENAI_API_KEY".into();
+    conflict.policy = Some(conflicting_policy);
+    assert!(bind_request(&harness, scope, conflict).await.is_err());
+    global.delete_secret(&selected).await?;
+    global
+        .put_secret(PutSecretRequest {
+            name: "shared".into(),
+            target: None,
+            secret: Secret::Key {
+                value: "replacement".into(),
+            },
+        })
+        .await?;
+    assert!(
+        resolver(&restarted)
+            .resolve(&identity, &name, &destination("api.test"))
+            .await
+            .is_err()
+    );
+    assert!(
+        bind_request(&harness, scope, request.clone())
+            .await
+            .is_err()
+    );
+    let local_model = agent
+        .put_binding(Binding::Llm {
+            name: "local".into(),
+            model: "gpt-5-mini".into(),
+            base_url: None,
+            secret: None,
+        })
+        .await?;
+    let mut out_of_scope = request;
+    out_of_scope.model.as_mut().unwrap().id = local_model;
+    assert!(
+        bind_request(&harness, ResourceScope::Global, out_of_scope)
             .await
             .is_err()
     );

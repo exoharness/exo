@@ -69,6 +69,7 @@ async fn agent_runs_a_command_in_a_smolvm_microvm() {
     // Selected through the registry; nothing here constructs the backend.
     let sandbox_id = agent
         .create_sandbox(CreateSandboxRequest {
+            model: None,
             name: Some("smolvm-e2e".to_string()),
             provider: SandboxProvider::Smolvm,
             image,
@@ -196,6 +197,7 @@ async fn agent_runs_the_default_sandbox_shape() {
 
     let sandbox_id = agent
         .create_sandbox(CreateSandboxRequest {
+            model: None,
             name: Some("smolvm-default".to_string()),
             provider: SandboxProvider::Smolvm,
             image,

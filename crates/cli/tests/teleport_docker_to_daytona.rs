@@ -85,6 +85,7 @@ async fn teleport_docker_sandbox_to_daytona_keeps_files() {
     // 1. Create a Docker sandbox and write a marker file.
     let sandbox_id = conv
         .create_sandbox(CreateSandboxRequest {
+            model: None,
             name: None,
             provider: SandboxProvider::Docker,
             image: "docker.io/library/ubuntu:24.04".into(),
@@ -148,6 +149,7 @@ async fn teleport_docker_sandbox_to_daytona_keeps_files() {
     let mount_dir = TempDir::new().expect("mount dir");
     let mounted_id = conv
         .create_sandbox(CreateSandboxRequest {
+            model: None,
             name: None,
             provider: SandboxProvider::Docker,
             image: "docker.io/library/ubuntu:24.04".into(),

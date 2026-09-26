@@ -29,7 +29,7 @@ import { responsesMessagesToLingua } from "@braintrust/lingua";
 import { ensureTable, getTable } from "@exo/model-runtime/cost";
 import {
   errorMessage,
-  ResponsesRuntime,
+  traceExecutorTurn,
   tracedUnderParent,
   type TraceParent,
 } from "@exo/model-runtime/responses";
@@ -43,7 +43,7 @@ import {
   materializePriorConversationMessages,
   objectArgs,
   pickEnv,
-  resolveLlmBinding,
+  resolveSandboxLlmBinding,
   sandboxCwd,
   stringOrNull,
   traceExoharnessToolCall,
@@ -61,6 +61,10 @@ import {
   codexUsageEvent,
   type CodexTokenUsage,
 } from "../../typescript/codex/usage";
+
+import { authorizeMcpElicitation } from "../../typescript/codex/mcp-approval";
+
+import { codexMcpToolName } from "../../typescript/harness/native-mcp";
 
 const CODEX_VERSION = readFileSync(
   new URL("../../containers/codex-sandbox/version", import.meta.url),
@@ -84,6 +88,7 @@ interface CodexWarmTurnScope {
   protocolLog: CodexProtocolEventBuffer;
   traceState: CodexTurnTraceState;
   turnParent: TraceParent;
+  mcpCalls: Map<string, PendingToolCall>;
 }
 
 interface CodexWarmSessionRecord {
@@ -110,14 +115,13 @@ class CodexWarmSession {
 
   static async start(
     scope: CodexWarmTurnScope,
-    modelBinding: ResolvedLlmBinding,
     sessionKey: string,
   ): Promise<CodexWarmSession> {
     let session: CodexWarmSession | null = null;
     const pendingProtocol: CodexProtocolLogEntry[] = [];
     const process = await scope.context.startSandboxProcess({
       command: codexSandboxCommand(scope.context),
-      env: codexSandboxEnv(modelBinding),
+      env: codexSandboxEnv(),
       reuseKey: sessionKey,
     });
     const warmRecord = await latestCodexWarmSession(
@@ -170,10 +174,21 @@ class CodexWarmSession {
   }
 
   private recordProtocol(entry: CodexProtocolLogEntry): void {
-    this.current?.protocolLog.record(entry);
-    if (this.current) {
-      const state = this.current.traceState;
-      state.tokenUsage = accumulateCodexUsage(state.tokenUsage, entry);
+    const scope = this.current;
+    if (!scope) return;
+    scope.protocolLog.record(entry);
+    scope.traceState.tokenUsage = accumulateCodexUsage(
+      scope.traceState.tokenUsage,
+      entry,
+    );
+    if (entry.direction !== "server_to_client") return;
+    const message = asRecord(entry.message);
+    if (message.method !== "item/started") return;
+    const item = asRecord(asRecord(message.params).item);
+    const id = itemIdFromItem(item);
+    if (item.type === "mcpToolCall" && id) {
+      const call = toolCallFromCodexItem(scope.context, item, id);
+      if (call) scope.mcpCalls.set(id, call);
     }
   }
 
@@ -188,6 +203,7 @@ class CodexWarmSession {
       current.context,
       current.turnParent,
       request,
+      current.mcpCalls,
     );
   }
 }
@@ -203,12 +219,8 @@ export default defineHarness({
       false,
     );
     await ensureTable();
-    const modelBinding = await resolveLlmBinding(context);
-    const runtime = ResponsesRuntime.fromModelBinding(
-      context.agentConfig,
-      modelBinding,
-    );
-    await runtime.runTurn(context, (turnParent) =>
+    const modelBinding = await resolveSandboxLlmBinding(context);
+    await traceExecutorTurn(context, (turnParent) =>
       runCodexTurn(context, turnParent, modelBinding),
     );
   },
@@ -235,6 +247,7 @@ async function runCodexTurn(
     context,
     protocolLog,
     turnParent,
+    mcpCalls: new Map(),
     traceState,
   };
   const sessionKey = codexWarmSessionKey(context, modelBinding);
@@ -250,7 +263,7 @@ async function runCodexTurn(
     },
     () =>
       codexSessions.get(sessionKey, () =>
-        CodexWarmSession.start(scope, modelBinding, sessionKey),
+        CodexWarmSession.start(scope, sessionKey),
       ),
   );
   session.setTurnScope(scope);
@@ -313,7 +326,10 @@ async function runCodexTurn(
           input: turnInput,
           model: modelBinding.model,
           approvalPolicy: "on-request",
-          sandboxPolicy: codexNativeSandboxPolicy(),
+          sandboxPolicy: {
+            type: "externalSandbox",
+            networkAccess: "restricted",
+          },
         }),
     );
     await appendCustomEvent(turn, "codex_turn_started", {
@@ -531,7 +547,33 @@ async function startCodexThread(
   );
   const request: JsonObject = {
     model: modelBinding.model,
-    modelProvider: "openai",
+    modelProvider: "exo",
+    config: {
+      features: { tool_call_mcp_elicitation: true },
+      mcp_servers: Object.fromEntries(
+        context.mcpServers.map((server) => [
+          server.name,
+          {
+            url: server.url,
+            ...(server.environmentVariable
+              ? { bearer_token_env_var: server.environmentVariable }
+              : {}),
+            enabled_tools: server.tools.map((tool) => tool.name),
+            required: true,
+            default_tools_approval_mode: "prompt",
+          },
+        ]),
+      ),
+      model_providers: {
+        exo: {
+          name: "Exo",
+          base_url: modelBinding.baseUrl ?? "https://api.openai.com/v1",
+          env_key: "OPENAI_API_KEY",
+          wire_api: "responses",
+          supports_websockets: false,
+        },
+      },
+    },
     cwd: codexAppServerCwd(context),
     approvalPolicy: "on-request",
     sandbox: "read-only",
@@ -629,9 +671,26 @@ async function handleCodexServerRequest(
   context: TurnContext,
   turnParent: TraceParent,
   request: CodexServerRequest,
+  mcpCalls: Map<string, PendingToolCall>,
 ): Promise<JsonValue | undefined> {
+  if (request.method === "mcpServer/elicitation/request") {
+    return authorizeMcpElicitation(context, asRecord(request.params), mcpCalls);
+  }
   if (request.method === "item/commandExecution/requestApproval") {
-    return { decision: "accept" };
+    const params = asRecord(request.params);
+    if (typeof params.command !== "string") return { decision: "decline" };
+    try {
+      await context.authorizeTool({
+        functionName: CODEX_SHELL_TOOL,
+        arguments: objectArgs({
+          command: params.command,
+          cwd: stringOrNull(params.cwd),
+        }),
+      });
+      return { decision: "accept" };
+    } catch {
+      return { decision: "decline" };
+    }
   }
   if (request.method !== "item/tool/call") {
     return undefined;
@@ -713,16 +772,18 @@ async function handleCodexNotification(
     }
     case "item/started": {
       const item = notificationItem(notification);
-      const events = projectStartedItem(item, activeItems);
+      const events = projectStartedItem(context, item, activeItems);
       await appendEvents(context, events);
       return "running";
     }
     case "item/completed": {
       const item = notificationItem(notification);
-      const events = projectCompletedItem(item, activeItems);
+      const events = projectCompletedItem(context, item, activeItems);
       await appendEvents(context, events);
       const itemId = itemIdFromItem(item);
-      const toolCall = itemId ? toolCallFromCodexItem(item, itemId) : null;
+      const toolCall = itemId
+        ? toolCallFromCodexItem(context, item, itemId)
+        : null;
       if (toolCall) {
         await traceObservedToolCall(
           context,
@@ -783,6 +844,7 @@ async function handleCodexNotification(
 }
 
 function projectStartedItem(
+  context: TurnContext,
   item: Record<string, unknown>,
   activeItems: Set<string>,
 ): EventData[] {
@@ -790,7 +852,7 @@ function projectStartedItem(
   if (!itemId) {
     return [];
   }
-  const toolCall = toolCallFromCodexItem(item, itemId);
+  const toolCall = toolCallFromCodexItem(context, item, itemId);
   if (!toolCall) {
     return [];
   }
@@ -799,6 +861,7 @@ function projectStartedItem(
 }
 
 function projectCompletedItem(
+  context: TurnContext,
   item: Record<string, unknown>,
   activeItems: Set<string>,
 ): EventData[] {
@@ -813,7 +876,7 @@ function projectCompletedItem(
   }
 
   const events: EventData[] = [];
-  const toolCall = toolCallFromCodexItem(item, itemId);
+  const toolCall = toolCallFromCodexItem(context, item, itemId);
   if (toolCall && !activeItems.has(itemId)) {
     events.push(toolRequestedEvent(toolCall));
   }
@@ -836,6 +899,7 @@ function projectCompletedItem(
 }
 
 function toolCallFromCodexItem(
+  context: TurnContext,
   item: Record<string, unknown>,
   itemId: string,
 ): PendingToolCall | null {
@@ -856,12 +920,12 @@ function toolCallFromCodexItem(
     return {
       toolCallId: itemId,
       request: {
-        functionName: `codex.mcp.${String(item.server ?? "unknown")}.${String(item.tool ?? "unknown")}`,
-        arguments: objectArgs({
-          server: stringOrNull(item.server),
-          tool: stringOrNull(item.tool),
-          arguments: toJsonValue(item.arguments ?? null),
-        }),
+        functionName: codexMcpToolName(
+          context.mcpServers,
+          String(item.server),
+          String(item.tool),
+        ),
+        arguments: objectArgs(asRecord(item.arguments)),
       },
     };
   }
@@ -919,18 +983,18 @@ function messagesToUserInput(messages: Message[]): JsonValue[] {
 }
 
 function buildCodexDynamicTools(context: TurnContext): JsonValue[] {
-  return context.tools.map((tool) => ({
-    name: tool.name,
-    description: tool.description,
-    inputSchema: tool.parameters,
-  }));
-}
-
-function codexNativeSandboxPolicy(): JsonValue {
-  return {
-    type: "externalSandbox",
-    networkAccess: "restricted",
-  };
+  const nativeTools = new Set(
+    context.mcpServers.flatMap((server) =>
+      server.tools.map((tool) => tool.exposedName),
+    ),
+  );
+  return context.tools
+    .filter((tool) => !nativeTools.has(tool.name))
+    .map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.parameters,
+    }));
 }
 
 async function requireCodexSandboxNetworking(
@@ -969,38 +1033,19 @@ function codexSandboxCommand(context: TurnContext): string[] {
     "set -e;",
     `test "$(codex --version)" = "codex-cli ${CODEX_VERSION}" || { echo "Expected Codex ${CODEX_VERSION}; rebuild the Codex sandbox image" >&2; exit 1; };`,
     'mkdir -p "${HOME:-/tmp/exo-home}" "${CODEX_HOME:-/tmp/exo-codex-home}" >/dev/null 2>/tmp/codex-setup.stderr;',
-    'if [ -n "${OPENAI_API_KEY:-}" ]; then',
-    'printf "%s" "$OPENAI_API_KEY" | codex login --with-api-key >/dev/null 2>/tmp/codex-login.stderr;',
-    "fi;",
     "exec codex app-server --listen stdio:// 2>/tmp/codex-app-server.stderr",
   ].join(" ");
   return [shell, "-lc", command];
 }
 
-function codexSandboxEnv(
-  modelBinding: ResolvedLlmBinding,
-): Record<string, string> {
-  const env: Record<string, string> = {
-    ...pickEnv(
-      (key) =>
-        [
-          "BRAINTRUST_API_KEY",
-          "BRAINTRUST_APP_URL",
-          "OPENAI_ORG_ID",
-          "OPENAI_ORGANIZATION",
-          "OPENAI_PROJECT",
-        ].includes(key) || key.startsWith("CODEX_"),
+function codexSandboxEnv(): Record<string, string> {
+  return {
+    ...pickEnv((key) =>
+      ["OPENAI_ORG_ID", "OPENAI_ORGANIZATION", "OPENAI_PROJECT"].includes(key),
     ),
     CODEX_HOME: "/tmp/exo-codex-home",
     HOME: "/tmp/exo-home",
   };
-  if (modelBinding.apiKey) {
-    env.OPENAI_API_KEY = modelBinding.apiKey;
-  }
-  if (modelBinding.baseUrl) {
-    env.OPENAI_BASE_URL = modelBinding.baseUrl;
-  }
-  return env;
 }
 
 function dynamicToolResultResponse(
@@ -1067,6 +1112,7 @@ function codexWarmSessionKey(
     model: modelBinding.model,
     base_url: modelBinding.baseUrl ?? null,
     instructions: context.agentConfig.instructions,
+    mcp_servers: context.mcpServers,
     sandbox_runtime: codexSandboxRuntimeKey(context),
   });
 }

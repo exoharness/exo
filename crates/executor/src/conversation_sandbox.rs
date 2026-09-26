@@ -11,6 +11,7 @@ use tokio::sync::Mutex as AsyncMutex;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConversationSandboxInfo {
     pub(crate) id: String,
+    pub(crate) policy: Option<exoharness::EgressPolicy>,
     pub(crate) provider: SandboxProvider,
     pub(crate) image: String,
     pub(crate) default_workdir: String,
@@ -52,6 +53,8 @@ pub(crate) async fn ensure_conversation_sandbox(
     let sandbox_lock = conversation_sandbox_lock(&conversation.record().id.to_string());
     let _guard = sandbox_lock.lock().await;
     let spec = conversation_sandbox_spec(agent_config, config);
+    let model = sandbox_model_binding(conversation, agent_config).await?;
+    let policy = sandbox_policy(conversation, agent_config, config).await?;
 
     // Of the still-active candidates in conversation history, prefer the most recent one
     // that was either explicitly attached or matches the spec derived from configuration.
@@ -61,8 +64,21 @@ pub(crate) async fn ensure_conversation_sandbox(
         .rev()
     {
         match candidate {
-            ConversationSandboxCandidate::Attached { id } => return Ok(id),
-            ConversationSandboxCandidate::Created(sandbox) if sandbox.matches_spec(&spec) => {
+            ConversationSandboxCandidate::Attached { id } => {
+                anyhow::ensure!(
+                    model.is_none(),
+                    "sandbox model credentials require an Exo-managed sandbox"
+                );
+                return Ok(id);
+            }
+            ConversationSandboxCandidate::Created(sandbox)
+                if sandbox.matches_spec(&spec)
+                    && matches_sandbox_policy(
+                        sandbox.policy.as_ref(),
+                        policy.as_ref(),
+                        model.as_ref(),
+                    ) =>
+            {
                 if let Some(program) = healthcheck_program {
                     let healthcheck = conversation
                         .run_in_sandbox(exoharness::RunInSandboxRequest {
@@ -81,7 +97,7 @@ pub(crate) async fn ensure_conversation_sandbox(
         }
     }
 
-    create_conversation_sandbox(conversation, agent_config, config).await
+    create_sandbox(conversation, config, spec, model, policy).await
 }
 
 pub async fn attached_conversation_sandbox(
@@ -149,11 +165,13 @@ async fn conversation_sandbox_candidates(
                 durable_file_systems,
                 enable_networking,
                 idle_seconds,
+                policy,
                 ..
             } => {
                 candidates.push(ConversationSandboxCandidate::Created(
                     ConversationSandboxInfo {
                         id: sandbox_id,
+                        policy,
                         provider,
                         image,
                         default_workdir,
@@ -187,8 +205,21 @@ pub(crate) async fn create_conversation_sandbox(
     config: &ConversationConfig,
 ) -> Result<String> {
     let spec = conversation_sandbox_spec(agent_config, config);
+    let model = sandbox_model_binding(conversation, agent_config).await?;
+    let policy = sandbox_policy(conversation, agent_config, config).await?;
+    create_sandbox(conversation, config, spec, model, policy).await
+}
+
+async fn create_sandbox(
+    conversation: &dyn ConversationHandle,
+    config: &ConversationConfig,
+    spec: ConversationSandboxSpec,
+    model: Option<exoharness::SandboxModelBinding>,
+    policy: Option<exoharness::EgressPolicy>,
+) -> Result<String> {
     conversation
         .create_sandbox(CreateSandboxRequest {
+            model,
             name: config
                 .environment
                 .as_ref()
@@ -202,10 +233,7 @@ pub(crate) async fn create_conversation_sandbox(
             default_workdir: Some(spec.default_workdir),
             file_system_mounts: Some(spec.file_system_mounts),
             durable_file_systems: Some(spec.durable_file_systems),
-            policy: config
-                .environment
-                .as_ref()
-                .and_then(|env| env.config.policy.clone()),
+            policy,
             enable_networking: Some(spec.enable_networking),
             idle_seconds: Some(spec.idle_seconds),
         })
@@ -289,6 +317,91 @@ pub(crate) fn conversation_sandbox_spec(
     }
 }
 
+async fn sandbox_policy(
+    conversation: &dyn ConversationHandle,
+    agent_config: &AgentConfig,
+    config: &ConversationConfig,
+) -> Result<Option<exoharness::EgressPolicy>> {
+    let configured = config
+        .environment
+        .as_ref()
+        .and_then(|env| env.config.policy.clone());
+    let module = agent_config
+        .typescript
+        .as_ref()
+        .and_then(|config| std::path::Path::new(&config.module_path).file_name())
+        .and_then(|name| name.to_str());
+    if !matches!(module, Some("codex-harness.ts" | "claude-code-harness.ts")) {
+        return Ok(configured);
+    }
+    let Some(selection) = exo_managed_agents::vaults::load_selection(conversation).await? else {
+        return Ok(configured);
+    };
+    if selection.bindings.is_empty() {
+        return Ok(configured);
+    }
+    let mut policy = configured.unwrap_or_else(|| {
+        if conversation_sandbox_spec(agent_config, config).enable_networking {
+            exoharness::SandboxNetworkPolicy::Unrestricted.into()
+        } else {
+            exoharness::SandboxNetworkPolicy::Disabled.into()
+        }
+    });
+    anyhow::ensure!(
+        policy.networking_enabled(),
+        "native MCP requires sandbox networking"
+    );
+    for selected in selection.bindings {
+        let exoharness::vault::SecretTarget::Mcp { server_url } = selected.target else {
+            anyhow::bail!("expected MCP destination");
+        };
+        let endpoint = url::Url::parse(&server_url)?;
+        let host = endpoint
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("MCP endpoint has no host"))?;
+        if let exoharness::SandboxNetworkPolicy::Limited { allowed_hosts } = &policy.networking {
+            anyhow::ensure!(
+                allowed_hosts
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(host)),
+                "MCP endpoint {host} is not allowed by the environment network policy"
+            );
+        }
+        let Some(secret) = selected.secret else {
+            continue;
+        };
+        anyhow::ensure!(
+            endpoint.scheme() == "https" && endpoint.port_or_known_default() == Some(443),
+            "sandbox MCP credentials require HTTPS on port 443"
+        );
+        let variable = crate::mcp::credential_variable(&secret.secret_id);
+        if let Some(existing) = policy
+            .credentials
+            .iter()
+            .find(|binding| binding.environment_variable == variable)
+        {
+            anyhow::ensure!(
+                existing.name == secret.secret_id.to_string(),
+                "environment credential conflicts with MCP server {}",
+                selected.server_name
+            );
+            continue;
+        }
+        policy
+            .credentials
+            .push(exoharness::EgressCredentialBinding {
+                name: secret.secret_id.to_string(),
+                model: None,
+                environment_variable: variable,
+                networking: exoharness::CredentialNetworkPolicy::Limited {
+                    allowed_hosts: vec![host.to_owned()],
+                },
+                injection_location: exoharness::CredentialInjectionLocation { header: true },
+            });
+    }
+    Ok(Some(policy))
+}
+
 fn normalize_mounts(mounts: &[FileSystemMount]) -> Vec<FileSystemMount> {
     mounts
         .iter()
@@ -315,4 +428,164 @@ fn conversation_sandbox_lock(conversation_id: &str) -> Arc<AsyncMutex<()>> {
             .entry(conversation_id.to_string())
             .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
     )
+}
+
+fn matches_sandbox_policy(
+    actual: Option<&exoharness::EgressPolicy>,
+    configured: Option<&exoharness::EgressPolicy>,
+    model: Option<&exoharness::SandboxModelBinding>,
+) -> bool {
+    let Some(actual) = actual else {
+        return configured.is_none() && model.is_none();
+    };
+    let credential = model.and_then(|model| {
+        actual.credentials.iter().find(|credential| {
+            credential.model == Some(model.id)
+                && credential.environment_variable == model.environment_variable
+        })
+    });
+    if model.is_some() && credential.is_none() {
+        return false;
+    }
+    let Some(configured) = configured else {
+        return true;
+    };
+    let mut expected = configured.clone();
+    if let Some(credential) = credential {
+        if let Some(existing) = expected
+            .credentials
+            .iter_mut()
+            .find(|existing| existing.environment_variable == credential.environment_variable)
+        {
+            if existing.model.is_none() {
+                existing.model = credential.model;
+            }
+        } else {
+            expected.credentials.push(credential.clone());
+        }
+    }
+    actual == &expected
+}
+
+async fn sandbox_model_binding(
+    conversation: &dyn ConversationHandle,
+    config: &AgentConfig,
+) -> Result<Option<exoharness::SandboxModelBinding>> {
+    let module = config
+        .typescript
+        .as_ref()
+        .and_then(|config| std::path::Path::new(&config.module_path).file_name())
+        .and_then(|name| name.to_str());
+    if !matches!(
+        module,
+        Some("codex-harness.ts" | "claude-code-harness.ts" | "pi-harness.ts")
+    ) {
+        return Ok(None);
+    }
+    let metadata = conversation
+        .list_bindings()
+        .await?
+        .into_iter()
+        .filter(|binding| {
+            binding.r#type == exoharness::BindingType::Llm && binding.name == config.model
+        })
+        .max_by_key(|binding| binding.created_at)
+        .ok_or_else(|| anyhow::anyhow!("model is not registered: {}", config.model))?;
+    let binding = conversation
+        .get_binding(&metadata.id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("model binding is unavailable"))?;
+    let exoharness::Binding::Llm { model, .. } = binding else {
+        anyhow::bail!("sandbox model credential requires an LLM binding");
+    };
+    let environment_variable = match module {
+        Some("codex-harness.ts") => "OPENAI_API_KEY",
+        Some("claude-code-harness.ts") => "ANTHROPIC_API_KEY",
+        Some("pi-harness.ts") => match model
+            .split_once('/')
+            .map(|(provider, _)| provider)
+            .unwrap_or("openai")
+        {
+            "openai" => "OPENAI_API_KEY",
+            "anthropic" => "ANTHROPIC_API_KEY",
+            "google" => "GEMINI_API_KEY",
+            provider => {
+                anyhow::bail!("Pi API-key bindings are not configured for provider {provider}")
+            }
+        },
+        _ => unreachable!(),
+    };
+    Ok(Some(exoharness::SandboxModelBinding {
+        id: metadata.id,
+        environment_variable: environment_variable.into(),
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use exoharness::{
+        CredentialInjectionLocation, CredentialNetworkPolicy, EgressCredentialBinding,
+        EgressPolicy, SandboxModelBinding, SandboxNetworkPolicy, Uuid7,
+    };
+
+    #[test]
+    fn saved_sandbox_must_match_the_environment_and_model_grant() {
+        let model = SandboxModelBinding {
+            id: Uuid7::now(),
+            environment_variable: "OPENAI_API_KEY".into(),
+        };
+        let configured = EgressPolicy::from(SandboxNetworkPolicy::Unrestricted);
+        let mut actual = configured.clone();
+        actual.credentials.push(EgressCredentialBinding {
+            name: format!("model:{}", model.id),
+            model: Some(model.id),
+            environment_variable: model.environment_variable.clone(),
+            networking: CredentialNetworkPolicy::Limited {
+                allowed_hosts: vec!["api.openai.com".into()],
+            },
+            injection_location: CredentialInjectionLocation { header: true },
+        });
+        assert!(matches_sandbox_policy(
+            Some(&actual),
+            Some(&configured),
+            Some(&model)
+        ));
+        assert!(!matches_sandbox_policy(
+            Some(&configured),
+            Some(&configured),
+            Some(&model)
+        ));
+        let mut changed = configured.clone();
+        changed.networking = SandboxNetworkPolicy::Limited {
+            allowed_hosts: vec!["api.openai.com".into()],
+        };
+        assert!(!matches_sandbox_policy(
+            Some(&actual),
+            Some(&changed),
+            Some(&model)
+        ));
+        let mut explicit = actual.clone();
+        explicit.credentials[0].model = None;
+        assert!(matches_sandbox_policy(
+            Some(&actual),
+            Some(&explicit),
+            Some(&model)
+        ));
+        explicit.credentials[0].name = "another-key".into();
+        assert!(!matches_sandbox_policy(
+            Some(&actual),
+            Some(&explicit),
+            Some(&model)
+        ));
+        let changed_model = SandboxModelBinding {
+            id: Uuid7::now(),
+            ..model
+        };
+        assert!(!matches_sandbox_policy(
+            Some(&actual),
+            Some(&configured),
+            Some(&changed_model)
+        ));
+    }
 }

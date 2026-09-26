@@ -133,7 +133,7 @@ describe("agent harness canonical events", () => {
           ],
         },
       },
-      { toolNamePrefix: "claude." },
+      { toolName: (name) => `claude.${name}` },
     );
     const result = projectAnthropicMessageToolEvents({
       type: "user",

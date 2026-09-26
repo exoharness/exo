@@ -8,7 +8,7 @@ mod basic_tests;
     feature = "basic-backend"
 ))]
 pub mod contract_tests;
-#[cfg(all(not(target_arch = "wasm32"), feature = "egress"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub mod egress;
 mod environment;
 mod error;
