@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [features]
 default = []
+smolvm = ["exoharness/smolvm"]
 aws-agentcore = ["exoharness/aws-agentcore"]
 firecracker = ["exoharness/firecracker"]
 

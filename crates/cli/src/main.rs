@@ -494,7 +494,7 @@ fn default_secret_backend() -> SecretBackendArg {
 
 #[cfg(target_os = "macos")]
 fn default_local_sandbox_provider() -> SandboxProvider {
-    SandboxProvider::AppleContainer
+    SandboxProvider::Smolvm
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -3314,6 +3314,15 @@ mod command_tests {
         assert_eq!(
             chat_command("support", "saved"),
             "exo agent run --agent support --thread saved"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_defaults_to_smolvm() {
+        assert_eq!(
+            super::default_local_sandbox_provider(),
+            super::SandboxProvider::Smolvm
         );
     }
 }

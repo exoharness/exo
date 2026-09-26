@@ -58,15 +58,20 @@ registered, Exo uses the first registered model and prints which one it selected
 An explicit `--model` must match a registered binding. With no registered models,
 Exo stops and prints the setup commands.
 
-For Codex, build the sandbox image with Apple container on a Mac:
+For Codex, build the sandbox image with Docker:
 
 ```bash
-container build --platform linux/arm64 -t exo-codex-sandbox:latest \
+docker build -t exo-codex-sandbox:latest \
   exoharness/containers/codex-sandbox
 ```
 
-On Linux, use `docker build -t exo-codex-sandbox:latest` with the same directory.
-Exo defaults to Apple container on macOS and Docker on Linux.
+Exo defaults to SmolVM on macOS and Docker on Linux. The CLI's default `smolvm`
+Cargo feature downloads and caches a checksum-verified runtime on first use when
+`smolvm` is not on `PATH`; no separate SmolVM installation is needed. Explicit
+`--smolvm-binary` / `SMOLVM_BIN` paths take precedence and must be valid.
+Build with `cargo build -p exo --no-default-features` to require an installed
+runtime instead. Library consumers opt in with `exoharness`'s `smolvm` feature.
+Set `SMOLMACHINES_NO_DOWNLOAD=1` to use only an installed or already cached runtime.
 See [coding agent harnesses](coding-agent-harnesses.md) for other harness setup.
 
 ## Run it

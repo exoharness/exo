@@ -2870,6 +2870,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "smolmachines",
  "tar",
  "tempfile",
  "thiserror 2.0.18",
@@ -5670,6 +5671,7 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2 0.4.13",
@@ -6610,6 +6612,32 @@ name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+
+[[package]]
+name = "smol-cloud"
+version = "1.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65f27a0ab6d3b2556a426db0b014d07d7f101f2beab2409ddf370b252531b6c0"
+dependencies = [
+ "base64 0.22.1",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "smolmachines"
+version = "1.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b4f93def64034361c3bde83c0c848c0dbf4f102eaa6bdf683c9026ed4d3f193"
+dependencies = [
+ "flate2",
+ "reqwest 0.12.28",
+ "serde_json",
+ "sha2 0.10.9",
+ "smol-cloud",
+ "tar",
+]
 
 [[package]]
 name = "socket2"
