@@ -26,10 +26,13 @@ export interface TextDeltaTraceState {
   ttftMs: number | null;
 }
 
-export interface ResolvedModel {
+export interface SandboxModel {
   model: string;
-  apiKey?: string;
   baseUrl?: string | null;
+}
+
+export interface ResolvedModel extends SandboxModel {
+  apiKey: string;
 }
 
 export class AsyncQueue<T> {
@@ -225,7 +228,7 @@ export class WarmJsonlSandboxWorker<TRequest, TEvent> {
   }
 }
 
-export function resolveSandboxModel(context: TurnContext): ResolvedModel {
+export function resolveSandboxModel(context: TurnContext): SandboxModel {
   return {
     model: context.agentConfig.model,
     baseUrl: context.agentConfig.baseUrl,
@@ -237,7 +240,7 @@ export async function resolveModel(
   defaultBaseUrl = context.agentConfig.model.toLowerCase().startsWith("claude")
     ? "https://api.anthropic.com"
     : "https://api.openai.com/v1",
-): Promise<ResolvedModel & { apiKey: string }> {
+): Promise<ResolvedModel> {
   const name = context.agentConfig.credential;
   if (!name) {
     throw new Error(

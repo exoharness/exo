@@ -136,6 +136,14 @@ impl BasicExoHarness {
                         )
                     })
             })?;
+            let Some(binding) = binding else {
+                tracing::debug!(
+                    name = record.name,
+                    "removing retired model binding during migration"
+                );
+                storage.delete_key_if_exists(path).await?;
+                continue;
+            };
             storage
                 .put_json(
                     path,
@@ -173,6 +181,8 @@ enum LegacyBinding {
         server_url: String,
         secret_id: Option<SecretId>,
     },
+    // Only decoded to remove retired records; their secrets are migrated separately.
+    #[allow(dead_code)]
     Llm {
         name: String,
         model: String,
@@ -229,8 +239,11 @@ enum LegacySandboxProviderConfig {
 }
 
 impl LegacyBinding {
-    fn migrate(self, resolve: impl Fn(SecretId) -> Result<SecretReference>) -> Result<Binding> {
-        Ok(match self {
+    fn migrate(
+        self,
+        resolve: impl Fn(SecretId) -> Result<SecretReference>,
+    ) -> Result<Option<Binding>> {
+        Ok(Some(match self {
             Self::Env {
                 name,
                 env_var,
@@ -249,22 +262,12 @@ impl LegacyBinding {
                 server_url,
                 secret: secret_id.map(&resolve).transpose()?,
             },
-            Self::Llm {
-                name,
-                model,
-                base_url,
-                secret_id,
-            } => Binding::Llm {
-                name,
-                model,
-                base_url,
-                secret: secret_id.map(&resolve).transpose()?,
-            },
+            Self::Llm { .. } => return Ok(None),
             Self::Sandbox { name, config } => Binding::Sandbox {
                 name,
                 config: config.migrate(resolve)?,
             },
-        })
+        }))
     }
 }
 
@@ -460,20 +463,11 @@ mod tests {
         ];
         for ((old_path, binding_path, secret_id, key), vault_id) in fixtures.iter().zip(ids) {
             assert!(!temp.path().join(old_path).exists());
-            let record: StoredBinding = storage.get_json(binding_path).await?;
-            let Binding::Llm {
-                secret: Some(reference),
-                ..
-            } = record.record.binding
-            else {
-                panic!("missing migrated model binding")
-            };
-            assert_eq!(
-                reference,
-                SecretReference {
-                    vault_id,
-                    secret_id: *secret_id
-                }
+            assert!(
+                storage
+                    .get_json_if_exists::<StoredBinding>(binding_path)
+                    .await?
+                    .is_none()
             );
             assert_eq!(
                 thread

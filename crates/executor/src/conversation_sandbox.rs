@@ -333,19 +333,66 @@ async fn sandbox_policy(
         .environment
         .as_ref()
         .and_then(|env| env.config.policy.clone());
+    let default_policy = if conversation_sandbox_spec(agent_config, config).enable_networking {
+        exoharness::SandboxNetworkPolicy::Unrestricted.into()
+    } else {
+        exoharness::SandboxNetworkPolicy::Disabled.into()
+    };
+    add_git_resource_bindings(conversation, config, &mut configured, &default_policy).await?;
+    let module = agent_config
+        .typescript
+        .as_ref()
+        .and_then(|config| std::path::Path::new(&config.module_path).file_name())
+        .and_then(|name| name.to_str());
+    let variable = match module {
+        Some("codex-harness.ts") => Some("OPENAI_API_KEY"),
+        Some("claude-code-harness.ts") => Some("ANTHROPIC_API_KEY"),
+        Some("pi-harness.ts") => Some(
+            match agent_config
+                .model
+                .split_once('/')
+                .map(|(provider, _)| provider)
+                .unwrap_or("openai")
+            {
+                "openai" => "OPENAI_API_KEY",
+                "anthropic" => "ANTHROPIC_API_KEY",
+                "google" => "GEMINI_API_KEY",
+                provider => anyhow::bail!(
+                    "Pi API-key credentials are not configured for provider {provider}"
+                ),
+            },
+        ),
+        _ => None,
+    };
+    if let Some(variable) = variable {
+        add_model_binding(
+            conversation,
+            agent_config,
+            variable,
+            &mut configured,
+            &default_policy,
+        )
+        .await?;
+    }
+    if matches!(module, Some("codex-harness.ts" | "claude-code-harness.ts")) {
+        add_native_mcp_bindings(conversation, &mut configured, &default_policy).await?;
+    }
+    Ok(configured)
+}
+
+async fn add_git_resource_bindings(
+    conversation: &dyn ConversationHandle,
+    config: &ConversationConfig,
+    configured: &mut Option<exoharness::EgressPolicy>,
+    default_policy: &exoharness::EgressPolicy,
+) -> Result<()> {
     if config.resources.iter().any(|resource| {
         matches!(
             resource.definition.source,
             exoharness::resources::ResourceSource::GitRepository { .. }
         )
     }) {
-        configured.get_or_insert_with(|| {
-            if conversation_sandbox_spec(agent_config, config).enable_networking {
-                exoharness::SandboxNetworkPolicy::Unrestricted.into()
-            } else {
-                exoharness::SandboxNetworkPolicy::Disabled.into()
-            }
-        });
+        configured.get_or_insert_with(|| default_policy.clone());
     }
     let credentials =
         futures::stream::iter(config.resources.iter().cloned().map(|resource| async move {
@@ -392,24 +439,9 @@ async fn sandbox_policy(
             policy.networking_enabled(),
             "Git credentials require sandbox networking"
         );
-        if let exoharness::SandboxNetworkPolicy::Limited { allowed_hosts } = &policy.networking {
-            anyhow::ensure!(
-                allowed_hosts
-                    .iter()
-                    .any(|allowed| allowed.eq_ignore_ascii_case(host)),
-                "Git resource host {host} is not allowed by the environment network policy"
-            );
-        }
+        ensure_host_allowed(policy, host, "Git resource host")?;
         if host == "github.com" {
-            if let exoharness::SandboxNetworkPolicy::Limited { allowed_hosts } = &policy.networking
-            {
-                anyhow::ensure!(
-                    allowed_hosts
-                        .iter()
-                        .any(|host| host.eq_ignore_ascii_case("api.github.com")),
-                    "GitHub API access requires api.github.com in the environment network policy"
-                );
-            }
+            ensure_host_allowed(policy, "api.github.com", "GitHub API host")?;
             if let Some(existing) = policy
                 .credentials
                 .iter()
@@ -420,150 +452,94 @@ async fn sandbox_policy(
                     "GitHub resources must share a credential for automatic GH_TOKEN selection"
                 );
             } else {
-                policy
-                    .credentials
-                    .push(exoharness::EgressCredentialBinding {
-                        name: reference.secret_id.to_string(),
-
-                        environment_variable: "GH_TOKEN".into(),
-                        networking: exoharness::CredentialNetworkPolicy::Limited {
-                            allowed_hosts: vec!["api.github.com".into()],
-                        },
-                        injection_location: exoharness::CredentialInjectionLocation {
-                            header: true,
-                        },
-                    });
+                policy.credentials.push(header_binding(
+                    &reference,
+                    "GH_TOKEN".into(),
+                    "api.github.com",
+                ));
             }
         }
-        policy
-            .credentials
-            .push(exoharness::EgressCredentialBinding {
-                name: reference.secret_id.to_string(),
-
-                environment_variable: resource.definition.git_credential_variable(),
-                networking: exoharness::CredentialNetworkPolicy::Limited {
-                    allowed_hosts: vec![host.to_owned()],
-                },
-                injection_location: exoharness::CredentialInjectionLocation { header: true },
-            });
+        policy.credentials.push(header_binding(
+            &reference,
+            resource.definition.git_credential_variable(),
+            host,
+        ));
     }
-    let module = agent_config
-        .typescript
-        .as_ref()
-        .and_then(|config| std::path::Path::new(&config.module_path).file_name())
-        .and_then(|name| name.to_str());
-    let variable = match module {
-        Some("codex-harness.ts") => Some("OPENAI_API_KEY"),
-        Some("claude-code-harness.ts") => Some("ANTHROPIC_API_KEY"),
-        Some("pi-harness.ts") => Some(
-            match agent_config
-                .model
-                .split_once('/')
-                .map(|(provider, _)| provider)
-                .unwrap_or("openai")
-            {
-                "openai" => "OPENAI_API_KEY",
-                "anthropic" => "ANTHROPIC_API_KEY",
-                "google" => "GEMINI_API_KEY",
-                provider => anyhow::bail!(
-                    "Pi API-key credentials are not configured for provider {provider}"
-                ),
-            },
-        ),
-        _ => None,
-    };
-    if let Some(variable) = variable {
-        let reference =
-            crate::harness_helpers::model_credential(conversation, agent_config).await?;
-        let endpoint =
-            exoharness::vault::model_endpoint(agent_config.base_url.as_deref(), variable)?;
-        let host = endpoint.host_str().expect("validated model endpoint");
-        let vault = exoharness::vault::require_vault(conversation, &reference.vault_id).await?;
-        let target =
-            exoharness::vault::SecretTarget::http(&endpoint.origin().ascii_serialization())?;
-        let metadata = vault
-            .list_secrets()
-            .await?
-            .into_iter()
-            .find(|secret| secret.id == reference.secret_id)
-            .ok_or_else(|| anyhow::anyhow!("model credential is unavailable"))?;
+    Ok(())
+}
+
+async fn add_model_binding(
+    conversation: &dyn ConversationHandle,
+    agent_config: &AgentConfig,
+    variable: &str,
+    configured: &mut Option<exoharness::EgressPolicy>,
+    default_policy: &exoharness::EgressPolicy,
+) -> Result<()> {
+    let reference = crate::harness_helpers::model_credential(conversation, agent_config).await?;
+    let endpoint = exoharness::vault::model_endpoint(agent_config.base_url.as_deref(), variable)?;
+    let host = endpoint.host_str().expect("validated model endpoint");
+    let vault = exoharness::vault::require_vault(conversation, &reference.vault_id).await?;
+    let target = exoharness::vault::SecretTarget::http(&endpoint.origin().ascii_serialization())?;
+    let metadata = vault
+        .list_secrets()
+        .await?
+        .into_iter()
+        .find(|secret| secret.id == reference.secret_id)
+        .ok_or_else(|| anyhow::anyhow!("model credential is unavailable"))?;
+    anyhow::ensure!(
+        metadata.r#type == exoharness::SecretType::Key,
+        "model credentials must be API keys"
+    );
+    anyhow::ensure!(
+        metadata.target.as_ref() == Some(&target),
+        "model credential {} is not authorized for {}; add its destination with `exo vault secret update <vault> {} --http-origin {}`",
+        metadata.name,
+        endpoint.origin().ascii_serialization(),
+        metadata.name,
+        endpoint.origin().ascii_serialization()
+    );
+    let policy = configured.get_or_insert_with(|| default_policy.clone());
+    anyhow::ensure!(
+        policy.networking_enabled(),
+        "sandbox models require networking"
+    );
+    ensure_host_allowed(policy, host, "model endpoint")?;
+    if let Some(existing) = policy
+        .credentials
+        .iter_mut()
+        .find(|binding| binding.environment_variable == variable)
+    {
+        let selected = exoharness::vault::find_secret(conversation, &existing.name).await?;
+        let exoharness::CredentialNetworkPolicy::Limited { allowed_hosts } = &existing.networking;
         anyhow::ensure!(
-            metadata.r#type == exoharness::SecretType::Key,
-            "model credentials must be API keys"
-        );
-        anyhow::ensure!(
-            metadata.target.as_ref() == Some(&target),
-            "model credential {} is not authorized for {}; add its destination with `exo vault secret update <vault> {} --http-origin {}`",
-            metadata.name,
-            endpoint.origin().ascii_serialization(),
-            metadata.name,
-            endpoint.origin().ascii_serialization()
-        );
-        let policy = configured.get_or_insert_with(|| {
-            if conversation_sandbox_spec(agent_config, config).enable_networking {
-                exoharness::SandboxNetworkPolicy::Unrestricted.into()
-            } else {
-                exoharness::SandboxNetworkPolicy::Disabled.into()
-            }
-        });
-        anyhow::ensure!(
-            policy.networking_enabled(),
-            "sandbox models require networking"
-        );
-        if let exoharness::SandboxNetworkPolicy::Limited { allowed_hosts } = &policy.networking {
-            anyhow::ensure!(
-                allowed_hosts
+            selected.as_ref() == Some(&reference)
+                && existing.injection_location.header
+                && allowed_hosts
                     .iter()
                     .any(|allowed| allowed.eq_ignore_ascii_case(host)),
-                "model endpoint {host} is not allowed by the environment network policy"
-            );
-        }
-        if let Some(existing) = policy
+            "environment credential {variable} conflicts with the model credential"
+        );
+        existing.name = reference.secret_id.to_string();
+    } else {
+        policy
             .credentials
-            .iter_mut()
-            .find(|binding| binding.environment_variable == variable)
-        {
-            let selected = exoharness::vault::find_secret(conversation, &existing.name).await?;
-            let exoharness::CredentialNetworkPolicy::Limited { allowed_hosts } =
-                &existing.networking;
-            anyhow::ensure!(
-                selected.as_ref() == Some(&reference)
-                    && existing.injection_location.header
-                    && allowed_hosts
-                        .iter()
-                        .any(|allowed| allowed.eq_ignore_ascii_case(host)),
-                "environment credential {variable} conflicts with the model credential"
-            );
-            existing.name = reference.secret_id.to_string();
-        } else {
-            policy
-                .credentials
-                .push(exoharness::EgressCredentialBinding {
-                    name: reference.secret_id.to_string(),
-                    environment_variable: variable.into(),
-                    networking: exoharness::CredentialNetworkPolicy::Limited {
-                        allowed_hosts: vec![host.to_owned()],
-                    },
-                    injection_location: exoharness::CredentialInjectionLocation { header: true },
-                });
-        }
+            .push(header_binding(&reference, variable.into(), host));
     }
-    if !matches!(module, Some("codex-harness.ts" | "claude-code-harness.ts")) {
-        return Ok(configured);
-    }
+    Ok(())
+}
+
+async fn add_native_mcp_bindings(
+    conversation: &dyn ConversationHandle,
+    configured: &mut Option<exoharness::EgressPolicy>,
+    default_policy: &exoharness::EgressPolicy,
+) -> Result<()> {
     let Some(selection) = exo_managed_agents::vaults::load_selection(conversation).await? else {
-        return Ok(configured);
+        return Ok(());
     };
     if selection.bindings.is_empty() {
-        return Ok(configured);
+        return Ok(());
     }
-    let mut policy = configured.unwrap_or_else(|| {
-        if conversation_sandbox_spec(agent_config, config).enable_networking {
-            exoharness::SandboxNetworkPolicy::Unrestricted.into()
-        } else {
-            exoharness::SandboxNetworkPolicy::Disabled.into()
-        }
-    });
+    let policy = configured.get_or_insert_with(|| default_policy.clone());
     anyhow::ensure!(
         policy.networking_enabled(),
         "native MCP requires sandbox networking"
@@ -576,14 +552,7 @@ async fn sandbox_policy(
         let host = endpoint
             .host_str()
             .ok_or_else(|| anyhow::anyhow!("MCP endpoint has no host"))?;
-        if let exoharness::SandboxNetworkPolicy::Limited { allowed_hosts } = &policy.networking {
-            anyhow::ensure!(
-                allowed_hosts
-                    .iter()
-                    .any(|allowed| allowed.eq_ignore_ascii_case(host)),
-                "MCP endpoint {host} is not allowed by the environment network policy"
-            );
-        }
+        ensure_host_allowed(policy, host, "MCP endpoint")?;
         let Some(secret) = selected.secret else {
             continue;
         };
@@ -606,17 +575,37 @@ async fn sandbox_policy(
         }
         policy
             .credentials
-            .push(exoharness::EgressCredentialBinding {
-                name: secret.secret_id.to_string(),
-
-                environment_variable: variable,
-                networking: exoharness::CredentialNetworkPolicy::Limited {
-                    allowed_hosts: vec![host.to_owned()],
-                },
-                injection_location: exoharness::CredentialInjectionLocation { header: true },
-            });
+            .push(header_binding(&secret, variable, host));
     }
-    Ok(Some(policy))
+    Ok(())
+}
+
+fn ensure_host_allowed(policy: &exoharness::EgressPolicy, host: &str, what: &str) -> Result<()> {
+    if let exoharness::SandboxNetworkPolicy::Limited { allowed_hosts } = &policy.networking {
+        anyhow::ensure!(
+            allowed_hosts
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(host)),
+            "{what} {host} is not allowed by the environment network policy"
+        );
+    }
+    Ok(())
+}
+
+fn header_binding(
+    reference: &exoharness::vault::SecretReference,
+    variable: String,
+    host: &str,
+) -> exoharness::EgressCredentialBinding {
+    exoharness::EgressCredentialBinding {
+        model: None,
+        name: reference.secret_id.to_string(),
+        environment_variable: variable,
+        networking: exoharness::CredentialNetworkPolicy::Limited {
+            allowed_hosts: vec![host.to_owned()],
+        },
+        injection_location: exoharness::CredentialInjectionLocation { header: true },
+    }
 }
 
 fn normalize_mounts(mounts: &[FileSystemMount]) -> Vec<FileSystemMount> {
@@ -843,7 +832,6 @@ mod tests {
             config: exoharness::CreateSandboxRequest {
                 provider: SandboxProvider::Docker,
                 image: "test".into(),
-
                 name: None,
                 resources: None,
                 default_workdir: None,

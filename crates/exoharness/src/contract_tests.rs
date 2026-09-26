@@ -9,11 +9,10 @@ use tokio::time::timeout;
 use tracing::info;
 
 use crate::{
-    AddEventsRequest, BeginTurnRequest, Binding, EventData, EventKind, EventQuery,
-    EventQueryDirection, ExoHarness, ForkConversationRequest, ListConversationsRequest,
-    ListThreadsRequest, ManagedSandboxBackend, ManagedSandboxHandle, NewAgentRequest,
-    NewConversationRequest, NewThreadRequest, SandboxCommand, SandboxRequest, ThreadHandle, Uuid7,
-    WriteArtifactRequest,
+    AddEventsRequest, BeginTurnRequest, EventData, EventKind, EventQuery, EventQueryDirection,
+    ExoHarness, ListConversationsRequest, ListThreadsRequest, ManagedSandboxBackend,
+    ManagedSandboxHandle, NewAgentRequest, NewConversationRequest, NewThreadRequest,
+    SandboxCommand, SandboxRequest, ThreadHandle, Uuid7, WriteArtifactRequest,
 };
 
 pub async fn supports_thread_api_and_conversation_compatibility(harness: Arc<dyn ExoHarness>) {
@@ -401,95 +400,6 @@ pub async fn turn_events_continue_after_artifact_writes(harness: Arc<dyn ExoHarn
     let artifact_event = events.first().expect("artifact_written event");
     assert_eq!(artifact_event.session_id, Some(turn.record().session_id));
     assert_eq!(artifact_event.turn_id, Some(turn.record().id));
-}
-
-pub async fn conversation_scope_overrides_agent_scope_and_fork_copies_bindings(
-    harness: Arc<dyn ExoHarness>,
-) {
-    let agent = harness
-        .new_agent(NewAgentRequest {
-            vaults: vec![],
-            slug: unique_slug("agent"),
-            name: "Agent".to_string(),
-        })
-        .await
-        .expect("agent");
-    let conversation = agent
-        .new_conversation(NewConversationRequest {
-            environment: None,
-            vaults: vec![],
-            slug: Some(unique_slug("base")),
-            name: Some("Base".to_string()),
-        })
-        .await
-        .expect("conversation");
-
-    agent
-        .put_binding(Binding::Env {
-            name: "OPENAI_API_KEY".to_string(),
-            env_var: "OPENAI_API_KEY".to_string(),
-            secret: crate::vault::SecretReference {
-                vault_id: Uuid7::now(),
-                secret_id: Uuid7::now(),
-            },
-        })
-        .await
-        .expect("agent binding");
-
-    let conversation_binding_id = conversation
-        .put_binding(Binding::Env {
-            name: "OPENAI_API_KEY".to_string(),
-            env_var: "OPENAI_API_KEY".to_string(),
-            secret: crate::vault::SecretReference {
-                vault_id: Uuid7::now(),
-                secret_id: Uuid7::now(),
-            },
-        })
-        .await
-        .expect("conversation binding");
-
-    let effective_binding = conversation
-        .list_bindings()
-        .await
-        .expect("list bindings")
-        .into_iter()
-        .find(|binding| binding.name == "OPENAI_API_KEY")
-        .expect("effective binding");
-    assert_eq!(effective_binding.id, conversation_binding_id);
-
-    let forked = conversation
-        .fork(ForkConversationRequest {
-            up_to_inclusive: None,
-            slug: Some(unique_slug("fork")),
-            name: Some("Fork".to_string()),
-        })
-        .await
-        .expect("fork");
-    let forked_binding = forked
-        .list_bindings()
-        .await
-        .expect("list forked bindings")
-        .into_iter()
-        .find(|binding| binding.name == "OPENAI_API_KEY")
-        .expect("forked effective binding");
-    assert_eq!(forked_binding.name, "OPENAI_API_KEY");
-    let events = forked
-        .get_events(Some(EventQuery {
-            cursor: None,
-            direction: Some(EventQueryDirection::Asc),
-            limit: None,
-            session_id: None,
-            turn_id: None,
-            types: None,
-        }))
-        .await
-        .expect("get forked events")
-        .events;
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event.data, EventData::ThreadForked { .. }))
-    );
 }
 
 pub async fn sandbox_handle_start_process_supports_interactive_stdio_and_env(

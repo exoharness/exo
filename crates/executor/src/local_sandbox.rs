@@ -346,18 +346,6 @@ impl AgentHandle for LocalSandboxAgent {
         self.remote.delete_conversation(id).await
     }
 
-    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
-        self.remote.list_bindings().await
-    }
-
-    async fn put_binding(&self, binding: Binding) -> Result<BindingId> {
-        self.remote.put_binding(binding).await
-    }
-
-    async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>> {
-        self.remote.get_binding(id).await
-    }
-
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion> {
         self.remote.write_artifact(request).await
     }
@@ -944,18 +932,6 @@ impl ConversationHandle for LocalSandboxConversation {
 
     async fn list_artifacts(&self) -> Result<Vec<ArtifactVersion>> {
         self.remote.list_artifacts().await
-    }
-
-    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
-        self.remote.list_bindings().await
-    }
-
-    async fn put_binding(&self, binding: Binding) -> Result<BindingId> {
-        self.remote.put_binding(binding).await
-    }
-
-    async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>> {
-        self.remote.get_binding(id).await
     }
 }
 

@@ -414,7 +414,8 @@ sandbox. Changing MCP destinations requires a new thread.
 Revoked secrets fail instead of switching to another account. Agent and thread
 records retain vault references, not copies of secret values.
 
-Model bindings use the global vault unless `--vault` selects a different one:
+Store a model credential in the global vault, then name it in the agent's
+`config.credential`:
 
 ```bash
 exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com

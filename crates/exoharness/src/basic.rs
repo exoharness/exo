@@ -1770,54 +1770,6 @@ impl AgentHandle for BasicAgentHandle {
         bail!("conversation {id} kept acquiring sandboxes while it was being deleted")
     }
 
-    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
-        self.harness
-            .check(ResourceScope::Agent {
-                agent_id: self.record.id,
-            })
-            .await?;
-        Ok(merge_binding_records(vec![
-            self.harness
-                .binding_records(&self.harness.bindings_dir())
-                .await?,
-            self.harness.binding_records(&self.bindings_dir()).await?,
-        ]))
-    }
-
-    async fn put_binding(&self, binding: Binding) -> Result<BindingId> {
-        self.harness.check_binding(&binding).await?;
-        self.harness
-            .check(ResourceScope::Agent {
-                agent_id: self.record.id,
-            })
-            .await?;
-        let _guard = self.harness.inner.write_lock.lock().await;
-        let id = Uuid7::now();
-        let record = stored_binding(id, binding);
-        self.harness
-            .inner
-            .storage
-            .put_json(
-                self.harness
-                    .caller_bindings_dir(&self.bindings_dir())
-                    .join(format!("{id}.json")),
-                &record,
-            )
-            .await?;
-        Ok(id)
-    }
-
-    async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>> {
-        self.harness
-            .check(ResourceScope::Agent {
-                agent_id: self.record.id,
-            })
-            .await?;
-        self.harness
-            .find_binding(&[self.bindings_dir(), self.harness.bindings_dir()], id)
-            .await
-    }
-
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion> {
         self.harness
             .check(ResourceScope::Agent {
@@ -1883,10 +1835,6 @@ impl BasicAgentHandle {
 
     fn conversations_dir(&self) -> PathBuf {
         self.agent_dir().join("conversations")
-    }
-
-    fn bindings_dir(&self) -> PathBuf {
-        self.agent_dir().join("bindings")
     }
 
     fn artifacts_dir(&self) -> PathBuf {
@@ -3665,67 +3613,6 @@ impl ConversationHandle for BasicConversationHandle {
             .await?;
         load_artifact_versions(&self.harness.inner.storage, &self.artifacts_dir()).await
     }
-
-    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
-        self.harness
-            .check(ResourceScope::Thread {
-                agent_id: self.agent_id,
-                thread_id: self.record.id,
-            })
-            .await?;
-        Ok(merge_binding_records(vec![
-            self.harness
-                .binding_records(&self.harness.bindings_dir())
-                .await?,
-            self.harness
-                .binding_records(&agent_bindings_dir(&self.harness, self.agent_id))
-                .await?,
-            self.harness.binding_records(&self.bindings_dir()).await?,
-        ]))
-    }
-
-    async fn put_binding(&self, binding: Binding) -> Result<BindingId> {
-        self.harness.check_binding(&binding).await?;
-        self.harness
-            .check(ResourceScope::Thread {
-                agent_id: self.agent_id,
-                thread_id: self.record.id,
-            })
-            .await?;
-        let _guard = self.harness.inner.write_lock.lock().await;
-        let id = Uuid7::now();
-        let record = stored_binding(id, binding);
-        self.harness
-            .inner
-            .storage
-            .put_json(
-                self.harness
-                    .caller_bindings_dir(&self.bindings_dir())
-                    .join(format!("{id}.json")),
-                &record,
-            )
-            .await?;
-        Ok(id)
-    }
-
-    async fn get_binding(&self, id: &BindingId) -> Result<Option<Binding>> {
-        self.harness
-            .check(ResourceScope::Thread {
-                agent_id: self.agent_id,
-                thread_id: self.record.id,
-            })
-            .await?;
-        self.harness
-            .find_binding(
-                &[
-                    self.bindings_dir(),
-                    agent_bindings_dir(&self.harness, self.agent_id),
-                    self.harness.bindings_dir(),
-                ],
-                id,
-            )
-            .await
-    }
 }
 
 impl BasicSandboxScope for BasicConversationHandle {
@@ -4506,6 +4393,12 @@ impl TurnHandle for BasicTurnHandle {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredBinding {
     record: BindingRecord,
+}
+
+impl StoredBinding {
+    fn into_active_record(self) -> Option<BindingRecord> {
+        (!matches!(self.record.binding, Binding::Llm { .. })).then_some(self.record)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5328,8 +5221,7 @@ async fn list_binding_records(
         .list_json_matching_suffix::<StoredBinding>(bindings_dir, ".json")
         .await?
         .into_iter()
-        .map(|stored| stored.record)
-        .filter(|record| !matches!(record.binding, Binding::Llm { .. }))
+        .filter_map(StoredBinding::into_active_record)
         .collect::<Vec<_>>();
     bindings.sort_by_key(|metadata| metadata.id);
     Ok(bindings)
@@ -5345,18 +5237,6 @@ fn stored_binding(id: BindingId, binding: Binding) -> StoredBinding {
             binding,
         },
     }
-}
-
-fn merge_binding_records(scopes: Vec<Vec<BindingRecord>>) -> Vec<BindingRecord> {
-    let mut effective = HashMap::<String, BindingRecord>::new();
-    for bindings in scopes {
-        for binding in bindings {
-            effective.insert(binding.name.clone(), binding);
-        }
-    }
-    let mut bindings = effective.into_values().collect::<Vec<_>>();
-    bindings.sort_by_key(|metadata| metadata.id);
-    bindings
 }
 
 fn binding_type(binding: &Binding) -> BindingType {
@@ -5393,13 +5273,6 @@ fn derive_unique_slug(prefix: &str, existing: &[ConversationRecord]) -> String {
 
 fn slug_to_name(slug: &str) -> String {
     slug.replace('-', " ")
-}
-
-fn agent_bindings_dir(harness: &BasicExoHarness, agent_id: AgentId) -> PathBuf {
-    harness
-        .agents_dir()
-        .join(agent_id.to_string())
-        .join("bindings")
 }
 
 pub(crate) fn build_secret_cipher(
@@ -5515,6 +5388,40 @@ impl BasicExoHarnessConfig {
 #[cfg(test)]
 mod stored_policy_tests {
     use super::*;
+
+    #[test]
+    fn reads_retired_model_bindings_in_stored_sandbox_policies() {
+        let stored: StoredSandbox = serde_json::from_str(
+            r#"{
+                "id": "existing-native-sandbox", "provider": "docker", "image": "test",
+                "file_system_mounts": [], "idle_seconds": 300, "running": true,
+                "policy": {
+                    "networking": {"type": "unrestricted"},
+                    "credentials": [{
+                        "name": "model:01900000-0000-7000-8000-000000000001",
+                        "model": "01900000-0000-7000-8000-000000000001",
+                        "environment_variable": "OPENAI_API_KEY",
+                        "networking": {"type": "limited", "allowed_hosts": ["api.openai.com"]},
+                        "injection_location": {"header": true}
+                    }]
+                }
+            }"#,
+        )
+        .unwrap();
+        let policy = stored.policy();
+        assert_eq!(policy.credentials.len(), 1);
+        assert!(policy.credentials[0].model.is_some());
+        let serialized = serde_json::to_string(&stored).unwrap();
+        assert!(!serialized.contains("\"model\":"));
+        let current: StoredSandbox = serde_json::from_str(&serialized).unwrap();
+        assert!(current.policy().credentials[0].model.is_none());
+        assert!(
+            serde_json::from_str::<StoredSandbox>(
+                &serialized.replace("\"environment_variable\":", "\"misspelled_variable\":")
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn reads_legacy_networking_and_writes_only_the_policy() {

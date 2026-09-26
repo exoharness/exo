@@ -780,18 +780,6 @@ impl AgentHandle for FakeAgentHandle {
         Err(anyhow!("not implemented"))
     }
 
-    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
-        Ok(vec![])
-    }
-
-    async fn put_binding(&self, _binding: Binding) -> Result<exoharness::BindingId> {
-        Err(anyhow!("not implemented"))
-    }
-
-    async fn get_binding(&self, _id: &exoharness::BindingId) -> Result<Option<Binding>> {
-        Ok(None)
-    }
-
     async fn write_artifact(&self, _request: WriteArtifactRequest) -> Result<ArtifactVersion> {
         Err(anyhow!("not implemented"))
     }
@@ -1072,18 +1060,6 @@ impl ConversationHandle for FakeConversationHandle {
 
     async fn list_artifacts(&self) -> Result<Vec<ArtifactVersion>> {
         Ok(Vec::new())
-    }
-
-    async fn list_bindings(&self) -> Result<Vec<BindingRecord>> {
-        Ok(vec![])
-    }
-
-    async fn put_binding(&self, _binding: Binding) -> Result<exoharness::BindingId> {
-        Err(anyhow!("not implemented"))
-    }
-
-    async fn get_binding(&self, _id: &exoharness::BindingId) -> Result<Option<Binding>> {
-        Ok(None)
     }
 }
 

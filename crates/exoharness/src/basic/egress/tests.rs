@@ -32,6 +32,7 @@ fn policy(name: &str) -> EgressPolicy {
             allowed_hosts: vec!["api.test".into()],
         },
         credentials: vec![EgressCredentialBinding {
+            model: None,
             name: name.into(),
             environment_variable: "API_KEY".into(),
             networking: CredentialNetworkPolicy::Limited {

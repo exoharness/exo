@@ -236,6 +236,8 @@ fn resolve_openai_config(
         .clone()
         .map(|raw| Url::parse(&raw))
         .transpose()?;
+    // Org/project select billing context, not credentials. API keys still come
+    // exclusively from the selected vault; these optional env-file hints remain.
     let mut metadata = HashMap::new();
     if let Some(organization_id) = optional_env(env, "OPENAI_ORG_ID") {
         metadata.insert(

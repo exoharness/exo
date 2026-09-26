@@ -49,7 +49,7 @@ Usage counts upstream `rawResponse/completed` records, including local replay
 compaction. Codex's remote compaction endpoint does not expose billable usage;
 its context-size estimates are excluded from token and cost totals.
 
-Register an OpenAI model:
+Store an OpenAI credential:
 
 ```bash
 ./target/debug/exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com
@@ -86,7 +86,7 @@ EOF
 
 ## Claude Code
 
-Register an Anthropic model:
+Store an Anthropic credential:
 
 ```bash
 ./target/debug/exo vault secret create global anthropic --token-env ANTHROPIC_API_KEY --http-origin https://api.anthropic.com
@@ -123,10 +123,10 @@ EOF
 
 ## Cursor
 
-Register a Cursor model:
+Store a Cursor credential:
 
 ```bash
-./target/debug/exo vault secret create global cursor --token-env CURSOR_API_KEY
+./target/debug/exo vault secret create global cursor --token-env CURSOR_API_KEY --http-origin https://api.cursor.com
 ```
 
 Build the sandbox image:
@@ -163,7 +163,7 @@ EOF
 
 Pi sandbox images must define `HOME` as a writable directory for session and tool files.
 
-Register a model Pi supports. Pi reads the provider key from the sandbox
+Store a credential for a provider Pi supports. Pi reads the provider key from the sandbox
 environment, so the same variable has to be set where exo runs:
 
 ```bash

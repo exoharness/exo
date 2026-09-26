@@ -109,21 +109,9 @@ impl Fixture {
         let runtime = Arc::new(Runtime::new(provider, None));
         let agent = runtime
             .create_agent(CreateAgentRequest {
-                credential: Some("test-openai".into()),
-                base_url: None,
-                slug: "http-test".into(),
-                name: None,
-                harness: AgentHarnessKind::Basic,
-                typescript: None,
                 enable_agent_tool_creation: false,
-                sandbox_image: None,
-                sandbox_provider: SandboxProvider::LocalProcess,
-                sandbox_scope: None,
-                enable_networking: false,
                 model: "test-model".into(),
-                max_output_tokens: None,
-                max_tool_round_trips: None,
-                braintrust: None,
+                ..crate::test_support::agent_request("http-test", AgentHarnessKind::Basic)
             })
             .await?;
         let listener = TcpListener::bind("127.0.0.1:0")?;

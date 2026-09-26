@@ -50,28 +50,6 @@ export interface AgentSandboxConfig {
   scope: "agent" | "conversation";
 }
 
-export type Binding =
-  | {
-      type: "env";
-      name: string;
-      envVar: string;
-      secret: SecretReference;
-    }
-  | {
-      type: "mcp";
-      name: string;
-      serverUrl: string;
-      secret?: SecretReference | null;
-    };
-
-export interface BindingRecord {
-  id: string;
-  type: "env" | "mcp";
-  name: string;
-  createdAt: string;
-  binding: Binding;
-}
-
 export type Secret =
   | {
       type: "key";
@@ -324,8 +302,6 @@ export interface Agent extends VaultContext {
     path: string;
     value: JsonValue;
   }): Promise<ArtifactVersion>;
-  listBindings(): Promise<BindingRecord[]>;
-  getBinding(id: string): Promise<Binding | null>;
 }
 
 export interface ExoHarness extends VaultContext {
@@ -338,8 +314,6 @@ export interface ExoHarness extends VaultContext {
     vaults?: string[];
   }): Promise<Agent>;
   deleteAgent(id: string): Promise<boolean>;
-  listBindings(): Promise<BindingRecord[]>;
-  getBinding(id: string): Promise<Binding | null>;
   createVault(name: string): Promise<Vault>;
   deleteVault(id: string): Promise<void>;
 }
@@ -384,8 +358,6 @@ export interface Conversation extends VaultContext {
     path: string;
     value: JsonValue;
   }): Promise<ArtifactVersion>;
-  listBindings(): Promise<BindingRecord[]>;
-  getBinding(id: string): Promise<Binding | null>;
 }
 
 export interface Turn {

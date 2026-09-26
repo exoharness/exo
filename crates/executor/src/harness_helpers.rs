@@ -191,7 +191,7 @@ pub async fn put_conversation_model_override(
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedModel {
     pub(crate) model: String,
-    pub(crate) api_key: Option<String>,
+    pub(crate) api_key: String,
     pub(crate) base_url: Option<String>,
 }
 
@@ -227,7 +227,7 @@ pub(crate) async fn resolve_model(
     let api_key = exoharness::vault::resolve_model_key(conversation, &reference, &endpoint).await?;
     Ok(ResolvedModel {
         model: config.model.clone(),
-        api_key: Some(api_key),
+        api_key,
         base_url: config.base_url.clone(),
     })
 }
@@ -529,7 +529,7 @@ mod vault_tests {
             None,
         )?;
         let model = resolve_model(thread.as_ref(), &config).await?;
-        assert_eq!(model.api_key.as_deref(), Some("user-key"));
+        assert_eq!(model.api_key, "user-key");
         user.update_secret(
             &user_secret,
             Secret::Key {
@@ -539,19 +539,15 @@ mod vault_tests {
         )
         .await?;
         assert_eq!(
-            resolve_model(thread.as_ref(), &config)
-                .await?
-                .api_key
-                .as_deref(),
-            Some("rotated-user-key")
+            resolve_model(thread.as_ref(), &config).await?.api_key,
+            "rotated-user-key"
         );
         let global_thread = agent.new_thread(Default::default()).await?;
         assert_eq!(
             resolve_model(global_thread.as_ref(), &config)
                 .await?
-                .api_key
-                .as_deref(),
-            Some("runtime-key")
+                .api_key,
+            "runtime-key"
         );
         config.credential = Some(user_secret.to_string());
         assert!(

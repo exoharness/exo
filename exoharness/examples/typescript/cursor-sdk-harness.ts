@@ -587,9 +587,7 @@ function cursorSandboxEnv(modelBinding: ResolvedModel): Record<string, string> {
       env[key] = value;
     }
   }
-  if (modelBinding.apiKey) {
-    env.CURSOR_API_KEY = modelBinding.apiKey;
-  }
+  env.CURSOR_API_KEY = modelBinding.apiKey;
   return env;
 }
 

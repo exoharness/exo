@@ -333,6 +333,7 @@ impl EgressCredentialResolver for ThreadResolver {
 async fn threads_select_different_bindings_and_resolve_the_same_name_independently() -> Result<()> {
     let binding = policy().credentials.remove(0);
     let extra = EgressCredentialBinding {
+        model: None,
         name: "extra".into(),
         environment_variable: "EXTRA_API_KEY".into(),
         ..binding.clone()
@@ -442,6 +443,7 @@ fn policy() -> EgressPolicy {
             allowed_hosts: vec!["api.test".into(), "public.test".into()],
         },
         credentials: vec![EgressCredentialBinding {
+            model: None,
             name: "test-credential".into(),
             environment_variable: "TEST_API_KEY".into(),
             networking: CredentialNetworkPolicy::Limited {

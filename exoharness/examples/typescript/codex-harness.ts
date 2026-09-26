@@ -49,7 +49,7 @@ import {
   traceExoharnessToolCall,
   traceObservedToolCall,
   WarmResourceCache,
-  type ResolvedModel,
+  type SandboxModel,
 } from "@exo/model-runtime/shared";
 
 import {
@@ -229,7 +229,7 @@ export default defineHarness({
 async function runCodexTurn(
   context: TurnContext,
   turnParent: TraceParent,
-  modelBinding: ResolvedModel,
+  modelBinding: SandboxModel,
 ): Promise<string | null> {
   await requireCodexSandboxNetworking(context);
 
@@ -436,7 +436,7 @@ async function traceCodexLlmTurn(
   threadId: string,
   injectedResponseItems: number,
   traceState: CodexTurnTraceState,
-  modelBinding: ResolvedModel,
+  modelBinding: SandboxModel,
   run: () => Promise<void>,
 ): Promise<void> {
   await tracedUnderParent(
@@ -539,7 +539,7 @@ function codexLlmTraceOutput(
 async function startCodexThread(
   codex: CodexAppServer,
   context: TurnContext,
-  modelBinding: ResolvedModel,
+  modelBinding: SandboxModel,
   resumeThreadId?: string,
 ): Promise<string> {
   const developerInstructions = instructionsText(
@@ -1103,7 +1103,7 @@ function codexSandboxRuntimeKey(context: TurnContext): JsonValue {
 
 function codexWarmSessionKey(
   context: TurnContext,
-  modelBinding: ResolvedModel,
+  modelBinding: SandboxModel,
 ): string {
   return JSON.stringify({
     agent_id: context.exoharness.current.agent.record.id,
