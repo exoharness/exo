@@ -1058,6 +1058,7 @@ async fn run_selected(
     let env = CliEnvironment::load(cli.runtime().env_file.as_deref())?;
     let definition = managed_agents::load_definition(&cli.command)?;
 
+    let local = http_client.is_none();
     let harness = providers::runtime(&cli, http_client, definition.as_ref(), &env).await?;
     let env_vars = env.into_vars();
     let root = cli.runtime().root.clone();
@@ -1070,7 +1071,7 @@ async fn run_selected(
         Commands::Provider { .. } => {
             unreachable!("management commands return before harness startup")
         }
-        Commands::Vault { command, .. } => vaults::run(harness.exoharness_handle().as_ref(), &command, &env_vars).await?,
+        Commands::Vault { command, .. } => vaults::run(harness.exoharness_handle().as_ref(), &command, &env_vars, local).await?,
         Commands::Agent { command: AgentCommands::Run { thread, tui, prompt, .. }, .. } => {
             let (agent, conversation) = managed_agents::open_thread(
                 harness.as_ref(),

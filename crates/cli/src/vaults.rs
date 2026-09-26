@@ -94,6 +94,7 @@ pub async fn run(
     store: &dyn ExoHarness,
     command: &VaultCommands,
     env: &HashMap<String, String>,
+    local: bool,
 ) -> Result<()> {
     match command {
         VaultCommands::Create { name } => {
@@ -151,6 +152,7 @@ pub async fn run(
                                 match secret.r#type {
                                     exoharness::SecretType::Key => "token",
                                     exoharness::SecretType::Oauth => "oauth",
+                                    exoharness::SecretType::GithubCli => "github_cli",
                                 }
                                 .into(),
                                 destinations,
@@ -208,9 +210,12 @@ pub async fn run(
                         "secret {name:?} already exists; use `exo vault secret update`"
                     );
                     let policy = policy.resolve()?.or(credential.default_policy()?);
-                    let secret = credential.read(env, policy.as_ref()).await?.context(
-                        "provide --token-env, --preset, --url, or OAuth device endpoints",
-                    )?;
+                    let secret = credential
+                        .read(env, policy.as_ref(), local)
+                        .await?
+                        .context(
+                            "provide --token-env, --preset, --url, or OAuth device endpoints",
+                        )?;
                     let id = vault
                         .put_secret(PutSecretRequest {
                             name: name.into(),
@@ -233,7 +238,7 @@ pub async fn run(
                         None
                     });
                     let secret = credential
-                        .read(env, policy.as_ref().or(record.policy.as_ref()))
+                        .read(env, policy.as_ref().or(record.policy.as_ref()), local)
                         .await?;
                     ensure!(
                         secret.is_some() || policy.is_some(),

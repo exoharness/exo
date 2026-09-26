@@ -491,6 +491,7 @@ async fn put_secret(
     path: web::Path<VaultPath>,
     body: web::Json<exoharness::PutSecretRequest>,
 ) -> Result<web::Json<exoharness::SecretId>, Error> {
+    exoharness::vault::require_portable_secret(&body.secret).map_err(ErrorBadRequest)?;
     let vault = writable_vault(&service, &path).await?;
     Ok(web::Json(
         vault
@@ -504,6 +505,9 @@ async fn update_secret(
     path: web::Path<VaultPath>,
     body: web::Json<exoharness::UpdateSecretRequest>,
 ) -> Result<web::Json<exoharness::SecretMetadata>, Error> {
+    if let Some(secret) = &body.secret {
+        exoharness::vault::require_portable_secret(secret).map_err(ErrorBadRequest)?;
+    }
     let vault = writable_vault(&service, &path).await?;
     Ok(web::Json(
         vault

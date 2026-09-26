@@ -78,6 +78,11 @@ export type Secret =
       value: string;
     }
   | {
+      type: "github_cli";
+      value: string;
+      account: string;
+    }
+  | {
       type: "oauth";
       accessToken: string;
       refreshToken?: string | null;
@@ -148,7 +153,7 @@ export interface SecretMetadata {
   policy?: CredentialPolicy | null;
   revision: number;
   id: string;
-  type: "key" | "oauth";
+  type: "key" | "oauth" | "github_cli";
   name: string;
   createdAt: string;
 }

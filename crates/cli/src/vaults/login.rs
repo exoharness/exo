@@ -35,7 +35,7 @@ pub struct CredentialArgs {
     /// Read an OAuth client secret from this environment variable.
     #[arg(long, requires = "client_id", value_parser = crate::parse_env_var_name)]
     client_secret_env: Option<String>,
-    /// OAuth scopes to request. Repeat for multiple scopes.
+    /// OAuth scopes to request; with GitHub CLI, adds to its existing permissions. Repeat as needed.
     #[arg(long, requires = "login_source")]
     scope: Vec<String>,
     /// OAuth device authorization endpoint; requires --token-url and --client-id.
@@ -73,6 +73,7 @@ impl CredentialArgs {
         &self,
         env: &HashMap<String, String>,
         policy: Option<&CredentialPolicy>,
+        local: bool,
     ) -> Result<Option<Secret>> {
         if let Some(variable) = &self.token_env {
             return token(variable, env).map(Some);
@@ -94,7 +95,7 @@ impl CredentialArgs {
         } else if self.client_id.is_some() {
             device(self, client_secret).await?
         } else {
-            github_cli(self, env).await?
+            github_cli(self, local).await?
         };
         exoharness::vault::validate_secret(&secret, policy)?;
         Ok(Some(secret))
@@ -235,22 +236,46 @@ fn oauth_secret(
     }
 }
 
-async fn github_cli(args: &CredentialArgs, env: &HashMap<String, String>) -> Result<Secret> {
+async fn github_cli(args: &CredentialArgs, local: bool) -> Result<Secret> {
     let command = || {
         let mut command = Command::new("gh");
-        command.envs(env).kill_on_drop(true);
+        command
+            .env_remove("GH_TOKEN")
+            .env_remove("GITHUB_TOKEN")
+            .kill_on_drop(true);
         command
     };
-    let status = command()
-        .args(["auth", "status", "--active", "--hostname", "github.com"])
-        .output()
-        .await
-        .context(
-            "GitHub login needs GitHub CLI (`gh`), or provide --client-id for OAuth device login",
-        )?;
-    if !status.status.success() || !args.scope.is_empty() {
-        let mut login = command();
-        login.args([
+    #[derive(serde::Deserialize)]
+    struct Account {
+        login: String,
+        state: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct Status {
+        hosts: HashMap<String, Vec<Account>>,
+    }
+    let account = || async {
+        let output = command()
+            .args(["auth", "status", "--active", "--hostname", "github.com", "--json", "hosts"])
+            .output().await.context(
+                "GitHub login needs GitHub CLI (`gh`), or provide --client-id for OAuth device login",
+            )?;
+        ensure!(output.status.success(), "could not check GitHub CLI login");
+        let mut status: Status = serde_json::from_slice(&output.stdout)?;
+        Ok::<_, anyhow::Error>(
+            status
+                .hosts
+                .remove("github.com")
+                .unwrap_or_default()
+                .into_iter()
+                .find(|account| account.state == "success")
+                .map(|account| account.login),
+        )
+    };
+    let mut login = account().await?;
+    if login.is_none() || !args.scope.is_empty() {
+        let mut auth = command();
+        auth.args([
             "auth",
             "login",
             "--web",
@@ -260,28 +285,25 @@ async fn github_cli(args: &CredentialArgs, env: &HashMap<String, String>) -> Res
             "https",
         ]);
         for scope in &args.scope {
-            login.args(["--scopes", scope]);
+            auth.args(["--scopes", scope]);
         }
         if args.no_browser {
-            login.env("GH_BROWSER", "true");
+            auth.env("GH_BROWSER", "true");
         }
-        ensure!(login.status().await?.success(), "GitHub login failed");
+        ensure!(auth.status().await?.success(), "GitHub login failed");
+        login = account().await?;
     }
-    let token = command()
-        .args(["auth", "token", "--hostname", "github.com"])
-        .output()
-        .await?;
-    ensure!(
-        token.status.success(),
-        "could not read the GitHub CLI credential; run `gh auth login`"
-    );
-    eprintln!(
-        "Importing the GitHub CLI token. Use `exo vault secret update <vault> <secret> --preset github` if it expires or is revoked."
-    );
-    Ok(Secret::Key {
-        value: String::from_utf8(token.stdout)
-            .context("invalid GitHub token encoding")?
-            .trim()
-            .to_owned(),
-    })
+    let account = login.context("GitHub CLI login did not produce an authenticated account")?;
+    let value = exoharness::vault::github_cli_token(&account).await?;
+    if local {
+        eprintln!(
+            "Linked GitHub CLI account {account}; token changes in `gh` are picked up automatically."
+        );
+        Ok(Secret::GithubCli { value, account })
+    } else {
+        eprintln!(
+            "Copied the GitHub CLI token to the remote vault. Use `exo vault secret update <vault> <secret> --preset github` after changing it in `gh`."
+        );
+        Ok(Secret::Key { value })
+    }
 }

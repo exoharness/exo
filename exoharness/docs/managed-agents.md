@@ -364,11 +364,19 @@ name is required. Import an existing token with `--token-env`, or omit it to log
 in. To rotate or reauthorize an existing credential, use `secret update` with the
 same options; its identity and policy are preserved unless explicitly changed.
 
-The GitHub preset imports the token from GitHub CLI (`gh`), prompting for login
-if needed. Imported tokens do not include refresh credentials; reconnect with
-`exo vault secret update personal github --preset github` if one expires or is
-revoked. Supply `--client-id` to use your own GitHub application's device flow instead. The application must enable device
-flow and have the permissions and repository access you need.
+The GitHub preset links a local vault secret to the current GitHub CLI (`gh`)
+account, prompting for login if needed. Exo reads that account's current token
+when resolving the credential, including after a CLI restart; switching the
+active account in `gh` does not change the linked account. If GitHub requires a
+new login, authenticate the same account with `gh auth login`.
+
+Remote vaults receive a token copy because they cannot access your local `gh`;
+use `exo vault secret update personal github --preset github` to copy a replacement.
+`--token-env` also stores a token copy. Supply `--client-id` to use your own
+GitHub application's device flow and store its OAuth grant instead. The
+application must enable device flow and have the repository permissions you need.
+`--scope` requests OAuth scopes; with `gh`, it adds permissions to its existing
+token rather than narrowing them.
 
 OAuth settings are shared options, not custom preset definitions: `--client-id`,
 `--client-secret-env`, and repeated `--scope` work with resource discovery.

@@ -680,8 +680,8 @@ impl BasicExoHarnessInner {
     async fn secret_key(&self, name: &str) -> Result<Option<String>> {
         match self.find_secret_by(|s| s.name == name).await? {
             Some(Secret::Key { value }) => Ok(Some(value)),
-            Some(Secret::Oauth { .. }) => {
-                bail!("secret {name:?} is an OAuth secret; expected an API key")
+            Some(Secret::Oauth { .. } | Secret::GithubCli { .. }) => {
+                bail!("secret {name:?} is not a static API key")
             }
             None => Ok(None),
         }
@@ -698,7 +698,9 @@ impl BasicExoHarnessInner {
             .await?
         {
             Some(Secret::Key { value }) => Ok(Some(value)),
-            Some(Secret::Oauth { .. }) => bail!("sandbox credential must be an API key"),
+            Some(Secret::Oauth { .. } | Secret::GithubCli { .. }) => {
+                bail!("sandbox credential must be an API key")
+            }
             None => Ok(None),
         }
     }
@@ -3172,7 +3174,7 @@ impl ConversationHandle for BasicConversationHandle {
                     let vault = crate::vault::require_vault(self, &reference.vault_id).await?;
                     let resolved = vault.resolve_secret(&reference.secret_id, &target).await?;
                     let value = match resolved.secret {
-                        Secret::Key { value } => value,
+                        Secret::Key { value } | Secret::GithubCli { value, .. } => value,
                         Secret::Oauth { access_token, .. } => access_token,
                     };
                     Some(crate::resources::GitCredential {

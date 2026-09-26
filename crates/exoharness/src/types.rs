@@ -1228,6 +1228,8 @@ impl From<Secret> for UpdateSecretRequest {
 pub enum SecretType {
     Key,
     Oauth,
+    #[serde(rename = "github_cli")]
+    GithubCli,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1385,6 +1387,11 @@ impl SandboxProviderConfig {
 pub enum Secret {
     Key {
         value: String,
+    },
+    #[serde(rename = "github_cli")]
+    GithubCli {
+        value: String,
+        account: String,
     },
     Oauth {
         access_token: String,

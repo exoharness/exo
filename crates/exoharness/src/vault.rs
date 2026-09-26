@@ -9,6 +9,11 @@ mod local;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub(crate) use local::BasicVaultStore;
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+mod github;
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+pub use github::github_cli_token;
+
 pub type VaultId = Uuid7;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -61,9 +66,19 @@ pub struct OAuthRefresh {
 }
 
 pub fn validate_secret(secret: &Secret, policy: Option<&CredentialPolicy>) -> Result<()> {
+    if let Secret::GithubCli { account, .. } = secret {
+        anyhow::ensure!(
+            !account.is_empty()
+                && account.len() <= 39
+                && account
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-'),
+            "invalid GitHub account"
+        );
+    }
     if policy.is_some() {
         let token = match secret {
-            Secret::Key { value } => value,
+            Secret::Key { value } | Secret::GithubCli { value, .. } => value,
             Secret::Oauth {
                 access_token,
                 refresh,
@@ -82,6 +97,14 @@ pub fn validate_secret(secret: &Secret, policy: Option<&CredentialPolicy>) -> Re
             bail!("bearer token must be nonempty ASCII without whitespace or control characters");
         }
     }
+    Ok(())
+}
+
+pub fn require_portable_secret(secret: &Secret) -> Result<()> {
+    anyhow::ensure!(
+        !matches!(secret, Secret::GithubCli { .. }),
+        "GitHub CLI credentials must be linked on the runtime host; send a token or OAuth grant to a remote vault"
+    );
     Ok(())
 }
 
@@ -207,7 +230,7 @@ pub async fn resolve_model_key(
         .await?
         .secret;
     match secret {
-        Secret::Key { value } => Ok(value),
+        Secret::Key { value } | Secret::GithubCli { value, .. } => Ok(value),
         Secret::Oauth { access_token, .. } => Ok(access_token),
     }
 }

@@ -100,12 +100,15 @@ impl ExoHarnessServer {
                 scope,
                 vault_id,
                 request,
-            } => Ok(Response::SecretId {
-                secret_id: require_vault(self.vault_context(scope).await?.as_ref(), &vault_id)
-                    .await?
-                    .put_secret(request)
-                    .await?,
-            }),
+            } => {
+                crate::vault::require_portable_secret(&request.secret)?;
+                Ok(Response::SecretId {
+                    secret_id: require_vault(self.vault_context(scope).await?.as_ref(), &vault_id)
+                        .await?
+                        .put_secret(request)
+                        .await?,
+                })
+            }
             Request::VaultGetSecret {
                 scope,
                 vault_id,
@@ -122,12 +125,17 @@ impl ExoHarnessServer {
                 secret_id,
                 secret,
                 policy,
-            } => Ok(Response::SecretMetadata {
-                metadata: require_vault(self.vault_context(scope).await?.as_ref(), &vault_id)
-                    .await?
-                    .update_secret(&secret_id, crate::UpdateSecretRequest { secret, policy })
-                    .await?,
-            }),
+            } => {
+                if let Some(secret) = &secret {
+                    crate::vault::require_portable_secret(secret)?;
+                }
+                Ok(Response::SecretMetadata {
+                    metadata: require_vault(self.vault_context(scope).await?.as_ref(), &vault_id)
+                        .await?
+                        .update_secret(&secret_id, crate::UpdateSecretRequest { secret, policy })
+                        .await?,
+                })
+            }
             Request::VaultDeleteSecret {
                 scope,
                 vault_id,

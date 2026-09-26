@@ -252,7 +252,7 @@ impl VaultMcpCredentials {
             }
         }
         let token = match resolved.secret {
-            Secret::Key { value } => value,
+            Secret::Key { value } | Secret::GithubCli { value, .. } => value,
             Secret::Oauth { access_token, .. } => access_token,
         };
         Ok(Some(McpCredential {

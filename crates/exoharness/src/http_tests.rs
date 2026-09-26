@@ -618,6 +618,35 @@ async fn http_vault_contexts_and_secrets_round_trip() -> crate::Result<()> {
         })
         .await?;
     assert_eq!(user.list_secrets().await?[0].id, id);
+    let host_credential = Secret::GithubCli {
+        value: "cached-token".into(),
+        account: "server-owner".into(),
+    };
+    assert!(
+        user.put_secret(PutSecretRequest {
+            name: "host-credential".into(),
+            secret: host_credential.clone(),
+            policy: Some(target.clone().into()),
+        })
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("runtime host")
+    );
+    assert!(
+        user.update_secret(&id, host_credential.into())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("runtime host")
+    );
+    assert_eq!(user.list_secrets().await?.len(), 1);
+    assert_eq!(
+        user.get_secret(&id).await?,
+        Some(Secret::Key {
+            value: "first".into()
+        })
+    );
     assert!(runtime.get_secret(&id).await?.is_none());
     let updated = user
         .update_secret(

@@ -26,7 +26,7 @@ pub async fn resolve_credential(
             .await?;
     }
     Ok(match resolved.secret {
-        Secret::Key { value } => value,
+        Secret::Key { value } | Secret::GithubCli { value, .. } => value,
         Secret::Oauth { access_token, .. } => access_token,
     })
 }

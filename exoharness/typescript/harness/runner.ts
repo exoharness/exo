@@ -175,6 +175,11 @@ type RawSecret =
       value: string;
     }
   | {
+      type: "github_cli";
+      value: string;
+      account: string;
+    }
+  | {
       type: "oauth";
       access_token: string;
       refresh_token?: string | null;
@@ -205,7 +210,7 @@ interface RawSecretMetadata {
   policy?: RawCredentialPolicy | null;
   revision: number;
   id: string;
-  type: "key" | "oauth";
+  type: "key" | "oauth" | "github_cli";
   name: string;
   created_at: string;
 }
@@ -1067,11 +1072,8 @@ function toSecretMetadata(raw: RawSecretMetadata): SecretMetadata {
 }
 
 function toSecret(raw: RawSecret): Secret {
-  if (raw.type === "key") {
-    return {
-      type: "key",
-      value: raw.value,
-    };
+  if (raw.type === "key" || raw.type === "github_cli") {
+    return raw;
   }
   return {
     type: "oauth",
@@ -1911,7 +1913,7 @@ void main().catch(() => {
 });
 
 function toRawSecret(secret: Secret): RawSecret {
-  return secret.type === "key"
+  return secret.type === "key" || secret.type === "github_cli"
     ? secret
     : {
         type: "oauth",

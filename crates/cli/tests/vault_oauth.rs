@@ -1071,14 +1071,25 @@ async fn device_login_preserves_oauth_refresh_and_policy_over_http() -> Result<(
 }
 
 #[tokio::test]
-async fn github_preset_imports_with_an_overridable_name_and_lists_vault_contents() -> Result<()> {
+async fn github_preset_links_accounts_and_picks_up_token_changes_after_restart() -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new().await?;
     let executable = f.temp.path().join("gh");
     std::fs::write(
         &executable,
-        "#!/bin/sh\ncase \"$1 $2\" in\n  'auth status') exit 0 ;;\n  'auth token') printf 'fixture-github-token\\n' ;;\n  *) exit 1 ;;\nesac\n",
+        r#"#!/bin/sh
+set -eu
+root=${0%/*}
+printf '%s\n' "$*" >> "$root/gh-calls"
+case "$*" in
+  'auth status --active --hostname github.com --json hosts')
+    printf '{"hosts":{"github.com":[{"login":"fixture-user","state":"success"}]}}\n' ;;
+  'auth token --hostname github.com --user fixture-user') /bin/cat "$root/token" ;;
+  *) exit 1 ;;
+esac
+"#,
     )?;
+    std::fs::write(f.temp.path().join("token"), "initial-token")?;
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
     for (name, token) in [
         (None, None),
@@ -1099,19 +1110,21 @@ async fn github_preset_imports_with_an_overridable_name_and_lists_vault_contents
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(!String::from_utf8(output.stdout)?.contains("fixture-github-token"));
+        assert!(!String::from_utf8(output.stdout)?.contains("initial-token"));
     }
     let listed = f.cli(&["vault", "list"]).await?;
     assert!(listed.contains("VAULT") && listed.contains("SECRETS"));
     let listed = f.cli(&["vault", "list", "global"]).await?;
     assert!(listed.contains("Secrets in vault global:") && listed.contains("github-work"));
-    assert!(!listed.contains("fixture-github-token"));
+    assert!(!listed.contains("initial-token"));
     let secrets = f.vault.list_secrets().await?;
     assert_eq!(secrets.len(), 3);
-    assert!(
+    assert_eq!(
         secrets
             .iter()
-            .all(|s| s.r#type == exoharness::SecretType::Key)
+            .filter(|s| s.r#type == exoharness::SecretType::GithubCli)
+            .count(),
+        2
     );
     let imported = secrets.iter().find(|s| s.name == "github-token").unwrap();
     assert_eq!(
@@ -1139,5 +1152,93 @@ async fn github_preset_imports_with_an_overridable_name_and_lists_vault_contents
         .await?;
     assert!(!missing_name.status.success());
     assert!(String::from_utf8(missing_name.stderr)?.contains("<NAME>"));
+    let linked = secrets.iter().find(|s| s.name == "github").unwrap();
+    assert_eq!(
+        f.vault.get_secret(&linked.id).await?,
+        Some(Secret::GithubCli {
+            value: "initial-token".into(),
+            account: "fixture-user".into(),
+        })
+    );
+    let url = format!("{}/mcp/", f.server.uri());
+    f.cli(&[
+        "vault",
+        "secret",
+        "update",
+        "global",
+        "github",
+        "--allow-url",
+        &url,
+    ])
+    .await?;
+    let spec = f.temp.path().join("github.md");
+    std::fs::write(
+        &spec,
+        format!(
+            "---\nname: GitHub fixture\nharness: basic\nconfig:\n  model: gpt-5-mini\nmcp_servers:\n  - type: url\n    name: github\n    url: {url}\n---\nTest GitHub credentials.\n"
+        ),
+    )?;
+    let script = std::fs::read_to_string(&executable)?
+        .replace(r#""login":"fixture-user""#, r#""login":"other-user""#);
+    std::fs::write(&executable, script)?;
+    let chat = || {
+        let mut command = f.command(&["agent", "run", "--agent-file", spec.to_str().unwrap()]);
+        command.env("PATH", f.temp.path()).stdin(Stdio::null());
+        command
+    };
+    for (value, revision) in [
+        ("initial-token", 2),
+        ("refreshed-token", 3),
+        ("refreshed-token", 3),
+    ] {
+        std::fs::write(f.temp.path().join("token"), value)?;
+        let output = tokio::time::timeout(Duration::from_secs(20), chat().output()).await??;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8(output.stdout)?.contains("mcp: 1 tools"));
+        let stored = f
+            .vault
+            .list_secrets()
+            .await?
+            .into_iter()
+            .find(|s| s.id == linked.id)
+            .unwrap();
+        assert_eq!(stored.revision, revision);
+        assert_eq!(
+            f.vault.get_secret(&linked.id).await?,
+            Some(Secret::GithubCli {
+                value: value.into(),
+                account: "fixture-user".into(),
+            })
+        );
+    }
+    let calls = std::fs::read_to_string(f.temp.path().join("gh-calls"))?;
+    assert!(
+        f.vault
+            .resolve_secret(
+                &linked.id,
+                &CredentialDestination::origin("https://unrelated.example")?
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.temp.path().join("gh-calls"))?,
+        calls
+    );
+    std::fs::remove_file(f.temp.path().join("token"))?;
+    let output = tokio::time::timeout(Duration::from_secs(20), chat().output()).await??;
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)?.contains("GitHub CLI has no token for fixture-user"));
+    assert_eq!(
+        f.vault.get_secret(&linked.id).await?,
+        Some(Secret::GithubCli {
+            value: "refreshed-token".into(),
+            account: "fixture-user".into(),
+        })
+    );
     Ok(())
 }

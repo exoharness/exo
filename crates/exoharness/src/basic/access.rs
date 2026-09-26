@@ -158,6 +158,7 @@ impl VaultHandle for CallerVault {
     }
     async fn put_secret(&self, request: crate::PutSecretRequest) -> Result<SecretId> {
         self.check(true).await?;
+        crate::vault::require_portable_secret(&request.secret)?;
         self.vault.put_secret(request).await
     }
     async fn get_secret(&self, id: &SecretId) -> Result<Option<Secret>> {
@@ -170,6 +171,9 @@ impl VaultHandle for CallerVault {
         request: crate::UpdateSecretRequest,
     ) -> Result<SecretMetadata> {
         self.check(true).await?;
+        if let Some(secret) = &request.secret {
+            crate::vault::require_portable_secret(secret)?;
+        }
         self.vault.update_secret(id, request).await
     }
     async fn delete_secret(&self, id: &SecretId) -> Result<()> {

@@ -266,7 +266,7 @@ export async function resolveModel(
     });
     return {
       ...resolveSandboxModel(context),
-      apiKey: secret.type === "key" ? secret.value : secret.accessToken,
+      apiKey: secret.type === "oauth" ? secret.accessToken : secret.value,
     };
   }
   throw new Error(

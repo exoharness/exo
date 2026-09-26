@@ -258,6 +258,7 @@ fn secret_type(secret: &Secret) -> SecretType {
     match secret {
         Secret::Key { .. } => SecretType::Key,
         Secret::Oauth { .. } => SecretType::Oauth,
+        Secret::GithubCli { .. } => SecretType::GithubCli,
     }
 }
 
@@ -419,7 +420,9 @@ impl VaultHandle for BasicVaultHandle {
         target: &CredentialDestination,
     ) -> Result<ResolvedSecret> {
         let resolved = self.read_for_destination(id, target).await?;
-        if !oauth::needs_refresh(&resolved.secret) {
+        if !matches!(resolved.secret, Secret::GithubCli { .. })
+            && !oauth::needs_refresh(&resolved.secret)
+        {
             return Ok(resolved);
         }
         self.refresh_secret(id, target, resolved.revision).await
@@ -451,7 +454,20 @@ impl BasicVaultHandle {
         if resolved.revision != rejected_revision {
             return Ok(resolved);
         }
-        let secret = oauth::refresh(resolved.secret).await?;
+        let secret = match &resolved.secret {
+            Secret::GithubCli { account, .. } => {
+                let value = super::github_cli_token(account).await?;
+                let secret = Secret::GithubCli {
+                    value,
+                    account: account.clone(),
+                };
+                if secret == resolved.secret {
+                    return self.read_for_destination(id, target).await;
+                }
+                secret
+            }
+            _ => oauth::refresh(resolved.secret).await?,
+        };
         let vault_id = self.record.id;
         let id = *id;
         self.store
@@ -462,7 +478,7 @@ impl BasicVaultHandle {
                     .find(|s| s.metadata.id == id)
                     .context("secret is unavailable")?;
                 if stored.metadata.revision != resolved.revision {
-                    bail!("credential changed during OAuth refresh; retry the operation");
+                    bail!("credential changed during refresh; retry the operation");
                 }
                 let mut metadata = stored.metadata.clone();
                 metadata.revision = metadata

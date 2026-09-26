@@ -1082,7 +1082,9 @@ async fn worker_secret_env(
             .with_context(|| format!("adapter secret not found: {}", secret_env.secret_id))?;
         let value = match secret {
             Secret::Key { value } => value,
-            Secret::Oauth { .. } => bail!("adapter worker secrets must be key secrets"),
+            Secret::Oauth { .. } | Secret::GithubCli { .. } => {
+                bail!("adapter worker secrets must be key secrets")
+            }
         };
         env.push((secret_env.env.clone(), value));
     }
