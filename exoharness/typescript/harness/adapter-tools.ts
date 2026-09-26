@@ -42,6 +42,7 @@ function createAdapterToolInstances(): ToolInstance[] {
 function createAdapterTool(): ToolInstance {
   return {
     source: "built_in",
+    authorization: "runtime",
     definition: {
       name: "create_adapter",
       description:
@@ -219,6 +220,7 @@ function hostTool(args: {
 }): ToolInstance {
   return {
     source: "built_in",
+    authorization: "runtime",
     definition: {
       name: args.name,
       description: args.description,

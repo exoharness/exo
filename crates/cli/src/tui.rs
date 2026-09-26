@@ -39,7 +39,12 @@ pub async fn run_chat_repl(
 ) -> Result<()> {
     let mut repl = ChatRepl::new(runtime, agent, conversation, verbosity)?;
     interruptible(repl.print_transcript()).await?;
-    while interruptible(repl.run()).await?.is_none() {}
+    repl.reconnect().await?;
+    while interruptible(repl.run()).await?.is_none() {
+        if let Some(key) = repl.active_turn.take() {
+            repl.runtime.cancel(key).await?;
+        }
+    }
     Ok(())
 }
 
@@ -589,11 +594,15 @@ impl ChatRepl {
 
     async fn send(&mut self, input: &str) -> Result<()> {
         let result = self.send_inner(input).await;
+        self.finish_observing(result).await
+    }
+
+    async fn finish_observing(&mut self, result: Result<()>) -> Result<()> {
         if result.as_ref().err().is_some_and(|error| {
             error
                 .downcast_ref::<io::Error>()
                 .is_some_and(|error| error.kind() == io::ErrorKind::Interrupted)
-        }) && let Some(key) = self.active_turn.take()
+        }) && let Some(key) = self.active_turn
         {
             self.runtime.cancel(key).await?;
         }
@@ -607,7 +616,7 @@ impl ChatRepl {
         progress
             .wait(self.usage.refresh(self.conversation.as_ref(), None))
             .await?;
-        let (turn, mut stream) = progress
+        let (turn, stream) = progress
             .wait(self.runtime.start_turn(
                 Arc::clone(&self.agent),
                 Arc::clone(&self.conversation),
@@ -621,6 +630,30 @@ impl ChatRepl {
                 None,
             ))
             .await?;
+        self.observe_turn(turn, stream, started).await
+    }
+
+    async fn reconnect(&mut self) -> Result<()> {
+        if let Some((turn, stream)) = self
+            .runtime
+            .reconnect_turn(self.conversation.as_ref())
+            .await?
+        {
+            println!("Reconnecting to turn {}", turn.id);
+            let result = self.observe_turn(turn, stream, Instant::now()).await;
+            self.finish_observing(result).await?;
+        }
+        Ok(())
+    }
+
+    async fn observe_turn(
+        &mut self,
+        turn: exoharness::TurnRecord,
+        mut stream: executor::ExecutionStreamHandle,
+        started: Instant,
+    ) -> Result<()> {
+        let mut progress = TurnProgress::new();
+        self.session_id = Some(turn.session_id);
         self.active_turn = Some(HarnessTurnKey::new(self.conversation.record().id, turn.id));
         progress.set_status(Some("Waiting for model".to_string()));
         let mut stdout = io::stdout();
@@ -636,6 +669,16 @@ impl ChatRepl {
             .await?
         {
             match event {
+                ExecutionStreamEvent::ApprovalRequested { turn, approval } => {
+                    progress.set_status(None);
+                    if printed_assistant {
+                        println!();
+                        printed_assistant = false;
+                        streamed_text.clear();
+                    }
+                    self.respond_to_approval(&turn, approval).await?;
+                    progress.set_status(Some("Running tool".to_owned()));
+                }
                 ExecutionStreamEvent::FirstChunk { .. } => {
                     ttft.get_or_insert_with(|| started.elapsed());
                     progress.set_status(Some("Thinking".to_string()));
@@ -733,6 +776,52 @@ impl ChatRepl {
             }
         }
         println!();
+        Ok(())
+    }
+
+    async fn respond_to_approval(
+        &mut self,
+        turn: &exoharness::TurnRecord,
+        approval: executor::permissions::ApprovalRequest,
+    ) -> Result<()> {
+        println!("Permission required: {}", approval.request.function_name);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&approval.request.arguments)?
+        );
+        let (approved, allow_for_tool) = loop {
+            match self
+                .editor
+                .readline("Allow? [y]es / [n]o / [a]ll calls to this tool this session: ")
+            {
+                Ok(answer) => match answer.trim().to_ascii_lowercase().as_str() {
+                    "y" | "yes" => break (true, false),
+                    "a" | "all" => break (true, true),
+                    "n" | "no" | "" => break (false, false),
+                    _ => println!("Enter y, n, or a."),
+                },
+                Err(ReadlineError::Eof) => break (false, false),
+                Err(ReadlineError::Interrupted) => {
+                    return Err(
+                        io::Error::new(io::ErrorKind::Interrupted, "approval interrupted").into(),
+                    );
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        self.runtime
+            .approval_response(
+                self.agent.record().id,
+                self.conversation.record().id,
+                turn.id,
+                &exo_managed_agents::http::protocol::ApprovalResponseBody {
+                    session_id: turn.session_id,
+                    approval_id: approval.approval_id,
+                    approved,
+                    allow_for_tool,
+                },
+            )
+            .await?;
         Ok(())
     }
 

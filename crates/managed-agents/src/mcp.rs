@@ -15,6 +15,8 @@ pub enum McpServerDefinition {
         allowed_tools: Option<Vec<String>>,
         #[serde(default)]
         blocked_tools: Vec<String>,
+        #[serde(flatten)]
+        permissions: crate::permissions::ToolPermissions,
     },
     Provider {
         name: String,
@@ -22,13 +24,21 @@ pub enum McpServerDefinition {
         allowed_tools: Option<Vec<String>>,
         #[serde(default)]
         blocked_tools: Vec<String>,
+        #[serde(flatten)]
+        permissions: crate::permissions::ToolPermissions,
     },
 }
 
 impl McpServerDefinition {
-    fn name(&self) -> &str {
+    pub fn name(&self) -> &str {
         match self {
             Self::Url { name, .. } | Self::Provider { name, .. } => name,
+        }
+    }
+
+    pub fn permissions(&self) -> &crate::permissions::ToolPermissions {
+        match self {
+            Self::Url { permissions, .. } | Self::Provider { permissions, .. } => permissions,
         }
     }
 

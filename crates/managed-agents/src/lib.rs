@@ -1,5 +1,6 @@
 pub mod http;
 pub mod mcp;
+pub mod permissions;
 pub mod vaults;
 
 use std::path::{Path, PathBuf};
@@ -24,6 +25,10 @@ pub struct AgentFrontmatter {
     pub name: String,
     pub harness: String,
     pub config: AgentModelConfig,
+    #[serde(default)]
+    pub permission_policy: permissions::PermissionPolicy,
+    #[serde(default)]
+    pub tool_policies: std::collections::BTreeMap<String, permissions::PermissionPolicy>,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerDefinition>,
 }

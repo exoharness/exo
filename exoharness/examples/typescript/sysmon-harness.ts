@@ -87,6 +87,7 @@ function gibibytes(bytes: number): string {
 }
 
 export default defineHarness({
+  nativeToolApprovals: true,
   async runTurn(context) {
     await runResponsesHarnessTurn(context, {
       instructions: sysmonInstructions,

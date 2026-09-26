@@ -44,6 +44,8 @@ import {
   type TurnContext,
   type TurnRecord,
   type TypeScriptHarness,
+  type PermissionPolicy,
+  validateToolPolicies,
 } from "./index";
 
 interface RawAgentConfig {
@@ -68,6 +70,10 @@ interface RawAgentConfig {
 }
 
 interface RawConversationConfig {
+  permissions: {
+    permission_policy: PermissionPolicy;
+    tool_policies: Record<string, PermissionPolicy>;
+  };
   sandbox_image?: string | null;
   sandbox_provider?:
     | "daytona"
@@ -239,6 +245,7 @@ interface RawTypeScriptInitPayload {
 }
 
 type RawRuntimeRequest =
+  | { type: "authorize_tool"; request: RawToolRequest }
   | { type: "execute_tool"; request: RawToolRequest }
   | {
       type: "start_sandbox_process";
@@ -923,6 +930,8 @@ function toAgentConfig(raw: RawAgentConfig): AgentConfig {
 
 function toConversationConfig(raw: RawConversationConfig): ConversationConfig {
   return {
+    permissionPolicy: raw.permissions.permission_policy,
+    toolPolicies: raw.permissions.tool_policies,
     sandboxImage: raw.sandbox_image ?? null,
     sandboxProvider: raw.sandbox_provider ?? null,
     shellProgram: raw.shell_program ?? null,
@@ -1705,6 +1714,12 @@ function createTurnContext(
     streaming,
     braintrustParent: init.braintrust_parent ?? null,
     exoharness,
+    async authorizeTool(request): Promise<void> {
+      await client.requestRuntime({
+        type: "authorize_tool",
+        request: toRawToolRequest(request),
+      });
+    },
     async executeTool(request): Promise<ToolResult> {
       const payload = await client.requestRuntime({
         type: "execute_tool",
@@ -1845,6 +1860,16 @@ async function main(): Promise<void> {
     }
     const context = createTurnContext(client, init);
     try {
+      if (harness.nativeToolApprovals !== true) {
+        validateToolPolicies(
+          context,
+          [
+            ...context.tools.map((tool) => tool.name),
+            ...(context.conversationConfig.shellProgram ? ["shell"] : []),
+          ],
+          false,
+        );
+      }
       await harness.runTurn(context);
       await client.done();
     } catch (error) {

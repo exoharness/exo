@@ -2,6 +2,7 @@ import {
   appendCustomEvent,
   assistantTextMessage,
   defineHarness,
+  validateToolPolicies,
   toolRequestedEvent,
   toolResultEvent,
   messageText,
@@ -60,7 +61,9 @@ type CursorSandboxWorker = WarmJsonlSandboxWorker<
 const cursorWorkers = new WarmResourceCache<CursorSandboxWorker>();
 
 export default defineHarness({
+  nativeToolApprovals: false,
   async runTurn(context) {
+    validateToolPolicies(context, [], false);
     const modelBinding = await resolveLlmBinding(context);
     await traceExecutorTurn(context, (turnParent) =>
       runCursorSdkHarnessTurn(context, turnParent, modelBinding),

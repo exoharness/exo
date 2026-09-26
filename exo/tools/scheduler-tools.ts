@@ -38,6 +38,7 @@ export function registerSchedulerTools(
 
 function createScheduleSandboxTaskTool(): ToolInstance {
   return {
+    authorization: "runtime",
     source: "built_in",
     definition: {
       name: "schedule_sandbox_task",
@@ -128,6 +129,7 @@ function createScheduleSandboxTaskTool(): ToolInstance {
 
 function createListScheduledTasksTool(): ToolInstance {
   return {
+    authorization: "runtime",
     source: "built_in",
     definition: {
       name: "list_scheduled_tasks",
@@ -159,6 +161,7 @@ function createListScheduledTasksTool(): ToolInstance {
 
 function createDeleteScheduledTaskTool(): ToolInstance {
   return {
+    authorization: "runtime",
     source: "built_in",
     definition: {
       name: "delete_scheduled_task",
@@ -181,6 +184,7 @@ function createDeleteScheduledTaskTool(): ToolInstance {
 
 function createCancelScheduledTaskTool(): ToolInstance {
   return {
+    authorization: "runtime",
     source: "built_in",
     definition: {
       name: "cancel_scheduled_task",

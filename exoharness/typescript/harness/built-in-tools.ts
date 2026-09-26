@@ -61,6 +61,7 @@ export function createShellToolInstance(
   }
   return {
     source: "built_in",
+    authorization: "runtime",
     definition: shellToolDefinition(config.shellProgram),
     handler: {
       execute(args, execution) {

@@ -396,6 +396,7 @@ pub(crate) fn compact_result_status(result: &Value) -> String {
             return format!("✗ exit {code}");
         }
         if object.get("error").is_some_and(|error| !error.is_null())
+            || object.get("is_error").and_then(Value::as_bool) == Some(true)
             || exo_mcp::tool_result_is_error(result)
         {
             return "✗ error".to_string();
@@ -444,7 +445,8 @@ fn render_value_inline(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        TranscriptFold, Verbosity, render_message_lines, render_tool_call, render_tool_result,
+        TranscriptFold, Verbosity, compact_result_status, render_message_lines, render_tool_call,
+        render_tool_result,
     };
     use lingua::Message;
     use lingua::universal::{
@@ -533,15 +535,17 @@ mod tests {
     }
 
     #[test]
-    fn mcp_results_show_error_status_without_rejecting_the_result() {
-        assert_eq!(
-            super::compact_result_status(&json!({"isError": true, "content": []})),
-            "✗ error"
-        );
-        assert_eq!(
-            super::compact_result_status(&json!({"isError": false, "content": []})),
-            "✓"
-        );
+    fn native_tool_errors_are_not_displayed_as_success() {
+        for key in ["is_error", "isError"] {
+            assert_eq!(
+                compact_result_status(&json!({ key: true, "content": "denied" })),
+                "✗ error"
+            );
+            assert_eq!(
+                compact_result_status(&json!({ key: false, "content": "ok" })),
+                "✓"
+            );
+        }
     }
 
     #[test]

@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, Weak},
+};
 
 use async_trait::async_trait;
 use exo_managed_agents::AgentBackend;
@@ -17,8 +21,24 @@ use crate::{
 pub trait Provider: AgentBackend {
     fn harness(&self) -> &dyn Harness<ProviderTurn>;
 
+    async fn is_turn_active(
+        &self,
+        thread: &dyn ThreadHandle,
+        turn: exoharness::TurnId,
+    ) -> Result<bool>;
+
     fn temporary(&self, _state: Arc<dyn ExoHarness>) -> Result<Runtime> {
         anyhow::bail!("this provider does not support temporary agents")
+    }
+
+    async fn approval_response(
+        &self,
+        _agent: exoharness::AgentId,
+        _thread: exoharness::ThreadId,
+        _turn: exoharness::TurnId,
+        _body: &exo_managed_agents::http::protocol::ApprovalResponseBody,
+    ) -> Result<exoharness::EventId> {
+        anyhow::bail!("this provider does not support tool approvals")
     }
 
     async fn cleanup(&self) -> Result<()> {
@@ -41,6 +61,11 @@ pub struct LocalProvider {
     pub(crate) executor: Arc<dyn HarnessExecutor>,
     pub(crate) harness: Arc<ExecutorHarness>,
     pub(crate) managed: crate::managed_agents::LocalAgentSetup,
+    // One provider-wide lock serializes the pending check and decision write so
+    // concurrent responses cannot accept the same approval twice.
+    approval_responses: tokio::sync::Mutex<()>,
+    pub(crate) live_turns:
+        Arc<tokio::sync::RwLock<HashMap<crate::harness::HarnessTurnKey, Weak<()>>>>,
 }
 
 impl LocalProvider {
@@ -50,6 +75,8 @@ impl LocalProvider {
             harness: Arc::new(ExecutorHarness::new(Arc::clone(&executor))),
             executor,
             managed: Default::default(),
+            approval_responses: Default::default(),
+            live_turns: Arc::default(),
         }
     }
 
@@ -87,6 +114,56 @@ impl LocalProvider {
 
 #[async_trait]
 impl Provider for LocalProvider {
+    async fn is_turn_active(
+        &self,
+        thread: &dyn ThreadHandle,
+        turn: exoharness::TurnId,
+    ) -> Result<bool> {
+        Ok(self
+            .live_turns
+            .read()
+            .await
+            .get(&crate::harness::HarnessTurnKey::new(
+                thread.record().id,
+                turn,
+            ))
+            .is_some_and(|turn| turn.strong_count() > 0))
+    }
+
+    async fn approval_response(
+        &self,
+        agent: exoharness::AgentId,
+        thread: exoharness::ThreadId,
+        turn: exoharness::TurnId,
+        body: &exo_managed_agents::http::protocol::ApprovalResponseBody,
+    ) -> Result<exoharness::EventId> {
+        use anyhow::Context;
+        let _guard = self.approval_responses.lock().await;
+        anyhow::ensure!(
+            self.harness
+                .is_active(crate::harness::HarnessTurnKey::new(thread, turn)),
+            "turn is not active"
+        );
+        let agent = self
+            .state
+            .get_agent(&agent)
+            .await?
+            .context("agent not found")?;
+        let thread = agent
+            .get_thread(&thread)
+            .await?
+            .context("thread not found")?;
+        crate::permissions::respond(
+            thread.as_ref(),
+            exoharness::TurnRecord {
+                id: turn,
+                session_id: body.session_id,
+            },
+            body,
+        )
+        .await
+    }
+
     fn temporary(&self, state: Arc<dyn ExoHarness>) -> Result<Runtime> {
         let executor = self.executor.fork(state.clone())?;
         Ok(Runtime::new(

@@ -6,6 +6,7 @@
 import {
   assistantTextMessage,
   defineHarness,
+  validateToolPolicies,
   materializeConversationMessages,
   messageText,
   messagesToTranscript,
@@ -202,9 +203,11 @@ function eventsForPiEvent(
 }
 
 const harness = defineHarness({
+  nativeToolApprovals: false,
   tools: [],
 
   async runTurn(context) {
+    validateToolPolicies(context, [], false);
     const history = await materializeConversationMessages(
       context.exoharness.current.conversation,
     );

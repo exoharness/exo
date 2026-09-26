@@ -76,6 +76,9 @@ impl AgentBackend for LocalProvider {
         } else {
             crate::load_conversation_config(thread).await?
         };
+        if let Some(definition) = managed::load_definition(agent).await? {
+            config.permissions = definition.permissions();
+        }
         let requested = &self.managed.thread;
         if let Some(provider) = &requested.sandbox_provider {
             config.sandbox_provider = Some(provider.clone());
@@ -93,13 +96,7 @@ impl AgentBackend for LocalProvider {
             .executor
             .configure_managed_thread(agent, thread, &agent_config, &config)
             .await?;
-        if created
-            || requested.sandbox_provider.is_some()
-            || requested.sandbox_image.is_some()
-            || !requested.mounts.is_empty()
-        {
-            crate::harness_config::store_conversation_config(thread, &config).await?;
-        }
+        crate::harness_config::store_conversation_config(thread, &config).await?;
         if (self.managed.model.is_some() && !(created && self.managed.temporary))
             || model != preferred
         {
@@ -285,6 +282,90 @@ impl PreparedMcp {
                 })
                 .await?;
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::*;
+    use exo_managed_agents::permissions::PermissionPolicy;
+    use exoharness::{BasicExoHarness, Binding, WriteArtifactRequest};
+
+    #[tokio::test]
+    async fn resumed_threads_use_updated_agent_permissions() -> Result<()> {
+        let temp = tempfile::TempDir::new()?;
+        let config = crate::test_support::local_test_config(temp.path().join("state"));
+        let state = Arc::new(BasicExoHarness::new(config.clone()).await?);
+        state
+            .put_binding(Binding::Llm {
+                name: "fixture".into(),
+                model: "fixture".into(),
+                base_url: None,
+                secret: None,
+            })
+            .await?;
+        let runtime = crate::Runtime::new(
+            LocalProvider::managed(
+                state,
+                config,
+                Default::default(),
+                Arc::new(cost::PricingTable::empty()),
+            )?,
+            None,
+        );
+        let source = "---\nname: permissions\nharness: basic\nconfig:\n  model: fixture\npermission_policy: {type: always_allow}\n---\nUse tools.\n";
+        let definition = AgentDefinition::parse(source.into())?;
+        let agent = runtime
+            .create_managed_agent(&definition, "permissions")
+            .await?;
+        let opened = runtime
+            .open_managed_thread(&agent, None, Default::default())
+            .await?;
+        let thread = opened.thread;
+        assert_eq!(
+            runtime
+                .get_conversation_config(thread.as_ref())
+                .await?
+                .permissions
+                .for_tool("shell"),
+            PermissionPolicy::AlwaysAllow {}
+        );
+        for (name, expected) in [
+            ("always_ask", PermissionPolicy::AlwaysAsk {}),
+            ("always_allow", PermissionPolicy::AlwaysAllow {}),
+        ] {
+            agent
+                .write_artifact(WriteArtifactRequest {
+                    path: managed::AGENT_DEFINITION_PATH.into(),
+                    contents: source.replace("always_allow", name).into_bytes(),
+                })
+                .await?;
+            let resumed = runtime
+                .open_managed_thread(
+                    &agent,
+                    Some(&thread.record().id.to_string()),
+                    Default::default(),
+                )
+                .await?;
+            assert!(!resumed.created);
+            assert_eq!(
+                runtime
+                    .get_conversation_config(thread.as_ref())
+                    .await?
+                    .permissions
+                    .for_tool("shell"),
+                expected
+            );
+            assert_eq!(
+                crate::load_conversation_config(thread.as_ref())
+                    .await?
+                    .permissions
+                    .for_tool("shell"),
+                expected
+            );
+        }
+        runtime.shutdown().await?;
         Ok(())
     }
 }

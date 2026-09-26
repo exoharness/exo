@@ -22,6 +22,7 @@ export function registerHostTool(
 
 export function hostTool(definition: ToolDefinition): ToolInstance {
   return {
+    authorization: "runtime",
     source: "built_in",
     definition,
     handler: {

@@ -48,6 +48,15 @@ pub(crate) struct ExecutorHarness {
 }
 
 impl ExecutorHarness {
+    pub(crate) fn is_active(&self, key: HarnessTurnKey) -> bool {
+        self.active
+            .lock()
+            .expect("active harness turns poisoned")
+            .turns
+            .get(&key)
+            .is_some_and(Option::is_some)
+    }
+
     pub(crate) fn new(executor: Arc<dyn HarnessExecutor>) -> Self {
         Self {
             executor,

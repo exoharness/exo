@@ -143,7 +143,11 @@ export interface SecretMetadata {
   createdAt: string;
 }
 
+export type PermissionPolicy = { type: "always_allow" | "always_ask" };
+
 export interface ConversationConfig {
+  permissionPolicy?: PermissionPolicy;
+  toolPolicies?: Record<string, PermissionPolicy>;
   sandboxImage?: string | null;
   sandboxProvider?:
     | "daytona"
@@ -418,6 +422,7 @@ export interface TurnContext {
   readonly streaming: boolean;
   readonly braintrustParent?: string | null;
   readonly exoharness: ExoHarness;
+  authorizeTool(request: ToolRequest): Promise<void>;
   executeTool(request: ToolRequest): Promise<ToolResult>;
   startSandboxProcess(
     request: SandboxProcessStartRequest,
@@ -437,11 +442,31 @@ export interface TurnContext {
 
 export interface TypeScriptHarness {
   tools?: ToolModuleExport;
+  nativeToolApprovals?: boolean;
   runTurn(context: TurnContext): Promise<void>;
 }
 
 export function defineHarness(harness: TypeScriptHarness): TypeScriptHarness {
   return harness;
+}
+
+export function validateToolPolicies(
+  context: TurnContext,
+  toolNames: Iterable<string>,
+  nativeToolApprovals = true,
+): void {
+  const { permissionPolicy, toolPolicies } = context.conversationConfig;
+  if (!nativeToolApprovals && permissionPolicy?.type === "always_ask") {
+    throw new Error(
+      "this harness cannot enforce always_ask for all native tools; use always_allow as the default and set supported tool policies individually",
+    );
+  }
+  const known = new Set(toolNames);
+  for (const name of Object.keys(toolPolicies ?? {})) {
+    if (!known.has(name)) {
+      throw new Error(`unknown tool in tool_policies: ${name}`);
+    }
+  }
 }
 
 export function turnMetadata(
@@ -902,4 +927,12 @@ export function asBytes(contents: Uint8Array | string): Uint8Array {
     return new TextEncoder().encode(contents);
   }
   return contents;
+}
+
+export function toJsonObject(value: unknown): JsonObject {
+  const json = toJsonValue(value);
+  if (json === null || typeof json !== "object" || Array.isArray(json)) {
+    throw new Error("Expected a JSON object");
+  }
+  return json;
 }

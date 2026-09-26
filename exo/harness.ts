@@ -32,6 +32,7 @@ const DEFAULT_EXO_REPO = "/workspace/exo";
 const DEFAULT_EXO_SELF_MAP = `${DEFAULT_EXO_REPO}/exo/SELF.md`;
 
 export default defineHarness({
+  nativeToolApprovals: true,
   async runTurn(context) {
     await runResponsesHarnessTurn(context, {
       instructions: exoInstructions,

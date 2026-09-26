@@ -309,11 +309,17 @@ async fn model_started(f: &Fixture, marker: &str) -> Result<()> {
 #[actix_web::test]
 async fn local_and_http_live_cancellation_finalizes_and_allows_resume() -> Result<()> {
     use std::{process::Stdio, time::Duration};
+    use tokio::io::AsyncWriteExt;
     use wiremock::{
         Mock,
         matchers::{body_string_contains, method, path},
     };
-    for provider in ["local", "remote"] {
+    for (provider, mode) in [
+        ("local", "run"),
+        ("remote", "run"),
+        ("local", "chat"),
+        ("remote", "chat"),
+    ] {
         let f = Fixture::new().await?;
         f.cli(&["provider", "switch", provider]).await?;
         f.cli(&[
@@ -331,25 +337,47 @@ async fn local_and_http_live_cancellation_finalizes_and_allows_resume() -> Resul
             .with_priority(1)
             .mount_as_scoped(&f.model)
             .await;
-        let child = f
-            .command(&["run", "--agent", "saved", "cancel this turn"])
+        let args = if mode == "chat" {
+            vec!["chat", "--agent", "saved"]
+        } else {
+            vec!["run", "--agent", "saved", "cancel this turn"]
+        };
+        let mut child = f
+            .command(&args)
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
+        if mode == "chat" {
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(b"cancel this turn\n")
+                .await?;
+        }
         model_started(&f, "cancel this turn").await?;
         let status = tokio::process::Command::new("kill")
             .args(["-INT", &child.id().unwrap().to_string()])
             .status()
             .await?;
         assert!(status.success());
+        if mode == "chat" {
+            child.stdin.take().unwrap().write_all(b"/quit\n").await?;
+        }
         let output =
             tokio::time::timeout(Duration::from_secs(10), child.wait_with_output()).await??;
-        assert!(!output.status.success(), "{provider}");
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains("turn interrupted"),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
+        assert_eq!(
+            output.status.success(),
+            mode == "chat",
+            "{provider} {mode}: {output:?}"
         );
+        if mode == "run" {
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("turn interrupted"),
+                "{provider} {mode}: {output:?}"
+            );
+        }
         let stdout = String::from_utf8(output.stdout)?;
         let thread = thread_slug(&stdout)?;
         let events = f.cli(&["thread", "events", "saved", thread]).await?;
@@ -630,7 +658,7 @@ export default defineHarness({{
     )?;
     assert!(!f.temp.path().join(&module).exists());
     let source = format!(
-        "---\nname: Remote workspace\nharness: {module}\nconfig:\n  model: gpt-5-mini\nmcp_servers:\n  - type: url\n    name: workspace\n    url: {url}\n---\nLook up the workspace.\n"
+        "---\nname: Remote workspace\nharness: {module}\nconfig:\n  model: gpt-5-mini\nmcp_servers:\n  - type: url\n    name: workspace\n    permission_policy: {{type: always_allow}}\n    url: {url}\n---\nLook up the workspace.\n"
     );
     std::fs::write(&f.agent_file, &source)?;
     f.cli(&["provider", "switch", "remote"]).await?;

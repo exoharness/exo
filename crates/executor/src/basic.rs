@@ -309,14 +309,29 @@ where
                 }
                 None => None,
             };
-            let tool_future = self.tools.execute(
-                context.agent,
-                context.conversation,
-                Some(context.turn.as_ref()),
-                context.agent_config,
-                context.conversation_config,
-                &tool_request.request,
-            );
+            let tool_future = async {
+                crate::permissions::authorize(
+                    context.conversation,
+                    context.turn.as_ref(),
+                    self.tools.permission_policy(
+                        &context.conversation_config.permissions,
+                        &tool_request.request.function_name,
+                    ),
+                    &tool_request.request,
+                    context.stream_mode,
+                )
+                .await?;
+                self.tools
+                    .execute(
+                        context.agent,
+                        context.conversation,
+                        Some(context.turn.as_ref()),
+                        context.agent_config,
+                        context.conversation_config,
+                        &tool_request.request,
+                    )
+                    .await
+            };
             let (result, tool_succeeded) = match tool_future.await {
                 Ok(response) => (response, true),
                 Err(error) => {
@@ -379,6 +394,12 @@ where
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
     ) -> Result<()> {
+        conversation_config.permissions.validate_tool_names(
+            build_tool_definitions(conversation_config)
+                .iter()
+                .chain(self.tools.definitions().iter())
+                .map(|tool| tool.name.as_str()),
+        )?;
         self.tools
             .prepare_conversation(agent, conversation, agent_config, conversation_config)
             .await

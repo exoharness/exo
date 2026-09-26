@@ -1,7 +1,6 @@
 import {
   materializeEventsToMessages,
   messageText,
-  stringifyValue,
   toJsonValue,
   turnMetadata,
   type EventData,
@@ -439,27 +438,6 @@ export async function appendAndTraceObservedToolEvents(
       activeToolCalls.delete(event.tool_call_id);
     }
   }
-}
-
-export function shellToolSucceeded(result: JsonValue): boolean {
-  const exitCode = asRecord(result).exit_code;
-  return typeof exitCode === "number" ? exitCode === 0 : true;
-}
-
-export function shellToolResultText(result: JsonValue): string {
-  const record = asRecord(result);
-  if (
-    typeof record.stdout === "string" ||
-    typeof record.stderr === "string" ||
-    typeof record.exit_code === "number"
-  ) {
-    return [
-      `exit_code: ${record.exit_code ?? "unknown"}`,
-      `stdout:\n${record.stdout ?? ""}`,
-      `stderr:\n${record.stderr ?? ""}`,
-    ].join("\n");
-  }
-  return stringifyValue(result);
 }
 
 export function pickEnv(
