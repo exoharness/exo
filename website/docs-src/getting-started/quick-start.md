@@ -13,7 +13,7 @@ primitives the setup script drives.
 ## 1. Store a secret
 
 ```bash
-exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com
+exo vault secret create global openai --token-env OPENAI_API_KEY --allow-origin https://api.openai.com
 ```
 
 This stores your API key in the global vault, encrypted using the configured secret backend.

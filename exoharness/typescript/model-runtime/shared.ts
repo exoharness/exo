@@ -9,7 +9,6 @@ import {
   type Message,
   type PendingToolCall,
   type SandboxProcess,
-  type Secret,
   type TurnContext,
 } from "@exo/harness";
 import {
@@ -259,26 +258,16 @@ export async function resolveModel(
         : secret.id.replaceAll("-", "").toLowerCase() === id,
     );
     if (!metadata) continue;
-    let secret: Secret | null;
-    if (metadata.target) {
-      const origin = new URL(context.agentConfig.baseUrl ?? defaultBaseUrl)
-        .origin;
-      if (
-        metadata.target.type !== "http" ||
-        metadata.target.origin !== origin
-      ) {
-        throw new Error(
-          `model credential ${name} is not authorized for ${origin}`,
-        );
-      }
-      secret = (await vault.resolveSecret(metadata.id, metadata.target)).secret;
-    } else {
-      secret = await vault.getSecret(metadata.id);
-    }
-    if (!secret || secret.type !== "key") {
-      throw new Error(`model credential ${name} must be an API key`);
-    }
-    return { ...resolveSandboxModel(context), apiKey: secret.value };
+    const origin = new URL(context.agentConfig.baseUrl ?? defaultBaseUrl)
+      .origin;
+    const { secret } = await vault.resolveSecret(metadata.id, {
+      type: "origin",
+      origin,
+    });
+    return {
+      ...resolveSandboxModel(context),
+      apiKey: secret.type === "key" ? secret.value : secret.accessToken,
+    };
   }
   throw new Error(
     `model credential ${name} was not found in the selected vaults`,

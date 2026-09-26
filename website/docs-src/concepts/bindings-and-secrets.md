@@ -9,7 +9,7 @@ Vaults store API keys and OAuth tokens. Agent specs refer to their names or IDs;
 the spec contains no secret values.
 
 ```bash
-exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com
+exo vault secret create global openai --token-env OPENAI_API_KEY --allow-origin https://api.openai.com
 ```
 
 Select the model and credential in the agent spec:

@@ -44,7 +44,7 @@ as `egress.json` (the flag also accepts `.yaml`, `.yml`, and `.toml`):
 
 ```bash
 exo vault secret create global notion \
-  --http-origin https://api.notion.com --token-env NOTION_API_KEY
+  --allow-origin https://api.notion.com --token-env NOTION_API_KEY
 exo agent run --agent-file agent.md --egress-policy egress.json \
   --environment-file exoharness/examples/environments/codex-firecracker.yaml
 ```
@@ -67,7 +67,7 @@ removing a secret or vault fails the request, even if another vault has a secret
 with the same name. Recreating a secret requires a new sandbox selection.
 
 HTTP credentials authorize one exact HTTPS origin, including its port. The
-`--http-origin` grant allows header substitution on requests to that origin;
+`--allow-origin` grant allows header substitution on requests to that origin;
 MCP credentials authorize only their exact MCP endpoint, including path and query.
 Keys without a destination do not grant HTTP access.
 Sandbox and credential host policies still apply. The same policy flag
@@ -93,13 +93,13 @@ config:
 ```
 
 ```bash
-exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com
+exo vault secret create global openai --token-env OPENAI_API_KEY --allow-origin https://api.openai.com
 ```
 
 For an existing key, add the grant without re-entering its value:
 
 ```bash
-exo vault secret update global openai --http-origin https://api.openai.com
+exo vault secret update global openai --allow-origin https://api.openai.com
 ```
 
 The wrapper receives the model and optional `config.base_url`. The sandbox
@@ -185,7 +185,7 @@ includes the sandbox ID and `ResourceScope`; destination includes the host,
 port, method, and normalized path/query. The local resolver loads the saved
 vault/secret reference and checks the current scope before each use.
 `egress::vault::resolve_credential` resolves that reference through `VaultHandle`
-with the matching HTTP or MCP target. Hosted resolvers can use the same helper with their
+with a credential policy permitting the requested URL. Hosted resolvers can use the same helper with their
 authenticated vault context. The local CLI assumes one user owns its vault
 catalog. Resolver failures are sanitized
 before returning them to the guest.

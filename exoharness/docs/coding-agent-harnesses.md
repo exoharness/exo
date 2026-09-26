@@ -52,7 +52,7 @@ its context-size estimates are excluded from token and cost totals.
 Register an OpenAI model:
 
 ```bash
-./target/debug/exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com
+./target/debug/exo vault secret create global openai --token-env OPENAI_API_KEY --allow-origin https://api.openai.com
 ```
 
 Build the sandbox image:
@@ -89,7 +89,7 @@ EOF
 Register an Anthropic model:
 
 ```bash
-./target/debug/exo vault secret create global anthropic --token-env ANTHROPIC_API_KEY --http-origin https://api.anthropic.com
+./target/debug/exo vault secret create global anthropic --token-env ANTHROPIC_API_KEY --allow-origin https://api.anthropic.com
 ```
 
 Build the sandbox image:
@@ -167,7 +167,7 @@ Register a model Pi supports. Pi reads the provider key from the sandbox
 environment, so the same variable has to be set where exo runs:
 
 ```bash
-./target/debug/exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com
+./target/debug/exo vault secret create global openai --token-env OPENAI_API_KEY --allow-origin https://api.openai.com
 ```
 
 Build the sandbox image:

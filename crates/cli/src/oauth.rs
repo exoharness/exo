@@ -74,6 +74,7 @@ pub(crate) async fn authorize_with<F, Fut>(
     mut manager: AuthorizationManager,
     scopes: &[String],
     client_id: Option<&str>,
+    client_secret: Option<&str>,
     launch: F,
     timeout: Duration,
 ) -> Result<Grant>
@@ -91,6 +92,9 @@ where
         .with_scopes(scopes.to_vec());
     if let Some(client_id) = client_id {
         request = request.with_preregistered_client(client_id);
+    }
+    if let Some(secret) = client_secret {
+        request = request.with_client_secret(secret);
     }
     let session = AuthorizationSession::new(manager, request)
         .await

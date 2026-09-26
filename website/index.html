@@ -1139,7 +1139,7 @@
         <p class="spaced">Store a vault secret, create an agent, then chat:</p>
         <pre
           class="code-block"
-        ><code>./target/debug/exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com
+        ><code>./target/debug/exo vault secret create global openai --token-env OPENAI_API_KEY --allow-origin https://api.openai.com
 ./target/debug/exo agent create assistant --file exoharness/examples/managed-agents/assistant.md
 ./target/debug/exo agent run --agent assistant</code></pre>
         <p class="spaced">Choose a harness when creating an agent:</p>

@@ -1,5 +1,5 @@
 use exoharness::vault::{
-    ResolvedSecret, SecretTarget, VaultContext, VaultHandle, VaultId, VaultRecord,
+    CredentialDestination, ResolvedSecret, VaultContext, VaultHandle, VaultId, VaultRecord,
 };
 use std::collections::VecDeque;
 use std::ops::Bound;
@@ -1303,7 +1303,11 @@ fn assistant_message(text: &str) -> Message {
 fn test_secret_metadata() -> SecretMetadata {
     let id = "01900000-0000-7000-8000-000000000001".parse().unwrap();
     SecretMetadata {
-        target: None,
+        policy: Some(
+            CredentialDestination::origin("https://api.openai.com")
+                .unwrap()
+                .into(),
+        ),
         revision: 1,
         id,
         r#type: SecretType::Key,
@@ -1377,9 +1381,19 @@ impl VaultHandle for FakeVault {
     async fn resolve_secret(
         &self,
         _id: &exoharness::SecretId,
-        _target: &SecretTarget,
+        target: &CredentialDestination,
     ) -> Result<ResolvedSecret> {
-        Err(anyhow!("not implemented"))
+        let metadata = test_secret_metadata();
+        anyhow::ensure!(
+            metadata.policy.as_ref().unwrap().permits(target),
+            "unauthorized destination"
+        );
+        Ok(ResolvedSecret {
+            revision: metadata.revision,
+            secret: Secret::Key {
+                value: "test-key".into(),
+            },
+        })
     }
 }
 

@@ -1,7 +1,8 @@
 use crate::Secret;
 use anyhow::{Context, Result, bail};
 use oauth2::{
-    AuthType, ClientId, RefreshToken, Scope, TokenResponse, TokenUrl, basic::BasicClient,
+    AuthType, ClientId, ClientSecret, RefreshToken, Scope, TokenResponse, TokenUrl,
+    basic::BasicClient,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -31,9 +32,16 @@ pub(super) async fn refresh(secret: Secret) -> Result<Secret> {
         refresh_token
             .context("OAuth refresh credentials are missing; re-authorize this credential")?,
     );
-    let client = BasicClient::new(ClientId::new(config.client_id.clone()))
-        .set_auth_type(AuthType::RequestBody)
+    let mut client = BasicClient::new(ClientId::new(config.client_id.clone()))
+        .set_auth_type(if config.client_secret_basic {
+            AuthType::BasicAuth
+        } else {
+            AuthType::RequestBody
+        })
         .set_token_uri(TokenUrl::new(config.token_endpoint.clone())?);
+    if let Some(secret) = &config.client_secret {
+        client = client.set_client_secret(ClientSecret::new(secret.clone()));
+    }
     let http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))

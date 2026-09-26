@@ -4,7 +4,7 @@ use anyhow::Context;
 use exoharness::{
     BasicExoHarness, BasicExoHarnessConfig, FileSystemMount, FileSystemMountMode, NewThreadRequest,
     PutSecretRequest, Secret, WriteArtifactRequest,
-    vault::{SecretTarget, global_vault},
+    vault::{CredentialDestination, global_vault},
 };
 use tempfile::TempDir;
 
@@ -95,7 +95,7 @@ async fn mcp_authentication_errors_identify_the_selected_vaults_and_secret() -> 
     let secret = vault
         .put_secret(PutSecretRequest {
             name: "github-token".into(),
-            target: Some(SecretTarget::mcp(&url)?),
+            policy: Some((CredentialDestination::url(&url)?).into()),
             secret: Secret::Key {
                 value: "invalid-github-token".into(),
             },
@@ -105,10 +105,9 @@ async fn mcp_authentication_errors_identify_the_selected_vaults_and_secret() -> 
         .await?
         .put_secret(PutSecretRequest {
             name: "github".into(),
-            target: Some(SecretTarget::mcp(&format!(
-                "{}/different-mcp",
-                server.uri()
-            ))?),
+            policy: Some(
+                (CredentialDestination::url(&format!("{}/different-mcp", server.uri()))?).into(),
+            ),
             secret: Secret::Key {
                 value: "wrong-destination-token".into(),
             },
@@ -417,7 +416,7 @@ async fn git_resources_require_a_selected_vault_and_matching_origin() -> Result<
     vault
         .put_secret(PutSecretRequest {
             name: "github".into(),
-            target: Some(SecretTarget::http("https://different.example")?),
+            policy: Some((CredentialDestination::origin("https://different.example")?).into()),
             secret: Secret::Key {
                 value: "must-not-leak".into(),
             },

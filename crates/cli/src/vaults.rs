@@ -1,73 +1,92 @@
-use oauth2::TokenResponse;
-use rmcp::transport::auth::AuthorizationManager;
-use std::{collections::HashMap, time::Duration};
+mod login;
 
-use anyhow::{Context, Result, bail};
-use clap::Subcommand;
+use anyhow::{Context, Result, bail, ensure};
+use clap::{Args, Subcommand};
 use exo_managed_agents::vaults::find_vault;
-use exoharness::vault::SecretTarget;
-use exoharness::{ExoHarness, PutSecretRequest, Secret, SecretMetadata};
+use exoharness::{
+    CredentialDestination, CredentialPolicy, ExoHarness, PutSecretRequest, Secret, SecretMetadata,
+};
+use std::{collections::HashMap, path::PathBuf};
 
 #[derive(Debug, Subcommand)]
 pub enum VaultCommands {
-    Create {
-        name: String,
-    },
-    List,
+    /// Create a vault.
+    Create { name: String },
+    /// List vaults, or the secrets inside a vault.
+    List { vault: Option<String> },
+    /// Show vault or secret metadata (never the credential value).
     Get {
         vault: String,
+        secret: Option<String>,
     },
-    Delete {
-        vault: String,
-    },
+    /// Delete a vault and its secrets.
+    Delete { vault: String },
+    /// Log in and save a credential in a vault.
+    Login(login::LoginArgs),
+    /// Import, update, or delete credentials in a vault.
     Secret {
         #[command(subcommand)]
         command: SecretCommands,
     },
 }
 
+#[derive(Debug, Args, Default)]
+pub(super) struct PolicyArgs {
+    /// Permit credential use on this HTTPS origin (HTTP allowed on loopback). Repeat for multiple origins.
+    #[arg(long)]
+    allow_origin: Vec<String>,
+    /// Permit credential use at this exact HTTP(S) resource URL. Repeat as needed.
+    #[arg(long)]
+    allow_url: Vec<String>,
+    /// Credential policy file (JSON, YAML, or TOML).
+    #[arg(long, conflicts_with_all = ["allow_origin", "allow_url"])]
+    policy: Option<PathBuf>,
+}
+
+impl PolicyArgs {
+    fn resolve(&self) -> Result<Option<CredentialPolicy>> {
+        if let Some(path) = &self.policy {
+            let policy: CredentialPolicy = crate::read_config_file(path)?;
+            return Ok(Some(policy.normalized()?));
+        }
+        let destinations = self
+            .allow_origin
+            .iter()
+            .map(|value| CredentialDestination::origin(value))
+            .chain(
+                self.allow_url
+                    .iter()
+                    .map(|value| CredentialDestination::url(value)),
+            )
+            .collect::<Result<Vec<_>>>()?;
+        Ok((!destinations.is_empty()).then(|| CredentialPolicy::destinations(destinations)))
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum SecretCommands {
+    /// Import a token from an environment variable.
     Create {
         vault: String,
         name: String,
-        /// MCP server URL; omit --token-env to log in with OAuth.
-        #[arg(long, conflicts_with = "http_origin")]
-        mcp_server_url: Option<String>,
-        /// Authorize this token for an HTTPS origin, e.g. https://github.com for Git.
-        #[arg(long)]
-        http_origin: Option<String>,
+        #[command(flatten)]
+        policy: PolicyArgs,
         /// Read the secret value from this environment variable.
         #[arg(long, value_parser = crate::parse_env_var_name)]
-        token_env: Option<String>,
-        /// Print the OAuth login URL without opening a browser.
-        #[arg(long, conflicts_with = "token_env")]
-        no_browser: bool,
+        token_env: String,
     },
-    List {
-        vault: String,
-    },
-    Get {
-        vault: String,
-        secret: String,
-    },
+    /// Rotate a token or replace its policy; omitted fields are preserved.
     Update {
         vault: String,
         secret: String,
-        /// Replace the allowed HTTPS origin, preserving the token unless --token-env is set.
-        #[arg(long, conflicts_with = "no_browser")]
-        http_origin: Option<String>,
-        /// Read the secret value from this environment variable.
+        #[command(flatten)]
+        policy: PolicyArgs,
+        /// Read the new secret value from this environment variable.
         #[arg(long, value_parser = crate::parse_env_var_name)]
         token_env: Option<String>,
-        /// Print the OAuth login URL without opening a browser.
-        #[arg(long, conflicts_with = "token_env")]
-        no_browser: bool,
     },
-    Delete {
-        vault: String,
-        secret: String,
-    },
+    /// Delete a secret from the vault.
+    Delete { vault: String, secret: String },
 }
 
 pub async fn run(
@@ -84,22 +103,72 @@ pub async fn run(
                 vault.record().id
             );
         }
-        VaultCommands::List => {
-            crate::print_table(
-                &["VAULT", "ID"],
-                store
-                    .list_vaults()
-                    .await?
-                    .into_iter()
-                    .map(|v| vec![v.record().name.clone(), v.record().id.to_string()])
-                    .collect(),
-            )?;
+        VaultCommands::List { vault: None } => {
+            let mut rows = Vec::new();
+            for vault in store.list_vaults().await? {
+                rows.push(vec![
+                    vault.record().name.clone(),
+                    vault.list_secrets().await?.len().to_string(),
+                    vault.record().id.to_string(),
+                ]);
+            }
+            crate::print_table(&["VAULT", "SECRETS", "ID"], rows)?;
+            println!("Use `exo vault list <vault>` to see its secrets.");
         }
-        VaultCommands::Get { vault } => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(find_vault(store, vault).await?.record())?
-            );
+        VaultCommands::List { vault: Some(vault) } => {
+            let vault = find_vault(store, vault).await?;
+            println!("Secrets in vault {}:", vault.record().name);
+            let secrets = vault.list_secrets().await?;
+            if secrets.is_empty() {
+                println!(
+                    "No secrets. Use `exo vault login {}` or `exo vault secret create {}`.",
+                    vault.record().name,
+                    vault.record().name
+                );
+            } else {
+                crate::print_table(
+                    &["SECRET", "TYPE", "DESTINATIONS", "ID"],
+                    secrets
+                        .into_iter()
+                        .map(|secret| {
+                            let destinations = secret
+                                .policy
+                                .map(|policy| match policy.networking {
+                                    exoharness::CredentialNetworkPolicy::Limited {
+                                        allowed_hosts,
+                                    } => allowed_hosts.join(", "),
+                                    exoharness::CredentialNetworkPolicy::Destinations {
+                                        allowed_destinations,
+                                    } => allowed_destinations
+                                        .iter()
+                                        .map(CredentialDestination::as_str)
+                                        .collect::<Vec<_>>()
+                                        .join(", "),
+                                })
+                                .unwrap_or_else(|| "none".into());
+                            vec![
+                                secret.name,
+                                match secret.r#type {
+                                    exoharness::SecretType::Key => "token",
+                                    exoharness::SecretType::Oauth => "oauth",
+                                }
+                                .into(),
+                                destinations,
+                                secret.id.to_string(),
+                            ]
+                        })
+                        .collect(),
+                )?;
+            }
+        }
+        VaultCommands::Get { vault, secret } => {
+            let vault = find_vault(store, vault).await?;
+            let json = if let Some(secret) = secret {
+                serde_json::to_string_pretty(&find_secret(vault.list_secrets().await?, secret)?)?
+            } else {
+                serde_json::to_string_pretty(vault.record())?
+            };
+            println!("{json}");
         }
         VaultCommands::Delete { vault } => {
             let vault = find_vault(store, vault).await?;
@@ -110,11 +179,10 @@ pub async fn run(
                 vault.record().id
             );
         }
+        VaultCommands::Login(args) => login::run(store, args, env).await?,
         VaultCommands::Secret { command } => {
             let vault = match command {
                 SecretCommands::Create { vault, .. }
-                | SecretCommands::List { vault }
-                | SecretCommands::Get { vault, .. }
                 | SecretCommands::Update { vault, .. }
                 | SecretCommands::Delete { vault, .. } => vault,
             };
@@ -122,111 +190,50 @@ pub async fn run(
             match command {
                 SecretCommands::Create {
                     name,
-                    mcp_server_url,
-                    http_origin,
+                    policy,
                     token_env,
-                    no_browser,
                     ..
                 } => {
-                    let target = mcp_server_url
-                        .as_deref()
-                        .map(SecretTarget::mcp)
-                        .transpose()?
-                        .or(http_origin.as_deref().map(SecretTarget::http).transpose()?);
-                    if vault.list_secrets().await?.iter().any(|secret| {
-                        secret.name == *name
-                            || matches!(target, Some(SecretTarget::Mcp { .. }))
-                                && secret.target == target
-                    }) {
-                        bail!(
-                            "a secret with this name or MCP destination already exists; use exo vault secret update"
-                        );
-                    }
-                    let secret =
-                        credential(token_env.as_deref(), target.as_ref(), *no_browser, env).await?;
-                    let secret_id = vault
+                    let id = vault
                         .put_secret(PutSecretRequest {
                             name: name.clone(),
-                            target,
-                            secret,
+                            policy: policy.resolve()?,
+                            secret: token(token_env, env)?,
                         })
                         .await?;
-                    println!("created secret {name} ({secret_id})");
+                    println!("created secret {name} ({id})");
                 }
-                SecretCommands::List { .. } => {
-                    crate::print_table(
-                        &["SECRET", "ID", "TYPE", "DESTINATION", "REVISION"],
-                        vault
-                            .list_secrets()
-                            .await?
-                            .into_iter()
-                            .map(|c| {
-                                let server_url = match c.target {
-                                    Some(SecretTarget::Mcp { server_url }) => server_url,
-                                    Some(SecretTarget::Http { origin }) => origin,
-                                    None => String::new(),
-                                };
-                                vec![
-                                    c.name,
-                                    c.id.to_string(),
-                                    match c.r#type {
-                                        exoharness::SecretType::Key => "key",
-                                        exoharness::SecretType::Oauth => "oauth",
-                                    }
-                                    .into(),
-                                    server_url,
-                                    c.revision.to_string(),
-                                ]
-                            })
-                            .collect(),
-                    )?;
-                }
-                SecretCommands::Get { secret, .. }
-                | SecretCommands::Update { secret, .. }
-                | SecretCommands::Delete { secret, .. } => {
+                SecretCommands::Update {
+                    secret,
+                    policy,
+                    token_env,
+                    ..
+                } => {
                     let record = find_secret(vault.list_secrets().await?, secret)?;
-                    match command {
-                        SecretCommands::Get { .. } => {
-                            println!("{}", serde_json::to_string_pretty(&record)?)
-                        }
-                        SecretCommands::Update {
-                            token_env,
-                            http_origin,
-                            no_browser,
-                            ..
-                        } => {
-                            let target =
-                                http_origin.as_deref().map(SecretTarget::http).transpose()?;
-                            let secret = if target.is_some() && token_env.is_none() {
-                                None
-                            } else {
-                                Some(
-                                    credential(
-                                        token_env.as_deref(),
-                                        target.as_ref().or(record.target.as_ref()),
-                                        *no_browser,
-                                        env,
-                                    )
-                                    .await?,
-                                )
-                            };
-                            let record = vault
-                                .update_secret(
-                                    &record.id,
-                                    exoharness::UpdateSecretRequest { secret, target },
-                                )
-                                .await?;
-                            println!(
-                                "updated secret {} ({}) to revision {}",
-                                record.name, record.id, record.revision
-                            );
-                        }
-                        SecretCommands::Delete { .. } => {
-                            vault.delete_secret(&record.id).await?;
-                            println!("deleted secret {} ({})", record.name, record.id);
-                        }
-                        _ => unreachable!(),
-                    }
+                    let policy = policy.resolve()?;
+                    let secret = token_env
+                        .as_deref()
+                        .map(|variable| token(variable, env))
+                        .transpose()?;
+                    ensure!(
+                        secret.is_some() || policy.is_some(),
+                        "provide --token-env or a policy to update; use `exo vault login --replace` to log in again"
+                    );
+                    let record = vault
+                        .update_secret(
+                            &record.id,
+                            exoharness::UpdateSecretRequest { secret, policy },
+                        )
+                        .await?;
+                    println!(
+                        "updated secret {} ({}) to revision {}",
+                        record.name, record.id, record.revision
+                    );
+                }
+                SecretCommands::Delete { secret, .. } => {
+                    let record = find_secret(vault.list_secrets().await?, secret)?;
+                    vault.delete_secret(&record.id).await?;
+                    println!("deleted secret {} ({})", record.name, record.id);
                 }
             }
         }
@@ -252,63 +259,4 @@ fn find_secret(secrets: Vec<SecretMetadata>, reference: &str) -> Result<SecretMe
         bail!("ambiguous secret reference: {reference}; use its id");
     }
     Ok(record)
-}
-
-async fn credential(
-    token_env: Option<&str>,
-    target: Option<&SecretTarget>,
-    no_browser: bool,
-    env: &HashMap<String, String>,
-) -> Result<Secret> {
-    if let Some(variable) = token_env {
-        return token(variable, env);
-    }
-    let Some(SecretTarget::Mcp { server_url }) = target else {
-        bail!("OAuth login requires an MCP destination; provide --token-env for other secrets");
-    };
-    let mut manager = AuthorizationManager::new(server_url.as_str()).await?;
-    let challenge = exo_mcp::probe_auth_challenge(server_url).await?;
-    let resolution = manager
-        .resolve_metadata_from_challenge(challenge.as_deref())
-        .await?;
-    if !resolution.source.is_discovered() {
-        bail!("MCP server does not advertise OAuth; provide a token with --token-env");
-    }
-    let token_endpoint = resolution.metadata.token_endpoint.clone();
-    manager.set_metadata(resolution.metadata);
-    let grant = crate::oauth::authorize_with(
-        manager,
-        &[],
-        None,
-        |url| crate::oauth::open_browser(url, no_browser),
-        Duration::from_secs(300),
-    )
-    .await?;
-    let response = grant
-        .credentials
-        .token_response
-        .context("OAuth token missing")?;
-    let expires_at = response
-        .expires_in()
-        .map(|ttl| {
-            grant
-                .credentials
-                .token_received_at
-                .context("OAuth receipt time missing")
-                .map(|time| time.saturating_add(ttl.as_secs()))
-        })
-        .transpose()?;
-    let secret = Secret::Oauth {
-        access_token: response.access_token().secret().clone(),
-        refresh_token: response.refresh_token().map(|token| token.secret().clone()),
-        expires_at,
-        refresh: Some(exoharness::vault::OAuthRefresh {
-            token_endpoint,
-            client_id: grant.credentials.client_id,
-            resource: grant.resource,
-            scopes: grant.credentials.granted_scopes,
-        }),
-    };
-    exoharness::vault::validate_secret(&secret, target)?;
-    Ok(secret)
 }

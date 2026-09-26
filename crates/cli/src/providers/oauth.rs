@@ -340,6 +340,7 @@ where
         manager(profile).await?,
         &profile.scopes,
         profile.client_id.as_deref(),
+        None,
         launch,
         timeout,
     )

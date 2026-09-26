@@ -55,7 +55,7 @@ async fn harness(root: &Path, model: Arc<RecordingModel>) -> Result<Arc<Runtime>
         vault
             .put_secret(exoharness::PutSecretRequest {
                 name: "test-openai".into(),
-                target: None,
+                policy: None,
                 secret: exoharness::Secret::Key {
                     value: "fixture-key".into(),
                 },

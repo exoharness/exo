@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::vault::{SecretTarget, VaultId, VaultRecord};
+use crate::vault::{CredentialDestination, VaultId, VaultRecord};
 use crate::{
     AddEventsRequest, AddEventsResult, AgentId, AgentRecord, Artifact, ArtifactVersion,
     AttachSandboxRequest, BeginTurnRequest, Binding, BindingId, BindingRecord,
@@ -111,7 +111,7 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         secret: Option<Secret>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        target: Option<SecretTarget>,
+        policy: Option<crate::CredentialPolicy>,
     },
     VaultDeleteSecret {
         #[serde(default)]
@@ -124,14 +124,14 @@ pub enum Request {
         scope: ResourceScope,
         vault_id: VaultId,
         secret_id: SecretId,
-        target: SecretTarget,
+        target: CredentialDestination,
     },
     VaultRefreshSecret {
         #[serde(default)]
         scope: ResourceScope,
         vault_id: VaultId,
         secret_id: SecretId,
-        target: SecretTarget,
+        target: CredentialDestination,
         rejected_revision: u64,
     },
     ListAgents,

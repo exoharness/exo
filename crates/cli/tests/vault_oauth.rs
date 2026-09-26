@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use exo_managed_agents::vaults::{VaultMcpCredentials, VaultSelection};
 use exo_mcp::{McpServerConfig, McpToolSet};
-use exoharness::vault::{SecretTarget, VaultHandle, global_vault};
+use exoharness::vault::{CredentialDestination, VaultHandle, global_vault};
 use exoharness::{
     BasicExoHarness, BasicExoHarnessConfig, PutSecretRequest, SandboxBackendRegistration,
     SandboxProvider, Secret, SecretBackendChoice,
@@ -128,27 +128,19 @@ impl Fixture {
 
     async fn login(&self, update: bool, denied: bool) -> Result<()> {
         let url = format!("{}/mcp/", self.server.uri());
-        let args = if update {
-            vec![
-                "vault",
-                "secret",
-                "update",
-                "global",
-                "notion",
-                "--no-browser",
-            ]
-        } else {
-            vec![
-                "vault",
-                "secret",
-                "create",
-                "global",
-                "notion",
-                "--mcp-server-url",
-                &url,
-                "--no-browser",
-            ]
-        };
+        let mut args = vec![
+            "vault",
+            "login",
+            "global",
+            "--name",
+            "notion",
+            "--url",
+            &url,
+            "--no-browser",
+        ];
+        if update {
+            args.push("--replace");
+        }
         let mut child = self
             .command(&args)
             .stdout(Stdio::piped())
@@ -239,8 +231,8 @@ impl Fixture {
         Ok((tools, selection))
     }
 
-    fn target(&self) -> Result<SecretTarget> {
-        SecretTarget::mcp(&format!("{}/mcp/", self.server.uri()))
+    fn target(&self) -> Result<CredentialDestination> {
+        CredentialDestination::url(&format!("{}/mcp/", self.server.uri()))
     }
 }
 
@@ -280,9 +272,7 @@ async fn vault_cli_oauth_survives_restart_refreshes_live_mcp_and_revokes() -> Re
     let f = Fixture::new().await?;
     f.login(false, false).await?;
     let id = f.secret_id().await?;
-    let metadata = f
-        .cli(&["vault", "secret", "get", "global", "notion"])
-        .await?;
+    let metadata = f.cli(&["vault", "get", "global", "notion"]).await?;
     assert!(metadata.contains("oauth"));
     for text in [
         metadata,
@@ -334,7 +324,10 @@ async fn vault_refresh_is_coordinated_across_reopened_stores_and_rejects_wrong_d
     let other = global_vault(&reopened).await?;
     assert!(
         other
-            .resolve_secret(&id, &SecretTarget::mcp("https://other.example/mcp/")?)
+            .resolve_secret(
+                &id,
+                &CredentialDestination::url("https://other.example/mcp/")?
+            )
             .await
             .is_err()
     );
@@ -366,7 +359,7 @@ async fn failed_authorization_preserves_existing_vault_entry() -> Result<()> {
         .vault
         .put_secret(PutSecretRequest {
             name: "notion".into(),
-            target: Some(f.target()?),
+            policy: Some((f.target()?).into()),
             secret: Secret::Key {
                 value: "existing-key".into(),
             },
@@ -490,7 +483,11 @@ async fn rejected_tokens_refresh_once_without_reinitializing_the_mcp_session() -
             let vault = global_vault(&remote).await?;
             assert!(
                 vault
-                    .refresh_secret(&id, &SecretTarget::mcp("https://other.example/mcp/")?, 1)
+                    .refresh_secret(
+                        &id,
+                        &CredentialDestination::url("https://other.example/mcp/")?,
+                        1
+                    )
                     .await
                     .is_err()
             );
@@ -641,7 +638,7 @@ async fn concurrent_rejections_share_refresh_and_recheck_destination() -> Result
         other
             .refresh_secret(
                 &id,
-                &SecretTarget::mcp("https://other.example/mcp/")?,
+                &CredentialDestination::url("https://other.example/mcp/")?,
                 revision
             )
             .await
@@ -801,7 +798,7 @@ async fn chat_vault_smoke_restart_second_vault_rotation_revocation_and_public_mc
             "create",
             "second",
             "workspace",
-            "--mcp-server-url",
+            "--allow-url",
             &url,
             "--token-env",
             "MCP_TOKEN",
@@ -936,5 +933,190 @@ async fn chat_vault_smoke_restart_second_vault_rotation_revocation_and_public_mc
     )?;
     f.cli(&["agent", "delete", "vault-smoke"]).await?;
     f.cli(&["vault", "delete", "second"]).await?;
+    Ok(())
+}
+
+#[actix_web::test]
+async fn device_login_preserves_oauth_refresh_and_policy_over_http() -> Result<()> {
+    let f = Fixture::new().await?;
+    let device_url = format!("{}/device", f.server.uri());
+    let token_url = format!("{}/device-token", f.server.uri());
+    Mock::given(path("/device")).and(body_string_contains("client_id=custom-client"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "device_code": "device-secret", "user_code": "ABCD-EFGH", "verification_uri": format!("{}/verify", f.server.uri()), "expires_in": 600, "interval": 1
+        }))).mount(&f.server).await;
+    Mock::given(path("/device-token"))
+        .and(body_string_contains("device_code=device-secret"))
+        .respond_with(token("device-access", Some("device-refresh")))
+        .expect(2)
+        .mount(&f.server)
+        .await;
+    let args = vec![
+        "vault",
+        "login",
+        "global",
+        "--preset",
+        "github",
+        "--client-id",
+        "custom-client",
+        "--device-url",
+        &device_url,
+        "--token-url",
+        &token_url,
+        "--no-browser",
+    ];
+    let output = f.cli(&args).await?;
+    assert!(output.contains("ABCD-EFGH") && output.contains("saved secret github"));
+    assert!(!output.contains("device-access") && !output.contains("device-secret"));
+    let metadata = f
+        .vault
+        .list_secrets()
+        .await?
+        .into_iter()
+        .find(|s| s.name == "github")
+        .context("github credential")?;
+    assert_eq!(metadata.r#type, exoharness::SecretType::Oauth);
+    for url in ["https://github.com", "https://api.github.com"] {
+        assert!(
+            metadata
+                .policy
+                .as_ref()
+                .unwrap()
+                .permits(&CredentialDestination::origin(url)?)
+        );
+    }
+    let duplicate = f
+        .command(&["vault", "login", "global", "--preset", "github"])
+        .output()
+        .await?;
+    assert!(!duplicate.status.success());
+    assert!(String::from_utf8(duplicate.stderr)?.contains("--replace"));
+    f.expire(&metadata.id).await?;
+    Mock::given(path("/device-token"))
+        .and(body_string_contains("grant_type=refresh_token"))
+        .and(body_string_contains("client_id=custom-client"))
+        .and(body_string_contains("refresh_token=device-refresh"))
+        .respond_with(token("device-renewed", Some("device-rotated")))
+        .expect(1)
+        .mount(&f.server)
+        .await;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let remote =
+        exoharness::HttpExoHarness::new(format!("http://{}", listener.local_addr()?), None)?;
+    let server = actix_web::rt::spawn(exoharness::serve_exoharness_http_listener(
+        listener,
+        Arc::new(BasicExoHarness::new(config(&f.temp)).await?),
+    ));
+    let vault = global_vault(&remote).await?;
+    let destination = CredentialDestination::url("https://api.github.com/user")?;
+    let (a, b) = tokio::try_join!(
+        vault.resolve_secret(&metadata.id, &destination),
+        vault.resolve_secret(&metadata.id, &destination)
+    )?;
+    assert_eq!(a.revision, b.revision);
+    assert!(
+        matches!(a.secret, Secret::Oauth { access_token, refresh_token: Some(refresh), .. } if access_token == "device-renewed" && refresh == "device-rotated")
+    );
+    assert!(
+        vault
+            .resolve_secret(
+                &metadata.id,
+                &CredentialDestination::url("https://github.com:8443/repo")?
+            )
+            .await
+            .is_err()
+    );
+    f.cli(&[
+        "vault",
+        "secret",
+        "update",
+        "global",
+        "github",
+        "--allow-origin",
+        "https://github.com",
+    ])
+    .await?;
+    assert!(
+        vault
+            .resolve_secret(&metadata.id, &destination)
+            .await
+            .is_err()
+    );
+    vault
+        .resolve_secret(
+            &metadata.id,
+            &CredentialDestination::url("https://github.com/repo")?,
+        )
+        .await?;
+    let mut replacement = args.clone();
+    replacement.push("--replace");
+    f.cli(&replacement).await?;
+    let relogged = vault
+        .list_secrets()
+        .await?
+        .into_iter()
+        .find(|s| s.name == "github")
+        .unwrap();
+    assert_eq!(relogged.id, metadata.id);
+    assert!(!relogged.policy.unwrap().permits(&destination));
+    f.cli(&["vault", "secret", "delete", "global", "github"])
+        .await?;
+    assert!(
+        vault
+            .resolve_secret(&metadata.id, &destination)
+            .await
+            .is_err()
+    );
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn github_preset_imports_with_an_overridable_name_and_lists_vault_contents() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new().await?;
+    let executable = f.temp.path().join("gh");
+    std::fs::write(
+        &executable,
+        "#!/bin/sh\ncase \"$1 $2\" in\n  'auth status') exit 0 ;;\n  'auth token') printf 'fixture-github-token\\n' ;;\n  *) exit 1 ;;\nesac\n",
+    )?;
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+    for name in [None, Some("github-work")] {
+        let mut args = vec!["vault", "login", "global", "--preset", "github"];
+        if let Some(name) = name {
+            args.extend(["--name", name]);
+        }
+        let output = f.command(&args).env("PATH", f.temp.path()).output().await?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!String::from_utf8(output.stdout)?.contains("fixture-github-token"));
+    }
+    let listed = f.cli(&["vault", "list"]).await?;
+    assert!(listed.contains("VAULT") && listed.contains("SECRETS"));
+    let listed = f.cli(&["vault", "list", "global"]).await?;
+    assert!(listed.contains("Secrets in vault global:") && listed.contains("github-work"));
+    assert!(!listed.contains("fixture-github-token"));
+    let secrets = f.vault.list_secrets().await?;
+    assert_eq!(secrets.len(), 2);
+    assert!(
+        secrets
+            .iter()
+            .all(|s| s.r#type == exoharness::SecretType::Key)
+    );
+    let missing_name = f
+        .command(&[
+            "vault",
+            "login",
+            "global",
+            "--url",
+            "https://example.com/mcp",
+        ])
+        .output()
+        .await?;
+    assert!(!missing_name.status.success());
+    assert!(String::from_utf8(missing_name.stderr)?.contains("--name"));
     Ok(())
 }

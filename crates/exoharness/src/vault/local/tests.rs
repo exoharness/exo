@@ -9,11 +9,11 @@ fn key(value: &str) -> Secret {
         value: value.into(),
     }
 }
-fn request(name: &str, value: &str, target: Option<SecretTarget>) -> PutSecretRequest {
+fn request(name: &str, value: &str, target: Option<CredentialDestination>) -> PutSecretRequest {
     PutSecretRequest {
         name: name.into(),
         secret: key(value),
-        target,
+        policy: target.map(Into::into),
     }
 }
 
@@ -22,7 +22,7 @@ async fn vault_secrets_share_one_store_and_rotate_without_changing_id() -> Resul
     let temp = TempDir::new()?;
     let harness = BasicExoHarness::new(local_test_config(temp.path())).await?;
     let vault = harness.create_vault("alice").await?;
-    let target = SecretTarget::mcp("https://example.com/mcp/")?;
+    let target = CredentialDestination::url("https://example.com/mcp/")?;
     let id = vault
         .put_secret(request("github", "first-secret", Some(target.clone())))
         .await?;
@@ -218,7 +218,7 @@ async fn destination_checks_and_failed_updates_preserve_the_original_secret() ->
     let harness = BasicExoHarness::new(local_test_config(temp.path())).await?;
     let alice = harness.create_vault("alice").await?;
     let bob = harness.create_vault("bob").await?;
-    let target = SecretTarget::mcp("HTTPS://EXAMPLE.COM:443/mcp///?tenant=one")?;
+    let target = CredentialDestination::url("HTTPS://EXAMPLE.COM:443/mcp///?tenant=one")?;
     let id = alice
         .put_secret(request("github", "original-secret", Some(target.clone())))
         .await?;
@@ -234,7 +234,7 @@ async fn destination_checks_and_failed_updates_preserve_the_original_secret() ->
     ] {
         assert!(
             alice
-                .resolve_secret(&id, &SecretTarget::mcp(url)?)
+                .resolve_secret(&id, &CredentialDestination::url(url)?)
                 .await
                 .is_err()
         );
@@ -263,13 +263,13 @@ async fn metadata_tampering_cannot_redirect_secrets() -> Result<()> {
         .put_secret(request(
             "github",
             "secret",
-            Some(SecretTarget::mcp("https://example.com/mcp")?),
+            Some(CredentialDestination::url("https://example.com/mcp")?),
         ))
         .await?;
     let path = temp.path().join("vaults/vaults.json");
     let mut catalog: Catalog = serde_json::from_slice(&std::fs::read(&path)?)?;
-    let attacker = SecretTarget::mcp("https://attacker.example/mcp")?;
-    catalog.vaults[0].secrets[0].metadata.target = Some(attacker.clone());
+    let attacker = CredentialDestination::url("https://attacker.example/mcp")?;
+    catalog.vaults[0].secrets[0].metadata.policy = Some(attacker.clone().into());
     std::fs::write(path, serde_json::to_vec(&catalog)?)?;
     assert!(vault.resolve_secret(&id, &attacker).await.is_err());
     Ok(())
@@ -294,7 +294,7 @@ async fn legacy_secrets_move_into_global_vault_with_stable_ids() -> Result<()> {
         name: "provider".into(),
         r#type: SecretType::Key,
         created_at: Utc::now(),
-        target: None,
+        policy: None,
         revision: 1,
     };
     let path = temp.path().join("secrets").join(format!("{id}.json"));
@@ -365,9 +365,9 @@ async fn concurrent_writers_preserve_secrets_and_mounts_cannot_expose_the_store(
 #[test]
 fn mcp_url_normalization_preserves_the_destination() -> Result<()> {
     assert_eq!(
-        SecretTarget::mcp("HTTPS://EXAMPLE.COM:443/mcp///?a=1")?,
-        SecretTarget::Mcp {
-            server_url: "https://example.com/mcp///?a=1".into()
+        CredentialDestination::url("HTTPS://EXAMPLE.COM:443/mcp///?a=1")?,
+        CredentialDestination::Url {
+            url: "https://example.com/mcp///?a=1".into()
         }
     );
     for url in [
@@ -375,14 +375,14 @@ fn mcp_url_normalization_preserves_the_destination() -> Result<()> {
         "https://user:pass@example.com",
         "https://example.com/#fragment",
     ] {
-        assert!(SecretTarget::mcp(url).is_err());
+        assert!(CredentialDestination::url(url).is_err());
     }
     Ok(())
 }
 
 #[test]
 fn oauth_credentials_validate_tokens_and_refresh_destinations() -> Result<()> {
-    let target = SecretTarget::mcp("https://example.com/mcp")?;
+    let target = CredentialDestination::url("https://example.com/mcp")?;
     for (endpoint, allowed) in [
         ("https://auth.example/token", true),
         ("http://127.0.0.1/token", true),
@@ -397,6 +397,8 @@ fn oauth_credentials_validate_tokens_and_refresh_destinations() -> Result<()> {
             refresh_token: Some("test-refresh".into()),
             expires_at: Some(0),
             refresh: Some(OAuthRefresh {
+                client_secret: None,
+                client_secret_basic: false,
                 token_endpoint: endpoint.into(),
                 client_id: "client".into(),
                 resource: None,
@@ -404,12 +406,17 @@ fn oauth_credentials_validate_tokens_and_refresh_destinations() -> Result<()> {
             }),
         };
         assert_eq!(
-            validate_secret(&secret, Some(&target)).is_ok(),
+            validate_secret(&secret, Some(&target.clone().into())).is_ok(),
             allowed,
             "{endpoint}"
         );
-        assert!(
-            validate_secret(&secret, Some(&SecretTarget::http("https://example.com")?)).is_err()
+        assert_eq!(
+            validate_secret(
+                &secret,
+                Some(&CredentialDestination::origin("https://example.com")?.into())
+            )
+            .is_ok(),
+            allowed
         );
     }
     let old: Secret = serde_json::from_str(
@@ -423,7 +430,7 @@ fn oauth_credentials_validate_tokens_and_refresh_destinations() -> Result<()> {
             ..
         }
     ));
-    validate_secret(&old, Some(&target))?;
+    validate_secret(&old, Some(&target.clone().into()))?;
     Ok(())
 }
 
@@ -482,7 +489,7 @@ async fn failed_destination_update_preserves_encrypted_secret_and_metadata() -> 
     let temp = TempDir::new()?;
     let harness = BasicExoHarness::new(local_test_config(temp.path())).await?;
     let vault = harness.create_vault("test").await?;
-    let target = SecretTarget::mcp("https://example.com/mcp")?;
+    let target = CredentialDestination::url("https://example.com/mcp")?;
     vault
         .put_secret(request("mcp", "key", Some(target.clone())))
         .await?;
@@ -490,7 +497,10 @@ async fn failed_destination_update_preserves_encrypted_secret_and_metadata() -> 
     let before = vault.list_secrets().await?;
     for (target, value) in [
         (target, "valid"),
-        (SecretTarget::http("https://example.com")?, "invalid token"),
+        (
+            CredentialDestination::origin("https://example.com")?,
+            "invalid token",
+        ),
     ] {
         assert!(
             vault
@@ -498,7 +508,7 @@ async fn failed_destination_update_preserves_encrypted_secret_and_metadata() -> 
                     &id,
                     crate::UpdateSecretRequest {
                         secret: Some(key(value)),
-                        target: Some(target)
+                        policy: Some((target).into())
                     }
                 )
                 .await
@@ -507,8 +517,9 @@ async fn failed_destination_update_preserves_encrypted_secret_and_metadata() -> 
         assert_eq!(vault.list_secrets().await?, before);
         assert_eq!(vault.get_secret(&id).await?, Some(key("original")));
     }
-    let update: crate::UpdateSecretRequest =
-        serde_json::from_str(r#"{"target":{"type":"http","origin":"https://example.com"}}"#)?;
+    let update: crate::UpdateSecretRequest = serde_json::from_str(
+        r#"{"policy":{"networking":{"type":"destinations","allowed_destinations":[{"type":"origin","origin":"https://example.com"}]},"injection_location":{"header":true}}}"#,
+    )?;
     assert_eq!(update.secret, None);
     vault.update_secret(&id, update).await?;
     assert_eq!(vault.get_secret(&id).await?, Some(key("original")));

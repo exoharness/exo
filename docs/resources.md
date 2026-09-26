@@ -57,16 +57,16 @@ To use a vault credential instead, add `credential: github` to the resource and
 select a vault containing that secret:
 
 ```sh
-exo vault secret create personal github --http-origin https://github.com \
+exo vault secret create personal github --allow-origin https://github.com \
   --token-env GITHUB_TOKEN
 exo agent run --agent exo-dev --vault personal
 ```
 
 The credential must target the Git server's HTTPS origin. If you created the
-secret without `--http-origin`, update it without changing its ID:
+secret without `--allow-origin`, update it without changing its ID:
 
 ```sh
-exo vault secret update personal github --http-origin https://github.com
+exo vault secret update personal github --allow-origin https://github.com
 ```
 
 Preparation uses HTTP Basic authentication with username `x-access-token`,
@@ -75,7 +75,9 @@ host; they are not saved in Git configuration or copied into thread volumes.
 Caches are partitioned by URL, checkout and vault credential identity.
 Git commands inside the sandbox use a placeholder credential through Exo's
 egress proxy; the real credential stays outside the sandbox. GitHub resources
-also expose a placeholder as `GH_TOKEN` for `gh`. The credential's permissions
+also expose a placeholder as `GH_TOKEN` for `gh` when the credential policy
+permits `https://api.github.com`. `exo vault login personal --preset github`
+authorizes both GitHub origins. The credential's permissions
 control repository access; this does not add a separate Git push approval policy.
 
 ## Local sources

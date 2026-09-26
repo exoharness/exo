@@ -33,7 +33,8 @@ import {
   type SendRequest,
   type Secret,
   type SecretMetadata,
-  type SecretTarget,
+  type CredentialDestination,
+  type CredentialPolicy,
   type Vault,
   type VaultContext,
   type SecretReference,
@@ -181,6 +182,8 @@ type RawSecret =
       refresh?: {
         token_endpoint: string;
         client_id: string;
+        client_secret?: string | null;
+        client_secret_basic?: boolean;
         resource: string | null;
         scopes: string[];
       } | null;
@@ -191,12 +194,15 @@ interface RawVaultRecord {
   name: string;
   created_at: string;
 }
-type RawSecretTarget =
-  | { type: "mcp"; server_url: string }
-  | { type: "http"; origin: string };
+interface RawCredentialPolicy {
+  networking:
+    | { type: "limited"; allowed_hosts: string[] }
+    | { type: "destinations"; allowed_destinations: CredentialDestination[] };
+  injection_location: { header: boolean };
+}
 
 interface RawSecretMetadata {
-  target?: RawSecretTarget | null;
+  policy?: RawCredentialPolicy | null;
   revision: number;
   id: string;
   type: "key" | "oauth";
@@ -311,14 +317,19 @@ type RawExoRequest =
       type: "vault_put_secret";
       scope: RawResourceScope;
       vault_id: string;
-      request: { name: string; secret: RawSecret; target?: RawSecretTarget };
+      request: {
+        name: string;
+        secret: RawSecret;
+        policy?: RawCredentialPolicy;
+      };
     }
   | {
       type: "vault_update_secret";
       scope: RawResourceScope;
       vault_id: string;
       secret_id: string;
-      secret: RawSecret;
+      secret?: RawSecret;
+      policy?: RawCredentialPolicy;
     }
   | {
       type: "vault_delete_secret";
@@ -331,7 +342,7 @@ type RawExoRequest =
       scope: RawResourceScope;
       vault_id: string;
       secret_id: string;
-      target: RawSecretTarget;
+      target: CredentialDestination;
     }
   | { type: "list_agents" }
   | { type: "get_agent"; agent_id: string }
@@ -1047,10 +1058,7 @@ function toBinding(raw: RawBinding): Binding {
 function toSecretMetadata(raw: RawSecretMetadata): SecretMetadata {
   return {
     revision: raw.revision,
-    target:
-      raw.target?.type === "mcp"
-        ? { type: "mcp", serverUrl: raw.target.server_url }
-        : (raw.target ?? null),
+    policy: raw.policy ? toCredentialPolicy(raw.policy) : null,
     id: raw.id,
     type: raw.type,
     name: raw.name,
@@ -1074,6 +1082,8 @@ function toSecret(raw: RawSecret): Secret {
       ? {
           tokenEndpoint: raw.refresh.token_endpoint,
           clientId: raw.refresh.client_id,
+          clientSecret: raw.refresh.client_secret,
+          clientSecretBasic: raw.refresh.client_secret_basic,
           resource: raw.refresh.resource,
           scopes: raw.refresh.scopes,
         }
@@ -1081,10 +1091,30 @@ function toSecret(raw: RawSecret): Secret {
   };
 }
 
-function toRawSecretTarget(target: SecretTarget): RawSecretTarget {
-  return target.type === "mcp"
-    ? { type: "mcp", server_url: target.serverUrl }
-    : target;
+function toRawCredentialPolicy(policy: CredentialPolicy): RawCredentialPolicy {
+  return {
+    networking:
+      policy.networking.type === "limited"
+        ? { type: "limited", allowed_hosts: policy.networking.allowedHosts }
+        : {
+            type: "destinations",
+            allowed_destinations: policy.networking.allowedDestinations,
+          },
+    injection_location: policy.injectionLocation,
+  };
+}
+
+function toCredentialPolicy(policy: RawCredentialPolicy): CredentialPolicy {
+  return {
+    networking:
+      policy.networking.type === "limited"
+        ? { type: "limited", allowedHosts: policy.networking.allowed_hosts }
+        : {
+            type: "destinations",
+            allowedDestinations: policy.networking.allowed_destinations,
+          },
+    injectionLocation: policy.injection_location,
+  };
 }
 
 function decodeArtifactText(artifact: Artifact | null): string | null {
@@ -1892,6 +1922,8 @@ function toRawSecret(secret: Secret): RawSecret {
           ? {
               token_endpoint: secret.refresh.tokenEndpoint,
               client_id: secret.refresh.clientId,
+              client_secret: secret.refresh.clientSecret,
+              client_secret_basic: secret.refresh.clientSecretBasic,
               resource: secret.refresh.resource,
               scopes: secret.refresh.scopes,
             }
@@ -1937,8 +1969,8 @@ function createVault(
         request: {
           name: request.name,
           secret: toRawSecret(request.secret),
-          target: request.target
-            ? toRawSecretTarget(request.target)
+          policy: request.policy
+            ? toRawCredentialPolicy(request.policy)
             : undefined,
         },
       });
@@ -1953,7 +1985,7 @@ function createVault(
         scope,
         vault_id: raw.id,
         secret_id: id,
-        target: toRawSecretTarget(target),
+        target,
       });
       if (payload.type !== "resolved_secret") {
         throw new Error(
@@ -1962,13 +1994,16 @@ function createVault(
       }
       return { secret: toSecret(payload.secret), revision: payload.revision };
     },
-    async updateSecret(id, secret) {
+    async updateSecret(id, request) {
       const payload = await client.requestExo({
         type: "vault_update_secret",
         scope,
         vault_id: raw.id,
         secret_id: id,
-        secret: toRawSecret(secret),
+        secret: request.secret ? toRawSecret(request.secret) : undefined,
+        policy: request.policy
+          ? toRawCredentialPolicy(request.policy)
+          : undefined,
       });
       if (payload.type !== "secret_metadata") {
         throw new Error(

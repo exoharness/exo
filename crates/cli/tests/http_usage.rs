@@ -117,7 +117,11 @@ async fn cli_reports_http_usage_across_restarts_and_paginated_history() -> Resul
         .await?
         .put_secret(exoharness::PutSecretRequest {
             name: "test-openai".into(),
-            target: None,
+            policy: Some(
+                exoharness::CredentialDestination::origin("https://api.openai.com")
+                    .unwrap()
+                    .into(),
+            ),
             secret: exoharness::Secret::Key {
                 value: "usage-key".into(),
             },

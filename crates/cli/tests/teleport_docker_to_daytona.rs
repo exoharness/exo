@@ -199,7 +199,7 @@ async fn seed_secret(harness: &BasicExoHarness, name: &str, value: &str) {
         .await
         .expect("runtime vault")
         .put_secret(PutSecretRequest {
-            target: None,
+            policy: None,
             name: name.into(),
             secret: Secret::Key {
                 value: value.into(),

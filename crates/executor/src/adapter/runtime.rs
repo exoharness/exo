@@ -1108,7 +1108,7 @@ mod tests {
             let id = vault
                 .put_secret(exoharness::PutSecretRequest {
                     name: "adapter".into(),
-                    target: None,
+                    policy: None,
                     secret: Secret::Key {
                         value: value.into(),
                     },

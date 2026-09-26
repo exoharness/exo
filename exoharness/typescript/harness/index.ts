@@ -85,6 +85,8 @@ export type Secret =
       refresh?: {
         tokenEndpoint: string;
         clientId: string;
+        clientSecret?: string | null;
+        clientSecretBasic?: boolean;
         resource: string | null;
         scopes: string[];
       } | null;
@@ -96,9 +98,16 @@ export interface VaultRecord {
   createdAt: string;
 }
 
-export type SecretTarget =
-  | { type: "mcp"; serverUrl: string }
-  | { type: "http"; origin: string };
+export type CredentialDestination =
+  | { type: "url"; url: string }
+  | { type: "origin"; origin: string };
+
+export interface CredentialPolicy {
+  networking:
+    | { type: "limited"; allowedHosts: string[] }
+    | { type: "destinations"; allowedDestinations: CredentialDestination[] };
+  injectionLocation: { header: boolean };
+}
 
 export interface SecretReference {
   vaultId: string;
@@ -121,16 +130,22 @@ export interface Vault {
   putSecret(request: {
     name: string;
     secret: Secret;
-    target?: SecretTarget;
+    policy?: CredentialPolicy;
   }): Promise<string>;
   getSecret(id: string): Promise<Secret | null>;
-  resolveSecret(id: string, target: SecretTarget): Promise<ResolvedSecret>;
-  updateSecret(id: string, secret: Secret): Promise<SecretMetadata>;
+  resolveSecret(
+    id: string,
+    target: CredentialDestination,
+  ): Promise<ResolvedSecret>;
+  updateSecret(
+    id: string,
+    request: { secret?: Secret; policy?: CredentialPolicy },
+  ): Promise<SecretMetadata>;
   deleteSecret(id: string): Promise<void>;
 }
 
 export interface SecretMetadata {
-  target?: SecretTarget | null;
+  policy?: CredentialPolicy | null;
   revision: number;
   id: string;
   type: "key" | "oauth";

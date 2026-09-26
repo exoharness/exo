@@ -133,6 +133,8 @@ impl Fixture {
             "model-key",
             "--token-env",
             "SMOKE_API_KEY",
+            "--allow-origin",
+            &f.model.uri(),
         ])
         .await?;
         std::fs::write(&f.agent_file, f.source())?;

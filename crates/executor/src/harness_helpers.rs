@@ -493,7 +493,11 @@ mod vault_tests {
         runtime
             .put_secret(PutSecretRequest {
                 name: "provider".into(),
-                target: None,
+                policy: Some(
+                    exoharness::CredentialDestination::origin("https://api.openai.com")
+                        .unwrap()
+                        .into(),
+                ),
                 secret: Secret::Key {
                     value: "runtime-key".into(),
                 },
@@ -502,7 +506,11 @@ mod vault_tests {
         let user_secret = user
             .put_secret(PutSecretRequest {
                 name: "provider".into(),
-                target: None,
+                policy: Some(
+                    exoharness::CredentialDestination::origin("https://api.openai.com")
+                        .unwrap()
+                        .into(),
+                ),
                 secret: Secret::Key {
                     value: "user-key".into(),
                 },

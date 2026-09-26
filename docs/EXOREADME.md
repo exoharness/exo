@@ -70,7 +70,7 @@ cargo build -p exo
 Store a vault secret, create an agent, then start chatting:
 
 ```bash
-./target/debug/exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com
+./target/debug/exo vault secret create global openai --token-env OPENAI_API_KEY --allow-origin https://api.openai.com
 cat > assistant.md <<'EOF'
 ---
 name: "assistant"

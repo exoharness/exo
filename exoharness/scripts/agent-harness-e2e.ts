@@ -222,7 +222,7 @@ function createCredential(harness: HarnessDefinition): void {
     harness.secret,
     "--token-env",
     harness.envName,
-    "--http-origin",
+    "--allow-origin",
     harness.secret === "anthropic"
       ? "https://api.anthropic.com"
       : harness.secret === "cursor"

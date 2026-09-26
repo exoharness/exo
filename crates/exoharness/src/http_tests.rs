@@ -601,20 +601,20 @@ fn hosted_harness_from_env() -> Arc<dyn ExoHarness> {
 
 #[actix_web::test]
 async fn http_vault_contexts_and_secrets_round_trip() -> crate::Result<()> {
-    use crate::vault::SecretTarget;
+    use crate::vault::CredentialDestination;
     use crate::{NewAgentRequest, NewThreadRequest, PutSecretRequest, Secret};
     let fixture = http_harness().await;
     let harness = &fixture.harness;
     let runtime = crate::vault::global_vault(harness.as_ref()).await?;
     let user = harness.create_vault("alice").await?;
-    let target = SecretTarget::mcp("https://example.com/mcp")?;
+    let target = CredentialDestination::url("https://example.com/mcp")?;
     let id = user
         .put_secret(PutSecretRequest {
             name: "github".into(),
             secret: Secret::Key {
                 value: "first".into(),
             },
-            target: Some(target.clone()),
+            policy: Some((target.clone()).into()),
         })
         .await?;
     assert_eq!(user.list_secrets().await?[0].id, id);

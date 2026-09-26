@@ -47,7 +47,7 @@ pnpm install --frozen-lockfile
 cargo build -p exo
 export PATH="$PWD/target/debug:$PATH"
 
-exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com
+exo vault secret create global openai --token-env OPENAI_API_KEY --allow-origin https://api.openai.com
 ```
 
 `OPENAI_API_KEY` must already be set. `--token-env` takes the variable's name.
@@ -327,7 +327,7 @@ that backend's existing lifecycle and durable-file-system support.
 
 ```sh
 container build -t exo-pi-sandbox:latest exoharness/containers/pi-sandbox
-exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com
+exo vault secret create global openai --token-env OPENAI_API_KEY --allow-origin https://api.openai.com
 exo agent run --agent-file exoharness/examples/managed-agents/pi-assistant.md \
   --environment-file exoharness/examples/environments/pi-local.yaml
 ```
@@ -348,13 +348,57 @@ proxy substitutes the model credential; Pi receives only a sandbox placeholder.
 
 ## Vaults
 
+List vaults with `exo vault list`, their contents with `exo vault list personal`,
+and a secret's metadata with `exo vault get personal github`. These commands
+never print credential values.
+
+```sh
+exo vault create personal
+exo vault login personal --preset github
+exo vault login personal --url https://mcp.notion.com/mcp --name notion
+```
+
+A preset supplies login settings, credential policy, and a default secret name.
+`--name` overrides that name. Without a preset, `--name` is required. To replace
+an existing credential after a successful login, use `--replace`. This preserves
+the saved policy unless you explicitly supply a new policy.
+
+The GitHub preset imports the token from GitHub CLI (`gh`), prompting for login
+if needed. Imported tokens do not include refresh credentials; reconnect with
+`--replace` if one expires or is revoked. Supply `--client-id` to use your own
+GitHub application's device flow instead. The application must enable device
+flow and have the permissions and repository access you need.
+
+OAuth settings are shared options, not custom preset definitions: `--client-id`,
+`--client-secret-env`, and repeated `--scope` work with resource discovery.
+For other device-flow servers, supply `--device-url`, `--token-url`, and
+`--client-id`, plus a credential policy. OAuth grants retain expiry and refresh
+credentials in encrypted storage.
+
+`--allow-origin` permits an entire HTTPS origin, including its port (loopback
+HTTP is also supported for local development);
+`--allow-url` permits an exact resource URL, including its path and query. Both
+are repeatable and apply to token imports, policy updates, and login. `--policy`
+accepts a JSON, YAML, or TOML credential policy instead. The environment's network
+policy remains a separate restriction and cannot widen credential permissions.
+
+```sh
+exo vault secret create personal openai --token-env OPENAI_API_KEY \
+  --allow-origin https://api.openai.com
+exo vault secret update personal github \
+  --allow-origin https://github.com --allow-origin https://api.github.com
+```
+
+Policy-only updates preserve the credential value. Login never attaches a vault
+to an agent; continue selecting vaults with the agent specification or `--vault`.
+
 For authenticated MCP servers, save a credential once and select its vault when
 starting a thread. For example, with `GITHUB_TOKEN` already set:
 
 ```bash
 exo vault create personal
 exo vault secret create personal github \
-  --mcp-server-url https://api.githubcopilot.com/mcp/ \
+  --allow-url https://api.githubcopilot.com/mcp/ \
   --token-env GITHUB_TOKEN
 unset GITHUB_TOKEN
 
@@ -364,14 +408,16 @@ exo agent run --agent-file exoharness/examples/managed-agents/github-analyst.md 
 
 `--token-env` reads a variable from the process environment or `--env-file` once.
 It accepts a variable name, not a token. Subsequent chats don't need that variable.
-The credential URL must match the agent's MCP URL, including its path, trailing slash, and query; names are labels. A vault allows one credential per destination. Servers without a matching
-credential connect unauthenticated.
+Exact URL policies match the agent's MCP URL including its path, trailing slash,
+and query; origin policies allow any resource on that origin. Names are labels.
+Overlapping credentials in the same vault are rejected when selecting an MCP
+credential. Servers without a matching credential connect unauthenticated.
 
 ```bash
 exo vault list
 exo vault get personal
-exo vault secret list personal
-exo vault secret get personal github
+exo vault list personal
+exo vault get personal github
 exo vault secret update personal github --token-env NEW_GITHUB_TOKEN
 exo vault secret delete personal github
 ```
@@ -417,7 +463,7 @@ records retain vault references, not copies of secret values.
 Model bindings use the global vault unless `--vault` selects a different one:
 
 ```bash
-exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com
+exo vault secret create global openai --token-env OPENAI_API_KEY --allow-origin https://api.openai.com
 ```
 
 All local secrets live in the harness's encrypted vault store under

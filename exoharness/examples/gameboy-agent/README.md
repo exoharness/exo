@@ -50,7 +50,7 @@ mkdir -p roms && cp /path/to/pokemon-red.gb roms/
 **2. Create the agent and play** (from the repo root, in another terminal):
 
 ```bash
-exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com
+exo vault secret create global openai --token-env OPENAI_API_KEY --allow-origin https://api.openai.com
 
 cat > gameboy.md <<'EOF'
 ---

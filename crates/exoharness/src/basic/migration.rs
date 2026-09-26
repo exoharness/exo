@@ -396,7 +396,7 @@ mod tests {
                             name: "provider".into(),
                             r#type: crate::SecretType::Key,
                             created_at: Utc::now(),
-                            target: None,
+                            policy: None,
                             revision: 1,
                         },
                         secret: cipher.encrypt_secret(&key)?,

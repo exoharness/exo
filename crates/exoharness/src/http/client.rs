@@ -16,7 +16,9 @@ use super::process::{
 use crate::protocol::{
     ClientMessage, ConversationHandleInfo, Request, Response, ServerMessage, SnapshotScope,
 };
-use crate::vault::{ResolvedSecret, SecretTarget, VaultContext, VaultHandle, VaultId, VaultRecord};
+use crate::vault::{
+    CredentialDestination, ResolvedSecret, VaultContext, VaultHandle, VaultId, VaultRecord,
+};
 use crate::{
     AddEventsRequest, AddEventsResult, AgentHandle, AgentId, AgentRecord, Artifact,
     ArtifactVersion, AttachSandboxRequest, BeginTurnRequest, Binding, BindingId, BindingRecord,
@@ -1424,7 +1426,7 @@ impl VaultHandle for HttpVaultHandle {
                 vault_id: self.record.id,
                 secret_id: *id,
                 secret: request.secret,
-                target: request.target,
+                policy: request.policy,
             })
             .await?
         {
@@ -1449,7 +1451,7 @@ impl VaultHandle for HttpVaultHandle {
     async fn refresh_secret(
         &self,
         id: &SecretId,
-        target: &SecretTarget,
+        target: &CredentialDestination,
         rejected_revision: u64,
     ) -> Result<ResolvedSecret> {
         match self
@@ -1470,7 +1472,11 @@ impl VaultHandle for HttpVaultHandle {
         }
     }
 
-    async fn resolve_secret(&self, id: &SecretId, target: &SecretTarget) -> Result<ResolvedSecret> {
+    async fn resolve_secret(
+        &self,
+        id: &SecretId,
+        target: &CredentialDestination,
+    ) -> Result<ResolvedSecret> {
         match self
             .harness
             .request(Request::VaultResolveSecret {

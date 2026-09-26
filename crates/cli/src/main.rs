@@ -1030,12 +1030,7 @@ async fn run_selected(
                     },
                 ..
             } | Commands::Vault {
-                command: vaults::VaultCommands::List
-                    | vaults::VaultCommands::Get { .. }
-                    | vaults::VaultCommands::Secret {
-                        command: vaults::SecretCommands::List { .. }
-                            | vaults::SecretCommands::Get { .. }
-                    },
+                command: vaults::VaultCommands::List { .. } | vaults::VaultCommands::Get { .. },
                 ..
             }
         ) {

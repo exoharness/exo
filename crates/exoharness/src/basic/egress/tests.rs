@@ -1,11 +1,11 @@
 use super::*;
-use crate::vault::SecretTarget;
+use crate::vault::CredentialDestination;
 
 #[test]
 fn http_credentials_require_an_exact_https_origin() -> Result<()> {
     assert_eq!(
-        SecretTarget::http("https://API.TEST:443/")?,
-        SecretTarget::Http {
+        CredentialDestination::origin("https://API.TEST:443/")?,
+        CredentialDestination::Origin {
             origin: "https://api.test".into()
         },
     );
@@ -16,7 +16,7 @@ fn http_credentials_require_an_exact_https_origin() -> Result<()> {
         "https://api.test#fragment",
         "https://user:password@api.test",
     ] {
-        assert!(SecretTarget::http(origin).is_err(), "{origin}");
+        assert!(CredentialDestination::origin(origin).is_err(), "{origin}");
     }
     Ok(())
 }
@@ -61,7 +61,7 @@ async fn secret(vault: &dyn VaultHandle, name: &str, value: &str) -> Result<Secr
     vault
         .put_secret(PutSecretRequest {
             name: name.into(),
-            target: Some(SecretTarget::http("https://api.test")?),
+            policy: Some((CredentialDestination::origin("https://api.test")?).into()),
             secret: Secret::Key {
                 value: value.into(),
             },
@@ -290,37 +290,37 @@ async fn http_credentials_require_explicit_destination_authorization() -> Result
         ("model", None, "api.test", false),
         (
             "mcp",
-            Some(SecretTarget::mcp("https://api.test/mcp")?),
+            Some(CredentialDestination::url("https://api.test/mcp")?),
             "api.test",
             false,
         ),
         (
             "github",
-            Some(SecretTarget::http("https://github.com")?),
+            Some(CredentialDestination::origin("https://github.com")?),
             "github.com",
             true,
         ),
         (
             "github",
-            Some(SecretTarget::http("https://github.com")?),
+            Some(CredentialDestination::origin("https://github.com")?),
             "api.github.com",
-            true,
+            false,
         ),
         (
             "github",
-            Some(SecretTarget::http("https://github.com")?),
+            Some(CredentialDestination::origin("https://github.com")?),
             "evil.github.com",
             false,
         ),
         (
             "github",
-            Some(SecretTarget::http("https://github.com")?),
+            Some(CredentialDestination::origin("https://github.com")?),
             "api.github.com.evil.test",
             false,
         ),
         (
             "other",
-            Some(SecretTarget::http("https://other.test")?),
+            Some(CredentialDestination::origin("https://other.test")?),
             "api.github.com",
             false,
         ),
@@ -328,7 +328,7 @@ async fn http_credentials_require_explicit_destination_authorization() -> Result
         let secret = global
             .put_secret(PutSecretRequest {
                 name: name.into(),
-                target,
+                policy: target.map(Into::into),
                 secret: Secret::Key {
                     value: "credential".into(),
                 },
@@ -371,7 +371,7 @@ async fn mcp_credentials_refresh_persist_and_remain_destination_scoped() -> Resu
     let config = crate::test_support::local_test_config(directory.path());
     let harness = BasicExoHarness::new(config.clone()).await?;
     let vault = harness.create_vault("mcp-account").await?;
-    let target = SecretTarget::mcp("https://api.test/mcp")?;
+    let target = CredentialDestination::url("https://api.test/mcp")?;
     let oauth = MockServer::start().await;
     Mock::given(method("POST")).and(path("/token"))
         .and(body_string_contains("refresh_token=refresh-v1"))
@@ -381,12 +381,14 @@ async fn mcp_credentials_refresh_persist_and_remain_destination_scoped() -> Resu
     let secret = vault
         .put_secret(PutSecretRequest {
             name: "mcp".into(),
-            target: Some(target.clone()),
+            policy: Some((target.clone()).into()),
             secret: Secret::Oauth {
                 access_token: "access-v1".into(),
                 refresh_token: Some("refresh-v1".into()),
                 expires_at: None,
                 refresh: Some(crate::vault::OAuthRefresh {
+                    client_secret: None,
+                    client_secret_basic: false,
                     token_endpoint: format!("{}/token", oauth.uri()),
                     client_id: "test-client".into(),
                     resource: Some("https://api.test/mcp".into()),

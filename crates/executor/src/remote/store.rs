@@ -92,7 +92,7 @@ impl Store {
             let secret = vault
                 .put_secret(PutSecretRequest {
                     name: STATE_SECRET.into(),
-                    target: None,
+                    policy: None,
                     secret: Secret::Key {
                         value: serde_json::to_string(&state)?,
                     },

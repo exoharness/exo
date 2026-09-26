@@ -14,6 +14,7 @@ pub mod egress;
 mod environment;
 mod error;
 pub use environment::EnvironmentDefinition;
+mod credential_policy;
 pub mod harness;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod http;
@@ -40,6 +41,7 @@ mod storage;
 mod test_support;
 mod types;
 mod uuid7;
+pub use credential_policy::{CredentialDestination, CredentialPolicy};
 pub mod vault;
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]

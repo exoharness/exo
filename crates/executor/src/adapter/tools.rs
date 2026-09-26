@@ -636,7 +636,7 @@ async fn bind_exochat_secret(agent: &dyn AgentHandle, config: &mut AdapterConfig
     let secret_id = exoharness::vault::global_vault(agent)
         .await?
         .put_secret(PutSecretRequest {
-            target: None,
+            policy: None,
             name: secret_name,
             secret: Secret::Key { value: secret },
         })
@@ -1638,7 +1638,7 @@ mod tests {
             .await
             .expect("runtime vault")
             .put_secret(PutSecretRequest {
-                target: None,
+                policy: None,
                 name: "exochat-test".to_string(),
                 secret: Secret::Key {
                     value: "secret-456".to_string(),

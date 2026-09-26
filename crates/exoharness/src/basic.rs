@@ -3166,13 +3166,14 @@ impl ConversationHandle for BasicConversationHandle {
                                     "Git resource credential {name} is not in the selected vaults"
                                 )
                             })?;
-                    let target = crate::vault::SecretTarget::http(
+                    let target = crate::vault::CredentialDestination::origin(
                         &url::Url::parse(url)?.origin().ascii_serialization(),
                     )?;
                     let vault = crate::vault::require_vault(self, &reference.vault_id).await?;
                     let resolved = vault.resolve_secret(&reference.secret_id, &target).await?;
-                    let Secret::Key { value } = resolved.secret else {
-                        bail!("Git resources require a static token");
+                    let value = match resolved.secret {
+                        Secret::Key { value } => value,
+                        Secret::Oauth { access_token, .. } => access_token,
                     };
                     Some(crate::resources::GitCredential {
                         identity: format!("{}:{}", reference.vault_id, reference.secret_id),

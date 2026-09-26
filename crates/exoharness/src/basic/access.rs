@@ -1,5 +1,5 @@
 use super::*;
-use crate::vault::{ResolvedSecret, SecretTarget, VaultRecord};
+use crate::vault::{CredentialDestination, ResolvedSecret, VaultRecord};
 
 impl BasicExoHarness {
     pub(super) async fn check(&self, scope: ResourceScope) -> Result<()> {
@@ -176,14 +176,18 @@ impl VaultHandle for CallerVault {
         self.check(true).await?;
         self.vault.delete_secret(id).await
     }
-    async fn resolve_secret(&self, id: &SecretId, target: &SecretTarget) -> Result<ResolvedSecret> {
+    async fn resolve_secret(
+        &self,
+        id: &SecretId,
+        target: &CredentialDestination,
+    ) -> Result<ResolvedSecret> {
         self.check(false).await?;
         self.vault.resolve_secret(id, target).await
     }
     async fn refresh_secret(
         &self,
         id: &SecretId,
-        target: &SecretTarget,
+        target: &CredentialDestination,
         rejected_revision: u64,
     ) -> Result<ResolvedSecret> {
         self.check(false).await?;

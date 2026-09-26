@@ -1,3 +1,4 @@
+mod legacy;
 mod oauth;
 #[cfg(test)]
 mod tests;
@@ -81,14 +82,14 @@ impl BasicVaultStore {
             Storage::File(root) => {
                 let lock = lock_secret_file(&root.join("vaults.lock"))?;
                 let path = root.join("vaults.json");
-                let mut catalog = match std::fs::read(&path) {
-                    Ok(bytes) => serde_json::from_slice(&bytes).context("reading vault catalog")?,
+                let (mut catalog, migrated) = match std::fs::read(&path) {
+                    Ok(bytes) => legacy::read_catalog(&bytes, &inner.cipher)?,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        Catalog::default()
+                        (Catalog::default(), false)
                     }
                     Err(error) => return Err(error.into()),
                 };
-                if !write {
+                if !write && !migrated {
                     drop(lock);
                     return operation(&mut catalog, &inner.cipher);
                 }
@@ -249,7 +250,7 @@ fn encrypt(
     metadata: &SecretMetadata,
     secret: &Secret,
 ) -> Result<EncryptedSecret> {
-    validate_secret(secret, metadata.target.as_ref())?;
+    validate_secret(secret, metadata.policy.as_ref())?;
     cipher.encrypt_bound(secret, &serde_json::to_vec(&(vault_id, metadata))?)
 }
 
@@ -294,13 +295,13 @@ impl VaultHandle for BasicVaultHandle {
                     bail!("secret name must not be empty");
                 }
                 let target = request
-                    .target
+                    .policy
                     .map(|target| target.normalized())
                     .transpose()?;
                 if vault.secrets.iter().any(|s| {
                     s.metadata.name == request.name
-                        || matches!(target, Some(SecretTarget::Mcp { .. }))
-                            && s.metadata.target == target
+                        || target.as_ref().is_some_and(CredentialPolicy::is_resource)
+                            && s.metadata.policy == target
                 }) {
                     bail!(
                         "a secret with this name or destination already exists in vault {vault_id}"
@@ -310,7 +311,7 @@ impl VaultHandle for BasicVaultHandle {
                     id: Uuid7::now(),
                     name: request.name,
                     r#type: secret_type(&request.secret),
-                    target,
+                    policy: target,
                     revision: 1,
                     created_at: Utc::now(),
                 };
@@ -348,7 +349,7 @@ impl VaultHandle for BasicVaultHandle {
         request: crate::UpdateSecretRequest,
     ) -> Result<SecretMetadata> {
         anyhow::ensure!(
-            request.secret.is_some() || request.target.is_some(),
+            request.secret.is_some() || request.policy.is_some(),
             "provide a secret value or destination to update"
         );
         let vault_id = self.record.id;
@@ -357,16 +358,16 @@ impl VaultHandle for BasicVaultHandle {
             .access(true, move |catalog, cipher| {
                 let vault = vault(catalog, vault_id)?;
                 let target = request
-                    .target
+                    .policy
                     .map(|target| target.normalized())
                     .transpose()?;
-                if matches!(target, Some(SecretTarget::Mcp { .. }))
+                if target.as_ref().is_some_and(CredentialPolicy::is_resource)
                     && vault
                         .secrets
                         .iter()
-                        .any(|stored| stored.metadata.id != id && stored.metadata.target == target)
+                        .any(|stored| stored.metadata.id != id && stored.metadata.policy == target)
                 {
-                    bail!("a secret for this MCP destination already exists in the vault");
+                    bail!("a secret with this resource policy already exists in the vault");
                 }
                 let stored = vault
                     .secrets
@@ -386,7 +387,7 @@ impl VaultHandle for BasicVaultHandle {
                     .checked_add(1)
                     .context("secret revision overflow")?;
                 if let Some(target) = target {
-                    metadata.target = Some(target);
+                    metadata.policy = Some(target);
                 }
                 metadata.r#type = secret_type(&secret);
                 let encrypted = encrypt(cipher, vault_id, &metadata, &secret)?;
@@ -412,7 +413,11 @@ impl VaultHandle for BasicVaultHandle {
             .await
     }
 
-    async fn resolve_secret(&self, id: &SecretId, target: &SecretTarget) -> Result<ResolvedSecret> {
+    async fn resolve_secret(
+        &self,
+        id: &SecretId,
+        target: &CredentialDestination,
+    ) -> Result<ResolvedSecret> {
         let resolved = self.read_for_destination(id, target).await?;
         if !oauth::needs_refresh(&resolved.secret) {
             return Ok(resolved);
@@ -423,7 +428,7 @@ impl VaultHandle for BasicVaultHandle {
     async fn refresh_secret(
         &self,
         id: &SecretId,
-        target: &SecretTarget,
+        target: &CredentialDestination,
         rejected_revision: u64,
     ) -> Result<ResolvedSecret> {
         let vault = self.clone();
@@ -438,7 +443,7 @@ impl BasicVaultHandle {
     async fn refresh(
         &self,
         id: &SecretId,
-        target: &SecretTarget,
+        target: &CredentialDestination,
         rejected_revision: u64,
     ) -> Result<ResolvedSecret> {
         let _guard = self.refresh_guard().await?;
@@ -523,7 +528,7 @@ impl BasicVaultHandle {
     async fn read_for_destination(
         &self,
         id: &SecretId,
-        target: &SecretTarget,
+        target: &CredentialDestination,
     ) -> Result<ResolvedSecret> {
         let vault_id = self.record.id;
         let id = *id;
@@ -535,17 +540,13 @@ impl BasicVaultHandle {
                     .iter()
                     .find(|s| s.metadata.id == id)
                     .context("secret is unavailable")?;
-                if stored.metadata.target.as_ref() != Some(&target) {
-                    if let SecretTarget::Http { origin } = &target {
-                        bail!("secret {:?} is not authorized for {origin}; set its HTTP destination with --http-origin {origin}", stored.metadata.name);
-                    }
-                    bail!("secret {:?} is not authorized for this MCP destination", stored.metadata.name);
-                }
+                anyhow::ensure!(stored.metadata.policy.as_ref().is_some_and(|policy| policy.permits(&target)),
+                    "secret {:?} is not authorized for {}; update its policy with --allow-origin or --allow-url", stored.metadata.name, target.as_str());
                 let secret = cipher.decrypt_bound(
                     &stored.secret,
                     &serde_json::to_vec(&(vault_id, &stored.metadata))?,
                 )?;
-                validate_secret(&secret, Some(&target))?;
+                validate_secret(&secret, stored.metadata.policy.as_ref())?;
                 Ok(ResolvedSecret {
                     revision: stored.metadata.revision,
                     secret,

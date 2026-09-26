@@ -32,10 +32,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::types::{canonical_egress_host, canonical_egress_hosts};
 
-use crate::{
-    CredentialNetworkPolicy, EgressCredentialBinding, EgressPolicy, SandboxEgressProxy,
-    SandboxNetworkPolicy,
-};
+use crate::{EgressCredentialBinding, EgressPolicy, SandboxEgressProxy, SandboxNetworkPolicy};
 
 mod explicit;
 pub use explicit::{ExplicitProxy, ProxyAuthorizer, ProxySession, serve_connect_proxy};
@@ -150,8 +147,14 @@ struct Binding {
 }
 
 impl Binding {
-    fn permits_header(&self, host: &str) -> bool {
-        self.config.injection_location.header && self.hosts.contains(host)
+    fn permits_header(&self, destination: &EgressDestination) -> bool {
+        self.config.injection_location.header
+            && self.hosts.contains(&destination.host)
+            && crate::CredentialDestination::url(&format!(
+                "https://{}:{}{}",
+                destination.host, destination.port, destination.path
+            ))
+            .is_ok_and(|destination| self.config.networking.permits(&destination))
     }
 }
 
@@ -303,9 +306,7 @@ impl State {
                     .credentials
                     .iter()
                     .try_fold(HashSet::new(), |mut hosts, binding| {
-                        let CredentialNetworkPolicy::Limited { allowed_hosts } =
-                            &binding.networking;
-                        hosts.extend(canonical_egress_hosts(allowed_hosts)?);
+                        hosts.extend(binding.networking.hosts()?);
                         Ok::<_, anyhow::Error>(hosts)
                     })?
             }
@@ -324,9 +325,9 @@ impl State {
             );
         }
         let mut bindings = Vec::new();
-        for config in policy.credentials {
-            let CredentialNetworkPolicy::Limited { allowed_hosts } = &config.networking;
-            let hosts = canonical_egress_hosts(allowed_hosts)?;
+        for mut config in policy.credentials {
+            config.networking = config.networking.normalized()?;
+            let hosts = config.networking.hosts()?;
             ensure!(
                 !config.name.is_empty(),
                 "credential binding name is required"
@@ -440,7 +441,7 @@ impl State {
     ) -> Result<Response<ProxyBody>> {
         let (destination, url) = self.destination(&request, sni)?;
         let mut headers = request.headers().clone();
-        self.validate_credentials(&headers, &destination.host, sni.is_some())?;
+        self.validate_credentials(&headers, &destination, sni.is_some())?;
         strip_hop_headers(&mut headers)?;
         let client = self.client(&destination.host, destination.port).await?;
         let original_headers = headers.clone();
@@ -555,7 +556,12 @@ impl State {
         Ok((destination, url))
     }
 
-    fn validate_credentials(&self, headers: &HeaderMap, host: &str, tls: bool) -> Result<()> {
+    fn validate_credentials(
+        &self,
+        headers: &HeaderMap,
+        destination: &EgressDestination,
+        tls: bool,
+    ) -> Result<()> {
         for (header, value) in headers {
             let basic = basic_credential_placeholder(header, value)?;
             let value = basic
@@ -576,7 +582,7 @@ impl State {
             );
             let mut unresolved = std::str::from_utf8(value)?.to_owned();
             for binding in &self.bindings {
-                if binding.permits_header(host) {
+                if binding.permits_header(destination) {
                     unresolved = unresolved.replace(&binding.placeholder, "");
                 }
             }
@@ -605,7 +611,7 @@ impl State {
                 None => header_value.to_str()?.to_owned(),
             };
             for binding in &self.bindings {
-                if !binding.permits_header(&destination.host)
+                if !binding.permits_header(destination)
                     || !replacement.contains(&binding.placeholder)
                 {
                     continue;

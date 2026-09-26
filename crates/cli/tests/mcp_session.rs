@@ -1,4 +1,4 @@
-use exoharness::vault::{OAuthRefresh, SecretTarget, global_vault};
+use exoharness::vault::{CredentialDestination, OAuthRefresh, global_vault};
 use exoharness::{
     BasicExoHarness, BasicExoHarnessConfig, PutSecretRequest, SandboxBackendRegistration,
     SandboxProvider, Secret, SecretBackendChoice,
@@ -137,6 +137,8 @@ async fn vault_credentials_stay_host_side_and_typescript_preserves_oauth_refresh
         refresh_token: Some("refresh-token".into()),
         expires_at: Some(4_000_000_000),
         refresh: Some(OAuthRefresh {
+            client_secret: None,
+            client_secret_basic: false,
             token_endpoint: format!("{}/token", server.uri()),
             client_id: "fixture".into(),
             resource: Some(server.uri()),
@@ -146,7 +148,7 @@ async fn vault_credentials_stay_host_side_and_typescript_preserves_oauth_refresh
     let id = vault
         .put_secret(PutSecretRequest {
             name: "mcp".into(),
-            target: Some(SecretTarget::mcp(&server.uri())?),
+            policy: Some((CredentialDestination::url(&server.uri())?).into()),
             secret: secret.clone(),
         })
         .await?;

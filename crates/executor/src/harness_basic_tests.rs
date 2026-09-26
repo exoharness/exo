@@ -254,7 +254,11 @@ async fn usage_record_is_persisted_with_computed_cost() {
         .await
         .expect("runtime vault")
         .put_secret(PutSecretRequest {
-            target: None,
+            policy: Some(
+                exoharness::CredentialDestination::origin("https://api.anthropic.com")
+                    .unwrap()
+                    .into(),
+            ),
             name: "cost-test-key".to_string(),
             secret: Secret::Key {
                 value: "test-key".to_string(),
@@ -403,7 +407,11 @@ async fn usage_record_with_anthropic_cache_hits() {
         .await
         .expect("runtime vault")
         .put_secret(PutSecretRequest {
-            target: None,
+            policy: Some(
+                exoharness::CredentialDestination::origin("https://api.anthropic.com")
+                    .unwrap()
+                    .into(),
+            ),
             name: "anthropic-cache-key".to_string(),
             secret: Secret::Key {
                 value: "test-key".to_string(),
@@ -528,7 +536,11 @@ async fn usage_record_with_openai_inclusive_accounting() {
         .await
         .expect("runtime vault")
         .put_secret(PutSecretRequest {
-            target: None,
+            policy: Some(
+                exoharness::CredentialDestination::origin("https://api.openai.com")
+                    .unwrap()
+                    .into(),
+            ),
             name: "openai-cache-key".to_string(),
             secret: Secret::Key {
                 value: "test-key".to_string(),
@@ -1605,7 +1617,11 @@ async fn create_test_credential(exoharness: &dyn ExoHarness) {
         .await
         .expect("runtime vault")
         .put_secret(PutSecretRequest {
-            target: None,
+            policy: Some(
+                exoharness::CredentialDestination::origin("https://api.openai.com")
+                    .unwrap()
+                    .into(),
+            ),
             name: "test-openai".to_string(),
             secret: Secret::Key {
                 value: "test-key".to_string(),

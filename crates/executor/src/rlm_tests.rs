@@ -708,7 +708,11 @@ async fn create_test_credential(exoharness: &dyn ExoHarness) {
         .await
         .expect("runtime vault")
         .put_secret(PutSecretRequest {
-            target: None,
+            policy: Some(
+                exoharness::CredentialDestination::origin("https://api.openai.com")
+                    .unwrap()
+                    .into(),
+            ),
             name: "test-openai".to_string(),
             secret: Secret::Key {
                 value: "test-key".to_string(),

@@ -825,7 +825,7 @@ main() {
     model_origin="https://openrouter.ai"
   fi
   ./target/debug/exo vault --env-file "$env_file" secret create global "$MODEL_PROVIDER" \
-    --token-env "$MODEL_API_KEY_ENV" --http-origin "$model_origin"
+    --token-env "$MODEL_API_KEY_ENV" --allow-origin "$model_origin"
 
   info "Create your agent"
   ./exo.sh setup-agent --agent-name "$AGENT_NAME" --model "$UPSTREAM_MODEL" \

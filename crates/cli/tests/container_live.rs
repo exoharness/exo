@@ -123,7 +123,7 @@ async fn with_live_fixture(
 async fn pi_managed_local_and_http() -> Result<()> {
     let api_key = std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY is required")?;
     with_live_fixture(exoharness::SandboxProvider::AppleContainer, async |f| {
-            success(f.command(&["--provider", "local", "vault", "secret", "create", "global", "live-openai", "--token-env", "LIVE_OPENAI_API_KEY", "--http-origin", "https://api.openai.com"]).env("LIVE_OPENAI_API_KEY", &api_key).output().await?)?;
+            success(f.command(&["--provider", "local", "vault", "secret", "create", "global", "live-openai", "--token-env", "LIVE_OPENAI_API_KEY", "--allow-origin", "https://api.openai.com"]).env("LIVE_OPENAI_API_KEY", &api_key).output().await?)?;
             let mcp = MockServer::start().await;
             for verb in ["GET", "DELETE"] {
                 Mock::given(method(verb)).and(path("/mcp")).respond_with(ResponseTemplate::new(405)).mount(&mcp).await;
@@ -381,7 +381,7 @@ for (const dir of ['/tmp/exo-codex-home', '/home/exo/.codex', '/home/exo/.claude
             "{type: unrestricted}".into()
         };
         with_live_fixture(backend.clone(), async |f| {
-                    success(f.command(&["--provider", "local", "vault", "secret", "create", "global", "live-model", "--token-env", "LIVE_MODEL_KEY", "--http-origin", if variable == "ANTHROPIC_API_KEY" { "https://api.anthropic.com" } else { "https://api.openai.com" }]).env("LIVE_MODEL_KEY", &key).output().await?)?;
+                    success(f.command(&["--provider", "local", "vault", "secret", "create", "global", "live-model", "--token-env", "LIVE_MODEL_KEY", "--allow-origin", if variable == "ANTHROPIC_API_KEY" { "https://api.anthropic.com" } else { "https://api.openai.com" }]).env("LIVE_MODEL_KEY", &key).output().await?)?;
                     std::fs::write(&f.agent_file, format!("---\nname: credential-test\nharness: {harness}\nconfig:\n  model: {model}\n  credential: live-model\n---\nFollow the user request.\n"))?;
                     let environment = f.temp.path().join("environment.yaml");
                     std::fs::write(&environment, format!("name: credential-test\nconfig:\n  provider: {backend}\n  image: {image}\n  default_workdir: /home/exo/workspace\n  resources: {{vcpu_count: 2, memory_mib: 2048}}\n  policy:\n    networking: {network}\n  idle_seconds: 600\n"))?;
@@ -440,7 +440,7 @@ async fn native_mcp_workflow(
 ) -> Result<()> {
     let key = std::env::var(variable).with_context(|| format!("{variable} is required"))?;
     with_live_fixture(exoharness::SandboxProvider::AppleContainer, async |f| {
-            success(f.command(&["--provider", "local", "vault", "secret", "create", "global", "native-key", "--token-env", "NATIVE_API_KEY", "--http-origin", if variable == "ANTHROPIC_API_KEY" { "https://api.anthropic.com" } else { "https://api.openai.com" }]).env("NATIVE_API_KEY", &key).output().await?)?;
+            success(f.command(&["--provider", "local", "vault", "secret", "create", "global", "native-key", "--token-env", "NATIVE_API_KEY", "--allow-origin", if variable == "ANTHROPIC_API_KEY" { "https://api.anthropic.com" } else { "https://api.openai.com" }]).env("NATIVE_API_KEY", &key).output().await?)?;
             std::fs::write(&f.agent_file, format!("---\nname: native-mcp\nharness: {harness}\nconfig:\n  model: {model}\n  credential: native-key\nmcp_servers:\n  - type: url\n    name: wiki\n    url: https://mcp.deepwiki.com/mcp\n    allowed_tools: [read_wiki_structure]\n---\nUse the requested MCP tool. If permission is denied, stop; do not use another tool or retry.\n"))?;
             let environment = f.temp.path().join("native.yaml");
             std::fs::write(&environment, format!("name: native\nconfig:\n  provider: apple_container\n  image: {image}\n  default_workdir: /home/exo/workspace\n  resources: {{vcpu_count: 2, memory_mib: 2048}}\n  policy:\n    networking: {{type: unrestricted}}\n"))?;

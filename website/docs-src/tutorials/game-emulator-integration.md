@@ -309,7 +309,7 @@ round, and the RAM state, refreshing once a second.
 Then, in another terminal (from the repo root), create the agent and play:
 
 ```bash
-exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com          # once
+exo vault secret create global openai --token-env OPENAI_API_KEY --allow-origin https://api.openai.com          # once
 
 cat > gameboy.md <<'EOF'
 ---

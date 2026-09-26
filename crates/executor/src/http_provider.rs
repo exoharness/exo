@@ -300,7 +300,7 @@ impl ExoHttpTransport for RuntimeTransport {
                 vault_id,
                 secret_id,
                 secret,
-                target,
+                policy,
             } => Ok(Response::SecretMetadata {
                 metadata: self
                     .client
@@ -308,7 +308,7 @@ impl ExoHttpTransport for RuntimeTransport {
                         scope,
                         vault_id,
                         secret_id,
-                        &exoharness::UpdateSecretRequest { secret, target },
+                        &exoharness::UpdateSecretRequest { secret, policy },
                     )
                     .await?,
             }),

@@ -209,7 +209,7 @@ export default defineHarness({
 ```bash
 pnpm install   # once, for the TypeScript runtime
 
-exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com
+exo vault secret create global openai --token-env OPENAI_API_KEY --allow-origin https://api.openai.com
 
 cat > sysmon.md <<'EOF'
 ---

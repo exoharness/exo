@@ -2149,7 +2149,10 @@ async fn sandbox_provider_state_persists_through_events_after_harness_reload() {
         .unwrap()
         .put_secret(PutSecretRequest {
             name: "thread-credential".into(),
-            target: Some(crate::vault::SecretTarget::http("https://api.example.com").unwrap()),
+            policy: Some(
+                (crate::vault::CredentialDestination::origin("https://api.example.com").unwrap())
+                    .into(),
+            ),
             secret: Secret::Key {
                 value: "test-token".into(),
             },
@@ -2810,7 +2813,7 @@ async fn daytona_sandbox_binding_drives_provider_config() {
         .await
         .expect("runtime vault")
         .put_secret(PutSecretRequest {
-            target: None,
+            policy: None,
             name: "DAYTONA_API_KEY".to_string(),
             secret: Secret::Key {
                 value: "key-123".to_string(),

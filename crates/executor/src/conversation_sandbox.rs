@@ -387,6 +387,12 @@ async fn sandbox_policy(
             .host_str()
             .ok_or_else(|| anyhow::anyhow!("Git resource URL has no host"))?;
         let reference = reference.expect("Git resource credential was resolved");
+        let credential_policy =
+            exoharness::vault::credential_policy(conversation, &reference).await?;
+        let git_policy = credential_policy.for_destination(
+            exoharness::CredentialDestination::origin(&endpoint.origin().ascii_serialization())?,
+        )?;
+        let github_api = exoharness::CredentialDestination::origin("https://api.github.com")?;
         let policy = configured.as_mut().expect("Git resource policy");
         anyhow::ensure!(
             policy.networking_enabled(),
@@ -400,7 +406,7 @@ async fn sandbox_policy(
                 "Git resource host {host} is not allowed by the environment network policy"
             );
         }
-        if host == "github.com" {
+        if host == "github.com" && credential_policy.permits(&github_api) {
             if let exoharness::SandboxNetworkPolicy::Limited { allowed_hosts } = &policy.networking
             {
                 anyhow::ensure!(
@@ -420,32 +426,17 @@ async fn sandbox_policy(
                     "GitHub resources must share a credential for automatic GH_TOKEN selection"
                 );
             } else {
-                policy
-                    .credentials
-                    .push(exoharness::EgressCredentialBinding {
-                        name: reference.secret_id.to_string(),
-
-                        environment_variable: "GH_TOKEN".into(),
-                        networking: exoharness::CredentialNetworkPolicy::Limited {
-                            allowed_hosts: vec!["api.github.com".into()],
-                        },
-                        injection_location: exoharness::CredentialInjectionLocation {
-                            header: true,
-                        },
-                    });
+                policy.credentials.push(
+                    credential_policy
+                        .for_destination(github_api)?
+                        .binding(reference.secret_id.to_string(), "GH_TOKEN".into()),
+                );
             }
         }
-        policy
-            .credentials
-            .push(exoharness::EgressCredentialBinding {
-                name: reference.secret_id.to_string(),
-
-                environment_variable: resource.definition.git_credential_variable(),
-                networking: exoharness::CredentialNetworkPolicy::Limited {
-                    allowed_hosts: vec![host.to_owned()],
-                },
-                injection_location: exoharness::CredentialInjectionLocation { header: true },
-            });
+        policy.credentials.push(git_policy.binding(
+            reference.secret_id.to_string(),
+            resource.definition.git_credential_variable(),
+        ));
     }
     let module = agent_config
         .typescript
@@ -478,27 +469,11 @@ async fn sandbox_policy(
         let endpoint =
             exoharness::vault::model_endpoint(agent_config.base_url.as_deref(), variable)?;
         let host = endpoint.host_str().expect("validated model endpoint");
-        let vault = exoharness::vault::require_vault(conversation, &reference.vault_id).await?;
         let target =
-            exoharness::vault::SecretTarget::http(&endpoint.origin().ascii_serialization())?;
-        let metadata = vault
-            .list_secrets()
+            exoharness::CredentialDestination::origin(&endpoint.origin().ascii_serialization())?;
+        let credential_policy = exoharness::vault::credential_policy(conversation, &reference)
             .await?
-            .into_iter()
-            .find(|secret| secret.id == reference.secret_id)
-            .ok_or_else(|| anyhow::anyhow!("model credential is unavailable"))?;
-        anyhow::ensure!(
-            metadata.r#type == exoharness::SecretType::Key,
-            "model credentials must be API keys"
-        );
-        anyhow::ensure!(
-            metadata.target.as_ref() == Some(&target),
-            "model credential {} is not authorized for {}; add its destination with `exo vault secret update <vault> {} --http-origin {}`",
-            metadata.name,
-            endpoint.origin().ascii_serialization(),
-            metadata.name,
-            endpoint.origin().ascii_serialization()
-        );
+            .for_destination(target.clone())?;
         let policy = configured.get_or_insert_with(|| {
             if conversation_sandbox_spec(agent_config, config).enable_networking {
                 exoharness::SandboxNetworkPolicy::Unrestricted.into()
@@ -524,28 +499,17 @@ async fn sandbox_policy(
             .find(|binding| binding.environment_variable == variable)
         {
             let selected = exoharness::vault::find_secret(conversation, &existing.name).await?;
-            let exoharness::CredentialNetworkPolicy::Limited { allowed_hosts } =
-                &existing.networking;
             anyhow::ensure!(
                 selected.as_ref() == Some(&reference)
                     && existing.injection_location.header
-                    && allowed_hosts
-                        .iter()
-                        .any(|allowed| allowed.eq_ignore_ascii_case(host)),
+                    && existing.networking.permits(&target),
                 "environment credential {variable} conflicts with the model credential"
             );
             existing.name = reference.secret_id.to_string();
         } else {
             policy
                 .credentials
-                .push(exoharness::EgressCredentialBinding {
-                    name: reference.secret_id.to_string(),
-                    environment_variable: variable.into(),
-                    networking: exoharness::CredentialNetworkPolicy::Limited {
-                        allowed_hosts: vec![host.to_owned()],
-                    },
-                    injection_location: exoharness::CredentialInjectionLocation { header: true },
-                });
+                .push(credential_policy.binding(reference.secret_id.to_string(), variable.into()));
         }
     }
     if !matches!(module, Some("codex-harness.ts" | "claude-code-harness.ts")) {
@@ -569,7 +533,8 @@ async fn sandbox_policy(
         "native MCP requires sandbox networking"
     );
     for selected in selection.bindings {
-        let exoharness::vault::SecretTarget::Mcp { server_url } = selected.target else {
+        let exoharness::vault::CredentialDestination::Url { url: server_url } = selected.target
+        else {
             anyhow::bail!("expected MCP destination");
         };
         let endpoint = url::Url::parse(&server_url)?;
@@ -604,17 +569,12 @@ async fn sandbox_policy(
             );
             continue;
         }
+        let credential_policy = exoharness::vault::credential_policy(conversation, &secret)
+            .await?
+            .for_destination(exoharness::CredentialDestination::url(&server_url)?)?;
         policy
             .credentials
-            .push(exoharness::EgressCredentialBinding {
-                name: secret.secret_id.to_string(),
-
-                environment_variable: variable,
-                networking: exoharness::CredentialNetworkPolicy::Limited {
-                    allowed_hosts: vec![host.to_owned()],
-                },
-                injection_location: exoharness::CredentialInjectionLocation { header: true },
-            });
+            .push(credential_policy.binding(secret.secret_id.to_string(), variable));
     }
     Ok(Some(policy))
 }
@@ -705,7 +665,7 @@ mod tests {
             let secret = vault
                 .put_secret(PutSecretRequest {
                     name: harness_name.into(),
-                    target: None,
+                    policy: None,
                     secret: Secret::Key {
                         value: "vault-key".into(),
                     },
@@ -727,9 +687,12 @@ mod tests {
                     &secret,
                     exoharness::UpdateSecretRequest {
                         secret: None,
-                        target: Some(exoharness::vault::SecretTarget::http(&format!(
-                            "https://{host}"
-                        ))?),
+                        policy: Some(
+                            (exoharness::vault::CredentialDestination::origin(&format!(
+                                "https://{host}"
+                            ))?)
+                            .into(),
+                        ),
                     },
                 )
                 .await?;
@@ -742,8 +705,10 @@ mod tests {
             assert_eq!(binding.environment_variable, variable);
             assert_eq!(
                 binding.networking,
-                CredentialNetworkPolicy::Limited {
-                    allowed_hosts: vec![host.into()]
+                CredentialNetworkPolicy::Destinations {
+                    allowed_destinations: vec![exoharness::CredentialDestination::origin(
+                        &format!("https://{host}")
+                    )?]
                 }
             );
             assert!(binding.injection_location.header);
@@ -769,7 +734,10 @@ mod tests {
         let secret = vault
             .put_secret(PutSecretRequest {
                 name: "github-git".into(),
-                target: Some(exoharness::vault::SecretTarget::http("https://github.com")?),
+                policy: Some(exoharness::CredentialPolicy::destinations(vec![
+                    exoharness::CredentialDestination::origin("https://github.com")?,
+                    exoharness::CredentialDestination::origin("https://api.github.com")?,
+                ])),
                 secret: Secret::Key {
                     value: "test-token".into(),
                 },
@@ -823,8 +791,10 @@ mod tests {
         assert_eq!(granted.credentials[0].environment_variable, "GH_TOKEN");
         assert_eq!(
             granted.credentials[0].networking,
-            CredentialNetworkPolicy::Limited {
-                allowed_hosts: vec!["api.github.com".into()]
+            CredentialNetworkPolicy::Destinations {
+                allowed_destinations: vec![exoharness::CredentialDestination::origin(
+                    "https://api.github.com"
+                )?]
             }
         );
         assert_eq!(granted.credentials[1].name, secret.to_string());
@@ -834,8 +804,10 @@ mod tests {
         );
         assert_eq!(
             granted.credentials[1].networking,
-            CredentialNetworkPolicy::Limited {
-                allowed_hosts: vec!["github.com".into()]
+            CredentialNetworkPolicy::Destinations {
+                allowed_destinations: vec![exoharness::CredentialDestination::origin(
+                    "https://github.com"
+                )?]
             }
         );
         config.environment = Some(exoharness::EnvironmentDefinition {

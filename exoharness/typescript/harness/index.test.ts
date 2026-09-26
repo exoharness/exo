@@ -1513,7 +1513,15 @@ it("resolves model credentials from attached vaults without shadowing IDs or ign
         revision: 2,
         type: "key",
         createdAt: "2026-01-01",
-        target: { type: "http", origin: "https://api.openai.com" },
+        policy: {
+          networking: {
+            type: "destinations",
+            allowedDestinations: [
+              { type: "origin", origin: "https://api.openai.com" },
+            ],
+          },
+          injectionLocation: { header: true },
+        },
       },
     ],
     resolveSecret: resolve,
@@ -1558,8 +1566,17 @@ it("resolves model credentials from attached vaults without shadowing IDs or ign
   expect(resolve).toHaveBeenCalledOnce();
   context.agentConfig.credential = "openai";
   expect((await resolveModel(context)).apiKey).toBe("vault-key");
+  expect(resolve).toHaveBeenLastCalledWith(originalId, {
+    type: "origin",
+    origin: "https://api.openai.com",
+  });
   context.agentConfig.baseUrl = "https://other.example/v1";
+  resolve.mockRejectedValueOnce(new Error("not authorized"));
   await expect(resolveModel(context)).rejects.toThrow("not authorized");
+  expect(resolve).toHaveBeenLastCalledWith(originalId, {
+    type: "origin",
+    origin: "https://other.example",
+  });
   context.agentConfig.credential = "missing";
   await expect(resolveModel(context)).rejects.toThrow(
     "not found in the selected vaults",

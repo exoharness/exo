@@ -1,6 +1,6 @@
 use super::transport::dns_response;
 use super::*;
-use crate::CredentialInjectionLocation;
+use crate::{CredentialInjectionLocation, CredentialNetworkPolicy};
 use anyhow::bail;
 use hickory_proto::op::{Message, ResponseCode};
 use hickory_proto::rr::RecordType;
@@ -899,7 +899,12 @@ fn rejects_unsafe_policy_and_addresses() {
     )
     .unwrap();
     assert!(!state.hosts.contains("blocked.test"));
-    assert!(!state.bindings[0].permits_header("api.test"));
+    assert!(!state.bindings[0].permits_header(&EgressDestination {
+        host: "api.test".into(),
+        port: 443,
+        path: "/auth".into(),
+        method: Method::GET
+    }));
 }
 
 #[test]
@@ -913,9 +918,24 @@ fn credential_networking_is_independent_of_environment_networking() -> Result<()
     )?;
     assert!(state.hosts.contains("public.test"));
     assert!(!state.hosts.contains("blocked.test"));
-    assert!(state.bindings[0].permits_header("api.test"));
-    assert!(!state.bindings[0].permits_header("public.test"));
-    assert!(!state.bindings[0].permits_header("blocked.test"));
+    assert!(state.bindings[0].permits_header(&EgressDestination {
+        host: "api.test".into(),
+        port: 443,
+        path: "/auth".into(),
+        method: Method::GET
+    }));
+    assert!(!state.bindings[0].permits_header(&EgressDestination {
+        host: "public.test".into(),
+        port: 443,
+        path: "/auth".into(),
+        method: Method::GET
+    }));
+    assert!(!state.bindings[0].permits_header(&EgressDestination {
+        host: "blocked.test".into(),
+        port: 443,
+        path: "/auth".into(),
+        method: Method::GET
+    }));
     config.credentials[0].injection_location.header = false;
     let state = State::new(
         identity("one"),
@@ -923,7 +943,12 @@ fn credential_networking_is_independent_of_environment_networking() -> Result<()
         Some(TestResolver::new()),
         Arc::new(PublicUpstreamResolver),
     )?;
-    assert!(!state.bindings[0].permits_header("api.test"));
+    assert!(!state.bindings[0].permits_header(&EgressDestination {
+        host: "api.test".into(),
+        port: 443,
+        path: "/auth".into(),
+        method: Method::GET
+    }));
     assert!(
         serde_json::from_str::<CredentialInjectionLocation>(r#"{"header": true, "body": true}"#)
             .is_err()
@@ -939,7 +964,12 @@ fn credential_networking_is_independent_of_environment_networking() -> Result<()
     assert!(state.unrestricted);
     assert!(state.hosts.contains("api.test"));
     assert!(!state.hosts.contains("public.test"));
-    assert!(!state.bindings[0].permits_header("public.test"));
+    assert!(!state.bindings[0].permits_header(&EgressDestination {
+        host: "public.test".into(),
+        port: 443,
+        path: "/auth".into(),
+        method: Method::GET
+    }));
     Ok(())
 }
 
@@ -957,8 +987,18 @@ fn empty_credential_allowlist_does_not_inherit_sandbox_hosts() -> Result<()> {
     )?;
     assert!(state.hosts.contains("api.test"));
     assert!(state.hosts.contains("public.test"));
-    assert!(!state.bindings[0].permits_header("api.test"));
-    assert!(!state.bindings[0].permits_header("public.test"));
+    assert!(!state.bindings[0].permits_header(&EgressDestination {
+        host: "api.test".into(),
+        port: 443,
+        path: "/auth".into(),
+        method: Method::GET
+    }));
+    assert!(!state.bindings[0].permits_header(&EgressDestination {
+        host: "public.test".into(),
+        port: 443,
+        path: "/auth".into(),
+        method: Method::GET
+    }));
     Ok(())
 }
 
@@ -2354,4 +2394,38 @@ gh api repos/org/repo/pulls/10/reviews --jq '.[0].body'
         }
     }
     result
+}
+
+#[tokio::test]
+async fn proxy_enforces_resource_urls_before_resolving_credentials() -> Result<()> {
+    let upstream = Upstream::start().await?;
+    let resolver = TestResolver::new();
+    let mut policy = policy();
+    policy.credentials[0].networking = CredentialNetworkPolicy::Destinations {
+        allowed_destinations: vec![crate::CredentialDestination::Url {
+            url: "HTTPS://API.TEST:443/auth?tenant=one".into(),
+        }],
+    };
+    let proxy = upstream
+        .proxy_with_policy(host_ip()?, "one", resolver.clone(), policy)
+        .await?;
+    let client = client(&proxy)?;
+    let placeholder = &proxy.environment()["TEST_API_KEY"];
+    for (url, allowed) in [
+        ("https://api.test/auth?tenant=one", true),
+        ("https://api.test/auth?tenant=two", false),
+        ("https://api.test/auth", false),
+        ("https://api.test/auth/?tenant=one", false),
+        ("https://public.test/auth?tenant=one", false),
+    ] {
+        let response = client
+            .get(url)
+            .header("authorization", format!("Bearer {placeholder}"))
+            .send()
+            .await?;
+        assert_eq!(response.status().is_success(), allowed, "{url}");
+    }
+    assert_eq!(resolver.uses.read().await.len(), 1);
+    proxy.shutdown().await?;
+    Ok(())
 }
