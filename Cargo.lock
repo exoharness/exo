@@ -2877,7 +2877,7 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.4",
  "tokio-stream",
- "tokio-tungstenite",
+ "tokio-tungstenite 0.26.2",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
@@ -6615,9 +6615,9 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "smol-cloud"
-version = "1.17.0"
+version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65f27a0ab6d3b2556a426db0b014d07d7f101f2beab2409ddf370b252531b6c0"
+checksum = "46d6873a5c0924b0d82798485719c162db9dbd80490e93c9f9fb93b25a11a59c"
 dependencies = [
  "base64 0.22.1",
  "reqwest 0.12.28",
@@ -6627,16 +6627,22 @@ dependencies = [
 
 [[package]]
 name = "smolmachines"
-version = "1.17.0"
+version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b4f93def64034361c3bde83c0c848c0dbf4f102eaa6bdf683c9026ed4d3f193"
+checksum = "5971d2574feda50a2f25a0aca84923723ebc985dc43e6b4a01270b0fcf53109a"
 dependencies = [
  "flate2",
+ "futures-util",
  "reqwest 0.12.28",
+ "rustls 0.23.37",
  "serde_json",
  "sha2 0.10.9",
  "smol-cloud",
  "tar",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.28.0",
+ "webpki-roots 1.0.6",
 ]
 
 [[package]]
@@ -7044,7 +7050,23 @@ dependencies = [
  "rustls-pki-types",
  "tokio",
  "tokio-rustls 0.26.4",
- "tungstenite",
+ "tungstenite 0.26.2",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "tokio-tungstenite"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d25a406cddcc431a75d3d9afc6a7c0f7428d4891dd973e4d54c56b46127bf857"
+dependencies = [
+ "futures-util",
+ "log",
+ "rustls 0.23.37",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tungstenite 0.28.0",
  "webpki-roots 0.26.11",
 ]
 
@@ -7282,6 +7304,25 @@ name = "tungstenite"
 version = "0.26.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4793cb5e56680ecbb1d843515b23b6de9a75eb04b66643e256a396d43be33c13"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http 1.4.0",
+ "httparse",
+ "log",
+ "rand 0.9.4",
+ "rustls 0.23.37",
+ "rustls-pki-types",
+ "sha1 0.10.6",
+ "thiserror 2.0.18",
+ "utf-8",
+]
+
+[[package]]
+name = "tungstenite"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8628dcc84e5a09eb3d8423d6cb682965dea9133204e8fb3efee74c2a0c259442"
 dependencies = [
  "bytes",
  "data-encoding",

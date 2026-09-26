@@ -43,13 +43,13 @@ import {
   materializePriorConversationMessages,
   objectArgs,
   pickEnv,
-  resolveSandboxLlmBinding,
+  resolveSandboxModel,
   sandboxCwd,
   stringOrNull,
   traceExoharnessToolCall,
   traceObservedToolCall,
   WarmResourceCache,
-  type ResolvedLlmBinding,
+  type ResolvedModel,
 } from "@exo/model-runtime/shared";
 
 import {
@@ -219,7 +219,7 @@ export default defineHarness({
       false,
     );
     await ensureTable();
-    const modelBinding = await resolveSandboxLlmBinding(context);
+    const modelBinding = resolveSandboxModel(context);
     await traceExecutorTurn(context, (turnParent) =>
       runCodexTurn(context, turnParent, modelBinding),
     );
@@ -229,7 +229,7 @@ export default defineHarness({
 async function runCodexTurn(
   context: TurnContext,
   turnParent: TraceParent,
-  modelBinding: ResolvedLlmBinding,
+  modelBinding: ResolvedModel,
 ): Promise<string | null> {
   await requireCodexSandboxNetworking(context);
 
@@ -436,7 +436,7 @@ async function traceCodexLlmTurn(
   threadId: string,
   injectedResponseItems: number,
   traceState: CodexTurnTraceState,
-  modelBinding: ResolvedLlmBinding,
+  modelBinding: ResolvedModel,
   run: () => Promise<void>,
 ): Promise<void> {
   await tracedUnderParent(
@@ -539,7 +539,7 @@ function codexLlmTraceOutput(
 async function startCodexThread(
   codex: CodexAppServer,
   context: TurnContext,
-  modelBinding: ResolvedLlmBinding,
+  modelBinding: ResolvedModel,
   resumeThreadId?: string,
 ): Promise<string> {
   const developerInstructions = instructionsText(
@@ -1103,12 +1103,11 @@ function codexSandboxRuntimeKey(context: TurnContext): JsonValue {
 
 function codexWarmSessionKey(
   context: TurnContext,
-  modelBinding: ResolvedLlmBinding,
+  modelBinding: ResolvedModel,
 ): string {
   return JSON.stringify({
     agent_id: context.exoharness.current.agent.record.id,
     conversation_id: context.exoharness.current.conversation.record.id,
-    model_binding: modelBinding.name,
     model: modelBinding.model,
     base_url: modelBinding.baseUrl ?? null,
     instructions: context.agentConfig.instructions,

@@ -51,6 +51,8 @@ pub struct AgentModelConfig {
     pub braintrust: Option<BraintrustTracingConfig>,
     pub module: Option<PathBuf>,
     pub model: String,
+    pub credential: Option<String>,
+    pub base_url: Option<String>,
     pub max_output_tokens: Option<i64>,
     pub max_tool_round_trips: Option<u32>,
 }

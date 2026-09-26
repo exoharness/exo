@@ -3,9 +3,9 @@ use std::{net::TcpListener, sync::Arc, time::Duration};
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use executor::{
-    AgentHarnessKind, BasicExoHarness, BasicExoHarnessConfig, BasicToolRuntime, Binding,
-    CreateAgentRequest, ExoHarness, LocalProvider, ModelClient, ModelRequest, ModelResponse,
-    ModelResponseStream, Runtime, SandboxBackendRegistration, SandboxProvider, SecretBackendChoice,
+    AgentHarnessKind, BasicExoHarness, BasicExoHarnessConfig, BasicToolRuntime, CreateAgentRequest,
+    LocalProvider, ModelClient, ModelRequest, ModelResponse, ModelResponseStream, Runtime,
+    SandboxBackendRegistration, SandboxProvider, SecretBackendChoice,
     http_service::{RuntimeHttpService, server},
 };
 use exoharness::{AddEventsRequest, EventData, UsageRecord};
@@ -107,19 +107,22 @@ async fn cli_reports_http_usage_across_restarts_and_paginated_history() -> Resul
         sandbox_backends: vec![SandboxBackendRegistration::local_process()],
     };
     let state = Arc::new(BasicExoHarness::in_memory(config.clone()).await?);
-    state
-        .put_binding(Binding::Llm {
-            name: "metered-model".into(),
-            model: "metered-model".into(),
-            base_url: None,
-            secret: None,
-        })
-        .await?;
+
     let pricing = cost::PricingTable::from_json_str(
         r#"{
         "metered-model": {"input_cost_per_token": 0.00001, "output_cost_per_token": 0.0001}
     }"#,
     )?;
+    exoharness::vault::global_vault(state.as_ref())
+        .await?
+        .put_secret(exoharness::PutSecretRequest {
+            name: "test-openai".into(),
+            target: None,
+            secret: exoharness::Secret::Key {
+                value: "usage-key".into(),
+            },
+        })
+        .await?;
     let runtime = Arc::new(Runtime::new(
         LocalProvider::basic(
             state,
@@ -131,6 +134,8 @@ async fn cli_reports_http_usage_across_restarts_and_paginated_history() -> Resul
     ));
     let agent = runtime
         .create_agent(CreateAgentRequest {
+            credential: Some("test-openai".into()),
+            base_url: None,
             slug: "usage-test".into(),
             name: None,
             harness: AgentHarnessKind::Basic,

@@ -59,6 +59,7 @@ const MIN_WARM_VERSION: Version = Version::new(1, 7, 2);
 /// Probed from `--help`, not the version: a build carrying `--label` still
 /// reported 1.7.5, so a version gate would refuse a flag that is right there.
 const LABEL_FLAG: &str = "--label";
+const INTERCEPTOR_FLAG: &str = "--egress-interceptor";
 static CONSUMABLE_SNAPSHOT_FORMATS: [SnapshotFormat; 1] = [SnapshotFormat::SmolvmMachinePack];
 
 /// What the installed smolvm supports. Probed once per backend.
@@ -95,7 +96,7 @@ pub struct SmolvmBackendConfig {
     pub mode: SmolvmExecutionMode,
     /// `smolvm` itself. `None` falls back to `SMOLVM_BIN`, then bare `smolvm`
     /// resolved through `PATH`. With the `smolvm` feature, a missing default
-    /// binary is downloaded and cached on first use.
+    /// or incompatible binary is replaced by a compatible cached/downloaded runtime.
     pub binary: Option<PathBuf>,
     /// The binary handed to smolvm as `SMOLVM_BOOT_BINARY`. `None` derives one
     /// from `binary` on first use; see [`resolve_boot_binary`].
@@ -204,8 +205,8 @@ impl SmolvmSandboxBackend {
                 let binary = match &self.binary_override {
                     Some(explicit) => explicit.clone(),
                     None => match which_binary(Path::new(DEFAULT_SMOLVM_BIN)).await {
-                        Some(installed) => installed,
-                        None => {
+                        Some(installed) if probe_flag_at(&installed, "machine", "start", INTERCEPTOR_FLAG).await => installed,
+                        _ => {
                             #[cfg(feature = "smolvm")]
                             {
                                 tokio::task::spawn_blocking(|| {
@@ -223,7 +224,7 @@ impl SmolvmSandboxBackend {
                             }
                             #[cfg(not(feature = "smolvm"))]
                             {
-                                PathBuf::from(DEFAULT_SMOLVM_BIN)
+                                bail!("no compatible SmolVM found; install SmolVM 1.19.0 or newer from https://smolmachines.com/install.sh, or configure `exo environment provider create --backend smolvm --smolvm-binary <path>`");
                             }
                         }
                     },
@@ -237,7 +238,7 @@ impl SmolvmSandboxBackend {
                         format!(
                             "could not run {} --version. Install SmolVM with \
                          `curl -sSL https://smolmachines.com/install.sh | bash`, \
-                         or configure its path with `exo sandbox provider create --sandbox smolvm \
+                         or configure its path with `exo environment provider create --backend smolvm \
                          --smolvm-binary /path/to/smolvm`",
                             binary.display()
                         )
@@ -248,6 +249,10 @@ impl SmolvmSandboxBackend {
                     binary.display(),
                     String::from_utf8_lossy(&output.stderr).trim()
                 );
+                if self.binary_override.is_none() {
+                    ensure!(probe_flag_at(&binary, "machine", "start", INTERCEPTOR_FLAG).await,
+                        "automatically provisioned SmolVM at {} lacks {INTERCEPTOR_FLAG}; use SmolVM 1.19.0 or newer", binary.display());
+                }
                 Ok(binary)
             })
             .await
@@ -265,9 +270,7 @@ impl SmolvmSandboxBackend {
                         .await
                         .is_some_and(|version| version >= MIN_WARM_VERSION),
                     labels: self.probe_flag("machine", "create", LABEL_FLAG).await,
-                    interceptor: self
-                        .probe_flag("machine", "start", "--egress-interceptor")
-                        .await,
+                    interceptor: self.probe_flag("machine", "start", INTERCEPTOR_FLAG).await,
                 }
             })
             .await)
@@ -289,14 +292,7 @@ impl SmolvmSandboxBackend {
         let Ok(binary) = self.binary().await else {
             return false;
         };
-        let Ok(output) = Command::new(binary)
-            .args([group, subcommand, "--help"])
-            .output()
-            .await
-        else {
-            return false;
-        };
-        output.status.success() && String::from_utf8_lossy(&output.stdout).contains(flag)
+        probe_flag_at(binary, group, subcommand, flag).await
     }
 
     /// The mode this request will actually run under: `idle_ttl` decides, and
@@ -590,7 +586,8 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             );
             ensure!(
                 self.capabilities().await?.interceptor,
-                "smolvm proxy egress requires a binary with --egress-interceptor support; configure --smolvm-binary"
+                "{} lacks --egress-interceptor support required for credential proxying; select a compatible build with `exo environment provider create --backend smolvm --smolvm-binary <path>`",
+                self.binary().await?.display()
             );
         }
         let binary = self.binary().await?;
@@ -1163,6 +1160,21 @@ fn machine_name(key: &str) -> String {
     format!("exo-{hash:016x}")
 }
 
+async fn probe_flag_at(binary: &Path, group: &str, subcommand: &str, flag: &str) -> bool {
+    let Ok(output) = Command::new(binary)
+        .args([group, subcommand, "--help"])
+        .kill_on_drop(true)
+        .output()
+        .await
+    else {
+        return false;
+    };
+    output.status.success()
+        && String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .any(|word| word == flag)
+}
+
 async fn run_checked(mut process: Command, what: &str) -> Result<String> {
     let output = process
         .output()
@@ -1209,7 +1221,7 @@ esac"#,
             .credentials
             .push(crate::EgressCredentialBinding {
                 name: "key".into(),
-                model: None,
+
                 environment_variable: "API_KEY".into(),
                 networking: crate::CredentialNetworkPolicy::Limited {
                     allowed_hosts: vec!["api.test".into()],
@@ -1234,6 +1246,18 @@ esac"#,
         request.lifecycle.idle_ttl = None;
         let error = backend.acquire(request).await.err().unwrap().to_string();
         assert!(error.contains("managed warm sandbox"), "{error}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "smolvm")]
+    #[ignore = "provisions the pinned SmolVM release in the local SDK cache"]
+    async fn provisioned_runtime_supports_native_egress() -> Result<()> {
+        let backend = SmolvmSandboxBackend::new();
+        let binary = backend.binary().await?;
+        let capabilities = backend.capabilities().await?;
+        assert!(capabilities.warm && capabilities.labels && capabilities.interceptor);
+        eprintln!("Compatible SmolVM: {}", binary.display());
         Ok(())
     }
 
@@ -1364,7 +1388,7 @@ esac"#,
                 .env_remove(SMOLVM_BIN_ENV)
                 .env_remove(SMOLVM_BOOT_BIN_ENV)
                 .env("SMOLMACHINES_CACHE_DIR", dir.path().join("cache"))
-                .env("SMOLMACHINES_ENGINE_VERSION", "1.17.0")
+                .env("SMOLMACHINES_ENGINE_VERSION", "1.19.0")
                 .env("SMOLMACHINES_NO_DOWNLOAD", "1")
                 .output()
                 .await
@@ -1391,9 +1415,22 @@ esac"#,
                 ("linux", "x86_64") => "linux-x86_64",
                 _ => unreachable!(),
             };
-            let cached = root.join("cache").join(format!("smolvm-1.17.0-{platform}"));
+            let cached = root.join("cache").join(format!("smolvm-1.19.0-{platform}"));
             let binary = cached.join("smolvm");
-            write_test_binary(&binary, "printf 'smolvm 1.17.0\\n'");
+            write_test_binary(&binary, "printf 'smolvm 1.19.0\\n'");
+            assert!(
+                backend
+                    .binary()
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains(INTERCEPTOR_FLAG)
+            );
+            write_test_binary(&root.join("bin/smolvm"), "printf 'smolvm 1.16.2\\n'");
+            write_test_binary(
+                &binary,
+                "case \"$*\" in --version) echo 'smolvm 1.19.0';; 'machine start --help') echo '--egress-interceptor <ADDR>';; esac",
+            );
             write_test_binary(&cached.join("smolvm-bin"), "exit 0");
             assert_eq!(backend.binary().await.unwrap(), &binary);
             assert!(backend.warm_supported().await);
@@ -1409,7 +1446,10 @@ esac"#,
         );
 
         let installed = root.join("bin/smolvm");
-        write_test_binary(&installed, "printf 'smolvm 1.17.0\\n'");
+        write_test_binary(
+            &installed,
+            "case \"$*\" in --version) echo 'smolvm 1.19.0';; 'machine start --help') echo '--egress-interceptor <ADDR>';; esac",
+        );
         let installed = installed.canonicalize().unwrap();
         assert_eq!(
             SmolvmSandboxBackend::new().binary().await.unwrap(),

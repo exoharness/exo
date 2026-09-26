@@ -25,8 +25,10 @@ fn run_exo(args: &[&str], root: &str, xdg: &str) -> std::process::Output {
         .args(["--secret-backend", "file"])
         .arg("--master-key-path")
         .arg(PathBuf::from(root).join("master.key"))
-        .arg("--pricing-path")
-        .arg(PathBuf::from(root).join("prices.json"))
+        .env(
+            "EXO_LITELLM_PRICES_PATH",
+            PathBuf::from(root).join("prices.json"),
+        )
         .args(&args[1..])
         .env("EXO_CONFIG_DIR", xdg)
         .env("XDG_CONFIG_HOME", xdg)
@@ -77,21 +79,8 @@ async fn chat_survives_model_call_failure() {
         &root,
         &xdg,
     );
-    run_exo(
-        &[
-            "model",
-            "create",
-            "gpt-test",
-            "--secret",
-            "test-key",
-            "--base-url",
-            &mock_server.uri(),
-        ],
-        &root,
-        &xdg,
-    );
     let spec = root_dir.path().join("agent.md");
-    std::fs::write(&spec, "---\nname: Chat Error Test Agent\nharness: basic\nconfig:\n  model: gpt-test\n---\nReply to the user.\n").unwrap();
+    std::fs::write(&spec, format!("---\nname: Chat Error Test Agent\nharness: basic\nconfig:\n  model: gpt-test\n  credential: test-key\n  base_url: {}\n---\nReply to the user.\n", mock_server.uri())).unwrap();
     run_exo(
         &[
             "agent",
@@ -110,8 +99,10 @@ async fn chat_survives_model_call_failure() {
         .args(["--secret-backend", "file"])
         .arg("--master-key-path")
         .arg(PathBuf::from(&root).join("master.key"))
-        .arg("--pricing-path")
-        .arg(PathBuf::from(&root).join("prices.json"))
+        .env(
+            "EXO_LITELLM_PRICES_PATH",
+            PathBuf::from(&root).join("prices.json"),
+        )
         .args(["--agent", "test-agent"])
         .env("EXO_CONFIG_DIR", &xdg)
         .env("XDG_CONFIG_HOME", &xdg)

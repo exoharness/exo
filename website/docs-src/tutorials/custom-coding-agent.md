@@ -230,6 +230,7 @@ name: "Coder"
 harness: exoharness/examples/typescript/coding-agent-harness.ts
 config:
   model: gpt-5.5
+  credential: openai
 sandbox:
   provider: docker
   image: python:3.12-slim

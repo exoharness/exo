@@ -142,9 +142,9 @@ fn resolve_runtime_config(
     env: &HashMap<String, String>,
 ) -> Result<ResolvedRuntimeConfig> {
     if is_anthropic_model(&request.model) {
-        resolve_anthropic_config(request, env)
+        resolve_anthropic_config(request)
     } else if is_openrouter_request(request) {
-        resolve_openrouter_config(request, env)
+        resolve_openrouter_config(request)
     } else {
         resolve_openai_config(request, env)
     }
@@ -152,7 +152,7 @@ fn resolve_runtime_config(
 
 /// OpenRouter is an OpenAI-compatible aggregator selected by its base URL (it
 /// has no Responses API, so it can't be detected by model name the way native
-/// Anthropic is). A binding pointed at `openrouter.ai` routes through the
+/// Anthropic is). An endpoint pointed at `openrouter.ai` routes through the
 /// OpenAI provider in Chat Completions mode.
 fn is_openrouter_request(request: &ModelRequest) -> bool {
     request
@@ -161,14 +161,10 @@ fn is_openrouter_request(request: &ModelRequest) -> bool {
         .is_some_and(|url| url.contains("openrouter.ai"))
 }
 
-fn resolve_openrouter_config(
-    request: &ModelRequest,
-    env: &HashMap<String, String>,
-) -> Result<ResolvedRuntimeConfig> {
+fn resolve_openrouter_config(request: &ModelRequest) -> Result<ResolvedRuntimeConfig> {
     let key = request
         .api_key
         .clone()
-        .or_else(|| optional_env(env, "OPENROUTER_API_KEY"))
         .ok_or_else(|| anyhow::anyhow!("model request is missing an API key"))?;
     let endpoint = request
         .base_url
@@ -192,7 +188,7 @@ fn resolve_openrouter_config(
     })
 }
 
-/// Anthropic model bindings route to the native Messages API. We detect them by
+/// Anthropic models route to the native Messages API. We detect them by
 /// model name (`claude*`). Bedrock/Vertex Anthropic ids carry provider prefixes
 /// (e.g. `us.anthropic.claude-...`) so they do not match here and keep falling
 /// through to the OpenAI-compatible path.
@@ -200,21 +196,16 @@ pub(crate) fn is_anthropic_model(model: &str) -> bool {
     model.to_ascii_lowercase().starts_with("claude")
 }
 
-fn resolve_anthropic_config(
-    request: &ModelRequest,
-    env: &HashMap<String, String>,
-) -> Result<ResolvedRuntimeConfig> {
+fn resolve_anthropic_config(request: &ModelRequest) -> Result<ResolvedRuntimeConfig> {
     let key = request
         .api_key
         .clone()
-        .or_else(|| optional_env(env, "ANTHROPIC_API_KEY"))
         .ok_or_else(|| anyhow::anyhow!("model request is missing an API key"))?;
     // `None` lets the provider use its built-in default
     // (`https://api.anthropic.com/v1/`).
     let endpoint = request
         .base_url
         .clone()
-        .or_else(|| optional_env(env, "ANTHROPIC_BASE_URL"))
         .map(|raw| Url::parse(&raw))
         .transpose()?;
     Ok(ResolvedRuntimeConfig {
@@ -239,12 +230,10 @@ fn resolve_openai_config(
     let key = request
         .api_key
         .clone()
-        .or_else(|| optional_env(env, "OPENAI_API_KEY"))
         .ok_or_else(|| anyhow::anyhow!("model request is missing an API key"))?;
     let endpoint = request
         .base_url
         .clone()
-        .or_else(|| optional_env(env, "OPENAI_BASE_URL"))
         .map(|raw| Url::parse(&raw))
         .transpose()?;
     let mut metadata = HashMap::new();
@@ -422,6 +411,25 @@ mod tests {
     }
 
     #[test]
+    fn model_calls_do_not_fall_back_to_host_credentials() {
+        let env = HashMap::from([
+            ("OPENAI_API_KEY".into(), "host-openai".into()),
+            ("ANTHROPIC_API_KEY".into(), "host-anthropic".into()),
+            ("OPENROUTER_API_KEY".into(), "host-openrouter".into()),
+        ]);
+        for (model, endpoint) in [
+            ("gpt-5-mini", None),
+            ("claude-sonnet-4-6", None),
+            ("openai/gpt-5-mini", Some("https://openrouter.ai/api/v1")),
+        ] {
+            let mut request = model_request();
+            request.model = model.into();
+            request.base_url = endpoint.map(str::to_owned);
+            assert!(resolve_runtime_config(&request, &env).is_err());
+        }
+    }
+
+    #[test]
     fn anthropic_models_route_to_the_native_messages_api() {
         let mut request = model_request();
         request.model = "claude-sonnet-4-6".to_string();
@@ -450,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_bindings_use_openai_chat_completions() {
+    fn openrouter_endpoints_use_openai_chat_completions() {
         let mut request = model_request();
         request.model = "openai/gpt-4o-mini".to_string();
         request.api_key = Some("sk-or-test".to_string());

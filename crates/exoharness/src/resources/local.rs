@@ -170,6 +170,7 @@ impl ResourceStore {
                 let path = if self.image_size_gib.is_some() {
                     resource.clone()
                 } else {
+                    tracing::info!(target: "exoharness::progress", "Mounting resource {}", definition.name);
                     self.mount_volume(&resource)?
                 };
                 Ok(FileSystemMount {
@@ -364,13 +365,14 @@ impl ResourceStore {
             self.create_volume(staging.path())?;
             fs::rename(staging.path(), &cache)?;
         }
+        tracing::info!(target: "exoharness::progress", "Mounting Git cache for {}", definition.name);
         let workspace = self.mount_volume(&cache)?;
         let updated = (|| {
             if !workspace.join(".git").exists() {
                 git(&workspace, ["init"], None)?;
                 git(&workspace, ["remote", "add", "origin", url], None)?;
             }
-            tracing::info!(resource = definition.name, "updating cached Git workspace");
+            tracing::info!(target: "exoharness::progress", "Fetching Git resource {}", definition.name);
             git(
                 &workspace,
                 [

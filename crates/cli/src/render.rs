@@ -28,8 +28,7 @@ const PRIMARY_ARGUMENT_KEYS: [&str; 3] = ["command", "cmd", "code"];
 pub(crate) enum Verbosity {
     /// Only user and assistant text; tool activity is hidden entirely.
     Minimal,
-    /// One line per tool call (name plus its primary argument) and one line
-    /// per tool result.
+    /// One line per tool call with its primary argument and result status.
     #[default]
     Compact,
     /// Every tool call argument and result field, fully expanded.

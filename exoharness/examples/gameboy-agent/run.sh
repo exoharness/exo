@@ -41,8 +41,7 @@ Watch the game live at http://$HOST:$PORT/view
 
 Next, in another terminal (from the repo root), make the agent play:
 
-  exo vault secret create global openai --token-env OPENAI_API_KEY        # once
-  exo model create gpt-5.5 --secret openai        # once
+  exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com        # once
   exo agent create gameboy --file exoharness/examples/gameboy-agent/agent.md # once
   exo thread create gameboy "Play Pokemon"    # once
 

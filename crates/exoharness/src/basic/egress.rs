@@ -41,33 +41,6 @@ impl LocalEgressResolver {
             harness: &harness,
             scope: identity.scope,
         };
-        let policy = sandbox.policy();
-        let credential = policy
-            .credentials
-            .iter()
-            .find(|binding| binding.name == binding_name)
-            .context("sandbox credential policy is unavailable")?;
-        if let Some(model_id) = credential.model {
-            let model = context.model_binding(&model_id).await?;
-            let endpoint = crate::vault::model_endpoint(
-                model.base_url.as_deref(),
-                &credential.environment_variable,
-            )?;
-            anyhow::ensure!(
-                model.secret.as_ref() == Some(reference),
-                "sandbox model credential changed; create a new sandbox"
-            );
-            let path = endpoint.path().trim_end_matches('/');
-            anyhow::ensure!(
-                endpoint.host_str() == Some(destination.host.as_str())
-                    && endpoint.port_or_known_default() == Some(destination.port)
-                    && (path.is_empty()
-                        || destination.path == path
-                        || destination.path.starts_with(&format!("{path}/"))),
-                "request is outside the model endpoint"
-            );
-            return crate::vault::resolve_model_key(&context, reference, &endpoint).await;
-        }
         crate::egress::vault::resolve_credential(&context, reference, destination, rejected).await
     }
 }

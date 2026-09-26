@@ -77,12 +77,12 @@ impl AgentBackend for LocalProvider {
             .as_ref()
             .map(|config| config.model.as_str())
             .unwrap_or(&agent_config.model);
-        let model = resolve_model(
-            self.state.as_ref(),
-            self.managed.model.as_deref(),
-            preferred,
-        )
-        .await?;
+        let model = self
+            .managed
+            .model
+            .as_deref()
+            .unwrap_or(preferred)
+            .to_owned();
         let mut config = if created {
             ConversationConfig {
                 resources: agent_config.resources.clone(),
@@ -162,12 +162,6 @@ impl AgentBackend for LocalProvider {
                 }
             }
             config.sandbox_scope = Some(crate::SandboxScope::Conversation);
-            config.resource_mounts = thread
-                .materialize_resources(
-                    config.resources.clone(),
-                    config.effective_sandbox_provider(&agent_config),
-                )
-                .await?;
         }
         let mcp_tools = self
             .executor
@@ -183,6 +177,25 @@ impl AgentBackend for LocalProvider {
                 }),
             )
             .await?;
+        }
+        if !config.resources.is_empty() {
+            let thread = agent
+                .get_thread(&thread.record().id)
+                .await?
+                .context("thread disappeared before resource preparation")?;
+            let provider = config.effective_sandbox_provider(&agent_config);
+            let mut preparations = self
+                .resource_preparations
+                .lock()
+                .expect("resource preparations poisoned");
+            while let Some(result) = preparations.try_join_next() {
+                result?;
+            }
+            preparations.spawn(async move {
+                if let Err(error) = thread.materialize_resources(config.resources, provider).await {
+                    tracing::debug!(%error, "background resource preparation failed; the next command will retry");
+                }
+            });
         }
         Ok(managed::ThreadInfo {
             model: Some(model),
@@ -214,38 +227,6 @@ impl LocalProvider {
         self.managed = setup;
         self
     }
-}
-
-async fn resolve_model(
-    root: &dyn ExoHarness,
-    requested: Option<&str>,
-    preferred: &str,
-) -> Result<String> {
-    let registered: Vec<_> = root
-        .list_bindings()
-        .await?
-        .into_iter()
-        .filter_map(|binding| match binding.binding {
-            exoharness::Binding::Llm { name, .. } => Some(name),
-            _ => None,
-        })
-        .collect();
-    let selected = requested.unwrap_or(preferred);
-    if registered.iter().any(|model| model == selected) {
-        return Ok(selected.to_string());
-    }
-    if requested.is_some() {
-        bail!(
-            "model is not registered: {selected}; register it with `exo model create {selected} --secret <secret>`"
-        );
-    }
-    let model = registered.first().context("no model is registered; run `exo vault secret create global openai --token-env OPENAI_API_KEY` and `exo model create gpt-5.6-sol --secret openai`")?;
-    tracing::warn!(
-        preferred,
-        model,
-        "model is not registered; using the only registered model"
-    );
-    Ok(model.clone())
 }
 
 struct PreparedMcp {
@@ -365,21 +346,14 @@ impl PreparedMcp {
 mod permission_tests {
     use super::*;
     use exo_managed_agents::permissions::PermissionPolicy;
-    use exoharness::{BasicExoHarness, Binding, WriteArtifactRequest};
+    use exoharness::{BasicExoHarness, WriteArtifactRequest};
 
     #[tokio::test]
     async fn resumed_threads_use_updated_agent_permissions() -> Result<()> {
         let temp = tempfile::TempDir::new()?;
         let config = crate::test_support::local_test_config(temp.path().join("state"));
         let state = Arc::new(BasicExoHarness::new(config.clone()).await?);
-        state
-            .put_binding(Binding::Llm {
-                name: "fixture".into(),
-                model: "fixture".into(),
-                base_url: None,
-                secret: None,
-            })
-            .await?;
+
         let runtime = crate::Runtime::new(
             LocalProvider::managed(
                 state,

@@ -24,7 +24,7 @@ pub struct ThreadArgs {
     /// Resume a saved thread by slug or id.
     #[arg(long)]
     pub thread: Option<String>,
-    /// Override the model binding for this thread.
+    /// Override the model name for this thread.
     #[arg(long)]
     pub model: Option<String>,
     /// Attach a vault to the thread, including when resuming an existing thread.
@@ -178,8 +178,8 @@ pub async fn open_thread(
     )
     .await?;
     let mut environment = match (&args.environment_file, &args.environment) {
-        (Some(path), _) => Some(crate::environments::load(path)?),
-        (_, Some(name)) => Some(crate::environments::find(root.as_ref(), name).await?),
+        (Some(path), _) => Some(crate::environment::load(path)?),
+        (_, Some(name)) => Some(crate::environment::find(root.as_ref(), name).await?),
         _ => None,
     };
     if let Some(environment) = &mut environment {
@@ -198,7 +198,7 @@ pub async fn open_thread(
         environment.validate()?;
     }
     let slug = crate::generate_fun_slug();
-    eprintln!("Preparing thread resources and connections...");
+    eprintln!("Opening thread...");
     let opened = runtime
         .open_managed_thread(
             &agent,

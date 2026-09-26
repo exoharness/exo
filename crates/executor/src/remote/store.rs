@@ -118,7 +118,8 @@ impl Store {
                 &self.secret,
                 Secret::Key {
                     value: serde_json::to_string(state)?,
-                },
+                }
+                .into(),
             )
             .await?;
         Ok(())

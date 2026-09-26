@@ -281,21 +281,6 @@ impl ExoHttpTransport for RuntimeTransport {
             Request::AgentWriteArtifact { agent_id, request } => Ok(Response::ArtifactVersion {
                 artifact: self.client.write_agent_artifact(agent_id, &request).await?,
             }),
-            Request::ListBindings => Ok(Response::Bindings {
-                bindings: self.client.list_models().await?,
-            }),
-            Request::PutBinding { binding } => Ok(Response::BindingId {
-                binding_id: self.client.put_model(&binding).await?,
-            }),
-            Request::GetBinding { binding_id } => Ok(Response::Binding {
-                binding: self
-                    .client
-                    .list_models()
-                    .await?
-                    .into_iter()
-                    .find(|r| r.id == binding_id)
-                    .map(|r| r.binding),
-            }),
             Request::CreateVault { name } => Ok(Response::Vault {
                 vault: Some(self.client.create_vault(&name).await?),
             }),
@@ -315,10 +300,16 @@ impl ExoHttpTransport for RuntimeTransport {
                 vault_id,
                 secret_id,
                 secret,
+                target,
             } => Ok(Response::SecretMetadata {
                 metadata: self
                     .client
-                    .update_secret(scope, vault_id, secret_id, &secret)
+                    .update_secret(
+                        scope,
+                        vault_id,
+                        secret_id,
+                        &exoharness::UpdateSecretRequest { secret, target },
+                    )
                     .await?,
             }),
             Request::VaultDeleteSecret {

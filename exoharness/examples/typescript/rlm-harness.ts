@@ -37,10 +37,7 @@ import {
   type TraceParent,
 } from "@exo/model-runtime/responses";
 
-import {
-  resolveLlmBinding,
-  type ResolvedLlmBinding,
-} from "@exo/model-runtime/shared";
+import { resolveModel, type ResolvedModel } from "@exo/model-runtime/shared";
 
 const STDOUT_PREVIEW_CHARS = 12_000;
 const RESULT_PREVIEW_CHARS = 12_000;
@@ -88,8 +85,8 @@ export default defineHarness({
       context,
       buildRlmToolDefinitions().map((tool) => tool.name),
     );
-    const modelBinding = await resolveLlmBinding(context);
-    const runtime = ResponsesRuntime.fromModelBinding(
+    const modelBinding = await resolveModel(context);
+    const runtime = ResponsesRuntime.fromModelConfig(
       context.agentConfig,
       modelBinding,
     );
@@ -103,7 +100,7 @@ async function runRlmTurnLoop(
   runtime: ResponsesRuntimeLike,
   context: TurnContext,
   turnParent: TraceParent,
-  modelBinding: ResolvedLlmBinding,
+  modelBinding: ResolvedModel,
 ): Promise<string | null> {
   const { conversation, turn } = context.exoharness.current;
   const contextMessages = await materializeConversationMessages(conversation);
@@ -317,7 +314,7 @@ async function traceRlmToolCall(
   toolCall: PendingToolCall,
   roundIndex: number,
   turnParent: TraceParent,
-  modelBinding: ResolvedLlmBinding,
+  modelBinding: ResolvedModel,
 ): Promise<ToolResult> {
   return tracedUnderParent(
     turnParent,
@@ -362,7 +359,7 @@ async function executeRlmTool(
   request: ToolRequest,
   turnParent: TraceParent,
   roundIndex: number,
-  modelBinding: ResolvedLlmBinding,
+  modelBinding: ResolvedModel,
 ): Promise<ToolResult> {
   switch (request.functionName) {
     case "repl_execute": {
@@ -410,7 +407,7 @@ async function runSubqueryTool(
   targetVar: string | null,
   turnParent: TraceParent,
   roundIndex: number,
-  modelBinding: ResolvedLlmBinding,
+  modelBinding: ResolvedModel,
 ): Promise<ToolResult> {
   const result = await runSubquery(
     runtime,
@@ -438,7 +435,7 @@ async function runSubquery(
   prompt: string,
   turnParent: TraceParent,
   roundIndex: number,
-  modelBinding: ResolvedLlmBinding,
+  modelBinding: ResolvedModel,
 ): Promise<string> {
   const response = await runtime.complete(
     {

@@ -7,9 +7,9 @@ use crate::{
 use anyhow::anyhow;
 use async_trait::async_trait;
 use exoharness::{
-    AddEventsRequest, BasicExoHarness, Binding, EventData, EventKind, EventQuery,
-    EventQueryDirection, ExoHarness, FileSystemMount, FileSystemMountMode, PutSecretRequest,
-    Result, SandboxAttachment, SandboxProvider, Secret, ToolRequest, Uuid7,
+    AddEventsRequest, BasicExoHarness, EventData, EventKind, EventQuery, EventQueryDirection,
+    ExoHarness, FileSystemMount, FileSystemMountMode, PutSecretRequest, Result, SandboxAttachment,
+    SandboxProvider, Secret, ToolRequest, Uuid7,
 };
 use lingua::universal::{AssistantContent, UserContent};
 use lingua::{Message, UniversalStreamChunk, UniversalUsage};
@@ -39,10 +39,12 @@ async fn creates_agents_and_conversations_with_persisted_config() {
         ),
         None,
     );
-    register_test_models(harness.exoharness_handle().as_ref()).await;
+    create_test_credential(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness
         .create_agent(CreateAgentRequest {
+            credential: Some("test-openai".into()),
+            base_url: None,
             slug: "demo".to_string(),
             name: Some("Demo".to_string()),
             harness: crate::AgentHarnessKind::Basic,
@@ -134,10 +136,12 @@ async fn send_persists_messages_through_harness() {
         ),
         None,
     );
-    register_test_models(harness.exoharness_handle().as_ref()).await;
+    create_test_credential(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness
         .create_agent(CreateAgentRequest {
+            credential: Some("test-openai".into()),
+            base_url: None,
             slug: "demo".to_string(),
             name: None,
             harness: crate::AgentHarnessKind::Basic,
@@ -246,7 +250,7 @@ async fn usage_record_is_persisted_with_computed_cost() {
         None,
     );
 
-    let secret_id = exoharness::vault::global_vault(exoharness.as_ref())
+    exoharness::vault::global_vault(exoharness.as_ref())
         .await
         .expect("runtime vault")
         .put_secret(PutSecretRequest {
@@ -258,25 +262,11 @@ async fn usage_record_is_persisted_with_computed_cost() {
         })
         .await
         .expect("test secret should register");
-    exoharness
-        .put_binding(Binding::Llm {
-            name: "claude-sonnet-4-6".to_string(),
-            model: "claude-sonnet-4-6".to_string(),
-            base_url: None,
-            secret: Some(exoharness::vault::SecretReference {
-                vault_id: exoharness::vault::global_vault(exoharness.as_ref())
-                    .await
-                    .unwrap()
-                    .record()
-                    .id,
-                secret_id,
-            }),
-        })
-        .await
-        .expect("binding should register");
 
     let agent = harness
         .create_agent(CreateAgentRequest {
+            credential: Some("cost-test-key".into()),
+            base_url: None,
             slug: "cost-demo".to_string(),
             name: None,
             harness: crate::AgentHarnessKind::Basic,
@@ -409,7 +399,7 @@ async fn usage_record_with_anthropic_cache_hits() {
         None,
     );
 
-    let secret_id = exoharness::vault::global_vault(exoharness.as_ref())
+    exoharness::vault::global_vault(exoharness.as_ref())
         .await
         .expect("runtime vault")
         .put_secret(PutSecretRequest {
@@ -421,25 +411,11 @@ async fn usage_record_with_anthropic_cache_hits() {
         })
         .await
         .expect("test secret should register");
-    exoharness
-        .put_binding(Binding::Llm {
-            name: "claude-sonnet-4-6".to_string(),
-            model: "claude-sonnet-4-6".to_string(),
-            base_url: None,
-            secret: Some(exoharness::vault::SecretReference {
-                vault_id: exoharness::vault::global_vault(exoharness.as_ref())
-                    .await
-                    .unwrap()
-                    .record()
-                    .id,
-                secret_id,
-            }),
-        })
-        .await
-        .expect("binding should register");
 
     let agent = harness
         .create_agent(CreateAgentRequest {
+            credential: Some("anthropic-cache-key".into()),
+            base_url: None,
             slug: "anthropic-cache".to_string(),
             name: None,
             harness: crate::AgentHarnessKind::Basic,
@@ -548,7 +524,7 @@ async fn usage_record_with_openai_inclusive_accounting() {
         None,
     );
 
-    let secret_id = exoharness::vault::global_vault(exoharness.as_ref())
+    exoharness::vault::global_vault(exoharness.as_ref())
         .await
         .expect("runtime vault")
         .put_secret(PutSecretRequest {
@@ -560,25 +536,11 @@ async fn usage_record_with_openai_inclusive_accounting() {
         })
         .await
         .expect("test secret should register");
-    exoharness
-        .put_binding(Binding::Llm {
-            name: "gpt-4o-mini".to_string(),
-            model: "gpt-4o-mini".to_string(),
-            base_url: None,
-            secret: Some(exoharness::vault::SecretReference {
-                vault_id: exoharness::vault::global_vault(exoharness.as_ref())
-                    .await
-                    .unwrap()
-                    .record()
-                    .id,
-                secret_id,
-            }),
-        })
-        .await
-        .expect("binding should register");
 
     let agent = harness
         .create_agent(CreateAgentRequest {
+            credential: Some("openai-cache-key".into()),
+            base_url: None,
             slug: "openai-cache".to_string(),
             name: None,
             harness: crate::AgentHarnessKind::Basic,
@@ -665,10 +627,12 @@ async fn close_session_appends_session_ended_event() {
         ),
         None,
     );
-    register_test_models(harness.exoharness_handle().as_ref()).await;
+    create_test_credential(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness
         .create_agent(CreateAgentRequest {
+            credential: Some("test-openai".into()),
+            base_url: None,
             slug: "demo".to_string(),
             name: None,
             harness: crate::AgentHarnessKind::Basic,
@@ -766,10 +730,12 @@ async fn updating_agent_config_refreshes_executor_cache() {
         ),
         None,
     );
-    register_test_models(harness.exoharness_handle().as_ref()).await;
+    create_test_credential(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness
         .create_agent(CreateAgentRequest {
+            credential: Some("test-openai".into()),
+            base_url: None,
             slug: "demo".to_string(),
             name: Some("Demo".to_string()),
             harness: crate::AgentHarnessKind::Basic,
@@ -876,10 +842,12 @@ async fn send_executes_shell_tool_when_enabled() {
         ),
         None,
     );
-    register_test_models(harness.exoharness_handle().as_ref()).await;
+    create_test_credential(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness
         .create_agent(CreateAgentRequest {
+            credential: Some("test-openai".into()),
+            base_url: None,
             slug: "demo".to_string(),
             name: Some("Demo".to_string()),
             harness: crate::AgentHarnessKind::Basic,
@@ -981,10 +949,12 @@ async fn harness_exposes_raw_exoharness_handles() {
         ),
         None,
     );
-    register_test_models(harness.exoharness_handle().as_ref()).await;
+    create_test_credential(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness
         .create_agent(CreateAgentRequest {
+            credential: Some("test-openai".into()),
+            base_url: None,
             slug: "demo".to_string(),
             name: Some("Demo".to_string()),
             harness: crate::AgentHarnessKind::Basic,
@@ -1112,10 +1082,12 @@ async fn updating_mounts_recreates_conversation_sandbox() {
         ),
         None,
     );
-    register_test_models(harness.exoharness_handle().as_ref()).await;
+    create_test_credential(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness
         .create_agent(CreateAgentRequest {
+            credential: Some("test-openai".into()),
+            base_url: None,
             slug: "demo".to_string(),
             name: Some("Demo".to_string()),
             harness: crate::AgentHarnessKind::Basic,
@@ -1237,6 +1209,8 @@ async fn updating_sandbox_image_recreates_shell_sandbox_without_shell_program() 
 
     let agent = harness
         .create_agent(CreateAgentRequest {
+            credential: Some("test-openai".into()),
+            base_url: None,
             slug: "demo".to_string(),
             name: Some("Demo".to_string()),
             harness: crate::AgentHarnessKind::Basic,
@@ -1421,10 +1395,12 @@ async fn conversation_model_override_changes_effective_model() {
         ),
         None,
     );
-    register_test_models(harness.exoharness_handle().as_ref()).await;
+    create_test_credential(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness
         .create_agent(CreateAgentRequest {
+            credential: Some("test-openai".into()),
+            base_url: None,
             slug: "demo".to_string(),
             name: None,
             harness: crate::AgentHarnessKind::Basic,
@@ -1624,8 +1600,8 @@ fn shell_command_arguments(command: &str) -> Map<String, Value> {
     Map::from_iter([(String::from("command"), Value::String(command.to_string()))])
 }
 
-async fn register_test_models(exoharness: &dyn ExoHarness) {
-    let secret_id = exoharness::vault::global_vault(exoharness)
+async fn create_test_credential(exoharness: &dyn ExoHarness) {
+    exoharness::vault::global_vault(exoharness)
         .await
         .expect("runtime vault")
         .put_secret(PutSecretRequest {
@@ -1637,25 +1613,6 @@ async fn register_test_models(exoharness: &dyn ExoHarness) {
         })
         .await
         .expect("test secret should register");
-
-    for model in ["gpt-5.4", "gpt-5.4-mini", "claude-sonnet-4"] {
-        exoharness
-            .put_binding(Binding::Llm {
-                name: model.to_string(),
-                model: model.to_string(),
-                base_url: None,
-                secret: Some(exoharness::vault::SecretReference {
-                    vault_id: exoharness::vault::global_vault(exoharness)
-                        .await
-                        .unwrap()
-                        .record()
-                        .id,
-                    secret_id,
-                }),
-            })
-            .await
-            .expect("test model should register");
-    }
 }
 
 #[tokio::test]
@@ -1678,6 +1635,8 @@ async fn remote_threads_paginate_and_failed_creation_only_deletes_the_new_thread
     );
     let agent = local
         .create_agent(CreateAgentRequest {
+            credential: Some("test-openai".into()),
+            base_url: None,
             slug: "support".to_string(),
             name: None,
             harness: crate::AgentHarnessKind::Basic,
@@ -1909,9 +1868,11 @@ async fn basic_and_rlm_models_receive_mcp_errors_and_can_continue() -> Result<()
             _ => LocalProvider::rlm(root, Arc::clone(&model), tools),
         };
         let harness = Runtime::new(provider, None);
-        register_test_models(harness.exoharness_handle().as_ref()).await;
+        create_test_credential(harness.exoharness_handle().as_ref()).await;
         let agent = harness
             .create_agent(CreateAgentRequest {
+                credential: Some("test-openai".into()),
+                base_url: None,
                 slug: "mcp-errors".into(),
                 name: None,
                 harness: kind,

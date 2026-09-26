@@ -159,8 +159,6 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         web::scope(RUNTIME_PATH)
             .wrap(from_fn(authorize))
             .route("/identity", web::get().to(identity))
-            .route("/model", web::get().to(list_models))
-            .route("/model", web::post().to(put_model))
             .route(
                 "/agent/{agent_id}/thread/{thread_id}/environment",
                 web::put().to(update_thread_environment),
@@ -447,39 +445,6 @@ async fn list_vaults(
     ))
 }
 
-async fn list_models(service: Service) -> Result<web::Json<Vec<exoharness::BindingRecord>>, Error> {
-    service.require_full_provider()?;
-    let bindings = service
-        .runtime
-        .exoharness_handle()
-        .list_bindings()
-        .await
-        .map_err(ErrorBadRequest)?;
-    Ok(web::Json(
-        bindings
-            .into_iter()
-            .filter(|r| matches!(r.binding, exoharness::Binding::Llm { .. }))
-            .collect(),
-    ))
-}
-async fn put_model(
-    service: Service,
-    body: web::Json<exoharness::Binding>,
-) -> Result<web::Json<exoharness::BindingId>, Error> {
-    service.require_full_provider()?;
-    if !matches!(&*body, exoharness::Binding::Llm { .. }) {
-        return Err(ErrorBadRequest("expected a model binding"));
-    }
-    Ok(web::Json(
-        service
-            .runtime
-            .exoharness_handle()
-            .put_binding(body.into_inner())
-            .await
-            .map_err(ErrorBadRequest)?,
-    ))
-}
-
 async fn create_vault(
     service: Service,
     body: web::Json<CreateVaultBody>,
@@ -537,7 +502,7 @@ async fn put_secret(
 async fn update_secret(
     service: Service,
     path: web::Path<VaultPath>,
-    body: web::Json<exoharness::Secret>,
+    body: web::Json<exoharness::UpdateSecretRequest>,
 ) -> Result<web::Json<exoharness::SecretMetadata>, Error> {
     let vault = writable_vault(&service, &path).await?;
     Ok(web::Json(

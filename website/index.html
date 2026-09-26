@@ -1136,11 +1136,10 @@
         <p>Build the CLI:</p>
         <pre class="code-block"><code>cargo build -p exo
 ./target/debug/exo --help</code></pre>
-        <p class="spaced">Register a model, create an agent, then chat:</p>
+        <p class="spaced">Store a vault secret, create an agent, then chat:</p>
         <pre
           class="code-block"
-        ><code>./target/debug/exo vault secret create global openai --token-env OPENAI_API_KEY
-./target/debug/exo model create gpt-5.5 --secret openai
+        ><code>./target/debug/exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com
 ./target/debug/exo agent create assistant --file exoharness/examples/managed-agents/assistant.md
 ./target/debug/exo agent run --agent assistant</code></pre>
         <p class="spaced">Choose a harness when creating an agent:</p>

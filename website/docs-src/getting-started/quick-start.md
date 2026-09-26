@@ -1,6 +1,6 @@
 ---
 title: Using the CLI Directly
-description: Store a secret, register a model, and start chatting.
+description: Store a secret, configure an agent, and start chatting.
 ---
 
 # Using the CLI Directly
@@ -13,27 +13,20 @@ primitives the setup script drives.
 ## 1. Store a secret
 
 ```bash
-exo vault secret create global openai --token-env OPENAI_API_KEY
+exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com
 ```
 
-This stores your API key in exo's secret store (file-backed by default,
-Apple Keychain also supported via `--secret-backend`).
+This stores your API key in the global vault, encrypted using the configured secret backend.
 
 ::: info
   `--token-env` takes the environment variable name; the CLI reads its value.
 :::
 
-## 2. Register a model
+## 2. Configure an agent and chat
 
-```bash
-exo model create gpt-5.5 --secret openai
-```
-
-This writes a *model binding*: a named model plus the secret it
-authenticates with. Use `--base-url` to target any OpenAI-compatible
-endpoint. Model names starting with `claude` use the Anthropic API.
-
-## 3. Create an agent and chat
+The spec selects the upstream model and a secret from its selected vaults.
+Set `config.base_url` for a custom endpoint. Model names starting with `claude`
+use the Anthropic API.
 
 ```bash
 cat > assistant.md <<'EOF'
@@ -42,6 +35,7 @@ name: "assistant"
 harness: basic
 config:
   model: gpt-5.5
+  credential: openai
 ---
 Help the user with their task.
 EOF

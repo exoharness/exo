@@ -38,7 +38,7 @@ separate and can be snapshotted or rewound without erasing the event log.
 ## Agent lifecycle
 
 An **agent** is the top-level identity: display name, slug, executor/harness
-config, model binding, sandbox defaults, and agent-scoped artifacts,
+config, model credentials, sandbox defaults, and agent-scoped artifacts,
 bindings, and secrets.
 
 ### Create
@@ -50,6 +50,7 @@ name: "My Agent"
 harness: basic
 config:
   model: gpt-5.6-terra
+  credential: openai
 ---
 Help the user with their task.
 EOF

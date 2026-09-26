@@ -106,8 +106,10 @@ impl Fixture {
             .arg(self.temp.path().join("state"))
             .args(["--secret-backend", "file", "--master-key-path"])
             .arg(self.temp.path().join("master-key"))
-            .arg("--pricing-path")
-            .arg(self.temp.path().join("prices.json"))
+            .env(
+                "EXO_LITELLM_PRICES_PATH",
+                self.temp.path().join("prices.json"),
+            )
             .args(&args[1..])
             .kill_on_drop(true);
         command
@@ -213,7 +215,7 @@ impl Fixture {
             anyhow::bail!("expected OAuth grant")
         };
         *expires_at = Some(0);
-        self.vault.update_secret(id, secret).await?;
+        self.vault.update_secret(id, secret.into()).await?;
         Ok(())
     }
 
@@ -409,7 +411,8 @@ async fn refresh_cannot_restore_a_revoked_or_manually_rotated_secret() -> Result
                     &id,
                     Secret::Key {
                         value: "manual-rotation".into(),
-                    },
+                    }
+                    .into(),
                 )
                 .await?;
         }
@@ -471,7 +474,7 @@ async fn rejected_tokens_refresh_once_without_reinitializing_the_mcp_session() -
                 panic!("expected OAuth")
             };
             *expires_at = None;
-            f.vault.update_secret(&id, secret).await?;
+            f.vault.update_secret(&id, secret.into()).await?;
         }
         let mut server = None;
         let vault = if unknown_expiry {
@@ -679,7 +682,8 @@ async fn mcp_auth_retries_are_bounded_and_only_for_refreshable_401s() -> Result<
                     &f.secret_id().await?,
                     Secret::Key {
                         value: "initial-token".into(),
-                    },
+                    }
+                    .into(),
                 )
                 .await?;
         }
@@ -732,21 +736,11 @@ async fn chat_vault_smoke_restart_second_vault_rotation_revocation_and_public_mc
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    f.cli(&[
-        "model",
-        "create",
-        "gpt-5-mini",
-        "--secret",
-        "model",
-        "--base-url",
-        &f.server.uri(),
-    ])
-    .await?;
     let file = f.temp.path().join("vault-agent.md");
     std::fs::write(
         &file,
         format!(
-            "---\nname: Vault smoke\nharness: basic\nconfig:\n  model: gpt-5-mini\nmcp_servers:\n  - type: url\n    name: workspace\n    url: {}/mcp/\n---\nAnswer workspace questions.\n",
+            "---\nname: Vault smoke\nharness: basic\nconfig:\n  model: gpt-5-mini\n  credential: model\n  base_url: {0}\nmcp_servers:\n  - type: url\n    name: workspace\n    url: {0}/mcp/\n---\nAnswer workspace questions.\n",
             f.server.uri()
         ),
     )?;

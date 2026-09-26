@@ -31,12 +31,16 @@ pub enum SecretCommands {
     Create {
         vault: String,
         name: String,
+        /// MCP server URL; omit --token-env to log in with OAuth.
         #[arg(long, conflicts_with = "http_origin")]
         mcp_server_url: Option<String>,
+        /// Authorize this token for an HTTPS origin, e.g. https://github.com for Git.
         #[arg(long)]
         http_origin: Option<String>,
+        /// Read the secret value from this environment variable.
         #[arg(long, value_parser = crate::parse_env_var_name)]
         token_env: Option<String>,
+        /// Print the OAuth login URL without opening a browser.
         #[arg(long, conflicts_with = "token_env")]
         no_browser: bool,
     },
@@ -50,8 +54,13 @@ pub enum SecretCommands {
     Update {
         vault: String,
         secret: String,
+        /// Replace the allowed HTTPS origin, preserving the token unless --token-env is set.
+        #[arg(long, conflicts_with = "no_browser")]
+        http_origin: Option<String>,
+        /// Read the secret value from this environment variable.
         #[arg(long, value_parser = crate::parse_env_var_name)]
         token_env: Option<String>,
+        /// Print the OAuth login URL without opening a browser.
         #[arg(long, conflicts_with = "token_env")]
         no_browser: bool,
     },
@@ -182,17 +191,31 @@ pub async fn run(
                         }
                         SecretCommands::Update {
                             token_env,
+                            http_origin,
                             no_browser,
                             ..
                         } => {
-                            let secret = credential(
-                                token_env.as_deref(),
-                                record.target.as_ref(),
-                                *no_browser,
-                                env,
-                            )
-                            .await?;
-                            let record = vault.update_secret(&record.id, secret).await?;
+                            let target =
+                                http_origin.as_deref().map(SecretTarget::http).transpose()?;
+                            let secret = if target.is_some() && token_env.is_none() {
+                                None
+                            } else {
+                                Some(
+                                    credential(
+                                        token_env.as_deref(),
+                                        target.as_ref().or(record.target.as_ref()),
+                                        *no_browser,
+                                        env,
+                                    )
+                                    .await?,
+                                )
+                            };
+                            let record = vault
+                                .update_secret(
+                                    &record.id,
+                                    exoharness::UpdateSecretRequest { secret, target },
+                                )
+                                .await?;
                             println!(
                                 "updated secret {} ({}) to revision {}",
                                 record.name, record.id, record.revision

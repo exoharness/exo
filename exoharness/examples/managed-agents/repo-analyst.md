@@ -3,6 +3,7 @@ name: repo-analyst
 harness: codex
 config:
   model: gpt-5.6-sol
+  credential: openai
 mcp_servers:
   - type: url
     name: deepwiki

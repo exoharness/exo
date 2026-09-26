@@ -30,6 +30,8 @@ pub struct AgentConfig {
     pub enable_agent_tool_creation: bool,
     pub sandbox: AgentSandboxConfig,
     pub model: String,
+    pub credential: Option<String>,
+    pub base_url: Option<String>,
     pub max_output_tokens: Option<i64>,
     pub max_tool_round_trips: Option<u32>,
     pub braintrust: Option<BraintrustTracingConfig>,
@@ -126,6 +128,23 @@ pub fn effective_sandbox_scope(
 }
 
 impl ConversationConfig {
+    pub async fn materialize_resources(
+        &mut self,
+        thread: &dyn ConversationHandle,
+        agent_config: &AgentConfig,
+    ) -> Result<()> {
+        if !self.resources.is_empty() {
+            tracing::info!(target: "exoharness::progress", "Preparing workspace");
+            self.resource_mounts = thread
+                .materialize_resources(
+                    self.resources.clone(),
+                    self.effective_sandbox_provider(agent_config),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
     pub fn effective_sandbox_image<'a>(&'a self, agent_config: &'a AgentConfig) -> Option<&'a str> {
         self.sandbox_image
             .as_deref()

@@ -815,8 +815,6 @@ pub struct EgressPolicy {
 #[serde(deny_unknown_fields)]
 pub struct EgressCredentialBinding {
     pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<BindingId>,
     pub environment_variable: String,
     pub networking: CredentialNetworkPolicy,
     pub injection_location: CredentialInjectionLocation,
@@ -883,16 +881,7 @@ impl From<SandboxNetworkPolicy> for EgressPolicy {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct SandboxModelBinding {
-    pub id: BindingId,
-    pub environment_variable: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct CreateSandboxRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<SandboxModelBinding>,
     #[serde(default)]
     pub name: Option<String>,
     pub provider: SandboxProvider,
@@ -1211,6 +1200,25 @@ pub struct PutSecretRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateSecretRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<Secret>,
+    /// Replace the destination grant; omitted preserves the current grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<SecretTarget>,
+}
+
+impl From<Secret> for UpdateSecretRequest {
+    fn from(secret: Secret) -> Self {
+        Self {
+            secret: Some(secret),
+            target: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SecretType {
     Key,
@@ -1230,6 +1238,7 @@ pub enum Binding {
         server_url: String,
         secret: Option<SecretReference>,
     },
+    /// Decoded only to preserve existing stores; model registration is retired.
     Llm {
         name: String,
         model: String,

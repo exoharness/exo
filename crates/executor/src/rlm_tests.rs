@@ -8,8 +8,8 @@ use crate::{
 use anyhow::{anyhow, bail};
 use async_trait::async_trait;
 use exoharness::{
-    BasicExoHarness, Binding, EventData, EventQuery, EventQueryDirection, ExoHarness,
-    PutSecretRequest, SandboxProvider, Secret, ToolRequest, Uuid7,
+    BasicExoHarness, EventData, EventQuery, EventQueryDirection, ExoHarness, PutSecretRequest,
+    SandboxProvider, Secret, ToolRequest, Uuid7,
 };
 use lingua::universal::{AssistantContent, UserContent};
 use lingua::{Message, UniversalStreamChunk};
@@ -67,10 +67,12 @@ async fn rlm_send_executes_repl_steps_and_persists_final_answer() {
         LocalProvider::rlm(exoharness, model, Arc::new(crate::BasicToolRuntime)),
         None,
     );
-    register_test_model(harness.exoharness_handle().as_ref()).await;
+    create_test_credential(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness
         .create_agent(CreateAgentRequest {
+            credential: Some("test-openai".into()),
+            base_url: None,
             slug: "demo".to_string(),
             name: Some("Demo".to_string()),
             harness: crate::AgentHarnessKind::Rlm,
@@ -226,10 +228,12 @@ async fn rlm_subquery_variable_can_store_final_answer() {
         ),
         None,
     );
-    register_test_model(harness.exoharness_handle().as_ref()).await;
+    create_test_credential(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness
         .create_agent(CreateAgentRequest {
+            credential: Some("test-openai".into()),
+            base_url: None,
             slug: "demo".to_string(),
             name: Some("Demo".to_string()),
             harness: crate::AgentHarnessKind::Rlm,
@@ -306,10 +310,12 @@ async fn rlm_send_stream_suppresses_internal_control_text() {
         LocalProvider::rlm(exoharness, model, Arc::new(crate::BasicToolRuntime)),
         None,
     );
-    register_test_model(harness.exoharness_handle().as_ref()).await;
+    create_test_credential(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness
         .create_agent(CreateAgentRequest {
+            credential: Some("test-openai".into()),
+            base_url: None,
             slug: "demo".to_string(),
             name: Some("Demo".to_string()),
             harness: crate::AgentHarnessKind::Rlm,
@@ -435,10 +441,12 @@ globalThis.answer = String(\n\
         LocalProvider::rlm(exoharness, model, Arc::new(crate::BasicToolRuntime)),
         None,
     );
-    register_test_model(harness.exoharness_handle().as_ref()).await;
+    create_test_credential(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness
         .create_agent(CreateAgentRequest {
+            credential: Some("test-openai".into()),
+            base_url: None,
             slug: "demo".to_string(),
             name: Some("Demo".to_string()),
             harness: crate::AgentHarnessKind::Rlm,
@@ -529,10 +537,12 @@ async fn rlm_can_finish_by_setting_final_in_repl() {
         ),
         None,
     );
-    register_test_model(harness.exoharness_handle().as_ref()).await;
+    create_test_credential(harness.exoharness_handle().as_ref()).await;
 
     let agent = harness
         .create_agent(CreateAgentRequest {
+            credential: Some("test-openai".into()),
+            base_url: None,
             slug: "demo".to_string(),
             name: Some("Demo".to_string()),
             harness: crate::AgentHarnessKind::Rlm,
@@ -693,8 +703,8 @@ fn assistant_text(message: &Message) -> String {
     }
 }
 
-async fn register_test_model(exoharness: &dyn ExoHarness) {
-    let secret_id = exoharness::vault::global_vault(exoharness)
+async fn create_test_credential(exoharness: &dyn ExoHarness) {
+    exoharness::vault::global_vault(exoharness)
         .await
         .expect("runtime vault")
         .put_secret(PutSecretRequest {
@@ -706,21 +716,4 @@ async fn register_test_model(exoharness: &dyn ExoHarness) {
         })
         .await
         .expect("test secret should register");
-
-    exoharness
-        .put_binding(Binding::Llm {
-            name: "gpt-5.4".to_string(),
-            model: "gpt-5.4".to_string(),
-            base_url: None,
-            secret: Some(exoharness::vault::SecretReference {
-                vault_id: exoharness::vault::global_vault(exoharness)
-                    .await
-                    .unwrap()
-                    .record()
-                    .id,
-                secret_id,
-            }),
-        })
-        .await
-        .expect("test model should register");
 }

@@ -153,21 +153,8 @@ async fn conversation_send_round_trips_through_real_sandbox_and_mocked_openai() 
         &root,
         &xdg,
     );
-    run_exo(
-        &[
-            "model",
-            "create",
-            "gpt-test",
-            "--secret",
-            "test-key",
-            "--base-url",
-            &mock_server.uri(),
-        ],
-        &root,
-        &xdg,
-    );
     let spec = root_dir.path().join("agent.md");
-    std::fs::write(&spec, "---\nname: Integration Test Agent\nharness: basic\nconfig:\n  model: gpt-test\n---\nReply to the user.\n").unwrap();
+    std::fs::write(&spec, format!("---\nname: Integration Test Agent\nharness: basic\nconfig:\n  model: gpt-test\n  credential: test-key\n  base_url: {}\n---\nReply to the user.\n", mock_server.uri())).unwrap();
     run_exo(
         &[
             "agent",

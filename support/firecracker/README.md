@@ -170,62 +170,27 @@ Run Exo as root, select the backend, and configure the provider binding:
 ```bash
 sudo EXO_FIRECRACKER_KERNEL=/var/lib/exo/firecracker/vmlinux \
   EXO_FIRECRACKER_INITRAMFS=/var/lib/exo/firecracker/exo-firecracker-initramfs.cpio \
-  target/debug/exo sandbox provider create \
-  --sandbox firecracker \
+  target/debug/exo environment provider create \
+  --backend firecracker \
   --default-image 123456789012.dkr.ecr.us-east-1.amazonaws.com/exo-sandbox@sha256:...
 ```
 
-Agents can then select `--sandbox firecracker`; the Exo CLI and data
-model remain the same as for hosted sandbox providers.
-
-To start an unnamed sandbox and connect a shell in one command, use `sandbox
-play`. It destroys the sandbox when the shell exits:
+Run an agent with the Firecracker backend:
 
 ```bash
-sudo target/debug/exo sandbox play \
-  --sandbox firecracker \
-  --image 123456789012.dkr.ecr.us-east-1.amazonaws.com/exo-sandbox@sha256:... \
-  --networking enabled \
-  --firecracker-memory-mib 2048 \
-  --firecracker-vcpu-count 2
+sudo target/debug/exo agent run \
+  --agent-file exoharness/examples/managed-agents/exo-developer.md \
+  --sandbox firecracker
 ```
 
-`sandbox create --help` and `sandbox play --help` list every sandbox-creation
-parameter, including the working directory, idle timeout, host mounts, durable
-filesystems, and networking. Their `--firecracker-*` options control the VMM
-and jailer paths, kernel, initramfs, state root, VM sizing, DNS, UID range,
-image/workspace sizes, and network rate limit. The same options live under
-`exo serve` for a persistent backend. The corresponding `EXO_FIRECRACKER_*`
-environment variables remain supported.
+The agent's thread owns its sandbox. In the conversation, `/sandbox COMMAND`
+runs a shell command in that sandbox. Use an environment definition to configure
+its image, working directory, resource limits, mounts, and networking.
 
-For a sandbox that survives between CLI invocations, use the separate lifecycle
-commands. Each command adopts the running Firecracker VM from its persisted
-state:
-
-```bash
-sandbox_id=$(sudo target/debug/exo sandbox create --sandbox firecracker)
-sudo target/debug/exo sandbox list
-sudo target/debug/exo sandbox exec "$sandbox_id" -- /bin/echo hello
-sudo target/debug/exo sandbox connect "$sandbox_id"
-sudo target/debug/exo sandbox delete "$sandbox_id"
-```
-
-`connect` streams an interactive shell over stdin/stdout/stderr; the current
-sandbox process API does not provide a PTY. A long-running `exo serve` process
-is still useful when multiple clients need concurrent access to one backend.
-Every lifecycle command accepts `--agent <slug>` to use that agent's sandbox
-scope. Without it, commands share an internal singleton owner intended for
-direct CLI use.
-
-`sandbox list` shows running sandboxes by default; `-a` includes stopped records,
-and `-q` prints only IDs.
-`stop` and `terminate` accept multiple IDs, so retained sandboxes can be cleaned
-up compositionally:
-
-```bash
-sudo target/debug/exo sandbox list -aq \
-  | sudo target/debug/exo sandbox delete
-```
+`exo serve --help` lists the `--firecracker-*` options for a persistent backend,
+including VMM and jailer paths, kernel, initramfs, state root, VM sizing, DNS,
+UID range, image/workspace sizes, and network rate limits. The corresponding
+`EXO_FIRECRACKER_*` environment variables also work with `exo agent run`.
 
 ## Resource storage
 

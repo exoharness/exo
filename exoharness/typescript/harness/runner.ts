@@ -65,6 +65,8 @@ interface RawAgentConfig {
     scope: "agent" | "conversation";
   };
   model: string;
+  credential?: string | null;
+  base_url?: string | null;
   max_output_tokens?: number | null;
   max_tool_round_trips?: number | null;
   braintrust?: unknown;
@@ -156,18 +158,11 @@ type RawBinding =
       name: string;
       server_url: string;
       secret?: RawSecretReference | null;
-    }
-  | {
-      type: "llm";
-      name: string;
-      model: string;
-      base_url?: string | null;
-      secret?: RawSecretReference | null;
     };
 
 interface RawBindingRecord {
   id: string;
-  type: "env" | "mcp" | "llm";
+  type: "env" | "mcp";
   name: string;
   created_at: string;
   binding: RawBinding;
@@ -929,6 +924,8 @@ function toAgentConfig(raw: RawAgentConfig): AgentConfig {
       scope: raw.sandbox.scope,
     },
     model: raw.model,
+    credential: raw.credential,
+    baseUrl: raw.base_url,
     maxOutputTokens: raw.max_output_tokens ?? null,
     maxToolRoundTrips: raw.max_tool_round_trips ?? null,
     braintrust: raw.braintrust,
@@ -1039,19 +1036,10 @@ function toBinding(raw: RawBinding): Binding {
       secret: toSecretReference(raw.secret),
     };
   }
-  if (raw.type === "mcp") {
-    return {
-      type: "mcp",
-      name: raw.name,
-      serverUrl: raw.server_url,
-      secret: raw.secret ? toSecretReference(raw.secret) : null,
-    };
-  }
   return {
-    type: "llm",
+    type: "mcp",
     name: raw.name,
-    model: raw.model,
-    baseUrl: raw.base_url ?? null,
+    serverUrl: raw.server_url,
     secret: raw.secret ? toSecretReference(raw.secret) : null,
   };
 }

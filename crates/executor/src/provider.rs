@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{Arc, Weak},
+    sync::{Arc, Mutex, Weak},
 };
 
 use async_trait::async_trait;
@@ -57,6 +57,7 @@ pub struct LocalProvider {
     pub(crate) executor: Arc<dyn HarnessExecutor>,
     pub(crate) harness: Arc<ExecutorHarness>,
     pub(crate) managed: crate::managed_agents::LocalAgentSetup,
+    pub(crate) resource_preparations: Arc<Mutex<tokio::task::JoinSet<()>>>,
     // One provider-wide lock serializes the pending check and decision write so
     // concurrent responses cannot accept the same approval twice.
     approval_responses: tokio::sync::Mutex<()>,
@@ -71,6 +72,7 @@ impl LocalProvider {
             harness: Arc::new(ExecutorHarness::new(Arc::clone(&executor))),
             executor,
             managed: Default::default(),
+            resource_preparations: Arc::default(),
             approval_responses: Default::default(),
             live_turns: Arc::default(),
         }
@@ -115,6 +117,7 @@ impl Provider for LocalProvider {
         let executor = self.executor.with_state(state.clone())?;
         let mut provider = Self::new(state, executor).with_managed_agents(self.managed.clone());
         provider.live_turns = self.live_turns.clone();
+        provider.resource_preparations = self.resource_preparations.clone();
         Ok(Arc::new(provider))
     }
 
@@ -198,6 +201,15 @@ impl Harness<ProviderTurn> for LocalProvider {
     }
 
     async fn shutdown(&self) -> Result<()> {
+        let mut preparations = std::mem::take(
+            &mut *self
+                .resource_preparations
+                .lock()
+                .expect("resource preparations poisoned"),
+        );
+        while let Some(result) = preparations.join_next().await {
+            result?;
+        }
         self.harness.shutdown().await
     }
 

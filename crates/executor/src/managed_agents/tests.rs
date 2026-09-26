@@ -1,8 +1,9 @@
 use super::*;
 use crate::{Runtime, SandboxProvider, SendRequest};
+use anyhow::Context;
 use exoharness::{
-    BasicExoHarness, BasicExoHarnessConfig, Binding, FileSystemMount, FileSystemMountMode,
-    NewThreadRequest, PutSecretRequest, Secret, WriteArtifactRequest,
+    BasicExoHarness, BasicExoHarnessConfig, FileSystemMount, FileSystemMountMode, NewThreadRequest,
+    PutSecretRequest, Secret, WriteArtifactRequest,
     vault::{SecretTarget, global_vault},
 };
 use tempfile::TempDir;
@@ -23,14 +24,7 @@ fn sandbox_provider_keeps_the_harness_preset_image() -> Result<()> {
 
 async fn state(config: &BasicExoHarnessConfig) -> Result<Arc<dyn ExoHarness>> {
     let state = Arc::new(BasicExoHarness::in_memory(config.clone()).await?);
-    state
-        .put_binding(Binding::Llm {
-            name: "gpt-5.4".into(),
-            model: "gpt-5.4".into(),
-            base_url: None,
-            secret: None,
-        })
-        .await?;
+
     Ok(state)
 }
 
@@ -362,7 +356,12 @@ async fn agent_resources_are_inherited_pinned_and_cleaned_up() -> Result<()> {
         let first = runtime
             .open_managed_thread(&agent, None, NewThreadRequest::default())
             .await?;
-        let first_config = crate::load_conversation_config(first.thread.as_ref()).await?;
+        let agent_config = crate::load_agent_config(agent.as_ref()).await?;
+        let mut first_config = crate::load_conversation_config(first.thread.as_ref()).await?;
+        assert!(first_config.resource_mounts.is_empty());
+        first_config
+            .materialize_resources(first.thread.as_ref(), &agent_config)
+            .await?;
         assert_eq!(first_config.resource_mounts.len(), 1);
         assert_eq!(
             crate::conversation_sandbox::conversation_sandbox_spec(
@@ -389,7 +388,10 @@ async fn agent_resources_are_inherited_pinned_and_cleaned_up() -> Result<()> {
         let second = runtime
             .open_managed_thread(&agent, None, NewThreadRequest::default())
             .await?;
-        let second_config = crate::load_conversation_config(second.thread.as_ref()).await?;
+        let mut second_config = crate::load_conversation_config(second.thread.as_ref()).await?;
+        second_config
+            .materialize_resources(second.thread.as_ref(), &agent_config)
+            .await?;
         let second_path = Path::new(&second_config.resource_mounts[0].host_path);
         assert_eq!(
             std::fs::read_to_string(second_path.join("file"))?,
@@ -421,13 +423,20 @@ async fn git_resources_require_a_selected_vault_and_matching_origin() -> Result<
             },
         })
         .await?;
-    let runtime = runtime(store.clone(), &config, Default::default())?;
+    let runtime = runtime(
+        store.clone(),
+        &config,
+        ConversationConfig {
+            sandbox_provider: Some(SandboxProvider::Smolvm),
+            ..Default::default()
+        },
+    )?;
     let definition = AgentDefinition::parse(SOURCE.replace("config:\n", "resources:\n  - name: code\n    type: git_repository\n    url: https://github.com/exoharness/exo\n    credential: github\n    mount_path: /workspace\nconfig:\n"))?;
     let agent = runtime
         .create_managed_agent(&definition, "private-code")
         .await?;
     for vaults in [vec![], vec![vault.record().id]] {
-        let error = runtime
+        let opened = runtime
             .open_managed_thread(
                 &agent,
                 None,
@@ -436,10 +445,22 @@ async fn git_resources_require_a_selected_vault_and_matching_origin() -> Result<
                     ..Default::default()
                 },
             )
+            .await?;
+        let error = runtime
+            .send(
+                agent.clone(),
+                opened.thread.clone(),
+                SendRequest {
+                    input: vec![],
+                    session_id: None,
+                },
+            )
             .await
             .err()
-            .context("credential selection should fail")?;
+            .context("credential selection must fail before execution")?;
         assert!(!format!("{error:#}").contains("must-not-leak"));
+        assert!(opened.thread.list_sandboxes().await?.is_empty());
+        agent.delete_thread(&opened.thread.record().id).await?;
         assert!(
             exo_managed_agents::list_threads(agent.as_ref())
                 .await?

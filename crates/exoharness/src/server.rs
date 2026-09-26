@@ -121,10 +121,11 @@ impl ExoHarnessServer {
                 vault_id,
                 secret_id,
                 secret,
+                target,
             } => Ok(Response::SecretMetadata {
                 metadata: require_vault(self.vault_context(scope).await?.as_ref(), &vault_id)
                     .await?
-                    .update_secret(&secret_id, secret)
+                    .update_secret(&secret_id, crate::UpdateSecretRequest { secret, target })
                     .await?,
             }),
             Request::VaultDeleteSecret {

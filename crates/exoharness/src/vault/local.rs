@@ -79,7 +79,7 @@ impl BasicVaultStore {
                 operation(&mut catalog, &inner.cipher)
             }
             Storage::File(root) => {
-                let _lock = lock_secret_file(&root.join("vaults.lock"))?;
+                let lock = lock_secret_file(&root.join("vaults.lock"))?;
                 let path = root.join("vaults.json");
                 let mut catalog = match std::fs::read(&path) {
                     Ok(bytes) => serde_json::from_slice(&bytes).context("reading vault catalog")?,
@@ -88,14 +88,16 @@ impl BasicVaultStore {
                     }
                     Err(error) => return Err(error.into()),
                 };
-                let result = operation(&mut catalog, &inner.cipher)?;
-                if write {
-                    let mut file = tempfile::NamedTempFile::new_in(root)?;
-                    file.write_all(&serde_json::to_vec_pretty(&catalog)?)?;
-                    file.as_file().sync_all()?;
-                    file.persist(path).map_err(|error| error.error)?;
-                    std::fs::File::open(root)?.sync_all()?;
+                if !write {
+                    drop(lock);
+                    return operation(&mut catalog, &inner.cipher);
                 }
+                let result = operation(&mut catalog, &inner.cipher)?;
+                let mut file = tempfile::NamedTempFile::new_in(root)?;
+                file.write_all(&serde_json::to_vec_pretty(&catalog)?)?;
+                file.as_file().sync_all()?;
+                file.persist(path).map_err(|error| error.error)?;
+                std::fs::File::open(root)?.sync_all()?;
                 Ok(result)
             }
         })
@@ -340,21 +342,52 @@ impl VaultHandle for BasicVaultHandle {
             .await
     }
 
-    async fn update_secret(&self, id: &SecretId, secret: Secret) -> Result<SecretMetadata> {
+    async fn update_secret(
+        &self,
+        id: &SecretId,
+        request: crate::UpdateSecretRequest,
+    ) -> Result<SecretMetadata> {
+        anyhow::ensure!(
+            request.secret.is_some() || request.target.is_some(),
+            "provide a secret value or destination to update"
+        );
         let vault_id = self.record.id;
         let id = *id;
         self.store
             .access(true, move |catalog, cipher| {
-                let stored = vault(catalog, vault_id)?
+                let vault = vault(catalog, vault_id)?;
+                let target = request
+                    .target
+                    .map(|target| target.normalized())
+                    .transpose()?;
+                if matches!(target, Some(SecretTarget::Mcp { .. }))
+                    && vault
+                        .secrets
+                        .iter()
+                        .any(|stored| stored.metadata.id != id && stored.metadata.target == target)
+                {
+                    bail!("a secret for this MCP destination already exists in the vault");
+                }
+                let stored = vault
                     .secrets
                     .iter_mut()
                     .find(|s| s.metadata.id == id)
                     .context("secret is unavailable")?;
+                let secret = match request.secret {
+                    Some(secret) => secret,
+                    None => cipher.decrypt_bound(
+                        &stored.secret,
+                        &serde_json::to_vec(&(vault_id, &stored.metadata))?,
+                    )?,
+                };
                 let mut metadata = stored.metadata.clone();
                 metadata.revision = metadata
                     .revision
                     .checked_add(1)
                     .context("secret revision overflow")?;
+                if let Some(target) = target {
+                    metadata.target = Some(target);
+                }
                 metadata.r#type = secret_type(&secret);
                 let encrypted = encrypt(cipher, vault_id, &metadata, &secret)?;
                 stored.metadata = metadata.clone();
@@ -503,7 +536,10 @@ impl BasicVaultHandle {
                     .find(|s| s.metadata.id == id)
                     .context("secret is unavailable")?;
                 if stored.metadata.target.as_ref() != Some(&target) {
-                    bail!("secret {id} is not authorized for this destination");
+                    if let SecretTarget::Http { origin } = &target {
+                        bail!("secret {:?} is not authorized for {origin}; set its HTTP destination with --http-origin {origin}", stored.metadata.name);
+                    }
+                    bail!("secret {:?} is not authorized for this MCP destination", stored.metadata.name);
                 }
                 let secret = cipher.decrypt_bound(
                     &stored.secret,

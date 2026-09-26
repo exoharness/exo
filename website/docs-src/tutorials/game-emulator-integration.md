@@ -309,8 +309,7 @@ round, and the RAM state, refreshing once a second.
 Then, in another terminal (from the repo root), create the agent and play:
 
 ```bash
-exo vault secret create global openai --token-env OPENAI_API_KEY          # once
-exo model create gpt-5.5 --secret openai          # once
+exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com          # once
 
 cat > gameboy.md <<'EOF'
 ---
@@ -318,6 +317,7 @@ name: "Gameboy"
 harness: exoharness/examples/gameboy-agent/agent/harness.ts
 config:
   model: gpt-5.5
+  credential: openai
   max_tool_round_trips: 20
 ---
 Help the user with their task.

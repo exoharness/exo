@@ -1,46 +1,31 @@
 ---
-title: Bindings & Secrets
-description: How credentials stay out of the model's reach.
+title: Vaults and credentials
+description: Select credentials independently of the agent definition.
 ---
 
-# Bindings & Secrets
+# Vaults and credentials
 
-Exo splits credentials into two records so that configuration can be
-shared, inspected, and versioned without ever exposing key material.
-
-## Secrets
-
-Secrets hold **only credential material** — opaque API keys, OAuth tokens.
-They live in the exoharness secret store (file-backed by default, Apple
-Keychain supported):
+Vaults store API keys and OAuth tokens. Agent specs refer to their names or IDs;
+the spec contains no secret values.
 
 ```bash
-exo vault secret create global openai --token-env OPENAI_API_KEY   # reads the variable name literally
+exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com
 ```
 
-## Bindings
+Select the model and credential in the agent spec:
 
-Bindings are **non-secret configuration that refer to secrets**:
+```yaml
+config:
+  model: gpt-5.5
+  credential: openai
+```
 
-- an *env var binding* maps a variable name to a secret,
-- an *LLM binding* defines a provider/model plus optional credentials
-  (`exo model create`),
-- a *sandbox binding* defines a sandbox provider plus its credentials
-  (`exo sandbox provider create`),
-- an *MCP binding* defines a server URL plus optional credentials.
+Attach another vault with `exo agent run --agent assistant --vault personal`.
+Later attachments override same-named entries from earlier vaults, including
+`global`. Missing credentials fail instead of falling back to host API keys.
+MCP declarations and sandbox provider bindings also use vault credentials.
 
-## Scoping
-
-Executors, agents, and individual conversations can all define bindings and
-secrets. **Conversation-scoped values override agent-scoped values**, so a
-single agent can talk to different endpoints or use different credentials
-per conversation.
-
-## Keeping secrets away from the model
-
-Secrets can be used without the LLM's knowledge — for example to
-authenticate MCP servers — or securely mounted inside sandboxes so
-specific programs can access them while the LLM can neither view nor
-exfiltrate them. This is a direct payoff of the
-[exoharness/executor split](./exoharness-and-executor): the layer the
-agent can modify never holds the keys.
+Sandbox credential policies supply placeholders to the sandbox. Supported
+network adapters substitute the real credential only at its authorized
+destination. Vault values remain in the runtime; rotation and revocation apply
+to subsequent requests.

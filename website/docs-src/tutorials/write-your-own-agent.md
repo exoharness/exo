@@ -209,8 +209,7 @@ export default defineHarness({
 ```bash
 pnpm install   # once, for the TypeScript runtime
 
-exo vault secret create global openai --token-env OPENAI_API_KEY
-exo model create gpt-5.5 --secret openai
+exo vault secret create global openai --token-env OPENAI_API_KEY --http-origin https://api.openai.com
 
 cat > sysmon.md <<'EOF'
 ---
@@ -218,6 +217,7 @@ name: "Sysmon"
 harness: exoharness/examples/typescript/sysmon-harness.ts
 config:
   model: gpt-5.5
+  credential: openai
 ---
 Help the user with their task.
 EOF

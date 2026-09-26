@@ -18,6 +18,7 @@ name: "Sandbox Example"
 harness: basic
 config:
   model: gpt-5.5
+  credential: openai
 sandbox:
   provider: docker
   enable_networking: true
@@ -52,7 +53,7 @@ configured as *provider bindings*:
 
 ```bash
 exo vault secret create global daytona --token-env DAYTONA_API_KEY
-exo sandbox provider create --sandbox daytona --secret daytona
+exo environment provider create --backend daytona --secret daytona
 ```
 
 ## Sandbox scope and image

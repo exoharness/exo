@@ -53,9 +53,7 @@ if [[ -n "$SETUP_ADAPTER" ]]; then
   SETUP_ADAPTERS+=("$SETUP_ADAPTER")
 fi
 INITIAL_PROMPT_FILE="${EXO_INITIAL_PROMPT_FILE:-}"
-UPSTREAM_MODEL="${EXO_UPSTREAM_MODEL:-}"
-SECRET_NAME=""
-SECRET_ENV=""
+MODEL_CREDENTIAL="openai"
 MODEL_BASE_URL=""
 USER_NAME="${EXO_USER_NAME:-}"
 export EXO_LOCAL_PROMPT_FILE="$LOCAL_PROMPT_FILE"
@@ -69,7 +67,6 @@ Usage:
   ./exo.sh fresh
   ./exo.sh stop-all
   ./exo.sh build
-  ./exo.sh register-model
   ./exo.sh write-profile
   ./exo.sh setup-profile
   ./exo.sh setup-sandbox
@@ -86,9 +83,6 @@ Subcommands:
   fresh            Rebuild, delete all state, and start a clean REPL
   stop-all         Stop the scheduler and adapter runners, preserving .exo state
   build            Install JS dependencies and build the exo CLI and scheduler
-  register-model   Store an API-key secret and register a model binding; uses
-                   --model, --upstream-model, --secret-name, --secret-env, and
-                   optionally --base-url
   write-profile    Write the local profile prompt non-interactively; uses
                    --user-name and --local-prompt-file
   setup-profile    Prompt interactively and write the local profile prompt
@@ -97,11 +91,9 @@ Subcommands:
                    image) without starting anything
 
 Options:
-  --model <model>              Model binding name (default: gpt-5.6-terra)
-  --upstream-model <model>     Upstream model id for register-model (default: --model)
-  --secret-name <name>         Secret name for register-model (e.g. openai)
-  --secret-env <env-var>       Environment variable holding the API key for register-model
-  --base-url <url>             Optional API base URL for register-model
+  --model <model>              Upstream model name (default: gpt-5.6-terra)
+  --credential <name>         Model secret in a selected vault (default: openai)
+  --base-url <url>             Optional model API base URL
   --user-name <name>           User name for write-profile (default: none)
   --agent <slug>               Agent slug (default: exo-agent)
   --conversation <slug>        Conversation slug (default: dev)
@@ -160,7 +152,7 @@ Environment overrides:
   EXO_AGENT_CLI_ROOT, EXO_AGENT_CLI_MOUNT,
   EXO_SCHEDULER_BIN, EXO_SCHEDULER_INTERVAL_SECONDS, EXO_ADAPTER_LIMIT,
   EXO_SETUP_ADAPTER, EXO_INITIAL_PROMPT_FILE, EXO_TEMPLATE, EXO_PROFILE,
-  EXO_SKIP_BUILD, EXO_UPSTREAM_MODEL, EXO_USER_NAME
+  EXO_SKIP_BUILD, EXO_USER_NAME
 EOF
 }
 
@@ -315,21 +307,6 @@ build_all() {
   build_exo_scheduler
 }
 
-register_model() {
-  [[ -n "$SECRET_NAME" ]] || die "register-model requires --secret-name"
-  [[ -n "$SECRET_ENV" ]] || die "register-model requires --secret-env"
-  ensure_exo_bin
-  local upstream="${UPSTREAM_MODEL:-$MODEL}"
-  echo "Storing secret $SECRET_NAME from \$$SECRET_ENV..."
-  exo vault secret create global "$SECRET_NAME" --token-env "$SECRET_ENV"
-  echo "Registering model $MODEL -> $upstream..."
-  local args=(model create "$MODEL" --model "$upstream" --secret "$SECRET_NAME")
-  if [[ -n "$MODEL_BASE_URL" ]]; then
-    args+=(--base-url "$MODEL_BASE_URL")
-  fi
-  exo "${args[@]}"
-}
-
 write_local_profile() {
   mkdir -p "$(dirname "$LOCAL_PROMPT_FILE")"
   {
@@ -359,7 +336,10 @@ scheduler_source_newer_than() {
 }
 
 append_exo_global_args() {
-  EXO_GLOBAL_ARGS=(--env-file-if-exists "$ENV_FILE")
+  EXO_GLOBAL_ARGS=()
+  if [[ -f "$ENV_FILE" ]]; then
+    EXO_GLOBAL_ARGS=(--env-file "$ENV_FILE")
+  fi
 }
 
 exo() {
@@ -487,8 +467,8 @@ ensure_adapters() {
   echo "Starting adapter runner..."
   EXO_GLOBAL_ARGS=()
   append_exo_global_args
-  nohup "$EXO_BIN" agent "${EXO_GLOBAL_ARGS[@]}" --harness "$HARNESS" \
-    serve "$AGENT" \
+  nohup "$EXO_BIN" serve "${EXO_GLOBAL_ARGS[@]}" --harness "$HARNESS" \
+    --agent "$AGENT" \
       --adapters-only \
       --adapter-limit "$ADAPTER_LIMIT" \
       --drain-marker "$(adapters_restart_file)" \
@@ -575,10 +555,10 @@ ensure_agent() {
   echo "Creating agent $AGENT..."
   mkdir -p "$ROOT_DIR/.exo"
   local spec="$ROOT_DIR/.exo/launch-agent.md"
-  python3 - "$spec" "$AGENT_NAME" "$HARNESS" "$MODULE" "$MODEL" "$USE_SANDBOX" "$SANDBOX_IMAGE" "$PROVIDER" "${SANDBOX_SCOPE:-agent}" "$NETWORKING" <<'PYTHON'
+  python3 - "$spec" "$AGENT_NAME" "$HARNESS" "$MODULE" "$MODEL" "$USE_SANDBOX" "$SANDBOX_IMAGE" "$PROVIDER" "${SANDBOX_SCOPE:-agent}" "$NETWORKING" "$MODEL_CREDENTIAL" "$MODEL_BASE_URL" <<'PYTHON'
 import json, pathlib, sys
-path, name, harness, module, model, sandbox, image, provider, scope, networking = sys.argv[1:]
-config = {"name": name, "harness": harness, "config": {"model": model, "module": str(pathlib.Path(module).resolve())}}
+path, name, harness, module, model, sandbox, image, provider, scope, networking, credential, base_url = sys.argv[1:]
+config = {"name": name, "harness": harness, "config": {"model": model, "credential": credential, "base_url": base_url or None, "module": str(pathlib.Path(module).resolve())}}
 if sandbox == "true":
     provider = {"apple-container": "apple_container", "local-process": "local_process"}.get(provider, provider)
     config["sandbox"] = {"image": image, "provider": provider or "docker", "scope": scope, "enable_networking": networking == "enabled"}
@@ -1263,10 +1243,6 @@ while [[ $# -gt 0 ]]; do
       [[ $# -eq 0 ]] || die "build does not accept additional arguments"
       COMMAND="build"
       ;;
-    register-model)
-      shift
-      COMMAND="register-model"
-      ;;
     write-profile)
       shift
       COMMAND="write-profile"
@@ -1276,19 +1252,9 @@ while [[ $# -gt 0 ]]; do
       [[ -n "$MODEL" ]] || die "--model requires a value"
       shift 2
       ;;
-    --upstream-model)
-      UPSTREAM_MODEL="${2:-}"
-      [[ -n "$UPSTREAM_MODEL" ]] || die "--upstream-model requires a value"
-      shift 2
-      ;;
-    --secret-name)
-      SECRET_NAME="${2:-}"
-      [[ -n "$SECRET_NAME" ]] || die "--secret-name requires a value"
-      shift 2
-      ;;
-    --secret-env)
-      SECRET_ENV="${2:-}"
-      [[ -n "$SECRET_ENV" ]] || die "--secret-env requires a value"
+    --credential)
+      MODEL_CREDENTIAL="${2:-}"
+      [[ -n "$MODEL_CREDENTIAL" ]] || die "--credential requires a value"
       shift 2
       ;;
     --base-url)
@@ -1521,9 +1487,6 @@ case "$COMMAND" in
     ;;
   build)
     build_all
-    ;;
-  register-model)
-    register_model
     ;;
   write-profile)
     write_local_profile

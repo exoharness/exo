@@ -21,9 +21,9 @@ use tokio::sync::mpsc;
 use crate::execution_tracing::{LlmExecutionTrace, TurnExecutionTrace};
 use crate::harness_executor::{ExecutorStreamMode, HarnessExecutor};
 use crate::harness_helpers::{
-    ResolvedModelBinding, assistant_message, assistant_messages_text,
-    materialize_conversation_messages, messages_to_history_messages, messages_to_transcript,
-    resolve_model_binding, system_message, to_lingua_value, user_message,
+    ResolvedModel, assistant_message, assistant_messages_text, materialize_conversation_messages,
+    messages_to_history_messages, messages_to_transcript, resolve_model, system_message,
+    to_lingua_value, user_message,
 };
 use crate::harness_js_repl::JsReplState;
 use crate::shared::try_send_stream_event;
@@ -55,7 +55,7 @@ where
         let context_messages = materialize_conversation_messages(conversation)
             .await
             .context("failed to materialize conversation messages for RLM context")?;
-        let model_binding = resolve_model_binding(conversation, &agent_config.model).await?;
+        let model_binding = resolve_model(conversation, agent_config).await?;
         let context_text = messages_to_transcript(&context_messages);
         let history_messages = messages_to_history_messages(&context_messages);
         let mut js_state = JsReplState::new(&context_text, &history_messages)?;
@@ -331,7 +331,7 @@ where
         &self,
         js_state: &mut JsReplState,
         agent_config: &AgentConfig,
-        model_binding: &ResolvedModelBinding,
+        model_binding: &ResolvedModel,
         request: &ToolRequest,
     ) -> Result<ToolResult> {
         match request.function_name.as_str() {
@@ -373,7 +373,7 @@ where
         &self,
         js_state: &mut JsReplState,
         agent_config: &AgentConfig,
-        model_binding: &ResolvedModelBinding,
+        model_binding: &ResolvedModel,
         prompt: &str,
         target_var: Option<String>,
     ) -> Result<ToolResult> {
@@ -393,7 +393,7 @@ where
     async fn run_subquery(
         &self,
         agent_config: &AgentConfig,
-        model_binding: &ResolvedModelBinding,
+        model_binding: &ResolvedModel,
         prompt: &str,
     ) -> Result<String> {
         let mut messages = agent_config.instructions.clone();

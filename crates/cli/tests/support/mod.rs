@@ -24,7 +24,7 @@ use wiremock::{
     matchers::{method, path},
 };
 
-pub const SOURCE: &str = "---\nname: Workflow agent\nharness: basic\nconfig:\n  model: gpt-5-mini\n---\nReply to the user.\n";
+pub const SOURCE: &str = "---\nname: Workflow agent\nharness: basic\nconfig:\n  model: gpt-5-mini\n  credential: model-key\n---\nReply to the user.\n";
 
 type RequestContext = (String, Option<HeaderValue>);
 
@@ -50,7 +50,6 @@ impl Fixture {
         let temp = TempDir::new()?;
         let root = temp.path().join("state");
         let agent_file = temp.path().join("agent.md");
-        std::fs::write(&agent_file, SOURCE)?;
         std::fs::write(temp.path().join("prices.json"), "{}")?;
         let model = MockServer::start().await;
         Mock::given(method("POST"))
@@ -136,16 +135,7 @@ impl Fixture {
             "SMOKE_API_KEY",
         ])
         .await?;
-        f.cli(&[
-            "model",
-            "create",
-            "gpt-5-mini",
-            "--secret",
-            "model-key",
-            "--base-url",
-            &f.model.uri(),
-        ])
-        .await?;
+        std::fs::write(&f.agent_file, f.source())?;
         f.cli(&[
             "provider",
             "create",
@@ -165,6 +155,14 @@ impl Fixture {
         ])
         .await?;
         Ok(f)
+    }
+
+    #[allow(dead_code)]
+    pub fn source(&self) -> String {
+        SOURCE.replace(
+            "  credential: model-key",
+            &format!("  credential: model-key\n  base_url: {}", self.model.uri()),
+        )
     }
 
     pub fn command(&self, args: &[&str]) -> Command {
@@ -200,8 +198,10 @@ impl Fixture {
                 .arg(&self.root)
                 .args(["--secret-backend", "file", "--master-key-path"])
                 .arg(self.temp.path().join("master-key"))
-                .arg("--pricing-path")
-                .arg(self.temp.path().join("prices.json"));
+                .env(
+                    "EXO_LITELLM_PRICES_PATH",
+                    self.temp.path().join("prices.json"),
+                );
         }
         command.args(&args[command_index + 1..]);
         command

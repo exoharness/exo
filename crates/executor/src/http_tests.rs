@@ -102,20 +102,15 @@ impl Fixture {
             BasicExoHarness::in_memory(crate::test_support::local_test_config("unused-http-test"))
                 .await?,
         );
-        state
-            .put_binding(exoharness::Binding::Llm {
-                name: "test-model".into(),
-                model: "test-model".into(),
-                base_url: None,
-                secret: None,
-            })
-            .await?;
+
         let release = Arc::new(Semaphore::new(0));
         let provider =
             LocalProvider::new(state, Arc::new(ControlledExecutor(Arc::clone(&release))));
         let runtime = Arc::new(Runtime::new(provider, None));
         let agent = runtime
             .create_agent(CreateAgentRequest {
+                credential: Some("test-openai".into()),
+                base_url: None,
                 slug: "http-test".into(),
                 name: None,
                 harness: AgentHarnessKind::Basic,
@@ -542,14 +537,7 @@ async fn local_and_http_providers_use_the_same_runtime_contract() -> Result<()> 
 async fn managed_agents_created_locally_resume_over_http() -> Result<()> {
     let f = Fixture::new().await?;
     let state = f.runtime.exoharness_handle();
-    state
-        .put_binding(exoharness::Binding::Llm {
-            name: "test-model".into(),
-            model: "test-model".into(),
-            base_url: None,
-            secret: None,
-        })
-        .await?;
+
     let existing = state.get_agent(&f.agent_id).await?.context("agent")?;
     let config = crate::load_agent_config(existing.as_ref()).await?;
     let local = Runtime::new(

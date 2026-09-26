@@ -1,7 +1,9 @@
 # Filesystem resources
 
-Declare resources on an agent. Every new thread gets private copies automatically;
-resuming a thread keeps its existing files, including across sandbox replacement.
+Declare resources on an agent. Exo starts preparing each thread's private copies
+in the background while the CLI accepts input. The first prompt or sandbox command
+waits for any remaining preparation before execution. Resuming a thread keeps its
+existing files, including across sandbox replacement.
 
 ```yaml
 resources:
@@ -33,8 +35,8 @@ does not trust unrelated repositories.
 
 ## Git cache
 
-For a Git URL, Exo maintains a checkout on a cached volume. Before each new
-thread it fetches the remote, advances the checkout to the requested branch or
+For a Git URL, Exo maintains a checkout on a cached volume. For a new thread,
+preparation fetches the remote, advances the checkout to the requested branch or
 commit, unmounts the volume, and makes a copy-on-write clone. The Git database and
 working tree are reused across updates. Refresh and clone are serialized for
 that cache; threads never mount the cache itself. Existing thread copies keep
@@ -42,8 +44,8 @@ their own files and Git state while later cache updates change only shared
 blocks that need writing.
 
 Omitting `checkout` follows the remote's default branch. Pin a commit with
-`checkout: {type: commit, sha: FULL_COMMIT_SHA}`. A failed fetch fails thread
-creation instead of silently using an old checkout. Resuming an existing thread
+`checkout: {type: commit, sha: FULL_COMMIT_SHA}`. A failed fetch fails the command
+before execution instead of silently using an old checkout. Resuming an existing thread
 does not fetch and works when the source is offline.
 
 Preparation uses the Git credential helpers and configuration on the runtime
@@ -60,9 +62,15 @@ exo vault secret create personal github --http-origin https://github.com \
 exo agent run --agent exo-dev --vault personal
 ```
 
-The credential must target the Git server's HTTPS origin. Preparation uses HTTP
-Basic authentication with username `x-access-token`, with host credential helpers
-disabled for that request. Credentials stay on the
+The credential must target the Git server's HTTPS origin. If you created the
+secret without `--http-origin`, update it without changing its ID:
+
+```sh
+exo vault secret update personal github --http-origin https://github.com
+```
+
+Preparation uses HTTP Basic authentication with username `x-access-token`,
+with host credential helpers disabled for that request. Credentials stay on the
 host; they are not saved in Git configuration or copied into thread volumes.
 Caches are partitioned by URL, checkout and vault credential identity.
 Git commands inside the sandbox use a placeholder credential through Exo's

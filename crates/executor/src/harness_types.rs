@@ -14,6 +14,8 @@ pub struct CreateAgentRequest {
     pub sandbox_scope: Option<SandboxScope>,
     pub enable_networking: bool,
     pub model: String,
+    pub credential: Option<String>,
+    pub base_url: Option<String>,
     pub max_output_tokens: Option<i64>,
     pub max_tool_round_trips: Option<u32>,
     pub braintrust: Option<BraintrustTracingConfig>,
