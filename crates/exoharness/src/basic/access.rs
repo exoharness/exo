@@ -45,10 +45,9 @@ impl BasicExoHarness {
                     self.caller_bindings_dir(base).join(format!("{id}.json")),
                 )
                 .await?
+                && !matches!(stored.record.binding, Binding::Llm { .. })
             {
-                if !matches!(stored.record.binding, Binding::Llm { .. }) {
-                    return Ok(Some(stored.record.binding));
-                }
+                return Ok(Some(stored.record.binding));
             }
         }
         Ok(None)

@@ -819,14 +819,17 @@ main() {
   AGENT_NAME="$(prompt_text "Agent display name" "$AGENT_NAME")"
   ./exo.sh write-profile ${USER_NAME:+--user-name "$USER_NAME"}
 
-  info "Store secrets and register model"
-  ./exo.sh register-model --model "$MODEL_NAME" \
-    --upstream-model "$UPSTREAM_MODEL" \
-    --secret-name "$MODEL_PROVIDER" --secret-env "$MODEL_API_KEY_ENV" \
-    ${MODEL_BASE_URL:+--base-url "$MODEL_BASE_URL"}
+  info "Store model credential in the global vault"
+  local model_origin="https://api.openai.com"
+  if [[ "$MODEL_PROVIDER" == "openrouter" ]]; then
+    model_origin="https://openrouter.ai"
+  fi
+  ./target/debug/exo vault --env-file "$env_file" secret create global "$MODEL_PROVIDER" \
+    --token-env "$MODEL_API_KEY_ENV" --http-origin "$model_origin"
 
   info "Create your agent"
-  ./exo.sh setup-agent --agent-name "$AGENT_NAME"
+  ./exo.sh setup-agent --agent-name "$AGENT_NAME" --model "$UPSTREAM_MODEL" \
+    --credential "$MODEL_PROVIDER" ${MODEL_BASE_URL:+--base-url "$MODEL_BASE_URL"}
 
   print_success_banner "$install_dir" "$launch_dir"
 }
