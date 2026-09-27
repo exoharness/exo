@@ -361,7 +361,7 @@ impl SmolvmSandboxBackend {
         create.arg("machine").arg("create").arg("--name").arg(name);
         create.arg("--image").arg(image);
         self.stamp_labels(&mut create, key).await;
-        configure_spec_args(&mut create, spec);
+        configure_spec_args(&mut create, spec)?;
         // Keepalive so the machine stays up between execs, as the Docker backend does.
         create.arg("--").arg("sleep").arg("infinity");
         let output = create
@@ -571,13 +571,6 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
     }
 
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        ensure!(
-            !matches!(
-                request.spec.policy.networking,
-                SandboxNetworkPolicy::Limited { .. }
-            ),
-            "smolvm does not support policy.networking.limited; its DNS filter permits subdomains, but Exo requires exact hosts"
-        );
         let protected = request.spec.policy.requires_proxy();
         if protected {
             ensure!(
@@ -697,7 +690,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
         // A restored machine is ours too, or reaping would never see it.
         self.stamp_labels(&mut create, request.sandbox_id.as_str())
             .await;
-        configure_spec_args(&mut create, &request.spec);
+        configure_spec_args(&mut create, &request.spec)?;
         run_checked(create, "smolvm machine create --from").await?;
 
         let mut start = Command::new(binary);
@@ -728,11 +721,11 @@ struct SmolvmOneShotHandle {
 }
 
 impl SmolvmOneShotHandle {
-    fn build(&self, command: &SandboxCommand, cwd: &str) -> Command {
+    fn build(&self, command: &SandboxCommand, cwd: &str) -> Result<Command> {
         let mut process = Command::new(&self.binary);
         process.arg("machine").arg("run");
         process.arg("--image").arg(&self.image);
-        configure_spec_args(&mut process, &self.request.spec);
+        configure_spec_args(&mut process, &self.request.spec)?;
         configure_command_args(&mut process, command, cwd);
         // Arms smolvm's parent-death watchdog so the VM dies with a SIGKILLed CLI
         // rather than reparenting to init. Ephemeral runs only.
@@ -742,7 +735,7 @@ impl SmolvmOneShotHandle {
         process.arg("--");
         process.args(&command.argv);
         process.kill_on_drop(true);
-        process
+        Ok(process)
     }
 }
 
@@ -758,13 +751,13 @@ impl ManagedSandboxHandle for SmolvmOneShotHandle {
 
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {
         let cwd = resolve_cwd(command, &self.request.spec);
-        let process = self.build(command, &cwd);
+        let process = self.build(command, &cwd)?;
         run_command(process, &with_backstop_timeout(command), cwd).await
     }
 
     async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts> {
         let cwd = resolve_cwd(command, &self.request.spec);
-        let process = self.build(command, &cwd);
+        let process = self.build(command, &cwd)?;
         spawn_sandbox_process(process, command).await
     }
 
@@ -971,12 +964,36 @@ fn resolve_cwd(command: &SandboxCommand, spec: &SandboxSpec) -> String {
 }
 
 /// Mounts and network policy, shared by the create/run paths.
-fn configure_spec_args(process: &mut Command, spec: &SandboxSpec) {
+fn configure_spec_args(process: &mut Command, spec: &SandboxSpec) -> Result<()> {
     let resources = spec.resources.unwrap_or_default();
     process.arg("--cpus").arg(resources.vcpu_count.to_string());
     process.arg("--mem").arg(resources.memory_mib.to_string());
     if spec.policy.networking_enabled() {
         process.args(["--net", "--net-backend", "virtio-net"]);
+    }
+    if let SandboxNetworkPolicy::Limited { allowed_hosts } = &spec.policy.networking {
+        let mut hosts: Vec<String> = crate::types::canonical_egress_hosts(allowed_hosts)?
+            .into_iter()
+            .collect();
+        ensure!(
+            !hosts.is_empty(),
+            "smolvm limited networking requires at least one allowed host"
+        );
+        hosts.sort();
+        // WARNING: SmolVM's current --allow-host admits the named host AND every
+        // subdomain in its DNS filter. Exo's limited policy admits exact hosts.
+        // Until https://github.com/smol-machines/smolvm/pull/1438 is available
+        // in the SmolVM build Exo uses, this is a broader VM-level DNS/IP policy
+        // than the Exo policy. The Exo interceptor still checks the exact host
+        // for HTTP/HTTPS requests, but DNS queries for subdomains are permitted
+        // and their resolved IPs enter SmolVM's network allowlist. Do not assume
+        // this VM-level policy has exact-host semantics. The PR adds opt-in
+        // --allow-host-pattern (bare = exact, *.domain = subdomains only) while
+        // preserving --allow-host for existing SmolVM users. Once available,
+        // switch this backend to --allow-host-pattern and remove this warning.
+        for host in hosts {
+            process.arg("--allow-host").arg(host);
+        }
     }
     for mount in &spec.mounts {
         let mut value = format!("{}:{}", mount.host_path.display(), mount.guest_path);
@@ -985,6 +1002,7 @@ fn configure_spec_args(process: &mut Command, spec: &SandboxSpec) {
         }
         process.arg("--volume").arg(value);
     }
+    Ok(())
 }
 
 /// Workdir, environment and timeout, shared by the run/exec paths.
@@ -1243,7 +1261,7 @@ esac"#,
             allowed_hosts: vec!["api.test".into()],
         };
         let error = backend.acquire(limited).await.err().unwrap().to_string();
-        assert!(error.contains("exact hosts"), "{error}");
+        assert!(error.contains("--egress-interceptor"), "{error}");
         request.lifecycle.idle_ttl = None;
         let error = backend.acquire(request).await.err().unwrap().to_string();
         assert!(error.contains("managed warm sandbox"), "{error}");
@@ -1660,7 +1678,7 @@ esac"#,
         };
 
         let mut process = Command::new("smolvm");
-        configure_spec_args(&mut process, &spec);
+        configure_spec_args(&mut process, &spec).unwrap();
         let rendered: Vec<String> = process
             .as_std()
             .get_args()
@@ -1672,5 +1690,45 @@ esac"#,
         assert!(rendered.contains(&"/host/ro:/guest/ro:ro".to_string()));
         // Disabled is smolvm's default, so no flag is emitted.
         assert!(!rendered.contains(&"--net".to_string()));
+    }
+
+    #[test]
+    fn limited_hosts_are_forwarded_to_smolvm() {
+        let mut spec = test_request(Some(Duration::from_secs(60))).spec;
+        spec.resources = crate::SandboxResourceShape::new(3, 2048);
+        spec.policy.networking = SandboxNetworkPolicy::Limited {
+            allowed_hosts: vec!["Z.example.com".into(), "api.example.com".into()],
+        };
+        let mut process = Command::new("smolvm");
+        configure_spec_args(&mut process, &spec).unwrap();
+        let rendered: Vec<String> = process
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            rendered,
+            [
+                "--cpus",
+                "3",
+                "--mem",
+                "2048",
+                "--net",
+                "--net-backend",
+                "virtio-net",
+                "--allow-host",
+                "api.example.com",
+                "--allow-host",
+                "z.example.com",
+            ]
+        );
+
+        spec.policy.networking = SandboxNetworkPolicy::Limited {
+            allowed_hosts: Vec::new(),
+        };
+        let error = configure_spec_args(&mut Command::new("smolvm"), &spec)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("at least one allowed host"), "{error}");
     }
 }

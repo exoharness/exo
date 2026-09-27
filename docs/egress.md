@@ -309,9 +309,13 @@ before NAT on a trusted local host. The production relay is not implemented here
 SmolVM requires version 1.19.0 or newer with `machine start --egress-interceptor`. Set `--smolvm-binary` on the
 environment provider binding (`exo environment provider create --backend smolvm
 --smolvm-binary /path/to/smolvm`) to select that binary. Unsupported versions fail before
-preparing an image. Protected sandboxes require a managed warm lifetime and
-unrestricted networking. SmolVM's DNS allowlist also permits subdomains, so Exo
-rejects limited networking until an adapter can enforce its exact-host contract.
+preparing an image. Protected sandboxes require a managed warm lifetime. Limited
+networking requires at least one allowed host. Exo passes those hosts to SmolVM's
+`--allow-host` filter. SmolVM currently allows each named host and its subdomains
+at the VM's DNS/IP layer, whereas Exo's policy allows exact hosts. Exo's
+interceptor still checks exact HTTP/HTTPS destinations. The temporary VM-level
+semantic difference is tracked in [SmolVM PR #1438](https://github.com/smol-machines/smolvm/pull/1438),
+which adds opt-in exact-host and wildcard patterns.
 
 Exo creates a loopback listener and a fresh token for each sandbox. It passes the
 listener address as a CLI flag and the token in the host-only
@@ -354,8 +358,9 @@ network.
 
 ## Current scope
 
-Firecracker supports limited networking with exact hosts. Both Firecracker and
-SmolVM support unrestricted networking with credential bindings. For unrestricted networking,
+Firecracker supports limited networking with exact hosts. SmolVM supports limited
+networking with the temporary DNS/IP distinction described above. Both support
+unrestricted networking with credential bindings. For unrestricted networking,
 HTTPS destinations outside the credential host list retain their original TLS
 connection. Credentials remain scoped to their own exact host lists. DNS is
 answered locally; the proxy resolves and validates the destination when
