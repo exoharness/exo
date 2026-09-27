@@ -57,3 +57,19 @@ impl EnvironmentDefinition {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SandboxProvider;
+
+    #[test]
+    fn omitted_environment_provider_defaults_to_smolvm() -> Result<()> {
+        let environment: EnvironmentDefinition = serde_json::from_str(
+            r#"{"name":"coding","config":{"image":"ghcr.io/exoharness/codex-sandbox:latest"}}"#,
+        )?;
+        assert_eq!(environment.config.provider, SandboxProvider::Smolvm);
+        environment.validate()?;
+        Ok(())
+    }
+}
