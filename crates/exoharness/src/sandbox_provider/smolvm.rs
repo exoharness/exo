@@ -591,9 +591,9 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             );
         }
         let binary = self.binary().await?;
-        reject_unsupported_spec(&request.spec, &request.spec.image)?;
         if self.resolve_mode(&request).await != SmolvmExecutionMode::Warm {
             let image = self.prepare_image(&request.spec.image).await?;
+            reject_unsupported_spec(&request.spec, &image)?;
             return Ok(crate::with_process_management(Arc::new(
                 SmolvmOneShotHandle {
                     id: format!("smolvm-oneshot:{}", request.sandbox_id),
@@ -612,6 +612,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
                 SmolvmProxy::start,
                 |egress| async {
                     let image = self.prepare_image(&request.spec.image).await?;
+                    reject_unsupported_spec(&request.spec, &image)?;
                     self.ensure_machine_started(
                         &machine,
                         &request.spec,
@@ -664,7 +665,6 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
                 payload.format
             );
         }
-        reject_unsupported_spec(&request.spec, &request.spec.image)?;
         let binary = self.binary().await?;
         if self.resolve_mode(&request).await != SmolvmExecutionMode::Warm {
             bail!(
@@ -681,6 +681,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
                 manifest.pack_path
             );
         }
+        reject_unsupported_spec(&request.spec, &manifest.pack_path)?;
 
         let machine = machine_name(request.sandbox_id.as_str());
         // Unconditional: delete already tolerates "not found".
@@ -1587,6 +1588,9 @@ esac"#,
         spec.policy.networking = SandboxNetworkPolicy::Disabled;
         spec.image = "/tmp/alpine.tar".into();
         assert!(reject_unsupported_spec(&spec, &spec.image).is_ok());
+
+        spec.image = "docker.io/library/ubuntu:24.04".into();
+        assert!(reject_unsupported_spec(&spec, "/tmp/prepared-rootfs").is_ok());
     }
 
     #[test]
