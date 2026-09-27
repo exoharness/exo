@@ -111,6 +111,7 @@ async fn attach_agent_sandbox(
 ) -> Result<AgentSandboxHandle> {
     let sandbox_id = agent
         .create_sandbox(CreateSandboxRequest {
+            tcp_port: None,
             name: Some(sandbox_name),
             provider: spec.provider.clone(),
             image: spec.image.clone(),

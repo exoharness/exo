@@ -2291,6 +2291,7 @@ async fn smolvm_proxy_live(with_gh: bool) -> Result<()> {
         scope: identity("smolvm-proxy").scope,
         provider_state: None,
         spec: SandboxSpec {
+            tcp_port: None,
             image,
             resources: SandboxResourceShape::new(2, 1024),
             mounts: Vec::new(),

@@ -70,6 +70,7 @@ async fn daytona_snapshot_and_rewind_round_trip() {
     // Phase 1: create a Daytona sandbox and write v1.
     let sandbox_id = conv
         .create_sandbox(CreateSandboxRequest {
+            tcp_port: None,
             name: None,
             provider: SandboxProvider::Daytona,
             image: String::new(),

@@ -223,6 +223,7 @@ async fn create_sandbox(
 ) -> Result<String> {
     conversation
         .create_sandbox(CreateSandboxRequest {
+            tcp_port: None,
             name: config
                 .environment
                 .as_ref()
@@ -826,6 +827,7 @@ mod tests {
         config.environment = Some(exoharness::EnvironmentDefinition {
             name: "restricted".into(),
             config: exoharness::CreateSandboxRequest {
+                tcp_port: None,
                 provider: SandboxProvider::Docker,
                 image: "test".into(),
                 name: None,

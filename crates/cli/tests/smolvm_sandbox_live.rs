@@ -21,6 +21,7 @@ use exoharness::{
     SandboxProvider, SandboxRequest, SandboxSpec, SmolvmExecutionMode, SmolvmSandboxBackend,
 };
 use futures::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt as TokioAsyncReadExt, AsyncWriteExt};
 use tokio::sync::{OnceCell, RwLock};
 
 /// Serialises the one test that counts *host-wide* VM processes against every
@@ -90,6 +91,7 @@ fn request(
             agent_id: exoharness::Uuid7::now(),
         },
         spec: SandboxSpec {
+            tcp_port: None,
             image,
             resources: Default::default(),
             mounts: vec![SandboxMount {
@@ -132,6 +134,64 @@ fn command(argv: &[&str]) -> SandboxCommand {
         cwd: None,
         timeout: Some(Duration::from_secs(120)),
     }
+}
+
+#[tokio::test]
+#[ignore]
+async fn published_tcp_port_connects_to_guest() -> anyhow::Result<()> {
+    let Some(image) = test_image() else {
+        return Ok(());
+    };
+    if !smolvm_installed() {
+        return Ok(());
+    }
+    let workspace = tempfile::tempdir()?;
+    let mut sandbox = request(
+        image,
+        workspace.path(),
+        SandboxNetworkPolicy::Disabled,
+        "exo-smolvm-live-tcp",
+        Some(Duration::from_secs(60)),
+    );
+    sandbox.spec.tcp_port = Some(25_011);
+    let backend = SmolvmSandboxBackend::with_mode(SmolvmExecutionMode::Warm);
+    let handle = backend.acquire(sandbox).await?;
+    let result = async {
+        let _process = handle
+            .start_process(&command(&[
+                "node",
+                "-e",
+                "require('net').createServer(s=>s.on('data',d=>s.write(d))).listen(25011,'0.0.0.0')",
+            ]))
+            .await?;
+        let mut last_error = None;
+        for _ in 0..50 {
+            let attempt = async {
+                let mut stream = handle
+                    .connect_tcp(25_011)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("TCP forwarding unavailable"))?;
+                stream.write_all(b"ping").await?;
+                let mut response = [0; 4];
+                TokioAsyncReadExt::read_exact(&mut stream, &mut response).await?;
+                anyhow::ensure!(&response == b"ping", "unexpected guest TCP response");
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            if attempt.is_ok() {
+                return Ok(());
+            }
+            last_error = attempt.err();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        anyhow::bail!(
+            "smolvm guest TCP listener did not become reachable: {}",
+            last_error.unwrap()
+        )
+    }
+    .await;
+    cleanup(&handle).await;
+    result
 }
 
 /// The whole point: the workload runs behind a hypervisor with its own kernel.

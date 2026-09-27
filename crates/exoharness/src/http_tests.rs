@@ -134,6 +134,7 @@ async fn http_exoharness_runs_noninteractive_sandbox_commands() {
         .expect("conversation");
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
+            tcp_port: None,
             name: None,
             provider: SandboxProvider::LocalProcess,
             image: "local".to_string(),
@@ -189,6 +190,7 @@ async fn http_exoharness_runs_agent_scoped_sandbox_commands() {
         .expect("conversation");
     let sandbox_id = agent
         .create_sandbox(CreateSandboxRequest {
+            tcp_port: None,
             name: Some("agent-http".to_string()),
             provider: SandboxProvider::LocalProcess,
             image: "local".to_string(),
@@ -263,6 +265,7 @@ async fn http_exoharness_supports_sandbox_process_events() {
         .expect("conversation");
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
+            tcp_port: None,
             name: None,
             provider: SandboxProvider::LocalProcess,
             image: "local".to_string(),
@@ -353,6 +356,7 @@ async fn http_exoharness_supports_turn_scoped_sandbox_snapshot_and_start() {
         .expect("conversation");
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
+            tcp_port: None,
             name: None,
             provider: SandboxProvider::LocalProcess,
             image: "local".to_string(),
@@ -447,6 +451,7 @@ async fn http_exoharness_restores_a_snapshot_into_a_new_sandbox() {
         .expect("conversation");
     let source_id = conversation
         .create_sandbox(CreateSandboxRequest {
+            tcp_port: None,
             name: Some("source".to_string()),
             provider: SandboxProvider::LocalProcess,
             image: "local".to_string(),
@@ -468,6 +473,7 @@ async fn http_exoharness_restores_a_snapshot_into_a_new_sandbox() {
         .restore_sandbox(RestoreSandboxRequest {
             snapshot_id,
             sandbox: CreateSandboxRequest {
+                tcp_port: None,
                 name: Some("target".to_string()),
                 provider: SandboxProvider::LocalProcess,
                 image: "local".to_string(),
@@ -689,6 +695,7 @@ async fn http_vault_contexts_and_secrets_round_trip() -> crate::Result<()> {
     let environment = crate::EnvironmentDefinition {
         name: "updated".into(),
         config: crate::CreateSandboxRequest {
+            tcp_port: None,
             provider: SandboxProvider::LocalProcess,
             image: "local".into(),
             enable_networking: Some(true),
