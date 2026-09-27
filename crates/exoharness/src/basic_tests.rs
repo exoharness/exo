@@ -2117,7 +2117,6 @@ async fn sandbox_provider_state_persists_through_events_after_harness_reload() {
             allowed_hosts: vec!["api.example.com".into()],
         },
         credentials: vec![crate::EgressCredentialBinding {
-            model: None,
             name: "thread-credential".into(),
             environment_variable: "API_KEY".into(),
             networking: crate::CredentialNetworkPolicy::Limited {

@@ -802,12 +802,8 @@ pub struct EgressPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct EgressCredentialBinding {
     pub name: String,
-    /// Decode sandbox policies written before model registration was retired.
-    #[serde(default, skip_serializing)]
-    pub model: Option<BindingId>,
     pub environment_variable: String,
     pub networking: CredentialNetworkPolicy,
     pub injection_location: CredentialInjectionLocation,

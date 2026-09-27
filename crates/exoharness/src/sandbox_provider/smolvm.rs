@@ -1239,9 +1239,7 @@ esac"#,
             .policy
             .credentials
             .push(crate::EgressCredentialBinding {
-                model: None,
                 name: "key".into(),
-
                 environment_variable: "API_KEY".into(),
                 networking: crate::CredentialNetworkPolicy::Limited {
                     allowed_hosts: vec!["api.test".into()],

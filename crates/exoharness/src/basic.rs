@@ -5390,7 +5390,7 @@ mod stored_policy_tests {
     use super::*;
 
     #[test]
-    fn reads_retired_model_bindings_in_stored_sandbox_policies() {
+    fn ignores_retired_fields_in_stored_sandbox_credential_bindings() {
         let stored: StoredSandbox = serde_json::from_str(
             r#"{
                 "id": "existing-native-sandbox", "provider": "docker", "image": "test",
@@ -5410,11 +5410,11 @@ mod stored_policy_tests {
         .unwrap();
         let policy = stored.policy();
         assert_eq!(policy.credentials.len(), 1);
-        assert!(policy.credentials[0].model.is_some());
+        assert_eq!(policy.credentials[0].environment_variable, "OPENAI_API_KEY");
         let serialized = serde_json::to_string(&stored).unwrap();
         assert!(!serialized.contains("\"model\":"));
         let current: StoredSandbox = serde_json::from_str(&serialized).unwrap();
-        assert!(current.policy().credentials[0].model.is_none());
+        assert_eq!(current.policy().credentials, policy.credentials);
         assert!(
             serde_json::from_str::<StoredSandbox>(
                 &serialized.replace("\"environment_variable\":", "\"misspelled_variable\":")
