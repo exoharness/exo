@@ -12,13 +12,15 @@ A change to an image or the workflow on `main` publishes `latest` and
 `sha-<full source commit>`. A `sandbox-images-v*` Git tag also publishes the
 tag's name and the source commit tag. The workflow can be run manually from
 GitHub Actions. Each job prints the multi-platform image digest in its summary.
-Use the `image@sha256:...` reference in bundled environment definitions after
-the first successful publication so their contents match a tested image.
+Harness defaults and bundled environment definitions use the published
+`image@sha256:...` references so they keep using the same tested images when
+`latest` changes. Update those references after testing a new publication.
 
 GitHub initially creates each container package as private, even when the
-source repository is public. An organization package admin must change each
-package's visibility to public in GitHub Packages before anonymous pulls work.
-The images are linked to this repository by the OCI source label.
+source repository is public. An organization owner must allow public packages
+in the organization's Packages settings, then a package admin must change each
+package's visibility to public before anonymous pulls work. The images are
+linked to this repository by the OCI source label.
 
 For local development, build an image directly from its directory:
 

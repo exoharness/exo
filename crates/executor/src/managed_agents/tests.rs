@@ -16,7 +16,9 @@ fn sandbox_provider_keeps_the_harness_preset_image() -> Result<()> {
     let config = super::config::agent_config(&definition, SandboxProvider::Docker, None, None)?;
     assert_eq!(
         config.sandbox.image.as_deref(),
-        Some("exo-codex-sandbox:latest")
+        Some(
+            "ghcr.io/exoharness/codex-sandbox@sha256:201aef9e3adf1efbee0f8856148818e2779030f6ca8b95397670e01bfe2cd48d"
+        )
     );
     assert!(config.sandbox.enable_networking);
     Ok(())

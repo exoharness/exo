@@ -56,7 +56,9 @@ name or ID in a selected vault. Set `config.base_url` for a custom endpoint.
 There is no model registration or fallback to another model. `--model` overrides
 the model name for the thread and keeps its credential and endpoint.
 
-For Codex, build the sandbox image with Docker:
+The Codex harness uses a pinned image from `ghcr.io/exoharness/codex-sandbox`
+by default. To develop the image locally, build it and set
+`config.image: exo-codex-sandbox:latest` in an environment definition:
 
 ```bash
 docker build -t exo-codex-sandbox:latest \
