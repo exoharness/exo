@@ -33,10 +33,14 @@ case "$sandbox_backend" in
       --output "$archive"
     printf '382a02a869e4d6d5cb14c40577f9545e8458021ea8b0b2d3fc10ec14d9c242e6  %s\n' "$archive" | sha256sum --check --strict
     tar -xzf "$archive" -C "$artifact_dir"
+    # Hosted runners allow user writes under /usr/local/bin. Firecracker's
+    # trusted artifacts require root ownership all the way to the filesystem root.
+    runtime_dir=/var/lib/exo/firecracker/bin
+    sudo install -d -o root -g root -m 0755 "$runtime_dir"
     sudo install -o root -g root -m 0755 \
-      "$artifact_dir/release-v1.16.1-x86_64/firecracker-v1.16.1-x86_64" /usr/local/bin/firecracker
+      "$artifact_dir/release-v1.16.1-x86_64/firecracker-v1.16.1-x86_64" "$runtime_dir/firecracker"
     sudo install -o root -g root -m 0755 \
-      "$artifact_dir/release-v1.16.1-x86_64/jailer-v1.16.1-x86_64" /usr/local/bin/jailer
+      "$artifact_dir/release-v1.16.1-x86_64/jailer-v1.16.1-x86_64" "$runtime_dir/jailer"
     kernel="$artifact_dir/vmlinux"
     curl --fail --location --retry 3 --max-time 120 \
       https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/20260812-48f1b9fb52e9-0/x86_64/vmlinux-6.18.39 \
@@ -49,8 +53,10 @@ case "$sandbox_backend" in
       --guest-runtime "$guest_runtime" --output "$artifact_dir/initramfs.cpio"
     sudo install -o root -g root -m 0644 \
       "$artifact_dir/initramfs.cpio" /var/lib/exo/firecracker/exo-firecracker-initramfs.cpio
-    firecracker --version
-    jailer --version
+    "$runtime_dir/firecracker" --version
+    "$runtime_dir/jailer" --version
+    printf 'EXO_FIRECRACKER_BINARY=%s/firecracker\n' "$runtime_dir" >> "$GITHUB_ENV"
+    printf 'EXO_FIRECRACKER_JAILER=%s/jailer\n' "$runtime_dir" >> "$GITHUB_ENV"
     ;;
   *)
     echo "Unsupported CI sandbox backend: $sandbox_backend" >&2
