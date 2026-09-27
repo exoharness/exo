@@ -26,7 +26,13 @@ Put the client on your PATH:
 ln -s "$PWD/exo/scripts/exo-cli" ~/bin/exo-cli
 ```
 
-That is the only manual step. As long as the Exo stack is running (`./exo.sh`), the first `exo-cli` invocation bootstraps everything else automatically: it adds the workspace mount (default `$HOME/projects` → `/agent-cli`, override with `EXO_AGENT_CLI_ROOT` / `EXO_AGENT_CLI_MOUNT`), sends the agent a message asking it to create the adapter, waits for the worker socket to appear, then delivers your prompt. Subsequent invocations skip straight to the socket.
+Start the stack with the workspace mount saved in its launch environment:
+
+```bash
+./exo.sh --agent-cli-mount "$HOME/projects"
+```
+
+The first `exo-cli` invocation checks that the workspace mount is configured, sends the agent a message asking it to create the adapter, waits for the worker socket to appear, then delivers your prompt. Subsequent invocations skip straight to the socket. The wrapper expects `$HOME/projects` → `/agent-cli` by default; set `EXO_AGENT_CLI_ROOT` / `EXO_AGENT_CLI_MOUNT` to match any custom launcher mount paths. If the mount is missing, the wrapper prints a relaunch command.
 
 The adapter config the agent creates looks like:
 
@@ -43,7 +49,7 @@ The adapter config the agent creates looks like:
 }
 ```
 
-You can also configure things explicitly at stack startup instead of relying on the bootstrap:
+You can also create the adapter at stack startup instead of waiting for the first client invocation:
 
 ```bash
 ./exo.sh \
@@ -60,7 +66,7 @@ You can also configure things explicitly at stack startup instead of relying on 
 ## Quirks And Gotchas
 
 - The bootstrap requires the adapter runner to already be running; `exo-cli` cannot start the Exo stack itself and will tell you to run `./exo.sh` if it is down.
-- The mount is part of the sandbox spec, not the adapter. The bootstrap adds it for you, but an already-running sandbox only picks it up when the sandbox is recreated.
+- Configure the mount through the launcher's `--agent-cli-mount` flag on each launch (or `EXO_AGENT_CLI_ROOT`). Direct `thread mount create` and `thread mount delete` commands reject environment-backed threads; update their environment instead.
 - `exo-cli` exits after the first reply. The conversation keeps its history, so a follow-up `exo-cli` invocation continues the same conversation context.
 - Replies can take as long as an agent turn. The client waits up to `EXO_AGENT_CLI_TIMEOUT_MS` (default 15 minutes).
 - If the client disconnects (Ctrl-C) before the agent replies, the reply is nacked and surfaced as an adapter error event rather than delivered.

@@ -4,6 +4,129 @@ use anyhow::{Context, Result};
 use support::{Fixture, thread_slug};
 
 #[actix_web::test]
+async fn thread_mount_commands_reject_environment_overrides_without_mutating_state() -> Result<()> {
+    let f = Fixture::new().await?;
+    f.cli(&["provider", "switch", "local"]).await?;
+    f.cli(&[
+        "agent",
+        "create",
+        "saved",
+        "--file",
+        f.agent_file.to_str().context("agent path")?,
+    ])
+    .await?;
+    let workspace = f.temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    let workspace = std::fs::canonicalize(workspace)?;
+    let host = workspace.to_str().context("workspace path")?;
+    let environment: exoharness::EnvironmentDefinition =
+        serde_json::from_value(serde_json::json!({
+            "name": "dev", "config": {
+                "provider": "docker", "image": "unused",
+                "file_system_mounts": [{
+                    "host_path": host, "mount_path": "/workspace", "mode": "rw",
+                }],
+            }
+        }))?;
+    let file = f.temp.path().join("environment.json");
+    std::fs::write(&file, serde_json::to_string(&environment)?)?;
+    let path = file.to_str().context("environment path")?;
+    f.cli(&["thread", "create", "saved", "Guarded", "--slug", "guarded"])
+        .await?;
+    // Opening with EOF applies the environment without starting a sandbox.
+    f.cli(&[
+        "agent",
+        "run",
+        "--agent",
+        "saved",
+        "--thread",
+        "guarded",
+        "--environment-file",
+        path,
+    ])
+    .await?;
+    let agent =
+        exo_managed_agents::find_agent(f.runtime.exoharness_handle().as_ref(), "saved").await?;
+    let thread = exo_managed_agents::find_thread(agent.as_ref(), "guarded").await?;
+    let mounts = environment.config.file_system_mounts.as_ref().unwrap();
+    assert_eq!(
+        executor::load_conversation_config(thread.as_ref())
+            .await?
+            .mounts,
+        *mounts
+    );
+    for args in [
+        vec![
+            "thread", "mount", "create", "saved", "guarded", host, "/extra", "--rw",
+        ],
+        vec![
+            "thread",
+            "mount",
+            "delete",
+            "saved",
+            "guarded",
+            "/workspace",
+        ],
+    ] {
+        let rejected = f.output(&args, None, None).await?;
+        assert!(
+            !rejected.status.success(),
+            "{args:?} unexpectedly succeeded"
+        );
+        let error = String::from_utf8_lossy(&rejected.stderr);
+        assert!(
+            error.contains("mounts are managed by its environment"),
+            "{error}"
+        );
+        assert!(error.contains("--environment-file"), "{error}");
+        assert_eq!(
+            executor::load_conversation_config(thread.as_ref())
+                .await?
+                .mounts,
+            *mounts
+        );
+        let unchanged = exo_managed_agents::find_thread(agent.as_ref(), "guarded").await?;
+        assert_eq!(unchanged.record().environment.as_ref(), Some(&environment));
+    }
+    assert!(
+        f.cli(&["thread", "mount", "list", "saved", "guarded"])
+            .await?
+            .contains("/workspace")
+    );
+    assert!(thread.list_sandboxes().await?.is_empty());
+
+    // Threads without an environment retain mutable mounts.
+    f.cli(&["thread", "create", "saved", "Plain", "--slug", "plain"])
+        .await?;
+    f.cli(&[
+        "thread",
+        "mount",
+        "create",
+        "saved",
+        "plain",
+        host,
+        "/workspace",
+        "--rw",
+    ])
+    .await?;
+    let plain = exo_managed_agents::find_thread(agent.as_ref(), "plain").await?;
+    let config = executor::load_conversation_config(plain.as_ref()).await?;
+    assert_eq!(config.mounts.len(), 1);
+    assert_eq!(config.mounts[0].host_path, host);
+    assert_eq!(config.mounts[0].mount_path, "/workspace");
+    f.cli(&["thread", "mount", "delete", "saved", "plain", "/workspace"])
+        .await?;
+    assert!(
+        executor::load_conversation_config(plain.as_ref())
+            .await?
+            .mounts
+            .is_empty()
+    );
+    f.stop().await?;
+    Ok(())
+}
+
+#[actix_web::test]
 async fn environments_reconcile_saved_threads_locally_and_over_http() -> Result<()> {
     for provider in ["local", "remote"] {
         let f = Fixture::new().await?;

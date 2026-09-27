@@ -1494,6 +1494,10 @@ async fn run_selected(
                 } => {
                     let conversation =
                         must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
+                    anyhow::ensure!(
+                        conversation.record().environment.is_none(),
+                        "this thread's mounts are managed by its environment; update the environment and reopen the thread with --environment or --environment-file"
+                    );
                     let canonical_host_path = canonicalize_directory(&host_path)?;
 
                     let mut config = executor::load_conversation_config(&*conversation).await?;
@@ -1541,6 +1545,10 @@ async fn run_selected(
                 } => {
                     let conversation =
                         must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
+                    anyhow::ensure!(
+                        conversation.record().environment.is_none(),
+                        "this thread's mounts are managed by its environment; update the environment and reopen the thread with --environment or --environment-file"
+                    );
                     let mut config = executor::load_conversation_config(&*conversation).await?;
                     let before = config.mounts.len();
                     config.mounts.retain(|mount| mount.mount_path != mount_path);

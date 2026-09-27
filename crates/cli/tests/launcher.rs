@@ -19,7 +19,10 @@ fn run(command: &mut Command) -> Result<String> {
     let output = command.output()?;
     ensure!(
         output.status.success(),
-        "command failed: {}\n{}",
+        "command {:?} {:?} failed ({}): {}\n{}",
+        command.get_program(),
+        command.get_args().collect::<Vec<_>>(),
+        output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -31,8 +34,10 @@ fn launcher_creates_and_updates_a_thread_environment_with_the_current_cli() -> R
     let temp = TempDir::new()?;
     let launch = temp.path().join("launch");
     let bin = temp.path().join("bin");
+    let agent_cli = temp.path().join("agent cli workspace");
     fs::create_dir(&launch)?;
     fs::create_dir(&bin)?;
+    fs::create_dir(&agent_cli)?;
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     fs::copy(repo.join("exo.sh"), launch.join("exo.sh"))?;
     fs::create_dir(launch.join("exo"))?;
@@ -73,8 +78,14 @@ fn launcher_creates_and_updates_a_thread_environment_with_the_current_cli() -> R
     let path = std::env::join_paths([bin.clone()].into_iter().chain(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
     )))?;
-    for (networking, image) in [("disabled", "test:first"), ("enabled", "test:second")] {
-        run(Command::new("bash")
+    for (networking, image, mount_agent_cli) in [
+        ("disabled", "test:first", false),
+        ("enabled", "test:second", true),
+        ("disabled", "test:third", false),
+    ] {
+        // Exercise the system Bash, including macOS's Bash 3.2.
+        let mut command = Command::new("/bin/bash");
+        command
             .arg(launch.join("exo.sh"))
             .args([
                 "setup-agent",
@@ -94,9 +105,18 @@ fn launcher_creates_and_updates_a_thread_environment_with_the_current_cli() -> R
             .arg(&env_file)
             .arg("--module")
             .arg(repo.join("exo/harness.ts"))
+            .args(["--self-repo-mount", "/workspace/exo source"])
             .current_dir(&launch)
             .env("EXO_BIN", &wrapper)
-            .env("PATH", &path))?;
+            .env("PATH", &path)
+            .env_remove("EXO_AGENT_CLI_ROOT");
+        if mount_agent_cli {
+            command
+                .arg("--agent-cli-mount")
+                .arg(&agent_cli)
+                .args(["--agent-cli-mount-path", "/agent cli"]);
+        }
+        run(&mut command)?;
         let environment: exoharness::EnvironmentDefinition = serde_json::from_str(
             &fs::read_to_string(launch.join(".exo/launch-environment.json"))?,
         )?;
@@ -106,6 +126,29 @@ fn launcher_creates_and_updates_a_thread_environment_with_the_current_cli() -> R
             environment.config.enable_networking,
             Some(networking == "enabled")
         );
+        let mut mounts = vec![exoharness::FileSystemMount {
+            host_path: fs::canonicalize(&launch)?.display().to_string(),
+            mount_path: "/workspace/exo source".to_string(),
+            mode: exoharness::FileSystemMountMode::ReadWrite,
+            internal: None,
+        }];
+        if mount_agent_cli {
+            mounts.push(exoharness::FileSystemMount {
+                host_path: fs::canonicalize(&agent_cli)?.display().to_string(),
+                mount_path: "/agent cli".to_string(),
+                mode: exoharness::FileSystemMountMode::ReadWrite,
+                internal: None,
+            });
+        }
+        assert_eq!(
+            environment.config.file_system_mounts.as_ref(),
+            Some(&mounts)
+        );
+        // A normal resume must retain the saved mounts without launch overrides.
+        run(Command::new(&wrapper)
+            .current_dir(&launch)
+            .env("PATH", &path)
+            .args(["agent", "run", "--agent", "exo-agent", "--thread", "dev"]))?;
         let state = exoharness::BasicExoHarnessConfig {
             root: temp.path().join("state/exoharness"),
             secret_backend: exoharness::SecretBackendChoice::File {
@@ -120,6 +163,12 @@ fn launcher_creates_and_updates_a_thread_environment_with_the_current_cli() -> R
             let agent = exo_managed_agents::find_agent(&harness, "exo-agent").await?;
             let thread = exo_managed_agents::find_thread(agent.as_ref(), "dev").await?;
             assert_eq!(thread.record().environment.as_ref(), Some(&environment));
+            let config = executor::load_conversation_config(thread.as_ref()).await?;
+            assert_eq!(config.mounts, mounts);
+            assert_eq!(
+                config.sandbox_scope,
+                Some(executor::SandboxScope::Conversation)
+            );
             Ok::<_, anyhow::Error>(())
         })?;
         // Exercise both absent and present optional env files on the next launch.
