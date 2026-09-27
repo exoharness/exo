@@ -1,12 +1,13 @@
 //! Integration test exercising the real `exo` binary against:
-//!   - a real sandbox provider (local-process / docker / apple-container), and
+//!   - a real microVM sandbox provider (smolvm / firecracker), and
 //!   - a wiremock-backed fake OpenAI Responses endpoint.
 //!
-//! `#[ignore]`'d so `cargo test` skips it by default; the integration workflow
+//! `#[ignore]`'d so `cargo test` skips it by default; the CI integration job
 //! runs this test target with `--ignored`, selecting the provider via the
-//! `EXO_TEST_SANDBOX_BACKEND` env var (defaults to `docker`), the same
-//! variable the workflow matrix sets and `snapshot_round_trip.rs` reads. The
-//! secret backend is always `file`, with the master key materialised inside a
+//! `EXO_TEST_SANDBOX_BACKEND` env var (defaults to `smolvm`). Missing runtimes
+//! fail instead of silently skipping. Firecracker requires the feature and
+//! host artifact bundle.
+//! The secret backend is always `file`, with the master key materialised inside a
 //! per-test tempdir via `XDG_CONFIG_HOME`.
 
 use std::path::PathBuf;
@@ -19,43 +20,24 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SandboxProvider {
-    LocalProcess,
-    Docker,
-    AppleContainer,
+    Smolvm,
+    Firecracker,
 }
 
 impl SandboxProvider {
     fn from_env() -> Self {
-        let raw = std::env::var("EXO_TEST_SANDBOX_BACKEND").unwrap_or_else(|_| "docker".into());
+        let raw = std::env::var("EXO_TEST_SANDBOX_BACKEND").unwrap_or_else(|_| "smolvm".into());
         match raw.as_str() {
-            "local-process" => Self::LocalProcess,
-            "docker" => Self::Docker,
-            "apple-container" => Self::AppleContainer,
+            "smolvm" => Self::Smolvm,
+            "firecracker" => Self::Firecracker,
             other => panic!("unknown EXO_TEST_SANDBOX_BACKEND={other}"),
         }
     }
 
     fn cli_arg(self) -> &'static str {
         match self {
-            Self::LocalProcess => "local-process",
-            Self::Docker => "docker",
-            Self::AppleContainer => "apple-container",
-        }
-    }
-
-    fn runtime_available(self) -> bool {
-        match self {
-            Self::LocalProcess => true,
-            Self::Docker => Command::new("docker")
-                .arg("info")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false),
-            Self::AppleContainer => Command::new("container")
-                .arg("--version")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false),
+            Self::Smolvm => "smolvm",
+            Self::Firecracker => "firecracker",
         }
     }
 }
@@ -120,14 +102,6 @@ fn canned_response_body() -> Value {
 #[ignore = "spawns real exo binary + real sandbox + wiremock; run with cargo test -- --ignored"]
 async fn conversation_send_round_trips_through_real_sandbox_and_mocked_openai() {
     let provider = SandboxProvider::from_env();
-    if !provider.runtime_available() {
-        println!(
-            "sandbox provider {:?} not available on this runner, skipping",
-            provider
-        );
-        return;
-    }
-
     let root_dir = TempDir::new().expect("tempdir for --root");
     let xdg_dir = TempDir::new().expect("tempdir for XDG_CONFIG_HOME");
     let root = root_dir.path().to_string_lossy().into_owned();
@@ -149,6 +123,8 @@ async fn conversation_send_round_trips_through_real_sandbox_and_mocked_openai() 
             "test-key",
             "--token-env",
             "OPENAI_API_KEY",
+            "--allow-origin",
+            &mock_server.uri(),
         ],
         &root,
         &xdg,
@@ -177,10 +153,45 @@ async fn conversation_send_round_trips_through_real_sandbox_and_mocked_openai() 
             "first",
             "--sandbox",
             provider.cli_arg(),
+            "--sandbox-image",
+            "docker.io/library/alpine:3.22",
+            "--shell-program",
+            "/bin/sh",
         ],
         &root,
         &xdg,
     );
+
+    // A mocked model reply alone does not boot a sandbox. Run a command through
+    // the CLI and prove it reached a guest kernel before exercising model I/O.
+    let guest = run_exo(
+        &[
+            "thread",
+            "sandbox",
+            "run",
+            "test-agent",
+            "first",
+            "uname -s; uname -r",
+        ],
+        &root,
+        &xdg,
+    );
+    let guest = String::from_utf8(guest.stdout).expect("guest uname is UTF-8");
+    let host = Command::new("uname")
+        .arg("-r")
+        .output()
+        .expect("host uname");
+    assert!(host.status.success(), "host uname failed");
+    let host_release = String::from_utf8(host.stdout).expect("host uname is UTF-8");
+    let mut guest_lines = guest.lines();
+    assert_eq!(guest_lines.next(), Some("Linux"), "guest output: {guest}");
+    let guest_release = guest_lines.next().expect("guest kernel release");
+    assert_ne!(
+        guest_release,
+        host_release.trim(),
+        "command ran on the host"
+    );
+    println!("{} guest kernel: {guest_release}", provider.cli_arg());
 
     let output = run_exo(
         &["thread", "send", "test-agent", "first", "hello there"],
@@ -254,26 +265,5 @@ async fn conversation_send_round_trips_through_real_sandbox_and_mocked_openai() 
         events_dir.display()
     );
 
-    if provider == SandboxProvider::Docker {
-        let leftover_containers = Command::new("docker")
-            .args([
-                "ps",
-                "-aq",
-                "--filter",
-                "label=exo.sandbox.owner-pid",
-                "--filter",
-                "status=exited",
-            ])
-            .output()
-            .expect("docker ps");
-        let stdout = String::from_utf8_lossy(&leftover_containers.stdout);
-        let stale = stdout
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .collect::<Vec<_>>();
-        assert!(
-            stale.is_empty(),
-            "expected zero leftover Exited exo containers after binary exit; found: {stale:?}"
-        );
-    }
+    run_exo(&["thread", "delete", "test-agent", "first"], &root, &xdg);
 }
