@@ -5,9 +5,14 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+# Keep Rust build settings identical for unit and sandbox integration jobs.
+env:
+  CARGO_PROFILE_DEV_DEBUG: 0
 
 jobs:
   validate:
@@ -39,8 +44,6 @@ jobs:
         run: pnpm check
 
   rust-tests:
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
     strategy:
       fail-fast: false
       matrix:
@@ -73,6 +76,10 @@ jobs:
 
       - name: Cache Rust dependencies and build output
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+        with:
+          # Reuse dependencies across Rust jobs; OS, architecture, and compiler
+          # settings remain part of the action's cache key.
+          shared-key: rust
 
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
@@ -85,3 +92,111 @@ jobs:
 
       - name: Check Firecracker and sandbox egress
         run: cargo test -p exoharness --features firecracker --lib --locked
+
+  # Exercise real sandboxes and the CLI against mocked providers on every PR
+  # and main push, alongside the regular validation and Rust test jobs.
+  rust-integration-tests:
+    name: ${{ matrix.os }} / ${{ matrix.sandbox-backend }}
+    runs-on: ${{ matrix.runner }}
+    # Include cold compilation, VM provisioning, and cache saving in the budget.
+    timeout-minutes: ${{ matrix.os == 'macos' && matrix.sandbox-backend == 'docker' && 45 || 25 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-latest
+            sandbox-backend: local-process
+          - os: linux
+            runner: ubuntu-latest
+            sandbox-backend: docker
+          - os: macos
+            runner: macos-15
+            sandbox-backend: local-process
+          - os: macos
+            runner: macos-15-intel # Intel runner exposes HVF; arm64 doesn't (nested virt)
+            sandbox-backend: docker
+          # macOS / apple-container is intentionally not covered by CI.
+          #
+          # Apple's `container` CLI uses VZ.framework, which requires
+          # hardware virtualization on Apple Silicon. GitHub-hosted
+          # Apple Silicon runners do not expose nested virtualization
+          # (tracked upstream: https://github.com/actions/runner-images/issues/13505),
+          # so VZ fails with "Virtualization is not available on this
+          # hardware" no matter how the container CLI is configured.
+          #
+          # To exercise this cell, run on either:
+          #   - a self-hosted Apple Silicon runner on macOS 26+, or
+          #   - a third-party Mac CI service such as Cirrus or MacStadium.
+          #
+          # The install-step + run-step plumbing for apple-container is
+          # left in place below so a self-hosted matrix entry can be
+          # added by just uncommenting and pointing `runner:` at a
+          # labelled self-hosted runner.
+          # - os: macos
+          #   runner: self-hosted-macos-26
+          #   sandbox-backend: apple-container
+
+    env:
+      EXO_TEST_SANDBOX_BACKEND: ${{ matrix.sandbox-backend }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Cache Rust dependencies and build output
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+        with:
+          # Reuse dependencies across Rust jobs; OS, architecture, and compiler
+          # settings remain part of the action's cache key.
+          shared-key: rust
+
+      # Linux runners ship with Docker preinstalled; just confirm it's up.
+      - name: Verify Docker is available
+        if: matrix.os == 'linux' && matrix.sandbox-backend == 'docker'
+        run: docker info
+
+      # macOS runners need a Linux VM; this action provisions Lima + QEMU.
+      - name: Install Docker (macOS)
+        timeout-minutes: 15
+        if: matrix.os == 'macos' && matrix.sandbox-backend == 'docker'
+        uses: crazy-max/ghaction-setup-docker@b2189fbf2a6592b51fee7cdd93ee2bfaeba733db # v5.1.0
+
+      - name: Verify Docker is available (macOS)
+        if: matrix.os == 'macos' && matrix.sandbox-backend == 'docker'
+        run: docker info
+
+      # Apple's `container` CLI is distributed as a signed .pkg from the
+      # apple/container repo. No matrix cell exercises this today (see the
+      # commented-out apple-container entry in the matrix above), but the
+      # install step is kept so a self-hosted-runner cell can re-enable it
+      # without re-discovering the install incantation.
+      - name: Install Apple container CLI (macOS)
+        if: matrix.os == 'macos' && matrix.sandbox-backend == 'apple-container'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          # Authed download via gh CLI to avoid api.github.com rate limiting.
+          gh release download --repo apple/container \
+            --pattern '*-installer-signed.pkg' \
+            --dir /tmp
+          PKG=$(ls /tmp/*-installer-signed.pkg | head -n1)
+          sudo installer -pkg "$PKG" -target /
+          container --version
+          # --enable-kernel-install skips the first-run interactive prompt
+          # asking whether to install the default kernel.
+          container system start --enable-kernel-install
+          container system status
+
+      - name: Run integration tests
+        # Select suites built for this sandbox matrix. Other ignored tests
+        # require native keychains, live API keys, or separately provisioned
+        # runtimes/images and must be run explicitly in those environments.
+        run: >-
+          cargo test --package exo
+          --test integration_chat --test snapshot_round_trip
+          -- --ignored

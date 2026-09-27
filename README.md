@@ -7,7 +7,6 @@
 # exo
 
 [![CI](https://github.com/exoharness/exo/actions/workflows/ci.yml/badge.svg)](https://github.com/exoharness/exo/actions/workflows/ci.yml)
-[![Integration tests](https://github.com/exoharness/exo/actions/workflows/integration.yml/badge.svg)](https://github.com/exoharness/exo/actions/workflows/integration.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg?logo=rust)](Cargo.toml)
 [![TypeScript](https://img.shields.io/badge/typescript-5.x-3178c6.svg?logo=typescript&logoColor=white)](tsconfig.json)
