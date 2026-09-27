@@ -21,7 +21,16 @@ from typing import Any
 from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from policy import GIT_IDENTITY, PolicyRepo, reclaim_ownership  # noqa: E402
+from policy import (  # noqa: E402
+    create_policy_repo,
+    head,
+    prune_build_outputs,
+    reclaim_ownership,
+    record_policy,
+    restore_source,
+    source_changed,
+    trial_count,
+)
 
 
 SREGYM_REPOSITORY = "https://github.com/SREGym/SREGym.git"
@@ -45,9 +54,9 @@ EXTRA_MOUNTS_ENV = "SREGYM_AGENT_EXTRA_MOUNTS"
 EXO_REPO_MOUNT = "/workspace/exo"
 GUARDIAN_SCRIPT = "exo/scripts/exo-service-guardian"
 EXO_PROFILES = ("practical", "memory-only")
-# Exo edits a per-run git worktree of this repository, not the checkout the
+# Exo edits a per-run clone of this repository, not the checkout the
 # runner was started from, so its changes are isolated and revertible.
-SOURCE_WORKTREE = "exo-source"
+SOURCE_REPO = "exo-source"
 HEALTH_CONVERSATION = "health"
 HEALTH_IMAGE = "alpine:3.20"
 HEALTH_PROBE = "Reply with the single word ok. Do not use any tools."
@@ -682,8 +691,8 @@ def stop_container(container_id: str) -> None:
     )
 
 
-def create_source_worktree(repo: Path, path: Path) -> None:
-    """Check out the committed tree for Exo to edit, then build it."""
+def create_source(repo: Path, path: Path) -> None:
+    """Clone the committed tree for Exo to edit, then build it."""
     dirty = run(["git", "status", "--porcelain"], cwd=repo, capture_output=True).stdout.strip()
     if dirty:
         print(
@@ -691,18 +700,13 @@ def create_source_worktree(repo: Path, path: Path) -> None:
             file=sys.stderr,
             flush=True,
         )
-    run(["git", "worktree", "add", "--detach", "-q", str(path), "HEAD"], cwd=repo)
-    # The agent container covers /workspace/exo/.local with an anonymous
-    # volume; Docker cannot create that mountpoint inside a read-only bind
-    # mount, so the directory must already exist (it is gitignored).
-    (path / ".local").mkdir()
+    create_policy_repo(repo, path, head(repo))
+    build_source(path)
+
+
+def build_source(path: Path) -> None:
     run(["pnpm", "install", "--frozen-lockfile"], cwd=path)
     run(["cargo", "build", "-p", "exo"], cwd=path)
-
-
-def remove_source_worktree(repo: Path, path: Path) -> None:
-    """Drop the worktree; the policy repository keeps its final source."""
-    run(["git", "worktree", "remove", "--force", str(path)], cwd=repo)
 
 
 def start_health_container(name: str) -> str:
@@ -735,66 +739,57 @@ class SourceCheck(BaseModel):
 
 
 class SourceGuard:
-    """Keep Exo's editable source at a state that can still complete a turn.
+    """Commit each trial's policy, keeping the source at a state that can
+    still complete a turn.
 
     Exo's harness loads fresh every turn and nothing validates an edit before
     it is live, so a broken edit would fail every later turn, including the
-    one Exo would need to repair it. After each trial that changed the
-    worktree, a tool-free probe turn either accepts the change as the new
-    known-good state or reverts to the previous one.
+    one Exo would need to repair it. After a trial that changed the source, a
+    tool-free probe turn decides whether the trial's commit becomes the new
+    known-good state or is followed by a commit restoring the previous one.
     """
 
-    def __init__(self, worktree: Path, *, client: ExoClient, log: Path) -> None:
-        self.worktree = worktree
+    def __init__(self, source: Path, *, client: ExoClient, exo_root: Path, log: Path) -> None:
+        self.source = source
         self.client = client
+        self.exo_root = exo_root
         self.log = log
-        self.accepted = self.head()
+        self.accepted = head(source)
         self.conversation: str | None = None
 
-    def head(self) -> str:
-        return run(["git", "rev-parse", "HEAD"], cwd=self.worktree, capture_output=True).stdout.strip()
-
-    def changed(self) -> bool:
-        status = run(["git", "status", "--porcelain"], cwd=self.worktree, capture_output=True).stdout
-        return bool(status.strip()) or self.head() != self.accepted
-
-    def check(self, trial: int) -> SourceCheck:
-        if not self.changed():
-            record = SourceCheck(trial=trial, changed=False)
-        else:
-            record = self.probe(trial)
-            if record.healthy:
-                self.accept(trial)
-            else:
-                self.revert()
-                record.reverted_to = self.accepted
+    def finish_trial(self, trial: int, message: str) -> SourceCheck:
+        record = SourceCheck(trial=trial, changed=source_changed(self.source, since=self.accepted))
+        if record.changed:
+            record.healthy, record.detail = self.probe()
+            message += "; source changed, probe " + ("ok" if record.healthy else "FAILED")
+        record_policy(self.source, exo_root=self.exo_root, message=message)
+        if record.changed and not record.healthy:
+            restore_source(self.source, self.accepted)
+            self.rebuild()
+            record.reverted_to = self.accepted
+            record_policy(
+                self.source,
+                exo_root=self.exo_root,
+                message=f"restored source to {self.accepted[:8]} after trial {trial} (could not complete a turn)",
+            )
+        self.accepted = head(self.source)
         self.append(record)
         return record
 
-    def probe(self, trial: int) -> SourceCheck:
+    def probe(self) -> tuple[bool, str | None]:
         if self.conversation is None:
             raise RuntimeError("source guard has no health conversation")
         print("Exo changed its source; probing that it still completes a turn", flush=True)
         try:
             self.client.send(self.conversation, HEALTH_PROBE, HEALTH_TIMEOUT)
         except (subprocess.TimeoutExpired, RuntimeError) as error:
-            print(f"probe failed; reverting Exo's source: {error}", file=sys.stderr, flush=True)
-            return SourceCheck(trial=trial, changed=True, healthy=False, detail=str(error)[:2000])
-        return SourceCheck(trial=trial, changed=True, healthy=True)
+            print(f"probe failed; restoring Exo's source: {error}", file=sys.stderr, flush=True)
+            return False, str(error)[:2000]
+        return True, None
 
-    def accept(self, trial: int) -> None:
-        run(["git", "add", "-A"], cwd=self.worktree)
-        run(
-            ["git", *GIT_IDENTITY, "commit", "-q", "--allow-empty", "-m", f"trial {trial}: accepted"],
-            cwd=self.worktree,
-        )
-        self.accepted = self.head()
-
-    def revert(self) -> None:
-        run(["git", "reset", "-q", "--hard", self.accepted], cwd=self.worktree)
-        run(["git", "clean", "-fdq"], cwd=self.worktree)
+    def rebuild(self) -> None:
         # The binary may have been rebuilt from the rejected source.
-        run(["cargo", "build", "-p", "exo"], cwd=self.worktree)
+        run(["cargo", "build", "-p", "exo"], cwd=self.source)
 
     def append(self, record: SourceCheck) -> None:
         records = json.loads(self.log.read_text()) if self.log.exists() else []
@@ -820,7 +815,6 @@ def run_trials(
     client: ExoClient,
     args: argparse.Namespace,
     phase: Phase,
-    policy: PolicyRepo,
     guard: SourceGuard,
 ) -> None:
     handled: set[str] = set()
@@ -883,14 +877,12 @@ def run_trials(
             finally:
                 stop_container(container_id)
                 reclaim_ownership(client.repo)
-                trial = policy.trial_count() + 1
-                policy.commit(
+                trial = trial_count(client.repo) + 1
+                guard.finish_trial(
+                    trial,
                     f"trial {trial} [{phase.name}]: {app['app_name']} ({artifact_id}): "
-                    f"{grade_summary(results)}"
+                    f"{grade_summary(results)}",
                 )
-                check = guard.check(trial)
-                if check.reverted_to:
-                    policy.commit(f"trial {trial} [{phase.name}]: reverted source that could not complete a turn")
 
 
 def results_batches(sregym_root: Path) -> set[Path]:
@@ -903,7 +895,6 @@ def run_phase(
     *,
     args: argparse.Namespace,
     client: ExoClient,
-    policy: PolicyRepo,
     guard: SourceGuard,
     sregym_root: Path,
     environment: dict[str, str],
@@ -918,7 +909,7 @@ def run_phase(
     print(f"\n=== Phase {phase.name}: {shlex.join(command)} ===", flush=True)
     process = subprocess.Popen(command, cwd=sregym_root, env=environment)
     try:
-        run_trials(process, client=client, args=args, phase=phase, policy=policy, guard=guard)
+        run_trials(process, client=client, args=args, phase=phase, guard=guard)
         return_code = process.wait()
     except BaseException:
         process.terminate()
@@ -969,22 +960,28 @@ def main() -> int:
             raise ValueError("Docker is unavailable; run this through ./eval.sh")
 
         resuming = args.resume is not None
-        source = run_dir / SOURCE_WORKTREE
+        source = run_dir / SOURCE_REPO
         if resuming:
             if not (run_dir / "exo").is_dir():
                 raise ValueError(f"--run-dir is not an earlier run to resume: {run_dir}")
-            if not source.is_dir():
-                raise ValueError(f"the run's source worktree is gone: {source}")
+            if not (source / ".git").is_dir():
+                raise ValueError(f"the run's source repository is gone: {source}")
         else:
             run_dir.mkdir(parents=True, exist_ok=False)
         write_run_manifest(run_dir, args=args, repo=repo, phases=phases, commands=commands)
         ensure_sregym_checkout(sregym_root, repo=repo)
         ensure_sregym_patch(sregym_root)
         run(["uv", "sync"], cwd=sregym_root)
-        if not resuming:
-            # Exo edits (and rebuilds) its own copy of the committed tree; a
-            # fresh worktree also starts with no inherited agent-built tools.
-            create_source_worktree(repo, source)
+        if resuming:
+            # A completed run drops its build outputs; an interrupted one
+            # usually still has them.
+            if not (source / "target/debug/exo").is_file():
+                build_source(source)
+        else:
+            # Exo edits (and rebuilds) its own clone of the committed tree,
+            # which is also the run's policy lineage. A fresh clone starts
+            # with no inherited agent-built tools.
+            create_source(repo, source)
 
         client = ExoClient(
             binary=source / "target/debug/exo",
@@ -992,11 +989,10 @@ def main() -> int:
             repo=source,
             profile=args.exo_profile,
         )
-        policy = PolicyRepo(run_dir / "policy", repo=source, exo_root=client.root)
         if resuming:
             # The same agent continues with its memory, skills, and tools.
             client.ensure_agent(args.model)
-            policy.commit(f"resumed from {args.resume.resolve()}")
+            record_policy(source, exo_root=client.root, message=f"resumed from {args.resume.resolve()}")
         else:
             setup_model(
                 client,
@@ -1006,13 +1002,13 @@ def main() -> int:
                 base_url=args.base_url,
             )
             client.ensure_agent(args.model)
-            policy.init()
+            record_policy(source, exo_root=client.root, message="initial policy")
 
         environment = {
             **os.environ,
             # Exo runs in SREGym's agent container, so mount its source tree
             # there the way `exo.sh` mounts it into Exo's own sandbox. An
-            # empty anonymous volume covers .local in case the worktree ever
+            # empty anonymous volume covers .local in case the clone ever
             # gains one: the checkout has every fault's code and grades.
             # Without self-modification the tree is read-only, since Exo's
             # TypeScript loads fresh every turn and a shell edit would
@@ -1040,7 +1036,9 @@ def main() -> int:
         print(f"SREGym checkout: {sregym_root} ({SREGYM_REF})", flush=True)
 
         health_container = start_health_container(f"sregym-exo-health-{run_dir.name}")
-        guard = SourceGuard(source, client=client, log=run_dir / "source-checks.json")
+        guard = SourceGuard(
+            source, client=client, exo_root=client.root, log=run_dir / "source-checks.json"
+        )
         batches: list[tuple[Phase, Path]] = []
         try:
             guard.conversation = f"{HEALTH_CONVERSATION}-{health_container[:8]}"
@@ -1053,7 +1051,6 @@ def main() -> int:
                         command,
                         args=args,
                         client=client,
-                        policy=policy,
                         guard=guard,
                         sregym_root=sregym_root,
                         environment=environment,
@@ -1063,7 +1060,7 @@ def main() -> int:
             remove_container(health_container)
             stop_guardian_services(source, exo_root=client.root)
             reclaim_ownership(source)
-            policy.commit("final policy")
+            record_policy(source, exo_root=client.root, message="final policy")
 
         jobs_dir = repo / ".local/sregym-evals/harbor-jobs"
         print("\n=== Results ===")
@@ -1082,10 +1079,10 @@ def main() -> int:
                 cwd=repo,
             )
             print(f"{phase.name}: {batch / 'exo_ALL_results.csv'}")
-        print(f"Exo state, policy repository, and per-trial audit data: {run_dir}")
-        # The policy repository holds the final source; the worktree only
-        # needs to outlive an interrupted run so it can be resumed.
-        remove_source_worktree(repo, source)
+        print(f"Exo state, source repository with policy lineage, and per-trial audit data: {run_dir}")
+        # The source repository is the run's record; only its build outputs
+        # are dropped, and a resume rebuilds them.
+        prune_build_outputs(source)
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
         print(f"error: {error}", file=sys.stderr)

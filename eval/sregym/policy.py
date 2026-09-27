@@ -1,11 +1,13 @@
-"""A per-run git repository holding Exo's policy with its lineage.
+"""One git repository per run that is both what Exo edits and its lineage.
 
-Exo's policy is spread over three places: its source tree (this repository,
-which Exo edits through the /workspace/exo mount), agent-built tools under
+Exo's policy has three parts: its source tree, agent-built tools under
 `.exo/` in that tree, and memory and skills stored as versioned artifacts in
-the run's Exo root. Each run gets `policy/`, a git repository whose first
-commit is the policy as the run started and which gains one commit per
-graded incident, so `git log -p` reads as what each reflection changed.
+the run's Exo root. Each run gets a clone of the committed tree under its run
+directory. Exo works in that clone through the /workspace/exo mount, and the
+runner commits there after every incident: source changes, the tool
+directories, and a copy of the latest memory and skill artifacts under
+`.exo/agent`. `git log -p` in the run's source reads as what each reflection
+changed, and the working tree is the state the next incident starts from.
 """
 
 from __future__ import annotations
@@ -17,8 +19,15 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-# Agent-built tools live in the repository, not under EXO_ROOT.
+# Agent-built tools live in the repository, not under EXO_ROOT. They are
+# gitignored there, so the runner force-adds them.
 TOOL_DIRECTORIES = (".exo/agent-tools", ".exo/tools", ".exo/tool-sources")
+# Where the runner copies the newest memory and skill artifacts before a commit.
+AGENT_STATE_DIRECTORY = ".exo/agent"
+RECORDED_DIRECTORIES = (*TOOL_DIRECTORIES, AGENT_STATE_DIRECTORY)
+# Build outputs that make the clone heavy; a resume rebuilds them.
+BUILD_OUTPUTS = ("target", "node_modules")
+POLICY_BRANCH = "policy"
 # A tiny image for reclaiming files the agent container wrote as root.
 OWNERSHIP_IMAGE = "alpine:3.20"
 GIT_IDENTITY = ("-c", "user.name=exo", "-c", "user.email=exo@localhost")
@@ -41,14 +50,8 @@ def git(repo: Path, *arguments: str) -> str:
     ).stdout
 
 
-def source_files(repo: Path) -> list[Path]:
-    """Tracked and untracked files that git does not ignore, skipping deletions."""
-    listing = git(repo, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
-    return [
-        Path(relative)
-        for relative in filter(None, listing.split("\0"))
-        if (repo / relative).is_file()
-    ]
+def head(repo: Path) -> str:
+    return git(repo, "rev-parse", "HEAD").strip()
 
 
 def latest_artifacts(exo_root: Path) -> dict[str, Path]:
@@ -71,7 +74,7 @@ def reclaim_ownership(repo: Path) -> None:
     ]
     targets = [
         f"/repo/{relative}"
-        for relative in (*TOOL_DIRECTORIES, *changed)
+        for relative in (".exo", *changed)
         if (repo / relative).exists()
     ]
     if not targets:
@@ -94,48 +97,72 @@ def reclaim_ownership(repo: Path) -> None:
     )
 
 
-def clear_tools(repo: Path) -> None:
-    """Start a run with no inherited agent-built tools."""
-    for relative in TOOL_DIRECTORIES:
-        shutil.rmtree(repo / relative, ignore_errors=True)
+def create_policy_repo(repo: Path, path: Path, commit: str) -> None:
+    """Clone `commit` of `repo` into `path` on its own branch, with no remote.
+
+    A clone rather than a worktree, so the run's history lives inside the run
+    directory and survives whatever happens to the checkout it came from.
+    """
+    subprocess.run(
+        ["git", "clone", "-q", "--no-checkout", str(repo), str(path)],
+        check=True,
+    )
+    git(path, "checkout", "-q", "-B", POLICY_BRANCH, commit)
+    git(path, "remote", "remove", "origin")
+    # The agent container covers /workspace/exo/.local with an anonymous
+    # volume; Docker cannot create that mountpoint inside a read-only bind
+    # mount, so the directory must already exist (it is gitignored).
+    (path / ".local").mkdir()
 
 
-class PolicyRepo:
-    def __init__(self, path: Path, *, repo: Path, exo_root: Path) -> None:
-        self.path = path
-        self.repo = repo
-        self.exo_root = exo_root
-
-    def init(self) -> None:
-        self.path.mkdir(parents=True)
-        git(self.path, "init", "-q")
-        self.commit("initial policy")
-
-    def commit(self, message: str) -> None:
-        self.refresh()
-        git(self.path, "add", "-A")
-        # An incident that changed nothing still gets a commit, so the log has
-        # one entry per incident.
-        git(self.path, "commit", "-q", "--allow-empty", "-m", message)
-
-    def trial_count(self) -> int:
-        """Trials committed so far, so a resumed run keeps numbering."""
-        log = git(self.path, "log", "--format=%s")
-        return sum(line.startswith("trial ") for line in log.splitlines())
-
-    def refresh(self) -> None:
-        for name in ("source", "tools", "agent"):
-            shutil.rmtree(self.path / name, ignore_errors=True)
-        for relative in source_files(self.repo):
-            copy_file(self.repo / relative, self.path / "source" / relative)
-        for relative in TOOL_DIRECTORIES:
-            source = self.repo / relative
-            if source.is_dir():
-                shutil.copytree(source, self.path / "tools" / Path(relative).name)
-        for artifact_path, content in latest_artifacts(self.exo_root).items():
-            copy_file(content, self.path / "agent" / artifact_path)
+def record_policy(source: Path, *, exo_root: Path, message: str) -> None:
+    """Commit the current policy: source, tools, and the latest agent artifacts."""
+    state = source / AGENT_STATE_DIRECTORY
+    shutil.rmtree(state, ignore_errors=True)
+    for artifact_path, content in latest_artifacts(exo_root).items():
+        destination = state / artifact_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(content, destination)
+    git(source, "add", "-A")
+    recorded = [relative for relative in RECORDED_DIRECTORIES if (source / relative).is_dir()]
+    if recorded:
+        git(source, "add", "-f", "--", *recorded)
+    # An incident that changed nothing still gets a commit, so the log has
+    # one entry per incident.
+    git(source, "commit", "-q", "--allow-empty", "-m", message)
 
 
-def copy_file(source: Path, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, destination)
+def trial_count(source: Path) -> int:
+    """Trials committed so far, so a resumed run keeps numbering."""
+    log = git(source, "log", "--format=%s")
+    return sum(line.startswith("trial ") for line in log.splitlines())
+
+
+def source_changed(source: Path, *, since: str) -> bool:
+    """Whether Exo changed anything since the commit `since`.
+
+    The runner's own artifact copies under `.exo/agent` do not count; a
+    memory entry is not a source change.
+    """
+    status = git(source, "status", "--porcelain", "--", ".", f":(exclude){AGENT_STATE_DIRECTORY}")
+    return bool(status.strip()) or head(source) != since
+
+
+def restore_source(source: Path, commit: str) -> None:
+    """Put the working tree back to `commit` without rewriting history.
+
+    The index and tree return to `commit` while HEAD stays where it is, so
+    the next commit records the restoration as its own step in the lineage.
+    """
+    current = head(source)
+    git(source, "reset", "-q", "--hard", commit)
+    git(source, "reset", "-q", "--soft", current)
+    git(source, "clean", "-fdq")
+    # New, still-ignored files in the tool directories are part of the change.
+    git(source, "clean", "-fdqx", "--", *TOOL_DIRECTORIES)
+
+
+def prune_build_outputs(source: Path) -> None:
+    """Drop the build outputs a completed run no longer needs on disk."""
+    for relative in BUILD_OUTPUTS:
+        shutil.rmtree(source / relative, ignore_errors=True)

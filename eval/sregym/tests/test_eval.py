@@ -250,7 +250,7 @@ class EvalTests(unittest.TestCase):
         [_, test] = sregym_eval.run_phases(sregym_eval.parse_args(["--test-problem", "wrong_dns_policy_social_network"]))
         self.assertEqual(test.selection, ["--problem", "wrong_dns_policy_social_network"])
 
-    def test_source_guard_accepts_working_edits_and_reverts_broken_ones(self) -> None:
+    def test_source_guard_commits_trials_and_restores_broken_source(self) -> None:
         class Client:
             def __init__(self) -> None:
                 self.healthy = True
@@ -262,46 +262,64 @@ class EvalTests(unittest.TestCase):
                     raise RuntimeError("harness failed to load")
 
         with tempfile.TemporaryDirectory() as temporary_directory:
-            worktree = Path(temporary_directory) / "source"
-            worktree.mkdir()
-            git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(worktree)]
-            (worktree / "harness.ts").write_text("ok\n")
-            (worktree / ".gitignore").write_text("target/\n")
-            subprocess.run([*git, "init", "-q"], check=True)
+            root = Path(temporary_directory)
+            repo = root / "repo"
+            repo.mkdir()
+            git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(repo)]
+            (repo / "harness.ts").write_text("ok\n")
+            (repo / ".gitignore").write_text(".exo/\n.local/\ntarget/\n")
+            subprocess.run([*git, "init", "-q", "-b", "main"], check=True)
             subprocess.run([*git, "add", "."], check=True)
             subprocess.run([*git, "commit", "-q", "-m", "base"], check=True)
-            client = Client()
-            guard = sregym_eval.SourceGuard(worktree, client=client, log=Path(temporary_directory) / "checks.json")
-            guard.conversation = "health"
-            guard.revert = lambda: (  # no cargo in the test
-                subprocess.run([*git, "reset", "-q", "--hard", guard.accepted], check=True),
-                subprocess.run([*git, "clean", "-fdq"], check=True),
-            )
+            source = root / "exo-source"
+            sregym_eval.create_policy_repo(repo, source, sregym_eval.head(repo))
+            exo_root = root / "exo"
+            sregym_eval.record_policy(source, exo_root=exo_root, message="initial policy")
 
-            self.assertFalse(guard.check(1).changed)
+            client = Client()
+            guard = sregym_eval.SourceGuard(
+                source, client=client, exo_root=exo_root, log=root / "checks.json"
+            )
+            guard.conversation = "health"
+            guard.rebuild = lambda: None  # no cargo in the test
+
+            unchanged = guard.finish_trial(1, "trial 1 [learn]: shop: diagnosis PASS")
+            self.assertFalse(unchanged.changed)
             self.assertEqual(client.probes, 0)
 
-            (worktree / "harness.ts").write_text("better\n")
-            (worktree / "target").mkdir()
-            (worktree / "target" / "exo").write_text("binary")
-            accepted = guard.check(2)
+            (source / "harness.ts").write_text("better\n")
+            (source / "target").mkdir()
+            (source / "target" / "exo").write_text("binary")
+            accepted = guard.finish_trial(2, "trial 2 [learn]: shop: diagnosis fail")
             self.assertTrue(accepted.healthy)
             self.assertIsNone(accepted.reverted_to)
-            self.assertFalse(guard.changed())
             good = guard.accepted
 
-            (worktree / "harness.ts").write_text("broken\n")
-            (worktree / "new-tool.ts").write_text("x")
+            (source / "harness.ts").write_text("broken\n")
+            (source / "new-tool.ts").write_text("x")
             client.healthy = False
-            reverted = guard.check(3)
-            self.assertFalse(reverted.healthy)
-            self.assertEqual(reverted.reverted_to, good)
-            self.assertEqual((worktree / "harness.ts").read_text(), "better\n")
-            self.assertFalse((worktree / "new-tool.ts").exists())
-            self.assertTrue((worktree / "target" / "exo").exists())
-            records = json.loads((Path(temporary_directory) / "checks.json").read_text())
-            self.assertEqual([record["trial"] for record in records], [1, 2, 3])
+            restored = guard.finish_trial(3, "trial 3 [learn]: shop: ungraded")
+            self.assertFalse(restored.healthy)
+            self.assertEqual(restored.reverted_to, good)
+            self.assertEqual((source / "harness.ts").read_text(), "better\n")
+            self.assertFalse((source / "new-tool.ts").exists())
+            self.assertTrue((source / "target" / "exo").exists())
 
+            log = subprocess.run(
+                ["git", "-C", str(source), "log", "--format=%s"], check=True, capture_output=True, text=True
+            ).stdout.splitlines()
+            self.assertEqual(
+                log[:4],
+                [
+                    f"restored source to {good[:8]} after trial 3 (could not complete a turn)",
+                    "trial 3 [learn]: shop: ungraded; source changed, probe FAILED",
+                    "trial 2 [learn]: shop: diagnosis fail; source changed, probe ok",
+                    "trial 1 [learn]: shop: diagnosis PASS",
+                ],
+            )
+            self.assertEqual(sregym_eval.trial_count(source), 3)
+            records = json.loads((root / "checks.json").read_text())
+            self.assertEqual([record["trial"] for record in records], [1, 2, 3])
 
 if __name__ == "__main__":
     unittest.main()

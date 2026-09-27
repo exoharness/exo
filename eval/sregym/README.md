@@ -11,31 +11,30 @@ the host, so the agent container gets neither API keys nor Codex auth), lets
 the runner add bind mounts to the agent container, and adds an optional review
 hold used by `--reflection`.
 
-Each run gets its own git worktree of this repository's committed `HEAD` at
-`<run>/exo-source`, built with `pnpm install` and `cargo build`. As in a
-regular `exo.sh` launch, that tree is mounted read-write at `/workspace/exo`
-inside the container Exo works in, so Exo can inspect and edit its own code
-without touching the checkout the runner was started from (uncommitted changes
-there are not part of the run). `rebuild_and_restart_exo` runs the service
-guardian in the worktree with `EXO_ROOT` set to the run's Exo state; a
-successful build replaces the worktree's `target/debug/exo`, which the next
-turn picks up, and a failed build leaves the previous binary in place. Exo's
-TypeScript harness loads fresh every turn, so a harness edit is live at once.
-The runner stops any guardian-started scheduler and adapters when the
-evaluation ends, and removes the worktree after a completed run (the policy
-repository keeps its final source). Files Exo writes through the mount are
-owned by root on the host. For each incident, Exo attaches to SREGym's isolated
-agent container. SREGym still owns the cluster, fault injection, network policy,
-agent container, grading, timeout, and cleanup.
+Each run gets its own clone of this repository's committed `HEAD` at
+`<run>/exo-source`, on a branch named `policy` with no remote, built with
+`pnpm install` and `cargo build`. As in a regular `exo.sh` launch, that tree
+is mounted read-write at `/workspace/exo` inside the container Exo works in,
+so Exo can inspect and edit its own code without touching the checkout the
+runner was started from (uncommitted changes there are not part of the run).
+`rebuild_and_restart_exo` runs the service guardian in the clone with
+`EXO_ROOT` set to the run's Exo state; a successful build replaces the clone's
+`target/debug/exo`, which the next turn picks up, and a failed build leaves
+the previous binary in place. Exo's TypeScript harness loads fresh every turn,
+so a harness edit is live at once. The runner stops any guardian-started
+scheduler and adapters when the evaluation ends. Files Exo writes through the
+mount are owned by root on the host. For each incident, Exo attaches to
+SREGym's isolated agent container. SREGym still owns the cluster, fault
+injection, network policy, agent container, grading, timeout, and cleanup.
 
 Nothing in Exo validates a source edit before it is live, and a harness that
 fails to load fails every later turn, including the one Exo would need to
-repair it. So after any trial that changed the worktree, the runner sends a
+repair it. So after any trial that changed the clone, the runner sends a
 tool-free probe turn ("reply ok") in a separate `health-*` conversation
-attached to a throwaway `alpine` container. If the turn completes, the change
-is committed in the worktree as the new known-good state; if it fails, the
-worktree is reset to the previous one (and rebuilt), and the policy
-repository gets a commit saying so. Every check is appended to
+attached to a throwaway `alpine` container. If the turn completes, the
+trial's commit is the new known-good state; if it fails, a further commit
+restores the previous state (and the binary is rebuilt), so the rejected
+edit stays in the history. Every check is appended to
 `<run>/source-checks.json`. This is the runner's backstop, not part of Exo.
 
 Each incident gets a fresh conversation, while memory, skills, and installed
@@ -157,21 +156,22 @@ eval/sregym/.venv/bin/python eval/sregym/postprocess.py \
   .local/sregym-evals/upstream/SREGym/results/<batch>
 ```
 
-Exo's policy has three homes: this source tree (which Exo edits through the
-`/workspace/exo` mount), agent-built tools under `.exo/agent-tools`,
-`.exo/tools`, and `.exo/tool-sources` in that tree, and memory and skills
-stored as versioned artifacts in the run's Exo root. Each run keeps a git
-repository at `.local/sregym-evals/<run>/policy` that brings them together:
-`source/` (tracked and untracked files), `tools/`, and `agent/` (the latest
-memory and skill artifacts). Its first commit is the policy as the run began;
-every graded incident adds a commit named after the trial and its grades, and
-the run ends with a final commit, so `git log -p` in that directory shows what
-each reflection changed.
+Exo's policy has three parts: its source tree, agent-built tools under
+`.exo/agent-tools`, `.exo/tools`, and `.exo/tool-sources` in that tree, and
+memory and skills stored as versioned artifacts in the run's Exo root. The
+run's clone at `<run>/exo-source` is both where Exo works and the record of
+what it changed: after every incident the runner commits there the source
+changes, the (otherwise gitignored) tool directories, and a copy of the
+latest memory and skill artifacts under `.exo/agent`. The first commit after
+the clone is the policy as the run began; every incident adds a commit named
+after the trial, its phase, and its grades (with a note when the source
+changed and how the probe went); and the run ends with a final commit. So
+`git log -p` in that directory shows what each reflection changed, and the
+working tree is the state the next incident starts from. A completed run
+drops the clone's `target/` and `node_modules/`; a resume rebuilds them.
 
-A run starts with no inherited tools: the runner removes the `.exo` tool
-directories first (the previous run's copies live in its policy repository).
-Files the agent container wrote as root are reclaimed with a throwaway
-`alpine` container before they are removed or copied.
+A fresh clone has no inherited tools. Files the agent container wrote as root
+are reclaimed with a throwaway `alpine` container before git touches them.
 
 The run-scoped Exo state is retained under `.local/sregym-evals/<run>/exo`, so
 the exact memory, artifacts, conversations, and tool state can be inspected
