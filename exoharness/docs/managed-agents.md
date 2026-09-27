@@ -515,6 +515,12 @@ sandboxes; vaults have global, agent, and thread contexts. `VaultHandle` owns
 uses `VaultHandle::resolve_secret` to check the destination and read the current
 value together.
 
+### Upgrading credential policies
+
+- Existing vault catalogs are rewritten once on first open; even a metadata-only command needs master-key access for this migration.
+- Saved sandboxes with the previous credential bindings are recreated on first resume.
+- `--http-origin` and `--mcp-server-url` are no longer accepted: use `--allow-origin`/`--allow-url` for token policies, or `--url` for OAuth discovery.
+
 ## Runtime providers
 
 The same CLI commands drive local Exo and an HTTP runtime:
