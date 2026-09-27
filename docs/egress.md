@@ -26,7 +26,7 @@ as `egress.json` (the flag also accepts `.yaml`, `.yml`, and `.toml`):
 {
   "networking": {
     "type": "limited",
-    "allowed_hosts": ["api.notion.com"]
+    "allowed_hosts": ["api.notion.com", "api.openai.com"]
   },
   "credentials": [
     {
@@ -46,8 +46,13 @@ as `egress.json` (the flag also accepts `.yaml`, `.yml`, and `.toml`):
 exo vault secret create global notion \
   --allow-origin https://api.notion.com --token-env NOTION_API_KEY
 exo agent run --agent-file agent.md --egress-policy egress.json \
-  --environment-file exoharness/examples/environments/codex-firecracker.yaml
+  --sandbox firecracker --sandbox-image /var/lib/exo/firecracker/rootfs.ext4
 ```
+
+An environment that sets `config.policy` cannot also be used with
+`--egress-policy`. Put the credential bindings in the environment policy, or
+use sandbox options as above. Include the model API host in a limited network
+policy so the agent can call its model.
 
 In the agent conversation, use `/sandbox` to run:
 

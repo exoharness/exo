@@ -1058,6 +1058,17 @@ async fn run_selected(
     let definition = managed_agents::load_definition(&cli.command)?;
 
     let local = http_client.is_none();
+    if !local
+        && matches!(
+            &cli.command,
+            Commands::Agent {
+                command: AgentCommands::Run { execution, .. },
+                ..
+            } if execution.egress_policy.is_some()
+        )
+    {
+        bail!("--egress-policy is local-only; put the policy in the remote environment definition");
+    }
     let harness = providers::runtime(&cli, http_client, definition.as_ref(), &env).await?;
     let env_vars = env.into_vars();
     let root = cli.runtime().root.clone();
@@ -1071,11 +1082,12 @@ async fn run_selected(
             unreachable!("management commands return before harness startup")
         }
         Commands::Vault { command, .. } => vaults::run(harness.exoharness_handle().as_ref(), &command, &env_vars, local).await?,
-        Commands::Agent { command: AgentCommands::Run { thread, tui, prompt, .. }, .. } => {
+        Commands::Agent { command: AgentCommands::Run { thread, tui, prompt, execution, .. }, .. } => {
             let (agent, conversation) = managed_agents::open_thread(
                 harness.as_ref(),
                 definition.as_ref(),
                 &thread,
+                execution.egress_policy.is_some(),
             )
             .await?;
             if let Some(provider) = &selected_provider {

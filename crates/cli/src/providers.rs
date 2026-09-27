@@ -78,6 +78,7 @@ pub(crate) async fn runtime(
             })
             .transpose()?,
         model,
+        egress_policy: thread.and_then(|_| config.sandbox_policy.clone()),
         thread: thread
             .map(|args| args.local_config())
             .transpose()?

@@ -1513,7 +1513,7 @@ async fn remote_threads_paginate_and_failed_creation_only_deletes_the_new_thread
     use exoharness::protocol::{
         ClientMessage, ConversationHandleInfo, Request, Response, ServerMessage,
     };
-    use exoharness::{HttpExoHarness, ListConversationsResult};
+    use exoharness::{HttpExoHarness, ListConversationsResult, ReadArtifactRequest};
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
 
     let temp = TempDir::new()?;
@@ -1533,8 +1533,14 @@ async fn remote_threads_paginate_and_failed_creation_only_deletes_the_new_thread
             ..crate::test_support::agent_request("support", crate::AgentHarnessKind::Basic)
         })
         .await?;
-    let config = local.get_agent_config(agent.as_ref()).await?;
     let artifact = agent.list_artifacts().await?.remove(0);
+    let config_artifact = agent
+        .read_artifact(ReadArtifactRequest {
+            artifact_id: artifact.artifact_id,
+            version: Some(artifact.version),
+        })
+        .await?
+        .ok_or_else(|| anyhow!("missing test agent config"))?;
     let agent_record = agent.record().clone();
     let agent_id = agent_record.id;
     let mut threads = Vec::new();
@@ -1571,6 +1577,12 @@ async fn remote_threads_paginate_and_failed_creation_only_deletes_the_new_thread
                 }),
                 Request::AgentWriteArtifact { .. } => Some(Response::ArtifactVersion {
                     artifact: artifact.clone(),
+                }),
+                Request::AgentListArtifacts { .. } => Some(Response::ArtifactVersions {
+                    artifacts: vec![artifact.clone()],
+                }),
+                Request::AgentReadArtifact { .. } => Some(Response::Artifact {
+                    artifact: Some(config_artifact.clone()),
                 }),
                 Request::ListConversations { request, .. } => {
                     let index = request.cursor.map_or(0, |cursor| {
@@ -1639,8 +1651,6 @@ async fn remote_threads_paginate_and_failed_creation_only_deletes_the_new_thread
             .slug,
         "older"
     );
-    // Prime the runtime cache so creation reaches the failing thread-config write.
-    remote.put_agent_config(agent.as_ref(), config).await?;
     let error = remote
         .create_conversation(agent.as_ref(), CreateConversationRequest::default())
         .await

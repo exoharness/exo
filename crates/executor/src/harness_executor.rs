@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use async_trait::async_trait;
@@ -24,10 +23,7 @@ use crate::harness_events::HarnessEvents;
 use crate::harness_helpers::{
     get_conversation_model_override, resolve_agent_handle, resolve_conversation_handle,
 };
-use crate::shared::{
-    AGENT_CONFIG_CACHE_NAME, CONVERSATION_CONFIG_CACHE_NAME, cache_agent_config,
-    cache_conversation_config, finalize_turn, get_or_load_cached,
-};
+use crate::shared::finalize_turn;
 use crate::{
     AgentConfig, ConversationConfig, ConversationModelConfig, CreateAgentRequest,
     CreateConversationRequest, ExecutionStreamEvent, ExecutionStreamHandle, Provider, SendRequest,
@@ -111,8 +107,6 @@ pub struct Runtime {
     events: Arc<HarnessEvents>,
     finalizers: Arc<tokio::sync::Mutex<tokio::task::JoinSet<()>>>,
     tracer: Arc<dyn ExecutionTracer>,
-    agent_config_cache: Arc<RwLock<HashMap<exoharness::AgentId, AgentConfig>>>,
-    conversation_config_cache: Arc<RwLock<HashMap<exoharness::ConversationId, ConversationConfig>>>,
 }
 
 impl Runtime {
@@ -134,8 +128,6 @@ impl Runtime {
             events: Arc::default(),
             finalizers: Arc::default(),
             tracer: Arc::new(BraintrustTracer::new(runtime_config)),
-            agent_config_cache: Arc::new(RwLock::new(HashMap::new())),
-            conversation_config_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -444,13 +436,7 @@ fn apply_conversation_model_override(
 
 impl Runtime {
     pub async fn get_agent_config(&self, agent: &dyn AgentHandle) -> Result<AgentConfig> {
-        get_or_load_cached(
-            &self.agent_config_cache,
-            agent.record().id,
-            AGENT_CONFIG_CACHE_NAME,
-            || load_agent_config(agent),
-        )
-        .await
+        load_agent_config(agent).await
     }
 
     pub async fn put_agent_config(
@@ -458,22 +444,14 @@ impl Runtime {
         agent: &dyn AgentHandle,
         config: AgentConfig,
     ) -> Result<()> {
-        store_agent_config(agent, &config).await?;
-        cache_agent_config(&self.agent_config_cache, agent.record().id, config);
-        Ok(())
+        store_agent_config(agent, &config).await
     }
 
     pub async fn get_conversation_config(
         &self,
         conversation: &dyn ConversationHandle,
     ) -> Result<ConversationConfig> {
-        get_or_load_cached(
-            &self.conversation_config_cache,
-            conversation.record().id,
-            CONVERSATION_CONFIG_CACHE_NAME,
-            || load_conversation_config(conversation),
-        )
-        .await
+        load_conversation_config(conversation).await
     }
 
     pub async fn put_conversation_config(
@@ -481,13 +459,7 @@ impl Runtime {
         conversation: &dyn ConversationHandle,
         config: ConversationConfig,
     ) -> Result<()> {
-        store_conversation_config(conversation, &config).await?;
-        cache_conversation_config(
-            &self.conversation_config_cache,
-            conversation.record().id,
-            config,
-        );
-        Ok(())
+        store_conversation_config(conversation, &config).await
     }
 
     pub async fn send(
@@ -582,10 +554,6 @@ impl Runtime {
                 })?;
             return Err(error);
         }
-        self.agent_config_cache
-            .write()
-            .expect("agent config cache poisoned")
-            .remove(&agent.record().id);
         if !external_mounts.is_empty() {
             let mut config = self.get_agent_config(agent.as_ref()).await?;
             for mount in external_mounts {
@@ -597,10 +565,6 @@ impl Runtime {
             }
             self.put_agent_config(agent.as_ref(), config).await?;
         }
-        self.agent_config_cache
-            .write()
-            .expect("agent config cache poisoned")
-            .remove(&agent.record().id);
         Ok(version)
     }
 
@@ -625,10 +589,6 @@ impl Runtime {
         let opened =
             exo_managed_agents::open_thread(self.provider.as_ref(), agent, reference, request)
                 .await?;
-        self.conversation_config_cache
-            .write()
-            .expect("conversation config cache poisoned")
-            .remove(&opened.thread.record().id);
         Ok(opened)
     }
 
@@ -763,6 +723,7 @@ impl Runtime {
                 .then_some(crate::SandboxScope::Conversation),
             permissions: default_conversation_config.permissions,
             environment: default_conversation_config.environment,
+            egress_policy: default_conversation_config.egress_policy,
         };
         if let Err(error) = self
             .put_conversation_config(conversation.as_ref(), conversation_config)

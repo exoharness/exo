@@ -17,6 +17,7 @@ pub struct LocalAgentSetup {
     pub agent: Option<AgentConfig>,
     pub model: Option<String>,
     pub thread: ConversationConfig,
+    pub egress_policy: Option<exoharness::EgressPolicy>,
 }
 
 #[async_trait]
@@ -112,6 +113,9 @@ impl AgentBackend for LocalProvider {
         if let Some(image) = &requested.sandbox_image {
             config.sandbox_image = Some(image.clone());
         }
+        if let Some(policy) = &self.managed.egress_policy {
+            config.egress_policy = Some(policy.clone());
+        }
         for mount in &requested.mounts {
             config
                 .mounts
@@ -125,14 +129,25 @@ impl AgentBackend for LocalProvider {
                     && requested.mounts.is_empty(),
                 "an environment fixes the sandbox provider and image; only additional mounts can be set when creating the thread"
             );
+            let mut mounts = config.mounts;
+            if let Some(previous) = &config.environment
+                && let Some(previous_mounts) = &previous.config.file_system_mounts
+            {
+                for mount in previous_mounts {
+                    mounts.retain(|other| other.mount_path != mount.mount_path);
+                }
+            }
+            for mount in environment.config.file_system_mounts.iter().flatten() {
+                mounts.retain(|other| other.mount_path != mount.mount_path);
+                mounts.push(mount.clone());
+            }
             config.environment = Some(environment.clone());
+            if environment.config.policy.is_some() {
+                config.egress_policy = None;
+            }
             config.sandbox_provider = Some(environment.config.provider.clone());
             config.sandbox_image = Some(environment.config.image.clone());
-            config.mounts = environment
-                .config
-                .file_system_mounts
-                .clone()
-                .unwrap_or_default();
+            config.mounts = mounts;
             config.durable_file_systems = environment
                 .config
                 .durable_file_systems

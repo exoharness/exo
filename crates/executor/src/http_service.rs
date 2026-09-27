@@ -1,7 +1,7 @@
 use std::{net::TcpListener, ops::Bound, sync::Arc};
 
 use actix_web::{
-    App, Error, HttpResponse, HttpServer,
+    App, Error, HttpMessage, HttpRequest, HttpResponse, HttpServer,
     body::MessageBody,
     dev::{Server, ServiceRequest, ServiceResponse},
     error::{
@@ -10,7 +10,7 @@ use actix_web::{
     },
     http::header::{AUTHORIZATION, HeaderValue},
     middleware::{Next, from_fn},
-    web,
+    mime, web,
 };
 use anyhow::{Context, Result, bail};
 use exo_managed_agents::http::{RUNTIME_PATH, protocol::*, sse};
@@ -26,6 +26,29 @@ use crate::{
     AgentConfig, AgentHarnessKind, ConversationModelConfig, ExecutionStreamEvent, Runtime,
     SendRequest, harness::HarnessTurnKey,
 };
+
+// Thread creation can include a large environment definition. Bytes buffers the request.
+const OPTIONAL_JSON_BODY_LIMIT: usize = 256 * 1024 * 1024;
+
+fn optional_json_body<T: Default + serde::de::DeserializeOwned>(
+    request: &HttpRequest,
+    body: &web::Bytes,
+) -> Result<T, Error> {
+    if body.is_empty() {
+        return Ok(T::default());
+    }
+    let json_content_type = request
+        .mime_type()
+        .ok()
+        .flatten()
+        .is_some_and(|content_type| {
+            content_type.subtype() == mime::JSON || content_type.suffix() == Some(mime::JSON)
+        });
+    if !json_content_type {
+        return Err(ErrorBadRequest("Content-Type must be JSON"));
+    }
+    serde_json::from_slice(body).map_err(ErrorBadRequest)
+}
 
 #[derive(Clone)]
 pub struct RuntimeHttpService {
@@ -177,8 +200,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 "/agent/{agent_id}/artifact/read",
                 web::get().to(read_artifact),
             )
-            .route("/agent/{agent_id}/thread", web::get().to(list_threads))
-            .route("/agent/{agent_id}/thread", web::post().to(create_thread))
+            .service(
+                web::resource("/agent/{agent_id}/thread")
+                    .app_data(web::PayloadConfig::new(OPTIONAL_JSON_BODY_LIMIT))
+                    .route(web::get().to(list_threads))
+                    .route(web::post().to(create_thread)),
+            )
             .route(
                 "/agent/{agent_id}/thread/{thread_id}",
                 web::get().to(get_thread),
@@ -195,9 +222,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 "/agent/{agent_id}/thread/{thread_id}/artifact/read",
                 web::get().to(read_thread_artifact),
             )
-            .route(
-                "/agent/{agent_id}/thread/{thread_id}/fork",
-                web::post().to(fork_thread),
+            .service(
+                web::resource("/agent/{agent_id}/thread/{thread_id}/fork")
+                    .app_data(web::PayloadConfig::new(OPTIONAL_JSON_BODY_LIMIT))
+                    .route(web::post().to(fork_thread)),
             )
             .route(
                 "/agent/{agent_id}/thread/{thread_id}/turn",
@@ -764,9 +792,10 @@ async fn check_harness(
 async fn create_thread(
     service: Service,
     path: web::Path<AgentPath>,
-    body: Option<web::Json<CreateThreadBody>>,
+    request: HttpRequest,
+    body: web::Bytes,
 ) -> Result<web::Json<CreateThreadResult>, Error> {
-    let body = body.map(web::Json::into_inner).unwrap_or_default();
+    let body: CreateThreadBody = optional_json_body(&request, &body)?;
     if body.thread_id.is_some()
         || body.endpoint_name.is_some()
         || body.reasoning_effort.is_some()
@@ -878,13 +907,15 @@ async fn delete_thread(
 async fn fork_thread(
     service: Service,
     path: web::Path<ThreadPath>,
-    body: Option<web::Json<ForkThreadBody>>,
+    request: HttpRequest,
+    body: web::Bytes,
 ) -> Result<web::Json<ThreadResult>, Error> {
+    let body: ForkThreadBody = optional_json_body(&request, &body)?;
     let agent = service.agent(path.agent_id).await?;
     let thread = service.thread(agent.as_ref(), path.thread_id).await?;
     let forked = thread
         .fork(exoharness::ForkThreadRequest {
-            name: body.and_then(|body| body.into_inner().thread_name),
+            name: body.thread_name,
             ..Default::default()
         })
         .await

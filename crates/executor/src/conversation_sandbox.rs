@@ -332,7 +332,8 @@ async fn sandbox_policy(
     let mut configured = config
         .environment
         .as_ref()
-        .and_then(|env| env.config.policy.clone());
+        .and_then(|env| env.config.policy.clone())
+        .or_else(|| config.egress_policy.clone());
     let default_policy = if conversation_sandbox_spec(agent_config, config).enable_networking {
         exoharness::SandboxNetworkPolicy::Unrestricted.into()
     } else {
@@ -675,7 +676,14 @@ mod tests {
                     },
                 })
                 .await?;
-            let config = ConversationConfig::default();
+            let config = ConversationConfig {
+                egress_policy: Some(exoharness::EgressPolicy {
+                    networking: exoharness::SandboxNetworkPolicy::Unrestricted,
+                    allowed_tcp_ports: Some(vec![443]),
+                    credentials: vec![],
+                }),
+                ..Default::default()
+            };
             assert!(
                 sandbox_policy(unattached.as_ref(), &agent_config, &config)
                     .await
@@ -703,6 +711,7 @@ mod tests {
             let policy = sandbox_policy(thread.as_ref(), &agent_config, &config)
                 .await?
                 .unwrap();
+            assert_eq!(policy.allowed_tcp_ports, Some(vec![443]));
             assert_eq!(policy.credentials.len(), 1);
             let binding = &policy.credentials[0];
             assert_eq!(binding.name, secret.to_string());

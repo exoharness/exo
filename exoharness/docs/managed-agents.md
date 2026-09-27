@@ -502,10 +502,11 @@ Restricted environment network policies must allow `github.com` and
 Vault-backed chat requires an isolated sandbox. Local-process execution and mounts
 that expose the vault store or its key are rejected. Harness implementations remain
 trusted code. Codex, Claude Code, and Pi model keys use the environment's
-[credential proxy](../../docs/egress.md#agent-model-credentials) on Apple container,
-Docker, or Firecracker, including when the CLI connects to the OSS HTTP runtime.
+[credential proxy](../../docs/egress.md#agent-model-credentials) on SmolVM or
+Firecracker, including when the CLI connects to the OSS HTTP runtime.
 The wrappers receive placeholders; the runtime keeps the real keys in the vault.
-Other sandbox providers still reject credential substitution.
+SmolVM does not support credential substitution when restoring a snapshot.
+Other sandbox providers reject credential substitution.
 
 `VaultContext` provides lookup and listing on the harness, agent, and thread.
 `ExoHarness` also creates and deletes vaults. `ResourceScope` is shared with

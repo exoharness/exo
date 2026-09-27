@@ -141,6 +141,70 @@ impl Fixture {
 }
 
 #[actix_web::test]
+async fn malformed_optional_thread_bodies_are_rejected() -> Result<()> {
+    let f = Fixture::new().await?;
+    let client = reqwest::Client::new();
+    let create_url = f
+        .client
+        .endpoint()
+        .join(&format!("agent/{}/thread", f.agent_id))?;
+    let response = client
+        .post(create_url.as_str())
+        .bearer_auth("test-token")
+        .header("content-type", "application/json")
+        .body(r#"{"environment":{"name":"test","config":{"provider":"docker","image":"test","file_system_mounts":[{"host_path":"/tmp","mount_path":"/data","mode":"read_write"}]}}}"#)
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let response = client
+        .post(create_url.as_str())
+        .bearer_auth("test-token")
+        .send()
+        .await?;
+    assert!(response.status().is_success());
+    let thread = response.json::<CreateThreadResult>().await?.thread;
+    let response = client
+        .post(format!("{create_url}/{}/fork", thread.id))
+        .bearer_auth("test-token")
+        .header("content-type", "application/json")
+        .body(r#"{"thread_name":123}"#)
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let agent = f
+        .runtime
+        .exoharness_handle()
+        .get_agent(&f.agent_id)
+        .await?
+        .context("agent")?;
+    assert_eq!(
+        agent.list_threads(Default::default()).await?.threads.len(),
+        1
+    );
+    f.stop().await
+}
+
+#[actix_web::test]
+async fn optional_thread_body_accepts_more_than_two_mebibytes() -> Result<()> {
+    let f = Fixture::new().await?;
+    let create_url = f
+        .client
+        .endpoint()
+        .join(&format!("agent/{}/thread", f.agent_id))?;
+    let body = format!("{{}}{}", " ".repeat(2 * 1024 * 1024));
+    let response = reqwest::Client::new()
+        .post(create_url.as_str())
+        .bearer_auth("test-token")
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await?;
+    assert!(response.status().is_success(), "{}", response.status());
+    f.stop().await
+}
+
+#[actix_web::test]
 async fn http_provider_auth_handles_and_exclusive_history_cursors() -> Result<()> {
     let f = Fixture::new().await?;
     for token in [None, Some("wrong-token")] {

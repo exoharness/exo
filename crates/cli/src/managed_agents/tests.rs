@@ -105,6 +105,7 @@ fn configured_runtime(
             .transpose()?,
         model: args.model.clone(),
         thread: args.local_config()?,
+        egress_policy: None,
     };
     Ok(Runtime::new(
         LocalProvider::basic(
@@ -124,7 +125,7 @@ async fn open_configured_thread(
     args: &ThreadArgs,
 ) -> Result<(Arc<dyn AgentHandle>, Arc<dyn ConversationHandle>)> {
     let runtime = configured_runtime(runtime, definition, args)?;
-    super::open_thread(&runtime, definition, args).await
+    super::open_thread(&runtime, definition, args, false).await
 }
 
 fn thread_args(agent: &str) -> ThreadArgs {

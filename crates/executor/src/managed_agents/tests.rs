@@ -60,6 +60,132 @@ async fn updating_a_definition_preserves_mounts_added_outside_the_spec() -> Resu
     runtime.shutdown().await
 }
 
+#[tokio::test]
+async fn applying_an_environment_preserves_thread_mounts() -> Result<()> {
+    let temp = TempDir::new()?;
+    let config = crate::test_support::local_test_config(temp.path().join("state"));
+    let store = state(&config).await?;
+    let runtime = runtime(store, &config, Default::default())?;
+    let definition = AgentDefinition::parse(SOURCE.into())?;
+    let agent = runtime.create_managed_agent(&definition, "support").await?;
+    let thread = runtime
+        .open_managed_thread(&agent, None, NewThreadRequest::default())
+        .await?
+        .thread;
+    let existing_mount = FileSystemMount {
+        host_path: temp.path().to_string_lossy().into_owned(),
+        mount_path: "/data".into(),
+        mode: FileSystemMountMode::ReadOnly,
+        internal: None,
+    };
+    let mut thread_config = runtime.get_conversation_config(thread.as_ref()).await?;
+    thread_config.mounts.push(existing_mount.clone());
+    runtime
+        .put_conversation_config(thread.as_ref(), thread_config)
+        .await?;
+
+    let environment: exoharness::EnvironmentDefinition = serde_json::from_str(
+        r#"{"name":"dev","config":{"provider":"local_process","image":"unused","file_system_mounts":[{"host_path":"/host/workspace","mount_path":"/workspace","mode":"rw"}]}}"#,
+    )?;
+    runtime
+        .open_managed_thread(
+            &agent,
+            Some(&thread.record().id.to_string()),
+            NewThreadRequest {
+                environment: Some(environment.clone()),
+                ..Default::default()
+            },
+        )
+        .await?;
+    let mounts = runtime
+        .get_conversation_config(thread.as_ref())
+        .await?
+        .mounts;
+    assert_eq!(mounts.len(), 2);
+    assert!(mounts.contains(&existing_mount));
+    assert!(mounts.iter().any(|mount| mount.mount_path == "/workspace"));
+
+    let mut updated_environment = environment;
+    updated_environment.config.file_system_mounts = Some(vec![FileSystemMount {
+        host_path: "/host/other".into(),
+        mount_path: "/other".into(),
+        mode: FileSystemMountMode::ReadWrite,
+        internal: None,
+    }]);
+    runtime
+        .open_managed_thread(
+            &agent,
+            Some(&thread.record().id.to_string()),
+            NewThreadRequest {
+                environment: Some(updated_environment),
+                ..Default::default()
+            },
+        )
+        .await?;
+    let mounts = runtime
+        .get_conversation_config(thread.as_ref())
+        .await?
+        .mounts;
+    assert_eq!(mounts.len(), 2);
+    assert!(mounts.contains(&existing_mount));
+    assert!(mounts.iter().any(|mount| mount.mount_path == "/other"));
+    runtime.shutdown().await
+}
+
+#[tokio::test]
+async fn runtime_reads_config_changes_made_by_another_runtime() -> Result<()> {
+    let temp = TempDir::new()?;
+    let config = crate::test_support::local_test_config(temp.path().join("state"));
+    let store = state(&config).await?;
+    let server = runtime(store.clone(), &config, Default::default())?;
+    let cli = runtime(store, &config, Default::default())?;
+    let definition = AgentDefinition::parse(SOURCE.into())?;
+    let agent = server.create_managed_agent(&definition, "support").await?;
+    let thread = server
+        .open_managed_thread(&agent, None, NewThreadRequest::default())
+        .await?
+        .thread;
+
+    assert_eq!(
+        server.get_agent_config(agent.as_ref()).await?.model,
+        "gpt-5.4"
+    );
+    let mut agent_config = cli.get_agent_config(agent.as_ref()).await?;
+    agent_config.model = "new-model".into();
+    cli.put_agent_config(agent.as_ref(), agent_config).await?;
+    assert_eq!(
+        server.get_agent_config(agent.as_ref()).await?.model,
+        "new-model"
+    );
+
+    assert!(
+        server
+            .get_conversation_config(thread.as_ref())
+            .await?
+            .mounts
+            .is_empty()
+    );
+    let mut thread_config = cli.get_conversation_config(thread.as_ref()).await?;
+    thread_config.mounts.push(FileSystemMount {
+        host_path: temp.path().to_string_lossy().into_owned(),
+        mount_path: "/data".into(),
+        mode: FileSystemMountMode::ReadOnly,
+        internal: None,
+    });
+    cli.put_conversation_config(thread.as_ref(), thread_config)
+        .await?;
+    assert_eq!(
+        server
+            .get_conversation_config(thread.as_ref())
+            .await?
+            .mounts
+            .len(),
+        1
+    );
+    server.shutdown().await?;
+    cli.shutdown().await
+}
+
 fn runtime(
     state: Arc<dyn ExoHarness>,
     config: &BasicExoHarnessConfig,

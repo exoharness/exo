@@ -138,7 +138,23 @@ pub async fn open_thread(
     runtime: &Runtime,
     definition: Option<&AgentDefinition>,
     args: &ThreadArgs,
+    egress_policy_selected: bool,
 ) -> Result<(Arc<dyn AgentHandle>, Arc<dyn ConversationHandle>)> {
+    let root = runtime.exoharness_handle();
+    let mut environment = match (&args.environment_file, &args.environment) {
+        (Some(path), _) => Some(crate::environment::load(path)?),
+        (_, Some(name)) => Some(crate::environment::find(root.as_ref(), name).await?),
+        _ => None,
+    };
+    if egress_policy_selected
+        && environment
+            .as_ref()
+            .is_some_and(|environment| environment.config.policy.is_some())
+    {
+        bail!(
+            "--egress-policy conflicts with the selected environment's policy; put the credential bindings in the environment policy or remove one policy"
+        );
+    }
     let agent = if let Some(definition) = definition {
         let path = args
             .agent_file
@@ -170,18 +186,28 @@ pub async fn open_thread(
         )
         .await?
     };
-    let root = runtime.exoharness_handle();
+    if egress_policy_selected
+        && environment.is_none()
+        && let Some(reference) = args.thread.as_deref()
+    {
+        let thread = managed::find_thread(agent.as_ref(), reference).await?;
+        if thread
+            .record()
+            .environment
+            .as_ref()
+            .is_some_and(|environment| environment.config.policy.is_some())
+        {
+            bail!(
+                "--egress-policy conflicts with this thread's saved environment policy; update the environment policy or remove --egress-policy"
+            );
+        }
+    }
     let vaults = futures::future::try_join_all(
         args.vault
             .iter()
             .map(|reference| managed::vaults::find_vault(root.as_ref(), reference)),
     )
     .await?;
-    let mut environment = match (&args.environment_file, &args.environment) {
-        (Some(path), _) => Some(crate::environment::load(path)?),
-        (_, Some(name)) => Some(crate::environment::find(root.as_ref(), name).await?),
-        _ => None,
-    };
     if let Some(environment) = &mut environment {
         for mount in &args.mounts {
             let mounts = environment

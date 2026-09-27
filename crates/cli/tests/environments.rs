@@ -4,6 +4,125 @@ use anyhow::{Context, Result};
 use support::{Fixture, thread_slug};
 
 #[actix_web::test]
+async fn explicit_egress_policy_conflicting_with_environment_is_rejected() -> Result<()> {
+    let f = Fixture::new().await?;
+    f.cli(&["provider", "switch", "local"]).await?;
+    let environment_file = f.temp.path().join("environment.json");
+    std::fs::write(
+        &environment_file,
+        r#"{"name":"dev","config":{"provider":"local_process","image":"unused","policy":{"networking":{"type":"unrestricted"}}}}"#,
+    )?;
+    let policy_file = f.temp.path().join("egress.json");
+    std::fs::write(
+        &policy_file,
+        r#"{"networking":{"type":"unrestricted"},"allowed_tcp_ports":[443],"credentials":[]}"#,
+    )?;
+    let output = f
+        .output(
+            &[
+                "agent",
+                "run",
+                "--agent-file",
+                f.agent_file.to_str().context("agent path")?,
+                "--environment-file",
+                environment_file.to_str().context("environment path")?,
+                "--egress-policy",
+                policy_file.to_str().context("egress policy path")?,
+            ],
+            None,
+            None,
+        )
+        .await?;
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("--egress-policy conflicts with the selected environment's policy")
+    );
+    assert!(
+        f.runtime
+            .exoharness_handle()
+            .list_agents()
+            .await?
+            .is_empty()
+    );
+
+    f.cli(&[
+        "agent",
+        "create",
+        "saved",
+        "--file",
+        f.agent_file.to_str().context("agent path")?,
+    ])
+    .await?;
+    f.cli(&["thread", "create", "saved", "Saved", "--slug", "saved"])
+        .await?;
+    f.cli(&[
+        "agent",
+        "run",
+        "--agent",
+        "saved",
+        "--thread",
+        "saved",
+        "--environment-file",
+        environment_file.to_str().context("environment path")?,
+    ])
+    .await?;
+    let output = f
+        .output(
+            &[
+                "agent",
+                "run",
+                "--agent",
+                "saved",
+                "--thread",
+                "saved",
+                "--egress-policy",
+                policy_file.to_str().context("egress policy path")?,
+            ],
+            None,
+            None,
+        )
+        .await?;
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("--egress-policy conflicts with this thread's saved environment policy")
+    );
+
+    let plain_environment = f.temp.path().join("plain-environment.json");
+    std::fs::write(
+        &plain_environment,
+        r#"{"name":"plain","config":{"provider":"local_process","image":"unused"}}"#,
+    )?;
+    f.cli(&[
+        "thread", "create", "saved", "Selected", "--slug", "selected",
+    ])
+    .await?;
+    f.cli(&[
+        "agent",
+        "run",
+        "--agent",
+        "saved",
+        "--thread",
+        "selected",
+        "--environment-file",
+        plain_environment.to_str().context("environment path")?,
+        "--egress-policy",
+        policy_file.to_str().context("egress policy path")?,
+    ])
+    .await?;
+    let agent =
+        exo_managed_agents::find_agent(f.runtime.exoharness_handle().as_ref(), "saved").await?;
+    let thread = exo_managed_agents::find_thread(agent.as_ref(), "selected").await?;
+    let selected = executor::load_conversation_config(thread.as_ref()).await?;
+    assert_eq!(
+        selected.egress_policy.unwrap().allowed_tcp_ports,
+        Some(vec![443])
+    );
+    f.stop().await
+}
+
+#[actix_web::test]
 async fn thread_mount_commands_reject_environment_overrides_without_mutating_state() -> Result<()> {
     let f = Fixture::new().await?;
     f.cli(&["provider", "switch", "local"]).await?;
