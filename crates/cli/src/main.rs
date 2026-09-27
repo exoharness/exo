@@ -469,14 +469,8 @@ fn default_secret_backend() -> SecretBackendArg {
     SecretBackendArg::File
 }
 
-#[cfg(target_os = "macos")]
 fn default_local_sandbox_provider() -> SandboxProvider {
     SandboxProvider::Smolvm
-}
-
-#[cfg(not(target_os = "macos"))]
-fn default_local_sandbox_provider() -> SandboxProvider {
-    SandboxProvider::Docker
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -2518,9 +2512,8 @@ mod command_tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn macos_defaults_to_smolvm() {
+    fn local_sandbox_defaults_to_smolvm() {
         assert_eq!(
             super::default_local_sandbox_provider(),
             super::SandboxProvider::Smolvm

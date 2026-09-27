@@ -878,6 +878,7 @@ impl From<SandboxNetworkPolicy> for EgressPolicy {
 pub struct CreateSandboxRequest {
     #[serde(default)]
     pub name: Option<String>,
+    #[serde(default)]
     pub provider: SandboxProvider,
     pub image: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -926,6 +927,12 @@ impl SandboxAttachment {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(transparent)]
 pub struct SandboxProvider(Cow<'static, str>);
+
+impl Default for SandboxProvider {
+    fn default() -> Self {
+        Self::Smolvm
+    }
+}
 
 #[allow(non_upper_case_globals)]
 impl SandboxProvider {

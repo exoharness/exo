@@ -339,3 +339,21 @@ fn aws_region_from_arn(resource_arn: &str, expected_service: &str) -> Option<Str
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn environment_file_defaults_to_smolvm() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let file = directory.path().join("environment.yaml");
+        std::fs::write(
+            &file,
+            "name: support-analyst-env\nconfig:\n  image: ghcr.io/exoharness/codex-sandbox:latest\n",
+        )?;
+        let environment = load(&file)?;
+        assert_eq!(environment.config.provider, SandboxProvider::Smolvm);
+        Ok(())
+    }
+}

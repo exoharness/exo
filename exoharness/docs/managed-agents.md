@@ -65,7 +65,7 @@ docker build -t exo-codex-sandbox:latest \
   exoharness/containers/codex-sandbox
 ```
 
-Exo defaults to SmolVM on macOS and Docker on Linux. The CLI's default `smolvm`
+Exo defaults to SmolVM locally. The CLI's default `smolvm`
 Cargo feature downloads and caches a checksum-verified runtime on first use when
 `smolvm` is not on `PATH`; no separate SmolVM installation is needed. Explicit
 `--smolvm-binary` / `SMOLVM_BIN` paths take precedence and must be valid.
@@ -301,7 +301,8 @@ For Codex on SmolVM, build `exo-codex-sandbox:latest` with Docker and select
 Definitions forward the existing sandbox settings: `provider`, `image`,
 `resources`, `default_workdir`, `file_system_mounts`, `durable_file_systems`, `policy`,
 `enable_networking`, and `idle_seconds`. `policy.networking` takes precedence over
-`enable_networking`. Unsupported network policies are rejected by the backend.
+`enable_networking`. Omitted `provider` selects SmolVM, and omitted networking
+allows unrestricted access. Unsupported network policies are rejected by the backend.
 Omitting `resources` preserves the container backend's defaults; Firecracker uses
 its default VM size. Local-process execution has no container resource or filesystem isolation.
 
