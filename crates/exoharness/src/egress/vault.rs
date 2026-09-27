@@ -1,6 +1,6 @@
 use super::EgressDestination;
+use crate::Result;
 use crate::vault::{CredentialDestination, SecretReference, VaultContext, require_vault};
-use crate::{Result, Secret};
 
 pub async fn resolve_credential(
     context: &dyn VaultContext,
@@ -19,14 +19,10 @@ pub async fn resolve_credential(
         destination.path
     ))?;
     let mut resolved = vault.resolve_secret(&reference.secret_id, &target).await?;
-    if matches!((&resolved.secret, rejected), (Secret::Oauth { access_token, refresh_token: Some(_), refresh: Some(_), .. }, Some(rejected)) if access_token == rejected)
-    {
+    if resolved.secret.is_refreshable() && rejected == Some(resolved.secret.bearer_value()) {
         resolved = vault
             .refresh_secret(&reference.secret_id, &target, resolved.revision)
             .await?;
     }
-    Ok(match resolved.secret {
-        Secret::Key { value } | Secret::GithubCli { value, .. } => value,
-        Secret::Oauth { access_token, .. } => access_token,
-    })
+    Ok(resolved.secret.bearer_value().to_owned())
 }

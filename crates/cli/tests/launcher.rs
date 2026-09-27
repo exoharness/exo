@@ -69,7 +69,7 @@ fn launcher_creates_and_updates_a_thread_environment_with_the_current_cli() -> R
             "openai",
             "--token-env",
             "TEST_MODEL_KEY",
-            "--http-origin",
+            "--allow-origin",
             "https://api.openai.com",
         ])
         .env("TEST_MODEL_KEY", "synthetic-launcher-test-key"))?;

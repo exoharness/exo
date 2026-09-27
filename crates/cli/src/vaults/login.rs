@@ -1,13 +1,12 @@
 use super::*;
 use clap::ValueEnum;
-use exoharness::vault::OAuthRefresh;
+use exoharness::vault::{OAuthRefresh, github_cli_account, github_cli_command};
 use oauth2::{
     AuthType, ClientId, ClientSecret, DeviceAuthorizationUrl, Scope,
     StandardDeviceAuthorizationResponse, TokenResponse, TokenUrl, basic::BasicClient,
 };
 use rmcp::transport::auth::AuthorizationManager;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::process::Command;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Preset {
@@ -51,7 +50,10 @@ pub struct CredentialArgs {
 
 impl CredentialArgs {
     pub(super) fn default_name(&self) -> Option<&'static str> {
-        self.preset.map(|_| "github")
+        match self.preset {
+            Some(Preset::Github) => Some("github"),
+            None => None,
+        }
     }
 
     pub(super) fn default_policy(&self) -> Result<Option<CredentialPolicy>> {
@@ -76,7 +78,9 @@ impl CredentialArgs {
         local: bool,
     ) -> Result<Option<Secret>> {
         if let Some(variable) = &self.token_env {
-            return token(variable, env).map(Some);
+            return Ok(Some(Secret::Key {
+                value: crate::env_value_from_arg("--token-env", variable, env)?,
+            }));
         }
         if self.preset.is_none() && self.url.is_none() && self.client_id.is_none() {
             return Ok(None);
@@ -122,8 +126,9 @@ async fn discover(
         #[serde(default)]
         token_endpoint_auth_methods_supported: Vec<String>,
     }
-    let authentication: Authentication =
-        serde_json::from_value(serde_json::to_value(&resolution.metadata)?)?;
+    let authentication: Authentication = serde_json::from_value(serde_json::to_value(
+        &resolution.metadata.additional_fields,
+    )?)?;
     let methods = authentication.token_endpoint_auth_methods_supported;
     let client_secret_basic = client_secret.is_some()
         && (methods.iter().any(|m| m == "client_secret_basic")
@@ -189,15 +194,21 @@ async fn device(args: &CredentialArgs, client_secret: Option<String>) -> Result<
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))
         .build()?;
-    let details: StandardDeviceAuthorizationResponse = client.exchange_device_code()
-        .add_scopes(args.scope.iter().cloned().map(Scope::new)).request_async(&http).await
-        .map_err(|_| anyhow::anyhow!("could not start OAuth device login; check the client ID and device-flow configuration"))?;
+    let details: StandardDeviceAuthorizationResponse = client
+        .exchange_device_code()
+        .add_scopes(args.scope.iter().cloned().map(Scope::new))
+        .request_async(&http)
+        .await
+        .map_err(device_error)
+        .context(
+            "could not start OAuth device login; check the client ID and device-flow configuration",
+        )?;
     exoharness::vault::validate_oauth_endpoint(details.verification_uri().as_str())?;
     println!("Enter code: {}", details.user_code().secret());
     crate::oauth::open_browser(details.verification_uri().to_string(), args.no_browser).await?;
     let response = tokio::select! {
         response = client.exchange_device_access_token(&details).request_async(&http, tokio::time::sleep, Some(Duration::from_secs(900))) =>
-            response.map_err(|_| anyhow::anyhow!("OAuth device login failed or expired; run the login command again"))?,
+            response.map_err(device_error).context("OAuth device login failed; run the login command again")?,
         result = tokio::signal::ctrl_c() => { result?; bail!("OAuth login canceled"); }
     };
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -237,44 +248,9 @@ fn oauth_secret(
 }
 
 async fn github_cli(args: &CredentialArgs, local: bool) -> Result<Secret> {
-    let command = || {
-        let mut command = Command::new("gh");
-        command
-            .env_remove("GH_TOKEN")
-            .env_remove("GITHUB_TOKEN")
-            .kill_on_drop(true);
-        command
-    };
-    #[derive(serde::Deserialize)]
-    struct Account {
-        login: String,
-        state: String,
-    }
-    #[derive(serde::Deserialize)]
-    struct Status {
-        hosts: HashMap<String, Vec<Account>>,
-    }
-    let account = || async {
-        let output = command()
-            .args(["auth", "status", "--active", "--hostname", "github.com", "--json", "hosts"])
-            .output().await.context(
-                "GitHub login needs GitHub CLI (`gh`), or provide --client-id for OAuth device login",
-            )?;
-        ensure!(output.status.success(), "could not check GitHub CLI login");
-        let mut status: Status = serde_json::from_slice(&output.stdout)?;
-        Ok::<_, anyhow::Error>(
-            status
-                .hosts
-                .remove("github.com")
-                .unwrap_or_default()
-                .into_iter()
-                .find(|account| account.state == "success")
-                .map(|account| account.login),
-        )
-    };
-    let mut login = account().await?;
+    let mut login = github_cli_account().await?;
     if login.is_none() || !args.scope.is_empty() {
-        let mut auth = command();
+        let mut auth = github_cli_command();
         auth.args([
             "auth",
             "login",
@@ -291,7 +267,7 @@ async fn github_cli(args: &CredentialArgs, local: bool) -> Result<Secret> {
             auth.env("GH_BROWSER", "true");
         }
         ensure!(auth.status().await?.success(), "GitHub login failed");
-        login = account().await?;
+        login = github_cli_account().await?;
     }
     let account = login.context("GitHub CLI login did not produce an authenticated account")?;
     let value = exoharness::vault::github_cli_token(&account).await?;
@@ -305,5 +281,27 @@ async fn github_cli(args: &CredentialArgs, local: bool) -> Result<Secret> {
             "Copied the GitHub CLI token to the remote vault. Use `exo vault secret update <vault> <secret> --preset github` after changing it in `gh`."
         );
         Ok(Secret::Key { value })
+    }
+}
+
+fn device_error<RE, T>(
+    error: oauth2::RequestTokenError<RE, oauth2::StandardErrorResponse<T>>,
+) -> anyhow::Error
+where
+    RE: std::error::Error + Send + Sync + 'static,
+    T: oauth2::ErrorResponseType + std::fmt::Display + 'static,
+{
+    match error {
+        oauth2::RequestTokenError::ServerResponse(response) => anyhow::anyhow!(
+            "OAuth server rejected the request ({})",
+            response.error().to_string().escape_default()
+        ),
+        oauth2::RequestTokenError::Request(error) => anyhow::Error::new(error),
+        oauth2::RequestTokenError::Parse(..) => {
+            anyhow::anyhow!("OAuth server returned an invalid response")
+        }
+        oauth2::RequestTokenError::Other(message) => {
+            anyhow::anyhow!("{}", message.escape_default())
+        }
     }
 }

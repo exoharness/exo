@@ -12,7 +12,7 @@ pub(crate) use local::BasicVaultStore;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod github;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
-pub use github::github_cli_token;
+pub use github::{github_cli_account, github_cli_command, github_cli_token};
 
 pub type VaultId = Uuid7;
 
@@ -77,22 +77,15 @@ pub fn validate_secret(secret: &Secret, policy: Option<&CredentialPolicy>) -> Re
         );
     }
     if policy.is_some() {
-        let token = match secret {
-            Secret::Key { value } | Secret::GithubCli { value, .. } => value,
-            Secret::Oauth {
-                access_token,
-                refresh,
-                ..
-            } => {
-                if let Some(refresh) = refresh {
-                    validate_oauth_endpoint(&refresh.token_endpoint)?;
-                    if refresh.client_id.is_empty() {
-                        bail!("OAuth client ID is missing");
-                    }
-                }
-                access_token
-            }
-        };
+        if let Secret::Oauth {
+            refresh: Some(refresh),
+            ..
+        } = secret
+        {
+            validate_oauth_endpoint(&refresh.token_endpoint)?;
+            anyhow::ensure!(!refresh.client_id.is_empty(), "OAuth client ID is missing");
+        }
+        let token = secret.bearer_value();
         if token.is_empty() || !token.bytes().all(|byte| byte.is_ascii_graphic()) {
             bail!("bearer token must be nonempty ASCII without whitespace or control characters");
         }
@@ -229,10 +222,7 @@ pub async fn resolve_model_key(
         .resolve_secret(&reference.secret_id, &destination)
         .await?
         .secret;
-    match secret {
-        Secret::Key { value } | Secret::GithubCli { value, .. } => Ok(value),
-        Secret::Oauth { access_token, .. } => Ok(access_token),
-    }
+    Ok(secret.bearer_value().to_owned())
 }
 
 pub fn validate_oauth_endpoint(endpoint: &str) -> Result<()> {

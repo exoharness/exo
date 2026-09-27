@@ -150,7 +150,7 @@ pub async fn run(
                             vec![
                                 secret.name,
                                 match secret.r#type {
-                                    exoharness::SecretType::Key => "token",
+                                    exoharness::SecretType::Key => "key",
                                     exoharness::SecretType::Oauth => "oauth",
                                     exoharness::SecretType::GithubCli => "github_cli",
                                 }
@@ -264,12 +264,6 @@ pub async fn run(
         }
     }
     Ok(())
-}
-
-fn token(variable: &str, env: &HashMap<String, String>) -> Result<Secret> {
-    Ok(Secret::Key {
-        value: crate::env_value_from_arg("--token-env", variable, env)?,
-    })
 }
 
 fn find_secret(secrets: Vec<SecretMetadata>, reference: &str) -> Result<SecretMetadata> {

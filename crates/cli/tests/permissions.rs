@@ -3,7 +3,7 @@ mod support;
 use anyhow::Result;
 use support::{Fixture, success};
 use wiremock::{
-    Mock, ResponseTemplate,
+    Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
 };
 
@@ -19,6 +19,7 @@ async fn local_and_http_cli_prompt_before_executing_and_continue_after_denial() 
             let f = Fixture::new().await?;
             f.cli(&["provider", "switch", provider]).await?;
             let marker = f.temp.path().join("approved");
+            let mcp_server = MockServer::start().await;
             let tool = if mcp {
                 "exo_mcp__notes__write"
             } else {
@@ -41,12 +42,12 @@ async fn local_and_http_cli_prompt_before_executing_and_continue_after_denial() 
                         other => panic!("unexpected MCP request {other}"),
                     };
                     ResponseTemplate::new(200).set_body_json(serde_json::json!({"jsonrpc":"2.0","id":rpc.id,"result":result}))
-                }).mount(&f.model).await;
+                }).mount(&mcp_server).await;
                 f.source().replace(
                     "config:",
                     &format!(
                         "mcp_servers:\n  - type: url\n    name: notes\n    url: {}/mcp\nconfig:",
-                        f.model.uri()
+                        mcp_server.uri()
                     ),
                 )
             } else {
@@ -247,6 +248,7 @@ async fn unknown_tool_policies_fail_before_model_execution() -> Result<()> {
     for provider in ["local", "remote"] {
         let f = Fixture::new().await?;
         f.cli(&["provider", "switch", provider]).await?;
+        let mcp_server = MockServer::start().await;
         Mock::given(method("POST")).and(path("/mcp")).respond_with(|request: &wiremock::Request| {
             #[derive(serde::Deserialize)]
             struct Rpc { id: Option<u64>, method: String }
@@ -258,7 +260,7 @@ async fn unknown_tool_policies_fail_before_model_execution() -> Result<()> {
                 other => panic!("unexpected MCP request {other}"),
             };
             ResponseTemplate::new(200).set_body_json(serde_json::json!({"jsonrpc":"2.0","id":rpc.id,"result":result}))
-        }).mount(&f.model).await;
+        }).mount(&mcp_server).await;
         for (policy, expected) in [
             (
                 "tool_policies:\n  shlel: {type: always_ask}".to_owned(),
@@ -267,7 +269,7 @@ async fn unknown_tool_policies_fail_before_model_execution() -> Result<()> {
             (
                 format!(
                     "mcp_servers:\n  - type: url\n    name: notes\n    url: {}/mcp\n    tool_policies:\n      exo_mcp__notes__write: {{type: always_ask}}",
-                    f.model.uri()
+                    mcp_server.uri()
                 ),
                 "MCP server notes has no tool named exo_mcp__notes__write",
             ),
@@ -294,14 +296,7 @@ async fn unknown_tool_policies_fail_before_model_execution() -> Result<()> {
             let error = String::from_utf8_lossy(&output.stderr);
             assert!(error.contains(expected), "{error}");
         }
-        assert!(
-            f.model
-                .received_requests()
-                .await
-                .unwrap()
-                .iter()
-                .all(|request| request.url.path() == "/mcp")
-        );
+        assert!(f.model.received_requests().await.unwrap().is_empty());
         f.stop().await?;
     }
     Ok(())

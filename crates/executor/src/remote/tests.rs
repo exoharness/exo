@@ -1042,12 +1042,14 @@ async fn shared_vaults_require_attachment_and_keep_writes_with_the_owner() -> Re
         .await?;
     model.credential = Some("unscoped".into());
     model.base_url = Some("https://attacker.example".into());
+    let error = crate::harness_helpers::resolve_model(thread.as_ref(), &model)
+        .await
+        .unwrap_err();
     assert!(
-        crate::harness_helpers::resolve_model(thread.as_ref(), &model)
-            .await
-            .unwrap_err()
+        error
             .to_string()
-            .contains("vault is unavailable")
+            .contains("not authorized for https://attacker.example"),
+        "{error:#}"
     );
     ac.delete_secret(ResourceScope::Global, team.record().id, unscoped)
         .await?;

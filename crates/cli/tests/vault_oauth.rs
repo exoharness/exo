@@ -1080,6 +1080,7 @@ async fn github_preset_links_accounts_and_picks_up_token_changes_after_restart()
         r#"#!/bin/sh
 set -eu
 root=${0%/*}
+[ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]
 printf '%s\n' "$*" >> "$root/gh-calls"
 case "$*" in
   'auth status --active --hostname github.com --json hosts')
@@ -1104,7 +1105,12 @@ esac
         if let Some(token) = token {
             command.args(["--token-env", "TOKEN"]).env("TOKEN", token);
         }
-        let output = command.env("PATH", f.temp.path()).output().await?;
+        let output = command
+            .env("PATH", f.temp.path())
+            .env("GH_TOKEN", "must-not-inherit")
+            .env("GITHUB_TOKEN", "must-not-inherit")
+            .output()
+            .await?;
         assert!(
             output.status.success(),
             "{}",
@@ -1192,7 +1198,18 @@ esac
         ("refreshed-token", 3),
     ] {
         std::fs::write(f.temp.path().join("token"), value)?;
+        let before = std::fs::read_to_string(f.temp.path().join("gh-calls"))?
+            .lines()
+            .count();
         let output = tokio::time::timeout(Duration::from_secs(20), chat().output()).await??;
+        let after = std::fs::read_to_string(f.temp.path().join("gh-calls"))?
+            .lines()
+            .count();
+        assert_eq!(
+            after - before,
+            1,
+            "one gh read per process, not per MCP request"
+        );
         assert!(
             output.status.success(),
             "{}",
@@ -1215,6 +1232,38 @@ esac
             })
         );
     }
+    std::fs::write(f.temp.path().join("token"), "initial-token")?;
+    let token_path = f.temp.path().join("token");
+    let rejected = Mock::given(method("POST"))
+        .and(path("/mcp/"))
+        .and(header("authorization", "Bearer initial-token"))
+        .and(body_string_contains("tools/list"))
+        .respond_with(move |_: &wiremock::Request| {
+            std::fs::write(&token_path, "refreshed-token").unwrap();
+            ResponseTemplate::new(401)
+                .insert_header("www-authenticate", "Bearer error=\"invalid_token\"")
+        })
+        .with_priority(1)
+        .expect(1)
+        .mount_as_scoped(&f.server)
+        .await;
+    let before = std::fs::read_to_string(f.temp.path().join("gh-calls"))?
+        .lines()
+        .count();
+    let output = tokio::time::timeout(Duration::from_secs(20), chat().output()).await??;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.temp.path().join("gh-calls"))?
+            .lines()
+            .count()
+            - before,
+        2
+    );
+    drop(rejected);
     let calls = std::fs::read_to_string(f.temp.path().join("gh-calls"))?;
     assert!(
         f.vault
@@ -1240,5 +1289,55 @@ esac
             account: "fixture-user".into(),
         })
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn device_login_reports_errors_without_echoing_server_secrets() -> Result<()> {
+    let f = Fixture::new().await?;
+    let device_url = format!("{}/device", f.server.uri());
+    let token_url = format!("{}/device-token", f.server.uri());
+    for (endpoint, code) in [
+        ("/device", "invalid_client"),
+        ("/device-token", "access_denied"),
+    ] {
+        f.server.reset().await;
+        let rejection = Mock::given(path(endpoint))
+            .respond_with(ResponseTemplate::new(400).set_body_json(
+                json!({"error": code, "error_description": "do-not-print-this-secret"}),
+            ))
+            .with_priority(1)
+            .expect(1)
+            .mount_as_scoped(&f.server)
+            .await;
+        Mock::given(path("/device")).respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "device_code": "device-secret", "user_code": "ABCD", "verification_uri": format!("{}/verify", f.server.uri()), "expires_in": 30, "interval": 1
+        }))).mount(&f.server).await;
+        let output = f
+            .command(&[
+                "vault",
+                "secret",
+                "create",
+                "global",
+                "--preset",
+                "github",
+                "--client-id",
+                "invalid",
+                "--device-url",
+                &device_url,
+                "--token-url",
+                &token_url,
+                "--no-browser",
+            ])
+            .output()
+            .await?;
+        assert!(!output.status.success());
+        let message = String::from_utf8(output.stderr)?;
+        assert!(message.contains(code), "{message}");
+        assert!(
+            !message.contains("do-not-print-this-secret") && !message.contains("device-secret")
+        );
+        drop(rejection);
+    }
     Ok(())
 }

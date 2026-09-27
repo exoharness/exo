@@ -6,7 +6,7 @@ use exo_mcp::{McpCredential, McpCredentialProvider, McpServerConfig};
 use exoharness::vault::{
     CredentialDestination, SecretReference, VaultContext, VaultHandle, VaultId, VaultRecord,
 };
-use exoharness::{ReadArtifactRequest, Secret, ThreadHandle, WriteArtifactRequest};
+use exoharness::{ReadArtifactRequest, ThreadHandle, WriteArtifactRequest};
 use serde::{Deserialize, Serialize};
 
 fn selection_path(thread: &dyn ThreadHandle) -> String {
@@ -57,9 +57,16 @@ impl VaultSelection {
                 let target = CredentialDestination::url(&server.url)?;
                 let mut secret = None;
                 for (vault, secrets) in vaults.iter().zip(&secrets).rev() {
-                    let mut matches = secrets.iter().filter(|s| s.policy.as_ref().is_some_and(|p| p.permits(&target)));
-                    if let Some(selected) = matches.next() {
-                        anyhow::ensure!(matches.next().is_none(), "multiple secrets in vault {} permit {}; narrow their policies to select one credential", vault.record().name, server.url);
+                    let mut matches = secrets.iter().filter_map(|secret| {
+                        let policy = secret.policy.as_ref().filter(|p| p.permits(&target))?;
+                        let exact = matches!(&policy.networking,
+                            exoharness::CredentialNetworkPolicy::Destinations { allowed_destinations }
+                                if allowed_destinations.contains(&target));
+                        Some((exact, secret))
+                    }).collect::<Vec<_>>();
+                    matches.sort_by_key(|(exact, _)| std::cmp::Reverse(*exact));
+                    if let Some((exact, selected)) = matches.first() {
+                        anyhow::ensure!(matches.get(1).is_none_or(|(next, _)| next != exact), "multiple secrets in vault {} permit {}; narrow their policies to select one credential", vault.record().name, server.url);
                         secret = Some(SecretReference { vault_id: vault.record().id, secret_id: selected.id });
                         break;
                     }
@@ -236,14 +243,7 @@ impl VaultMcpCredentials {
                 reference.vault_id, reference.secret_id, resolved.revision
             );
             if version == rejected.version {
-                if !matches!(
-                    &resolved.secret,
-                    Secret::Oauth {
-                        refresh_token: Some(_),
-                        refresh: Some(_),
-                        ..
-                    }
-                ) {
+                if !resolved.secret.is_refreshable() {
                     return Ok(None);
                 }
                 resolved = vault
@@ -251,10 +251,10 @@ impl VaultMcpCredentials {
                     .await?;
             }
         }
-        let token = match resolved.secret {
-            Secret::Key { value } | Secret::GithubCli { value, .. } => value,
-            Secret::Oauth { access_token, .. } => access_token,
-        };
+        let token = resolved.secret.bearer_value().to_owned();
+        if rejected.is_some_and(|previous| previous.token == token) {
+            return Ok(None);
+        }
         Ok(Some(McpCredential {
             version: format!(
                 "{}:{}:{}",
@@ -268,11 +268,11 @@ impl VaultMcpCredentials {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use exoharness::ExoHarness;
     use exoharness::{
         BasicExoHarness, BasicExoHarnessConfig, PutSecretRequest, SandboxBackendRegistration,
         SandboxProvider, SecretBackendChoice,
     };
+    use exoharness::{ExoHarness, Secret};
 
     #[tokio::test]
     async fn saved_selection_pins_each_servers_destination() -> Result<()> {
@@ -336,6 +336,34 @@ mod tests {
         let public = VaultSelection::from_vaults(std::slice::from_ref(&user), &servers).await?;
         let public_provider = VaultMcpCredentials::new(vec![user.clone()], public);
         assert!(public_provider.resolve(&servers[0]).await?.is_none());
+        let broad = user
+            .put_secret(PutSecretRequest {
+                name: "origin".into(),
+                policy: Some(CredentialDestination::origin("https://example.com")?.into()),
+                secret: Secret::Key {
+                    value: "origin-token".into(),
+                },
+            })
+            .await?;
+        let selection =
+            VaultSelection::from_vaults(&[global.clone(), user.clone()], &servers).await?;
+        assert_eq!(
+            selection.bindings[0].secret.as_ref().unwrap().secret_id,
+            broad
+        );
+        user.put_secret(PutSecretRequest {
+            name: "second-origin".into(),
+            policy: Some(CredentialDestination::origin("https://example.com")?.into()),
+            secret: Secret::Key {
+                value: "other-token".into(),
+            },
+        })
+        .await?;
+        assert!(
+            VaultSelection::from_vaults(std::slice::from_ref(&user), &servers)
+                .await
+                .is_err()
+        );
         let id = user
             .put_secret(PutSecretRequest {
                 name: "mcp".into(),

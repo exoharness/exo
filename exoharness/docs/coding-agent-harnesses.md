@@ -126,7 +126,7 @@ EOF
 Store a Cursor credential:
 
 ```bash
-./target/debug/exo vault secret create global cursor --token-env CURSOR_API_KEY --http-origin https://api.cursor.com
+./target/debug/exo vault secret create global cursor --token-env CURSOR_API_KEY --allow-origin https://api.cursor.com
 ```
 
 Build the sandbox image:

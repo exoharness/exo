@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CredentialDestination {
+    // Saved thread MCP selections on main use the former http/mcp tags.
     #[serde(alias = "http")]
     Origin { origin: String },
     #[serde(alias = "mcp")]

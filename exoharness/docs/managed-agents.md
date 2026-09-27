@@ -29,7 +29,7 @@ Resource commands use `create`, `list`, `get`, `update`, and `delete` where supp
 | -------------------------------------------- | ------------------------------------------- |
 | `agent`, `thread`, `provider`, `environment` | `create`, `list`, `get`, `update`, `delete` |
 | `vault`                                      | `create`, `list`, `get`, `delete`           |
-| `vault secret`                               | `create`, `list`, `get`, `update`, `delete` |
+| `vault secret`                               | `create`, `update`, `delete`                |
 | `agent mount`, `thread mount`                | `create`, `list`, `delete`                  |
 | `environment provider`                       | `create`, `list`                            |
 
@@ -364,11 +364,18 @@ name is required. Import an existing token with `--token-env`, or omit it to log
 in. To rotate or reauthorize an existing credential, use `secret update` with the
 same options; its identity and policy are preserved unless explicitly changed.
 
-The GitHub preset links a local vault secret to the current GitHub CLI (`gh`)
-account, prompting for login if needed. Exo reads that account's current token
-when resolving the credential, including after a CLI restart; switching the
-active account in `gh` does not change the linked account. If GitHub requires a
-new login, authenticate the same account with `gh auth login`.
+The GitHub preset uses GitHub CLI (`gh`) 2.81 or newer. For a linked local vault,
+`gh` runs on the runtime host. Exo checks the linked account's token on first use
+after restart, then caches it for 24 hours, rechecking on demand. Authentication
+rejection in the proxy or MCP client forces an immediate check. Switching the
+active account in `gh` does not change the linked account. Reading `gh` does not
+renew an expired token: authenticate the same account with `gh auth login` when
+GitHub requires a new login.
+
+Sharing a vault containing a linked account allows authorized callers to use
+that account's credentials within their permitted destinations. Authenticated
+callers have private default vaults; the operator's global vault is not
+automatically shared.
 
 Remote vaults receive a token copy because they cannot access your local `gh`;
 use `exo vault secret update personal github --preset github` to copy a replacement.
@@ -419,8 +426,9 @@ exo agent run --agent-file exoharness/examples/managed-agents/github-analyst.md 
 It accepts a variable name, not a token. Subsequent chats don't need that variable.
 Exact URL policies match the agent's MCP URL including its path, trailing slash,
 and query; origin policies allow any resource on that origin. Names are labels.
-Overlapping credentials in the same vault are rejected when selecting an MCP
-credential. Servers without a matching credential connect unauthenticated.
+Within each vault, an exact URL match takes precedence over an origin match;
+equally specific matches are rejected as ambiguous. Later attached vaults still
+override earlier vaults. Servers without a matching credential connect unauthenticated.
 
 ```bash
 exo vault list

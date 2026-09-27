@@ -28,10 +28,14 @@ enum LegacyTarget {
 }
 
 pub(super) fn read_catalog(bytes: &[u8], cipher: &SecretCipher) -> Result<(Catalog, bool)> {
-    if let Ok(catalog) = serde_json::from_slice::<Catalog>(bytes) {
-        return Ok((catalog, false));
-    }
-    let old: LegacyCatalog = serde_json::from_slice(bytes).context("reading vault catalog")?;
+    let current_error = match serde_json::from_slice::<Catalog>(bytes) {
+        Ok(catalog) => return Ok((catalog, false)),
+        Err(error) => error,
+    };
+    let old: LegacyCatalog = serde_json::from_slice(bytes)
+        .map_err(|_| current_error)
+        .context("reading vault catalog")?;
+    tracing::info!(target: "exoharness::progress", "Migrating vault credential policies");
     let mut catalog = Catalog::default();
     for vault in old.vaults {
         let mut secrets = Vec::new();

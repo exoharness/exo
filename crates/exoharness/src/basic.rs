@@ -3121,10 +3121,7 @@ impl ConversationHandle for BasicConversationHandle {
                     )?;
                     let vault = crate::vault::require_vault(self, &reference.vault_id).await?;
                     let resolved = vault.resolve_secret(&reference.secret_id, &target).await?;
-                    let value = match resolved.secret {
-                        Secret::Key { value } | Secret::GithubCli { value, .. } => value,
-                        Secret::Oauth { access_token, .. } => access_token,
-                    };
+                    let value = resolved.secret.bearer_value().to_owned();
                     Some(crate::resources::GitCredential {
                         identity: format!("{}:{}", reference.vault_id, reference.secret_id),
                         username: "x-access-token".into(),

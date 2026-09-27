@@ -10,9 +10,11 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     io::Write,
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 #[derive(Clone)]
@@ -24,6 +26,7 @@ struct Inner {
     storage: Storage,
     cipher: SecretCipher,
     refresh: Arc<tokio::sync::Mutex<()>>,
+    github_checked: Mutex<HashMap<SecretId, (u64, Instant)>>,
 }
 
 enum Storage {
@@ -62,6 +65,7 @@ impl BasicVaultStore {
                 storage,
                 cipher,
                 refresh: Arc::default(),
+                github_checked: Mutex::default(),
             }),
         })
     }
@@ -420,12 +424,15 @@ impl VaultHandle for BasicVaultHandle {
         target: &CredentialDestination,
     ) -> Result<ResolvedSecret> {
         let resolved = self.read_for_destination(id, target).await?;
-        if !matches!(resolved.secret, Secret::GithubCli { .. })
-            && !oauth::needs_refresh(&resolved.secret)
-        {
+        let needs_refresh = match &resolved.secret {
+            Secret::GithubCli { .. } => !self.github_cache_fresh(id, resolved.revision)?,
+            secret => oauth::needs_refresh(secret),
+        };
+        if !needs_refresh {
             return Ok(resolved);
         }
-        self.refresh_secret(id, target, resolved.revision).await
+        self.refresh_task(id, target, resolved.revision, false)
+            .await
     }
 
     async fn refresh_secret(
@@ -434,66 +441,112 @@ impl VaultHandle for BasicVaultHandle {
         target: &CredentialDestination,
         rejected_revision: u64,
     ) -> Result<ResolvedSecret> {
+        self.refresh_task(id, target, rejected_revision, true).await
+    }
+}
+
+const GITHUB_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+impl BasicVaultHandle {
+    fn github_cache_fresh(&self, id: &SecretId, revision: u64) -> Result<bool> {
+        Ok(self
+            .store
+            .inner
+            .github_checked
+            .lock()
+            .map_err(|_| anyhow::anyhow!("GitHub credential cache lock is poisoned"))?
+            .get(id)
+            .is_some_and(|(checked_revision, at)| {
+                *checked_revision == revision && at.elapsed() < GITHUB_CACHE_TTL
+            }))
+    }
+
+    async fn refresh_task(
+        &self,
+        id: &SecretId,
+        target: &CredentialDestination,
+        rejected_revision: u64,
+        force: bool,
+    ) -> Result<ResolvedSecret> {
         let vault = self.clone();
         let id = *id;
         let target = target.clone();
         // Finish persisting rotated tokens even if the calling request is canceled.
-        tokio::spawn(async move { vault.refresh(&id, &target, rejected_revision).await }).await?
+        tokio::spawn(async move { vault.refresh(&id, &target, rejected_revision, force).await })
+            .await?
     }
-}
 
-impl BasicVaultHandle {
     async fn refresh(
         &self,
         id: &SecretId,
         target: &CredentialDestination,
         rejected_revision: u64,
+        force: bool,
     ) -> Result<ResolvedSecret> {
         let _guard = self.refresh_guard().await?;
         let resolved = self.read_for_destination(id, target).await?;
         if resolved.revision != rejected_revision {
             return Ok(resolved);
         }
+        let github = matches!(resolved.secret, Secret::GithubCli { .. });
+        if github && !force && self.github_cache_fresh(id, resolved.revision)? {
+            return Ok(resolved);
+        }
         let secret = match &resolved.secret {
             Secret::GithubCli { account, .. } => {
                 let value = super::github_cli_token(account).await?;
-                let secret = Secret::GithubCli {
+                Secret::GithubCli {
                     value,
                     account: account.clone(),
-                };
-                if secret == resolved.secret {
-                    return self.read_for_destination(id, target).await;
                 }
-                secret
             }
-            _ => oauth::refresh(resolved.secret).await?,
+            _ => oauth::refresh(resolved.secret.clone()).await?,
         };
-        let vault_id = self.record.id;
-        let id = *id;
-        self.store
-            .access(true, move |catalog, cipher| {
-                let stored = vault(catalog, vault_id)?
-                    .secrets
-                    .iter_mut()
-                    .find(|s| s.metadata.id == id)
-                    .context("secret is unavailable")?;
-                if stored.metadata.revision != resolved.revision {
-                    bail!("credential changed during refresh; retry the operation");
-                }
-                let mut metadata = stored.metadata.clone();
-                metadata.revision = metadata
-                    .revision
-                    .checked_add(1)
-                    .context("secret revision overflow")?;
-                let encrypted = encrypt(cipher, vault_id, &metadata, &secret)?;
-                stored.metadata = metadata;
-                stored.secret = encrypted;
-                Ok(ResolvedSecret {
-                    revision: stored.metadata.revision,
-                    secret,
+        let resolved = if secret == resolved.secret {
+            let current = self.read_for_destination(id, target).await?;
+            if current.revision != resolved.revision {
+                return Ok(current);
+            }
+            current
+        } else {
+            let vault_id = self.record.id;
+            let id = *id;
+            self.store
+                .access(true, move |catalog, cipher| {
+                    let stored = vault(catalog, vault_id)?
+                        .secrets
+                        .iter_mut()
+                        .find(|s| s.metadata.id == id)
+                        .context("secret is unavailable")?;
+                    if stored.metadata.revision != resolved.revision {
+                        bail!("credential changed during refresh; retry the operation");
+                    }
+                    let mut metadata = stored.metadata.clone();
+                    metadata.revision = metadata
+                        .revision
+                        .checked_add(1)
+                        .context("secret revision overflow")?;
+                    let encrypted = encrypt(cipher, vault_id, &metadata, &secret)?;
+                    stored.metadata = metadata;
+                    stored.secret = encrypted;
+                    Ok(ResolvedSecret {
+                        revision: stored.metadata.revision,
+                        secret,
+                    })
                 })
-            })
-            .await
+                .await?
+        };
+        if github {
+            let mut checked = self
+                .store
+                .inner
+                .github_checked
+                .lock()
+                .map_err(|_| anyhow::anyhow!("GitHub credential cache lock is poisoned"))?;
+            checked.retain(|_, (_, at)| at.elapsed() < GITHUB_CACHE_TTL);
+            checked.insert(*id, (resolved.revision, Instant::now()));
+        }
+        Ok(resolved)
     }
 }
 

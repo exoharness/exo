@@ -1398,6 +1398,27 @@ pub enum Secret {
     },
 }
 
+impl Secret {
+    pub fn bearer_value(&self) -> &str {
+        match self {
+            Self::Key { value } | Self::GithubCli { value, .. } => value,
+            Self::Oauth { access_token, .. } => access_token,
+        }
+    }
+
+    pub fn is_refreshable(&self) -> bool {
+        matches!(
+            self,
+            Self::GithubCli { .. }
+                | Self::Oauth {
+                    refresh_token: Some(_),
+                    refresh: Some(_),
+                    ..
+                }
+        )
+    }
+}
+
 pub type AgentId = Uuid7;
 pub type ThreadId = Uuid7;
 /// Compatibility name for [`ThreadId`].

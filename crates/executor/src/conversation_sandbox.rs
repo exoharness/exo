@@ -560,6 +560,7 @@ async fn add_native_mcp_bindings(
             );
             continue;
         }
+        // Native MCP uses one streamable-HTTP endpoint; preserve its path and query scope.
         let credential_policy = exoharness::vault::credential_policy(conversation, &secret)
             .await?
             .for_destination(exoharness::CredentialDestination::url(&server_url)?)?;

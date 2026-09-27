@@ -549,7 +549,7 @@ ensure_agent() {
     return
   fi
 
-  if ! exo vault secret get global "$MODEL_CREDENTIAL" >/dev/null; then
+  if ! exo vault get global "$MODEL_CREDENTIAL" >/dev/null; then
     local origin token_env="OPENAI_API_KEY" endpoint="${MODEL_BASE_URL:-https://api.openai.com}"
     if [[ "$MODEL" == claude* ]]; then
       token_env="ANTHROPIC_API_KEY"
@@ -563,7 +563,7 @@ PYTHON
 )"
     echo "Create the model credential before starting Exo:" >&2
     printf '  %q' "$EXO_BIN" vault secret create global "$MODEL_CREDENTIAL" \
-      --token-env "$token_env" --http-origin "$origin" >&2
+      --token-env "$token_env" --allow-origin "$origin" >&2
     printf '\n' >&2
     exit 1
   fi

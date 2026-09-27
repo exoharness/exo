@@ -1819,6 +1819,9 @@ function createVault(
       return payload.secret ? toSecret(payload.secret) : null;
     },
     async putSecret(request) {
+      if (!request?.secret) {
+        throw new Error("putSecret requires { name, secret, policy? }");
+      }
       const payload = await client.requestExo({
         type: "vault_put_secret",
         scope,
@@ -1852,6 +1855,11 @@ function createVault(
       return { secret: toSecret(payload.secret), revision: payload.revision };
     },
     async updateSecret(id, request) {
+      if (!request?.secret && !request?.policy) {
+        throw new Error(
+          "updateSecret requires { secret?, policy? } with at least one field",
+        );
+      }
       const payload = await client.requestExo({
         type: "vault_update_secret",
         scope,

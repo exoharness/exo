@@ -580,3 +580,135 @@ async fn metadata_reads_do_not_wait_for_keychain_unlock() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn github_cache_rechecks_after_expiry_rejection_and_restart() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(directory) = std::env::var("EXO_TEST_GITHUB_CACHE") else {
+        let temp = TempDir::new()?;
+        let gh = temp.path().join("gh");
+        std::fs::write(
+            &gh,
+            r#"#!/bin/sh
+set -eu
+[ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]
+[ "$*" = 'auth token --hostname github.com --user fixture-user' ]
+root=${0%/*}
+printf 'read\n' >> "$root/calls"
+/bin/cat "$root/token"
+"#,
+        )?;
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700))?;
+        let output = tokio::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "vault::local::tests::github_cache_rechecks_after_expiry_rejection_and_restart",
+                "--nocapture",
+            ])
+            .env("EXO_TEST_GITHUB_CACHE", temp.path())
+            .env("PATH", temp.path())
+            .env("GH_TOKEN", "must-not-inherit")
+            .env("GITHUB_TOKEN", "must-not-inherit")
+            .output()
+            .await?;
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("calls"))?
+                .lines()
+                .count(),
+            5
+        );
+        return Ok(());
+    };
+    let directory = PathBuf::from(directory);
+    let cipher = SecretCipher::new(Arc::new(crate::secrets::StaticSecretKeyProvider::new(
+        [7; 32],
+    )));
+    let store = BasicVaultStore::new(Some(directory.join("vaults")), cipher.clone())?;
+    let record = store.create_vault("personal").await?.record().clone();
+    let vault = BasicVaultHandle {
+        store: store.clone(),
+        record: record.clone(),
+    };
+    let target = CredentialDestination::origin("https://github.com")?;
+    let id = vault
+        .put_secret(PutSecretRequest {
+            name: "github".into(),
+            policy: Some(target.clone().into()),
+            secret: Secret::GithubCli {
+                value: "stored".into(),
+                account: "fixture-user".into(),
+            },
+        })
+        .await?;
+    let calls = || -> Result<usize> {
+        Ok(std::fs::read_to_string(directory.join("calls"))?
+            .lines()
+            .count())
+    };
+    std::fs::write(directory.join("token"), "first")?;
+    let results =
+        futures::future::try_join_all((0..8).map(|_| vault.resolve_secret(&id, &target))).await?;
+    assert!(results.iter().all(|r| r.secret.bearer_value() == "first"));
+    assert_eq!(calls()?, 1);
+    std::fs::write(directory.join("token"), "rotated")?;
+    // A fresh cache hit must not wait on the store-wide refresh lock.
+    let guard = vault.refresh_guard().await?;
+    let cached =
+        tokio::time::timeout(Duration::from_secs(1), vault.resolve_secret(&id, &target)).await??;
+    drop(guard);
+    assert_eq!(cached.secret.bearer_value(), "first");
+    assert_eq!(calls()?, 1);
+    let refreshed = vault.refresh_secret(&id, &target, cached.revision).await?;
+    assert_eq!(refreshed.secret.bearer_value(), "rotated");
+    assert_eq!(calls()?, 2);
+    vault.refresh_secret(&id, &target, cached.revision).await?;
+    assert_eq!(calls()?, 2);
+    let unchanged = vault
+        .refresh_secret(&id, &target, refreshed.revision)
+        .await?;
+    assert_eq!(unchanged.revision, refreshed.revision);
+    assert_eq!(calls()?, 3);
+    std::fs::write(directory.join("token"), "after-expiry")?;
+    for (age, expected, reads) in [(86_340, "rotated", 3), (86_400, "after-expiry", 4)] {
+        store.inner.github_checked.lock().unwrap().insert(
+            id,
+            (
+                unchanged.revision,
+                Instant::now() - Duration::from_secs(age),
+            ),
+        );
+        let resolved = vault.resolve_secret(&id, &target).await?;
+        assert_eq!(resolved.secret.bearer_value(), expected);
+        assert_eq!(calls()?, reads);
+    }
+    let reopened = BasicVaultStore::new(Some(directory.join("vaults")), cipher)?;
+    reopened
+        .get_vault(&record.id)
+        .await?
+        .unwrap()
+        .resolve_secret(&id, &target)
+        .await?;
+    assert_eq!(calls()?, 5);
+    let rejected = CredentialDestination::origin("https://other.example")?;
+    assert!(vault.resolve_secret(&id, &rejected).await.is_err());
+    vault
+        .update_secret(
+            &id,
+            crate::UpdateSecretRequest {
+                secret: None,
+                policy: Some(rejected.into()),
+            },
+        )
+        .await?;
+    assert!(vault.resolve_secret(&id, &target).await.is_err());
+    vault.delete_secret(&id).await?;
+    assert!(vault.resolve_secret(&id, &target).await.is_err());
+    assert_eq!(calls()?, 5);
+    Ok(())
+}

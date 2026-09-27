@@ -75,6 +75,8 @@ async fn chat_survives_model_call_failure() {
             "test-key",
             "--token-env",
             "OPENAI_API_KEY",
+            "--allow-origin",
+            &mock_server.uri(),
         ],
         &root,
         &xdg,
@@ -143,6 +145,6 @@ async fn chat_survives_model_call_failure() {
         .count();
     assert!(
         responses_calls >= 2,
-        "expected a model call per chat line; got {responses_calls}"
+        "expected a model call per chat line; got {responses_calls}; stdout={stdout} stderr={stderr}"
     );
 }
