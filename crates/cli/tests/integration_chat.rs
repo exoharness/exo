@@ -3,7 +3,7 @@
 //!   - a wiremock-backed fake OpenAI Responses endpoint.
 //!
 //! `#[ignore]`'d so `cargo test` skips it by default; the integration workflow
-//! runs `cargo test --workspace -- --ignored` and selects the provider via the
+//! runs this test target with `--ignored`, selecting the provider via the
 //! `EXO_TEST_SANDBOX_BACKEND` env var (defaults to `docker`), the same
 //! variable the workflow matrix sets and `snapshot_round_trip.rs` reads. The
 //! secret backend is always `file`, with the master key materialised inside a

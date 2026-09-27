@@ -112,6 +112,10 @@ jobs:
           container system status
 
       - name: Run integration tests
-        # `--tests` auto-picks-up new test files; each self-skips on
-        # cells that don't have its required backend.
-        run: cargo test --package exo --tests -- --ignored
+        # Select suites built for this sandbox matrix. Other ignored tests
+        # require native keychains, live API keys, or separately provisioned
+        # runtimes/images and must be run explicitly in those environments.
+        run: >-
+          cargo test --package exo
+          --test integration_chat --test snapshot_round_trip
+          -- --ignored
