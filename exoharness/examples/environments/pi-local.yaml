@@ -1,7 +1,7 @@
 name: pi-local
 config:
   provider: apple_container
-  image: exo-pi-sandbox:latest
+  image: ghcr.io/exoharness/pi-devbox:latest
   default_workdir: /home/exo/workspace
   resources:
     vcpu_count: 2

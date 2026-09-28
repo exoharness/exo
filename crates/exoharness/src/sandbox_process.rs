@@ -453,6 +453,7 @@ mod tests {
             sandbox_id: Uuid7::now().to_string(),
             scope: crate::ResourceScope::Global,
             spec: SandboxSpec {
+                tcp_ports: vec![],
                 image: String::new(),
                 resources: Default::default(),
                 mounts: vec![],

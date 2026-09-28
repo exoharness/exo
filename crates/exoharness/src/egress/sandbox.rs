@@ -444,6 +444,7 @@ mod tests {
             scope: crate::ResourceScope::Global,
             provider_state: None,
             spec: SandboxSpec {
+                tcp_ports: vec![],
                 image: "test".into(),
                 resources: Default::default(),
                 mounts: vec![],

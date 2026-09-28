@@ -1,0 +1,176 @@
+name: Publish sandbox images
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Optional release tag (sandbox-images-vX.Y.Z)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-sandbox-images
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.repository == 'exoharness/exo' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate release tag
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [ -n "$RELEASE_TAG" ] && ! [[ "$RELEASE_TAG" =~ ^sandbox-images-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release_tag must be sandbox-images-vX.Y.Z" >&2
+            exit 1
+          fi
+
+  publish:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: sandbox-image-publish
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: codex-sandbox
+            context: exoharness/containers/codex-sandbox
+            build_args: DEVBOX_TOOLS=false
+            pin_default: false
+          - image: codex-devbox
+            context: exoharness/containers/codex-sandbox
+            build_args: DEVBOX_TOOLS=true
+            pin_default: true
+          - image: claude-code-sandbox
+            context: exoharness/containers/claude-code-sandbox
+            build_args: ""
+            pin_default: false
+          - image: claude-code-devbox
+            context: exoharness/containers/claude-code-sandbox
+            build_args: DEVBOX_TOOLS=true
+            pin_default: true
+          - image: pi-sandbox
+            context: exoharness/containers/pi-sandbox
+            build_args: ""
+            pin_default: false
+          - image: pi-devbox
+            context: exoharness/containers/pi-sandbox
+            build_args: DEVBOX_TOOLS=true
+            pin_default: true
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image tags and labels
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ghcr.io/exoharness/${{ matrix.image }}
+          tags: |
+            type=sha,format=long,prefix=sha-
+            type=raw,value=latest
+            type=raw,value=${{ inputs.release_tag }},enable=${{ inputs.release_tag != '' }}
+
+      - name: Build and publish
+        id: publish
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ matrix.context }}
+          build-args: ${{ matrix.build_args }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            org.opencontainers.image.source=https://github.com/exoharness/exo
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+      - name: Show immutable image reference
+        env:
+          IMAGE: ghcr.io/exoharness/${{ matrix.image }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: echo "${IMAGE}@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save default image digest
+        if: matrix.pin_default
+        env:
+          IMAGE: ${{ matrix.image }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          mkdir -p image-digests
+          printf '%s\n' "$DIGEST" > "image-digests/$IMAGE.txt"
+
+      - name: Upload default image digest
+        if: matrix.pin_default
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sandbox-image-digest-${{ matrix.image }}
+          path: image-digests/${{ matrix.image }}.txt
+          if-no-files-found: error
+
+  propose-default-images:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Download published image digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: sandbox-image-digest-*
+          path: image-digests
+          merge-multiple: true
+
+      - name: Update pinned image references
+        run: python3 exoharness/containers/update-default-image-digests.py image-digests
+
+      - name: Open default image digest pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git diff --quiet; then
+            echo "Default image digests are already current." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          branch="sandbox-image-pins/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add crates/executor/src/managed_agents/config.rs \
+            crates/executor/src/managed_agents/tests.rs
+          git commit -m "Pin managed agent sandbox images from release"
+          git push origin "HEAD:refs/heads/$branch"
+          printf 'Update the default sandbox image digests from the approved [image release](https://github.com/%s/actions/runs/%s).\n\nThe published images are available now; merging this PR adopts them as Exo defaults.\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$RUNNER_TEMP/image-pin-pr.md"
+          pr_url=$(gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$branch" --title "Pin sandbox images from approved release" --body-file "$RUNNER_TEMP/image-pin-pr.md")
+          echo "Review the [default image digest PR]($pr_url) to adopt the released images." >> "$GITHUB_STEP_SUMMARY"
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$branch"

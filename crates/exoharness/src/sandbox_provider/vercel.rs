@@ -9,11 +9,11 @@ pub fn default_vercel_image() -> String {
     DEFAULT_VERCEL_IMAGE.to_string()
 }
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use async_trait::async_trait;
 use reqwest::StatusCode;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
@@ -145,6 +145,7 @@ impl VercelSandboxBackend {
         let body = VercelCreateSandboxRequest {
             project_id: self.project_id.clone(),
             runtime,
+            ports: request.spec.tcp_ports.clone(),
             name: name.to_string(),
             persistent: true,
             timeout: request.lifecycle.idle_ttl.map(duration_to_millis),
@@ -184,6 +185,21 @@ impl ManagedSandboxBackend for VercelSandboxBackend {
     }
 
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
+        ensure!(
+            request.spec.tcp_ports.iter().all(|port| *port != 0),
+            "sandbox TCP ports must be nonzero"
+        );
+        ensure!(
+            request
+                .spec
+                .tcp_ports
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .len()
+                == request.spec.tcp_ports.len(),
+            "sandbox TCP ports must be unique"
+        );
         let network_policy = VercelNetworkPolicy::from_policy(&request.spec.policy)?;
         reject_unsupported_mounts(&request)?;
         let spec_hash = sandbox_spec_hash(&request.spec);
@@ -717,6 +733,8 @@ struct VercelCreateSandboxRequest {
     project_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     runtime: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ports: Vec<u16>,
     name: String,
     persistent: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

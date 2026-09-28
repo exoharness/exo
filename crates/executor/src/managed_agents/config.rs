@@ -33,10 +33,16 @@ impl TypeScriptHarnessPreset {
 
     pub fn sandbox_image(self) -> Option<&'static str> {
         match self {
-            Self::Codex => Some("exo-codex-sandbox:latest"),
-            Self::ClaudeCode => Some("exo-claude-code-sandbox:latest"),
+            Self::Codex => Some(
+                "ghcr.io/exoharness/codex-devbox@sha256:d6c147fb855862aef256672a81f28ad7970e510bee7c07553b69c282709311f7",
+            ),
+            Self::ClaudeCode => Some(
+                "ghcr.io/exoharness/claude-code-devbox@sha256:7d8bb4cc57a3c31a6155737b5fb0d0d939802504ff84143df4219f8093b5b819",
+            ),
             Self::Cursor => Some("exo-cursor-sdk-sandbox:latest"),
-            Self::Pi => Some("exo-pi-sandbox:latest"),
+            Self::Pi => Some(
+                "ghcr.io/exoharness/pi-devbox@sha256:15a8b71b99a0b0583b651e48f24fbfe2e10af02add9aa7fa7bccd2f74af429a5",
+            ),
         }
     }
 }

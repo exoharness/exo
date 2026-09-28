@@ -1102,6 +1102,7 @@ async fn firecracker_transparent_egress_live() -> Result<()> {
         scope: crate::ResourceScope::Global,
         provider_state: None,
         spec: SandboxSpec {
+            tcp_ports: vec![],
             image: crate::default_firecracker_image(),
             resources: SandboxResourceShape::new(1, 512),
             mounts: vec![],
@@ -1265,6 +1266,7 @@ async fn managed_firecracker_egress(unrestricted: bool) -> Result<()> {
         },
         provider_state: None,
         spec: SandboxSpec {
+            tcp_ports: vec![],
             image: crate::default_firecracker_image(),
             resources: SandboxResourceShape::new(1, 512),
             mounts: vec![],
@@ -2291,6 +2293,7 @@ async fn smolvm_proxy_live(with_gh: bool) -> Result<()> {
         scope: identity("smolvm-proxy").scope,
         provider_state: None,
         spec: SandboxSpec {
+            tcp_ports: vec![],
             image,
             resources: SandboxResourceShape::new(2, 1024),
             mounts: Vec::new(),

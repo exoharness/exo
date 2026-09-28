@@ -21,6 +21,7 @@ fn make_request(thread_id: exoharness::Uuid7, sandbox_id: &str) -> SandboxReques
             thread_id,
         },
         spec: SandboxSpec {
+            tcp_ports: vec![],
             image: "node24".into(),
             resources: Default::default(),
             mounts: Vec::new(),
@@ -110,14 +111,16 @@ async fn acquire_creates_named_sandbox_when_missing() {
     Mock::given(method("POST"))
         .and(path("/v2/sandboxes"))
         .and(query_param("teamId", "team_1"))
-        .and(body_creates_named_sandbox())
+        .and(body_creates_named_sandbox(vec![3000, 8000]))
         .respond_with(ResponseTemplate::new(200).set_body_json(sandbox_response("sess_1")))
         .expect(1)
         .mount(&server)
         .await;
 
+    let mut request = make_request(exoharness::Uuid7::now(), "sandbox-1");
+    request.spec.tcp_ports = vec![3000, 8000];
     backend
-        .acquire(make_request(exoharness::Uuid7::now(), "sandbox-1"))
+        .acquire(request)
         .await
         .expect("acquire should create a named Vercel sandbox");
 }
@@ -396,8 +399,10 @@ async fn start_process_rejects_existing_vercel_bridge() {
     );
 }
 
-fn body_creates_named_sandbox() -> impl wiremock::Match {
-    struct Has;
+fn body_creates_named_sandbox(ports: Vec<u16>) -> impl wiremock::Match {
+    struct Has {
+        ports: Vec<u16>,
+    }
     impl wiremock::Match for Has {
         fn matches(&self, request: &Request) -> bool {
             let Ok(body) = serde_json::from_slice::<VercelCreateBody>(&request.body) else {
@@ -407,11 +412,12 @@ fn body_creates_named_sandbox() -> impl wiremock::Match {
                 && body.name.starts_with("exo-")
                 && body.runtime.as_deref() == Some("node24")
                 && body.persistent == Some(true)
+                && body.ports == self.ports
                 && body.tags.contains_key("exo.sandbox.key")
                 && body.tags.contains_key("exo.sandbox.spec-hash")
         }
     }
-    Has
+    Has { ports }
 }
 
 fn body_runs_command_with_env() -> impl wiremock::Match {
@@ -489,6 +495,8 @@ struct VercelCreateBody {
     #[serde(rename = "projectId")]
     project_id: String,
     runtime: Option<String>,
+    #[serde(default)]
+    ports: Vec<u16>,
     name: String,
     persistent: Option<bool>,
     tags: HashMap<String, String>,

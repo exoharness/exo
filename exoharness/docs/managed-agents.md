@@ -56,12 +56,17 @@ name or ID in a selected vault. Set `config.base_url` for a custom endpoint.
 There is no model registration or fallback to another model. `--model` overrides
 the model name for the thread and keeps its credential and endpoint.
 
-For Codex, build the sandbox image with Docker:
+Codex, Claude Code, and Pi use digest-pinned devbox images by default. To develop
+the Codex image locally, build it and set
+`config.image: exo-codex-devbox:latest` in an environment definition:
 
 ```bash
-docker build -t exo-codex-sandbox:latest \
+docker build --build-arg DEVBOX_TOOLS=true -t exo-codex-devbox:latest \
   exoharness/containers/codex-sandbox
 ```
+
+For a smaller image without Python and TypeScript tools, use
+`ghcr.io/exoharness/codex-sandbox:latest` as the sandbox image.
 
 Exo defaults to SmolVM locally. The CLI's default `smolvm`
 Cargo feature downloads and caches a checksum-verified runtime on first use when
@@ -121,7 +126,7 @@ Editing or deleting the source Markdown has no effect until it is synced again. 
 harness.
 
 Use `harness: basic` for Exo's native tool loop, or `harness: claude-code` with an
-Anthropic vault secret and the Claude Code sandbox image. Custom TypeScript
+Anthropic vault secret; its default image is the Claude Code devbox. Custom TypeScript
 harness paths are resolved relative to the Markdown file for local execution,
 and relative to the provider's working directory for remote execution. Modules
 must be installed on the provider; the spec does not bundle their code.
@@ -294,8 +299,9 @@ The example uses Apple container. Change `config.provider` to `docker` on Linux.
 Exo imports matching images from the local Docker store into its private cache;
 registry images are handled by SmolVM. You do not need to export an archive.
 Building an image remains a separate step from selecting it in the environment.
-For Codex on SmolVM, build `exo-codex-sandbox:latest` with Docker and select
-`--environment-file exoharness/examples/environments/codex-smolvm.yaml`.
+The Codex example at `exoharness/examples/environments/codex-smolvm.yaml` uses
+the published `ghcr.io/exoharness/codex-devbox:latest`. To use a locally built
+image instead, change its `config.image` to `exo-codex-devbox:latest`.
 Definitions forward the existing sandbox settings: `provider`, `image`,
 `resources`, `default_workdir`, `file_system_mounts`, `durable_file_systems`, `policy`,
 `enable_networking`, and `idle_seconds`. `policy.networking` takes precedence over
@@ -327,12 +333,12 @@ that backend's existing lifecycle and durable-file-system support.
 ## Pi
 
 ```sh
-container build -t exo-pi-sandbox:latest exoharness/containers/pi-sandbox
 exo vault secret create global openai --token-env OPENAI_API_KEY --allow-origin https://api.openai.com
 exo agent run --agent-file exoharness/examples/managed-agents/pi-assistant.md \
   --environment-file exoharness/examples/environments/pi-local.yaml
 ```
 
+The environment file uses the published `ghcr.io/exoharness/pi-devbox:latest`.
 Pi runs inside the sandbox using its RPC mode. The Exo extension forwards native
 tool approval requests and declared MCP calls to the runtime. Assistant text
 streams live, and each model step contributes token and cost usage. Saved threads
@@ -495,7 +501,7 @@ remain until those changes are saved, so an interrupted migration can be retried
 GitHub repository resources with a vault `credential` also configure `GH_TOKEN`
 for GitHub API access through the egress proxy. `gh` receives a placeholder; the
 real token stays in the vault, so no `gh auth login` is needed inside the sandbox.
-The default Codex image includes `gh`; other images can install it if needed.
+The default Codex, Claude Code, and Pi images include `gh`.
 Restricted environment network policies must allow `github.com` and
 `api.github.com`. GitHub resources must share a credential for automatic
 `GH_TOKEN` selection.

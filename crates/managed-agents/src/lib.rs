@@ -30,6 +30,7 @@ pub struct AgentFrontmatter {
     pub resources: Vec<exoharness::resources::ResourceDefinition>,
     pub name: String,
     pub harness: String,
+    #[serde(alias = "model")]
     pub config: AgentModelConfig,
     #[serde(default)]
     pub permission_policy: permissions::PermissionPolicy,
@@ -50,6 +51,7 @@ pub struct AgentFrontmatter {
 pub struct AgentModelConfig {
     pub braintrust: Option<BraintrustTracingConfig>,
     pub module: Option<PathBuf>,
+    #[serde(alias = "name")]
     pub model: String,
     pub credential: Option<String>,
     pub base_url: Option<String>,
@@ -89,7 +91,7 @@ impl AgentDefinition {
         for (field, value) in [
             ("name", frontmatter.name.as_str()),
             ("harness", frontmatter.harness.as_str()),
-            ("config.model", frontmatter.config.model.as_str()),
+            ("model.name", frontmatter.config.model.as_str()),
             ("instructions", instructions.as_str()),
         ] {
             if value.trim().is_empty() {

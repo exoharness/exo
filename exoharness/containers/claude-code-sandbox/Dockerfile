@@ -1,7 +1,6 @@
 FROM node:22-bookworm-slim
 
-ARG CLAUDE_AGENT_SDK_PACKAGE=@anthropic-ai/claude-agent-sdk
-ARG CLAUDE_AGENT_SDK_NATIVE_PACKAGE=@anthropic-ai/claude-agent-sdk-linux-arm64
+COPY version /tmp/claude-agent-sdk-version
 
 ENV CLAUDE_CONFIG_DIR=/home/exo/.claude
 ENV HOME=/home/exo
@@ -17,13 +16,30 @@ RUN apt-get update \
         ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g \
-        "${CLAUDE_AGENT_SDK_PACKAGE}" \
-        "${CLAUDE_AGENT_SDK_NATIVE_PACKAGE}" \
-    && CLAUDE_BIN="$(find "$(npm root -g)" -path "*/@anthropic-ai/claude-agent-sdk-linux-arm64/claude" -type f -print -quit)" \
-    && test -n "${CLAUDE_BIN}" \
-    && chmod +x "${CLAUDE_BIN}" \
-    && ln -sf "${CLAUDE_BIN}" /usr/local/bin/claude-code
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) native_arch=x64 ;; \
+        arm64) native_arch=arm64 ;; \
+        *) echo "Unsupported Claude Agent SDK architecture" >&2; exit 1 ;; \
+    esac; \
+    version="$(cat /tmp/claude-agent-sdk-version)"; \
+    native_package="@anthropic-ai/claude-agent-sdk-linux-${native_arch}"; \
+    npm install -g \
+        "@anthropic-ai/claude-agent-sdk@${version}" \
+        "${native_package}@${version}"; \
+    claude_bin="$(npm root -g)/${native_package}/claude"; \
+    test -f "${claude_bin}"; \
+    chmod +x "${claude_bin}"; \
+    ln -sf "${claude_bin}" /usr/local/bin/claude-code; \
+    rm /tmp/claude-agent-sdk-version
+
+ARG DEVBOX_TOOLS=false
+RUN if [ "$DEVBOX_TOOLS" = true ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends gh jq python3 python3-pip python3-venv python-is-python3 \
+        && rm -rf /var/lib/apt/lists/* \
+        && npm install -g pnpm@10.26.2 typescript@5.9.3 tsx@4.21.0; \
+    fi
 
 RUN mkdir -p /home/exo/.claude /home/exo/workspace
 

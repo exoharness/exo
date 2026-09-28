@@ -914,6 +914,7 @@ async fn switching_callers_stops_old_sandboxes_and_does_not_reuse_them() -> Resu
         .unwrap();
     assert!(!a.activate_caller().await?);
     let request = exoharness::CreateSandboxRequest {
+        tcp_ports: vec![],
         provider: exoharness::SandboxProvider::LocalProcess,
         name: Some("warm".into()),
         image: "local".into(),
