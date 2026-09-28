@@ -1102,6 +1102,7 @@ async fn firecracker_transparent_egress_live() -> Result<()> {
         scope: crate::ResourceScope::Global,
         provider_state: None,
         spec: SandboxSpec {
+            tcp_port: None,
             image: crate::default_firecracker_image(),
             resources: SandboxResourceShape::new(1, 512),
             mounts: vec![],
@@ -1265,6 +1266,7 @@ async fn managed_firecracker_egress(unrestricted: bool) -> Result<()> {
         },
         provider_state: None,
         spec: SandboxSpec {
+            tcp_port: None,
             image: crate::default_firecracker_image(),
             resources: SandboxResourceShape::new(1, 512),
             mounts: vec![],

@@ -5476,6 +5476,7 @@ mod egress_resolution_tests {
         config.sandbox_policy = Some(limited.clone());
         let harness = BasicExoHarness::new(config).await?;
         let request = CreateSandboxRequest {
+            tcp_port: None,
             name: None,
             provider: SandboxProvider::LocalProcess,
             image: "".into(),

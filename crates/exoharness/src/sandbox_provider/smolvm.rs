@@ -365,23 +365,7 @@ impl SmolvmSandboxBackend {
         create.arg("--image").arg(image);
         self.stamp_labels(&mut create, key).await;
         configure_spec_args(&mut create, spec)?;
-        let (host_port, reservation) = if let Some(guest_port) = spec.tcp_port {
-            ensure!(guest_port != 0, "sandbox TCP port must be nonzero");
-            ensure!(
-                self.labels_supported().await,
-                "smolvm TCP forwarding requires machine labels"
-            );
-            let reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-                .context("reserve smolvm host TCP port")?;
-            let port = reservation.local_addr()?.port();
-            create.arg("--port").arg(format!("{port}:{guest_port}"));
-            create
-                .arg("--label")
-                .arg(format!("{TCP_FORWARD_LABEL}={guest_port}:{port}"));
-            (Some(port), Some(reservation))
-        } else {
-            (None, None)
-        };
+        let (host_port, reservation) = self.configure_tcp_forward(&mut create, spec).await?;
         // Keepalive so the machine stays up between execs, as the Docker backend does.
         create.arg("--").arg("sleep").arg("infinity");
         let output = create
@@ -459,6 +443,31 @@ impl SmolvmSandboxBackend {
             }
             _ => bail!("existing smolvm machine has a different TCP forwarding configuration"),
         }
+    }
+
+    async fn configure_tcp_forward(
+        &self,
+        create: &mut Command,
+        spec: &SandboxSpec,
+    ) -> Result<(Option<u16>, Option<TcpListener>)> {
+        let Some(guest_port) = spec.tcp_port else {
+            return Ok((None, None));
+        };
+        ensure!(guest_port != 0, "sandbox TCP port must be nonzero");
+        ensure!(
+            self.labels_supported().await,
+            "smolvm TCP forwarding requires machine labels"
+        );
+        let reservation =
+            TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).context("reserve smolvm host TCP port")?;
+        let host_port = reservation.local_addr()?.port();
+        create
+            .arg("--port")
+            .arg(format!("{host_port}:{guest_port}"));
+        create
+            .arg("--label")
+            .arg(format!("{TCP_FORWARD_LABEL}={guest_port}:{host_port}"));
+        Ok((Some(host_port), Some(reservation)))
     }
 
     /// Drop warm machines this process created that are idle past `idle_ttl`.
@@ -759,23 +768,9 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
         self.stamp_labels(&mut create, request.sandbox_id.as_str())
             .await;
         configure_spec_args(&mut create, &request.spec)?;
-        let (host_port, reservation) = if let Some(guest_port) = request.spec.tcp_port {
-            ensure!(guest_port != 0, "sandbox TCP port must be nonzero");
-            ensure!(
-                self.labels_supported().await,
-                "smolvm TCP forwarding requires machine labels"
-            );
-            let reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-                .context("reserve smolvm host TCP port")?;
-            let port = reservation.local_addr()?.port();
-            create.arg("--port").arg(format!("{port}:{guest_port}"));
-            create
-                .arg("--label")
-                .arg(format!("{TCP_FORWARD_LABEL}={guest_port}:{port}"));
-            (Some(port), Some(reservation))
-        } else {
-            (None, None)
-        };
+        let (host_port, reservation) = self
+            .configure_tcp_forward(&mut create, &request.spec)
+            .await?;
         run_checked(create, "smolvm machine create --from").await?;
         drop(reservation);
 
