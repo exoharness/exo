@@ -1,7 +1,7 @@
 name: pi-local
 config:
   provider: apple_container
-  image: ghcr.io/exoharness/pi-sandbox@sha256:86d2fd4039634905fd0db477aedded49d7ccb5df6c7642979e05c09472c0f926
+  image: ghcr.io/exoharness/pi-sandbox:latest
   default_workdir: /home/exo/workspace
   resources:
     vcpu_count: 2

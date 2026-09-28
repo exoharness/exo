@@ -160,9 +160,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add crates/executor/src/managed_agents/config.rs \
-            crates/executor/src/managed_agents/tests.rs \
-            exoharness/examples/environments/codex-smolvm.yaml \
-            exoharness/examples/environments/pi-local.yaml
+            crates/executor/src/managed_agents/tests.rs
           git commit -m "Pin managed agent sandbox images from release"
           git push origin HEAD:refs/heads/main
           echo "Updated [default image digests](https://github.com/exoharness/exo/commit/$(git rev-parse HEAD)) on main." >> "$GITHUB_STEP_SUMMARY"

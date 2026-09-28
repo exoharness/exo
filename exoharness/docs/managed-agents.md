@@ -296,8 +296,9 @@ The example uses Apple container. Change `config.provider` to `docker` on Linux.
 Exo imports matching images from the local Docker store into its private cache;
 registry images are handled by SmolVM. You do not need to export an archive.
 Building an image remains a separate step from selecting it in the environment.
-For Codex on SmolVM, build `exo-codex-sandbox:latest` with Docker and select
-`--environment-file exoharness/examples/environments/codex-smolvm.yaml`.
+The Codex example at `exoharness/examples/environments/codex-smolvm.yaml` uses
+the published `ghcr.io/exoharness/codex-sandbox:latest`. To use a locally built
+image instead, change its `config.image` to `exo-codex-sandbox:latest`.
 Definitions forward the existing sandbox settings: `provider`, `image`,
 `resources`, `default_workdir`, `file_system_mounts`, `durable_file_systems`, `policy`,
 `enable_networking`, and `idle_seconds`. `policy.networking` takes precedence over
@@ -329,12 +330,12 @@ that backend's existing lifecycle and durable-file-system support.
 ## Pi
 
 ```sh
-container build -t exo-pi-sandbox:latest exoharness/containers/pi-sandbox
 exo vault secret create global openai --token-env OPENAI_API_KEY --allow-origin https://api.openai.com
 exo agent run --agent-file exoharness/examples/managed-agents/pi-assistant.md \
   --environment-file exoharness/examples/environments/pi-local.yaml
 ```
 
+The environment file uses the published `ghcr.io/exoharness/pi-sandbox:latest`.
 Pi runs inside the sandbox using its RPC mode. The Exo extension forwards native
 tool approval requests and declared MCP calls to the runtime. Assistant text
 streams live, and each model step contributes token and cost usage. Saved threads

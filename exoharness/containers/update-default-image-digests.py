@@ -10,14 +10,12 @@ IMAGE_REFERENCES = {
     "codex-sandbox": {
         "crates/executor/src/managed_agents/config.rs": 1,
         "crates/executor/src/managed_agents/tests.rs": 1,
-        "exoharness/examples/environments/codex-smolvm.yaml": 1,
     },
     "claude-code-sandbox": {
         "crates/executor/src/managed_agents/config.rs": 1,
     },
     "pi-sandbox": {
         "crates/executor/src/managed_agents/config.rs": 1,
-        "exoharness/examples/environments/pi-local.yaml": 1,
     },
 }
 
