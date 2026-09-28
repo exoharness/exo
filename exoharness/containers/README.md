@@ -33,8 +33,8 @@ docker build -t exo-claude-code-sandbox:latest exoharness/containers/claude-code
 docker build -t exo-pi-sandbox:latest exoharness/containers/pi-sandbox
 ```
 
-Images contain harness executables and common command-line tools, not model
-credentials or a project's dependencies. Store the model key in Exo's vault,
+These Dockerfiles install harness executables, Node.js, Python 3 with pip and
+venv, and common command-line tools. Store the model key in Exo's vault,
 then reference its secret name in the agent spec. For example, create the
 `openai` secret with:
 
