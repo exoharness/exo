@@ -1,27 +1,43 @@
 name: Publish sandbox images
 
 on:
-  push:
-    branches:
-      - main
-    tags:
-      - sandbox-images-v*
-    paths:
-      - .github/workflows/publish-sandbox-images.yml
-      - exoharness/containers/codex-sandbox/**
-      - exoharness/containers/claude-code-sandbox/**
-      - exoharness/containers/pi-sandbox/**
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Optional release tag (sandbox-images-vX.Y.Z)
+        required: false
+        type: string
 
 permissions:
   contents: read
-  packages: write
+
+concurrency:
+  group: publish-sandbox-images
+  cancel-in-progress: false
 
 jobs:
+  validate:
+    if: github.repository == 'exoharness/exo' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate release tag
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [ -n "$RELEASE_TAG" ] && ! [[ "$RELEASE_TAG" =~ ^sandbox-images-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release_tag must be sandbox-images-vX.Y.Z" >&2
+            exit 1
+          fi
+
   publish:
-    if: github.repository == 'exoharness/exo'
+    needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    environment: sandbox-image-publish
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -54,8 +70,8 @@ jobs:
           images: ghcr.io/exoharness/${{ matrix.image }}
           tags: |
             type=sha,format=long,prefix=sha-
-            type=ref,event=tag
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest
+            type=raw,value=${{ inputs.release_tag }},enable=${{ inputs.release_tag != '' }}
 
       - name: Build and publish
         id: publish

@@ -8,10 +8,13 @@ Container Registry:
 - `ghcr.io/exoharness/claude-code-sandbox`
 - `ghcr.io/exoharness/pi-sandbox`
 
-A change to an image or the workflow on `main` publishes `latest` and
-`sha-<full source commit>`. A `sandbox-images-v*` Git tag also publishes the
-tag's name and the source commit tag. The workflow can be run manually from
-GitHub Actions. Each job prints the multi-platform image digest in its summary.
+Publishing is manual. Run the workflow from the Actions tab on `main` and
+approve its `sandbox-image-publish` environment before any image is pushed.
+That environment is configured in GitHub with `main` as its deployment branch
+and `ankrgyl` as its required reviewer.
+The workflow publishes `latest` and `sha-<full source commit>`; optionally
+provide a `sandbox-images-vX.Y.Z` release tag. Each job prints the
+multi-platform image digest in its summary.
 Harness defaults and bundled environment definitions use the published
 `image@sha256:...` references so they keep using the same tested images when
 `latest` changes. Update those references after testing a new publication.

@@ -1031,9 +1031,9 @@ function codexSandboxCommand(context: TurnContext): string[] {
   const shell = context.conversationConfig.shellProgram ?? "/bin/bash";
   const command = [
     "set -e;",
+    'mkdir -p "${HOME:-/tmp/exo-home}" "${CODEX_HOME:-/tmp/exo-codex-home}";',
     `test "$(codex --version)" = "codex-cli ${CODEX_VERSION}" || { echo "Expected Codex ${CODEX_VERSION}; rebuild the Codex sandbox image" >&2; exit 1; };`,
-    'mkdir -p "${HOME:-/tmp/exo-home}" "${CODEX_HOME:-/tmp/exo-codex-home}" >/dev/null 2>/tmp/codex-setup.stderr;',
-    "exec codex app-server --listen stdio:// 2>/tmp/codex-app-server.stderr",
+    "exec codex app-server --listen stdio://",
   ].join(" ");
   return [shell, "-lc", command];
 }
