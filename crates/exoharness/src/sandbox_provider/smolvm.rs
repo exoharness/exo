@@ -20,6 +20,7 @@ use egress::SmolvmProxy;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -122,6 +123,7 @@ pub struct SmolvmSandboxBackend {
     capabilities: OnceCell<Capabilities>,
     /// Last use of each warm machine this process created, for TTL reaping.
     warm_seen: Mutex<HashMap<String, Instant>>,
+    abandoned_reap_running: Arc<AtomicBool>,
     egress: EgressRuntime<SmolvmWarmHandle, SmolvmProxy>,
 }
 
@@ -158,6 +160,7 @@ impl SmolvmSandboxBackend {
             image_cache: config.image_cache,
             capabilities: OnceCell::new(),
             warm_seen: Mutex::new(HashMap::new()),
+            abandoned_reap_running: Arc::new(AtomicBool::new(false)),
             egress: EgressRuntime::new(None, Arc::new(PublicUpstreamResolver)),
         }
     }
@@ -461,82 +464,109 @@ impl SmolvmSandboxBackend {
     /// restart leaves nobody to expire them. A live owner is left alone: two
     /// harnesses may share a host, and reaping a peer's sandbox mid-turn is worse
     /// than leaking one.
-    async fn reap_abandoned_machines(&self, current: &str) {
-        let machines = match self.labelled_machines().await {
-            Ok(machines) => machines,
-            Err(error) => {
-                tracing::debug!(%error, "could not list smolvm machines for reaping");
-                return;
-            }
-        };
-        for (name, owner) in machines {
-            if name == current || owner_pid_is_alive(&owner) {
-                continue;
-            }
-            match self.delete_machine_if_present(&name).await {
-                Ok(()) => tracing::info!(machine = %name, owner, "reaped abandoned smolvm machine"),
-                Err(error) => {
-                    tracing::warn!(machine = %name, owner, %error, "failed to reap abandoned machine")
-                }
-            }
+    fn schedule_abandoned_reap(&self, binary: PathBuf, current: String) {
+        if self
+            .abandoned_reap_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
         }
-    }
-
-    /// `(name, owner pid)` for machines carrying this backend's labels. Reads
-    /// `--json`: the table view truncates names and omits labels entirely.
-    async fn labelled_machines(&self) -> Result<Vec<(String, String)>> {
-        let output = Command::new(self.binary().await?)
-            .args(["machine", "ls", "--json"])
-            .output()
-            .await
-            .context("spawn smolvm machine ls --json")?;
-        if !output.status.success() {
-            bail!(
-                "smolvm machine ls failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        let parsed: Value =
-            serde_json::from_slice(&output.stdout).context("parse smolvm machine ls --json")?;
-        let items = parsed
-            .as_array()
-            .cloned()
-            .or_else(|| parsed.get("machines")?.as_array().cloned())
-            .unwrap_or_default();
-        Ok(items
-            .iter()
-            .filter_map(|item| {
-                let labels = item.get("labels")?;
-                // The key label is what marks a machine as ours.
-                labels.get(WARM_SANDBOX_KEY_LABEL)?;
-                let name = item.get("name")?.as_str()?.to_string();
-                let owner = labels
-                    .get(WARM_SANDBOX_OWNER_PID_LABEL)?
-                    .as_str()?
-                    .to_string();
-                Some((name, owner))
-            })
-            .collect())
+        let running = self.abandoned_reap_running.clone();
+        tokio::spawn(async move {
+            reap_abandoned_machines(&binary, &current).await;
+            running.store(false, Ordering::Release);
+        });
     }
 
     /// Delete if present, tolerating "not found". Deliberately not a `machine ls`
     /// pre-check: that view truncates names at 15 chars and ours are 20, so the
     /// match could never hit — and asking outright has no check-then-act race.
     async fn delete_machine_if_present(&self, name: &str) -> Result<()> {
-        let output = Command::new(self.binary().await?)
-            .args(["machine", "delete", "--name", name, "--force"])
-            .output()
-            .await
-            .context("spawn smolvm machine delete")?;
-        if output.status.success() {
-            return Ok(());
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if cli_says::no_such_machine(&stderr) {
-            return Ok(());
-        }
-        bail!("smolvm machine delete failed: {}", stderr.trim())
+        delete_machine_if_present(self.binary().await?, name).await
     }
+}
+
+async fn reap_abandoned_machines(binary: &Path, current: &str) {
+    let machines = match labelled_machines(binary).await {
+        Ok(machines) => machines,
+        Err(error) => {
+            tracing::debug!(%error, "could not list smolvm machines for reaping");
+            return;
+        }
+    };
+    for (name, owner) in machines {
+        if name == current || owner_pid_is_alive(&owner) {
+            continue;
+        }
+        match delete_machine_if_present(binary, &name).await {
+            Ok(()) => tracing::info!(machine = %name, owner, "reaped abandoned smolvm machine"),
+            Err(error) => {
+                tracing::warn!(machine = %name, owner, %error, "failed to reap abandoned machine")
+            }
+        }
+    }
+}
+
+/// `(name, owner pid)` for machines carrying this backend's labels. Reads
+/// `--json`: the table view truncates names and omits labels entirely.
+async fn labelled_machines(binary: &Path) -> Result<Vec<(String, String)>> {
+    #[derive(Deserialize)]
+    struct Machine {
+        name: Option<String>,
+        labels: Option<HashMap<String, String>>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum MachineList {
+        Direct(Vec<Machine>),
+        Wrapped { machines: Vec<Machine> },
+    }
+
+    let output = Command::new(binary)
+        .args(["machine", "ls", "--json"])
+        .output()
+        .await
+        .context("spawn smolvm machine ls --json")?;
+    if !output.status.success() {
+        bail!(
+            "smolvm machine ls failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let parsed: MachineList =
+        serde_json::from_slice(&output.stdout).context("parse smolvm machine ls --json")?;
+    let items = match parsed {
+        MachineList::Direct(machines) | MachineList::Wrapped { machines } => machines,
+    };
+    Ok(items
+        .into_iter()
+        .filter_map(|item| {
+            let labels = item.labels?;
+            // The key label is what marks a machine as ours.
+            labels.get(WARM_SANDBOX_KEY_LABEL)?;
+            let name = item.name?;
+            let owner = labels.get(WARM_SANDBOX_OWNER_PID_LABEL)?.to_string();
+            Some((name, owner))
+        })
+        .collect())
+}
+
+async fn delete_machine_if_present(binary: &Path, name: &str) -> Result<()> {
+    let output = Command::new(binary)
+        .args(["machine", "delete", "--name", name, "--force"])
+        .output()
+        .await
+        .context("spawn smolvm machine delete")?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if cli_says::no_such_machine(&stderr) {
+        return Ok(());
+    }
+    bail!("smolvm machine delete failed: {}", stderr.trim())
 }
 
 impl Default for SmolvmSandboxBackend {
@@ -632,7 +662,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             .await?;
         self.reap_idle_machines(&request).await;
         if self.labels_supported().await {
-            self.reap_abandoned_machines(&machine).await;
+            self.schedule_abandoned_reap(binary.clone(), machine.clone());
         }
         Ok(crate::with_process_management(handle))
     }
@@ -1351,6 +1381,39 @@ esac"#,
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn abandoned_machine_cleanup_does_not_block_acquisition() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let binary = dir.path().join("smolvm");
+        let deleted = dir.path().join("deleted");
+        let release = dir.path().join("release");
+        write_test_binary(
+            &binary,
+            &format!(
+                "case \"$1 $2\" in\n\
+                 'machine ls') while [ ! -f '{}' ]; do sleep 0.01; done; printf '%s\\n' '[{{\"name\":\"orphan\",\"labels\":{{\"exo.sandbox.key\":\"orphan\",\"exo.sandbox.owner-pid\":\"4194305\"}}}}]' ;;\n\
+                 'machine delete') printf '%s' \"$4\" > '{}' ;;\n\
+                 *) exit 23 ;;\n\
+                 esac",
+                release.display(),
+                deleted.display()
+            ),
+        );
+        let backend = SmolvmSandboxBackend::new();
+        backend.schedule_abandoned_reap(binary, "current".into());
+        assert!(!deleted.exists());
+        std::fs::write(release, "")?;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !deleted.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        assert_eq!(std::fs::read_to_string(deleted)?, "orphan");
+        Ok(())
     }
 
     #[cfg(unix)]

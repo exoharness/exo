@@ -481,7 +481,7 @@ async fn abandoned_machines_are_reaped_by_a_later_backend() {
     );
     assert!(machine_names().contains(&orphan.to_string()));
 
-    // Any acquire runs the sweep.
+    // Any acquire schedules the sweep without waiting for machine deletion.
     let live = backend
         .acquire(request(
             image,
@@ -493,15 +493,13 @@ async fn abandoned_machines_are_reaped_by_a_later_backend() {
         .await
         .expect("acquire sweeper sandbox");
 
-    let remaining = machine_names();
-    println!(
-        "orphan present after sweep: {}",
-        remaining.contains(&orphan.to_string())
-    );
-    assert!(
-        !remaining.contains(&orphan.to_string()),
-        "abandoned machine survived the sweep"
-    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while machine_names().contains(&orphan.to_string()) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("abandoned machine survived the sweep");
 
     cleanup(&live).await;
 }
