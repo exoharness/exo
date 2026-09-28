@@ -31,7 +31,7 @@ fn make_request(thread_id: exoharness::Uuid7, sandbox_id: &str) -> SandboxReques
             thread_id,
         },
         spec: SandboxSpec {
-            tcp_port: None,
+            tcp_ports: vec![],
             image: "docker.io/library/ubuntu:24.04".into(),
             resources: Default::default(),
             mounts: Vec::new(),

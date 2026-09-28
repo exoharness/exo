@@ -22,7 +22,7 @@ fn make_request(thread_id: exoharness::Uuid7, sandbox_id: &str) -> SandboxReques
             thread_id,
         },
         spec: SandboxSpec {
-            tcp_port: None,
+            tcp_ports: vec![],
             image: "base".into(),
             resources: Default::default(),
             mounts: Vec::new(),

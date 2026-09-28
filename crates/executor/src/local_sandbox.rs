@@ -1384,7 +1384,7 @@ mod tests {
             .expect("conversation should be created");
         let sandbox_id = conversation
             .create_sandbox(CreateSandboxRequest {
-                tcp_port: None,
+                tcp_ports: vec![],
                 name: None,
                 provider: SandboxProvider::LocalProcess,
                 image: "local-image".to_string(),

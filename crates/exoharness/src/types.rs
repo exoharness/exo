@@ -889,8 +889,8 @@ pub struct CreateSandboxRequest {
     pub policy: Option<EgressPolicy>,
     pub enable_networking: Option<bool>,
     pub idle_seconds: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tcp_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tcp_ports: Vec<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

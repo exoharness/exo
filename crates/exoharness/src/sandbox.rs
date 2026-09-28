@@ -89,8 +89,8 @@ pub struct SandboxSpec {
     pub durable_file_systems: Vec<DurableFileSystem>,
     pub policy: EgressPolicy,
     pub default_workdir: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tcp_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tcp_ports: Vec<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -755,7 +755,7 @@ impl CliContainerSandboxBackend {
             sandbox_id: request.sandbox_id,
             scope: request.scope,
             spec: SandboxSpec {
-                tcp_port: None,
+                tcp_ports: vec![],
                 image: if request.spec.image.trim().is_empty() {
                     DEFAULT_SANDBOX_IMAGE.to_string()
                 } else {
@@ -2545,7 +2545,7 @@ mod tests {
                 sandbox_id: "sandbox".into(),
                 scope: ResourceScope::Global,
                 spec: SandboxSpec {
-                    tcp_port: None,
+                    tcp_ports: vec![],
                     image: "image".into(),
                     resources,
                     mounts: vec![],
@@ -2749,7 +2749,7 @@ mod tests {
                 thread_id: "00000000-0000-7000-8000-000000000001".parse().unwrap(),
             },
             spec: SandboxSpec {
-                tcp_port: None,
+                tcp_ports: vec![],
                 image: "docker.io/library/ubuntu:24.04".to_string(),
                 resources: Default::default(),
                 mounts: Vec::new(),
@@ -2831,7 +2831,7 @@ mod tests {
                 thread_id: "00000000-0000-7000-8000-000000000001".parse().unwrap(),
             },
             spec: SandboxSpec {
-                tcp_port: None,
+                tcp_ports: vec![],
                 image: "docker.io/library/ubuntu:24.04".to_string(),
                 resources: Default::default(),
                 mounts: Vec::new(),
@@ -2926,7 +2926,7 @@ esac
                 thread_id: "00000000-0000-7000-8000-000000000001".parse().unwrap(),
             },
             spec: SandboxSpec {
-                tcp_port: None,
+                tcp_ports: vec![],
                 image: "docker.io/library/ubuntu:24.04".to_string(),
                 resources: Default::default(),
                 mounts: Vec::new(),
@@ -3040,7 +3040,7 @@ esac
                 thread_id: "00000000-0000-7000-8000-000000000001".parse().unwrap(),
             },
             spec: SandboxSpec {
-                tcp_port: None,
+                tcp_ports: vec![],
                 image: "task-image".to_string(),
                 resources: Default::default(),
                 mounts: Vec::new(),

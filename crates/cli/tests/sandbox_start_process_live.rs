@@ -41,7 +41,7 @@ fn make_e2b_request(thread_id: exoharness::Uuid7, sandbox_id: &str) -> SandboxRe
             thread_id,
         },
         spec: SandboxSpec {
-            tcp_port: None,
+            tcp_ports: vec![],
             image: e2b_template_id(),
             resources: Default::default(),
             mounts: Vec::new(),
@@ -93,7 +93,7 @@ fn make_sprites_request(thread_id: exoharness::Uuid7, sandbox_id: &str) -> Sandb
             thread_id,
         },
         spec: SandboxSpec {
-            tcp_port: None,
+            tcp_ports: vec![],
             image: "default".into(),
             resources: Default::default(),
             mounts: Vec::new(),

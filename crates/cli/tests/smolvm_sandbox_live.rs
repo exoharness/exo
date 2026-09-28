@@ -91,7 +91,7 @@ fn request(
             agent_id: exoharness::Uuid7::now(),
         },
         spec: SandboxSpec {
-            tcp_port: None,
+            tcp_ports: vec![],
             image,
             resources: Default::default(),
             mounts: vec![SandboxMount {
@@ -138,7 +138,7 @@ fn command(argv: &[&str]) -> SandboxCommand {
 
 #[tokio::test]
 #[ignore]
-async fn published_tcp_port_connects_to_guest() -> anyhow::Result<()> {
+async fn published_tcp_ports_connect_to_guest() -> anyhow::Result<()> {
     let Some(image) = test_image() else {
         return Ok(());
     };
@@ -153,7 +153,7 @@ async fn published_tcp_port_connects_to_guest() -> anyhow::Result<()> {
         "exo-smolvm-live-tcp",
         Some(Duration::from_secs(60)),
     );
-    sandbox.spec.tcp_port = Some(25_011);
+    sandbox.spec.tcp_ports = vec![25_011, 25_012];
     let backend = SmolvmSandboxBackend::with_mode(SmolvmExecutionMode::Warm);
     let handle = backend.acquire(sandbox).await?;
     let result = async {
@@ -161,33 +161,36 @@ async fn published_tcp_port_connects_to_guest() -> anyhow::Result<()> {
             .start_process(&command(&[
                 "node",
                 "-e",
-                "require('net').createServer(s=>s.on('data',d=>s.write(d))).listen(25011,'0.0.0.0')",
+                "for(const port of [25011,25012]) require('net').createServer(s=>s.on('data',d=>s.write(d))).listen(port,'0.0.0.0')",
             ]))
             .await?;
-        let mut last_error = None;
-        for _ in 0..50 {
-            let attempt = async {
-                let mut stream = handle
-                    .connect_tcp(25_011)
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("TCP forwarding unavailable"))?;
-                stream.write_all(b"ping").await?;
-                let mut response = [0; 4];
-                TokioAsyncReadExt::read_exact(&mut stream, &mut response).await?;
-                anyhow::ensure!(&response == b"ping", "unexpected guest TCP response");
-                Ok::<_, anyhow::Error>(())
+        for port in [25_011, 25_012] {
+            let mut last_error = None;
+            for _ in 0..50 {
+                let attempt = async {
+                    let mut stream = handle
+                        .connect_tcp(port)
+                        .await?
+                        .ok_or_else(|| anyhow::anyhow!("TCP forwarding unavailable"))?;
+                    stream.write_all(b"ping").await?;
+                    let mut response = [0; 4];
+                    TokioAsyncReadExt::read_exact(&mut stream, &mut response).await?;
+                    anyhow::ensure!(&response == b"ping", "unexpected guest TCP response");
+                    Ok::<_, anyhow::Error>(())
+                }
+                .await;
+                if attempt.is_ok() {
+                    last_error = None;
+                    break;
+                }
+                last_error = attempt.err();
+                tokio::time::sleep(Duration::from_millis(200)).await;
             }
-            .await;
-            if attempt.is_ok() {
-                return Ok(());
+            if let Some(error) = last_error {
+                anyhow::bail!("smolvm guest TCP listener on {port} did not become reachable: {error}");
             }
-            last_error = attempt.err();
-            tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        anyhow::bail!(
-            "smolvm guest TCP listener did not become reachable: {}",
-            last_error.unwrap()
-        )
+        Ok(())
     }
     .await;
     cleanup(&handle).await;

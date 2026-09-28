@@ -122,7 +122,7 @@ fn proxy_transport_enforces_egress_independently_of_network_policy() {
             scope: crate::ResourceScope::Global,
             provider_state: None,
             spec: SandboxSpec {
-                tcp_port: None,
+                tcp_ports: vec![],
                 image: String::new(),
                 resources: Default::default(),
                 mounts: vec![],
@@ -898,7 +898,7 @@ impl DurableStopFixture {
             sandbox_id: "durable".into(),
             scope: crate::ResourceScope::Global,
             spec: SandboxSpec {
-                tcp_port: None,
+                tcp_ports: vec![],
                 image: "/images/test.ext4".into(),
                 resources: Default::default(),
                 mounts: vec![],
@@ -1203,7 +1203,7 @@ fn resource_disks_have_independent_guest_mounts_and_read_only_drives() -> Result
             provider_state: None,
             lifecycle: Default::default(),
             spec: SandboxSpec {
-                tcp_port: None,
+                tcp_ports: vec![],
                 image: "/base.ext4".into(),
                 resources: None,
                 mounts: vec![
@@ -1315,7 +1315,7 @@ async fn resource_disks_live_isolate_resume_and_enforce_read_only() -> Result<()
             thread_id: thread,
         },
         spec: SandboxSpec {
-            tcp_port: None,
+            tcp_ports: vec![],
             image: image.clone(),
             resources: None,
             mounts: mounts

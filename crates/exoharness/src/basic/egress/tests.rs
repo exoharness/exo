@@ -78,7 +78,7 @@ async fn bind(
         harness,
         scope,
         CreateSandboxRequest {
-            tcp_port: None,
+            tcp_ports: vec![],
             name: None,
             provider: SandboxProvider::Firecracker,
             image: "test-image".into(),
@@ -514,7 +514,7 @@ async fn container_registrations_reject_credentials_before_launch() -> Result<()
         scope: ResourceScope::Global,
         provider_state: None,
         spec: crate::SandboxSpec {
-            tcp_port: None,
+            tcp_ports: vec![],
             image: "must-not-be-launched".into(),
             resources: crate::SandboxResourceShape::new(1, 512),
             mounts: vec![],

@@ -2241,7 +2241,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         let sandbox_id = format!("sandbox-{}", Uuid7::now());
         let provider = request.attachment.provider();
         let sandbox = StoredSandbox {
-            tcp_port: None,
+            tcp_ports: vec![],
             principal: None,
             credentials: BTreeMap::new(),
             id: sandbox_id.clone(),
@@ -3983,7 +3983,7 @@ async fn prepare_sandbox_request(
         durable_file_systems: request.durable_file_systems.unwrap_or_default(),
         policy,
         idle_seconds: request.idle_seconds.unwrap_or(60),
-        tcp_port: request.tcp_port,
+        tcp_ports: request.tcp_ports,
     })
 }
 
@@ -4023,7 +4023,7 @@ async fn find_matching_stored_sandbox(
             || sandbox.policy() != request.policy
             || sandbox.credentials != request.credentials
             || sandbox.idle_seconds != request.idle_seconds
-            || sandbox.tcp_port != request.tcp_port
+            || sandbox.tcp_ports != request.tcp_ports
         {
             bail!("sandbox name {name:?} already exists with a different configuration");
         }
@@ -4443,7 +4443,7 @@ struct StoredSandbox {
     credentials: BTreeMap<String, SecretReference>,
     idle_seconds: u64,
     #[serde(default)]
-    tcp_port: Option<u16>,
+    tcp_ports: Vec<u16>,
     running: bool,
     latest_snapshot_id: Option<SnapshotId>,
     #[serde(default)]
@@ -4495,7 +4495,7 @@ struct PreparedSandboxRequest {
     policy: crate::EgressPolicy,
     credentials: BTreeMap<String, SecretReference>,
     idle_seconds: u64,
-    tcp_port: Option<u16>,
+    tcp_ports: Vec<u16>,
 }
 
 impl PreparedSandboxRequest {
@@ -4516,7 +4516,7 @@ impl PreparedSandboxRequest {
             },
             credentials: self.credentials.clone(),
             idle_seconds: self.idle_seconds,
-            tcp_port: self.tcp_port,
+            tcp_ports: self.tcp_ports.clone(),
             running: true,
             latest_snapshot_id: None,
             attachment: None,
@@ -4998,7 +4998,7 @@ fn sandbox_request(
                 .default_workdir
                 .clone()
                 .unwrap_or_else(|| SANDBOX_MAIN_MOUNT_DIR.to_string()),
-            tcp_port: sandbox.tcp_port,
+            tcp_ports: sandbox.tcp_ports.clone(),
         },
         lifecycle: SandboxLifecycleConfig {
             idle_ttl: Some(std::time::Duration::from_secs(sandbox.idle_seconds)),
@@ -5476,7 +5476,7 @@ mod egress_resolution_tests {
         config.sandbox_policy = Some(limited.clone());
         let harness = BasicExoHarness::new(config).await?;
         let request = CreateSandboxRequest {
-            tcp_port: None,
+            tcp_ports: vec![],
             name: None,
             provider: SandboxProvider::LocalProcess,
             image: "".into(),

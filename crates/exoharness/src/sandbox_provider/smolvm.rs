@@ -18,7 +18,7 @@ mod image_cache;
 
 use egress::SmolvmProxy;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -62,7 +62,7 @@ const MIN_WARM_VERSION: Version = Version::new(1, 7, 2);
 /// reported 1.7.5, so a version gate would refuse a flag that is right there.
 const LABEL_FLAG: &str = "--label";
 const INTERCEPTOR_FLAG: &str = "--egress-interceptor";
-const TCP_FORWARD_LABEL: &str = "exo.sandbox.tcp-forward";
+const TCP_FORWARD_LABEL_PREFIX: &str = "exo.sandbox.tcp-forward.";
 static CONSUMABLE_SNAPSHOT_FORMATS: [SnapshotFormat; 1] = [SnapshotFormat::SmolvmMachinePack];
 
 /// What the installed smolvm supports. Probed once per backend.
@@ -359,28 +359,28 @@ impl SmolvmSandboxBackend {
         key: &str,
         image: &str,
         egress: Option<&SandboxEgress<SmolvmProxy>>,
-    ) -> Result<Option<u16>> {
+    ) -> Result<BTreeMap<u16, u16>> {
         let mut create = Command::new(self.binary().await?);
         create.arg("machine").arg("create").arg("--name").arg(name);
         create.arg("--image").arg(image);
         self.stamp_labels(&mut create, key).await;
         configure_spec_args(&mut create, spec)?;
-        let (host_port, reservation) = self.configure_tcp_forward(&mut create, spec).await?;
+        let (host_ports, reservations) = self.configure_tcp_forwards(&mut create, spec).await?;
         // Keepalive so the machine stays up between execs, as the Docker backend does.
         create.arg("--").arg("sleep").arg("infinity");
         let output = create
             .output()
             .await
             .context("spawn smolvm machine create")?;
-        drop(reservation);
-        let host_port = if !output.status.success() {
+        drop(reservations);
+        let host_ports = if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if !cli_says::already_exists(&stderr) {
                 bail!("smolvm machine create failed: {}", stderr.trim());
             }
-            self.existing_tcp_forward(name, spec.tcp_port).await?
+            self.existing_tcp_forwards(name, &spec.tcp_ports).await?
         } else {
-            host_port
+            host_ports
         };
         if !output.status.success() && egress.is_some() {
             let mut stop = Command::new(self.binary().await?);
@@ -395,12 +395,12 @@ impl SmolvmSandboxBackend {
         }
         let output = start.output().await.context("spawn smolvm machine start")?;
         if output.status.success() {
-            return Ok(host_port);
+            return Ok(host_ports);
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
         // Already up is the caller's intent, not an error.
         if egress.is_none() && cli_says::already_running(&stderr) {
-            return Ok(host_port);
+            return Ok(host_ports);
         }
         bail!(
             "smolvm machine start failed for '{name}': {}",
@@ -408,11 +408,11 @@ impl SmolvmSandboxBackend {
         );
     }
 
-    async fn existing_tcp_forward(
+    async fn existing_tcp_forwards(
         &self,
         machine: &str,
-        guest_port: Option<u16>,
-    ) -> Result<Option<u16>> {
+        guest_ports: &[u16],
+    ) -> Result<BTreeMap<u16, u16>> {
         #[derive(Deserialize)]
         struct Status {
             labels: HashMap<String, String>,
@@ -429,45 +429,53 @@ impl SmolvmSandboxBackend {
             String::from_utf8_lossy(&output.stderr).trim()
         );
         let status: Status = serde_json::from_slice(&output.stdout)?;
-        match (guest_port, status.labels.get(TCP_FORWARD_LABEL)) {
-            (None, None) => Ok(None),
-            (Some(guest), Some(value)) => {
-                let (configured_guest, host) = value
-                    .split_once(':')
-                    .context("invalid smolvm TCP forward label")?;
-                ensure!(
-                    configured_guest.parse::<u16>()? == guest,
-                    "existing smolvm machine publishes a different guest TCP port"
-                );
-                Ok(Some(host.parse::<u16>()?))
+        let mut host_ports = BTreeMap::new();
+        for (label, value) in status.labels {
+            if let Some(port) = label.strip_prefix(TCP_FORWARD_LABEL_PREFIX) {
+                host_ports.insert(port.parse::<u16>()?, value.parse::<u16>()?);
             }
-            _ => bail!("existing smolvm machine has a different TCP forwarding configuration"),
         }
+        ensure!(
+            host_ports.keys().copied().collect::<BTreeSet<_>>()
+                == guest_ports.iter().copied().collect(),
+            "existing smolvm machine has a different TCP forwarding configuration"
+        );
+        Ok(host_ports)
     }
 
-    async fn configure_tcp_forward(
+    async fn configure_tcp_forwards(
         &self,
         create: &mut Command,
         spec: &SandboxSpec,
-    ) -> Result<(Option<u16>, Option<TcpListener>)> {
-        let Some(guest_port) = spec.tcp_port else {
-            return Ok((None, None));
-        };
-        ensure!(guest_port != 0, "sandbox TCP port must be nonzero");
+    ) -> Result<(BTreeMap<u16, u16>, Vec<TcpListener>)> {
+        if spec.tcp_ports.is_empty() {
+            return Ok((BTreeMap::new(), Vec::new()));
+        }
         ensure!(
             self.labels_supported().await,
             "smolvm TCP forwarding requires machine labels"
         );
-        let reservation =
-            TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).context("reserve smolvm host TCP port")?;
-        let host_port = reservation.local_addr()?.port();
-        create
-            .arg("--port")
-            .arg(format!("{host_port}:{guest_port}"));
-        create
-            .arg("--label")
-            .arg(format!("{TCP_FORWARD_LABEL}={guest_port}:{host_port}"));
-        Ok((Some(host_port), Some(reservation)))
+        let mut host_ports = BTreeMap::new();
+        let mut reservations = Vec::with_capacity(spec.tcp_ports.len());
+        for &guest_port in &spec.tcp_ports {
+            ensure!(guest_port != 0, "sandbox TCP ports must be nonzero");
+            ensure!(
+                !host_ports.contains_key(&guest_port),
+                "duplicate sandbox TCP port {guest_port}"
+            );
+            let reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .context("reserve smolvm host TCP port")?;
+            let host_port = reservation.local_addr()?.port();
+            create
+                .arg("--port")
+                .arg(format!("{host_port}:{guest_port}"));
+            create.arg("--label").arg(format!(
+                "{TCP_FORWARD_LABEL_PREFIX}{guest_port}={host_port}"
+            ));
+            host_ports.insert(guest_port, host_port);
+            reservations.push(reservation);
+        }
+        Ok((host_ports, reservations))
     }
 
     /// Drop warm machines this process created that are idle past `idle_ttl`.
@@ -656,7 +664,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
         let binary = self.binary().await?;
         if self.resolve_mode(&request).await != SmolvmExecutionMode::Warm {
             ensure!(
-                request.spec.tcp_port.is_none(),
+                request.spec.tcp_ports.is_empty(),
                 "smolvm TCP forwarding requires a warm sandbox"
             );
             let image = self.prepare_image(&request.spec.image).await?;
@@ -680,7 +688,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
                 |egress| async {
                     let image = self.prepare_image(&request.spec.image).await?;
                     reject_unsupported_spec(&request.spec, &image)?;
-                    let host_port = self
+                    let host_ports = self
                         .ensure_machine_started(
                             &machine,
                             &request.spec,
@@ -695,7 +703,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
                         machine: machine.clone(),
                         request: request.clone(),
                         egress: None,
-                        host_port,
+                        host_ports,
                     };
                     if let Some(egress) = egress {
                         egress.initialize_trust(&handle).await?;
@@ -768,11 +776,11 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
         self.stamp_labels(&mut create, request.sandbox_id.as_str())
             .await;
         configure_spec_args(&mut create, &request.spec)?;
-        let (host_port, reservation) = self
-            .configure_tcp_forward(&mut create, &request.spec)
+        let (host_ports, reservations) = self
+            .configure_tcp_forwards(&mut create, &request.spec)
             .await?;
         run_checked(create, "smolvm machine create --from").await?;
-        drop(reservation);
+        drop(reservations);
 
         let mut start = Command::new(binary);
         start
@@ -788,7 +796,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             machine,
             request,
             egress: None,
-            host_port,
+            host_ports,
         })))
     }
 }
@@ -866,7 +874,7 @@ struct SmolvmWarmHandle {
     machine: String,
     request: SandboxRequest,
     egress: Option<Arc<SandboxEgress<SmolvmProxy>>>,
-    host_port: Option<u16>,
+    host_ports: BTreeMap<u16, u16>,
 }
 
 impl SmolvmWarmHandle {
@@ -903,19 +911,19 @@ impl ManagedSandboxHandle for SmolvmWarmHandle {
     }
 
     fn supports_tcp(&self) -> bool {
-        self.host_port.is_some()
+        !self.host_ports.is_empty()
     }
 
     async fn connect_tcp(&self, port: u16) -> Result<Option<BoxSandboxTcpStream>> {
-        let Some(host_port) = self.host_port else {
+        if self.host_ports.is_empty() {
             return Ok(None);
-        };
-        ensure!(
-            self.request.spec.tcp_port == Some(port),
-            "sandbox TCP port {port} is not published"
-        );
+        }
+        let host_port = self
+            .host_ports
+            .get(&port)
+            .context(format!("sandbox TCP port {port} is not published"))?;
         Ok(Some(Box::pin(
-            TcpStream::connect((Ipv4Addr::LOCALHOST, host_port)).await?,
+            TcpStream::connect((Ipv4Addr::LOCALHOST, *host_port)).await?,
         )))
     }
 
@@ -1070,7 +1078,7 @@ fn configure_spec_args(process: &mut Command, spec: &SandboxSpec) -> Result<()> 
     process.arg("--mem").arg(resources.memory_mib.to_string());
     if spec.policy.networking_enabled() {
         process.args(["--net", "--net-backend", "virtio-net"]);
-    } else if spec.tcp_port.is_some() {
+    } else if !spec.tcp_ports.is_empty() {
         process.arg("--outbound-localhost-only");
     }
     if let SandboxNetworkPolicy::Limited { allowed_hosts } = &spec.policy.networking {
@@ -1316,30 +1324,34 @@ mod tests {
     use crate::sandbox::SandboxLifecycleConfig;
 
     #[tokio::test]
-    async fn published_tcp_port_connects_and_rejects_other_guest_ports() -> Result<()> {
-        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
-        let host_port = listener.local_addr()?.port();
+    async fn published_tcp_ports_connect_and_reject_other_guest_ports() -> Result<()> {
+        let first = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let second = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         let mut request = test_request(Some(Duration::from_secs(60)));
-        request.spec.tcp_port = Some(20_000);
+        request.spec.tcp_ports = vec![20_000, 20_001];
         let handle = SmolvmWarmHandle {
             id: "smolvm:test".into(),
             binary: PathBuf::from("smolvm"),
             machine: "test".into(),
             request,
             egress: None,
-            host_port: Some(host_port),
+            host_ports: BTreeMap::from([
+                (20_000, first.local_addr()?.port()),
+                (20_001, second.local_addr()?.port()),
+            ]),
         };
         assert!(handle.supports_tcp());
-        let connection = handle.connect_tcp(20_000).await?;
-        assert!(connection.is_some());
-        listener.accept().await?;
-        assert!(handle.connect_tcp(20_001).await.is_err());
+        assert!(handle.connect_tcp(20_000).await?.is_some());
+        first.accept().await?;
+        assert!(handle.connect_tcp(20_001).await?.is_some());
+        second.accept().await?;
+        assert!(handle.connect_tcp(20_002).await.is_err());
         Ok(())
     }
 
     #[tokio::test]
     #[cfg(unix)]
-    async fn warm_machine_publishes_requested_guest_port() -> Result<()> {
+    async fn warm_machine_publishes_requested_guest_ports() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let binary = dir.path().join("smolvm");
         let args_file = dir.path().join("create-args");
@@ -1361,27 +1373,31 @@ mod tests {
             ..Default::default()
         });
         let mut request = test_request(Some(Duration::from_secs(60)));
-        request.spec.tcp_port = Some(20_000);
-        let host_port = backend
+        request.spec.tcp_ports = vec![20_000, 20_001];
+        let host_ports = backend
             .ensure_machine_started("test", &request.spec, "test", "alpine", None)
-            .await?
-            .context("published host port")?;
+            .await?;
         let args = std::fs::read_to_string(args_file)?;
-        assert!(
-            args.contains(&format!("--port\n{host_port}:20000\n")),
-            "{args}"
-        );
-        assert!(
-            args.contains(&format!("--label\n{TCP_FORWARD_LABEL}=20000:{host_port}\n")),
-            "{args}"
-        );
+        for (guest, host) in &host_ports {
+            assert!(
+                args.contains(&format!("--port\n{host}:{guest}\n")),
+                "{args}"
+            );
+            assert!(
+                args.contains(&format!(
+                    "--label\n{TCP_FORWARD_LABEL_PREFIX}{guest}={host}\n"
+                )),
+                "{args}"
+            );
+        }
+        assert_eq!(host_ports.len(), 2);
         assert!(args.contains("--outbound-localhost-only\n"), "{args}");
         Ok(())
     }
 
     #[tokio::test]
     #[cfg(unix)]
-    async fn existing_machine_reuses_its_published_host_port() -> Result<()> {
+    async fn existing_machine_reuses_its_published_host_ports() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let binary = dir.path().join("smolvm");
         write_test_binary(
@@ -1390,7 +1406,7 @@ mod tests {
              '--version  ') printf 'smolvm 1.19.0\\n';;
              'machine create --help') printf '%s\\n' '--label';;
              'machine create '*) echo 'already exists' >&2; exit 1;;
-             'machine status '*) printf '%s\\n' '{\"labels\":{\"exo.sandbox.tcp-forward\":\"20000:43210\"}}';;
+             'machine status '*) printf '%s\\n' '{\"labels\":{\"exo.sandbox.tcp-forward.20000\":\"43210\",\"exo.sandbox.tcp-forward.20001\":\"43211\"}}';;
              'machine start '*) exit 0;;
              *) exit 23;;
              esac",
@@ -1400,14 +1416,14 @@ mod tests {
             ..Default::default()
         });
         let mut request = test_request(Some(Duration::from_secs(60)));
-        request.spec.tcp_port = Some(20_000);
+        request.spec.tcp_ports = vec![20_000, 20_001];
         assert_eq!(
             backend
                 .ensure_machine_started("test", &request.spec, "test", "alpine", None)
                 .await?,
-            Some(43_210)
+            BTreeMap::from([(20_000, 43_210), (20_001, 43_211)])
         );
-        request.spec.tcp_port = Some(20_001);
+        request.spec.tcp_ports = vec![20_001];
         assert!(
             backend
                 .ensure_machine_started("test", &request.spec, "test", "alpine", None)
@@ -1719,7 +1735,7 @@ esac"#,
                 agent_id: crate::Uuid7::now(),
             },
             spec: SandboxSpec {
-                tcp_port: None,
+                tcp_ports: vec![],
                 image: "alpine".into(),
                 resources: Default::default(),
                 mounts: Vec::new(),
@@ -1862,7 +1878,7 @@ esac"#,
     #[test]
     fn resource_shape_and_mounts_are_forwarded() {
         let spec = SandboxSpec {
-            tcp_port: None,
+            tcp_ports: vec![],
             image: "alpine".into(),
             resources: crate::SandboxResourceShape::new(3, 2048),
             mounts: vec![
