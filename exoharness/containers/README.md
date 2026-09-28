@@ -24,12 +24,10 @@ multi-platform image digest in its summary.
 Harness defaults use published `image@sha256:...` references so they keep using
 the same tested images when `latest` changes. Bundled environment examples use
 `latest` for easy setup; pin a digest in an environment for reproducibility.
-After publication, the workflow commits the new default-image digests to `main`
-using a GitHub App installed only on this repository. Its private key is stored
-in the separately approved `sandbox-image-pin-update` environment. The app
-bypasses the `main` pull-request rule for this commit; the push starts CI. If
-`main` changes during the build, the pin update stops; rerun the release from
-the new `main` commit.
+After publication, the workflow commits the new default-image digests to a
+dedicated branch and opens a PR. The `main` ruleset requires a review
+before those new defaults are adopted. The workflow also starts CI for the PR
+branch, since pushes made with `GITHUB_TOKEN` do not trigger ordinary push runs.
 `codex-devbox` is published in the same release, but is not a harness default.
 
 GitHub initially creates each container package as private, even when the

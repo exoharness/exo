@@ -120,34 +120,17 @@ jobs:
           path: image-digests/${{ matrix.image }}.txt
           if-no-files-found: error
 
-  update-default-images:
+  propose-default-images:
     needs: publish
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    environment: sandbox-image-pin-update
     permissions:
-      contents: read
+      actions: write
+      contents: write
+      pull-requests: write
     steps:
-      - name: Create sandbox image pinning token
-        id: image-pin-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ vars.SANDBOX_IMAGE_UPDATE_APP_ID }}
-          private-key: ${{ secrets.SANDBOX_IMAGE_UPDATE_APP_PRIVATE_KEY }}
-          permission-contents: write
-
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          token: ${{ steps.image-pin-token.outputs.token }}
-
-      - name: Ensure main still points to the released commit
-        run: |
-          git fetch origin main
-          if [ "$(git rev-parse FETCH_HEAD)" != "$GITHUB_SHA" ]; then
-            echo "main advanced during publication; rerun the release from the new main commit" >&2
-            exit 1
-          fi
 
       - name: Download published image digests
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -159,16 +142,23 @@ jobs:
       - name: Update pinned image references
         run: python3 exoharness/containers/update-default-image-digests.py image-digests
 
-      - name: Commit released image digests to main
+      - name: Open default image digest pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if git diff --quiet; then
             echo "Default image digests are already current." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          branch="sandbox-image-pins/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
           git add crates/executor/src/managed_agents/config.rs \
             crates/executor/src/managed_agents/tests.rs
           git commit -m "Pin managed agent sandbox images from release"
-          git push origin HEAD:refs/heads/main
-          echo "Updated [default image digests](https://github.com/exoharness/exo/commit/$(git rev-parse HEAD)) on main." >> "$GITHUB_STEP_SUMMARY"
+          git push origin "HEAD:refs/heads/$branch"
+          printf 'Update the default sandbox image digests from the approved [image release](https://github.com/%s/actions/runs/%s).\n\nThe published images are available now; merging this PR adopts them as Exo defaults.\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$RUNNER_TEMP/image-pin-pr.md"
+          pr_url=$(gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$branch" --title "Pin sandbox images from approved release" --body-file "$RUNNER_TEMP/image-pin-pr.md")
+          echo "Review the [default image digest PR]($pr_url) to adopt the released images." >> "$GITHUB_STEP_SUMMARY"
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$branch"
