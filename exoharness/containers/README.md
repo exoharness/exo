@@ -28,6 +28,8 @@ After publication, the workflow commits the new default-image digests to a
 dedicated branch and opens a PR. The `main` ruleset requires a review
 before those new defaults are adopted. The workflow also starts CI for the PR
 branch, since pushes made with `GITHUB_TOKEN` do not trigger ordinary push runs.
+GitHub Actions PR creation must be enabled in both the organization and
+repository settings; this job requests write permissions explicitly.
 `codex-devbox` is published in the same release, but is not a harness default.
 
 GitHub initially creates each container package as private, even when the
