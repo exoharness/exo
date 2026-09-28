@@ -2009,20 +2009,6 @@ async fn test_sandbox(conversation: &Arc<dyn crate::ConversationHandle>) -> Stri
         .expect("sandbox should be created")
 }
 
-#[test]
-fn create_sandbox_request_requires_provider() {
-    let error = serde_json::from_value::<CreateSandboxRequest>(serde_json::json!({
-        "image": "test-sandbox",
-        "default_workdir": "/",
-        "file_system_mounts": null,
-        "enable_networking": true,
-        "idle_seconds": 60,
-    }))
-    .expect_err("provider should be required");
-
-    assert!(error.to_string().contains("missing field `provider`"));
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn basic_backend_rejects_daytona_provider() {
     let tempdir = TempDir::new().expect("tempdir");

@@ -50,10 +50,10 @@ jobs:
             build_args: DEVBOX_TOOLS=true
           - image: claude-code-sandbox
             context: exoharness/containers/claude-code-sandbox
-            build_args: ''
+            build_args: ""
           - image: pi-sandbox
             context: exoharness/containers/pi-sandbox
-            build_args: ''
+            build_args: ""
 
     steps:
       - name: Check out repository
