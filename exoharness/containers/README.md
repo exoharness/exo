@@ -11,7 +11,7 @@ Container Registry:
 
 `codex-sandbox` is the small default with Codex, Node.js, git, curl, and
 ripgrep. `codex-devbox` uses the same Codex version and adds Python 3 with pip
-and venv, plus pnpm, TypeScript, and tsx. Project dependencies are installed
+and venv, jq, pnpm, TypeScript, and tsx. Project dependencies are installed
 separately.
 
 Publishing is manual. Run the workflow from the Actions tab on `main` and
