@@ -124,12 +124,14 @@ jobs:
     needs: publish
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: sandbox-image-pin-update
     permissions:
-      actions: write
-      contents: write
+      contents: read
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ssh-key: ${{ secrets.SANDBOX_IMAGE_UPDATE_SSH_KEY }}
 
       - name: Ensure main still points to the released commit
         run: |
@@ -150,8 +152,6 @@ jobs:
         run: python3 exoharness/containers/update-default-image-digests.py image-digests
 
       - name: Commit released image digests to main
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           if git diff --quiet; then
             echo "Default image digests are already current." >> "$GITHUB_STEP_SUMMARY"
@@ -164,4 +164,3 @@ jobs:
           git commit -m "Pin managed agent sandbox images from release"
           git push origin HEAD:refs/heads/main
           echo "Updated [default image digests](https://github.com/exoharness/exo/commit/$(git rev-parse HEAD)) on main." >> "$GITHUB_STEP_SUMMARY"
-          gh workflow run ci.yml --repo exoharness/exo --ref main

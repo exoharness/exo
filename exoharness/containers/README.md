@@ -25,9 +25,10 @@ Harness defaults use published `image@sha256:...` references so they keep using
 the same tested images when `latest` changes. Bundled environment examples use
 `latest` for easy setup; pin a digest in an environment for reproducibility.
 After publication, the workflow commits the new default-image digests to `main`
-and starts CI for that commit. The image release approval gates both publication
-and the subsequent pin update. If `main` changes during the build, the pin
-update stops; rerun the release from the new `main` commit.
+using a repository deploy key stored in the separately approved
+`sandbox-image-pin-update` environment. That key bypasses the `main` pull-request
+rule for this commit; the push starts CI. If `main` changes during the build,
+the pin update stops; rerun the release from the new `main` commit.
 `codex-devbox` is published in the same release, but is not a harness default.
 
 GitHub initially creates each container package as private, even when the
