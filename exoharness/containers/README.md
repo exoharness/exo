@@ -23,10 +23,11 @@ provide a `sandbox-images-vX.Y.Z` release tag. Each job prints the
 multi-platform image digest in its summary.
 Harness defaults and bundled environment definitions use the published
 `image@sha256:...` references so they keep using the same tested images when
-`latest` changes. After publication, the workflow puts updated digest pins on
-a dedicated branch and links to a compare page in the job summary. Open and
-review a PR from that branch to adopt the new images. `codex-devbox` is
-published in the same release, but is not a harness default.
+`latest` changes. After publication, the workflow commits the new digests to
+`main` and starts CI for that commit. The image release approval gates both
+publication and the subsequent pin update. If `main` changes during the build,
+the pin update stops; rerun the release from the new `main` commit.
+`codex-devbox` is published in the same release, but is not a harness default.
 
 GitHub initially creates each container package as private, even when the
 source repository is public. An organization owner must allow public packages
