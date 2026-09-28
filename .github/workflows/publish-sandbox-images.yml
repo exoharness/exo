@@ -102,3 +102,59 @@ jobs:
           IMAGE: ghcr.io/exoharness/${{ matrix.image }}
           DIGEST: ${{ steps.publish.outputs.digest }}
         run: echo "${IMAGE}@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save default image digest
+        if: matrix.image != 'codex-devbox'
+        env:
+          IMAGE: ${{ matrix.image }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          mkdir -p image-digests
+          printf '%s\n' "$DIGEST" > "image-digests/$IMAGE.txt"
+
+      - name: Upload default image digest
+        if: matrix.image != 'codex-devbox'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sandbox-image-digest-${{ matrix.image }}
+          path: image-digests/${{ matrix.image }}.txt
+          if-no-files-found: error
+
+  propose-default-images:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Download published image digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: sandbox-image-digest-*
+          path: image-digests
+          merge-multiple: true
+
+      - name: Update pinned image references
+        run: python3 exoharness/containers/update-default-image-digests.py image-digests
+
+      - name: Propose digest update branch
+        env:
+          BRANCH: sandbox-image-pins/${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          if git diff --quiet; then
+            echo "Default image digests are already current." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git add crates/executor/src/managed_agents/config.rs \
+            crates/executor/src/managed_agents/tests.rs \
+            exoharness/examples/environments/codex-smolvm.yaml \
+            exoharness/examples/environments/pi-local.yaml
+          git commit -m "Pin managed agent sandbox images from release"
+          git push origin "HEAD:refs/heads/$BRANCH"
+          echo "Review and open a PR for [the published image digest update](https://github.com/exoharness/exo/compare/main...$BRANCH?expand=1)." >> "$GITHUB_STEP_SUMMARY"
