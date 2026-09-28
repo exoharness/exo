@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 IMAGE_REFERENCES = {
-    "codex-sandbox": {
+    "codex-devbox": {
         "crates/executor/src/managed_agents/config.rs": 1,
         "crates/executor/src/managed_agents/tests.rs": 1,
     },

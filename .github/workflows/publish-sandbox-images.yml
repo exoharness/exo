@@ -45,15 +45,27 @@ jobs:
           - image: codex-sandbox
             context: exoharness/containers/codex-sandbox
             build_args: DEVBOX_TOOLS=false
+            pin_default: false
           - image: codex-devbox
             context: exoharness/containers/codex-sandbox
             build_args: DEVBOX_TOOLS=true
+            pin_default: true
           - image: claude-code-sandbox
             context: exoharness/containers/claude-code-sandbox
             build_args: ""
+            pin_default: true
+          - image: claude-code-devbox
+            context: exoharness/containers/claude-code-sandbox
+            build_args: DEVBOX_TOOLS=true
+            pin_default: false
           - image: pi-sandbox
             context: exoharness/containers/pi-sandbox
             build_args: ""
+            pin_default: true
+          - image: pi-devbox
+            context: exoharness/containers/pi-sandbox
+            build_args: DEVBOX_TOOLS=true
+            pin_default: false
 
     steps:
       - name: Check out repository
@@ -104,7 +116,7 @@ jobs:
         run: echo "${IMAGE}@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save default image digest
-        if: matrix.image != 'codex-devbox'
+        if: matrix.pin_default
         env:
           IMAGE: ${{ matrix.image }}
           DIGEST: ${{ steps.publish.outputs.digest }}
@@ -113,7 +125,7 @@ jobs:
           printf '%s\n' "$DIGEST" > "image-digests/$IMAGE.txt"
 
       - name: Upload default image digest
-        if: matrix.image != 'codex-devbox'
+        if: matrix.pin_default
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sandbox-image-digest-${{ matrix.image }}

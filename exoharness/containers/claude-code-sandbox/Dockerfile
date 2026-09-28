@@ -33,6 +33,14 @@ RUN set -eu; \
     ln -sf "${claude_bin}" /usr/local/bin/claude-code; \
     rm /tmp/claude-agent-sdk-version
 
+ARG DEVBOX_TOOLS=false
+RUN if [ "$DEVBOX_TOOLS" = true ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends gh jq python3 python3-pip python3-venv python-is-python3 \
+        && rm -rf /var/lib/apt/lists/* \
+        && npm install -g pnpm@10.26.2 typescript@5.9.3 tsx@4.21.0; \
+    fi
+
 RUN mkdir -p /home/exo/.claude /home/exo/workspace
 
 WORKDIR /home/exo/workspace

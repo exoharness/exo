@@ -56,14 +56,17 @@ name or ID in a selected vault. Set `config.base_url` for a custom endpoint.
 There is no model registration or fallback to another model. `--model` overrides
 the model name for the thread and keeps its credential and endpoint.
 
-The Codex harness uses a pinned image from `ghcr.io/exoharness/codex-sandbox`
+The Codex harness uses a pinned image from `ghcr.io/exoharness/codex-devbox`
 by default. To develop the image locally, build it and set
-`config.image: exo-codex-sandbox:latest` in an environment definition:
+`config.image: exo-codex-devbox:latest` in an environment definition:
 
 ```bash
-docker build -t exo-codex-sandbox:latest \
+docker build --build-arg DEVBOX_TOOLS=true -t exo-codex-devbox:latest \
   exoharness/containers/codex-sandbox
 ```
+
+For a smaller image without Python and TypeScript tools, use
+`ghcr.io/exoharness/codex-sandbox:latest` as the sandbox image.
 
 Exo defaults to SmolVM locally. The CLI's default `smolvm`
 Cargo feature downloads and caches a checksum-verified runtime on first use when
@@ -297,8 +300,8 @@ Exo imports matching images from the local Docker store into its private cache;
 registry images are handled by SmolVM. You do not need to export an archive.
 Building an image remains a separate step from selecting it in the environment.
 The Codex example at `exoharness/examples/environments/codex-smolvm.yaml` uses
-the published `ghcr.io/exoharness/codex-sandbox:latest`. To use a locally built
-image instead, change its `config.image` to `exo-codex-sandbox:latest`.
+the published `ghcr.io/exoharness/codex-devbox:latest`. To use a locally built
+image instead, change its `config.image` to `exo-codex-devbox:latest`.
 Definitions forward the existing sandbox settings: `provider`, `image`,
 `resources`, `default_workdir`, `file_system_mounts`, `durable_file_systems`, `policy`,
 `enable_networking`, and `idle_seconds`. `policy.networking` takes precedence over

@@ -34,7 +34,7 @@ impl TypeScriptHarnessPreset {
     pub fn sandbox_image(self) -> Option<&'static str> {
         match self {
             Self::Codex => Some(
-                "ghcr.io/exoharness/codex-sandbox@sha256:84885e277d22185a98dbf7be4c2bc1d743790908c39011a007efcac07fa04ae0",
+                "ghcr.io/exoharness/codex-devbox@sha256:0bee2fca5b3938c82ac3e9932f2a4e58de4571a56ea32a974e95c2a9fad8ea2c",
             ),
             Self::ClaudeCode => Some(
                 "ghcr.io/exoharness/claude-code-sandbox@sha256:97c5e2bc51263b0c5d4203b9c58c414b785554370615f4b42aade5458f45ff51",

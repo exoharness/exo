@@ -7,12 +7,15 @@ Container Registry:
 - `ghcr.io/exoharness/codex-sandbox`
 - `ghcr.io/exoharness/codex-devbox`
 - `ghcr.io/exoharness/claude-code-sandbox`
+- `ghcr.io/exoharness/claude-code-devbox`
 - `ghcr.io/exoharness/pi-sandbox`
+- `ghcr.io/exoharness/pi-devbox`
 
-`codex-sandbox` is the small default with Codex, Node.js, git, curl, and
-ripgrep. `codex-devbox` uses the same Codex version and adds Python 3 with pip
-and venv, jq, pnpm, TypeScript, and tsx. Project dependencies are installed
-separately.
+`codex-devbox` is the Codex harness default. Each devbox includes its harness,
+Node.js, git, gh, curl, ripgrep, Python 3 with pip and venv, jq, pnpm, TypeScript,
+and tsx. The corresponding `-sandbox` images omit the extra development tools.
+Project dependencies are installed separately. Claude Code and Pi switch to
+their devbox defaults after the new images have been released and pinned.
 
 Publishing is manual. Run the workflow from the Actions tab on `main` and
 approve its `sandbox-image-publish` environment before any image is pushed.
@@ -30,7 +33,6 @@ before those new defaults are adopted. The workflow also starts CI for the PR
 branch, since pushes made with `GITHUB_TOKEN` do not trigger ordinary push runs.
 GitHub Actions PR creation must be enabled in both the organization and
 repository settings; this job requests write permissions explicitly.
-`codex-devbox` is published in the same release, but is not a harness default.
 
 GitHub initially creates each container package as private, even when the
 source repository is public. An organization owner must allow public packages
@@ -44,7 +46,9 @@ For local development, build the images directly:
 docker build -t exo-codex-sandbox:latest exoharness/containers/codex-sandbox
 docker build --build-arg DEVBOX_TOOLS=true -t exo-codex-devbox:latest exoharness/containers/codex-sandbox
 docker build -t exo-claude-code-sandbox:latest exoharness/containers/claude-code-sandbox
+docker build --build-arg DEVBOX_TOOLS=true -t exo-claude-code-devbox:latest exoharness/containers/claude-code-sandbox
 docker build -t exo-pi-sandbox:latest exoharness/containers/pi-sandbox
+docker build --build-arg DEVBOX_TOOLS=true -t exo-pi-devbox:latest exoharness/containers/pi-sandbox
 ```
 
 Store the model key in Exo's vault, then reference its secret name in the agent
