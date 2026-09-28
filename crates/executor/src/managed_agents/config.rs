@@ -34,14 +34,14 @@ impl TypeScriptHarnessPreset {
     pub fn sandbox_image(self) -> Option<&'static str> {
         match self {
             Self::Codex => Some(
-                "ghcr.io/exoharness/codex-sandbox@sha256:201aef9e3adf1efbee0f8856148818e2779030f6ca8b95397670e01bfe2cd48d",
+                "ghcr.io/exoharness/codex-sandbox@sha256:84885e277d22185a98dbf7be4c2bc1d743790908c39011a007efcac07fa04ae0",
             ),
             Self::ClaudeCode => Some(
-                "ghcr.io/exoharness/claude-code-sandbox@sha256:3451281c17e3a335ff3745c3d1bf49048fa461ecba956cfdf93d0b879014f774",
+                "ghcr.io/exoharness/claude-code-sandbox@sha256:97c5e2bc51263b0c5d4203b9c58c414b785554370615f4b42aade5458f45ff51",
             ),
             Self::Cursor => Some("exo-cursor-sdk-sandbox:latest"),
             Self::Pi => Some(
-                "ghcr.io/exoharness/pi-sandbox@sha256:9dbf102f027510a44c7f45db9b5a845baab0381dfcc26a180a0bb81c1f6f0970",
+                "ghcr.io/exoharness/pi-sandbox@sha256:cbaeb3efa65bf945bf3e62025f02f194cde472a35fe4b723fe925fe73f6ae750",
             ),
         }
     }

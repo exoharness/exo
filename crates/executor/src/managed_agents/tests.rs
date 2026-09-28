@@ -17,7 +17,7 @@ fn sandbox_provider_keeps_the_harness_preset_image() -> Result<()> {
     assert_eq!(
         config.sandbox.image.as_deref(),
         Some(
-            "ghcr.io/exoharness/codex-sandbox@sha256:201aef9e3adf1efbee0f8856148818e2779030f6ca8b95397670e01bfe2cd48d"
+            "ghcr.io/exoharness/codex-sandbox@sha256:84885e277d22185a98dbf7be4c2bc1d743790908c39011a007efcac07fa04ae0"
         )
     );
     assert!(config.sandbox.enable_networking);
