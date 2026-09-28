@@ -11,11 +11,10 @@ Container Registry:
 - `ghcr.io/exoharness/pi-sandbox`
 - `ghcr.io/exoharness/pi-devbox`
 
-`codex-devbox` is the Codex harness default. Each devbox includes its harness,
+The three devboxes are the managed coding harness defaults. Each includes its harness,
 Node.js, git, gh, curl, ripgrep, Python 3 with pip and venv, jq, pnpm, TypeScript,
 and tsx. The corresponding `-sandbox` images omit the extra development tools.
-Project dependencies are installed separately. Claude Code and Pi switch to
-their devbox defaults after the new images have been released and pinned.
+Project dependencies are installed separately.
 
 Publishing is manual. Run the workflow from the Actions tab on `main` and
 approve its `sandbox-image-publish` environment before any image is pushed.

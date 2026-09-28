@@ -11,10 +11,10 @@ IMAGE_REFERENCES = {
         "crates/executor/src/managed_agents/config.rs": 1,
         "crates/executor/src/managed_agents/tests.rs": 1,
     },
-    "claude-code-sandbox": {
+    "claude-code-devbox": {
         "crates/executor/src/managed_agents/config.rs": 1,
     },
-    "pi-sandbox": {
+    "pi-devbox": {
         "crates/executor/src/managed_agents/config.rs": 1,
     },
 }

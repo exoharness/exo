@@ -53,19 +53,19 @@ jobs:
           - image: claude-code-sandbox
             context: exoharness/containers/claude-code-sandbox
             build_args: ""
-            pin_default: true
+            pin_default: false
           - image: claude-code-devbox
             context: exoharness/containers/claude-code-sandbox
             build_args: DEVBOX_TOOLS=true
-            pin_default: false
+            pin_default: true
           - image: pi-sandbox
             context: exoharness/containers/pi-sandbox
             build_args: ""
-            pin_default: true
+            pin_default: false
           - image: pi-devbox
             context: exoharness/containers/pi-sandbox
             build_args: DEVBOX_TOOLS=true
-            pin_default: false
+            pin_default: true
 
     steps:
       - name: Check out repository
