@@ -4,6 +4,7 @@ use std::{
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
     process::{Command, Output},
+    time::Instant,
 };
 
 use anyhow::{Context, Result, bail, ensure};
@@ -109,7 +110,9 @@ impl ResourceStore {
             "resource credentials are incomplete"
         );
         self.initialize()?;
+        let lock_started = Instant::now();
         let _lock = self.lock(&thread.to_string())?;
+        resource_timing(&thread.to_string(), "thread lock", lock_started);
         let directory = self.thread_directory(agent, thread);
         let manifest = directory.join("resources.json");
         let instances: Vec<Instance> = if manifest.exists() {
@@ -139,6 +142,7 @@ impl ResourceStore {
             for (prepared, credential) in resources.into_iter().zip(credentials) {
                 let target = staging.path().join(&prepared.definition.name);
                 fs::create_dir(&target)?;
+                let clone_started = Instant::now();
                 let (snapshot, revision) = match &prepared.snapshot {
                     Some(snapshot) => {
                         validate_key(snapshot)?;
@@ -149,6 +153,11 @@ impl ResourceStore {
                         self.clone_git_resource(&prepared.definition, credential.as_ref(), &target)?
                     }
                 };
+                resource_timing(
+                    &prepared.definition.name,
+                    "thread resource preparation",
+                    clone_started,
+                );
                 instances.push(Instance {
                     prepared,
                     snapshot,
@@ -171,7 +180,10 @@ impl ResourceStore {
                     resource.clone()
                 } else {
                     tracing::info!(target: "exoharness::progress", "Mounting resource {}", definition.name);
-                    self.mount_volume(&resource)?
+                    let mount_started = Instant::now();
+                    let path = self.mount_volume(&resource)?;
+                    resource_timing(&definition.name, "thread image attach", mount_started);
+                    path
                 };
                 Ok(FileSystemMount {
                     host_path: path.to_string_lossy().into_owned(),
@@ -356,7 +368,9 @@ impl ResourceStore {
             checkout,
             credential.map(|c| &c.identity),
         ))?);
+        let lock_started = Instant::now();
         let _lock = self.lock(&key)?;
+        resource_timing(&definition.name, "Git cache lock", lock_started);
         let cache = self.root.join("git").join(&key);
         if !cache.exists() {
             let parent = cache.parent().context("Git cache parent")?;
@@ -366,13 +380,16 @@ impl ResourceStore {
             fs::rename(staging.path(), &cache)?;
         }
         tracing::info!(target: "exoharness::progress", "Mounting Git cache for {}", definition.name);
+        let mount_started = Instant::now();
         let workspace = self.mount_volume(&cache)?;
+        resource_timing(&definition.name, "Git cache image attach", mount_started);
         let updated = (|| {
             if !workspace.join(".git").exists() {
                 git(&workspace, ["init"], None)?;
                 git(&workspace, ["remote", "add", "origin", url], None)?;
             }
             tracing::info!(target: "exoharness::progress", "Fetching Git resource {}", definition.name);
+            let fetch_started = Instant::now();
             git(
                 &workspace,
                 [
@@ -385,15 +402,22 @@ impl ResourceStore {
                 ],
                 credential,
             )?;
+            resource_timing(&definition.name, "Git fetch", fetch_started);
             let branch = match checkout {
                 Some(GitCheckout::Branch { name }) => Some(name.clone()),
                 Some(GitCheckout::Commit { .. }) => None,
                 None => {
+                    let resolve_started = Instant::now();
                     let refs = git(
                         &workspace,
                         ["ls-remote", "--symref", "origin", "HEAD"],
                         credential,
                     )?;
+                    resource_timing(
+                        &definition.name,
+                        "Git default branch lookup",
+                        resolve_started,
+                    );
                     Some(
                         refs.lines()
                             .find_map(|line| {
@@ -417,6 +441,7 @@ impl ResourceStore {
             )?
             .trim()
             .to_owned();
+            let checkout_started = Instant::now();
             if let Some(name) = branch {
                 git(
                     &workspace,
@@ -444,16 +469,32 @@ impl ResourceStore {
                     None,
                 )?;
             }
+            resource_timing(&definition.name, "Git checkout", checkout_started);
             Ok::<_, anyhow::Error>(revision)
         })();
         let updated = updated.and_then(|revision| {
+            let ownership_started = Instant::now();
             self.prepare_ownership(&workspace)?;
+            resource_timing(&definition.name, "Git ownership", ownership_started);
             Ok(revision)
         });
+        let detach_started = Instant::now();
         self.unmount_volume(&cache)?;
+        resource_timing(&definition.name, "Git cache image detach", detach_started);
         let revision = updated?;
+        let clone_started = Instant::now();
         self.clone_volume(&cache, target)?;
+        resource_timing(&definition.name, "copy-on-write clone", clone_started);
         Ok((key, Some(revision)))
+    }
+}
+
+fn resource_timing(name: &str, stage: &str, started: Instant) {
+    if std::env::var_os("EXO_RESOURCE_TIMING").is_some() {
+        eprintln!(
+            "[exo resource timing] {name}: {stage}: {:.3}s",
+            started.elapsed().as_secs_f64()
+        );
     }
 }
 

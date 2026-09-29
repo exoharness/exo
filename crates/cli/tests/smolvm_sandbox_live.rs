@@ -713,11 +713,13 @@ async fn smolvm_image_cache_is_shared_read_only_and_threads_are_private() -> any
         return Ok(());
     };
     let _shared = vm_gate().await.read().await;
-    let cache = tempfile::tempdir()?;
+    let current_dir = std::env::current_dir()?;
+    let cache = tempfile::tempdir_in(&current_dir)?;
+    let relative_cache = cache.path().strip_prefix(&current_dir)?.to_path_buf();
     let workspace = tempfile::tempdir()?;
     let config = SmolvmBackendConfig {
         mode: SmolvmExecutionMode::Warm,
-        image_cache: Some(cache.path().to_path_buf()),
+        image_cache: Some(relative_cache),
         ..Default::default()
     };
     let backend = SmolvmSandboxBackend::from_config(config.clone());

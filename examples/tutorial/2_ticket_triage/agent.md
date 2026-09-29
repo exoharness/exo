@@ -10,7 +10,11 @@ resources:
     url: https://github.com/braintrustdata/autoevals
 ---
 
-You receive support tickets and if it's a technical issue, try to reproduce
-it. Produce a well-written response describing whether or not it repros, and
-if so, a minimal test. If possible, provide a workaround that solves the issue
-in the interim. Also try to fix the issue, test the fix, and provide a patch.
+For each support ticket, determine whether it describes a technical issue.
+If it does:
+
+- Try to reproduce the issue.
+- Clearly explain whether you were able to reproduce it.
+- If reproduced, provide a minimal test case.
+- When possible, suggest a temporary workaround.
+- Attempt to fix the underlying issue, test the fix, and provide a patch.
