@@ -982,8 +982,21 @@ describe("agent tool loading", () => {
 
       const context = fakeTurnContext();
       const registry = createToolRegistry(context);
-      await registerAgentToolsFromDirectoryIfExists(registry, context);
+      const errors: string[] = [];
+      const errorLog = vi
+        .spyOn(console, "error")
+        .mockImplementation((message: unknown) => {
+          errors.push(String(message));
+        });
+      try {
+        await registerAgentToolsFromDirectoryIfExists(registry, context);
+      } finally {
+        errorLog.mockRestore();
+      }
 
+      expect(errors).toHaveLength(2);
+      expect(errors[0]).toContain("a-broken.ts");
+      expect(errors[1]).toContain("tool is already registered: reverse_text");
       expect(registry.get("reverse_text")?.source).toBe("agent");
       await expect(
         registry.executePending([
