@@ -259,10 +259,6 @@ impl SmolvmSandboxBackend {
                     binary.display(),
                     String::from_utf8_lossy(&output.stderr).trim()
                 );
-                if self.binary_override.is_none() {
-                    ensure!(probe_flag_at(&binary, "machine", "start", INTERCEPTOR_FLAG).await,
-                        "automatically provisioned SmolVM at {} lacks {INTERCEPTOR_FLAG}; use SmolVM 1.19.0 or newer", binary.display());
-                }
                 Ok(binary)
             })
             .await
@@ -306,6 +302,45 @@ impl SmolvmSandboxBackend {
             return false;
         };
         probe_flag_at(binary, group, subcommand, flag).await
+    }
+
+    /// Check request-specific CLI requirements once, before preparing an image
+    /// or creating a machine. The default binary probe above only selects which
+    /// runtime to use; it does not decide which features a request needs.
+    async fn require_capabilities(&self, request: &SandboxRequest) -> Result<()> {
+        let protected = request.spec.policy.requires_proxy();
+        let limited = matches!(
+            request.spec.policy.networking,
+            SandboxNetworkPolicy::Limited { .. }
+        );
+        if protected {
+            ensure!(
+                request.lifecycle.idle_ttl.is_some() && self.mode != SmolvmExecutionMode::OneShot,
+                "smolvm proxy egress requires a managed warm sandbox"
+            );
+        }
+        if !protected && request.spec.tcp_ports.is_empty() {
+            return Ok(());
+        }
+
+        let caps = self.capabilities().await?;
+        let mut missing = Vec::new();
+        if protected && !caps.interceptor {
+            missing.push(INTERCEPTOR_FLAG);
+        }
+        if limited && !caps.host_patterns {
+            missing.push(HOST_PATTERN_FLAG);
+        }
+        if (limited || !request.spec.tcp_ports.is_empty()) && !caps.labels {
+            missing.push(LABEL_FLAG);
+        }
+        ensure!(
+            missing.is_empty(),
+            "{} lacks SmolVM flags required by this sandbox: {}; update SmolVM or select a compatible build with `exo environment provider create --backend smolvm --smolvm-binary <path>`",
+            self.binary().await?.display(),
+            missing.join(", ")
+        );
+        Ok(())
     }
 
     /// The mode this request will actually run under: `idle_ttl` decides, and
@@ -377,10 +412,6 @@ impl SmolvmSandboxBackend {
         configure_spec_args(&mut create, spec)?;
         let exact_host_policy = exact_host_policy_fingerprint(&spec.policy.networking)?;
         if let Some(policy) = &exact_host_policy {
-            ensure!(
-                self.labels_supported().await,
-                "smolvm exact-host limited networking requires machine labels"
-            );
             create
                 .arg(LABEL_FLAG)
                 .arg(format!("{EXACT_HOST_POLICY_LABEL}={policy}"));
@@ -482,10 +513,6 @@ impl SmolvmSandboxBackend {
         if spec.tcp_ports.is_empty() {
             return Ok((BTreeMap::new(), Vec::new()));
         }
-        ensure!(
-            self.labels_supported().await,
-            "smolvm TCP forwarding requires machine labels"
-        );
         let mut host_ports = BTreeMap::new();
         let mut reservations = Vec::with_capacity(spec.tcp_ports.len());
         for &guest_port in &spec.tcp_ports {
@@ -707,32 +734,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
     }
 
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        let protected = request.spec.policy.requires_proxy();
-        if protected {
-            ensure!(
-                request.lifecycle.idle_ttl.is_some() && self.mode != SmolvmExecutionMode::OneShot,
-                "smolvm proxy egress requires a managed warm sandbox"
-            );
-            ensure!(
-                self.capabilities().await?.interceptor,
-                "{} lacks --egress-interceptor support required for credential proxying; select a compatible build with `exo environment provider create --backend smolvm --smolvm-binary <path>`",
-                self.binary().await?.display()
-            );
-            if matches!(
-                request.spec.policy.networking,
-                SandboxNetworkPolicy::Limited { .. }
-            ) {
-                ensure!(
-                    self.capabilities().await?.host_patterns,
-                    "{} lacks {HOST_PATTERN_FLAG} support required for exact-host limited networking; use SmolVM 1.20.0 or newer",
-                    self.binary().await?.display()
-                );
-                ensure!(
-                    self.capabilities().await?.labels,
-                    "smolvm exact-host limited networking requires machine labels"
-                );
-            }
-        }
+        self.require_capabilities(&request).await?;
         let binary = self.binary().await?;
         if self.resolve_mode(&request).await != SmolvmExecutionMode::Warm {
             ensure!(
@@ -814,6 +816,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
                 payload.format
             );
         }
+        self.require_capabilities(&request).await?;
         let binary = self.binary().await?;
         if self.resolve_mode(&request).await != SmolvmExecutionMode::Warm {
             bail!(
@@ -1655,8 +1658,7 @@ esac"#,
 
     #[tokio::test]
     #[cfg(unix)]
-    async fn limited_networking_requires_exact_host_support_before_preparing_images() -> Result<()>
-    {
+    async fn limited_networking_reports_missing_flags_before_preparing_images() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let binary = dir.path().join("smolvm");
         write_test_binary(
@@ -1664,7 +1666,7 @@ esac"#,
             r#"case "$*" in
 --version) printf 'smolvm 1.19.0\n';;
 'machine start --help') printf '%s\n' '--egress-interceptor <ADDR>';;
-'machine create --help') printf '%s\n' '--label';;
+'machine create --help') exit 0;;
 *) exit 23;;
 esac"#,
         );
@@ -1680,7 +1682,7 @@ esac"#,
         request.spec.image = "/nonexistent/image.tar".into();
         let error = backend.acquire(request).await.err().unwrap().to_string();
         assert!(error.contains(HOST_PATTERN_FLAG), "{error}");
-        assert!(error.contains("1.20.0"), "{error}");
+        assert!(error.contains(LABEL_FLAG), "{error}");
         assert!(!dir.path().join("cache").exists());
         Ok(())
     }
@@ -1892,20 +1894,26 @@ esac"#,
             let cached = root.join("cache").join(format!("smolvm-1.20.0-{platform}"));
             let binary = cached.join("smolvm");
             write_test_binary(&binary, "printf 'smolvm 1.20.0\\n'");
-            assert!(
-                backend
-                    .binary()
-                    .await
-                    .unwrap_err()
-                    .to_string()
-                    .contains(INTERCEPTOR_FLAG)
-            );
+            assert_eq!(backend.binary().await.unwrap(), &binary);
+            let mut request = test_request(Some(Duration::from_secs(60)));
+            request.spec.policy.networking = SandboxNetworkPolicy::Limited {
+                allowed_hosts: vec!["api.test".into()],
+            };
+            let error = backend
+                .require_capabilities(&request)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(INTERCEPTOR_FLAG), "{error}");
+            assert!(error.contains(HOST_PATTERN_FLAG), "{error}");
+            assert!(error.contains(LABEL_FLAG), "{error}");
             write_test_binary(&root.join("bin/smolvm"), "printf 'smolvm 1.16.2\\n'");
             write_test_binary(
                 &binary,
                 "case \"$*\" in --version) echo 'smolvm 1.20.0';; 'machine start --help') echo '--egress-interceptor <ADDR>';; 'machine create --help') echo '--allow-host-pattern <PATTERN>';; esac",
             );
             write_test_binary(&cached.join("smolvm-bin"), "exit 0");
+            let backend = SmolvmSandboxBackend::new();
             assert_eq!(backend.binary().await.unwrap(), &binary);
             assert!(backend.warm_supported().await);
             assert_eq!(
