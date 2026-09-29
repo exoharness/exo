@@ -21,6 +21,7 @@ use exoharness::{
     SandboxProvider, SandboxRequest, SandboxSpec, SmolvmExecutionMode, SmolvmSandboxBackend,
 };
 use futures::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt as TokioAsyncReadExt, AsyncWriteExt};
 use tokio::sync::{OnceCell, RwLock};
 
 /// Serialises the one test that counts *host-wide* VM processes against every
@@ -90,6 +91,7 @@ fn request(
             agent_id: exoharness::Uuid7::now(),
         },
         spec: SandboxSpec {
+            tcp_ports: vec![],
             image,
             resources: Default::default(),
             mounts: vec![SandboxMount {
@@ -132,6 +134,67 @@ fn command(argv: &[&str]) -> SandboxCommand {
         cwd: None,
         timeout: Some(Duration::from_secs(120)),
     }
+}
+
+#[tokio::test]
+#[ignore]
+async fn published_tcp_ports_connect_to_guest() -> anyhow::Result<()> {
+    let Some(image) = test_image() else {
+        return Ok(());
+    };
+    if !smolvm_installed() {
+        return Ok(());
+    }
+    let workspace = tempfile::tempdir()?;
+    let mut sandbox = request(
+        image,
+        workspace.path(),
+        SandboxNetworkPolicy::Disabled,
+        "exo-smolvm-live-tcp",
+        Some(Duration::from_secs(60)),
+    );
+    sandbox.spec.tcp_ports = vec![25_011, 25_012];
+    let backend = SmolvmSandboxBackend::with_mode(SmolvmExecutionMode::Warm);
+    let handle = backend.acquire(sandbox).await?;
+    let result = async {
+        let _process = handle
+            .start_process(&command(&[
+                "node",
+                "-e",
+                "for(const port of [25011,25012]) require('net').createServer(s=>s.on('data',d=>s.write(d))).listen(port,'0.0.0.0')",
+            ]))
+            .await?;
+        for port in [25_011, 25_012] {
+            let mut last_error = None;
+            for _ in 0..50 {
+                let attempt = async {
+                    let mut stream = handle
+                        .connect_tcp(port)
+                        .await?
+                        .ok_or_else(|| anyhow::anyhow!("TCP forwarding unavailable"))?;
+                    stream.write_all(b"ping").await?;
+                    let mut response = [0; 4];
+                    TokioAsyncReadExt::read_exact(&mut stream, &mut response).await?;
+                    anyhow::ensure!(&response == b"ping", "unexpected guest TCP response");
+                    Ok::<_, anyhow::Error>(())
+                }
+                .await;
+                if attempt.is_ok() {
+                    last_error = None;
+                    break;
+                }
+                last_error = attempt.err();
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            if let Some(error) = last_error {
+                anyhow::bail!("smolvm guest TCP listener on {port} did not become reachable: {error}");
+            }
+        }
+        Ok(())
+    }
+    .await;
+    cleanup(&handle).await;
+    result
 }
 
 /// The whole point: the workload runs behind a hypervisor with its own kernel.
@@ -481,7 +544,7 @@ async fn abandoned_machines_are_reaped_by_a_later_backend() {
     );
     assert!(machine_names().contains(&orphan.to_string()));
 
-    // Any acquire runs the sweep.
+    // Any acquire schedules the sweep without waiting for machine deletion.
     let live = backend
         .acquire(request(
             image,
@@ -493,15 +556,13 @@ async fn abandoned_machines_are_reaped_by_a_later_backend() {
         .await
         .expect("acquire sweeper sandbox");
 
-    let remaining = machine_names();
-    println!(
-        "orphan present after sweep: {}",
-        remaining.contains(&orphan.to_string())
-    );
-    assert!(
-        !remaining.contains(&orphan.to_string()),
-        "abandoned machine survived the sweep"
-    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while machine_names().contains(&orphan.to_string()) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("abandoned machine survived the sweep");
 
     cleanup(&live).await;
 }

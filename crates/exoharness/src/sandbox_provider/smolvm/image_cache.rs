@@ -1,10 +1,13 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, ensure};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::local_volume::{create_volume, mount_read_only, mount_volume, unmount_volume};
@@ -33,19 +36,24 @@ pub(super) fn prepare(
     cache: &Path,
     image: &str,
 ) -> Result<Option<PathBuf>> {
-    let archive = if super::is_local_image_ref(image) {
+    let docker_image = if super::is_local_image_ref(image) {
         None
     } else {
         docker_archive(cache, image)?
     };
-    let image = match &archive {
-        Some(path) => path
-            .to_str()
-            .context("SmolVM image cache path must be UTF-8")?,
-        None => image,
-    };
-    let Some((digest, compressed)) = archive_key(image)? else {
-        return Ok(None);
+    let (image, digest, compressed, verify_digest) = match docker_image {
+        Some((archive, docker_digest)) => (archive, format!("docker-{docker_digest}"), false, None),
+        None => {
+            let Some((digest, compressed)) = archive_key(image, cache)? else {
+                return Ok(None);
+            };
+            (
+                PathBuf::from(image),
+                digest.clone(),
+                compressed,
+                Some(digest),
+            )
+        }
     };
     fs::create_dir_all(cache)?;
     fs::set_permissions(cache, fs::Permissions::from_mode(0o700))?;
@@ -69,7 +77,7 @@ pub(super) fn prepare(
         let archive = source.join("image.tar");
         let copied = Command::new("cp")
             .arg("-c")
-            .arg(Path::new(image).canonicalize()?)
+            .arg(image.canonicalize()?)
             .arg(&archive)
             .output()
             .context("snapshotting image archive")?;
@@ -78,10 +86,12 @@ pub(super) fn prepare(
             "snapshotting image archive: {}",
             String::from_utf8_lossy(&copied.stderr).trim()
         );
-        ensure!(
-            hash_file(&archive)? == digest,
-            "image archive changed while preparing it; retry"
-        );
+        if let Some(verify_digest) = verify_digest {
+            ensure!(
+                hash_file(&archive)? == verify_digest,
+                "image archive changed while preparing it; retry"
+            );
+        }
 
         create_volume(staging.path())?;
         let result = (|| {
@@ -136,7 +146,7 @@ pub(super) fn prepare(
     mount_read_only(&destination).map(Some)
 }
 
-fn docker_archive(cache: &Path, image: &str) -> Result<Option<PathBuf>> {
+fn docker_archive(cache: &Path, image: &str) -> Result<Option<(PathBuf, String)>> {
     let output = match Command::new("docker")
         .args(["image", "inspect", "--format", "{{.Id}}", image])
         .output()
@@ -183,17 +193,70 @@ fn docker_archive(cache: &Path, image: &str) -> Result<Option<PathBuf>> {
         );
         staging.persist(&archive)?;
     }
-    Ok(Some(archive))
+    Ok(Some((archive, digest.to_string())))
 }
 
-fn archive_key(image: &str) -> Result<Option<(String, bool)>> {
+#[derive(Deserialize, Serialize, PartialEq, Eq)]
+struct ArchiveIdentity {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified_seconds: i64,
+    modified_nanos: i64,
+    changed_seconds: i64,
+    changed_nanos: i64,
+}
+
+impl ArchiveIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.len(),
+            modified_seconds: metadata.mtime(),
+            modified_nanos: metadata.mtime_nsec(),
+            changed_seconds: metadata.ctime(),
+            changed_nanos: metadata.ctime_nsec(),
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+struct ArchiveKeyMemo {
+    identity: ArchiveIdentity,
+    digest: String,
+    compressed: bool,
+}
+
+fn archive_key(image: &str, cache: &Path) -> Result<Option<(String, bool)>> {
     if !(image.ends_with(".tar") || image.ends_with(".tar.gz") || image.ends_with(".tgz"))
         || Path::new(image).is_dir()
     {
         return Ok(None);
     }
+    fs::create_dir_all(cache)?;
+    fs::set_permissions(cache, fs::Permissions::from_mode(0o700))?;
+    let canonical = Path::new(image).canonicalize()?;
+    let path_digest = format!("{:x}", Sha256::digest(canonical.as_os_str().as_bytes()));
+    let memo_path = cache.join(format!("archive-key-{path_digest}.json"));
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(cache.join(format!("archive-key-{path_digest}.lock")))?;
+    lock.lock()?;
     let mut file = File::open(image).with_context(|| format!("opening image archive {image}"))?;
-    ensure!(file.metadata()?.is_file(), "image archive must be a file");
+    let metadata = file.metadata()?;
+    ensure!(metadata.is_file(), "image archive must be a file");
+    let identity = ArchiveIdentity::from_metadata(&metadata);
+    if let Ok(contents) = fs::read(&memo_path)
+        && let Ok(memo) = serde_json::from_slice::<ArchiveKeyMemo>(&contents)
+        && memo.identity == identity
+        && identity == ArchiveIdentity::from_metadata(&file.metadata()?)
+    {
+        return Ok(Some((memo.digest, memo.compressed)));
+    }
     let mut header = [0u8; 4];
     file.read_exact(&mut header)
         .context("reading image archive header")?;
@@ -202,7 +265,19 @@ fn archive_key(image: &str) -> Result<Option<(String, bool)>> {
         return Ok(None);
     }
     file.rewind()?;
-    Ok(Some((hash(&mut file)?, header.starts_with(&[0x1f, 0x8b]))))
+    let memo = ArchiveKeyMemo {
+        identity,
+        digest: hash(&mut file)?,
+        compressed: header.starts_with(&[0x1f, 0x8b]),
+    };
+    ensure!(
+        memo.identity == ArchiveIdentity::from_metadata(&file.metadata()?),
+        "image archive changed while hashing it; retry"
+    );
+    let staging = tempfile::NamedTempFile::new_in(cache)?;
+    serde_json::to_writer(&staging, &memo)?;
+    staging.persist(&memo_path)?;
+    Ok(Some((memo.digest, memo.compressed)))
 }
 
 fn hash_file(path: &Path) -> Result<String> {
@@ -233,18 +308,36 @@ mod tests {
         let second = dir.path().join("second.tgz");
         fs::write(&first, b"first image").unwrap();
         fs::write(&second, b"first image").unwrap();
-        let original = archive_key(first.to_str().unwrap()).unwrap();
-        assert_eq!(original, archive_key(second.to_str().unwrap()).unwrap());
+        let original = archive_key(first.to_str().unwrap(), dir.path()).unwrap();
+        assert_eq!(
+            original,
+            archive_key(second.to_str().unwrap(), dir.path()).unwrap()
+        );
+        assert_eq!(
+            original,
+            archive_key(first.to_str().unwrap(), dir.path()).unwrap()
+        );
         fs::write(&first, b"other image").unwrap();
-        assert_ne!(original, archive_key(first.to_str().unwrap()).unwrap());
+        assert_ne!(
+            original,
+            archive_key(first.to_str().unwrap(), dir.path()).unwrap()
+        );
     }
 
     #[test]
     fn directories_and_registry_images_pass_through() {
-        assert!(archive_key("alpine:latest").unwrap().is_none());
-        assert!(archive_key("-").unwrap().is_none());
+        assert!(
+            archive_key("alpine:latest", Path::new("."))
+                .unwrap()
+                .is_none()
+        );
+        assert!(archive_key("-", Path::new(".")).unwrap().is_none());
         let dir = tempfile::Builder::new().suffix(".tar").tempdir().unwrap();
-        assert!(archive_key(dir.path().to_str().unwrap()).unwrap().is_none());
+        assert!(
+            archive_key(dir.path().to_str().unwrap(), dir.path())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -265,10 +358,18 @@ mod tests {
             "{error:#}"
         );
         let entries = fs::read_dir(&cache)?.collect::<std::io::Result<Vec<_>>>()?;
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].path().extension().unwrap(), "lock");
-        let lock = File::open(entries[0].path())?;
-        lock.try_lock()?;
+        assert!(entries.iter().all(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|ext| ext == "lock" || ext == "json")
+        }));
+        for entry in entries
+            .iter()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "lock"))
+        {
+            File::open(entry.path())?.try_lock()?;
+        }
         Ok(())
     }
 }
