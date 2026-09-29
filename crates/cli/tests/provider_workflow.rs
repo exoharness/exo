@@ -844,10 +844,27 @@ async fn local_and_http_providers_configure_named_harnesses() -> Result<()> {
     let f = Fixture::new().await?;
     for provider in ["local", "remote"] {
         f.cli(&["provider", "switch", provider]).await?;
+        f.cli(&[
+            "vault",
+            "secret",
+            "update",
+            "global",
+            "model-key",
+            "--allow-origin",
+            &f.model.uri(),
+            "--allow-origin",
+            "https://api.openai.com",
+            "--allow-origin",
+            "https://api.anthropic.com",
+        ])
+        .await?;
         for harness in ["rlm", "codex", "claude-code", "cursor", "pi"] {
-            let source = f
+            let mut source = f
                 .source()
                 .replace("harness: basic", &format!("harness: {harness}"));
+            if harness != "rlm" {
+                source = source.replace(&format!("  base_url: {}\n", f.model.uri()), "");
+            }
             std::fs::write(&f.agent_file, &source)?;
             let name = format!("{provider}-{harness}");
             f.cli(&[
