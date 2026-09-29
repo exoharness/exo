@@ -117,6 +117,16 @@ async fn unsupported_native_approvals_fail_before_model_execution() -> Result<()
     for provider in ["local", "remote"] {
         let f = Fixture::new().await?;
         f.cli(&["provider", "switch", provider]).await?;
+        f.cli(&[
+            "vault",
+            "secret",
+            "update",
+            "global",
+            "model-key",
+            "--allow-origin",
+            "https://api.openai.com",
+        ])
+        .await?;
         for (harness, policy, expected) in [
             (
                 "codex",
@@ -142,7 +152,8 @@ async fn unsupported_native_approvals_fail_before_model_execution() -> Result<()
             std::fs::write(
                 &f.agent_file,
                 f.source()
-                    .replace("harness: basic", &format!("harness: {harness}\n{policy}")),
+                    .replace("harness: basic", &format!("harness: {harness}\n{policy}"))
+                    .replace(&format!("  base_url: {}\n", f.model.uri()), ""),
             )?;
             let output = f
                 .output(
