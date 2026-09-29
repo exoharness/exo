@@ -8,6 +8,7 @@ use crate::FileSystemMountMode;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResourceDefinition {
     pub name: String,
+    #[serde(default)]
     pub mount_path: String,
     #[serde(default = "writable")]
     pub mode: FileSystemMountMode,
@@ -69,6 +70,12 @@ fn writable() -> FileSystemMountMode {
 }
 
 impl ResourceDefinition {
+    pub fn apply_mount_path_default(&mut self) {
+        if self.mount_path.is_empty() {
+            self.mount_path = format!("/workspace/{}", self.name);
+        }
+    }
+
     pub fn git_credential_variable(&self) -> String {
         let name: String = self
             .name

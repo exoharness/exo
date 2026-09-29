@@ -11,7 +11,6 @@ resources:
     type: git_repository
     url: https://github.com/exoharness/exo
     checkout: { type: branch, name: main }
-    mount_path: /workspace
   - name: fixtures
     type: directory
     path: ./testdata
@@ -25,9 +24,11 @@ exo agent run --agent exo-dev
 exo agent run --agent exo-dev --thread THREAD
 ```
 
-Resource paths are absolute inside the sandbox. With resources, the default
-working directory is `/workspace`; an environment's `default_workdir` overrides
-it. Mount destinations must not overlap other resources or environment mounts.
+Resources default to `/workspace/<name>` inside the sandbox, so `code` in this
+example is at `/workspace/code`. Set `mount_path` for a different location.
+With resources, the default working directory is `/workspace`; an environment's
+`default_workdir` overrides it. Mount destinations must not overlap other
+resources or environment mounts.
 Resources always use a separate sandbox for each thread. Sandbox processes trust
 the mounted Git resource paths via `safe.directory`, so host/guest ownership
 differences do not block Git. This leaves host Git configuration unchanged and

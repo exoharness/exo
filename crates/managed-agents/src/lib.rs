@@ -86,7 +86,7 @@ impl AgentDefinition {
         let (yaml_end, body_start) = delimiter.ok_or_else(|| {
             anyhow!("agent file is missing the closing frontmatter delimiter (---)")
         })?;
-        let frontmatter: AgentFrontmatter =
+        let mut frontmatter: AgentFrontmatter =
             serde_yaml_ng::from_str(&contents[..yaml_end]).context("invalid agent frontmatter")?;
         let instructions = contents[body_start..].trim().to_string();
         for (field, value) in [
@@ -100,6 +100,9 @@ impl AgentDefinition {
             }
         }
         mcp::validate_servers(&frontmatter.mcp_servers)?;
+        for resource in &mut frontmatter.resources {
+            resource.apply_mount_path_default();
+        }
         exoharness::resources::validate_resources(&frontmatter.resources)?;
         for (index, name) in frontmatter.adapters.iter().enumerate() {
             if name.is_empty()

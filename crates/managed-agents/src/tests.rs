@@ -5,13 +5,25 @@ fn resource_declarations_validate_sources_and_mounts() -> Result<()> {
     let source = SOURCE.replace("config:\n", "resources:\n  - name: code\n    type: git_repository\n    url: https://github.com/exoharness/exo\n    checkout: {type: branch, name: main}\n    credential: github\n    mount_path: /workspace\n  - name: data\n    type: directory\n    path: ./fixtures\n    mount_path: /data\n    mode: ro\nconfig:\n");
     let definition = AgentDefinition::parse(source.clone())?;
     assert_eq!(definition.frontmatter.resources.len(), 2);
+    let without_mount_path =
+        AgentDefinition::parse(source.replace("    mount_path: /workspace\n", ""))?;
+    assert_eq!(
+        without_mount_path.frontmatter.resources[0].mount_path,
+        "/workspace/code"
+    );
+    assert_eq!(
+        without_mount_path.frontmatter.resources[1].mount_path,
+        "/data"
+    );
     for invalid in [
         source.replace(
             "https://github.com/exoharness/exo",
             "https://secret@github.com/org/repo",
         ),
         source.replace("https://github.com/exoharness/exo", "file:///etc"),
-        source.replace("mount_path: /data", "mount_path: /workspace/data"),
+        source
+            .replace("    mount_path: /workspace\n", "")
+            .replace("mount_path: /data", "mount_path: /workspace/code/data"),
         source.replace("name: data", "name: ../data"),
         source.replace("path: ./fixtures", "path: ./fixtures\n    typo: value"),
         source.replace(
