@@ -712,6 +712,7 @@ async fn chat_vault_smoke_restart_second_vault_rotation_revocation_and_public_mc
     use tokio::io::AsyncWriteExt;
     let f = Fixture::new().await?;
     f.login(false, false).await?;
+    let model = MockServer::start().await;
     let output = f
         .command(&[
             "vault",
@@ -721,6 +722,8 @@ async fn chat_vault_smoke_restart_second_vault_rotation_revocation_and_public_mc
             "model",
             "--token-env",
             "MODEL_TEST_KEY",
+            "--allow-origin",
+            &model.uri(),
         ])
         .env("MODEL_TEST_KEY", "unused-test-model-key")
         .output()
@@ -734,8 +737,9 @@ async fn chat_vault_smoke_restart_second_vault_rotation_revocation_and_public_mc
     std::fs::write(
         &file,
         format!(
-            "---\nname: Vault smoke\nharness: basic\nconfig:\n  model: gpt-5-mini\n  credential: model\n  base_url: {0}\nmcp_servers:\n  - type: url\n    name: workspace\n    url: {0}/mcp/\n---\nAnswer workspace questions.\n",
-            f.server.uri()
+            "---\nname: Vault smoke\nharness: basic\nconfig:\n  model: gpt-5-mini\n  credential: model\n  base_url: {}\nmcp_servers:\n  - type: url\n    name: workspace\n    url: {}/mcp/\n---\nAnswer workspace questions.\n",
+            model.uri(),
+            f.server.uri(),
         ),
     )?;
     f.cli(&[
