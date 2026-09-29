@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use async_trait::async_trait;
@@ -288,20 +288,10 @@ impl Runtime {
         if thread.caller().is_some() {
             thread_config.sandbox_scope = Some(crate::SandboxScope::Conversation);
         }
-        let resource_timing = !thread_config.resources.is_empty()
-            && std::env::var_os("EXO_RESOURCE_TIMING").is_some();
         if !thread_config.resources.is_empty() {
-            let started = Instant::now();
             thread_config
                 .materialize_resources(thread.as_ref(), &agent_config)
                 .await?;
-            if resource_timing {
-                eprintln!(
-                    "[exo resource timing] {}: workspace materialization: {:.3}s",
-                    thread.record().id,
-                    started.elapsed().as_secs_f64()
-                );
-            }
             let mut locations = String::from("Filesystem resources for this thread:\n");
             for resource in &thread_config.resources {
                 let resource = &resource.definition;
@@ -318,8 +308,6 @@ impl Runtime {
                 .instructions
                 .push(crate::harness_helpers::system_message(&locations));
         }
-        tracing::info!(target: "exoharness::progress", "Preparing sandbox and tools");
-        let prepare_started = Instant::now();
         provider
             .executor
             .prepare_conversation(
@@ -329,14 +317,6 @@ impl Runtime {
                 &thread_config,
             )
             .await?;
-        if resource_timing {
-            eprintln!(
-                "[exo resource timing] {}: agent tool preparation: {:.3}s",
-                thread.record().id,
-                prepare_started.elapsed().as_secs_f64()
-            );
-        }
-        let dispatch_started = Instant::now();
         // Reconnect must not see the saved turn before it is registered as live.
         let mut live_turns = provider.live_turns.write().await;
         let turn = thread
@@ -399,13 +379,6 @@ impl Runtime {
                 trace.finish_error(&error).await;
             }
             return Err(error);
-        }
-        if resource_timing {
-            eprintln!(
-                "[exo resource timing] {}: turn setup and dispatch: {:.3}s",
-                key.thread_id,
-                dispatch_started.elapsed().as_secs_f64()
-            );
         }
         let harness = Arc::clone(&provider.harness);
         finalizers.spawn(async move {

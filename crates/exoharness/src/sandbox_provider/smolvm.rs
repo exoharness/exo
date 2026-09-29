@@ -69,15 +69,6 @@ const EXACT_HOST_POLICY_LABEL: &str = "exo.sandbox.exact-host-policy";
 const TCP_FORWARD_LABEL_PREFIX: &str = "exo.sandbox.tcp-forward.";
 static CONSUMABLE_SNAPSHOT_FORMATS: [SnapshotFormat; 1] = [SnapshotFormat::SmolvmMachinePack];
 
-fn smolvm_timing(stage: &str, started: Instant) {
-    if std::env::var_os("EXO_RESOURCE_TIMING").is_some() {
-        eprintln!(
-            "[exo resource timing] SmolVM {stage}: {:.3}s",
-            started.elapsed().as_secs_f64()
-        );
-    }
-}
-
 /// What the installed smolvm supports. Probed once per backend.
 #[derive(Debug, Clone, Copy)]
 struct Capabilities {
@@ -428,12 +419,10 @@ impl SmolvmSandboxBackend {
         let (host_ports, reservations) = self.configure_tcp_forwards(&mut create, spec).await?;
         // Keepalive so the machine stays up between execs, as the Docker backend does.
         create.arg("--").arg("sleep").arg("infinity");
-        let create_started = Instant::now();
         let output = create
             .output()
             .await
             .context("spawn smolvm machine create")?;
-        smolvm_timing("machine create", create_started);
         drop(reservations);
         let host_ports = if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -456,9 +445,7 @@ impl SmolvmSandboxBackend {
         if let Some(egress) = egress {
             egress.proxy.configure(&mut start);
         }
-        let start_started = Instant::now();
         let output = start.output().await.context("spawn smolvm machine start")?;
-        smolvm_timing("machine start", start_started);
         if output.status.success() {
             return Ok(host_ports);
         }
@@ -747,19 +734,14 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
     }
 
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        let setup_started = Instant::now();
         self.require_capabilities(&request).await?;
         let binary = self.binary().await?;
-        let mode = self.resolve_mode(&request).await;
-        smolvm_timing("runtime checks and mode", setup_started);
-        if mode != SmolvmExecutionMode::Warm {
+        if self.resolve_mode(&request).await != SmolvmExecutionMode::Warm {
             ensure!(
                 request.spec.tcp_ports.is_empty(),
                 "smolvm TCP forwarding requires a warm sandbox"
             );
-            let image_started = Instant::now();
             let image = self.prepare_image(&request.spec.image).await?;
-            smolvm_timing("prepare image", image_started);
             reject_unsupported_spec(&request.spec, &image)?;
             return Ok(crate::with_process_management(Arc::new(
                 SmolvmOneShotHandle {
@@ -772,16 +754,13 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             )));
         }
         let machine = machine_name(&request.sandbox_id);
-        let acquire_started = Instant::now();
         let handle = self
             .egress
             .acquire_with_proxy(
                 request.clone(),
                 SmolvmProxy::start,
                 |egress| async {
-                    let image_started = Instant::now();
                     let image = self.prepare_image(&request.spec.image).await?;
-                    smolvm_timing("prepare image", image_started);
                     reject_unsupported_spec(&request.spec, &image)?;
                     let host_ports = self
                         .ensure_machine_started(
@@ -801,9 +780,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
                         host_ports,
                     };
                     if let Some(egress) = egress {
-                        let trust_started = Instant::now();
                         egress.initialize_trust(&handle).await?;
-                        smolvm_timing("initialize egress trust", trust_started);
                         handle.egress = Some(egress);
                     }
                     Ok(handle)
@@ -811,13 +788,10 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
                 self.delete_machine_if_present(&machine),
             )
             .await?;
-        smolvm_timing("proxy and machine acquisition", acquire_started);
-        let cleanup_started = Instant::now();
         self.reap_idle_machines(&request).await;
         if self.labels_supported().await {
             self.schedule_abandoned_reap(binary.clone(), machine.clone());
         }
-        smolvm_timing("post-start housekeeping", cleanup_started);
         Ok(crate::with_process_management(handle))
     }
 

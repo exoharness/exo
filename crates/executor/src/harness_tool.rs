@@ -73,15 +73,7 @@ impl ToolRuntime for BasicToolRuntime {
         config: &ConversationConfig,
     ) -> Result<()> {
         if config.environment.is_some() || !config.resources.is_empty() {
-            let started = std::time::Instant::now();
             ensure_conversation_sandbox(conversation, agent_config, config, None).await?;
-            if std::env::var_os("EXO_RESOURCE_TIMING").is_some() {
-                eprintln!(
-                    "[exo resource timing] {}: ensure sandbox: {:.3}s",
-                    conversation.record().id,
-                    started.elapsed().as_secs_f64()
-                );
-            }
         }
         Ok(())
     }

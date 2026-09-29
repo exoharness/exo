@@ -5,7 +5,6 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -34,13 +33,11 @@ if [ "$1" != registry ]; then
 fi
 jq -e --arg arch "$arch" 'if .architecture == $arch and .os == "linux" then true else error("image must target linux/" + $arch) end' /output/config.json >/dev/null
 mkdir /output/0000_rootfs
-printf '[exo image prep] rootfs export start: %s\n' "$(date +%s)"
 if [ "$1" = registry ]; then
     crane export --platform "linux/$arch" "$2" - | tar -xp -C /output/0000_rootfs
 else
     crane export - - < "$archive" | tar -xp -C /output/0000_rootfs
 fi
-printf '[exo image prep] rootfs export end: %s\n' "$(date +%s)"
 printf '0000_rootfs\n' > /output/layer-order
 "#;
 
@@ -128,13 +125,9 @@ pub(super) fn prepare(
             }
         }
 
-        let volume_started = Instant::now();
         create_volume(staging.path())?;
-        image_cache_timing("create volume", volume_started);
         let result = (|| {
-            let mount_started = Instant::now();
             let output = mount_volume(staging.path())?;
-            image_cache_timing("mount preparation volume", mount_started);
             let mut command = Command::new(binary);
             command.args([
                 "machine",
@@ -168,18 +161,9 @@ pub(super) fn prepare(
             if let Some(boot_binary) = boot_binary {
                 command.env(super::SMOLVM_BOOT_BIN_ENV, boot_binary);
             }
-            let run_started = Instant::now();
             let output = command
                 .output()
                 .context("starting SmolVM image preparation")?;
-            image_cache_timing("run image preparation VM", run_started);
-            if std::env::var_os("EXO_RESOURCE_TIMING").is_some() {
-                for line in String::from_utf8_lossy(&output.stdout).lines() {
-                    if line.starts_with("[exo image prep]") {
-                        eprintln!("{line}");
-                    }
-                }
-            }
             ensure!(
                 output.status.success(),
                 "SmolVM image preparation failed: {}",
@@ -187,14 +171,12 @@ pub(super) fn prepare(
             );
             Ok(())
         })();
-        let unmount_started = Instant::now();
         if let Err(error) = unmount_volume(staging.path()) {
             let path = staging.keep();
             return Err(error).with_context(|| {
                 format!("unmounting image preparation volume at {}", path.display())
             });
         }
-        image_cache_timing("unmount preparation volume", unmount_started);
         if let Err(error) = result {
             if registry_image {
                 // SmolVM's own registry pull may have credentials unavailable
@@ -212,19 +194,7 @@ pub(super) fn prepare(
         fs::remove_dir_all(source)?;
         fs::rename(staging.path(), &destination)?;
     }
-    let mount_started = Instant::now();
-    let prepared = mount_read_only(&destination)?;
-    image_cache_timing("mount cached image", mount_started);
-    Ok(Some(prepared))
-}
-
-fn image_cache_timing(stage: &str, started: Instant) {
-    if std::env::var_os("EXO_RESOURCE_TIMING").is_some() {
-        eprintln!(
-            "[exo resource timing] SmolVM image cache {stage}: {:.3}s",
-            started.elapsed().as_secs_f64()
-        );
-    }
+    mount_read_only(&destination).map(Some)
 }
 
 fn pinned_registry_image(image: &str) -> bool {

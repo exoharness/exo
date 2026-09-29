@@ -1,8 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::{
-    sync::{Arc, Mutex, OnceLock},
-    time::Instant,
-};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::{AgentConfig, ConversationConfig};
 use exoharness::{
@@ -55,20 +52,17 @@ pub(crate) async fn ensure_conversation_sandbox(
     healthcheck_program: Option<&str>,
 ) -> Result<String> {
     let sandbox_lock = conversation_sandbox_lock(&conversation.record().id.to_string());
-    let started = Instant::now();
     let _guard = sandbox_lock.lock().await;
-    sandbox_timing("sandbox lock", started);
     let spec = conversation_sandbox_spec(agent_config, config);
-    let started = Instant::now();
     let policy = sandbox_policy(conversation, agent_config, config).await?;
-    sandbox_timing("sandbox policy", started);
 
     // Of the still-active candidates in conversation history, prefer the most recent one
     // that was either explicitly attached or matches the spec derived from configuration.
-    let started = Instant::now();
-    let candidates = conversation_sandbox_candidates(conversation).await?;
-    sandbox_timing("sandbox history", started);
-    for candidate in candidates.into_iter().rev() {
+    for candidate in conversation_sandbox_candidates(conversation)
+        .await?
+        .into_iter()
+        .rev()
+    {
         match candidate {
             ConversationSandboxCandidate::Attached { id } => {
                 anyhow::ensure!(
@@ -105,19 +99,7 @@ pub(crate) async fn ensure_conversation_sandbox(
         }
     }
 
-    let started = Instant::now();
-    let sandbox = create_sandbox(conversation, config, spec, policy).await;
-    sandbox_timing("create sandbox", started);
-    sandbox
-}
-
-fn sandbox_timing(stage: &str, started: Instant) {
-    if std::env::var_os("EXO_RESOURCE_TIMING").is_some() {
-        eprintln!(
-            "[exo resource timing] {stage}: {:.3}s",
-            started.elapsed().as_secs_f64()
-        );
-    }
+    create_sandbox(conversation, config, spec, policy).await
 }
 
 pub async fn attached_conversation_sandbox(
