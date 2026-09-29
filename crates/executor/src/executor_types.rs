@@ -32,6 +32,8 @@ pub struct AgentConfig {
     pub model: String,
     pub credential: Option<String>,
     pub base_url: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
     pub max_output_tokens: Option<i64>,
     pub max_tool_round_trips: Option<u32>,
     pub braintrust: Option<BraintrustTracingConfig>,

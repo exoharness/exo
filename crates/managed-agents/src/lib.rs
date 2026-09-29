@@ -55,6 +55,7 @@ pub struct AgentModelConfig {
     pub model: String,
     pub credential: Option<String>,
     pub base_url: Option<String>,
+    pub reasoning_effort: Option<String>,
     pub max_output_tokens: Option<i64>,
     pub max_tool_round_trips: Option<u32>,
 }

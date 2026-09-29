@@ -325,6 +325,9 @@ async function runCodexTurn(
           threadId,
           input: turnInput,
           model: modelBinding.model,
+          ...(context.agentConfig.reasoningEffort
+            ? { effort: context.agentConfig.reasoningEffort }
+            : {}),
           approvalPolicy: "on-request",
           sandboxPolicy: {
             type: "externalSandbox",
@@ -582,6 +585,10 @@ async function startCodexThread(
     experimentalRawEvents: true,
     persistFullHistory: true,
   };
+  if (context.agentConfig.reasoningEffort) {
+    request[resumeThreadId ? "reasoningEffort" : "effort"] =
+      context.agentConfig.reasoningEffort;
+  }
   if (developerInstructions) {
     request.developerInstructions = developerInstructions;
   }
@@ -1109,6 +1116,7 @@ function codexWarmSessionKey(
     agent_id: context.exoharness.current.agent.record.id,
     conversation_id: context.exoharness.current.conversation.record.id,
     model: modelBinding.model,
+    reasoning_effort: context.agentConfig.reasoningEffort ?? null,
     base_url: modelBinding.baseUrl ?? null,
     instructions: context.agentConfig.instructions,
     mcp_servers: context.mcpServers,

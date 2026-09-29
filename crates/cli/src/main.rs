@@ -1278,6 +1278,10 @@ async fn run_selected(
                 print_mounts(&config.sandbox.mounts);
                 println!("model: {}", config.model);
                 println!(
+                    "reasoning_effort: {}",
+                    config.reasoning_effort.as_deref().unwrap_or("default")
+                );
+                println!(
                     "max_output_tokens: {}",
                     config
                         .max_output_tokens

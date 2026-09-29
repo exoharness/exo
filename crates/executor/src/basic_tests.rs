@@ -1296,6 +1296,7 @@ fn default_agent_config() -> AgentConfig {
     AgentConfig {
         credential: Some("test-secret".into()),
         base_url: None,
+        reasoning_effort: None,
         resources: Vec::new(),
         instructions: Vec::new(),
         harness: crate::AgentHarnessKind::Basic,

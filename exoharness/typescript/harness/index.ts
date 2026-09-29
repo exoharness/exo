@@ -37,6 +37,7 @@ export interface AgentConfig {
   model: string;
   credential?: string | null;
   baseUrl?: string | null;
+  reasoningEffort?: string | null;
   maxOutputTokens?: number | null;
   maxToolRoundTrips?: number | null;
   braintrust?: unknown;

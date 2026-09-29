@@ -851,7 +851,7 @@ describe("agent tool loading", () => {
         tools: [{ id: "broken" }],
       });
       await fs.writeFile(path.join(tempdir, "tools.lock.json"), lockfile);
-      expect(readToolRegistry(tempdir)).rejects.toThrow(
+      await expect(readToolRegistry(tempdir)).rejects.toThrow(
         "invalid tool lockfile",
       );
       expect(

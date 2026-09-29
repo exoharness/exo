@@ -65,6 +65,7 @@ interface RawAgentConfig {
   model: string;
   credential?: string | null;
   base_url?: string | null;
+  reasoning_effort?: string | null;
   max_output_tokens?: number | null;
   max_tool_round_trips?: number | null;
   braintrust?: unknown;
@@ -895,6 +896,7 @@ function toAgentConfig(raw: RawAgentConfig): AgentConfig {
     model: raw.model,
     credential: raw.credential,
     baseUrl: raw.base_url,
+    reasoningEffort: raw.reasoning_effort ?? null,
     maxOutputTokens: raw.max_output_tokens ?? null,
     maxToolRoundTrips: raw.max_tool_round_trips ?? null,
     braintrust: raw.braintrust,

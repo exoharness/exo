@@ -118,6 +118,7 @@ impl Fixture {
         let config = AgentConfig {
             credential: Some("test-openai".into()),
             base_url: None,
+            reasoning_effort: None,
             resources: Vec::new(),
             instructions: Vec::new(),
             harness: AgentHarnessKind::Basic,

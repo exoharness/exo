@@ -162,6 +162,14 @@ pub fn agent_config(
     if model.trim().is_empty() {
         bail!("model must not be empty");
     }
+    if let Some(effort) = definition.frontmatter.config.reasoning_effort.as_deref() {
+        if preset != Some(TypeScriptHarnessPreset::Codex) {
+            bail!("model.reasoning_effort is only supported by the codex harness");
+        }
+        if effort.trim().is_empty() {
+            bail!("model.reasoning_effort must not be empty");
+        }
+    }
     Ok(AgentConfig {
         resources: Vec::new(),
         harness: kind,
@@ -182,6 +190,7 @@ pub fn agent_config(
         model: model.into(),
         credential: definition.frontmatter.config.credential.clone(),
         base_url: definition.frontmatter.config.base_url.clone(),
+        reasoning_effort: definition.frontmatter.config.reasoning_effort.clone(),
         max_output_tokens: definition.frontmatter.config.max_output_tokens,
         max_tool_round_trips: definition.frontmatter.config.max_tool_round_trips,
         braintrust: definition.frontmatter.config.braintrust.clone(),
