@@ -15,7 +15,7 @@ use crate::local_volume::{clone_volume, create_volume, mount_volume, unmount_vol
 use crate::{AgentId, FileSystemMount, ResourceScope, ThreadId};
 
 #[derive(Clone)]
-pub(crate) struct ResourceStore {
+pub struct ResourceStore {
     root: PathBuf,
     excluded: PathBuf,
     master_key: Option<PathBuf>,
@@ -30,7 +30,7 @@ struct Instance {
 }
 
 impl ResourceStore {
-    pub(crate) fn new(root: &Path) -> Result<Self> {
+    pub fn new(root: &Path) -> Result<Self> {
         let root = canonical_path(&std::env::current_dir()?.join(root))?;
         Ok(Self {
             root: root.join("resources"),
@@ -56,10 +56,7 @@ impl ResourceStore {
         Ok(())
     }
 
-    pub(crate) fn prepare(
-        &self,
-        resources: Vec<ResourceDefinition>,
-    ) -> Result<Vec<PreparedResource>> {
+    pub fn prepare(&self, resources: Vec<ResourceDefinition>) -> Result<Vec<PreparedResource>> {
         super::validate_resources(&resources)?;
         if resources.is_empty() {
             return Ok(Vec::new());
@@ -94,7 +91,7 @@ impl ResourceStore {
         }).collect()
     }
 
-    pub(crate) fn materialize(
+    pub fn materialize(
         &self,
         agent: AgentId,
         thread: ThreadId,
@@ -183,7 +180,7 @@ impl ResourceStore {
             .collect()
     }
 
-    pub(crate) fn command_env(
+    pub fn command_env(
         &self,
         scope: ResourceScope,
         mounts: &[FileSystemMount],
@@ -253,7 +250,7 @@ impl ResourceStore {
         Ok(env)
     }
 
-    pub(crate) fn remove_thread(&self, agent: AgentId, thread: ThreadId) -> Result<()> {
+    pub fn remove_thread(&self, agent: AgentId, thread: ThreadId) -> Result<()> {
         let directory = self.thread_directory(agent, thread);
         if !directory.exists() {
             return Ok(());

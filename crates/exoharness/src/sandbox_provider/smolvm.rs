@@ -718,6 +718,21 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
         &CONSUMABLE_SNAPSHOT_FORMATS
     }
 
+    #[cfg(target_os = "macos")]
+    async fn resolve_image(&self, image: &str) -> Result<crate::ResolvedSandboxImage> {
+        let cache = self
+            .image_cache
+            .clone()
+            .context("SmolVM image resolution requires an image cache")?;
+        let binary = self.binary().await?.clone();
+        let boot_binary = self.boot_binary().await?.clone();
+        let image = image.to_owned();
+        tokio::task::spawn_blocking(move || {
+            image_cache::resolve_image(&binary, boot_binary.as_deref(), &cache, &image)
+        })
+        .await?
+    }
+
     async fn terminate(&self, request: SandboxRequest) -> Result<()> {
         let machine = machine_name(&request.sandbox_id);
         self.egress

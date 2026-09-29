@@ -12,6 +12,7 @@ fn test_host_runtime() -> FirecrackerHostFingerprint {
         kernel_sha256: "kernel".to_string(),
         initramfs_sha256: "initramfs".to_string(),
         network_device_policy: FirecrackerNetworkDevicePolicy::default(),
+        template_resource_slots: 0,
     }
 }
 
@@ -668,6 +669,7 @@ fn explicit_snapshots_are_unique_and_reusable() {
 
     let manifest = FirecrackerSnapshotManifest {
         format_version: SNAPSHOT_FORMAT_VERSION,
+        template: false,
         template_key: first,
         spec_hash: source.spec_hash,
         source_network_slot: source.slot,

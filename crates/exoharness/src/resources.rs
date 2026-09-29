@@ -202,7 +202,9 @@ pub fn validate_mount_overlap(left: &str, right: &str) -> Result<()> {
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod local;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
-pub(crate) use local::{ResourceStore, host_git_credential};
+pub use local::ResourceStore;
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+pub(crate) use local::host_git_credential;
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 #[derive(Debug, Serialize, Deserialize)]

@@ -2288,6 +2288,7 @@ async fn smolvm_proxy_live(with_gh: bool) -> Result<()> {
         .with_egress(resolver.clone(), Arc::new(upstream.config.clone()))
     };
     let backend = make_backend();
+    let image = backend.resolve_image(&image).await?.image;
     let request = SandboxRequest {
         sandbox_id: format!("smolvm-proxy-{}", uuid::Uuid::new_v4()),
         scope: identity("smolvm-proxy").scope,
@@ -2432,4 +2433,148 @@ async fn proxy_enforces_resource_urls_before_resolving_credentials() -> Result<(
     assert_eq!(resolver.uses.read().await.len(), 1);
     proxy.shutdown().await?;
     Ok(())
+}
+
+#[cfg(all(target_os = "linux", feature = "firecracker"))]
+#[tokio::test]
+#[ignore = "requires root, Linux/KVM, XFS and the Exo Firecracker artifact bundle"]
+async fn firecracker_template_egress_resources_live() -> Result<()> {
+    use crate::resources::{
+        MaterializeResourcesRequest, ResourceDefinition, ResourceSource, ResourceStore,
+    };
+    use crate::{
+        ManagedSandboxBackend, ResourceScope, SandboxCommand, SandboxLifecycleConfig, SandboxMount,
+        SandboxMountAccess, SandboxRequest, SandboxResourceShape, SandboxSpec,
+    };
+    let root = tempfile::Builder::new()
+        .prefix("tpl-")
+        .tempdir_in("/var/lib/exo")?;
+    let config = crate::FirecrackerConfig {
+        state_root: root.path().join("state"),
+        image_size_gib: 2,
+        workspace_size_gib: 1,
+        template_resource_slots: 2,
+        network_device_policy: crate::FirecrackerNetworkDevicePolicy::AllSandboxes,
+        ..Default::default()
+    };
+    let upstream = Upstream::start().await?;
+    let resolver = TestResolver::new();
+    let backend = crate::FirecrackerSandboxBackend::new(config.clone())
+        .await?
+        .with_egress(Some(resolver.clone()), Arc::new(upstream.config.clone()));
+    let request = SandboxRequest {
+        sandbox_id: "pristine-template".into(),
+        scope: ResourceScope::Global,
+        provider_state: None,
+        spec: SandboxSpec {
+            image: "docker.io/library/python:3.12-slim".into(),
+            resources: SandboxResourceShape::new(1, 512),
+            mounts: vec![],
+            durable_file_systems: vec![],
+            tcp_ports: vec![8765],
+            policy: SandboxNetworkPolicy::Disabled.into(),
+            default_workdir: "/home/exo/workspace".into(),
+        },
+        lifecycle: SandboxLifecycleConfig {
+            idle_ttl: Some(Duration::from_secs(300)),
+        },
+    };
+    let command = |script: &str| SandboxCommand {
+        argv: vec!["python3".into(), "-c".into(), script.into()],
+        env: HashMap::new(),
+        cwd: None,
+        display_argv: None,
+        timeout: Some(Duration::from_secs(30)),
+    };
+    let result: Result<()> = async {
+        let source = backend.acquire(request.clone()).await?;
+        let start = source.exec(&command(r#"
+import pathlib, subprocess, time, urllib.request
+pathlib.Path('prepared').write_text('prepared-server')
+with open('/tmp/server.log', 'w') as output:
+    subprocess.Popen(['python3', '-m', 'http.server', '8765'], stdout=output, stderr=output, start_new_session=True)
+for i in range(100):
+    try:
+        assert urllib.request.urlopen('http://127.0.0.1:8765/prepared').read() == b'prepared-server'
+        break
+    except OSError:
+        time.sleep(.05)
+else:
+    raise AssertionError('prepared server never became ready')
+"#)).await?;
+        ensure!(start.ok, "preparation failed: {}", start.stderr);
+        let snapshot = source.snapshot_template().await?;
+        backend.terminate(request.clone()).await?;
+        let source_dir = root.path().join("repository");
+        std::fs::create_dir(&source_dir)?;
+        std::fs::write(source_dir.join("source.txt"), "pristine")?;
+        let store = ResourceStore::image_store(&config.state_root, 1)?;
+        let resources = store.prepare(vec![ResourceDefinition {
+            name: "repository".into(), mount_path: "/home/exo/workspace/repository".into(),
+            mode: crate::FileSystemMountMode::ReadWrite,
+            source: ResourceSource::Directory { path: source_dir },
+        }])?;
+        let agent = crate::Uuid7::now();
+        let mut handles = Vec::new();
+        let mut ca_paths = Vec::new();
+        let mut placeholders = Vec::new();
+        for index in 0..2 {
+            let thread = crate::Uuid7::now();
+            let mounts = backend.materialize_resources(MaterializeResourcesRequest {
+                agent, thread, resources: resources.clone(), archives: Default::default(),
+                credentials: vec![None], resume: false,
+            }).await?;
+            let mut allocation = request.clone();
+            allocation.sandbox_id = format!("template-clone-{index}");
+            allocation.scope = ResourceScope::Thread { agent_id: agent, thread_id: thread };
+            allocation.spec.policy = policy();
+            allocation.spec.policy.networking = SandboxNetworkPolicy::Limited { allowed_hosts: vec!["api.github.com".into()] };
+            allocation.spec.policy.credentials[0].networking = CredentialNetworkPolicy::Limited { allowed_hosts: vec!["api.github.com".into()] };
+            allocation.spec.mounts = mounts.into_iter().map(|mount| SandboxMount {
+                host_path: mount.host_path.into(), guest_path: mount.mount_path, internal: true,
+                access: SandboxMountAccess::ReadWrite,
+            }).collect();
+            let started = std::time::Instant::now();
+            let handle = backend.acquire_from_snapshot(allocation.clone(), snapshot.clone()).await?;
+            println!("clone {index} restored in {:?}", started.elapsed());
+            let check = handle.exec(&command(r#"
+import os, pathlib, urllib.request
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+assert opener.open('http://127.0.0.1:8765/prepared').read() == b'prepared-server'
+request = urllib.request.Request('https://api.github.com/auth', headers={'Authorization': 'Bearer ' + os.environ['TEST_API_KEY']})
+assert opener.open(request).read() == b'authenticated-v1'
+assert pathlib.Path('repository/source.txt').read_text() == 'pristine'
+assert not pathlib.Path('repository/edit.txt').exists()
+pathlib.Path('repository/edit.txt').write_text('private edit')
+assert 'HTTPS_PROXY' not in os.environ
+print(os.environ['SSL_CERT_FILE'])
+print(os.environ['TEST_API_KEY'])
+"#)).await?;
+            ensure!(check.ok, "clone check failed: {} {}", check.stdout, check.stderr);
+            let mut lines = check.stdout.lines();
+            ca_paths.push(lines.next().context("missing CA path")?.to_owned());
+            placeholders.push(lines.next().context("missing placeholder")?.to_owned());
+            handles.push((allocation, handle));
+        }
+        ensure!(ca_paths[0] != ca_paths[1], "clones share a CA path");
+        ensure!(placeholders[0] != placeholders[1], "clones share credentials");
+        *resolver.value.write().await = None;
+        for (_, handle) in &handles {
+            let check = handle.exec(&command(r#"
+import os, pathlib, urllib.request, urllib.error
+assert pathlib.Path('repository/edit.txt').read_text() == 'private edit'
+try:
+    urllib.request.urlopen(urllib.request.Request('https://api.github.com/auth', headers={'Authorization': 'Bearer ' + os.environ['TEST_API_KEY']}))
+    raise AssertionError('revoked credential was accepted')
+except urllib.error.HTTPError:
+    pass
+"#)).await?;
+            ensure!(check.ok, "revocation check failed: {}", check.stderr);
+        }
+        backend.delete_snapshot(snapshot).await?;
+        println!("PASS prepared process, private disks, fresh CA/placeholder and revocation across two restores");
+        Ok(())
+    }.await;
+    backend.terminate_all().await?;
+    result
 }

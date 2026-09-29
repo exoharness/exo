@@ -297,6 +297,10 @@ pub trait ManagedSandboxHandle: Send + Sync {
     /// error if this backend doesn't (yet) support snapshotting.
     async fn snapshot(&self) -> Result<SnapshotPayload>;
 
+    async fn snapshot_template(&self) -> Result<SnapshotPayload> {
+        bail!("sandbox handle does not support template capture")
+    }
+
     async fn delete_snapshot(&self, _payload: SnapshotPayload) -> Result<()> {
         bail!("sandbox handle does not support snapshot deletion")
     }
