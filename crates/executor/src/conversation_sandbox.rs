@@ -345,26 +345,7 @@ async fn sandbox_policy(
         .as_ref()
         .and_then(|config| std::path::Path::new(&config.module_path).file_name())
         .and_then(|name| name.to_str());
-    let variable = match module {
-        Some("codex-harness.ts") => Some("OPENAI_API_KEY"),
-        Some("claude-code-harness.ts") => Some("ANTHROPIC_API_KEY"),
-        Some("pi-harness.ts") => Some(
-            match agent_config
-                .model
-                .split_once('/')
-                .map(|(provider, _)| provider)
-                .unwrap_or("openai")
-            {
-                "openai" => "OPENAI_API_KEY",
-                "anthropic" => "ANTHROPIC_API_KEY",
-                "google" => "GEMINI_API_KEY",
-                provider => anyhow::bail!(
-                    "Pi API-key credentials are not configured for provider {provider}"
-                ),
-            },
-        ),
-        _ => None,
-    };
+    let variable = crate::managed_agents::sandbox_model_credential_variable(agent_config)?;
     if let Some(variable) = variable {
         add_model_binding(
             conversation,

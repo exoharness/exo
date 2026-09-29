@@ -362,14 +362,17 @@ never print credential values.
 ```sh
 exo vault create personal
 exo vault secret create personal --preset github
+exo vault secret create personal --preset openai
 exo vault secret create personal notion --url https://mcp.notion.com/mcp
 ```
 
-A preset supplies login settings, credential policy, and a default secret name.
-An explicit secret name overrides the preset's default; without a preset, the
-name is required. Import an existing token with `--token-env`, or omit it to log
-in. To rotate or reauthorize an existing credential, use `secret update` with the
-same options; its identity and policy are preserved unless explicitly changed.
+A preset supplies a credential policy and a default secret name. An explicit
+secret name overrides the preset's default; without a preset, the name is
+required. Import an existing token with `--token-env`. The OpenAI preset reads
+`OPENAI_API_KEY` and permits `https://api.openai.com`; combine it with
+`--token-env` to read a different variable. To rotate or reauthorize an existing
+credential, use `secret update` with the same options; its identity and policy
+are preserved unless explicitly changed.
 
 The GitHub preset uses GitHub CLI (`gh`) 2.81 or newer. For a linked local vault,
 `gh` runs on the runtime host. Exo checks the linked account's token on first use

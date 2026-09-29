@@ -9,6 +9,7 @@ export default defineConfig({
       "**/.exo/**",
       "**/.local/**",
       "exoharness/examples/tutorials/**/sample-repo/**",
+      "scratch/**",
     ],
   },
   resolve: {

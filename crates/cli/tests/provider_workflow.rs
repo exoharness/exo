@@ -1651,6 +1651,34 @@ async fn provider_selection_is_visible_and_clearable() -> Result<()> {
 }
 
 #[actix_web::test]
+async fn openai_preset_imports_key_with_model_destination_locally_and_over_http() -> Result<()> {
+    for provider in ["local", "remote"] {
+        let f = Fixture::new().await?;
+        f.cli(&["provider", "switch", provider]).await?;
+        let output = f
+            .command(&["vault", "secret", "create", "global", "--preset", "openai"])
+            .env("OPENAI_API_KEY", "preset-model-key")
+            .output()
+            .await?;
+        let stdout = success(output)?;
+        assert!(stdout.contains("created secret openai"), "{stdout}");
+        assert!(!stdout.contains("preset-model-key"), "{stdout}");
+        let metadata: exoharness::SecretMetadata =
+            serde_json::from_str(&f.cli(&["vault", "get", "global", "openai"]).await?)?;
+        assert_eq!(metadata.r#type, exoharness::SecretType::Key);
+        let policy = metadata.policy.context("OpenAI preset policy")?;
+        assert!(policy.permits(&exoharness::CredentialDestination::origin(
+            "https://api.openai.com"
+        )?));
+        assert!(!policy.permits(&exoharness::CredentialDestination::origin(
+            "https://other.example"
+        )?));
+        f.stop().await?;
+    }
+    Ok(())
+}
+
+#[actix_web::test]
 async fn secret_destination_updates_preserve_identity_locally_and_over_http() -> Result<()> {
     for provider in ["local", "remote"] {
         let f = Fixture::new().await?;
@@ -1805,6 +1833,60 @@ async fn models_use_spec_names_and_selected_vault_credentials_locally_and_over_h
             requests[0].body_json::<ModelPayload>()?.model,
             "gpt-5.6-sol"
         );
+        f.cli(&[
+            "vault",
+            "secret",
+            "create",
+            "personal",
+            "unscoped-model-key",
+            "--token-env",
+            "SMOKE_API_KEY",
+        ])
+        .await?;
+        std::fs::write(
+            &f.agent_file,
+            f.source()
+                .replace("credential: model-key", "credential: unscoped-model-key"),
+        )?;
+        for expected in ["has no permitted destinations", "is not permitted for"] {
+            if expected == "is not permitted for" {
+                f.cli(&[
+                    "vault",
+                    "secret",
+                    "update",
+                    "personal",
+                    "unscoped-model-key",
+                    "--allow-origin",
+                    "https://other.example",
+                ])
+                .await?;
+            }
+            let failed = f
+                .output(
+                    &[
+                        "agent",
+                        "run",
+                        "--agent-file",
+                        f.agent_file.to_str().unwrap(),
+                        "--vault",
+                        "personal",
+                        "--prompt",
+                        "hello",
+                    ],
+                    None,
+                    None,
+                )
+                .await?;
+            assert!(!failed.status.success());
+            let stderr = String::from_utf8_lossy(&failed.stderr);
+            assert!(stderr.contains(expected), "{stderr}");
+            assert!(
+                stderr
+                    .contains("exo vault secret update personal unscoped-model-key --allow-origin"),
+                "{stderr}"
+            );
+            assert!(!stderr.contains("typescript harness"), "{stderr}");
+        }
         let missing = f
             .source()
             .replace("credential: model-key", "credential: missing");
@@ -1822,9 +1904,12 @@ async fn models_use_spec_names_and_selected_vault_credentials_locally_and_over_h
             .output()
             .await?;
         assert!(!failed.status.success());
+        let stderr = String::from_utf8_lossy(&failed.stderr);
         assert!(
-            String::from_utf8_lossy(&failed.stderr).contains("not found in the selected vaults")
+            stderr.contains("model credential \"missing\" was not found in this thread's vaults"),
+            "{stderr}"
         );
+        assert!(!stderr.contains("typescript harness"), "{stderr}");
         f.stop().await?;
     }
     Ok(())

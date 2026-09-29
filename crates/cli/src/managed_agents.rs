@@ -254,6 +254,46 @@ pub async fn open_thread(
     {
         println!("mcp: {count} tools");
     }
+    let config = runtime.get_agent_config(agent.as_ref()).await?;
+    if let Some(name) = config.credential.as_deref() {
+        let reference = exoharness::vault::find_secret(opened.thread.as_ref(), name)
+            .await?
+            .with_context(|| {
+                format!(
+                    "model credential {name:?} was not found in this thread's vaults; add it to the global vault or attach a vault containing it with --vault"
+                )
+            })?;
+        let vault =
+            exoharness::vault::require_vault(opened.thread.as_ref(), &reference.vault_id).await?;
+        let secret = vault
+            .list_secrets()
+            .await?
+            .into_iter()
+            .find(|secret| secret.id == reference.secret_id)
+            .context("model credential is unavailable")?;
+        let destination = executor::managed_agents::model_credential_destination(&config)?;
+        let hint = if let Some(destination) = destination.as_ref() {
+            let vault_name = shlex::try_quote(&vault.record().name)?;
+            let secret_name = shlex::try_quote(&secret.name)?;
+            format!(
+                "run `exo vault secret update {vault_name} {secret_name} --allow-origin {}`",
+                destination.as_str()
+            )
+        } else {
+            "set its policy with --allow-origin, --allow-url, or --policy".into()
+        };
+        let policy = secret.policy.with_context(|| {
+            format!("model credential {name:?} has no permitted destinations; {hint}")
+        })?;
+        if let Some(destination) = destination
+            && !policy.permits(&destination)
+        {
+            bail!(
+                "model credential {name:?} is not permitted for {}; {hint}",
+                destination.as_str()
+            );
+        }
+    }
     Ok((agent, opened.thread))
 }
 

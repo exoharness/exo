@@ -1,6 +1,7 @@
 mod config;
 mod executor;
-pub use config::{TypeScriptHarnessPreset, agent_config};
+pub(crate) use config::sandbox_model_credential_variable;
+pub use config::{TypeScriptHarnessPreset, agent_config, model_credential_destination};
 
 use std::{path::Path, sync::Arc};
 

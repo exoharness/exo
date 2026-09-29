@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Preset {
     Github,
+    Openai,
 }
 
 #[derive(Debug, Args)]
@@ -52,6 +53,7 @@ impl CredentialArgs {
     pub(super) fn default_name(&self) -> Option<&'static str> {
         match self.preset {
             Some(Preset::Github) => Some("github"),
+            Some(Preset::Openai) => Some("openai"),
             None => None,
         }
     }
@@ -62,6 +64,9 @@ impl CredentialArgs {
                 CredentialDestination::origin("https://github.com")?,
                 CredentialDestination::origin("https://api.github.com")?,
             ]))),
+            Some(Preset::Openai) => Ok(Some(
+                CredentialDestination::origin("https://api.openai.com")?.into(),
+            )),
             None => self
                 .url
                 .as_deref()
@@ -80,6 +85,21 @@ impl CredentialArgs {
         if let Some(variable) = &self.token_env {
             return Ok(Some(Secret::Key {
                 value: crate::env_value_from_arg("--token-env", variable, env)?,
+            }));
+        }
+        if let Some(Preset::Openai) = self.preset {
+            ensure!(
+                self.client_id.is_none()
+                    && self.client_secret_env.is_none()
+                    && self.scope.is_empty()
+                    && self.device_url.is_none()
+                    && self.token_url.is_none()
+                    && !self.no_browser,
+                "--preset openai reads OPENAI_API_KEY and does not use OAuth options"
+            );
+            return Ok(Some(Secret::Key {
+                value: crate::env_value_from_arg("--preset openai", "OPENAI_API_KEY", env)
+                    .context("set OPENAI_API_KEY for --preset openai")?,
             }));
         }
         if self.preset.is_none() && self.url.is_none() && self.client_id.is_none() {
