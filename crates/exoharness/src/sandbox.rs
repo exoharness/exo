@@ -227,6 +227,10 @@ pub trait ManagedSandboxHandle: Send + Sync {
         None
     }
 
+    async fn command_environment(&self) -> Result<HashMap<String, String>> {
+        Ok(HashMap::new())
+    }
+
     async fn is_running(&self) -> Result<Option<bool>> {
         Ok(None)
     }

@@ -111,14 +111,17 @@ impl<P: SandboxProxy> SandboxEgress<P> {
     }
 
     pub(crate) fn command(&self, command: &SandboxCommand) -> Result<SandboxCommand> {
+        let mut command = command.clone();
+        command.env.extend(self.environment()?);
+        Ok(command)
+    }
+
+    pub(crate) fn environment(&self) -> Result<HashMap<String, String>> {
         ensure!(
             self.is_open(),
             "sandbox egress proxy is closed; acquire the sandbox again"
         );
-        let mut command = command.clone();
-        command
-            .env
-            .extend(self.proxy.connection().environment.clone());
+        let mut env = self.proxy.connection().environment.clone();
         for key in [
             "SSL_CERT_FILE",
             "CODEX_CA_CERTIFICATE",
@@ -127,9 +130,9 @@ impl<P: SandboxProxy> SandboxEgress<P> {
             "CURL_CA_BUNDLE",
             "GIT_SSL_CAINFO",
         ] {
-            command.env.insert(key.into(), self.ca_path.clone());
+            env.insert(key.into(), self.ca_path.clone());
         }
-        Ok(command)
+        Ok(env)
     }
 
     pub(crate) fn close(&self) {

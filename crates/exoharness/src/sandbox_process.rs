@@ -40,6 +40,10 @@ struct ProcessManagedSandbox {
 
 #[async_trait]
 impl ManagedSandboxHandle for ProcessManagedSandbox {
+    async fn command_environment(&self) -> Result<std::collections::HashMap<String, String>> {
+        self.handle.command_environment().await
+    }
+
     fn id(&self) -> &str {
         self.handle.id()
     }

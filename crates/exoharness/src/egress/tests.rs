@@ -2439,6 +2439,18 @@ async fn proxy_enforces_resource_urls_before_resolving_credentials() -> Result<(
 #[tokio::test]
 #[ignore = "requires root, Linux/KVM, XFS and the Exo Firecracker artifact bundle"]
 async fn firecracker_template_egress_resources_live() -> Result<()> {
+    firecracker_template_egress_resources(None).await
+}
+
+#[cfg(all(target_os = "linux", feature = "firecracker"))]
+#[tokio::test]
+#[ignore = "requires Linux/KVM and EXO_FIRECRACKER_TEST_IMAGE pointing to a Codex ext4 image"]
+async fn firecracker_codex_template_egress_resources_live() -> Result<()> {
+    firecracker_template_egress_resources(Some(std::env::var("EXO_FIRECRACKER_TEST_IMAGE")?)).await
+}
+
+#[cfg(all(target_os = "linux", feature = "firecracker"))]
+async fn firecracker_template_egress_resources(codex_image: Option<String>) -> Result<()> {
     use crate::resources::{
         MaterializeResourcesRequest, ResourceDefinition, ResourceSource, ResourceStore,
     };
@@ -2446,12 +2458,14 @@ async fn firecracker_template_egress_resources_live() -> Result<()> {
         ManagedSandboxBackend, ResourceScope, SandboxCommand, SandboxLifecycleConfig, SandboxMount,
         SandboxMountAccess, SandboxRequest, SandboxResourceShape, SandboxSpec,
     };
+    let codex = codex_image.is_some();
     let root = tempfile::Builder::new()
         .prefix("tpl-")
         .tempdir_in("/var/lib/exo")?;
     let config = crate::FirecrackerConfig {
         state_root: root.path().join("state"),
-        image_size_gib: 2,
+        image_size_gib: if codex { 4 } else { 2 },
+        allowed_local_images: codex_image.iter().map(std::path::PathBuf::from).collect(),
         workspace_size_gib: 1,
         template_resource_slots: 2,
         network_device_policy: crate::FirecrackerNetworkDevicePolicy::AllSandboxes,
@@ -2467,8 +2481,8 @@ async fn firecracker_template_egress_resources_live() -> Result<()> {
         scope: ResourceScope::Global,
         provider_state: None,
         spec: SandboxSpec {
-            image: "docker.io/library/python:3.12-slim".into(),
-            resources: SandboxResourceShape::new(1, 512),
+            image: codex_image.unwrap_or_else(|| "docker.io/library/python:3.12-slim".into()),
+            resources: SandboxResourceShape::new(1, if codex { 1024 } else { 512 }),
             mounts: vec![],
             durable_file_systems: vec![],
             tcp_ports: vec![8765],
@@ -2481,7 +2495,7 @@ async fn firecracker_template_egress_resources_live() -> Result<()> {
     };
     let command = |script: &str| SandboxCommand {
         argv: vec!["python3".into(), "-c".into(), script.into()],
-        env: HashMap::new(),
+        env: HashMap::from([("EXO_TEST_CODEX".into(), codex.to_string())]),
         cwd: None,
         display_argv: None,
         timeout: Some(Duration::from_secs(30)),
@@ -2489,7 +2503,7 @@ async fn firecracker_template_egress_resources_live() -> Result<()> {
     let result: Result<()> = async {
         let source = backend.acquire(request.clone()).await?;
         let start = source.exec(&command(r#"
-import pathlib, subprocess, time, urllib.request
+import os, pathlib, subprocess, time, urllib.request
 pathlib.Path('prepared').write_text('prepared-server')
 with open('/tmp/server.log', 'w') as output:
     subprocess.Popen(['python3', '-m', 'http.server', '8765'], stdout=output, stderr=output, start_new_session=True)
@@ -2501,6 +2515,16 @@ for i in range(100):
         time.sleep(.05)
 else:
     raise AssertionError('prepared server never became ready')
+if os.environ['EXO_TEST_CODEX'] == 'true':
+    with open('/tmp/codex.log', 'w') as output:
+        subprocess.Popen(['codex', 'exec-server', '--listen', 'ws://127.0.0.1:41255'], stdout=output, stderr=output, start_new_session=True)
+    os.environ['CODEX_EXEC_PORT'] = '41255'
+    for i in range(100):
+        if subprocess.run(['node', '/usr/local/bin/check-exec-server.mjs'], capture_output=True).returncode == 0:
+            break
+        time.sleep(.05)
+    else:
+        raise AssertionError('prepared Codex exec-server never became ready')
 "#)).await?;
         ensure!(start.ok, "preparation failed: {}", start.stderr);
         let snapshot = source.snapshot_template().await?;
@@ -2516,7 +2540,7 @@ else:
         }])?;
         let agent = crate::Uuid7::now();
         let mut handles = Vec::new();
-        let mut ca_paths = Vec::new();
+        let mut ca_certificates = Vec::new();
         let mut placeholders = Vec::new();
         for index in 0..2 {
             let thread = crate::Uuid7::now();
@@ -2547,16 +2571,68 @@ assert pathlib.Path('repository/source.txt').read_text() == 'pristine'
 assert not pathlib.Path('repository/edit.txt').exists()
 pathlib.Path('repository/edit.txt').write_text('private edit')
 assert 'HTTPS_PROXY' not in os.environ
-print(os.environ['SSL_CERT_FILE'])
+print(__import__('hashlib').sha256(pathlib.Path(os.environ['SSL_CERT_FILE']).read_bytes()).hexdigest())
 print(os.environ['TEST_API_KEY'])
 "#)).await?;
             ensure!(check.ok, "clone check failed: {} {}", check.stdout, check.stderr);
             let mut lines = check.stdout.lines();
-            ca_paths.push(lines.next().context("missing CA path")?.to_owned());
+            ca_certificates.push(lines.next().context("missing CA certificate hash")?.to_owned());
             placeholders.push(lines.next().context("missing placeholder")?.to_owned());
+            let env = handle.command_environment().await?;
+            ensure!(env.get("TEST_API_KEY") == placeholders.last(), "shared command environment has stale credentials");
+            ensure!(!env.contains_key("HTTPS_PROXY"), "native command environment contains a routing proxy");
+            if codex {
+                let check = handle.exec(&SandboxCommand {
+                    argv: vec!["node".into(), "-e".into(), r#"
+const assert = require('node:assert/strict');
+const socket = new WebSocket('ws://127.0.0.1:41255');
+const pending = new Map();
+let nextId = 0;
+const exited = Promise.withResolvers();
+const timeout = setTimeout(() => { console.error('Codex process timed out'); process.exit(1); }, 15000);
+socket.addEventListener('message', event => {
+  const message = JSON.parse(event.data);
+  if (message.method === 'process/exited') exited.resolve(message.params);
+  const entry = pending.get(message.id);
+  if (entry) {
+    pending.delete(message.id);
+    if (message.error) entry.reject(new Error(message.error.message));
+    else entry.resolve(message.result);
+  }
+});
+function request(method, params) {
+  return new Promise((resolve, reject) => {
+    const id = ++nextId;
+    pending.set(id, {resolve, reject});
+    socket.send(JSON.stringify({id, method, params}));
+  });
+}
+(async () => {
+  await new Promise((resolve, reject) => {
+    socket.addEventListener('open', resolve, {once: true});
+    socket.addEventListener('error', reject, {once: true});
+  });
+  await request('initialize', {clientName: 'native-template-test'});
+  socket.send(JSON.stringify({method: 'initialized', params: {}}));
+  await request('process/start', {
+    processId: 'fresh-credentials', cwd: 'file:///home/exo/workspace', tty: false,
+    argv: ['python3', '-c', "import os, urllib.request; assert 'HTTPS_PROXY' not in os.environ; request = urllib.request.Request('https://api.github.com/auth', headers={'Authorization': 'Bearer ' + os.environ['TEST_API_KEY']}); assert urllib.request.urlopen(request, timeout=10).read() == b'authenticated-v1'"],
+    env: process.env,
+  });
+  assert.equal((await exited.promise).exitCode, 0);
+  clearTimeout(timeout);
+  socket.close();
+})().catch(error => { console.error(error); process.exit(1); });
+"#.into()],
+                    env: HashMap::new(), display_argv: None, cwd: None,
+                    timeout: Some(Duration::from_secs(30)),
+                }).await?;
+                ensure!(check.ok, "prepared Codex did not forward with fresh credentials: {} {}", check.stdout, check.stderr);
+                println!("clone {index}: prestarted Codex used fresh native credentials");
+            }
             handles.push((allocation, handle));
         }
-        ensure!(ca_paths[0] != ca_paths[1], "clones share a CA path");
+        ensure!(ca_certificates[0] != ca_certificates[1], "clones share a CA certificate");
         ensure!(placeholders[0] != placeholders[1], "clones share credentials");
         *resolver.value.write().await = None;
         for (_, handle) in &handles {

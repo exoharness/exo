@@ -1615,6 +1615,13 @@ struct FirecrackerSandboxHandle {
 
 #[async_trait]
 impl ManagedSandboxHandle for FirecrackerSandboxHandle {
+    async fn command_environment(&self) -> Result<HashMap<String, String>> {
+        match &self.egress {
+            Some(egress) => egress.environment(),
+            None => Ok(HashMap::new()),
+        }
+    }
+
     fn id(&self) -> &str {
         &self.id
     }
