@@ -125,6 +125,16 @@ pub trait EgressCredentialResolver: Send + Sync {
     }
 }
 
+/// Checks each forwarded request independently of credential substitution.
+#[async_trait]
+pub trait EgressRequestAuthorizer: Send + Sync {
+    async fn authorize_request(
+        &self,
+        identity: &EgressIdentity,
+        destination: &EgressDestination,
+    ) -> Result<()>;
+}
+
 // Owns one sandbox's TLS server, placeholders, and active proxy connections.
 // It does not create VMs or decide where credentials are stored.
 pub struct EgressProxy {
@@ -173,6 +183,7 @@ pub(crate) struct State {
     bindings: Vec<Binding>,
     identity: EgressIdentity,
     resolver: Option<Arc<dyn EgressCredentialResolver>>,
+    request_authorizer: Option<Arc<dyn EgressRequestAuthorizer>>,
     upstream: Arc<dyn UpstreamResolver>,
 }
 
@@ -252,12 +263,20 @@ pub async fn serve_https_connect<T>(
     identity: EgressIdentity,
     policy: EgressPolicy,
     resolver: Option<Arc<dyn EgressCredentialResolver>>,
+    request_authorizer: Option<Arc<dyn EgressRequestAuthorizer>>,
     placeholders: &HashMap<String, String>,
 ) -> Result<()>
 where
     T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
-    let session = ProxySession::new(identity, policy, resolver, tls, placeholders)?;
+    let session = ProxySession::new(
+        identity,
+        policy,
+        resolver,
+        request_authorizer,
+        tls,
+        placeholders,
+    )?;
     let host = session.state.connect_host(connect_authority)?;
     https_connection(stream, session.tls, session.state, Some(&host)).await
 }
@@ -275,13 +294,14 @@ impl State {
         resolver: Option<Arc<dyn EgressCredentialResolver>>,
         upstream: Arc<dyn UpstreamResolver>,
     ) -> Result<Self> {
-        Self::new_with_placeholders(identity, policy, resolver, upstream, None)
+        Self::new_with_placeholders(identity, policy, resolver, None, upstream, None)
     }
 
     fn new_with_placeholders(
         identity: EgressIdentity,
         policy: EgressPolicy,
         resolver: Option<Arc<dyn EgressCredentialResolver>>,
+        request_authorizer: Option<Arc<dyn EgressRequestAuthorizer>>,
         upstream: Arc<dyn UpstreamResolver>,
         placeholders: Option<&HashMap<String, String>>,
     ) -> Result<Self> {
@@ -378,6 +398,7 @@ impl State {
             bindings,
             identity,
             resolver,
+            request_authorizer,
             upstream,
         })
     }
@@ -440,6 +461,11 @@ impl State {
         sni: Option<&str>,
     ) -> Result<Response<ProxyBody>> {
         let (destination, url) = self.destination(&request, sni)?;
+        if let Some(authorizer) = &self.request_authorizer {
+            authorizer
+                .authorize_request(&self.identity, &destination)
+                .await?;
+        }
         let mut headers = request.headers().clone();
         self.validate_credentials(&headers, &destination, sni.is_some())?;
         strip_hop_headers(&mut headers)?;

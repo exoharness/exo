@@ -781,24 +781,75 @@ async fn proxy_rejects_cleartext_wrong_destinations_and_other_sandboxes() -> Res
     Ok(())
 }
 
+#[derive(Default)]
+struct PathAuthorizer(AtomicUsize);
+
+#[async_trait]
+impl EgressRequestAuthorizer for PathAuthorizer {
+    async fn authorize_request(
+        &self,
+        _identity: &EgressIdentity,
+        destination: &EgressDestination,
+    ) -> Result<()> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        ensure!(destination.path != "/blocked", "request denied");
+        Ok(())
+    }
+}
+
 #[tokio::test]
-async fn connect_stream_uses_supplied_placeholder_and_checks_both_hosts() -> Result<()> {
+async fn connect_stream_checks_hosts_and_authorizes_requests() -> Result<()> {
     let upstream = Upstream::start().await?;
     let resolver = TestResolver::new();
+    let authorizer = Arc::new(PathAuthorizer::default());
     let placeholder = "exo_egress_0123456789abcdef0123456789abcdef";
+    let credential = format!("Bearer {placeholder}");
     let placeholders = HashMap::from([("TEST_API_KEY".into(), placeholder.into())]);
     let listener = Arc::new(TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?);
     let (ca_pem, tls) = tls_configuration(vec!["api.test".into(), "public.test".into()])?;
 
-    for (connect_host, request_host, expected_status) in [
-        ("api.test", "api.test", Some(StatusCode::OK)),
-        ("api.test", "public.test", Some(StatusCode::BAD_GATEWAY)),
-        ("public.test", "api.test", None),
+    for (connect_host, request_host, path, authorization, expected_status) in [
+        (
+            "api.test",
+            "api.test",
+            "/auth",
+            Some(credential.as_str()),
+            Some(StatusCode::OK),
+        ),
+        (
+            "api.test",
+            "public.test",
+            "/auth",
+            Some(credential.as_str()),
+            Some(StatusCode::BAD_GATEWAY),
+        ),
+        (
+            "public.test",
+            "api.test",
+            "/auth",
+            Some(credential.as_str()),
+            None,
+        ),
+        (
+            "api.test",
+            "api.test",
+            "/blocked",
+            Some("Bearer guest-token"),
+            Some(StatusCode::BAD_GATEWAY),
+        ),
+        (
+            "api.test",
+            "api.test",
+            "/blocked",
+            None,
+            Some(StatusCode::BAD_GATEWAY),
+        ),
     ] {
         let state = Arc::new(State::new_with_placeholders(
             identity("connect"),
             policy(),
             Some(resolver.clone()),
+            Some(authorizer.clone()),
             Arc::new(upstream.config.clone()),
             Some(&placeholders),
         )?);
@@ -813,13 +864,14 @@ async fn connect_stream_uses_supplied_placeholder_and_checks_both_hosts() -> Res
             .add_root_certificate(reqwest::Certificate::from_pem(ca_pem.as_bytes())?)
             .resolve("api.test", listener.local_addr()?)
             .build()?;
-        let response = client
-            .get("https://api.test/auth")
+        let mut request = client
+            .get(format!("https://api.test{path}"))
             .header(HOST, request_host)
-            .header("connection", "close")
-            .header("authorization", format!("Bearer {placeholder}"))
-            .send()
-            .await;
+            .header("connection", "close");
+        if let Some(authorization) = authorization {
+            request = request.header("authorization", authorization);
+        }
+        let response = request.send().await;
         if let Some(status) = expected_status {
             let response = response?;
             assert_eq!(response.status(), status);
@@ -835,6 +887,7 @@ async fn connect_stream_uses_supplied_placeholder_and_checks_both_hosts() -> Res
     }
     assert_eq!(upstream.connections.load(Ordering::SeqCst), 1);
     assert_eq!(resolver.uses.read().await.len(), 1);
+    assert_eq!(authorizer.0.load(Ordering::SeqCst), 3);
     let mut no_credentials = policy();
     no_credentials.credentials.clear();
     for authority in ["blocked.test:443", "api.test:80"] {
@@ -846,6 +899,7 @@ async fn connect_stream_uses_supplied_placeholder_and_checks_both_hosts() -> Res
                 tls.clone(),
                 identity("connect"),
                 no_credentials.clone(),
+                None,
                 None,
                 &HashMap::new(),
             )

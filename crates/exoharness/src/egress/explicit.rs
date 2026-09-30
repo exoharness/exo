@@ -30,6 +30,7 @@ impl ProxySession {
         identity: EgressIdentity,
         policy: EgressPolicy,
         resolver: Option<Arc<dyn EgressCredentialResolver>>,
+        request_authorizer: Option<Arc<dyn EgressRequestAuthorizer>>,
         tls: TlsAcceptor,
         placeholders: &HashMap<String, String>,
     ) -> Result<Self> {
@@ -38,6 +39,7 @@ impl ProxySession {
                 identity,
                 policy,
                 resolver,
+                request_authorizer,
                 Arc::new(PublicUpstreamResolver),
                 Some(placeholders),
             )?),
