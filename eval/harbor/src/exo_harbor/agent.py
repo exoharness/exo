@@ -17,7 +17,7 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
 from exo_harbor import conventions
-from exo_harbor.exo import PI_HARNESS, ExoClient
+from exo_harbor.exo import HOST_NETWORK_DISABLED, PI_HARNESS, ExoClient
 from exo_harbor.trajectory import export_trial_trajectory
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,11 @@ class ExoAgentOptions(AgentOptions):
     exo_model: str
     harness: str = "exo"
     task_timeout_sec: float | None = None
+    # `enabled` or `disabled`. Harbor's `network_mode` only covers the task
+    # container, and the harness's web tools run on the host, so an agent can
+    # reach the internet even under `no-network`. Disabled by default; pass
+    # `enabled` only to ablate what the withheld tools are worth.
+    host_network: str = HOST_NETWORK_DISABLED
 
 
 class ExoAgent(BaseAgent):
@@ -53,6 +58,7 @@ class ExoAgent(BaseAgent):
             exo_root=options.exo_root,
             repo_root=options.exo_repo_root,
             harness=options.harness,
+            host_network=options.host_network,
         )
         self._container_id: str | None = None
         self._sandbox_id: str | None = None

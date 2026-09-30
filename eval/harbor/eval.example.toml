@@ -11,3 +11,10 @@ n_concurrent = 1
 # Each task has its own conversation; agent memory and tools persist across tasks.
 # "basic" uses the shell-only executor as a control; "exo" enables Exo tools.
 harness = "exo"
+
+# Host-side network access for the harness process. "disabled" withholds the
+# agent's web_search and web_fetch tools: they run on the host, so a task's
+# network_mode does not cover them and an agent in a no-network container can
+# still read the upstream fix for the issue it is graded on. Set "enabled" only
+# to ablate what those tools are worth.
+host_network = "disabled"

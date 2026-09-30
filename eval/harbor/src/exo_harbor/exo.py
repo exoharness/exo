@@ -15,6 +15,16 @@ EXO_HARNESS = "exo"
 BASIC_HARNESS = "basic"
 PI_HARNESS = "pi"
 
+# Host-side network access for the harness process. `web_search` and
+# `web_fetch` run on the host, so Harbor's per-phase `network_mode` does not
+# cover them and an agent in a `no-network` container can still reach the
+# internet. These tasks are graded on a code change, so reaching GitHub means
+# fetching the upstream fix: withhold the tools unless a run is explicitly
+# ablating that.
+HOST_NETWORK_ENABLED = "enabled"
+HOST_NETWORK_DISABLED = "disabled"
+HOST_NETWORK_VALUES = (HOST_NETWORK_ENABLED, HOST_NETWORK_DISABLED)
+
 # `exo thread sandbox attach` reports the new sandbox in prose:
 # "attached Docker container as sandbox <id> for <conversation>".
 ATTACHED_SANDBOX_ID = re.compile(r"as sandbox (\S+) for ")
@@ -30,6 +40,16 @@ class ExoClient:
     exo_root: Path
     repo_root: Path
     harness: str = EXO_HARNESS
+    host_network: str = HOST_NETWORK_DISABLED
+
+    def __post_init__(self) -> None:
+        # A typo must not silently re-open host networking, so reject anything
+        # but the two documented values instead of passing the string through.
+        if self.host_network not in HOST_NETWORK_VALUES:
+            raise ValueError(
+                f"--ak host_network must be one of "
+                f"{', '.join(HOST_NETWORK_VALUES)}, got {self.host_network!r}"
+            )
 
     async def ensure_agent(self, model: str) -> None:
         if await self._exists("agent", "get", conventions.AGENT_SLUG):
@@ -197,6 +217,7 @@ class ExoClient:
             **os.environ,
             "EXO_PROFILE": os.environ.get("EXO_PROFILE", "practical"),
             "EXO_ROOT": str(self.exo_root),
+            "EXO_HOST_NETWORK": self.host_network,
         }
 
     def _argv(self, *args: str) -> list[str]:

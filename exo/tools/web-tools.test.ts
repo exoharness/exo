@@ -1,12 +1,15 @@
+import { HarnessToolRegistry, type TurnContext } from "@exo/harness";
 import { describe, expect, it } from "vitest";
 
 import {
   decodeEntities,
   extractArticleMarkdown,
   extractReadableText,
+  hostNetworkAllowed,
   isPrivateIp,
   normalizeDuckDuckGoUrl,
   parseDuckDuckGoHtml,
+  registerWebToolsWithEnv,
 } from "./web-tools";
 
 describe("isPrivateIp", () => {
@@ -241,5 +244,34 @@ describe("decodeEntities", () => {
     expect(decodeEntities("&bogus; &#x110000; &#0;")).toBe(
       "&bogus; &#x110000; &#0;",
     );
+  });
+});
+
+describe("host network gate", () => {
+  function registeredNames(env: NodeJS.ProcessEnv): string[] {
+    const registry = new HarnessToolRegistry({} as TurnContext);
+
+    registerWebToolsWithEnv(registry, env);
+
+    return registry.definitions().map(({ name }) => name);
+  }
+
+  it("registers both tools by default", () => {
+    expect(hostNetworkAllowed({})).toBe(true);
+    expect(registeredNames({})).toEqual(["web_search", "web_fetch"]);
+  });
+
+  it("withholds both tools when host networking is disabled", () => {
+    const env = { EXO_HOST_NETWORK: "disabled" };
+
+    expect(hostNetworkAllowed(env)).toBe(false);
+    expect(registeredNames(env)).toEqual([]);
+  });
+
+  it("only treats the exact value disabled as off", () => {
+    expect(hostNetworkAllowed({ EXO_HOST_NETWORK: "enabled" })).toBe(true);
+    expect(hostNetworkAllowed({ EXO_HOST_NETWORK: "" })).toBe(true);
+    expect(hostNetworkAllowed({ EXO_HOST_NETWORK: "Disabled" })).toBe(true);
+    expect(hostNetworkAllowed({ EXO_HOST_NETWORK: "none" })).toBe(true);
   });
 });

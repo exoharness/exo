@@ -19,6 +19,13 @@ import type {
 // the harness runner process on the host, so work even when the sandbox
 // was created with networking disabled.
 //
+// EXO_HOST_NETWORK=disabled withholds both. A sandbox enforces its network
+// policy on its own interfaces, which says nothing about this process, so a
+// caller that needs the agent to have no route to the internet at all -- an
+// eval that must stop the agent fetching the upstream fix -- sets it instead of
+// relying on the sandbox's policy. The tools are withheld rather than made to
+// fail so the model is never offered a route that cannot work.
+//
 // Backend provider for search is Brave Search API (requires a key) or
 // DuckDuckGo HTML (no key), and is selected per-call based on the presence
 // of a Brave key in the exo secret store (`exo vault secret create global brave-api-key ...`)
@@ -795,7 +802,21 @@ export function createWebToolInstances(): ToolInstance[] {
   return [webSearchTool(), webFetchTool()];
 }
 
+export function hostNetworkAllowed(env: NodeJS.ProcessEnv): boolean {
+  return env.EXO_HOST_NETWORK !== "disabled";
+}
+
 export function registerWebTools(registry: HarnessToolRegistry): void {
+  registerWebToolsWithEnv(registry, process.env);
+}
+
+export function registerWebToolsWithEnv(
+  registry: HarnessToolRegistry,
+  env: NodeJS.ProcessEnv,
+): void {
+  if (!hostNetworkAllowed(env)) {
+    return;
+  }
   for (const tool of createWebToolInstances()) {
     registry.register(tool);
   }

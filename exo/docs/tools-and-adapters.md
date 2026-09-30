@@ -79,6 +79,15 @@ the tool lockfile.
 Deferred, deliberately: capability sandboxes, remote registries, signatures,
 publisher trust, and generated command tools.
 
+The web tools are the one case where a tool reaches further than the sandbox
+policy describes. `web_search` and `web_fetch` run in the harness process, so
+they keep working when the sandbox was created with networking disabled — the
+policy is enforced on the sandbox's interfaces and says nothing about the host.
+Set `EXO_HOST_NETWORK=disabled` to withhold both. The tools are withheld rather
+than made to fail so the model is never offered a route that cannot work; use it
+when the agent must have no route to the internet at all, such as an eval graded
+on a code change it could otherwise look up.
+
 ### Profiles
 
 Profiles are curated tool sets, not trust levels:
