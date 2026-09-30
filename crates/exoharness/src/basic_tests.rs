@@ -693,7 +693,6 @@ async fn local_process_contract_handle(
         Arc::new(crate::LocalProcessSandboxBackend::new());
     backend
         .acquire(SandboxRequest {
-            external_proxy: None,
             sandbox_id: sandbox_id.to_string(),
             scope: ResourceScope::Thread {
                 agent_id: crate::Uuid7::now(),
@@ -897,7 +896,6 @@ fn provider_contract_request(
     default_workdir: &str,
 ) -> SandboxRequest {
     SandboxRequest {
-        external_proxy: None,
         sandbox_id: format!("{provider}-{contract}-contract"),
         scope: ResourceScope::Thread {
             agent_id: crate::Uuid7::now(),
@@ -2848,7 +2846,6 @@ async fn local_process_sandbox_rejects_disabled_networking() {
     let backend = crate::LocalProcessSandboxBackend::new();
     let result = backend
         .acquire(crate::SandboxRequest {
-            external_proxy: None,
             sandbox_id: "disabled-network".into(),
             scope: crate::ResourceScope::Global,
             provider_state: None,

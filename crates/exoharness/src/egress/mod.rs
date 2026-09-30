@@ -329,7 +329,9 @@ impl State {
         );
         let mut variables = HashSet::new();
         let mut values = HashSet::new();
-        if let Some(placeholders) = placeholders {
+        if external.is_none()
+            && let Some(placeholders) = placeholders
+        {
             ensure!(
                 placeholders.len() == policy.credentials.len(),
                 "placeholder map must match credential bindings"
@@ -985,16 +987,16 @@ impl ProxyConnection {
         F: std::future::Future<Output = Result<C>> + Send + 'static,
         C: std::future::Future<Output = Result<Connection>> + Send + 'static,
     {
-        let (ca_pem, tls, environment) = match &state.external {
-            Some(external) => (external.ca_pem.clone(), None, external.environment.clone()),
+        let environment = state
+            .bindings
+            .iter()
+            .map(|b| (b.config.environment_variable.clone(), b.placeholder.clone()))
+            .collect();
+        let (ca_pem, tls) = match &state.external {
+            Some(external) => (external.ca_pem.clone(), None),
             None => {
                 let (ca_pem, tls) = tls_configuration(state.hosts.iter().cloned().collect())?;
-                let environment = state
-                    .bindings
-                    .iter()
-                    .map(|b| (b.config.environment_variable.clone(), b.placeholder.clone()))
-                    .collect();
-                (ca_pem, Some(tls), environment)
+                (ca_pem, Some(tls))
             }
         };
         let shutdown = cancel.clone();

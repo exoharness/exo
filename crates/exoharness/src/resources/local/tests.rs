@@ -67,7 +67,6 @@ async fn isolated_git_resources_live(
         credential: None,
     });
     let request = SandboxRequest {
-        external_proxy: None,
         sandbox_id: format!("resource-preparation-{}", Uuid7::now()),
         scope: ResourceScope::Global,
         provider_state: None,

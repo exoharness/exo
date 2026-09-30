@@ -16,7 +16,6 @@ use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
 fn make_request(thread_id: exoharness::Uuid7, sandbox_id: &str) -> SandboxRequest {
     SandboxRequest {
-        external_proxy: None,
         sandbox_id: sandbox_id.into(),
         scope: ResourceScope::Thread {
             agent_id: exoharness::Uuid7::now(),

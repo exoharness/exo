@@ -145,6 +145,7 @@ impl<P: SandboxProxy> SandboxEgress<P> {
 }
 
 struct CachedSandbox<H, P> {
+    external_proxy: Option<super::ExternalProxyConfig>,
     request: SandboxRequest,
     handle: Option<Arc<H>>,
     egress: Arc<SandboxEgress<P>>,
@@ -211,6 +212,7 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
     pub(crate) async fn acquire_with_proxy<T, TF, B, BF>(
         &self,
         request: SandboxRequest,
+        external_proxy: Option<&super::ExternalProxyConfig>,
         proxy: T,
         build: B,
         terminate: impl Future<Output = Result<()>>,
@@ -228,7 +230,7 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
             (
                 cached.request.spec == request.spec
                     && cached.request.scope == request.scope
-                    && cached.request.external_proxy == request.external_proxy,
+                    && cached.external_proxy.as_ref() == external_proxy,
                 cached.handle.clone(),
                 cached.egress.clone(),
             )
@@ -259,7 +261,7 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
             sandbox_id: request.sandbox_id.clone(),
             scope: request.scope,
         };
-        let state = match &request.external_proxy {
+        let state = match external_proxy {
             Some(proxy) => {
                 State::with_external_proxy(identity, request.spec.policy.clone(), proxy.clone())?
             }
@@ -284,6 +286,7 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
             sandboxes.insert(
                 request.sandbox_id.clone(),
                 CachedSandbox {
+                    external_proxy: external_proxy.cloned(),
                     request: request.clone(),
                     handle: None,
                     egress: egress.clone(),
@@ -347,6 +350,7 @@ impl<H: ManagedSandboxHandle + 'static> EgressRuntime<H> {
     pub(crate) async fn acquire<T, TF, B, BF>(
         &self,
         request: SandboxRequest,
+        external_proxy: Option<&super::ExternalProxyConfig>,
         transport: T,
         build: B,
         terminate: impl Future<Output = Result<()>>,
@@ -360,6 +364,7 @@ impl<H: ManagedSandboxHandle + 'static> EgressRuntime<H> {
         let policy = request.spec.policy.networking.clone();
         self.acquire_with_proxy(
             request,
+            external_proxy,
             |state, cancel| async move {
                 EgressProxy::start_with_transport(transport(policy).await?, state, cancel).await
             },
@@ -451,7 +456,6 @@ mod tests {
 
     fn request(id: &str) -> SandboxRequest {
         SandboxRequest {
-            external_proxy: None,
             sandbox_id: id.into(),
             scope: crate::ResourceScope::Global,
             provider_state: None,
@@ -482,6 +486,7 @@ mod tests {
             let result = runtime
                 .acquire(
                     request("one"),
+                    None,
                     |_| async { Ok(transport.clone() as Arc<dyn EgressTransport>) },
                     |_| async {
                         running.store(true, Ordering::SeqCst);
@@ -508,6 +513,7 @@ mod tests {
             runtime
                 .acquire(
                     request("one"),
+                    None,
                     |_| async { Ok(replacement.clone() as Arc<dyn EgressTransport>) },
                     |_| async { Ok(Handle(Some(true))) },
                     async { panic!("successful acquisition must not terminate the sandbox") },
@@ -528,6 +534,7 @@ mod tests {
         let (release, released) = tokio::sync::oneshot::channel();
         let acquiring = runtime.acquire(
             request("one"),
+            None,
             |_| async { Ok(transport.clone() as Arc<dyn EgressTransport>) },
             |_| async {
                 started.send(()).unwrap();
@@ -561,6 +568,7 @@ mod tests {
         let (release, released) = tokio::sync::oneshot::channel();
         let acquiring = runtime.acquire(
             request("one"),
+            None,
             |_| async {
                 started.send(()).unwrap();
                 released.await?;
@@ -589,6 +597,7 @@ mod tests {
         let (release, released) = tokio::sync::oneshot::channel();
         let acquiring = runtime.acquire(
             request("one"),
+            None,
             |_| async { Ok(transport.clone() as Arc<dyn EgressTransport>) },
             |_| async {
                 started.send(()).unwrap();
@@ -625,6 +634,7 @@ mod tests {
             let retained = runtime
                 .acquire(
                     request("one"),
+                    None,
                     |_| async { Ok(old.clone() as Arc<dyn EgressTransport>) },
                     |_| async { Ok(Handle(running)) },
                     async { panic!("successful acquisition must not terminate the sandbox") },
@@ -636,6 +646,7 @@ mod tests {
             let replacement = runtime
                 .acquire(
                     changed,
+                    None,
                     |_| async {
                         assert!(old.shutdown_completed.load(Ordering::SeqCst));
                         Ok(new.clone() as Arc<dyn EgressTransport>)

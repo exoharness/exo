@@ -119,7 +119,6 @@ fn proxy_transport_enforces_egress_independently_of_network_policy() {
     };
     let request = |networking, egress_proxy| FirecrackerRequest {
         sandbox: SandboxRequest {
-            external_proxy: None,
             sandbox_id: "policy-validation".into(),
             scope: crate::ResourceScope::Global,
             provider_state: None,
@@ -854,6 +853,7 @@ async fn idle_reap_closes_egress_before_machine_cleanup_can_fail() -> Result<()>
         .unwrap()
         .insert(record.machine_id.clone(), listener.clone());
     let backend = FirecrackerSandboxBackend {
+        external_proxy: None,
         shared: shared.clone(),
         egress: Arc::new(EgressRuntime::new(None, Arc::new(PublicUpstreamResolver))),
     };
@@ -898,7 +898,6 @@ impl DurableStopFixture {
             ..Default::default()
         };
         let request = SandboxRequest {
-            external_proxy: None,
             sandbox_id: "durable".into(),
             scope: crate::ResourceScope::Global,
             spec: SandboxSpec {
@@ -955,6 +954,7 @@ impl DurableStopFixture {
             std::process::id().to_string(),
         )?;
         let backend = FirecrackerSandboxBackend {
+            external_proxy: None,
             shared,
             egress: Arc::new(EgressRuntime::new(None, Arc::new(PublicUpstreamResolver))),
         };
@@ -970,6 +970,7 @@ impl DurableStopFixture {
             .egress
             .acquire(
                 request.clone(),
+                None,
                 |_| async { Ok(egress_transport.clone() as Arc<dyn EgressTransport>) },
                 |egress| async {
                     Ok(FirecrackerSandboxHandle {
@@ -1202,7 +1203,6 @@ fn resource_disks_have_independent_guest_mounts_and_read_only_drives() -> Result
     use base64::Engine;
     let mut request = FirecrackerRequest {
         sandbox: SandboxRequest {
-            external_proxy: None,
             sandbox_id: "resources".into(),
             scope: crate::ResourceScope::Global,
             provider_state: None,
@@ -1314,7 +1314,6 @@ async fn resource_disks_live_isolate_resume_and_enforce_read_only() -> Result<()
     let agent = crate::Uuid7::now();
     let threads = [crate::Uuid7::now(), crate::Uuid7::now()];
     let request = |thread, mounts: Vec<crate::FileSystemMount>| SandboxRequest {
-        external_proxy: None,
         sandbox_id: format!("resource-{thread}"),
         scope: crate::ResourceScope::Thread {
             agent_id: agent,

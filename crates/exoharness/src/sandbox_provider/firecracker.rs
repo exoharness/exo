@@ -663,6 +663,7 @@ impl Drop for Shared {
 
 #[derive(Clone)]
 pub struct FirecrackerSandboxBackend {
+    external_proxy: Option<crate::egress::ExternalProxyConfig>,
     egress: Arc<EgressRuntime<FirecrackerSandboxHandle>>,
     shared: Arc<Shared>,
 }
@@ -934,6 +935,7 @@ impl FirecrackerSandboxBackend {
         validate_jailed_socket_paths(&config)?;
 
         Ok(Self {
+            external_proxy: None,
             egress,
             shared: Arc::new(Shared {
                 config,
@@ -1384,6 +1386,7 @@ impl FirecrackerSandboxBackend {
         self.egress
             .acquire(
                 request.clone(),
+                self.external_proxy.as_ref(),
                 |policy| async move { self.egress_transport(&policy).await },
                 |egress| async move {
                     let request = FirecrackerRequest {
@@ -1419,6 +1422,17 @@ impl FirecrackerSandboxBackend {
 
 #[async_trait]
 impl ManagedSandboxBackend for FirecrackerSandboxBackend {
+    fn with_external_proxy(
+        &self,
+        proxy: crate::egress::ExternalProxyConfig,
+    ) -> Result<Arc<dyn ManagedSandboxBackend>> {
+        proxy.validate()?;
+        Ok(Arc::new(Self {
+            external_proxy: Some(proxy),
+            ..self.clone()
+        }))
+    }
+
     async fn materialize_resources(
         &self,
         request: crate::resources::MaterializeResourcesRequest,

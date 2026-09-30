@@ -457,7 +457,6 @@ mod tests {
         };
         let backend = LocalProcessSandboxBackend::new();
         let request = SandboxRequest {
-            external_proxy: None,
             sandbox_id: Uuid7::now().to_string(),
             scope: crate::ResourceScope::Global,
             spec: SandboxSpec {

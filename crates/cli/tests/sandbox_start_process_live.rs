@@ -35,7 +35,6 @@ fn live_provider_secret(provider: &str, secret_name: &str) -> Option<String> {
 
 fn make_e2b_request(thread_id: exoharness::Uuid7, sandbox_id: &str) -> SandboxRequest {
     SandboxRequest {
-        external_proxy: None,
         sandbox_id: sandbox_id.into(),
         scope: ResourceScope::Thread {
             agent_id: exoharness::Uuid7::now(),
@@ -88,7 +87,6 @@ fn sprites_config_from_env() -> Option<SpritesConfig> {
 
 fn make_sprites_request(thread_id: exoharness::Uuid7, sandbox_id: &str) -> SandboxRequest {
     SandboxRequest {
-        external_proxy: None,
         sandbox_id: sandbox_id.into(),
         scope: ResourceScope::Thread {
             agent_id: exoharness::Uuid7::now(),
