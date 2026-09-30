@@ -15,6 +15,8 @@
 mod egress;
 #[cfg(target_os = "macos")]
 mod image_cache;
+#[cfg(unix)]
+mod terminal;
 
 use egress::SmolvmProxy;
 
@@ -968,7 +970,7 @@ struct SmolvmWarmHandle {
 }
 
 impl SmolvmWarmHandle {
-    fn build(&self, command: &SandboxCommand, cwd: &str, interactive: bool) -> Command {
+    fn build(&self, command: &SandboxCommand, cwd: &str, interactive: bool, tty: bool) -> Command {
         let mut process = Command::new(&self.binary);
         process
             .arg("machine")
@@ -977,6 +979,9 @@ impl SmolvmWarmHandle {
             .arg(&self.machine);
         if interactive {
             process.arg("--interactive");
+        }
+        if tty {
+            process.arg("--tty");
         }
         configure_command_args(&mut process, command, cwd);
         process.arg("--");
@@ -1028,7 +1033,7 @@ impl ManagedSandboxHandle for SmolvmWarmHandle {
         let command = SandboxEgress::prepare_command(self.egress.as_deref(), command)?;
         let command = command.as_ref();
         let cwd = resolve_cwd(command, &self.request.spec);
-        let process = self.build(command, &cwd, false);
+        let process = self.build(command, &cwd, false, false);
         run_command(process, &with_backstop_timeout(command), cwd).await
     }
 
@@ -1036,8 +1041,19 @@ impl ManagedSandboxHandle for SmolvmWarmHandle {
         let command = SandboxEgress::prepare_command(self.egress.as_deref(), command)?;
         let command = command.as_ref();
         let cwd = resolve_cwd(command, &self.request.spec);
-        let process = self.build(command, &cwd, true);
+        let process = self.build(command, &cwd, true, false);
         spawn_sandbox_process(process, command).await
+    }
+
+    #[cfg(unix)]
+    async fn start_terminal(
+        &self,
+        command: &SandboxCommand,
+        size: crate::SandboxTerminalSize,
+    ) -> Result<crate::SandboxTerminalParts> {
+        let command = SandboxEgress::prepare_command(self.egress.as_deref(), command)?;
+        let cwd = resolve_cwd(&command, &self.request.spec);
+        terminal::spawn(self.build(&command, &cwd, true, true), size)
     }
 
     async fn is_running(&self) -> Result<Option<bool>> {

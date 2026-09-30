@@ -2350,6 +2350,32 @@ gh api repos/org/repo/pulls/10/reviews --jq '.[0].body'
                 output.stderr
             );
         }
+        #[cfg(unix)]
+        {
+            use futures::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+            let mut terminal_command = command.clone();
+            terminal_command.argv[2] = format!(
+                "stty size; read -r input; test \"$input\" = resized; stty size; {}",
+                command.argv[2]
+            );
+            let mut terminal = handle.start_terminal(
+                &terminal_command, crate::SandboxTerminalSize { rows: 24, cols: 80 },
+            ).await?;
+            let mut output = BufReader::new(terminal.output);
+            let mut line = String::new();
+            output.read_line(&mut line).await?;
+            ensure!(line.trim() == "24 80", "initial terminal size: {line:?}");
+            terminal.control.resize(crate::SandboxTerminalSize { rows: 40, cols: 120 }).await?;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            terminal.input.write_all(b"resized\n").await?;
+            terminal.input.flush().await?;
+            let mut remainder = String::new();
+            output.read_to_string(&mut remainder).await?;
+            ensure!(terminal.wait.await? == 0, "terminal failed: {remainder}");
+            ensure!(remainder.contains("40 120"), "terminal resize failed: {remainder}");
+            let expected = if with_gh { "private review" } else { "authenticated-v2" };
+            ensure!(remainder.contains(expected), "terminal egress failed: {remainder}");
+        }
         let mut save = command.clone();
         save.argv[2] = "printf '%s' retained > /egress-retained".into();
         ensure!(handle.exec(&save).await?.ok, "saving reconnect marker");
