@@ -84,17 +84,17 @@ function usageRecord(
   return modelUsageRecord(
     typeof message.model === "string" ? message.model : "",
     {
-      promptTokens:
+      prompt_tokens:
         input === undefined
           ? undefined
           : provider === "anthropic"
             ? input
             : input + (cached ?? 0) + (created ?? 0),
-      completionTokens:
+      completion_tokens:
         typeof usage.output === "number" ? usage.output : undefined,
-      promptCachedTokens: cached,
-      promptCacheCreationTokens: created,
-      providerCostUsd: typeof cost.total === "number" ? cost.total : undefined,
+      prompt_cached_tokens: cached,
+      prompt_cache_creation_tokens: created,
+      cost_usd: typeof cost.total === "number" ? cost.total : undefined,
     },
   );
 }

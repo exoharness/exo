@@ -19,6 +19,7 @@ import {
   materializeConversationMessages,
   messageText,
   messagesToTranscript,
+  messagesEvent,
   systemTextMessage,
   toJsonValue,
   toJsonObject,
@@ -48,10 +49,7 @@ import {
 } from "@exo/model-runtime/shared";
 
 import { claudeToolName } from "../../typescript/harness/native-mcp";
-import {
-  modelResponseEvents,
-  modelUsageRecord,
-} from "../../typescript/model-runtime/events";
+import { modelUsageRecord } from "../../typescript/model-runtime/events";
 
 const DEFAULT_CLAUDE_CODE_SANDBOX_EXECUTABLE = "/usr/local/bin/claude-code";
 const CLAUDE_MAX_API_RETRIES = 2;
@@ -409,22 +407,21 @@ async function appendClaudeFinalMessage(
   state.finalMessageStored = true;
   const result = state.result;
   const usage = result?.usage;
-  await appendEvents(
-    context,
-    modelResponseEvents({
-      messages: state.finalText ? [assistantTextMessage(state.finalText)] : [],
-      usage:
-        usage && result
-          ? modelUsageRecord(model, {
-              promptTokens: usage.input_tokens,
-              completionTokens: usage.output_tokens,
-              promptCachedTokens: usage.cache_read_input_tokens,
-              promptCacheCreationTokens: usage.cache_creation_input_tokens,
-              providerCostUsd: result.total_cost_usd,
-            })
-          : undefined,
-    }),
-  );
+  await appendEvents(context, [
+    messagesEvent(
+      state.finalText ? [assistantTextMessage(state.finalText)] : [],
+      undefined,
+      usage && result
+        ? modelUsageRecord(model, {
+            prompt_tokens: usage.input_tokens,
+            completion_tokens: usage.output_tokens,
+            prompt_cached_tokens: usage.cache_read_input_tokens,
+            prompt_cache_creation_tokens: usage.cache_creation_input_tokens,
+            cost_usd: result.total_cost_usd,
+          })
+        : undefined,
+    ),
+  ]);
 }
 
 function claudeApiRetryLimitError(message: SDKMessage): string | null {

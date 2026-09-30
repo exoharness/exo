@@ -16,6 +16,8 @@ import {
   registerLibraryTools,
   registerLibraryToolModulePath,
   registerTools,
+  assistantTextMessage,
+  messagesEvent,
   materializeEventsToMessages,
   toolResultMessage,
   toolResultEvent,
@@ -236,6 +238,28 @@ describe("HarnessToolRegistry", () => {
 });
 
 describe("materializeEventsToMessages", () => {
+  it("leaves RLM diagnostics out of conversation replay", () => {
+    const data = [
+      {
+        type: "custom",
+        event_type: "rlm_model_response",
+        payload: { messages: [assistantTextMessage("FINAL(secret)")] },
+      },
+      messagesEvent([assistantTextMessage("answer")]),
+    ];
+    expect(
+      materializeEventsToMessages(
+        data.map((data, index) => ({
+          id: String(index),
+          conversationId: "thread",
+          turnId: "turn",
+          createdAt: "2026-09-29T00:00:00Z",
+          data,
+        })),
+      ),
+    ).toEqual([assistantTextMessage("answer")]);
+  });
+
   it("synthesizes results for dangling tool calls before later messages", () => {
     const events: Event[] = [
       {

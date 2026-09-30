@@ -13,7 +13,6 @@ import {
   linguaToAnthropicMessages,
   linguaToResponsesMessages,
   responsesMessagesToLingua,
-  type Message as LinguaMessage,
 } from "@braintrust/lingua";
 import type {
   Response,
@@ -25,6 +24,8 @@ import type {
 } from "openai/resources/responses/responses";
 
 import {
+  messagesEvent,
+  toolRequestedEvent,
   toolResultEvent,
   type AgentConfig,
   type EventData,
@@ -34,7 +35,7 @@ import {
   type ToolDefinition,
   type TurnContext,
 } from "../harness";
-import { modelResponseEvents, modelUsageRecord } from "./events";
+import { modelUsageRecord } from "./events";
 import type {
   ChatCompletion,
   ChatCompletionChunk,
@@ -502,7 +503,7 @@ function splitAnthropicMessages(messages: Message[]): {
   return {
     system: systemParts.join("\n\n"),
     messages: linguaToAnthropicMessages(
-      conversation as LinguaMessage[],
+      conversation,
     ) as Anthropic.MessageParam[],
   };
 }
@@ -980,9 +981,7 @@ export function tracedUnderParent<R>(
 export function linguaMessagesToResponsesInput(
   messages: Message[] | undefined,
 ): ResponseInput {
-  const items = linguaToResponsesMessages<ResponseInput>(
-    (messages ?? []) as LinguaMessage[],
-  );
+  const items = linguaToResponsesMessages<ResponseInput>(messages ?? []);
   // Requests are sent with `store: false`, so server-side item ids from prior
   // rounds (rs_/fc_/msg_) don't resolve — replaying them 404s on reasoning
   // models. Replay statelessly: drop reasoning items (lingua doesn't preserve
@@ -1000,24 +999,30 @@ export function linguaMessagesToResponsesInput(
 
 export function responseToLinguaEvents(response: Response): EventData[] {
   const parsed = responseToolCallResults(response);
+  const messages = responseMessages(response);
   const usage = response.usage;
-  const events = modelResponseEvents({
-    messages: responseMessages(response),
-    toolCalls: parsed.flatMap((result) =>
-      result.type === "tool_call" ? [result.toolCall] : [],
-    ),
-    usage: usage
-      ? modelUsageRecord(response.model, {
-          promptTokens: usage.input_tokens,
-          completionTokens: usage.output_tokens,
-          promptCachedTokens: usage.input_tokens_details?.cached_tokens,
-          completionReasoningTokens:
-            usage.output_tokens_details?.reasoning_tokens,
-        })
-      : undefined,
-  });
+  const events: EventData[] = [];
+  if (messages.length > 0 || usage) {
+    events.push(
+      messagesEvent(
+        messages,
+        undefined,
+        usage
+          ? modelUsageRecord(response.model, {
+              prompt_tokens: usage.input_tokens,
+              completion_tokens: usage.output_tokens,
+              prompt_cached_tokens: usage.input_tokens_details?.cached_tokens,
+              completion_reasoning_tokens:
+                usage.output_tokens_details?.reasoning_tokens,
+            })
+          : undefined,
+      ),
+    );
+  }
   for (const result of parsed) {
-    if (result.type === "parse_error") {
+    if (result.type === "tool_call") {
+      events.push(toolRequestedEvent(result.toolCall));
+    } else {
       events.push(
         toolResultEvent(result.toolCallId, { ok: false, error: result.error }),
       );
@@ -1035,7 +1040,7 @@ export function responseStreamEventToLinguaEvents(
 }
 
 export function responseMessages(response: Response): Message[] {
-  return responsesMessagesToLingua(response.output) as Message[];
+  return responsesMessagesToLingua(response.output);
 }
 
 export function responseToolCalls(response: Response): PendingToolCall[] {

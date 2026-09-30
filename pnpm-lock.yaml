@@ -17,6 +17,9 @@ importers:
       '@braintrust/lingua':
         specifier: ^0.1.0
         version: 0.1.0(@anthropic-ai/sdk@0.106.0(zod@4.3.6))(openai@6.33.0(ws@8.21.0)(zod@4.3.6))
+      '@braintrust/lingua-types':
+        specifier: ^0.1.1
+        version: 0.1.1
       '@braintrust/lingua-wasm':
         specifier: ^0.1.0
         version: 0.1.0
@@ -420,6 +423,10 @@ packages:
 
   '@borewit/text-codec@0.2.2':
     resolution: {integrity: sha512-DDaRehssg1aNrH4+2hnj1B7vnUGEjU6OIlyRdkMd0aUdIUvKXrJfXsy8LVtXAy7DRvYVluWbMspsRhz2lcW0mQ==}
+
+  '@braintrust/lingua-types@0.1.1':
+    resolution: {integrity: sha512-PGNpL8ISleSGEEoz+sie4+qNYAPWVqF6jhOw7wOX7vQo1DkWQZNd7I6fkRIzP1hF5jmD2zNshoXQq13ntQqX4w==}
+    engines: {pnpm: '>=10.27.0'}
 
   '@braintrust/lingua-wasm@0.1.0':
     resolution: {integrity: sha512-yHCE77Ypm4qX4EJGsm9/AGtukh1jgQmAN7rY/ycmSoVbr/61WJAsDyn1e+JX3jwn2GAA4i4M7ZZg9OIau10ffg==}
@@ -5786,6 +5793,8 @@ snapshots:
       '@babel/helper-validator-identifier': 7.29.7
 
   '@borewit/text-codec@0.2.2': {}
+
+  '@braintrust/lingua-types@0.1.1': {}
 
   '@braintrust/lingua-wasm@0.1.0': {}
 

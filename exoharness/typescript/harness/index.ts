@@ -1,4 +1,7 @@
+import type { Message } from "@braintrust/lingua";
 import type { ToolModuleExport } from "./tool-modules";
+
+export type { Message } from "@braintrust/lingua";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
@@ -12,18 +15,7 @@ export * from "./tool-modules";
 export * from "./adapter-tools";
 export * from "./skill-tools";
 
-export type MessageRole =
-  | "system"
-  | "developer"
-  | "user"
-  | "assistant"
-  | "tool";
-
-export interface Message {
-  role: MessageRole;
-  content: unknown;
-  id?: string | null;
-}
+export type MessageRole = Message["role"];
 
 export interface AgentConfig {
   instructions: Message[];

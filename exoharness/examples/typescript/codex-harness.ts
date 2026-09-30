@@ -1210,7 +1210,7 @@ function rawCodexPromptMessage(item: Record<string, unknown>): Message | null {
   if (!isRawCodexPromptRole(item.role)) {
     return null;
   }
-  const messages = responsesMessagesToLingua([item]) as Message[];
+  const messages = responsesMessagesToLingua([item]);
   return messages[0] ?? null;
 }
 

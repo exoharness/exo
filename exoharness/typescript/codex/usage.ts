@@ -1,7 +1,7 @@
 import { type CodexProtocolLogEntry } from "./app-server";
-import { type EventData } from "../harness";
+import { messagesEvent, type EventData } from "../harness";
 import { type PricingTable } from "../model-runtime/cost";
-import { modelResponseEvents, modelUsageRecord } from "../model-runtime/events";
+import { modelUsageRecord } from "../model-runtime/events";
 import { isRecord } from "../model-runtime/shared";
 
 export interface CodexTokenUsage {
@@ -69,18 +69,19 @@ export function codexUsageEvent(
   usage: CodexTokenUsage,
   table: PricingTable | null,
 ): EventData {
-  return modelResponseEvents({
-    messages: [],
-    usage: modelUsageRecord(
+  return messagesEvent(
+    [],
+    undefined,
+    modelUsageRecord(
       model,
       {
-        promptTokens: usage.inputTokens,
-        completionTokens: usage.outputTokens,
-        promptCachedTokens: usage.cachedInputTokens,
-        promptCacheCreationTokens: usage.cacheWriteInputTokens,
-        completionReasoningTokens: usage.reasoningOutputTokens,
+        prompt_tokens: usage.inputTokens,
+        completion_tokens: usage.outputTokens,
+        prompt_cached_tokens: usage.cachedInputTokens,
+        prompt_cache_creation_tokens: usage.cacheWriteInputTokens,
+        completion_reasoning_tokens: usage.reasoningOutputTokens,
       },
       table,
     ),
-  })[0];
+  );
 }
