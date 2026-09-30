@@ -165,7 +165,7 @@ impl ActiveEventTurn {
     }
 }
 
-pub(crate) fn execution_stream_event(data: EventData) -> Option<ExecutionStreamEvent> {
+fn execution_stream_event(data: EventData) -> Option<ExecutionStreamEvent> {
     match data {
         EventData::LinguaStreamChunk { chunk } => Some(ExecutionStreamEvent::Chunk(chunk)),
         EventData::ToolRequested {

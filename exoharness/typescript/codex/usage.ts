@@ -1,7 +1,7 @@
 import { type CodexProtocolLogEntry } from "./app-server";
 import { messagesEvent, type EventData } from "../harness";
 import { type PricingTable } from "../model-runtime/cost";
-import { modelUsageRecord } from "../model-runtime/events";
+import { modelUsageRecord } from "../model-runtime/usage";
 import { isRecord } from "../model-runtime/shared";
 
 export interface CodexTokenUsage {

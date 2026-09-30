@@ -756,9 +756,8 @@ async function handleCodexNotification(
   const { turn } = context.exoharness.current;
   updateTraceStateFromNotification(notification, traceState);
   switch (notification.method) {
-    case "rawResponseItem/completed": {
+    case "rawResponseItem/completed":
       return "running";
-    }
     case "item/agentMessage/delta": {
       const params = asRecord(notification.params);
       if (typeof params.delta === "string") {

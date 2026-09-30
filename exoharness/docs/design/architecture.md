@@ -209,8 +209,9 @@ Harnesses normalize their provider protocols into `messages`, `tool_requested`,
 `tool_result`, and `lingua_stream_chunk`. Shared model-event helpers attach usage
 and cost, including usage-only `messages` events for calls without assistant
 text. Runtime routes active-turn writes through one event sink and publishes
-canonical tool progress after persistence. Harnesses should append tool events
-instead of also emitting them through `context.stream`.
+canonical tool progress after persistence. Harnesses should append canonical
+tool events; `context.stream.toolCall` and `toolResult` are for custom tool events
+such as RLM's internal tools.
 
 RLM retains custom events for its internal model responses and tools. Those
 events stay outside conversation replay, and its model control text stays out

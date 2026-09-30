@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { UniversalUsage } from "@braintrust/lingua-types";
 
-import { modelUsageRecord } from "./events";
+import { modelUsageRecord } from "./usage";
 
 describe("model usage records", () => {
   it("preserves Lingua token details and omits undefined fields", () => {

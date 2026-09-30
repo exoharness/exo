@@ -28,7 +28,6 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::execution_tracing::TurnExecutionTrace;
-use crate::harness_events::execution_stream_event;
 use crate::harness_executor::{ExecutorStreamMode, HarnessExecutor};
 use crate::harness_tool::ensure_shell_sandbox;
 use crate::shared::try_send_stream_event;
@@ -1140,37 +1139,30 @@ enum TypeScriptStreamEvent {
 }
 
 fn to_execution_stream_event(event: TypeScriptStreamEvent) -> ExecutionStreamEvent {
-    let data = match event {
-        TypeScriptStreamEvent::FirstChunk { ttft_ms } => {
-            return ExecutionStreamEvent::FirstChunk {
-                ttft: Duration::from_millis(ttft_ms),
-            };
-        }
-        TypeScriptStreamEvent::TextDelta { text } => EventData::LinguaStreamChunk {
-            chunk: UniversalStreamChunk::text_delta(0, &text),
+    match event {
+        TypeScriptStreamEvent::FirstChunk { ttft_ms } => ExecutionStreamEvent::FirstChunk {
+            ttft: Duration::from_millis(ttft_ms),
         },
+        TypeScriptStreamEvent::TextDelta { text } => {
+            ExecutionStreamEvent::Chunk(UniversalStreamChunk::text_delta(0, &text))
+        }
         TypeScriptStreamEvent::ToolCall {
             tool_call_id,
             tool_name,
             arguments,
-        } => EventData::ToolRequested {
+        } => ExecutionStreamEvent::ToolCall {
             tool_call_id,
-            response_id: None,
-            request: ToolRequest {
-                function_name: tool_name,
-                arguments,
-                namespace: None,
-            },
+            tool_name,
+            arguments,
         },
         TypeScriptStreamEvent::ToolResult {
             tool_call_id,
             result,
-        } => EventData::ToolResult {
+        } => ExecutionStreamEvent::ToolResult {
             tool_call_id,
             result,
         },
-    };
-    execution_stream_event(data).expect("TypeScript progress is a canonical stream event")
+    }
 }
 
 fn spawn_sandbox_process_event_task(

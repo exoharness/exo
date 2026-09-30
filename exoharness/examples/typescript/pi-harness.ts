@@ -19,7 +19,7 @@ import {
   resolveSandboxModel,
   WarmJsonlSandboxWorker,
 } from "@exo/model-runtime/shared";
-import { modelUsageRecord } from "../../typescript/model-runtime/events";
+import { modelUsageRecord } from "@exo/model-runtime/usage";
 
 const PI_EXTENSION = String.raw`
 import { readFileSync } from "node:fs";
@@ -74,13 +74,12 @@ function usageRecord(
   provider: string,
 ): Record<string, JsonValue> | undefined {
   if (!message.usage) return undefined;
+  const num = (v: unknown) => (typeof v === "number" ? v : undefined);
   const usage = asRecord(message.usage);
   const cost = asRecord(usage.cost);
-  const input = typeof usage.input === "number" ? usage.input : undefined;
-  const cached =
-    typeof usage.cacheRead === "number" ? usage.cacheRead : undefined;
-  const created =
-    typeof usage.cacheWrite === "number" ? usage.cacheWrite : undefined;
+  const input = num(usage.input);
+  const cached = num(usage.cacheRead);
+  const created = num(usage.cacheWrite);
   return modelUsageRecord(
     typeof message.model === "string" ? message.model : "",
     {
@@ -90,11 +89,10 @@ function usageRecord(
           : provider === "anthropic"
             ? input
             : input + (cached ?? 0) + (created ?? 0),
-      completion_tokens:
-        typeof usage.output === "number" ? usage.output : undefined,
+      completion_tokens: num(usage.output),
       prompt_cached_tokens: cached,
       prompt_cache_creation_tokens: created,
-      cost_usd: typeof cost.total === "number" ? cost.total : undefined,
+      cost_usd: num(cost.total),
     },
   );
 }

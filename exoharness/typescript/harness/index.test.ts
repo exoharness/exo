@@ -101,7 +101,7 @@ describe("HarnessToolRegistry", () => {
     expect(executionContexts[0].toolCallId).toBe("call_1");
   });
 
-  it("returns tool events for publication after persistence", async () => {
+  it("returns tool result events without publishing stream progress", async () => {
     const streamEvents: EventData[] = [];
     const context = fakeTurnContext({
       streaming: true,
@@ -111,7 +111,7 @@ describe("HarnessToolRegistry", () => {
       fakeTool("echo", async (args) => ({ echoed: args.value })),
     );
 
-    await registry.executePending([
+    const events = await registry.executePending([
       {
         toolCallId: "call_1",
         request: {
@@ -121,6 +121,11 @@ describe("HarnessToolRegistry", () => {
       },
     ]);
 
+    expect(events).toEqual([
+      wrappedToolResultEvent("call_1", "echo", "library", 1, {
+        echoed: "hello",
+      }),
+    ]);
     expect(streamEvents).toEqual([]);
   });
 

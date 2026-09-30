@@ -58,9 +58,7 @@ pub(crate) async fn complete_model_round<M: ModelClient + ?Sized>(
     match result {
         Ok((mut response, ttft)) => {
             response.model.get_or_insert(requested_model);
-            if response.ttft.is_none() {
-                response.ttft = ttft;
-            }
+            response.ttft = response.ttft.or(ttft);
             response.duration.get_or_insert(started_at.elapsed());
             if let Some(trace) = trace {
                 trace.finish_success(&response, ttft).await;

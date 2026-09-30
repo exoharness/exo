@@ -19,6 +19,9 @@
       "@exo/model-runtime/cost": [
         "./exoharness/typescript/model-runtime/cost.ts"
       ],
+      "@exo/model-runtime/usage": [
+        "./exoharness/typescript/model-runtime/usage.ts"
+      ],
       "@exo/model-runtime/shared": [
         "./exoharness/typescript/model-runtime/shared.ts"
       ],

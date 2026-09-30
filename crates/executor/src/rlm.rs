@@ -15,7 +15,6 @@ use lingua::Message;
 use lingua::universal::{ToolContentPart, ToolResultContentPart};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
 
 use crate::execution_tracing::TurnExecutionTrace;
 use crate::harness_executor::{ExecutorStreamMode, HarnessExecutor};
@@ -50,7 +49,7 @@ where
         conversation_config: &ConversationConfig,
         query_text: &str,
         turn_trace: Option<&dyn TurnExecutionTrace>,
-        event_tx: Option<&mpsc::UnboundedSender<Result<ExecutionStreamEvent>>>,
+        stream_mode: ExecutorStreamMode<'_>,
     ) -> Result<()> {
         let context_messages = materialize_conversation_messages(conversation)
             .await
@@ -109,9 +108,7 @@ where
                 self.model.as_ref(),
                 request,
                 round as usize,
-                event_tx
-                    .map(ExecutorStreamMode::Enabled)
-                    .unwrap_or(ExecutorStreamMode::Disabled),
+                stream_mode,
                 ModelStreamOutput::Internal,
                 turn_trace,
             )
@@ -139,7 +136,7 @@ where
 
             let mut tool_messages = Vec::with_capacity(response.tool_calls.len());
             for tool_call in response.tool_calls {
-                if let Some(event_tx) = event_tx {
+                if let ExecutorStreamMode::Enabled(event_tx) = stream_mode {
                     try_send_stream_event(
                         event_tx,
                         ExecutionStreamEvent::ToolCall {
@@ -177,9 +174,7 @@ where
                             &tool_call.request.function_name,
                         ),
                         &tool_call.request,
-                        event_tx
-                            .map(ExecutorStreamMode::Enabled)
-                            .unwrap_or(ExecutorStreamMode::Disabled),
+                        stream_mode,
                     )
                     .await?;
                     if external_names.contains(&tool_call.request.function_name) {
@@ -228,7 +223,7 @@ where
                     },
                 )
                 .await?;
-                if let Some(event_tx) = event_tx {
+                if let ExecutorStreamMode::Enabled(event_tx) = stream_mode {
                     try_send_stream_event(
                         event_tx,
                         ExecutionStreamEvent::ToolResult {
@@ -396,10 +391,7 @@ where
             conversation_config,
             &messages_to_transcript(&request.input),
             turn_trace,
-            match stream_mode {
-                ExecutorStreamMode::Disabled => None,
-                ExecutorStreamMode::Enabled(event_tx) => Some(event_tx),
-            },
+            stream_mode,
         )
         .await
     }

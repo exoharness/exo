@@ -18,8 +18,8 @@ import {
   validateToolPolicies,
   materializeConversationMessages,
   messageText,
-  messagesToTranscript,
   messagesEvent,
+  messagesToTranscript,
   systemTextMessage,
   toJsonValue,
   toJsonObject,
@@ -49,7 +49,7 @@ import {
 } from "@exo/model-runtime/shared";
 
 import { claudeToolName } from "../../typescript/harness/native-mcp";
-import { modelUsageRecord } from "../../typescript/model-runtime/events";
+import { modelUsageRecord } from "@exo/model-runtime/usage";
 
 const DEFAULT_CLAUDE_CODE_SANDBOX_EXECUTABLE = "/usr/local/bin/claude-code";
 const CLAUDE_MAX_API_RETRIES = 2;

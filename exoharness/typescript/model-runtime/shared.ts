@@ -315,9 +315,8 @@ export async function appendEvents(
   context: TurnContext,
   events: EventData[],
 ): Promise<void> {
-  if (events.length > 0) {
+  if (events.length > 0)
     await context.exoharness.current.turn.addEvents(events);
-  }
 }
 
 export async function materializePriorConversationMessages(

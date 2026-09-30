@@ -26,6 +26,12 @@ export default defineConfig({
           import.meta.url,
         ),
       ),
+      "@exo/model-runtime/usage": fileURLToPath(
+        new URL(
+          "./exoharness/typescript/model-runtime/usage.ts",
+          import.meta.url,
+        ),
+      ),
       "@exo/model-runtime/shared": fileURLToPath(
         new URL(
           "./exoharness/typescript/model-runtime/shared.ts",

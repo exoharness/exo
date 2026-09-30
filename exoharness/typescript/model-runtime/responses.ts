@@ -35,7 +35,7 @@ import {
   type ToolDefinition,
   type TurnContext,
 } from "../harness";
-import { modelUsageRecord } from "./events";
+import { modelUsageRecord } from "./usage";
 import type {
   ChatCompletion,
   ChatCompletionChunk,
@@ -211,6 +211,8 @@ function modelRuntimeOptions(
 }
 
 function openAiClient(options: ResponsesRuntimeOptions): OpenAI {
+  // wrapOpenAI instruments chat.completions/responses calls, including OpenRouter
+  // through this OpenAI client. wrapOpenRouter targets OpenRouter's native SDK.
   return wrapOpenAI(
     new OpenAI({
       apiKey: options.apiKey,
@@ -998,7 +1000,6 @@ export function linguaMessagesToResponsesInput(
 }
 
 export function responseToLinguaEvents(response: Response): EventData[] {
-  const parsed = responseToolCallResults(response);
   const messages = responseMessages(response);
   const usage = response.usage;
   const events: EventData[] = [];
@@ -1019,7 +1020,7 @@ export function responseToLinguaEvents(response: Response): EventData[] {
       ),
     );
   }
-  for (const result of parsed) {
+  for (const result of responseToolCallResults(response)) {
     if (result.type === "tool_call") {
       events.push(toolRequestedEvent(result.toolCall));
     } else {

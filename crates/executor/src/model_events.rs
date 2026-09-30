@@ -33,58 +33,36 @@ fn build_usage_record(
     response: &ModelResponse,
     pricing: &PricingTable,
 ) -> Option<Box<UsageRecord>> {
-    // Only emit a record when we have *something* worth recording — token usage
-    // cost, or timing. Skipping when all are absent keeps event JSON clean for
-    // tests/fakes that don't populate metadata.
-    let has_usage = response.usage.is_some();
+    // Production completions always include duration; fakes may omit all metadata.
+    let usage = response.usage.as_ref();
     let has_timing = response.ttft.is_some() || response.duration.is_some();
-    if !has_usage && !has_timing && response.provider_cost_usd.is_none() {
+    if usage.is_none() && !has_timing && response.provider_cost_usd.is_none() {
         return None;
     }
 
     let model = response.model.clone().unwrap_or_default();
-    let (
-        prompt_tokens,
-        completion_tokens,
-        prompt_cached_tokens,
-        prompt_cache_creation_tokens,
-        completion_reasoning_tokens,
-    ) = match &response.usage {
-        Some(u) => (
-            u.prompt_tokens,
-            u.completion_tokens,
-            u.prompt_cached_tokens,
-            u.prompt_cache_creation_tokens,
-            u.completion_reasoning_tokens,
-        ),
-        None => (None, None, None, None, None),
-    };
-
     // Prefer the provider-reported cost (e.g. OpenRouter's `usage.cost`); fall
     // back to the local price-table estimate when the provider doesn't send one.
     let cost_usd = response.provider_cost_usd.or_else(|| {
-        if has_usage && !model.is_empty() {
-            pricing.compute_cost_usd(
-                &model,
-                TokenCounts {
-                    prompt: prompt_tokens,
-                    completion: completion_tokens,
-                    prompt_cached: prompt_cached_tokens,
-                    prompt_cache_creation: prompt_cache_creation_tokens,
-                },
-            )
-        } else {
-            None
-        }
+        let usage = usage.filter(|_| !model.is_empty())?;
+        pricing.compute_cost_usd(
+            &model,
+            TokenCounts {
+                prompt: usage.prompt_tokens,
+                completion: usage.completion_tokens,
+                prompt_cached: usage.prompt_cached_tokens,
+                prompt_cache_creation: usage.prompt_cache_creation_tokens,
+            },
+        )
     });
 
     Some(Box::new(UsageRecord {
         model,
-        prompt_tokens,
-        completion_tokens,
-        prompt_cached_tokens,
-        prompt_cache_creation_tokens,
-        completion_reasoning_tokens,
+        prompt_tokens: usage.and_then(|u| u.prompt_tokens),
+        completion_tokens: usage.and_then(|u| u.completion_tokens),
+        prompt_cached_tokens: usage.and_then(|u| u.prompt_cached_tokens),
+        prompt_cache_creation_tokens: usage.and_then(|u| u.prompt_cache_creation_tokens),
+        completion_reasoning_tokens: usage.and_then(|u| u.completion_reasoning_tokens),
         cost_usd,
         ttft_ms: response.ttft.map(|d| d.as_millis() as u64),
         duration_ms: response.duration.map(|d| d.as_millis() as u64),

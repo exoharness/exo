@@ -421,11 +421,13 @@ export interface TurnContext {
   stream: {
     firstChunk(ttftMs: number): Promise<void>;
     text(text: string): Promise<void>;
+    /** For custom tool events (e.g. RLM); canonical tool events stream after persistence. */
     toolCall(args: {
       toolCallId: string;
       toolName: string;
       arguments: JsonObject;
     }): Promise<void>;
+    /** For custom tool events (e.g. RLM); canonical tool events stream after persistence. */
     toolResult(args: { toolCallId: string; result: ToolResult }): Promise<void>;
   };
 }
