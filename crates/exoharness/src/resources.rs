@@ -205,6 +205,8 @@ mod local;
 pub use local::ResourceStore;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub(crate) use local::host_git_credential;
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+pub use local::{ResourcePreparation, git_preparation_command};
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 #[derive(Debug, Serialize, Deserialize)]

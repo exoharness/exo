@@ -20,6 +20,7 @@ pub struct ResourceStore {
     excluded: PathBuf,
     master_key: Option<PathBuf>,
     image_size_gib: Option<u64>,
+    volume_size_gib: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -37,7 +38,21 @@ impl ResourceStore {
             excluded: root,
             master_key: None,
             image_size_gib: None,
+            volume_size_gib: None,
         })
+    }
+
+    pub fn with_volume_size(mut self, size_gib: u64) -> Result<Self> {
+        ensure!(size_gib > 0, "resource volume size must be positive");
+        ensure!(
+            cfg!(target_os = "macos") || self.image_size_gib.is_some(),
+            "bounded resources require APFS volumes or Firecracker resource images"
+        );
+        self.volume_size_gib = Some(size_gib);
+        if self.image_size_gib.is_some() {
+            self.image_size_gib = Some(size_gib);
+        }
+        Ok(self)
     }
 
     pub(crate) fn excluding_master_key(mut self, path: Option<PathBuf>) -> Result<Self> {
@@ -139,6 +154,7 @@ impl ResourceStore {
                 let (snapshot, revision) = match &prepared.snapshot {
                     Some(snapshot) => {
                         validate_key(snapshot)?;
+                        let _lock = self.lock(snapshot)?;
                         self.clone_volume(&self.root.join("snapshots").join(snapshot), &target)?;
                         (snapshot.clone(), None)
                     }
@@ -696,4 +712,6 @@ fn checked(command: &mut Command) -> Result<Output> {
 mod tests;
 
 mod images;
+mod preparation;
 pub(crate) use images::host_git_credential;
+pub use preparation::{ResourcePreparation, git_preparation_command};
