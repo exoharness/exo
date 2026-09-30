@@ -82,6 +82,28 @@ describe("model runtime dispatch", () => {
 });
 
 describe("response tool-call parsing", () => {
+  it("keeps usage when a response has only tool calls", () => {
+    const response = {
+      model: "model",
+      output: [
+        {
+          type: "function_call",
+          call_id: "call",
+          name: "shell",
+          arguments: '{"command":"pwd"}',
+        },
+      ],
+      usage: { input_tokens: 12, output_tokens: 3 },
+    } as unknown as Response;
+    expect(responseToLinguaEvents(response)).toMatchObject([
+      {
+        type: "messages",
+        usage: { model: "model", prompt_tokens: 12, completion_tokens: 3 },
+      },
+      { type: "tool_requested", tool_call_id: "call" },
+    ]);
+  });
+
   it("attaches response usage to message events", () => {
     const response = {
       id: "resp_1",

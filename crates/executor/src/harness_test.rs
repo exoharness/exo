@@ -20,7 +20,7 @@ use crate::harness::{
     HarnessTurnKey, HarnessTurnOutcome,
 };
 use crate::harness_adapter::{ExecutorHarness, ExecutorTurn};
-use crate::harness_events::HarnessEvents;
+use crate::harness_events::{HarnessEvents, HarnessTurn};
 use crate::harness_executor::{ExecutorStreamMode, HarnessExecutor, Runtime};
 use crate::{
     AgentConfig, AgentHarnessKind, AgentSandboxConfig, ConversationConfig, SandboxProvider,
@@ -328,7 +328,7 @@ async fn event_sink_acknowledges_persistence_and_requires_execution_stopped() ->
         turn_id: turn.record().id,
     };
     let events = HarnessEvents::default();
-    let mut completion = events.register(Arc::clone(&fixture.thread), turn)?;
+    let mut completion = events.register(Arc::clone(&fixture.thread), turn, None)?;
     let ack = events
         .emit(HarnessEvent::TurnEvents {
             key,
@@ -389,5 +389,64 @@ async fn event_sink_acknowledges_persistence_and_requires_execution_stopped() ->
             .await
             .is_err()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn harness_turn_publishes_canonical_tools_after_persistence() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let turn = fixture.thread.begin_turn(Default::default()).await?;
+    let key = HarnessTurnKey::new(fixture.thread.record().id, turn.record().id);
+    let events = Arc::new(HarnessEvents::default());
+    let (stream, mut receiver) = mpsc::unbounded_channel();
+    let completion = events.register(fixture.thread.clone(), turn.clone(), Some(stream))?;
+    let turn = HarnessTurn::new(turn, HarnessEventSink::new(events.clone()), key);
+    let result = turn
+        .add_events(vec![
+            EventData::ToolRequested {
+                tool_call_id: "call".into(),
+                response_id: None,
+                request: exoharness::ToolRequest {
+                    function_name: "shell".into(),
+                    arguments: Default::default(),
+                    namespace: None,
+                },
+            },
+            EventData::ToolResult {
+                tool_call_id: "call".into(),
+                result: serde_json::json!({ "ok": true }),
+            },
+        ])
+        .await?;
+    for id in &result.event_ids {
+        assert!(fixture.thread.get_event(*id).await?.is_some());
+    }
+    assert!(
+        matches!(receiver.try_recv()??, crate::ExecutionStreamEvent::ToolCall { tool_call_id, .. } if tool_call_id == "call")
+    );
+    assert!(
+        matches!(receiver.try_recv()??, crate::ExecutionStreamEvent::ToolResult { tool_call_id, .. } if tool_call_id == "call")
+    );
+    assert!(receiver.try_recv().is_err());
+    events
+        .emit(HarnessEvent::TurnFinished {
+            key,
+            outcome: HarnessTurnOutcome::Completed(None),
+            events: vec![],
+        })
+        .await?;
+    assert!(
+        turn.add_events(vec![EventData::ToolResult {
+            tool_call_id: "late".into(),
+            result: serde_json::json!({})
+        }])
+        .await
+        .is_err()
+    );
+    events.emit(HarnessEvent::ExecutionStopped { key }).await?;
+    assert!(matches!(
+        completion.await?,
+        HarnessTurnOutcome::Completed(None)
+    ));
     Ok(())
 }

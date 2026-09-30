@@ -19,6 +19,7 @@ import {
   resolveSandboxModel,
   WarmJsonlSandboxWorker,
 } from "@exo/model-runtime/shared";
+import { modelUsageRecord } from "@exo/model-runtime/usage";
 
 const PI_EXTENSION = String.raw`
 import { readFileSync } from "node:fs";
@@ -73,28 +74,27 @@ function usageRecord(
   provider: string,
 ): Record<string, JsonValue> | undefined {
   if (!message.usage) return undefined;
+  const num = (v: unknown) => (typeof v === "number" ? v : undefined);
   const usage = asRecord(message.usage);
   const cost = asRecord(usage.cost);
-  const record: Record<string, JsonValue> = {};
-  if (typeof message.model === "string") record.model = message.model;
-  if (typeof usage.input === "number") {
-    record.prompt_tokens =
-      provider === "anthropic"
-        ? usage.input
-        : usage.input +
-          (typeof usage.cacheRead === "number" ? usage.cacheRead : 0) +
-          (typeof usage.cacheWrite === "number" ? usage.cacheWrite : 0);
-  }
-  const fields: Array<[string, unknown]> = [
-    ["completion_tokens", usage.output],
-    ["prompt_cached_tokens", usage.cacheRead],
-    ["prompt_cache_creation_tokens", usage.cacheWrite],
-    ["cost_usd", cost.total],
-  ];
-  for (const [key, value] of fields) {
-    if (typeof value === "number") record[key] = value;
-  }
-  return record;
+  const input = num(usage.input);
+  const cached = num(usage.cacheRead);
+  const created = num(usage.cacheWrite);
+  return modelUsageRecord(
+    typeof message.model === "string" ? message.model : "",
+    {
+      prompt_tokens:
+        input === undefined
+          ? undefined
+          : provider === "anthropic"
+            ? input
+            : input + (cached ?? 0) + (created ?? 0),
+      completion_tokens: num(usage.output),
+      prompt_cached_tokens: cached,
+      prompt_cache_creation_tokens: created,
+      cost_usd: num(cost.total),
+    },
+  );
 }
 
 export default defineHarness({

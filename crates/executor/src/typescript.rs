@@ -485,7 +485,18 @@ impl TypeScriptRunnerProcess {
                         }
                         GuestToHostMessage::ExoRequest { id, request } => {
                             let request_kind = request.kind();
-                            let response = match exoharness_server.handle_request(*request).await {
+                            let result = match *request {
+                                ExoRequest::TurnAddEvents { agent_id, conversation_id, session_id, turn_id, data }
+                                    if agent_id == agent.record().id
+                                        && conversation_id == conversation.record().id
+                                        && session_id == turn.record().session_id
+                                        && turn_id == turn.record().id =>
+                                {
+                                    turn.add_events(data).await.map(|result| ExoResponse::AddEvents { result })
+                                }
+                                request => exoharness_server.handle_request(request).await,
+                            };
+                            let response = match result {
                                 Ok(response) => HostToGuestMessage::ExoResponse {
                                     id,
                                     ok: true,
@@ -1320,6 +1331,95 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use super::*;
+
+    #[tokio::test]
+    async fn canonical_turn_events_publish_tool_progress_once() -> Result<()> {
+        use crate::{BasicToolRuntime, LocalProvider, Runtime, test_support::local_test_config};
+        use exoharness::{BasicExoHarness, NewAgentRequest};
+
+        let temp = tempfile::TempDir::new()?;
+        let module = temp.path().join("canonical-events.mjs");
+        std::fs::write(
+            &module,
+            r#"
+export default {
+  async runTurn(context) {
+    await context.exoharness.current.turn.addEvents([
+      { type: "tool_requested", tool_call_id: "call", response_id: null,
+        request: { function_name: "shell", arguments: { command: "pwd" } } },
+      { type: "tool_result", tool_call_id: "call", result: { stdout: "/workspace" } },
+      { type: "messages", response_id: null, messages: [{ role: "assistant", content: "done" }] }
+    ]);
+  }
+};
+"#,
+        )?;
+        let state =
+            Arc::new(BasicExoHarness::new(local_test_config(temp.path().join("state"))).await?);
+        let agent = state
+            .new_agent(NewAgentRequest {
+                slug: "canonical".into(),
+                name: "Canonical".into(),
+                vaults: vec![],
+            })
+            .await?;
+        let thread = agent.new_conversation(Default::default()).await?;
+        let config: AgentConfig = serde_json::from_value(serde_json::json!({
+            "instructions": [], "harness": "typescript",
+            "typescript": { "module_path": module },
+            "sandbox": { "provider": "local_process" }, "model": "gpt-5-mini"
+        }))?;
+        let runtime = Runtime::new(
+            LocalProvider::typescript(
+                state,
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+                HashMap::new(),
+                Arc::new(BasicToolRuntime),
+            ),
+            None,
+        );
+        let (_, mut stream) = runtime
+            .start_turn(
+                agent,
+                thread.clone(),
+                SendRequest {
+                    input: vec![],
+                    session_id: None,
+                },
+                true,
+                Some(config),
+            )
+            .await?;
+        let mut calls = 0;
+        let mut results = 0;
+        let mut completed = false;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = stream.next().await {
+                match event? {
+                    ExecutionStreamEvent::ToolCall { tool_call_id, .. } => {
+                        assert_eq!(tool_call_id, "call");
+                        calls += 1;
+                    }
+                    ExecutionStreamEvent::ToolResult { tool_call_id, .. } => {
+                        assert_eq!(tool_call_id, "call");
+                        results += 1;
+                    }
+                    ExecutionStreamEvent::Completed(_) => completed = true,
+                    _ => {}
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        runtime.shutdown().await?;
+        assert_eq!((calls, results, completed), (1, 1, true));
+        let history = crate::materialize_conversation_messages(thread.as_ref()).await?;
+        assert_eq!(history.len(), 3);
+        assert!(matches!(history.last(), Some(lingua::Message::Assistant {
+            content: lingua::universal::AssistantContent::String(text), ..
+        }) if text == "done"));
+        Ok(())
+    }
 
     #[tokio::test]
     async fn approvals_do_not_block_other_requests_output_or_runner_exit() -> Result<()> {

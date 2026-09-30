@@ -1,27 +1,25 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use std::time::Instant;
 
 use async_trait::async_trait;
-use cost::{PricingTable, TokenCounts};
+use cost::PricingTable;
 use exoharness::{
     AgentHandle, ConversationHandle, ConversationId, EventData, EventId, EventKind, EventQuery,
-    EventQueryDirection, Result, ToolCallId, ToolRequest, TurnHandle, UsageRecord,
+    EventQueryDirection, Result, ToolCallId, ToolRequest, TurnHandle,
 };
 use lingua::Message;
-use lingua::universal::{
-    AssistantContent, AssistantContentPart, ToolCallArguments, ToolContentPart,
-    ToolResultContentPart,
-};
 use serde_json::json;
 
 use crate::execution_tracing::TurnExecutionTrace;
 use crate::harness_executor::{ExecutorStreamMode, HarnessExecutor};
-use crate::harness_helpers::{resolve_model, to_lingua_value};
-use crate::shared::{HISTORY_CACHE_NAME, try_send_stream_event};
+use crate::harness_helpers::resolve_model;
+use crate::message_history::extend_message_history;
+use crate::model_events::model_response_events;
+use crate::model_execution::{ModelStreamOutput, complete_model_round};
+use crate::shared::HISTORY_CACHE_NAME;
 use crate::{
-    AgentConfig, ConversationConfig, ExecutionStreamEvent, ModelClient, ModelRequest,
-    ModelResponse, SendRequest, ToolDefinition, ToolRuntime,
+    AgentConfig, ConversationConfig, ModelClient, ModelRequest, SendRequest, ToolDefinition,
+    ToolRuntime,
 };
 
 pub struct BasicExecutor<M, T> {
@@ -143,11 +141,17 @@ where
                 build_model_request(conversation, agent_config, conversation_config, messages)
                     .await?;
             request.tools.extend(self.tools.definitions());
-            let response = self
-                .complete_model_round(request, round as usize, stream_mode, turn_trace)
-                .await?;
+            let response = complete_model_round(
+                self.model.as_ref(),
+                request,
+                round as usize,
+                stream_mode,
+                ModelStreamOutput::Visible,
+                turn_trace,
+            )
+            .await?;
 
-            let events = interpret_model_response(response, &self.pricing);
+            let events = model_response_events(response, &self.pricing);
             turn.add_events(events.clone()).await?;
 
             let tool_requests = collect_tool_requests(&events);
@@ -176,112 +180,6 @@ where
         Ok(())
     }
 
-    async fn complete_model_round(
-        &self,
-        request: ModelRequest,
-        round: usize,
-        stream_mode: ExecutorStreamMode<'_>,
-        turn_trace: Option<&dyn TurnExecutionTrace>,
-    ) -> Result<ModelResponse> {
-        let llm_trace = match turn_trace {
-            Some(turn_trace) => turn_trace.start_llm_round(&request, round).await,
-            None => None,
-        };
-        let requested_model = request.model.clone();
-
-        match stream_mode {
-            ExecutorStreamMode::Disabled => {
-                let started_at = Instant::now();
-                let response = match self.model.complete(request).await {
-                    Ok(response) => response,
-                    Err(error) => {
-                        if let Some(llm_trace) = llm_trace {
-                            llm_trace.finish_error(&error).await;
-                        }
-                        return Err(error);
-                    }
-                };
-                let duration = started_at.elapsed();
-                let mut response = response;
-                if response.model.is_none() {
-                    response.model = Some(requested_model);
-                }
-                if response.duration.is_none() {
-                    response.duration = Some(duration);
-                }
-                if let Some(llm_trace) = llm_trace {
-                    llm_trace.finish_success(&response, None).await;
-                }
-                Ok(response)
-            }
-            ExecutorStreamMode::Enabled(event_tx) => {
-                let started_at = Instant::now();
-                let mut stream = match self.model.complete_stream(request).await {
-                    Ok(stream) => stream,
-                    Err(error) => {
-                        if let Some(llm_trace) = llm_trace {
-                            llm_trace.finish_error(&error).await;
-                        }
-                        return Err(error);
-                    }
-                };
-                let mut ttft = None;
-                loop {
-                    let chunk = match stream.next_chunk().await {
-                        Ok(chunk) => chunk,
-                        Err(error) => {
-                            if let Some(llm_trace) = llm_trace {
-                                llm_trace.finish_error(&error).await;
-                            }
-                            return Err(error);
-                        }
-                    };
-                    let Some(chunk) = chunk else {
-                        break;
-                    };
-                    if chunk.is_keep_alive() {
-                        continue;
-                    }
-                    if ttft.is_none() {
-                        let measured_ttft = started_at.elapsed();
-                        ttft = Some(measured_ttft);
-                        try_send_stream_event(
-                            event_tx,
-                            ExecutionStreamEvent::FirstChunk {
-                                ttft: measured_ttft,
-                            },
-                        );
-                    }
-                    try_send_stream_event(event_tx, ExecutionStreamEvent::Chunk(chunk));
-                }
-                let response = match stream.finish().await {
-                    Ok(response) => response,
-                    Err(error) => {
-                        if let Some(llm_trace) = llm_trace {
-                            llm_trace.finish_error(&error).await;
-                        }
-                        return Err(error);
-                    }
-                };
-                let duration = started_at.elapsed();
-                let mut response = response;
-                if response.model.is_none() {
-                    response.model = Some(requested_model);
-                }
-                if response.ttft.is_none() {
-                    response.ttft = ttft;
-                }
-                if response.duration.is_none() {
-                    response.duration = Some(duration);
-                }
-                if let Some(llm_trace) = llm_trace {
-                    llm_trace.finish_success(&response, ttft).await;
-                }
-                Ok(response)
-            }
-        }
-    }
-
     async fn execute_tool_round(
         &self,
         context: ToolRoundContext<'_>,
@@ -290,17 +188,6 @@ where
         let mut tool_results = Vec::with_capacity(tool_requests.len());
 
         for tool_request in tool_requests {
-            if let ExecutorStreamMode::Enabled(event_tx) = context.stream_mode {
-                try_send_stream_event(
-                    event_tx,
-                    ExecutionStreamEvent::ToolCall {
-                        tool_call_id: tool_request.tool_call_id.clone(),
-                        tool_name: tool_request.request.function_name.clone(),
-                        arguments: tool_request.request.arguments.clone(),
-                    },
-                );
-            }
-
             let mut tool_trace = match context.turn_trace {
                 Some(turn_trace) => {
                     turn_trace
@@ -349,15 +236,6 @@ where
             };
             if tool_succeeded && let Some(tool_trace) = tool_trace.take() {
                 tool_trace.finish_success(&result).await;
-            }
-            if let ExecutorStreamMode::Enabled(event_tx) = context.stream_mode {
-                try_send_stream_event(
-                    event_tx,
-                    ExecutionStreamEvent::ToolResult {
-                        tool_call_id: tool_request.tool_call_id.clone(),
-                        result: result.clone(),
-                    },
-                );
             }
             tool_results.push(EventData::ToolResult {
                 tool_call_id: tool_request.tool_call_id,
@@ -419,222 +297,6 @@ where
         )
         .await
     }
-}
-
-/// Each batch must contain complete tool rounds: calls still pending at its end
-/// receive cancellation results, and their later real results would be discarded.
-pub(crate) fn extend_message_history(
-    history: &mut Vec<Message>,
-    tool_call_names: &mut HashMap<ToolCallId, String>,
-    events: &[exoharness::Event],
-) {
-    let mut pending_tool_call_ids = Vec::new();
-
-    for event in events {
-        match &event.data {
-            EventData::Messages { messages, .. } => {
-                for message in messages {
-                    match message {
-                        Message::Tool { content } => {
-                            for ToolContentPart::ToolResult(result) in content {
-                                remove_pending_tool_call(
-                                    &mut pending_tool_call_ids,
-                                    &result.tool_call_id,
-                                );
-                            }
-                        }
-                        _ => flush_dangling_tool_results(
-                            history,
-                            tool_call_names,
-                            &mut pending_tool_call_ids,
-                        ),
-                    }
-                    if let Message::Assistant {
-                        content: AssistantContent::Array(parts),
-                        ..
-                    } = message
-                    {
-                        for part in parts {
-                            if let AssistantContentPart::ToolCall {
-                                tool_call_id,
-                                tool_name,
-                                ..
-                            } = part
-                            {
-                                tool_call_names.insert(tool_call_id.clone(), tool_name.clone());
-                                pending_tool_call_ids.push(tool_call_id.clone());
-                            }
-                        }
-                    }
-                    history.push(message.clone());
-                }
-            }
-            EventData::ToolRequested {
-                tool_call_id,
-                request,
-                ..
-            } if !tool_call_names.contains_key(tool_call_id) => {
-                history.push(Message::Assistant {
-                    content: AssistantContent::Array(vec![AssistantContentPart::ToolCall {
-                        tool_call_id: tool_call_id.clone(),
-                        tool_name: request.function_name.clone(),
-                        arguments: ToolCallArguments::Valid(
-                            request
-                                .arguments
-                                .iter()
-                                .map(|(key, value)| (key.clone(), to_lingua_value(value.clone())))
-                                .collect(),
-                        ),
-                        encrypted_content: None,
-                        provider_options: None,
-                        provider_executed: None,
-                    }]),
-                    id: None,
-                });
-                tool_call_names.insert(tool_call_id.clone(), request.function_name.clone());
-                pending_tool_call_ids.push(tool_call_id.clone());
-            }
-            EventData::ToolResult {
-                tool_call_id,
-                result,
-            } => {
-                if !pending_tool_call_ids.contains(tool_call_id) {
-                    continue;
-                }
-                let Some(tool_name) = tool_call_names.get(tool_call_id) else {
-                    continue;
-                };
-                remove_pending_tool_call(&mut pending_tool_call_ids, tool_call_id);
-                history.push(Message::Tool {
-                    content: vec![ToolContentPart::ToolResult(ToolResultContentPart {
-                        tool_call_id: tool_call_id.clone(),
-                        tool_name: tool_name.clone(),
-                        output: to_lingua_value(result.clone()),
-                        provider_options: None,
-                    })],
-                });
-            }
-            _ => {}
-        }
-    }
-    flush_dangling_tool_results(history, tool_call_names, &mut pending_tool_call_ids);
-}
-
-fn flush_dangling_tool_results(
-    history: &mut Vec<Message>,
-    tool_call_names: &HashMap<ToolCallId, String>,
-    pending_tool_call_ids: &mut Vec<ToolCallId>,
-) {
-    for tool_call_id in std::mem::take(pending_tool_call_ids) {
-        let Some(tool_name) = tool_call_names.get(&tool_call_id) else {
-            continue;
-        };
-        history.push(Message::Tool {
-            content: vec![ToolContentPart::ToolResult(ToolResultContentPart {
-                tool_call_id,
-                tool_name: tool_name.clone(),
-                output: to_lingua_value(json!({
-                    "ok": false,
-                    "error": "tool execution did not complete before the previous turn ended",
-                })),
-                provider_options: None,
-            })],
-        });
-    }
-}
-
-fn remove_pending_tool_call(pending_tool_call_ids: &mut Vec<ToolCallId>, tool_call_id: &str) {
-    if let Some(index) = pending_tool_call_ids
-        .iter()
-        .position(|pending| pending == tool_call_id)
-    {
-        pending_tool_call_ids.remove(index);
-    }
-}
-
-fn interpret_model_response(response: ModelResponse, pricing: &PricingTable) -> Vec<EventData> {
-    let mut events = Vec::new();
-
-    if !response.messages.is_empty() {
-        let usage = build_usage_record(&response, pricing);
-        events.push(EventData::Messages {
-            messages: response.messages,
-            response_id: response.response_id,
-            usage,
-        });
-    }
-
-    for tool_call in response.tool_calls {
-        events.push(EventData::ToolRequested {
-            tool_call_id: tool_call.tool_call_id,
-            response_id: response.response_id,
-            request: tool_call.request,
-        });
-    }
-
-    events
-}
-
-fn build_usage_record(
-    response: &ModelResponse,
-    pricing: &PricingTable,
-) -> Option<Box<UsageRecord>> {
-    // Only emit a record when we have *something* worth recording — token usage
-    // cost, or timing. Skipping when all are absent keeps event JSON clean for
-    // tests/fakes that don't populate metadata.
-    let has_usage = response.usage.is_some();
-    let has_timing = response.ttft.is_some() || response.duration.is_some();
-    if !has_usage && !has_timing && response.provider_cost_usd.is_none() {
-        return None;
-    }
-
-    let model = response.model.clone().unwrap_or_default();
-    let (
-        prompt_tokens,
-        completion_tokens,
-        prompt_cached_tokens,
-        prompt_cache_creation_tokens,
-        completion_reasoning_tokens,
-    ) = match &response.usage {
-        Some(u) => (
-            u.prompt_tokens,
-            u.completion_tokens,
-            u.prompt_cached_tokens,
-            u.prompt_cache_creation_tokens,
-            u.completion_reasoning_tokens,
-        ),
-        None => (None, None, None, None, None),
-    };
-
-    // Prefer the provider-reported cost (e.g. OpenRouter's `usage.cost`); fall
-    // back to the local price-table estimate when the provider doesn't send one.
-    let cost_usd = response.provider_cost_usd.or_else(|| {
-        if has_usage && !model.is_empty() {
-            pricing.compute_cost_usd(
-                &model,
-                TokenCounts {
-                    prompt: prompt_tokens,
-                    completion: completion_tokens,
-                    prompt_cached: prompt_cached_tokens,
-                    prompt_cache_creation: prompt_cache_creation_tokens,
-                },
-            )
-        } else {
-            None
-        }
-    });
-
-    Some(Box::new(UsageRecord {
-        model,
-        prompt_tokens,
-        completion_tokens,
-        prompt_cached_tokens,
-        prompt_cache_creation_tokens,
-        completion_reasoning_tokens,
-        cost_usd,
-        ttft_ms: response.ttft.map(|d| d.as_millis() as u64),
-        duration_ms: response.duration.map(|d| d.as_millis() as u64),
-    }))
 }
 
 #[derive(Debug, Clone)]

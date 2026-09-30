@@ -3,19 +3,92 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
-use exoharness::{ConversationHandle, EventData, TurnHandle};
-use futures::StreamExt;
-use tokio::sync::{Mutex as AsyncMutex, oneshot};
-
-use crate::harness::{
-    HarnessEvent, HarnessEventAck, HarnessEventHandler, HarnessTurnKey, HarnessTurnOutcome,
+use exoharness::{
+    AddEventsResult, ArtifactVersion, ConversationHandle, EventData, EventId, SandboxId,
+    SnapshotHandle, SnapshotId, StartSandboxRequest, TurnHandle, TurnRecord, WriteArtifactRequest,
 };
+use futures::StreamExt;
+use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
+
+use crate::ExecutionStreamEvent;
+use crate::harness::{
+    HarnessEvent, HarnessEventAck, HarnessEventHandler, HarnessEventSink, HarnessTurnKey,
+    HarnessTurnOutcome,
+};
+
+pub(crate) struct HarnessTurn {
+    inner: Arc<dyn TurnHandle>,
+    events: HarnessEventSink,
+    key: HarnessTurnKey,
+}
+
+impl HarnessTurn {
+    pub(crate) fn new(
+        inner: Arc<dyn TurnHandle>,
+        events: HarnessEventSink,
+        key: HarnessTurnKey,
+    ) -> Self {
+        Self { inner, events, key }
+    }
+}
+
+#[async_trait]
+impl SnapshotHandle for HarnessTurn {
+    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
+        self.inner.snapshot_sandbox(id).await
+    }
+
+    async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
+        self.inner.start_sandbox(request).await
+    }
+}
+
+#[async_trait]
+impl TurnHandle for HarnessTurn {
+    fn record(&self) -> &TurnRecord {
+        self.inner.record()
+    }
+
+    async fn add_events(&self, data: Vec<EventData>) -> Result<AddEventsResult> {
+        if data.is_empty() {
+            return self.inner.add_events(data).await;
+        }
+        let acknowledgement = self
+            .events
+            .emit(HarnessEvent::TurnEvents {
+                key: self.key,
+                events: data,
+            })
+            .await?;
+        Ok(AddEventsResult {
+            latest_event_id: acknowledgement
+                .events
+                .last()
+                .context("harness event append returned no events")?
+                .id,
+            event_ids: acknowledgement
+                .events
+                .into_iter()
+                .map(|event| event.id)
+                .collect(),
+        })
+    }
+
+    async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion> {
+        self.inner.write_artifact(request).await
+    }
+
+    async fn finish(&self) -> Result<EventId> {
+        self.inner.finish().await
+    }
+}
 
 struct ActiveEventTurn {
     thread: Arc<dyn ConversationHandle>,
     turn: Arc<dyn TurnHandle>,
     outcome: Option<HarnessTurnOutcome>,
     completion: Option<oneshot::Sender<HarnessTurnOutcome>>,
+    stream: Option<mpsc::UnboundedSender<Result<ExecutionStreamEvent>>>,
 }
 
 #[derive(Default)]
@@ -35,6 +108,7 @@ impl HarnessEvents {
         &self,
         thread: Arc<dyn ConversationHandle>,
         turn: Arc<dyn TurnHandle>,
+        stream: Option<mpsc::UnboundedSender<Result<ExecutionStreamEvent>>>,
     ) -> Result<oneshot::Receiver<HarnessTurnOutcome>> {
         let key = HarnessTurnKey {
             thread_id: thread.record().id,
@@ -52,6 +126,7 @@ impl HarnessEvents {
                 turn,
                 outcome: None,
                 completion: Some(completion),
+                stream,
             })),
         );
         Ok(receiver)
@@ -71,7 +146,7 @@ impl ActiveEventTurn {
             return Ok(HarnessEventAck::default());
         }
         let result = self.turn.add_events(events).await?;
-        let events =
+        let events: Vec<_> =
             futures::future::try_join_all(result.event_ids.into_iter().map(|id| async move {
                 self.thread
                     .get_event(id)
@@ -79,7 +154,37 @@ impl ActiveEventTurn {
                     .ok_or_else(|| anyhow!("appended harness event is missing: {id}"))
             }))
             .await?;
+        if let Some(stream) = &self.stream {
+            for event in &events {
+                if let Some(output) = execution_stream_event(event.data.clone()) {
+                    crate::shared::try_send_stream_event(stream, output);
+                }
+            }
+        }
         Ok(HarnessEventAck { events })
+    }
+}
+
+fn execution_stream_event(data: EventData) -> Option<ExecutionStreamEvent> {
+    match data {
+        EventData::LinguaStreamChunk { chunk } => Some(ExecutionStreamEvent::Chunk(chunk)),
+        EventData::ToolRequested {
+            tool_call_id,
+            request,
+            ..
+        } => Some(ExecutionStreamEvent::ToolCall {
+            tool_call_id,
+            tool_name: request.function_name,
+            arguments: request.arguments,
+        }),
+        EventData::ToolResult {
+            tool_call_id,
+            result,
+        } => Some(ExecutionStreamEvent::ToolResult {
+            tool_call_id,
+            result,
+        }),
+        _ => None,
     }
 }
 
@@ -170,23 +275,6 @@ pub(crate) fn turn_stream(
                             approval: serde_json::from_value(payload)?,
                         })
                     }
-                    EventData::LinguaStreamChunk { chunk } => Some(Output::Chunk(chunk)),
-                    EventData::ToolRequested {
-                        tool_call_id,
-                        request,
-                        ..
-                    } => Some(Output::ToolCall {
-                        tool_call_id,
-                        tool_name: request.function_name,
-                        arguments: request.arguments,
-                    }),
-                    EventData::ToolResult {
-                        tool_call_id,
-                        result,
-                    } => Some(Output::ToolResult {
-                        tool_call_id,
-                        result,
-                    }),
                     EventData::Error { message, .. } => {
                         failure = Some(message);
                         None
@@ -204,7 +292,7 @@ pub(crate) fn turn_stream(
                             None,
                         )));
                     }
-                    _ => None,
+                    data => execution_stream_event(data),
                 };
                 if let Some(output) = output {
                     return Ok(Some((output, Some((events, failure)))));

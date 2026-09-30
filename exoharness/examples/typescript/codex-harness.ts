@@ -756,16 +756,8 @@ async function handleCodexNotification(
   const { turn } = context.exoharness.current;
   updateTraceStateFromNotification(notification, traceState);
   switch (notification.method) {
-    case "rawResponseItem/completed": {
-      const params = asRecord(notification.params);
-      const item = toJsonValue(params.item);
-      await appendCustomEvent(turn, "codex_raw_response_item", {
-        thread_id: params.threadId ?? null,
-        turn_id: params.turnId ?? null,
-        item,
-      });
+    case "rawResponseItem/completed":
       return "running";
-    }
     case "item/agentMessage/delta": {
       const params = asRecord(notification.params);
       if (typeof params.delta === "string") {
@@ -1217,7 +1209,7 @@ function rawCodexPromptMessage(item: Record<string, unknown>): Message | null {
   if (!isRawCodexPromptRole(item.role)) {
     return null;
   }
-  const messages = responsesMessagesToLingua([item]) as Message[];
+  const messages = responsesMessagesToLingua([item]);
   return messages[0] ?? null;
 }
 

@@ -1,6 +1,7 @@
 import { type CodexProtocolLogEntry } from "./app-server";
-import { messagesEvent, type EventData, type JsonObject } from "../harness";
-import { computeCostUsd, type PricingTable } from "../model-runtime/cost";
+import { messagesEvent, type EventData } from "../harness";
+import { type PricingTable } from "../model-runtime/cost";
+import { modelUsageRecord } from "../model-runtime/usage";
 import { isRecord } from "../model-runtime/shared";
 
 export interface CodexTokenUsage {
@@ -68,28 +69,19 @@ export function codexUsageEvent(
   usage: CodexTokenUsage,
   table: PricingTable | null,
 ): EventData {
-  const record: JsonObject = { model };
-  if (usage.inputTokens !== undefined) record.prompt_tokens = usage.inputTokens;
-  if (usage.outputTokens !== undefined)
-    record.completion_tokens = usage.outputTokens;
-  if (usage.cachedInputTokens !== undefined) {
-    record.prompt_cached_tokens = usage.cachedInputTokens;
-  }
-  if (usage.cacheWriteInputTokens !== undefined) {
-    record.prompt_cache_creation_tokens = usage.cacheWriteInputTokens;
-  }
-  if (usage.reasoningOutputTokens !== undefined) {
-    record.completion_reasoning_tokens = usage.reasoningOutputTokens;
-  }
-  const cost =
-    table && usage.inputTokens !== undefined && usage.outputTokens !== undefined
-      ? computeCostUsd(table, model, {
-          prompt: usage.inputTokens,
-          completion: usage.outputTokens,
-          cached: usage.cachedInputTokens,
-          cacheCreation: usage.cacheWriteInputTokens,
-        })
-      : null;
-  if (cost !== null) record.cost_usd = cost;
-  return messagesEvent([], undefined, record);
+  return messagesEvent(
+    [],
+    undefined,
+    modelUsageRecord(
+      model,
+      {
+        prompt_tokens: usage.inputTokens,
+        completion_tokens: usage.outputTokens,
+        prompt_cached_tokens: usage.cachedInputTokens,
+        prompt_cache_creation_tokens: usage.cacheWriteInputTokens,
+        completion_reasoning_tokens: usage.reasoningOutputTokens,
+      },
+      table,
+    ),
+  );
 }

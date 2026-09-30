@@ -11,7 +11,7 @@ mod conversation_sandbox;
 mod conversation_wakeup;
 mod execution_tracing;
 mod executor_types;
-pub mod harness;
+pub use exoharness::harness;
 mod harness_adapter;
 #[cfg(test)]
 mod harness_basic_tests;
@@ -32,6 +32,9 @@ mod http_tests;
 mod local_sandbox;
 pub mod managed_agents;
 mod mcp;
+mod message_history;
+mod model_events;
+mod model_execution;
 pub mod permissions;
 mod provider;
 pub mod remote;
