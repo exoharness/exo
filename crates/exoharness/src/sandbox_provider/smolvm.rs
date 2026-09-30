@@ -2013,6 +2013,7 @@ esac"#,
 
     fn test_request(idle_ttl: Option<Duration>) -> SandboxRequest {
         SandboxRequest {
+            external_proxy: None,
             sandbox_id: "s".into(),
             scope: ResourceScope::Agent {
                 agent_id: crate::Uuid7::now(),

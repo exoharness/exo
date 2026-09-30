@@ -95,6 +95,8 @@ pub struct SandboxSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxRequest {
+    #[serde(skip)]
+    pub external_proxy: Option<crate::egress::ExternalProxyConfig>,
     pub sandbox_id: SandboxId,
     #[serde(default)]
     pub scope: ResourceScope,
@@ -760,6 +762,7 @@ impl CliContainerSandboxBackend {
         )?);
 
         Ok(SandboxRequest {
+            external_proxy: None,
             sandbox_id: request.sandbox_id,
             scope: request.scope,
             spec: SandboxSpec {
@@ -2550,6 +2553,7 @@ mod tests {
         std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755))?;
         for resources in [None, Some(crate::SandboxResourceShape::default())] {
             let request = SandboxRequest {
+                external_proxy: None,
                 sandbox_id: "sandbox".into(),
                 scope: ResourceScope::Global,
                 spec: SandboxSpec {
@@ -2751,6 +2755,7 @@ mod tests {
         fs::set_permissions(&script_path, permissions).expect("chmod fake docker");
 
         let request = SandboxRequest {
+            external_proxy: None,
             sandbox_id: "sandbox".to_string(),
             scope: ResourceScope::Thread {
                 agent_id: crate::Uuid7::now(),
@@ -2833,6 +2838,7 @@ mod tests {
             warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),
         };
         let request = SandboxRequest {
+            external_proxy: None,
             sandbox_id: "sandbox".to_string(),
             scope: ResourceScope::Thread {
                 agent_id: crate::Uuid7::now(),
@@ -2928,6 +2934,7 @@ esac
             warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),
         };
         let request = SandboxRequest {
+            external_proxy: None,
             sandbox_id: "sandbox".to_string(),
             scope: ResourceScope::Thread {
                 agent_id: crate::Uuid7::now(),
@@ -3042,6 +3049,7 @@ esac
             warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),
         };
         let request = SandboxRequest {
+            external_proxy: None,
             sandbox_id: "sandbox".to_string(),
             scope: ResourceScope::Thread {
                 agent_id: crate::Uuid7::now(),

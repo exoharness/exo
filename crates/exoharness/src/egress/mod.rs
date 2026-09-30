@@ -34,6 +34,8 @@ use crate::types::{canonical_egress_host, canonical_egress_hosts};
 
 use crate::{EgressCredentialBinding, EgressPolicy, SandboxEgressProxy, SandboxNetworkPolicy};
 
+mod external;
+pub use external::ExternalProxyConfig;
 mod explicit;
 pub use explicit::{ExplicitProxy, ProxyAuthorizer, ProxySession, serve_connect_proxy};
 mod transport;
@@ -166,6 +168,7 @@ struct PooledClient {
 // Request handling shared by all connections to one sandbox's proxy. Clients
 // are pooled by destination and replaced whenever its resolved addresses change.
 pub(crate) struct State {
+    external: Option<ExternalProxyConfig>,
     clients: Mutex<HashMap<(String, u16), PooledClient>>,
     hosts: HashSet<String>,
     unrestricted: bool,
@@ -275,7 +278,7 @@ impl State {
         resolver: Option<Arc<dyn EgressCredentialResolver>>,
         upstream: Arc<dyn UpstreamResolver>,
     ) -> Result<Self> {
-        Self::new_with_placeholders(identity, policy, resolver, upstream, None)
+        Self::new_with_placeholders(identity, policy, resolver, upstream, None, None)
     }
 
     fn new_with_placeholders(
@@ -284,7 +287,15 @@ impl State {
         resolver: Option<Arc<dyn EgressCredentialResolver>>,
         upstream: Arc<dyn UpstreamResolver>,
         placeholders: Option<&HashMap<String, String>>,
+        external: Option<ExternalProxyConfig>,
     ) -> Result<Self> {
+        let placeholders = external
+            .as_ref()
+            .map(|proxy| &proxy.environment)
+            .or(placeholders);
+        if let Some(proxy) = &external {
+            proxy.validate()?;
+        }
         ensure!(
             policy
                 .allowed_tcp_ports
@@ -313,7 +324,7 @@ impl State {
             SandboxNetworkPolicy::Disabled => anyhow::bail!("credential proxy requires networking"),
         };
         ensure!(
-            policy.credentials.is_empty() || resolver.is_some(),
+            policy.credentials.is_empty() || resolver.is_some() || external.is_some(),
             "credential substitution requires an egress credential resolver"
         );
         let mut variables = HashSet::new();
@@ -371,6 +382,7 @@ impl State {
             });
         }
         Ok(Self {
+            external,
             clients: Mutex::new(HashMap::new()),
             hosts,
             unrestricted,
@@ -888,15 +900,17 @@ where
 
 async fn transparent_https_connection<T>(
     mut stream: T,
-    tls: TlsAcceptor,
+    tls: Option<TlsAcceptor>,
     state: Arc<State>,
 ) -> Result<()>
 where
     T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
     state.check_port(443)?;
-    if !state.unrestricted {
-        return https_connection(stream, tls, state, None).await;
+    if !state.unrestricted
+        && let Some(tls) = &tls
+    {
+        return https_connection(stream, tls.clone(), state, None).await;
     }
     let (host, prefix) = tokio::time::timeout(IO_TIMEOUT, async {
         let mut acceptor = rustls::server::Acceptor::default();
@@ -925,15 +939,27 @@ where
     .await??;
     let (read, write) = tokio::io::split(stream);
     let mut stream = tokio::io::join(std::io::Cursor::new(prefix).chain(read), write);
-    if state.hosts.contains(&host) {
+    ensure!(
+        state.unrestricted || state.hosts.contains(&host),
+        "host is not allowed"
+    );
+    if state.hosts.contains(&host)
+        && let Some(tls) = tls
+    {
         return https_connection(stream, tls, state, Some(&host)).await;
     }
-    let addresses = state.upstream.resolve(&host, 443).await?.addresses;
-    let mut upstream = tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        tokio::net::TcpStream::connect(addresses.as_slice()),
-    )
-    .await??;
+    let mut upstream = if let Some(proxy) = &state.external {
+        proxy.connect(&host).await?
+    } else {
+        let addresses = state.upstream.resolve(&host, 443).await?.addresses;
+        Box::pin(
+            tokio::time::timeout(
+                CONNECT_TIMEOUT,
+                tokio::net::TcpStream::connect(addresses.as_slice()),
+            )
+            .await??,
+        )
+    };
     tokio::io::copy_bidirectional(&mut stream, &mut upstream).await?;
     Ok(())
 }
@@ -959,12 +985,18 @@ impl ProxyConnection {
         F: std::future::Future<Output = Result<C>> + Send + 'static,
         C: std::future::Future<Output = Result<Connection>> + Send + 'static,
     {
-        let (ca_pem, tls) = tls_configuration(state.hosts.iter().cloned().collect())?;
-        let environment = state
-            .bindings
-            .iter()
-            .map(|b| (b.config.environment_variable.clone(), b.placeholder.clone()))
-            .collect();
+        let (ca_pem, tls, environment) = match &state.external {
+            Some(external) => (external.ca_pem.clone(), None, external.environment.clone()),
+            None => {
+                let (ca_pem, tls) = tls_configuration(state.hosts.iter().cloned().collect())?;
+                let environment = state
+                    .bindings
+                    .iter()
+                    .map(|b| (b.config.environment_variable.clone(), b.placeholder.clone()))
+                    .collect();
+                (ca_pem, Some(tls), environment)
+            }
+        };
         let shutdown = cancel.clone();
         let task = tokio::spawn(async move {
             serve(accept, tls, Arc::new(state), shutdown).await;
@@ -990,8 +1022,12 @@ impl Drop for ProxyConnection {
     }
 }
 
-async fn serve<A, F, C>(accept: A, tls: TlsAcceptor, state: Arc<State>, cancel: CancellationToken)
-where
+async fn serve<A, F, C>(
+    accept: A,
+    tls: Option<TlsAcceptor>,
+    state: Arc<State>,
+    cancel: CancellationToken,
+) where
     A: Fn(Arc<State>) -> F,
     F: std::future::Future<Output = Result<C>>,
     C: std::future::Future<Output = Result<Connection>> + Send + 'static,

@@ -1,64 +1,11 @@
 use super::*;
 
-pub fn git_preparation_command(
-    definition: &ResourceDefinition,
-    mut environment: HashMap<String, String>,
-    depth: std::num::NonZeroU32,
-    timeout: std::time::Duration,
-) -> Result<crate::SandboxCommand> {
-    definition.validate()?;
-    let ResourceSource::GitRepository {
-        url: Some(url),
-        checkout,
-        ..
-    } = &definition.source
-    else {
-        bail!("sandbox Git preparation requires a remote repository");
-    };
-    ensure!(
-        !timeout.is_zero(),
-        "Git preparation timeout must be positive"
-    );
-    let (kind, reference) = match checkout {
-        Some(GitCheckout::Branch { name }) => ("branch", name.as_str()),
-        Some(GitCheckout::Commit { sha }) => ("commit", sha.as_str()),
-        None => ("default", ""),
-    };
-    environment.extend([
-        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-        ("GIT_TERMINAL_PROMPT".into(), "0".into()),
-        ("GIT_LFS_SKIP_SMUDGE".into(), "1".into()),
-    ]);
-    Ok(crate::SandboxCommand {
-        argv: vec![
-            "/bin/sh".into(),
-            "-ceu".into(),
-            include_str!("prepare_git.sh").into(),
-            "exo-git".into(),
-            url.clone(),
-            kind.into(),
-            reference.into(),
-            depth.to_string(),
-        ],
-        env: environment,
-        display_argv: None,
-        cwd: Some(definition.mount_path.clone()),
-        timeout: Some(timeout),
-    })
-}
-
-pub struct ResourcePreparation {
-    pub scope: ResourceScope,
-    pub mount: FileSystemMount,
-}
-
 impl ResourceStore {
     pub fn prepare_volume(
         &self,
         definition: ResourceDefinition,
         identity: &str,
-        populate: impl FnOnce(ResourcePreparation) -> Result<()>,
+        populate: impl FnOnce(ResourceScope, FileSystemMount) -> Result<()>,
     ) -> Result<PreparedResource> {
         definition.validate()?;
         ensure!(!identity.is_empty(), "resource cache identity is required");
@@ -97,18 +44,18 @@ impl ResourceStore {
         } else {
             self.mount_volume(staging.path())?
         };
-        let prepared = populate(ResourcePreparation {
-            scope: ResourceScope::Thread {
+        let prepared = populate(
+            ResourceScope::Thread {
                 agent_id,
                 thread_id,
             },
-            mount: FileSystemMount {
+            FileSystemMount {
                 host_path: host_path.to_string_lossy().into_owned(),
                 mount_path: definition.mount_path.clone(),
                 mode: crate::FileSystemMountMode::ReadWrite,
                 internal: Some(true),
             },
-        });
+        );
         if let Err(error) = self.unmount_volume(staging.path()) {
             let path = staging.keep();
             drop(temporary.keep());

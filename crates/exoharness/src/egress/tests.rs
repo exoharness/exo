@@ -801,6 +801,7 @@ async fn connect_stream_uses_supplied_placeholder_and_checks_both_hosts() -> Res
             Some(resolver.clone()),
             Arc::new(upstream.config.clone()),
             Some(&placeholders),
+            None,
         )?);
         let accept = listener.clone();
         let tls = tls.clone();
@@ -1098,6 +1099,7 @@ async fn firecracker_transparent_egress_live() -> Result<()> {
         .proxy(host_ip()?, "live-two", resolver.clone())
         .await?;
     let request = |id: &str| SandboxRequest {
+        external_proxy: None,
         sandbox_id: id.into(),
         scope: crate::ResourceScope::Global,
         provider_state: None,
@@ -1259,6 +1261,7 @@ async fn managed_firecracker_egress(unrestricted: bool) -> Result<()> {
         network_policy.networking = SandboxNetworkPolicy::Unrestricted;
     }
     let request = SandboxRequest {
+        external_proxy: None,
         sandbox_id: "managed-egress-live".into(),
         scope: ResourceScope::Thread {
             agent_id: crate::Uuid7::now(),
@@ -2290,6 +2293,7 @@ async fn smolvm_proxy_live(with_gh: bool) -> Result<()> {
     let backend = make_backend();
     let image = backend.resolve_image(&image).await?.image;
     let request = SandboxRequest {
+        external_proxy: None,
         sandbox_id: format!("smolvm-proxy-{}", uuid::Uuid::new_v4()),
         scope: identity("smolvm-proxy").scope,
         provider_state: None,
@@ -2503,6 +2507,7 @@ async fn firecracker_template_egress_resources(codex_image: Option<String>) -> R
         .await?
         .with_egress(Some(resolver.clone()), Arc::new(upstream.config.clone()));
     let request = SandboxRequest {
+        external_proxy: None,
         sandbox_id: "pristine-template".into(),
         scope: ResourceScope::Global,
         provider_state: None,
@@ -2679,4 +2684,66 @@ except urllib.error.HTTPError:
     }.await;
     backend.terminate_all().await?;
     result
+}
+
+#[tokio::test]
+async fn native_tls_uses_the_external_proxys_identity_and_credential_resolver() -> Result<()> {
+    let upstream = Upstream::start().await?;
+    let authorizer = TestProxyAuthorizer::new(&upstream)?;
+    let placeholder = authorizer.sessions["first"].state.bindings[0]
+        .placeholder
+        .clone();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+    let address = listener.local_addr()?;
+    let cancel = CancellationToken::new();
+    let server = tokio::spawn(serve_connect_proxy(
+        listener,
+        authorizer.clone(),
+        cancel.clone(),
+    ));
+    for (password, permitted) in [("first", true), ("wrong", false)] {
+        let config = ExternalProxyConfig {
+            url: format!("http://{address}").parse()?,
+            username: "sandbox".into(),
+            password: password.into(),
+            ca_pem: authorizer.ca_pem.clone(),
+            environment: HashMap::from([("TEST_API_KEY".into(), placeholder.clone())]),
+        };
+        let state = State::with_external_proxy(identity("worker"), policy(), config)?;
+        assert!(state.resolver.is_none());
+        assert_eq!(state.bindings[0].placeholder, placeholder);
+        let transport = Arc::new(
+            LocalEgressTransport::with_config(
+                crate::EgressListenConfig {
+                    bind_address: host_ip()?,
+                    advertised_address: host_ip()?,
+                    http_port: 0,
+                    https_port: 0,
+                    dns_port: 0,
+                },
+                &["api.test".into()],
+            )
+            .await?,
+        );
+        let proxy =
+            EgressProxy::start_with_transport(transport, state, CancellationToken::new()).await?;
+        proxy.bind_source(host_ip()?).await?;
+        assert_eq!(proxy.ca_pem(), authorizer.ca_pem);
+        let response = client(&proxy)?
+            .get("https://api.test/auth")
+            .header("authorization", format!("Bearer {placeholder}"))
+            .header("connection", "close")
+            .send()
+            .await;
+        if permitted {
+            assert_eq!(response?.text().await?, "authenticated-v1");
+        } else {
+            assert!(response.is_err());
+        }
+        proxy.shutdown().await?;
+    }
+    assert_eq!(upstream.connections.load(Ordering::SeqCst), 1);
+    cancel.cancel();
+    server.await??;
+    Ok(())
 }

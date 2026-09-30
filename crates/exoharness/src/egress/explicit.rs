@@ -40,6 +40,7 @@ impl ProxySession {
                 resolver,
                 Arc::new(PublicUpstreamResolver),
                 Some(placeholders),
+                None,
             )?),
             tls,
         })

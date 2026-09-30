@@ -226,7 +226,9 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
         let _guard = self.lock(&request.sandbox_id).await;
         let cached = self.sandboxes().get(&request.sandbox_id).map(|cached| {
             (
-                cached.request.spec == request.spec && cached.request.scope == request.scope,
+                cached.request.spec == request.spec
+                    && cached.request.scope == request.scope
+                    && cached.request.external_proxy == request.external_proxy,
                 cached.handle.clone(),
                 cached.egress.clone(),
             )
@@ -253,15 +255,21 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
             request.lifecycle.idle_ttl.is_some(),
             "proxy egress requires a managed sandbox lifecycle"
         );
-        let state = State::new(
-            EgressIdentity {
-                sandbox_id: request.sandbox_id.clone(),
-                scope: request.scope,
-            },
-            request.spec.policy.clone(),
-            self.resolver.clone(),
-            self.upstream.clone(),
-        )?;
+        let identity = EgressIdentity {
+            sandbox_id: request.sandbox_id.clone(),
+            scope: request.scope,
+        };
+        let state = match &request.external_proxy {
+            Some(proxy) => {
+                State::with_external_proxy(identity, request.spec.policy.clone(), proxy.clone())?
+            }
+            None => State::new(
+                identity,
+                request.spec.policy.clone(),
+                self.resolver.clone(),
+                self.upstream.clone(),
+            )?,
+        };
         // The proxy must exist before boot so the backend can install its
         // endpoints in the VM's network rules. It admits no source yet.
         let egress = Arc::new(SandboxEgress {
@@ -443,6 +451,7 @@ mod tests {
 
     fn request(id: &str) -> SandboxRequest {
         SandboxRequest {
+            external_proxy: None,
             sandbox_id: id.into(),
             scope: crate::ResourceScope::Global,
             provider_state: None,

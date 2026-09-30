@@ -86,6 +86,7 @@ fn request(
     idle_ttl: Option<Duration>,
 ) -> SandboxRequest {
     SandboxRequest {
+        external_proxy: None,
         sandbox_id: tag.into(),
         scope: ResourceScope::Agent {
             agent_id: exoharness::Uuid7::now(),

@@ -560,6 +560,7 @@ mod tests {
 
     fn durable_request(mount_path: &str, mode: FileSystemMountMode) -> SandboxRequest {
         SandboxRequest {
+            external_proxy: None,
             sandbox_id: "sandbox".to_string(),
             scope: ResourceScope::Thread {
                 agent_id: crate::Uuid7::now(),

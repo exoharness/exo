@@ -510,6 +510,7 @@ async fn container_registrations_reject_credentials_before_launch() -> Result<()
     let mut policy = policy("api");
     policy.networking = SandboxNetworkPolicy::Unrestricted;
     let request = crate::SandboxRequest {
+        external_proxy: None,
         sandbox_id: "native-egress-required".into(),
         scope: ResourceScope::Global,
         provider_state: None,

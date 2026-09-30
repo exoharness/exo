@@ -4974,6 +4974,7 @@ fn sandbox_request(
     provider_state: Option<Value>,
 ) -> SandboxRequest {
     SandboxRequest {
+        external_proxy: None,
         sandbox_id: sandbox_id.to_string(),
         scope: owner,
         spec: SandboxSpec {

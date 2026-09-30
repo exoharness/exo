@@ -723,13 +723,6 @@ impl FirecrackerSandboxBackend {
         self
     }
 
-    pub async fn with_credentials(
-        config: FirecrackerConfig,
-        resolver: Arc<dyn EgressCredentialResolver>,
-    ) -> Result<Self> {
-        Self::new_with_egress(config, Some(resolver), Arc::new(PublicUpstreamResolver)).await
-    }
-
     pub fn shutdown_egress(&self) {
         self.egress.shutdown();
     }
@@ -1381,6 +1374,47 @@ impl FirecrackerSandboxBackend {
             one_shot,
         })
     }
+
+    async fn acquire_managed(
+        &self,
+        request: SandboxRequest,
+        snapshot: Option<FirecrackerSnapshotManifest>,
+    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
+        let terminate = self.shutdown_request(request.clone(), ShutdownMode::Terminate);
+        self.egress
+            .acquire(
+                request.clone(),
+                |policy| async move { self.egress_transport(&policy).await },
+                |egress| async move {
+                    let request = FirecrackerRequest {
+                        sandbox: request,
+                        egress_proxy: egress.as_ref().map(|egress| egress.endpoints()),
+                    };
+                    let mut handle = match snapshot {
+                        Some(snapshot) => {
+                            self.restore_snapshot(
+                                self.resolve_request(request).await?,
+                                snapshot,
+                                SnapshotTemplateLifecycle::Snapshot,
+                                None,
+                            )
+                            .await?
+                        }
+                        None => self.acquire_raw(request).await?,
+                    };
+                    if let Some(egress) = egress {
+                        let source = handle.machine.record.network().guest_ip;
+                        self.track_egress(&handle, egress.transport()).await?;
+                        egress.initialize(&handle, source).await?;
+                        handle.egress = Some(egress);
+                    }
+                    Ok(handle)
+                },
+                terminate,
+            )
+            .await
+            .map(|handle| crate::with_process_management(handle))
+    }
 }
 
 #[async_trait]
@@ -1446,30 +1480,7 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
     }
 
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        let terminate = self.shutdown_request(request.clone(), ShutdownMode::Terminate);
-        self.egress
-            .acquire(
-                request.clone(),
-                |policy| async move { self.egress_transport(&policy).await },
-                |egress| async move {
-                    let mut handle = self
-                        .acquire_raw(FirecrackerRequest {
-                            sandbox: request,
-                            egress_proxy: egress.as_ref().map(|egress| egress.endpoints()),
-                        })
-                        .await?;
-                    if let Some(egress) = egress {
-                        let source = handle.machine.record.network().guest_ip;
-                        self.track_egress(&handle, egress.transport()).await?;
-                        egress.initialize(&handle, source).await?;
-                        handle.egress = Some(egress);
-                    }
-                    Ok(handle)
-                },
-                terminate,
-            )
-            .await
-            .map(|handle| crate::with_process_management(handle))
+        self.acquire_managed(request, None).await
     }
 
     async fn attach(
@@ -1567,39 +1578,11 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
         request: SandboxRequest,
         payload: SnapshotPayload,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        let manifest = FirecrackerSnapshotManifest::from_payload(payload)?;
-        let terminate = self.shutdown_request(request.clone(), ShutdownMode::Terminate);
-        self.egress
-            .acquire(
-                request.clone(),
-                |policy| async move { self.egress_transport(&policy).await },
-                |egress| async move {
-                    let request = self
-                        .resolve_request(FirecrackerRequest {
-                            sandbox: request,
-                            egress_proxy: egress.as_ref().map(|egress| egress.endpoints()),
-                        })
-                        .await?;
-                    let mut handle = self
-                        .restore_snapshot(
-                            request,
-                            manifest,
-                            SnapshotTemplateLifecycle::Snapshot,
-                            None,
-                        )
-                        .await?;
-                    if let Some(egress) = egress {
-                        let source = handle.machine.record.network().guest_ip;
-                        self.track_egress(&handle, egress.transport()).await?;
-                        egress.initialize(&handle, source).await?;
-                        handle.egress = Some(egress);
-                    }
-                    Ok(handle)
-                },
-                terminate,
-            )
-            .await
-            .map(|handle| crate::with_process_management(handle))
+        self.acquire_managed(
+            request,
+            Some(FirecrackerSnapshotManifest::from_payload(payload)?),
+        )
+        .await
     }
 }
 

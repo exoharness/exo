@@ -1686,6 +1686,7 @@ mod egress_cleanup_tests {
             let resources =
                 fail_proxy_cleanup.then(|| crate::SandboxResourceShape::new(3, 2048).unwrap());
             let request = SandboxRequest {
+                external_proxy: None,
                 sandbox_id: "failed-egress-setup".into(),
                 scope: crate::ResourceScope::Global,
                 provider_state: None,
@@ -1867,6 +1868,7 @@ mod egress_cleanup_tests {
             connection: Mutex::new(Some(connection.clone())),
         });
         let request = SandboxRequest {
+            external_proxy: None,
             sandbox_id: "stop-test".into(),
             scope: crate::ResourceScope::Global,
             provider_state: None,

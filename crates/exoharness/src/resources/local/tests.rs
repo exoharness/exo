@@ -67,6 +67,7 @@ async fn isolated_git_resources_live(
         credential: None,
     });
     let request = SandboxRequest {
+        external_proxy: None,
         sandbox_id: format!("resource-preparation-{}", Uuid7::now()),
         scope: ResourceScope::Global,
         provider_state: None,
@@ -92,16 +93,24 @@ async fn isolated_git_resources_live(
         let request = request.clone();
         let runtime = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
-            let command = git_preparation_command(
-                &definition,
-                HashMap::new(),
-                std::num::NonZeroU32::new(1).unwrap(),
-                std::time::Duration::from_secs(120),
-            )?;
-            store.prepare_volume(definition, "test-project", |preparation| {
-                let mount = preparation.mount;
+            let command = SandboxCommand {
+                argv: vec![
+                    "git".into(),
+                    "clone".into(),
+                    "--depth=1".into(),
+                    "--single-branch".into(),
+                    "--no-tags".into(),
+                    "https://github.com/octocat/Hello-World.git".into(),
+                    "checkout".into(),
+                ],
+                env: HashMap::new(),
+                display_argv: None,
+                cwd: Some("/workspace".into()),
+                timeout: Some(std::time::Duration::from_secs(120)),
+            };
+            store.prepare_volume(definition, "test-project", |scope, mount| {
                 let mut request = request;
-                request.scope = preparation.scope;
+                request.scope = scope;
                 runtime.block_on(run_resource_command(
                     backend.as_ref(),
                     request,
@@ -136,12 +145,12 @@ async fn isolated_git_resources_live(
         offline.scope = ResourceScope::Thread { agent_id: agent, thread_id: first };
         offline.sandbox_id = format!("resource-private-{}", Uuid7::now());
         run_resource_command(backend.as_ref(), offline.clone(), copies[0].clone(), command(first,
-            "test -d .git; test \"$(git rev-parse --is-shallow-repository)\" = true; test \"$(git rev-list --count HEAD)\" = 1; printf kept > edits"
+            "test -d checkout/.git; test \"$(git -C checkout rev-parse --is-shallow-repository)\" = true; test \"$(git -C checkout rev-list --count HEAD)\" = 1; printf kept > edits"
         )?).await?;
         offline.scope = ResourceScope::Thread { agent_id: agent, thread_id: second };
         offline.sandbox_id = format!("resource-other-{}", Uuid7::now());
         run_resource_command(backend.as_ref(), offline.clone(), copies[1].clone(), command(second,
-            "test -d .git; test ! -e edits"
+            "test -d checkout/.git; test ! -e edits"
         )?).await?;
         {
             let store = store.clone();
@@ -154,7 +163,7 @@ async fn isolated_git_resources_live(
         offline.scope = ResourceScope::Thread { agent_id: agent, thread_id: first };
         offline.sandbox_id = format!("resource-replacement-{}", Uuid7::now());
         run_resource_command(backend.as_ref(), offline, copies[0].clone(), command(first,
-            "test \"$(cat edits)\" = kept; test -d .git"
+            "test \"$(cat edits)\" = kept; test -d checkout/.git"
         )?).await?;
         Ok(())
     }.await;
@@ -206,16 +215,14 @@ fn isolated_preparation_preserves_edits_and_purge_preserves_private_copies() -> 
     let first = Uuid7::now();
     let second = Uuid7::now();
     let result = (|| {
-        let prepared = store.prepare_volume(definition.clone(), "project-a", |preparation| {
-            let mount = preparation.mount;
+        let prepared = store.prepare_volume(definition.clone(), "project-a", |_scope, mount| {
             fs::write(Path::new(&mount.host_path).join("README"), "pristine")?;
             Ok(())
         })?;
         let mounts = store.materialize(agent, first, vec![prepared.clone()], vec![None])?;
         let private = Path::new(&mounts[0].host_path).join("README");
         fs::write(&private, "thread edits")?;
-        let updated = store.prepare_volume(definition.clone(), "project-a", |preparation| {
-            let mount = preparation.mount;
+        let updated = store.prepare_volume(definition.clone(), "project-a", |_scope, mount| {
             let file = Path::new(&mount.host_path).join("README");
             assert_eq!(fs::read_to_string(&file)?, "pristine");
             fs::write(file, "updated")?;
@@ -229,8 +236,7 @@ fn isolated_preparation_preserves_edits_and_purge_preserves_private_copies() -> 
         assert_eq!(fs::read_to_string(&private)?, "thread edits");
         assert!(
             store
-                .prepare_volume(definition.clone(), "project-a", |preparation| {
-                    let mount = preparation.mount;
+                .prepare_volume(definition.clone(), "project-a", |_scope, mount| {
                     fs::write(Path::new(&mount.host_path).join("README"), "incomplete")?;
                     bail!("fetch failed")
                 })
@@ -241,8 +247,7 @@ fn isolated_preparation_preserves_edits_and_purge_preserves_private_copies() -> 
             fs::read_to_string(Path::new(&other[0].host_path).join("README"))?,
             "updated"
         );
-        let partitioned = store.prepare_volume(definition, "project-b", |preparation| {
-            let mount = preparation.mount;
+        let partitioned = store.prepare_volume(definition, "project-b", |_scope, mount| {
             assert!(!Path::new(&mount.host_path).join("README").exists());
             Ok(())
         })?;

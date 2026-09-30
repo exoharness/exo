@@ -714,4 +714,3 @@ mod tests;
 mod images;
 mod preparation;
 pub(crate) use images::host_git_credential;
-pub use preparation::{ResourcePreparation, git_preparation_command};
