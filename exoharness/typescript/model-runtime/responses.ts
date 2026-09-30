@@ -25,9 +25,7 @@ import type {
 } from "openai/resources/responses/responses";
 
 import {
-  messagesEvent,
   toolResultEvent,
-  toolRequestedEvent,
   type AgentConfig,
   type EventData,
   type JsonObject,
@@ -36,7 +34,7 @@ import {
   type ToolDefinition,
   type TurnContext,
 } from "../harness";
-import { computeCostUsd, getTable } from "./cost";
+import { modelResponseEvents, modelUsageRecord } from "./events";
 import type {
   ChatCompletion,
   ChatCompletionChunk,
@@ -124,36 +122,9 @@ interface NativeLlmTraceOptions extends NativeTraceOptions {
   handlers?: NativeStreamHandlers;
 }
 
-export class ResponsesRuntime implements ResponsesRuntimeLike {
-  private readonly client: OpenAI;
-
+abstract class ModelRuntime implements ResponsesRuntimeLike {
   constructor(options: ResponsesRuntimeOptions) {
     ensureBraintrustLogger(options.braintrust ?? null);
-    // wrapOpenAI auto-instruments chat.completions/responses calls with a
-    // braintrust LLM span. Also covers the OpenRouter path (same OpenAI client,
-    // just a different base URL) — braintrust's wrapOpenRouter is for their
-    // native SDK, not the OpenAI SDK, so it doesn't apply here.
-    this.client = wrapOpenAI(
-      new OpenAI({
-        apiKey: options.apiKey,
-        baseURL: options.baseURL ?? "https://api.openai.com/v1",
-        organization: options.organization,
-        project: options.project,
-      }),
-    );
-  }
-
-  static fromModelConfig(
-    agentConfig: AgentConfig | undefined,
-    binding: ResponsesModelConfig,
-  ): ResponsesRuntime {
-    return new ResponsesRuntime({
-      apiKey: binding.apiKey,
-      baseURL: binding.baseUrl ?? undefined,
-      organization: process.env.OPENAI_ORG_ID,
-      project: process.env.OPENAI_PROJECT,
-      braintrust: braintrustOptionsFromAgentConfig(agentConfig),
-    });
   }
 
   async runTurn(
@@ -219,7 +190,52 @@ export class ResponsesRuntime implements ResponsesRuntimeLike {
     );
   }
 
-  private async runLlmRequest(
+  protected abstract runLlmRequest(
+    request: NativeResponsesRequest,
+    options: NativeLlmTraceOptions,
+  ): Promise<Response>;
+}
+
+function modelRuntimeOptions(
+  agentConfig: AgentConfig | undefined,
+  binding: ResponsesModelConfig,
+): ResponsesRuntimeOptions {
+  return {
+    apiKey: binding.apiKey,
+    baseURL: binding.baseUrl ?? undefined,
+    organization: process.env.OPENAI_ORG_ID,
+    project: process.env.OPENAI_PROJECT,
+    braintrust: braintrustOptionsFromAgentConfig(agentConfig),
+  };
+}
+
+function openAiClient(options: ResponsesRuntimeOptions): OpenAI {
+  return wrapOpenAI(
+    new OpenAI({
+      apiKey: options.apiKey,
+      baseURL: options.baseURL ?? "https://api.openai.com/v1",
+      organization: options.organization,
+      project: options.project,
+    }),
+  );
+}
+
+export class ResponsesRuntime extends ModelRuntime {
+  private readonly client: OpenAI;
+
+  constructor(options: ResponsesRuntimeOptions) {
+    super(options);
+    this.client = openAiClient(options);
+  }
+
+  static fromModelConfig(
+    agentConfig: AgentConfig | undefined,
+    binding: ResponsesModelConfig,
+  ): ResponsesRuntime {
+    return new ResponsesRuntime(modelRuntimeOptions(agentConfig, binding));
+  }
+
+  protected async runLlmRequest(
     request: NativeResponsesRequest,
     options: NativeLlmTraceOptions,
   ): Promise<Response> {
@@ -319,102 +335,24 @@ export function modelRequiresResponsesApi(model: string): boolean {
   );
 }
 
-export class ChatCompletionsRuntime implements ResponsesRuntimeLike {
+export class ChatCompletionsRuntime extends ModelRuntime {
   private readonly client: OpenAI;
 
   constructor(options: ResponsesRuntimeOptions) {
-    ensureBraintrustLogger(options.braintrust ?? null);
-    // wrapOpenAI auto-instruments chat.completions/responses calls with a
-    // braintrust LLM span. Also covers the OpenRouter path (same OpenAI client,
-    // just a different base URL) — braintrust's wrapOpenRouter is for their
-    // native SDK, not the OpenAI SDK, so it doesn't apply here.
-    this.client = wrapOpenAI(
-      new OpenAI({
-        apiKey: options.apiKey,
-        baseURL: options.baseURL ?? "https://api.openai.com/v1",
-        organization: options.organization,
-        project: options.project,
-      }),
-    );
+    super(options);
+    this.client = openAiClient(options);
   }
 
   static fromModelConfig(
     agentConfig: AgentConfig | undefined,
     binding: ResponsesModelConfig,
   ): ChatCompletionsRuntime {
-    return new ChatCompletionsRuntime({
-      apiKey: binding.apiKey,
-      baseURL: binding.baseUrl ?? undefined,
-      organization: process.env.OPENAI_ORG_ID,
-      project: process.env.OPENAI_PROJECT,
-      braintrust: braintrustOptionsFromAgentConfig(agentConfig),
-    });
-  }
-
-  async runTurn(
-    context: TurnContext,
-    run: (turnParent: TraceParent) => Promise<string | null>,
-  ): Promise<void> {
-    await traceExecutorTurn(context, run);
-  }
-
-  async complete(
-    request: NativeResponsesRequest,
-    options: NativeTraceOptions = {},
-  ): Promise<Response> {
-    return this.runLlmRequest(request, {
-      ...options,
-      streamed: false,
-    });
-  }
-
-  async completeStream(
-    request: NativeResponsesRequest,
-    handlers: NativeStreamHandlers = {},
-    options: NativeTraceOptions = {},
-  ): Promise<Response> {
-    return this.runLlmRequest(request, {
-      ...options,
-      streamed: true,
-      handlers,
-    });
-  }
-
-  async traceToolCall(
-    turnParent: TraceParent,
-    context: TurnContext,
-    toolCall: PendingToolCall,
-    roundIndex: number,
-    execute: ToolCallExecutor = (toolCall) =>
-      context.executePendingTools([toolCall]),
-  ): Promise<EventData[]> {
-    return tracedUnderParent(
-      turnParent,
-      async (span) => {
-        try {
-          const events = await execute(toolCall);
-          span.log({ output: toolResultTraceOutput(events) });
-          return events;
-        } catch (error) {
-          span.log({ error: errorMessage(error) });
-          throw error;
-        }
-      },
-      {
-        name: toolCall.request.functionName,
-        type: "tool",
-        spanAttributes: { purpose: "tool_call" },
-        event: {
-          input: toolCall.request,
-          metadata: {
-            round_index: roundIndex,
-          },
-        },
-      },
+    return new ChatCompletionsRuntime(
+      modelRuntimeOptions(agentConfig, binding),
     );
   }
 
-  private async runLlmRequest(
+  protected async runLlmRequest(
     request: NativeResponsesRequest,
     options: NativeLlmTraceOptions,
   ): Promise<Response> {
@@ -470,11 +408,11 @@ const DEFAULT_ANTHROPIC_MAX_TOKENS = 4096;
 // Mirrors ChatCompletionsRuntime: build a provider-native request, call the
 // provider SDK, then normalize the provider response into the OpenAI Responses
 // `Response` shape that the rest of the harness consumes.
-export class AnthropicRuntime implements ResponsesRuntimeLike {
+export class AnthropicRuntime extends ModelRuntime {
   private readonly client: Anthropic;
 
   constructor(options: ResponsesRuntimeOptions) {
-    ensureBraintrustLogger(options.braintrust ?? null);
+    super(options);
     // wrapAnthropic auto-instruments every messages.create/.stream call with a
     // braintrust LLM span (input/output/usage), so we don't hand-roll spans.
     this.client = wrapAnthropic(
@@ -490,77 +428,10 @@ export class AnthropicRuntime implements ResponsesRuntimeLike {
     agentConfig: AgentConfig | undefined,
     binding: ResponsesModelConfig,
   ): AnthropicRuntime {
-    return new AnthropicRuntime({
-      apiKey: binding.apiKey,
-      baseURL: binding.baseUrl ?? undefined,
-      braintrust: braintrustOptionsFromAgentConfig(agentConfig),
-    });
+    return new AnthropicRuntime(modelRuntimeOptions(agentConfig, binding));
   }
 
-  async runTurn(
-    context: TurnContext,
-    run: (turnParent: TraceParent) => Promise<string | null>,
-  ): Promise<void> {
-    await traceExecutorTurn(context, run);
-  }
-
-  async complete(
-    request: NativeResponsesRequest,
-    options: NativeTraceOptions = {},
-  ): Promise<Response> {
-    return this.runLlmRequest(request, {
-      ...options,
-      streamed: false,
-    });
-  }
-
-  async completeStream(
-    request: NativeResponsesRequest,
-    handlers: NativeStreamHandlers = {},
-    options: NativeTraceOptions = {},
-  ): Promise<Response> {
-    return this.runLlmRequest(request, {
-      ...options,
-      streamed: true,
-      handlers,
-    });
-  }
-
-  async traceToolCall(
-    turnParent: TraceParent,
-    context: TurnContext,
-    toolCall: PendingToolCall,
-    roundIndex: number,
-    execute: ToolCallExecutor = (toolCall) =>
-      context.executePendingTools([toolCall]),
-  ): Promise<EventData[]> {
-    return tracedUnderParent(
-      turnParent,
-      async (span) => {
-        try {
-          const events = await execute(toolCall);
-          span.log({ output: toolResultTraceOutput(events) });
-          return events;
-        } catch (error) {
-          span.log({ error: errorMessage(error) });
-          throw error;
-        }
-      },
-      {
-        name: toolCall.request.functionName,
-        type: "tool",
-        spanAttributes: { purpose: "tool_call" },
-        event: {
-          input: toolCall.request,
-          metadata: {
-            round_index: roundIndex,
-          },
-        },
-      },
-    );
-  }
-
-  private async runLlmRequest(
+  protected async runLlmRequest(
     request: NativeResponsesRequest,
     options: NativeLlmTraceOptions,
   ): Promise<Response> {
@@ -1128,47 +999,31 @@ export function linguaMessagesToResponsesInput(
 }
 
 export function responseToLinguaEvents(response: Response): EventData[] {
-  const events: EventData[] = [];
-  const messages = responseMessages(response);
-  if (messages.length > 0) {
-    events.push(messagesEvent(messages, undefined, usageRecord(response)));
-  }
-  for (const result of responseToolCallResults(response)) {
-    if (result.type === "tool_call") {
-      events.push(toolRequestedEvent(result.toolCall));
-    } else {
+  const parsed = responseToolCallResults(response);
+  const usage = response.usage;
+  const events = modelResponseEvents({
+    messages: responseMessages(response),
+    toolCalls: parsed.flatMap((result) =>
+      result.type === "tool_call" ? [result.toolCall] : [],
+    ),
+    usage: usage
+      ? modelUsageRecord(response.model, {
+          promptTokens: usage.input_tokens,
+          completionTokens: usage.output_tokens,
+          promptCachedTokens: usage.input_tokens_details?.cached_tokens,
+          completionReasoningTokens:
+            usage.output_tokens_details?.reasoning_tokens,
+        })
+      : undefined,
+  });
+  for (const result of parsed) {
+    if (result.type === "parse_error") {
       events.push(
-        toolResultEvent(result.toolCallId, {
-          ok: false,
-          error: result.error,
-        }),
+        toolResultEvent(result.toolCallId, { ok: false, error: result.error }),
       );
     }
   }
   return events;
-}
-
-// Policy: attach raw usage + cost to the messages event. cost_usd is filled from
-// the shared price cache; left unset if the cache is unavailable.
-function usageRecord(response: Response): JsonObject | undefined {
-  const usage = response.usage;
-  if (!usage) return undefined;
-  const prompt = usage.input_tokens;
-  const completion = usage.output_tokens;
-  const cached = usage.input_tokens_details?.cached_tokens;
-  const reasoning = usage.output_tokens_details?.reasoning_tokens;
-  const table = getTable();
-  const cost = table
-    ? computeCostUsd(table, response.model, { prompt, completion, cached })
-    : null;
-
-  const record: JsonObject = { model: response.model };
-  if (prompt != null) record.prompt_tokens = prompt;
-  if (completion != null) record.completion_tokens = completion;
-  if (cached != null) record.prompt_cached_tokens = cached;
-  if (reasoning != null) record.completion_reasoning_tokens = reasoning;
-  if (cost != null) record.cost_usd = cost;
-  return record;
 }
 
 export function responseStreamEventToLinguaEvents(

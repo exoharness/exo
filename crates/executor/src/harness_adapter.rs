@@ -11,6 +11,7 @@ use crate::execution_tracing::TurnExecutionTrace;
 use crate::harness::{
     Harness, HarnessCommand, HarnessEvent, HarnessEventSink, HarnessTurnKey, HarnessTurnOutcome,
 };
+use crate::harness_events::HarnessTurn;
 use crate::harness_executor::{ExecutorStreamMode, HarnessExecutor};
 use crate::{AgentConfig, ConversationConfig, ExecutionStreamEvent};
 
@@ -143,10 +144,15 @@ impl Harness<ExecutorTurn> for ExecutorHarness {
         let idle = Arc::clone(&self.idle);
         let executor = self.executor.clone();
         tokio::spawn(async move {
+            let turn = Arc::new(HarnessTurn::new(
+                Arc::clone(&work.turn),
+                events.clone(),
+                key,
+            ));
             let execution = executor.execute_turn(
                 work.agent.as_ref(),
                 Arc::clone(&work.thread),
-                Arc::clone(&work.turn),
+                turn,
                 &work.agent_config,
                 &work.thread_config,
                 &work.request,

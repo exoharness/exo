@@ -314,36 +314,9 @@ export function instructionsText(messages: Message[]): string | null {
 export async function appendEvents(
   context: TurnContext,
   events: EventData[],
-  options: { defaultToolName?: string } = {},
 ): Promise<void> {
-  if (events.length === 0) {
-    return;
-  }
-  await context.exoharness.current.turn.addEvents(events);
-  if (!context.streaming) {
-    return;
-  }
-
-  for (const event of events) {
-    if (event.type === "tool_requested") {
-      await context.stream.toolCall({
-        toolCallId: String(event.tool_call_id),
-        toolName: String(
-          (event.request as { function_name?: unknown } | undefined)
-            ?.function_name ??
-            options.defaultToolName ??
-            "tool",
-        ),
-        arguments: asJsonObject(
-          (event.request as { arguments?: unknown } | undefined)?.arguments,
-        ),
-      });
-    } else if (event.type === "tool_result") {
-      await context.stream.toolResult({
-        toolCallId: String(event.tool_call_id),
-        result: toJsonValue(event.result ?? null),
-      });
-    }
+  if (events.length > 0) {
+    await context.exoharness.current.turn.addEvents(events);
   }
 }
 

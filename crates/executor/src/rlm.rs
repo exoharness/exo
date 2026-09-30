@@ -1,11 +1,10 @@
 use std::sync::Arc;
-use std::time::Instant;
 
 use async_trait::async_trait;
 
 use crate::{
     AgentConfig, ConversationConfig, ExecutionStreamEvent, ModelClient, ModelRequest,
-    ModelResponse, ToolDefinition, ToolRuntime,
+    ToolDefinition, ToolRuntime,
 };
 use anyhow::{Context as AnyhowContext, anyhow, bail};
 use exoharness::{
@@ -18,7 +17,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use crate::execution_tracing::{LlmExecutionTrace, TurnExecutionTrace};
+use crate::execution_tracing::TurnExecutionTrace;
 use crate::harness_executor::{ExecutorStreamMode, HarnessExecutor};
 use crate::harness_helpers::{
     ResolvedModel, assistant_message, assistant_messages_text, materialize_conversation_messages,
@@ -26,6 +25,7 @@ use crate::harness_helpers::{
     to_lingua_value, user_message,
 };
 use crate::harness_js_repl::JsReplState;
+use crate::model_execution::{ModelStreamOutput, complete_model_round};
 use crate::shared::try_send_stream_event;
 
 const RLM_STDOUT_PREVIEW_CHARS: usize = 12_000;
@@ -105,29 +105,17 @@ where
                     .collect(),
                 max_output_tokens: agent_config.max_output_tokens,
             };
-            let llm_trace = match turn_trace {
-                Some(turn_trace) => turn_trace.start_llm_round(&request, round as usize).await,
-                None => None,
-            };
-            let response = if let Some(event_tx) = event_tx {
-                self.complete_streaming(request, event_tx, llm_trace)
-                    .await?
-            } else {
-                match self.model.complete(request).await {
-                    Ok(response) => {
-                        if let Some(llm_trace) = llm_trace {
-                            llm_trace.finish_success(&response, None).await;
-                        }
-                        response
-                    }
-                    Err(error) => {
-                        if let Some(llm_trace) = llm_trace {
-                            llm_trace.finish_error(&error).await;
-                        }
-                        return Err(error);
-                    }
-                }
-            };
+            let response = complete_model_round(
+                self.model.as_ref(),
+                request,
+                round as usize,
+                event_tx
+                    .map(ExecutorStreamMode::Enabled)
+                    .unwrap_or(ExecutorStreamMode::Disabled),
+                ModelStreamOutput::Internal,
+                turn_trace,
+            )
+            .await?;
 
             append_custom_event(
                 turn,
@@ -265,66 +253,6 @@ where
             history.extend(tool_messages);
             round += 1;
         }
-    }
-
-    async fn complete_streaming(
-        &self,
-        request: ModelRequest,
-        event_tx: &mpsc::UnboundedSender<Result<ExecutionStreamEvent>>,
-        llm_trace: Option<Box<dyn LlmExecutionTrace>>,
-    ) -> Result<ModelResponse> {
-        let started_at = Instant::now();
-        let mut stream = match self.model.complete_stream(request).await {
-            Ok(stream) => stream,
-            Err(error) => {
-                if let Some(llm_trace) = llm_trace {
-                    llm_trace.finish_error(&error).await;
-                }
-                return Err(error);
-            }
-        };
-        let mut ttft = None;
-        loop {
-            let chunk = match stream.next_chunk().await {
-                Ok(chunk) => chunk,
-                Err(error) => {
-                    if let Some(llm_trace) = llm_trace {
-                        llm_trace.finish_error(&error).await;
-                    }
-                    return Err(error);
-                }
-            };
-            let Some(chunk) = chunk else {
-                break;
-            };
-            if chunk.is_keep_alive() {
-                continue;
-            }
-            if ttft.is_none() {
-                let first_chunk = started_at.elapsed();
-                ttft = Some(first_chunk);
-                try_send_stream_event(
-                    event_tx,
-                    ExecutionStreamEvent::FirstChunk { ttft: first_chunk },
-                );
-            }
-            // RLM root-model text is executor control traffic rather than user-facing output.
-            // The final persisted assistant message is emitted after the loop finishes, so
-            // streaming these raw chunks would leak control syntax like FINAL(...).
-        }
-        let response = match stream.finish().await {
-            Ok(response) => response,
-            Err(error) => {
-                if let Some(llm_trace) = llm_trace {
-                    llm_trace.finish_error(&error).await;
-                }
-                return Err(error);
-            }
-        };
-        if let Some(llm_trace) = llm_trace {
-            llm_trace.finish_success(&response, ttft).await;
-        }
-        Ok(response)
     }
 
     async fn execute_tool_call(

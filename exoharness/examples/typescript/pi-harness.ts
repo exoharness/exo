@@ -19,6 +19,7 @@ import {
   resolveSandboxModel,
   WarmJsonlSandboxWorker,
 } from "@exo/model-runtime/shared";
+import { modelUsageRecord } from "../../typescript/model-runtime/events";
 
 const PI_EXTENSION = String.raw`
 import { readFileSync } from "node:fs";
@@ -75,26 +76,27 @@ function usageRecord(
   if (!message.usage) return undefined;
   const usage = asRecord(message.usage);
   const cost = asRecord(usage.cost);
-  const record: Record<string, JsonValue> = {};
-  if (typeof message.model === "string") record.model = message.model;
-  if (typeof usage.input === "number") {
-    record.prompt_tokens =
-      provider === "anthropic"
-        ? usage.input
-        : usage.input +
-          (typeof usage.cacheRead === "number" ? usage.cacheRead : 0) +
-          (typeof usage.cacheWrite === "number" ? usage.cacheWrite : 0);
-  }
-  const fields: Array<[string, unknown]> = [
-    ["completion_tokens", usage.output],
-    ["prompt_cached_tokens", usage.cacheRead],
-    ["prompt_cache_creation_tokens", usage.cacheWrite],
-    ["cost_usd", cost.total],
-  ];
-  for (const [key, value] of fields) {
-    if (typeof value === "number") record[key] = value;
-  }
-  return record;
+  const input = typeof usage.input === "number" ? usage.input : undefined;
+  const cached =
+    typeof usage.cacheRead === "number" ? usage.cacheRead : undefined;
+  const created =
+    typeof usage.cacheWrite === "number" ? usage.cacheWrite : undefined;
+  return modelUsageRecord(
+    typeof message.model === "string" ? message.model : "",
+    {
+      promptTokens:
+        input === undefined
+          ? undefined
+          : provider === "anthropic"
+            ? input
+            : input + (cached ?? 0) + (created ?? 0),
+      completionTokens:
+        typeof usage.output === "number" ? usage.output : undefined,
+      promptCachedTokens: cached,
+      promptCacheCreationTokens: created,
+      providerCostUsd: typeof cost.total === "number" ? cost.total : undefined,
+    },
+  );
 }
 
 export default defineHarness({

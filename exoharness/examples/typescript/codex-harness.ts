@@ -757,13 +757,6 @@ async function handleCodexNotification(
   updateTraceStateFromNotification(notification, traceState);
   switch (notification.method) {
     case "rawResponseItem/completed": {
-      const params = asRecord(notification.params);
-      const item = toJsonValue(params.item);
-      await appendCustomEvent(turn, "codex_raw_response_item", {
-        thread_id: params.threadId ?? null,
-        turn_id: params.turnId ?? null,
-        item,
-      });
       return "running";
     }
     case "item/agentMessage/delta": {

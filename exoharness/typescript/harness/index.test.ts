@@ -99,7 +99,7 @@ describe("HarnessToolRegistry", () => {
     expect(executionContexts[0].toolCallId).toBe("call_1");
   });
 
-  it("emits stream events around tool execution when streaming", async () => {
+  it("returns tool events for publication after persistence", async () => {
     const streamEvents: EventData[] = [];
     const context = fakeTurnContext({
       streaming: true,
@@ -119,21 +119,7 @@ describe("HarnessToolRegistry", () => {
       },
     ]);
 
-    expect(streamEvents).toEqual([
-      {
-        type: "tool_call_streamed",
-        toolCallId: "call_1",
-        toolName: "echo",
-        arguments: { value: "hello" },
-      },
-      {
-        type: "tool_result_streamed",
-        toolCallId: "call_1",
-        result: wrappedToolResult("call_1", "echo", "library", 1, {
-          echoed: "hello",
-        }),
-      },
-    ]);
+    expect(streamEvents).toEqual([]);
   });
 
   it("throws for unregistered tools", async () => {
