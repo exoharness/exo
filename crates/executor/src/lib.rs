@@ -11,7 +11,7 @@ mod conversation_sandbox;
 mod conversation_wakeup;
 mod execution_tracing;
 mod executor_types;
-pub mod harness;
+pub use exoharness::harness;
 mod harness_adapter;
 #[cfg(test)]
 mod harness_basic_tests;
