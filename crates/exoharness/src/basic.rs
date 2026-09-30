@@ -1231,12 +1231,12 @@ impl ExoHarness for BasicExoHarness {
         // record left that could ever find them. Same protocol as
         // delete_conversation: terminate outside the write lock, since
         // terminate_sandbox takes that lock itself, then delete only after a
-        // locked re-check sees nothing running — bounded, so racing sandbox
+        // locked re-check sees no managed sandboxes — bounded, so racing sandbox
         // creation yields an error instead of a leaked VM.
         for _ in 0..5 {
-            terminate_running_sandboxes(&BasicScopedSandboxHandle::agent(self, *id)).await?;
+            terminate_managed_sandboxes(&BasicScopedSandboxHandle::agent(self, *id)).await?;
             for conversation_id in agent_conversation_ids(self, &agent_dir).await? {
-                terminate_running_sandboxes(&BasicScopedSandboxHandle::conversation(
+                terminate_managed_sandboxes(&BasicScopedSandboxHandle::conversation(
                     self,
                     *id,
                     conversation_id,
@@ -1715,13 +1715,13 @@ impl AgentHandle for BasicAgentHandle {
             BasicScopedSandboxHandle::conversation(&self.harness, self.record.id, *id);
         // Sandbox creation persists its record under the write lock, so the
         // only way to guarantee no VM outlives its conversation record is to
-        // observe "no running sandboxes" while holding that lock and delete
+        // observe "no managed sandboxes" while holding that lock and delete
         // without releasing it. terminate_sandbox takes the write lock itself,
         // so terminations run outside it and the locked check loops until it
         // finds nothing new — bounded, so a caller racing sandbox creation
         // against deletion gets an error instead of a silently leaked VM.
         for _ in 0..5 {
-            terminate_running_sandboxes(&sandbox_handle).await?;
+            terminate_managed_sandboxes(&sandbox_handle).await?;
 
             let _guard = self.harness.inner.write_lock.lock().await;
             if self
@@ -1909,9 +1909,9 @@ fn paginate_conversation_records(
 }
 
 // Deletion helpers shared by delete_agent and delete_conversation: an owner's
-// storage prefix must never be removed while sandboxes it owns are running,
-// or their VMs would outlive every record that could find them.
-async fn terminate_running_sandboxes(scope: &BasicScopedSandboxHandle<'_>) -> Result<()> {
+// storage prefix must never be removed while it owns sandbox disks, including
+// stopped VMs that will otherwise outlive every record that could find them.
+async fn terminate_managed_sandboxes(scope: &BasicScopedSandboxHandle<'_>) -> Result<()> {
     for sandbox in scope
         .harness
         .inner
@@ -1919,7 +1919,7 @@ async fn terminate_running_sandboxes(scope: &BasicScopedSandboxHandle<'_>) -> Re
         .list_json_matching_suffix::<StoredSandbox>(scope.sandboxes_dir(), ".json")
         .await?
     {
-        if sandbox.running && sandbox.attachment.is_none() {
+        if sandbox.attachment.is_none() {
             scope.terminate_sandbox(sandbox.id).await?;
         }
     }
@@ -1942,10 +1942,7 @@ async fn prepare_sandbox_scopes_for_deletion(
             .storage
             .list_json_matching_suffix::<StoredSandbox>(scope.sandboxes_dir(), ".json")
             .await?;
-        if sandboxes
-            .iter()
-            .any(|sandbox| sandbox.running && sandbox.attachment.is_none())
-        {
+        if sandboxes.iter().any(|sandbox| sandbox.attachment.is_none()) {
             return Ok(false);
         }
         sandbox_ids.extend(sandboxes.into_iter().map(|sandbox| sandbox.id));
@@ -2197,7 +2194,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         if sandbox.attachment.is_some() {
             bail!("attached sandboxes cannot be terminated");
         }
-        if sandbox.running {
+        {
             let backend = self
                 .harness
                 .inner
@@ -2344,9 +2341,9 @@ impl<'a> BasicScopedSandboxHandle<'a> {
 
     async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
         self.harness.check(self.owner).await?;
-        let event =
+        let events =
             start_sandbox_side_effect(self.harness, &self.owner_dir, self.owner, request).await?;
-        self.append_events(vec![event]).await?;
+        self.append_events(events).await?;
         Ok(())
     }
 
@@ -2400,7 +2397,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         if !sandbox.running {
             bail!("sandbox is not running: {id}");
         }
-        let sandbox_handle = self.active_sandbox_handle(&id, &sandbox).await?;
+        let sandbox_handle = self.tcp_sandbox_handle(&id, &sandbox).await?;
         sandbox_handle.connect_tcp(port).await
     }
 
@@ -2411,7 +2408,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         if !sandbox.running {
             bail!("sandbox is not running: {id}");
         }
-        let sandbox_handle = self.active_sandbox_handle(&id, &sandbox).await?;
+        let sandbox_handle = self.tcp_sandbox_handle(&id, &sandbox).await?;
         Ok(sandbox_handle.supports_tcp())
     }
 
@@ -2679,6 +2676,8 @@ impl<'a> BasicScopedSandboxHandle<'a> {
                 default_workdir: sandbox.default_workdir.unwrap_or_default(),
                 file_system_mounts: sandbox.file_system_mounts,
                 durable_file_systems: sandbox.durable_file_systems,
+                tcp_ports: sandbox.tcp_ports,
+                resources: sandbox.resources,
                 policy: Some(policy),
                 enable_networking,
                 idle_seconds: sandbox.idle_seconds,
@@ -2788,6 +2787,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
                 default_workdir,
                 file_system_mounts,
                 durable_file_systems,
+                tcp_ports,
                 idle_seconds,
                 ..
             } = event.data
@@ -2819,6 +2819,8 @@ impl<'a> BasicScopedSandboxHandle<'a> {
                 || default_workdir != request.default_workdir.clone().unwrap_or_default()
                 || file_system_mounts != request.file_system_mounts
                 || durable_file_systems != request.durable_file_systems
+                || tcp_ports != request.tcp_ports
+                || sandbox.resources != request.resources
                 || sandbox.policy() != request.policy
                 || sandbox.credentials != request.credentials
                 || idle_seconds != request.idle_seconds
@@ -2837,14 +2839,31 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         Ok(sandbox)
     }
 
-    async fn active_sandbox_handle(
+    async fn tcp_sandbox_handle(
         &self,
         id: &SandboxId,
         sandbox: &StoredSandbox,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        self.harness.check(self.owner).await?;
-        let (handle, provider_state_event) =
-            active_sandbox_handle(self.harness, &self.owner_dir, self.owner, id, sandbox).await?;
+        if let Some(handle) = self
+            .harness
+            .inner
+            .running_sandboxes
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+        {
+            return Ok(handle);
+        }
+        let (handle, provider_state_event) = create_sandbox_handle_for_access(
+            self.harness,
+            &self.owner_dir,
+            self.owner,
+            id,
+            sandbox,
+            SandboxHandleAccess::Tcp,
+        )
+        .await?;
         if let Some(event) = provider_state_event {
             self.append_events(vec![event]).await?;
         }
@@ -2978,7 +2997,7 @@ impl ConversationHandle for BasicConversationHandle {
         let scope =
             BasicScopedSandboxHandle::conversation(&operator, self.agent_id, self.record.id);
         let reset = active.is_some() || !scope.list_sandboxes().await?.is_empty();
-        terminate_running_sandboxes(&scope).await?;
+        terminate_managed_sandboxes(&scope).await?;
         self.harness
             .inner
             .storage
@@ -3752,8 +3771,45 @@ async fn start_sandbox_side_effect(
     owner_dir: &Path,
     owner: ResourceScope,
     request: StartSandboxRequest,
-) -> Result<EventData> {
-    let payload = load_snapshot_payload(harness, owner_dir, request.snapshot_id).await?;
+) -> Result<Vec<EventData>> {
+    let Some(snapshot_id) = request.snapshot_id else {
+        let _guard = harness.inner.write_lock.lock().await;
+        let mut sandbox = load_stored_sandbox(harness, owner_dir, &request.id).await?;
+        anyhow::ensure!(
+            sandbox.attachment.is_none(),
+            "attached sandboxes cannot be resumed"
+        );
+        anyhow::ensure!(
+            request
+                .provider
+                .as_ref()
+                .is_none_or(|provider| provider == &sandbox.provider),
+            "changing sandbox providers requires a snapshot"
+        );
+        if let Some(idle_seconds) = request.idle_seconds {
+            sandbox.idle_seconds = idle_seconds;
+        }
+        let (_handle, provider_state_event) =
+            active_sandbox_handle_locked(harness, owner_dir, owner, &request.id, &sandbox).await?;
+        sandbox.running = true;
+        harness
+            .inner
+            .storage
+            .put_json(
+                owner_dir
+                    .join("sandboxes")
+                    .join(format!("{}.json", request.id)),
+                &sandbox,
+            )
+            .await?;
+        let mut events: Vec<_> = provider_state_event.into_iter().collect();
+        events.push(EventData::SandboxStarted {
+            sandbox_id: request.id,
+            snapshot_id: None,
+        });
+        return Ok(events);
+    };
+    let payload = load_snapshot_payload(harness, owner_dir, snapshot_id).await?;
 
     // Keep the state transition and backend replacement behind the same
     // barrier as stop, terminate, and owner deletion. Otherwise one of those
@@ -3765,7 +3821,7 @@ async fn start_sandbox_side_effect(
         bail!("attached sandboxes cannot be started from snapshots");
     }
     sandbox.running = true;
-    sandbox.latest_snapshot_id = Some(request.snapshot_id);
+    sandbox.latest_snapshot_id = Some(snapshot_id);
     if let Some(idle_seconds) = request.idle_seconds {
         sandbox.idle_seconds = idle_seconds;
     }
@@ -3862,10 +3918,10 @@ async fn start_sandbox_side_effect(
         .lock()
         .await
         .insert(request.id.clone(), sandbox_handle);
-    Ok(EventData::SandboxStarted {
+    Ok(vec![EventData::SandboxStarted {
         sandbox_id: request.id,
-        snapshot_id: Some(request.snapshot_id),
-    })
+        snapshot_id: Some(snapshot_id),
+    }])
 }
 
 async fn load_snapshot_payload(
@@ -3937,6 +3993,13 @@ async fn prepare_sandbox_request(
     scope: ResourceScope,
     request: CreateSandboxRequest,
 ) -> Result<PreparedSandboxRequest> {
+    if request
+        .resources
+        .is_some_and(|resources| resources.storage_gib.is_some() || resources.overlay_gib.is_some())
+        && request.provider != SandboxProvider::Smolvm
+    {
+        bail!("storage_gib and overlay_gib are supported only by SmolVM");
+    }
     let image = if !request.image.trim().is_empty() {
         request.image.clone()
     } else if let Some(default) = harness
@@ -4114,6 +4177,30 @@ async fn create_sandbox_handle(
     sandbox_id: &SandboxId,
     sandbox: &StoredSandbox,
 ) -> Result<(Arc<dyn ManagedSandboxHandle>, Option<EventData>)> {
+    create_sandbox_handle_for_access(
+        harness,
+        owner_dir,
+        owner,
+        sandbox_id,
+        sandbox,
+        SandboxHandleAccess::Full,
+    )
+    .await
+}
+
+enum SandboxHandleAccess {
+    Full,
+    Tcp,
+}
+
+async fn create_sandbox_handle_for_access(
+    harness: &BasicExoHarness,
+    owner_dir: &Path,
+    owner: ResourceScope,
+    sandbox_id: &SandboxId,
+    sandbox: &StoredSandbox,
+    access: SandboxHandleAccess,
+) -> Result<(Arc<dyn ManagedSandboxHandle>, Option<EventData>)> {
     let state_key = sandbox_provider_state_key(owner, sandbox_id, sandbox);
     let previous_state = load_sandbox_provider_state(
         harness,
@@ -4131,7 +4218,10 @@ async fn create_sandbox_handle(
     let request = sandbox_request(owner, sandbox_id, sandbox, previous_state.clone());
     let handle = match &sandbox.attachment {
         Some(attachment) => backend.attach(request, attachment.clone()).await?,
-        None => backend.acquire(request).await?,
+        None => match access {
+            SandboxHandleAccess::Full => backend.acquire(request).await?,
+            SandboxHandleAccess::Tcp => backend.acquire_tcp(request).await?,
+        },
     };
     let provider_state_event = sandbox_provider_state_event(
         sandbox_id,

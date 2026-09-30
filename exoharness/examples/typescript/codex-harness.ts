@@ -1038,7 +1038,7 @@ function codexSandboxCommand(context: TurnContext): string[] {
   const shell = context.conversationConfig.shellProgram ?? "/bin/bash";
   const command = [
     "set -e;",
-    'mkdir -p "${HOME:-/tmp/exo-home}" "${CODEX_HOME:-/tmp/exo-codex-home}";',
+    'mkdir -p "$HOME" "${CODEX_HOME:-$HOME/.codex}";',
     `test "$(codex --version)" = "codex-cli ${CODEX_VERSION}" || { echo "Expected Codex ${CODEX_VERSION}; rebuild the Codex sandbox image" >&2; exit 1; };`,
     "exec codex app-server --listen stdio://",
   ].join(" ");
@@ -1050,8 +1050,6 @@ function codexSandboxEnv(): Record<string, string> {
     ...pickEnv((key) =>
       ["OPENAI_ORG_ID", "OPENAI_ORGANIZATION", "OPENAI_PROJECT"].includes(key),
     ),
-    CODEX_HOME: "/tmp/exo-codex-home",
-    HOME: "/tmp/exo-home",
   };
 }
 

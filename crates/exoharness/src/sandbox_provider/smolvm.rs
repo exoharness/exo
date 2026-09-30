@@ -21,7 +21,6 @@ use egress::SmolvmProxy;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -45,8 +44,7 @@ use crate::egress::{
 use crate::sandbox::{
     BoxSandboxTcpStream, ManagedSandboxBackend, ManagedSandboxHandle, SandboxCommand,
     SandboxCommandOutput, SandboxMountAccess, SandboxNetworkPolicy, SandboxRequest, SandboxSpec,
-    SnapshotFormat, SnapshotPayload, WARM_SANDBOX_KEY_LABEL, WARM_SANDBOX_OWNER_PID_LABEL,
-    owner_pid_is_alive, run_command, spawn_sandbox_process,
+    SnapshotFormat, SnapshotPayload, WARM_SANDBOX_KEY_LABEL, run_command, spawn_sandbox_process,
 };
 
 /// Default binary name; overridable with `SMOLVM_BIN` for a non-PATH install.
@@ -74,7 +72,7 @@ static CONSUMABLE_SNAPSHOT_FORMATS: [SnapshotFormat; 1] = [SnapshotFormat::Smolv
 struct Capabilities {
     /// An image-backed machine can be started.
     warm: bool,
-    /// `machine create --label`; without it, reaping cannot cross processes.
+    /// `machine create --label`, used for sandbox identity and TCP forwarding.
     labels: bool,
     interceptor: bool,
     host_patterns: bool,
@@ -128,9 +126,8 @@ pub struct SmolvmSandboxBackend {
     image_cache: Option<PathBuf>,
     /// Probed once: re-asking per `acquire` would spawn a process per sandbox.
     capabilities: OnceCell<Capabilities>,
-    /// Last use of each warm machine this process created, for TTL reaping.
+    /// Last use of each warm machine acquired by this process, for TTL reaping.
     warm_seen: Mutex<HashMap<String, Instant>>,
-    abandoned_reap_running: Arc<AtomicBool>,
     egress: EgressRuntime<SmolvmWarmHandle, SmolvmProxy>,
 }
 
@@ -167,7 +164,6 @@ impl SmolvmSandboxBackend {
             image_cache: config.image_cache,
             capabilities: OnceCell::new(),
             warm_seen: Mutex::new(HashMap::new()),
-            abandoned_reap_running: Arc::new(AtomicBool::new(false)),
             egress: EgressRuntime::new(None, Arc::new(PublicUpstreamResolver)),
         }
     }
@@ -291,7 +287,7 @@ impl SmolvmSandboxBackend {
         self.capabilities().await.is_ok_and(|caps| caps.warm)
     }
 
-    /// Whether the installed smolvm can label machines, which cross-process reaping needs.
+    /// Whether the installed smolvm can label machines.
     pub async fn labels_supported(&self) -> bool {
         self.capabilities().await.is_ok_and(|caps| caps.labels)
     }
@@ -417,8 +413,14 @@ impl SmolvmSandboxBackend {
                 .arg(format!("{EXACT_HOST_POLICY_LABEL}={policy}"));
         }
         let (host_ports, reservations) = self.configure_tcp_forwards(&mut create, spec).await?;
-        // Keepalive so the machine stays up between execs, as the Docker backend does.
-        create.arg("--").arg("sleep").arg("infinity");
+        // The workload is PID 1. A shell reaps orphaned service processes;
+        // sleep alone leaves zombies that can prevent build servers restarting.
+        create.args([
+            "--",
+            "/bin/sh",
+            "-c",
+            "trap 'exit 0' INT TERM; while :; do sleep 86400 & wait \"$!\"; done",
+        ]);
         let output = create
             .output()
             .await
@@ -536,9 +538,7 @@ impl SmolvmSandboxBackend {
         Ok((host_ports, reservations))
     }
 
-    /// Drop warm machines this process created that are idle past `idle_ttl`.
-    /// Idle age lives in memory, so [`Self::reap_abandoned_machines`] covers
-    /// machines stranded by an earlier process.
+    /// Stop idle machines while retaining their disks for the next acquisition.
     async fn reap_idle_machines(&self, request: &SandboxRequest) {
         let Some(ttl) = request.lifecycle.idle_ttl else {
             return;
@@ -566,10 +566,12 @@ impl SmolvmSandboxBackend {
             let name = machine_name(&id);
             match self
                 .egress
-                .terminate(&id, self.delete_machine_if_present(&name))
+                .terminate(&id, async {
+                    stop_machine(self.binary().await?, &name).await
+                })
                 .await
             {
-                Ok(()) => tracing::info!(machine = %name, "reaped idle smolvm machine"),
+                Ok(()) => tracing::info!(machine = %name, "stopped idle smolvm machine"),
                 Err(error) => {
                     tracing::warn!(machine = %name, %error, "failed to reap idle smolvm machine")
                 }
@@ -577,39 +579,16 @@ impl SmolvmSandboxBackend {
         }
     }
 
-    /// Record which sandbox a machine serves and which process owns it, under the
-    /// same keys the Docker backend uses. A no-op without `--label`.
+    /// Record which sandbox a machine serves. The creator's PID cannot identify
+    /// the owner after another process resumes a machine, so cleanup belongs to
+    /// the session lifecycle and thread deletion. A no-op without `--label`.
     async fn stamp_labels(&self, command: &mut Command, key: &str) {
         if !self.labels_supported().await {
             return;
         }
         command
             .arg("--label")
-            .arg(format!("{WARM_SANDBOX_KEY_LABEL}={key}"))
-            .arg("--label")
-            .arg(format!(
-                "{WARM_SANDBOX_OWNER_PID_LABEL}={}",
-                std::process::id()
-            ));
-    }
-
-    /// Reclaim labelled machines whose owning process is gone — a crash or a
-    /// restart leaves nobody to expire them. A live owner is left alone: two
-    /// harnesses may share a host, and reaping a peer's sandbox mid-turn is worse
-    /// than leaking one.
-    fn schedule_abandoned_reap(&self, binary: PathBuf, current: String) {
-        if self
-            .abandoned_reap_running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return;
-        }
-        let running = self.abandoned_reap_running.clone();
-        tokio::spawn(async move {
-            reap_abandoned_machines(&binary, &current).await;
-            running.store(false, Ordering::Release);
-        });
+            .arg(format!("{WARM_SANDBOX_KEY_LABEL}={key}"));
     }
 
     /// Delete if present, tolerating "not found". Deliberately not a `machine ls`
@@ -620,70 +599,11 @@ impl SmolvmSandboxBackend {
     }
 }
 
-async fn reap_abandoned_machines(binary: &Path, current: &str) {
-    let machines = match labelled_machines(binary).await {
-        Ok(machines) => machines,
-        Err(error) => {
-            tracing::debug!(%error, "could not list smolvm machines for reaping");
-            return;
-        }
-    };
-    for (name, owner) in machines {
-        if name == current || owner_pid_is_alive(&owner) {
-            continue;
-        }
-        match delete_machine_if_present(binary, &name).await {
-            Ok(()) => tracing::info!(machine = %name, owner, "reaped abandoned smolvm machine"),
-            Err(error) => {
-                tracing::warn!(machine = %name, owner, %error, "failed to reap abandoned machine")
-            }
-        }
-    }
-}
-
-/// `(name, owner pid)` for machines carrying this backend's labels. Reads
-/// `--json`: the table view truncates names and omits labels entirely.
-async fn labelled_machines(binary: &Path) -> Result<Vec<(String, String)>> {
-    #[derive(Deserialize)]
-    struct Machine {
-        name: Option<String>,
-        labels: Option<HashMap<String, String>>,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum MachineList {
-        Direct(Vec<Machine>),
-        Wrapped { machines: Vec<Machine> },
-    }
-
-    let output = Command::new(binary)
-        .args(["machine", "ls", "--json"])
-        .output()
-        .await
-        .context("spawn smolvm machine ls --json")?;
-    if !output.status.success() {
-        bail!(
-            "smolvm machine ls failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    let parsed: MachineList =
-        serde_json::from_slice(&output.stdout).context("parse smolvm machine ls --json")?;
-    let items = match parsed {
-        MachineList::Direct(machines) | MachineList::Wrapped { machines } => machines,
-    };
-    Ok(items
-        .into_iter()
-        .filter_map(|item| {
-            let labels = item.labels?;
-            // The key label is what marks a machine as ours.
-            labels.get(WARM_SANDBOX_KEY_LABEL)?;
-            let name = item.name?;
-            let owner = labels.get(WARM_SANDBOX_OWNER_PID_LABEL)?.to_string();
-            Some((name, owner))
-        })
-        .collect())
+async fn stop_machine(binary: &Path, name: &str) -> Result<()> {
+    let mut stop = Command::new(binary);
+    stop.args(["machine", "stop", "--name", name]);
+    run_checked(stop, "smolvm machine stop").await?;
+    Ok(())
 }
 
 async fn delete_machine_if_present(binary: &Path, name: &str) -> Result<()> {
@@ -789,10 +709,18 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             )
             .await?;
         self.reap_idle_machines(&request).await;
-        if self.labels_supported().await {
-            self.schedule_abandoned_reap(binary.clone(), machine.clone());
-        }
         Ok(crate::with_process_management(handle))
+    }
+
+    async fn acquire_tcp(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
+        let machine = machine_name(&request.sandbox_id);
+        let host_ports = self
+            .existing_tcp_forwards(&machine, &request.spec.tcp_ports, None)
+            .await?;
+        Ok(Arc::new(SmolvmTcpHandle {
+            id: format!("smolvm:{machine}"),
+            host_ports,
+        }))
     }
 
     async fn attach(
@@ -847,7 +775,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             .arg(&machine)
             .arg("--from")
             .arg(&manifest.pack_path);
-        // A restored machine is ours too, or reaping would never see it.
+        // Preserve sandbox identity when importing a snapshot.
         self.stamp_labels(&mut create, request.sandbox_id.as_str())
             .await;
         configure_spec_args(&mut create, &request.spec)?;
@@ -952,6 +880,61 @@ struct SmolvmWarmHandle {
     host_ports: BTreeMap<u16, u16>,
 }
 
+struct SmolvmTcpHandle {
+    id: String,
+    host_ports: BTreeMap<u16, u16>,
+}
+
+#[async_trait]
+impl ManagedSandboxHandle for SmolvmTcpHandle {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn supports_tcp(&self) -> bool {
+        !self.host_ports.is_empty()
+    }
+
+    async fn connect_tcp(&self, port: u16) -> Result<Option<BoxSandboxTcpStream>> {
+        connect_published_tcp(&self.host_ports, port).await
+    }
+
+    async fn exec(&self, _command: &SandboxCommand) -> Result<SandboxCommandOutput> {
+        bail!("TCP access does not permit command execution")
+    }
+
+    async fn start_process(&self, _command: &SandboxCommand) -> Result<crate::SandboxProcessParts> {
+        bail!("TCP access does not permit starting processes")
+    }
+
+    async fn stop(&self) -> Result<()> {
+        bail!("TCP access does not permit stopping the sandbox")
+    }
+
+    async fn detach(&self) -> Result<SandboxAttachment> {
+        bail!("TCP access does not permit detaching the sandbox")
+    }
+
+    async fn snapshot(&self) -> Result<SnapshotPayload> {
+        bail!("TCP access does not permit snapshotting the sandbox")
+    }
+}
+
+async fn connect_published_tcp(
+    host_ports: &BTreeMap<u16, u16>,
+    port: u16,
+) -> Result<Option<BoxSandboxTcpStream>> {
+    if host_ports.is_empty() {
+        return Ok(None);
+    }
+    let host_port = host_ports
+        .get(&port)
+        .context(format!("sandbox TCP port {port} is not published"))?;
+    Ok(Some(Box::pin(
+        TcpStream::connect((Ipv4Addr::LOCALHOST, *host_port)).await?,
+    )))
+}
+
 impl SmolvmWarmHandle {
     fn build(&self, command: &SandboxCommand, cwd: &str, interactive: bool) -> Command {
         let mut process = Command::new(&self.binary);
@@ -990,16 +973,7 @@ impl ManagedSandboxHandle for SmolvmWarmHandle {
     }
 
     async fn connect_tcp(&self, port: u16) -> Result<Option<BoxSandboxTcpStream>> {
-        if self.host_ports.is_empty() {
-            return Ok(None);
-        }
-        let host_port = self
-            .host_ports
-            .get(&port)
-            .context(format!("sandbox TCP port {port} is not published"))?;
-        Ok(Some(Box::pin(
-            TcpStream::connect((Ipv4Addr::LOCALHOST, *host_port)).await?,
-        )))
+        connect_published_tcp(&self.host_ports, port).await
     }
 
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {
@@ -1183,6 +1157,12 @@ fn configure_spec_args(process: &mut Command, spec: &SandboxSpec) -> Result<()> 
     let resources = spec.resources.unwrap_or_default();
     process.arg("--cpus").arg(resources.vcpu_count.to_string());
     process.arg("--mem").arg(resources.memory_mib.to_string());
+    if let Some(storage) = resources.storage_gib {
+        process.arg("--storage").arg(storage.to_string());
+    }
+    if let Some(overlay) = resources.overlay_gib {
+        process.arg("--overlay").arg(overlay.to_string());
+    }
     if spec.policy.networking_enabled() {
         process.args(["--net", "--net-backend", "virtio-net"]);
     } else if !spec.tcp_ports.is_empty() {
@@ -1439,6 +1419,38 @@ mod tests {
 
     #[tokio::test]
     #[cfg(unix)]
+    async fn tcp_access_inspects_existing_machine_without_acquiring_egress() -> Result<()> {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let dir = tempfile::tempdir()?;
+        let binary = dir.path().join("smolvm");
+        write_test_binary(
+            &binary,
+            &format!(
+                "case \"$1 $2\" in\n\
+                 '--version ') printf 'smolvm 1.19.0\\n';;\n\
+                 'machine status') printf '%s\\n' '{{\"labels\":{{\"exo.sandbox.tcp-forward.20000\":\"{}\"}}}}';;\n\
+                 *) exit 23;;\n\
+                 esac",
+                listener.local_addr()?.port()
+            ),
+        );
+        let backend = SmolvmSandboxBackend::from_config(SmolvmBackendConfig {
+            binary: Some(binary),
+            ..Default::default()
+        });
+        let mut request = test_request(Some(Duration::from_secs(60)));
+        request.spec.tcp_ports = vec![20_000];
+        let handle = backend.acquire_tcp(request).await?;
+        assert!(handle.supports_tcp());
+        assert!(handle.connect_tcp(20_000).await?.is_some());
+        listener.accept().await?;
+        assert!(handle.connect_tcp(20_001).await.is_err());
+        assert!(handle.stop().await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
     async fn warm_machine_publishes_requested_guest_ports() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let binary = dir.path().join("smolvm");
@@ -1462,10 +1474,16 @@ mod tests {
         });
         let mut request = test_request(Some(Duration::from_secs(60)));
         request.spec.tcp_ports = vec![20_000, 20_001];
+        request.spec.resources = Some(serde_json::from_str(
+            r#"{"vcpu_count":4,"memory_mib":16384,"storage_gib":64,"overlay_gib":64}"#,
+        )?);
         let host_ports = backend
             .ensure_machine_started("test", &request.spec, "test", "alpine", None)
             .await?;
         let args = std::fs::read_to_string(args_file)?;
+        assert!(args.contains("--storage\n64\n"));
+        assert!(args.contains("--overlay\n64\n"));
+        assert!(args.contains("--\n/bin/sh\n-c\ntrap 'exit 0' INT TERM;"));
         for (guest, host) in &host_ports {
             assert!(
                 args.contains(&format!("--port\n{host}:{guest}\n")),
@@ -1780,34 +1798,37 @@ esac"#,
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn abandoned_machine_cleanup_does_not_block_acquisition() -> Result<()> {
+    async fn idle_cleanup_stops_only_expired_machines_without_deleting_disks() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let binary = dir.path().join("smolvm");
-        let deleted = dir.path().join("deleted");
-        let release = dir.path().join("release");
+        let stopped = dir.path().join("stopped");
         write_test_binary(
             &binary,
             &format!(
-                "case \"$1 $2\" in\n\
-                 'machine ls') while [ ! -f '{}' ]; do sleep 0.01; done; printf '%s\\n' '[{{\"name\":\"orphan\",\"labels\":{{\"exo.sandbox.key\":\"orphan\",\"exo.sandbox.owner-pid\":\"4194305\"}}}}]' ;;\n\
-                 'machine delete') printf '%s' \"$4\" > '{}' ;;\n\
+                "case \"$*\" in\n\
+                 --version) printf 'smolvm 1.20.0\\n' ;;\n\
+                 'machine stop --name '*) printf '%s\\n' \"$4\" >> '{}' ;;\n\
                  *) exit 23 ;;\n\
                  esac",
-                release.display(),
-                deleted.display()
+                stopped.display()
             ),
         );
-        let backend = SmolvmSandboxBackend::new();
-        backend.schedule_abandoned_reap(binary, "current".into());
-        assert!(!deleted.exists());
-        std::fs::write(release, "")?;
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while !deleted.exists() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await?;
-        assert_eq!(std::fs::read_to_string(deleted)?, "orphan");
+        let backend = SmolvmSandboxBackend::from_config(SmolvmBackendConfig {
+            binary: Some(binary),
+            ..Default::default()
+        });
+        backend.warm_seen.lock().unwrap().extend([
+            ("expired".into(), Instant::now() - Duration::from_secs(120)),
+            ("active".into(), Instant::now()),
+        ]);
+        backend
+            .reap_idle_machines(&test_request(Some(Duration::from_secs(60))))
+            .await;
+        assert_eq!(
+            std::fs::read_to_string(stopped)?,
+            format!("{}\n", machine_name("expired"))
+        );
+        assert!(backend.warm_seen.lock().unwrap().contains_key("active"));
         Ok(())
     }
 

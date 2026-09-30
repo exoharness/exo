@@ -113,6 +113,13 @@ The CLI prints the agent and thread ids. Both ids and slugs work when resuming.
 A missing `--thread` starts a new thread; an unknown thread is an error.
 Add `--prompt "..."` to run a single turn and exit.
 
+Direct local CLI sessions stop their managed thread sandboxes when the session
+exits. With SmolVM, resuming the thread restarts the same VM with its disks and
+chat retained. Processes inside the VM restart; a development stack needs its
+startup command on resume. Deleting the thread removes its managed VM and disks.
+HTTP clients leave sandbox lifetime with the server, so use `exo serve` when
+services should stay running between client sessions.
+
 Each `--agent-file` invocation creates or updates a saved agent from the Markdown
 file, then starts a saved thread. The agent slug combines the filename with a hash
 of its canonical absolute path; rerunning the same file reuses the agent and
@@ -303,12 +310,16 @@ The Codex example at `exoharness/examples/environments/codex-smolvm.yaml` uses
 the published `ghcr.io/exoharness/codex-devbox:latest`. To use a locally built
 image instead, change its `config.image` to `exo-codex-devbox:latest`.
 Definitions forward the existing sandbox settings: `provider`, `image`,
-`resources`, `default_workdir`, `file_system_mounts`, `durable_file_systems`, `policy`,
+`resources`, `default_workdir`, `file_system_mounts`, `durable_file_systems`, `tcp_ports`, `policy`,
 `enable_networking`, and `idle_seconds`. `policy.networking` takes precedence over
 `enable_networking`. Omitted `provider` selects SmolVM, and omitted networking
 allows unrestricted access. Unsupported network policies are rejected by the backend.
 Omitting `resources` preserves the container backend's defaults; Firecracker uses
 its default VM size. Local-process execution has no container resource or filesystem isolation.
+
+SmolVM also accepts `resources.storage_gib` and `resources.overlay_gib` to size
+its storage and persistent root filesystem disks. Both must be positive integers;
+other backends reject these settings. These are virtual disk sizes, not RAM.
 
 Use `--environment-file path.yaml` without saving a definition. An HTTP provider
 receives the definition's contents and provisions it on its host. Mount paths in
@@ -329,6 +340,37 @@ change the image reference in the environment; use a versioned tag or digest.
 `exo environment delete NAME` removes only the definition. Explicit host mounts can share data between sandboxes; ordinary sandbox files are private
 to their thread. Persistence after a backend terminates a sandbox still follows
 that backend's existing lifecycle and durable-file-system support.
+
+## Development service ports
+
+Declare the guest ports a thread needs in its environment:
+
+```yaml
+name: web-dev
+config:
+  provider: smolvm
+  image: my-devbox:latest
+  tcp_ports: [3000, 8000]
+```
+
+After starting the services in the thread, forward a declared port to the local
+machine:
+
+```sh
+exo thread sandbox forward my-agent THREAD --port 3000 --bind 127.0.0.1:13000
+```
+
+Open `http://127.0.0.1:13000`. The forward carries TCP, including HTTP and
+WebSockets, until Ctrl-C. Omitting `--bind` allocates a loopback port and prints
+its address. Each thread can use the same guest ports with different local
+listeners. Browser requests to additional services need their own forwards and
+matching browser URLs, or an application proxy serving those services together.
+
+This command currently requires a local Exo provider and a sandbox backend with
+TCP support. SmolVM port access inspects the running VM without restarting it or
+taking over its credential proxy. Changing an environment's `tcp_ports` or
+`resources` replaces its sandbox when the updated environment is applied to the
+thread.
 
 ## Pi
 

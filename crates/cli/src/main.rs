@@ -8,11 +8,13 @@ mod mount_tests;
 #[cfg(test)]
 mod naming_tests;
 mod oauth;
+mod port_forward;
 mod providers;
 mod render;
 #[cfg(test)]
 mod secret_tests;
 mod serve;
+mod session;
 mod tui;
 mod tui_app;
 mod turn_display;
@@ -747,6 +749,16 @@ enum ConversationCommands {
 
 #[derive(Debug, Subcommand)]
 enum ConversationSandboxCommands {
+    /// Forward a local TCP listener to a published port in a running thread sandbox.
+    Forward {
+        agent: String,
+        #[arg(value_name = "THREAD")]
+        conversation: String,
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+        port: u16,
+        #[arg(long, default_value = "127.0.0.1:0")]
+        bind: std::net::SocketAddr,
+    },
     Attach {
         agent: String,
         #[arg(value_name = "THREAD")]
@@ -1066,6 +1078,7 @@ async fn run_selected(
     let harness = providers::runtime(&cli, http_client, definition.as_ref(), &env).await?;
     let env_vars = env.into_vars();
     let root = cli.runtime().root.clone();
+    let mut session_thread = None;
     let result: Result<()> = async {
     match cli.command {
         Commands::Environment { command, .. } => environment::run(harness.exoharness_handle().as_ref(), command).await?,
@@ -1084,6 +1097,9 @@ async fn run_selected(
                 execution.egress_policy.is_some(),
             )
             .await?;
+            if local {
+                session_thread = Some(Arc::clone(&conversation));
+            }
             if let Some(provider) = &selected_provider {
                 provider_store.pin_thread(
                     conversation.record().slug.clone(),
@@ -1574,6 +1590,16 @@ async fn run_selected(
                 }
             },
             ConversationCommands::Sandbox { command, .. } => match command {
+                ConversationSandboxCommands::Forward {
+                    agent,
+                    conversation,
+                    port,
+                    bind,
+                } => {
+                    let conversation =
+                        must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
+                    port_forward::run(conversation, port, bind).await?;
+                }
                 ConversationSandboxCommands::Attach {
                     agent,
                     conversation,
@@ -1633,6 +1659,9 @@ async fn run_selected(
                         .get_conversation(agent_handle.as_ref(), &conversation)
                         .await?
                         .ok_or_else(|| anyhow!("conversation not found: {}", conversation))?;
+                    if local {
+                        session_thread = Some(Arc::clone(&conversation));
+                    }
                     let output = run_sandbox_shell_command(
                         agent_handle.as_ref(),
                         conversation.as_ref(),
@@ -1818,6 +1847,9 @@ async fn run_selected(
             } => {
                 let conversation =
                     must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
+                if local {
+                    session_thread = Some(Arc::clone(&conversation));
+                }
                 let previous_messages =
                     executor::materialize_conversation_messages(conversation.as_ref()).await?;
                 let agent = must_get_agent(harness.as_ref(), &agent).await?;
@@ -1849,8 +1881,10 @@ async fn run_selected(
     Ok(())
     }.await;
     let shutdown = harness.shutdown().await;
+    let stopped = session::stop_session_sandboxes(session_thread.as_deref()).await;
     result?;
-    shutdown
+    shutdown?;
+    stopped
 }
 
 fn command_refs_mut(command: &mut Commands) -> (Option<&mut String>, Option<&mut String>) {
@@ -1916,7 +1950,12 @@ fn command_refs_mut(command: &mut Commands) -> (Option<&mut String>, Option<&mut
                 } => (Some(agent), Some(conversation)),
             },
             ConversationCommands::Sandbox { command, .. } => match command {
-                ConversationSandboxCommands::Attach {
+                ConversationSandboxCommands::Forward {
+                    agent,
+                    conversation,
+                    ..
+                }
+                | ConversationSandboxCommands::Attach {
                     agent,
                     conversation,
                     ..

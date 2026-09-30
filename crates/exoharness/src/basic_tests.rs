@@ -2280,6 +2280,33 @@ fn provider_state_test_create_request() -> CreateSandboxRequest {
     }
 }
 
+#[tokio::test]
+async fn deleting_a_thread_terminates_its_stopped_sandbox() -> crate::Result<()> {
+    let temp = TempDir::new()?;
+    let backend = Arc::new(TestProviderStateBackend::new(
+        serde_json::json!({"machine": "test"}),
+    ));
+    let harness =
+        BasicExoHarness::new_with_sandbox_backend(local_test_config(temp.path()), backend.clone())
+            .await?;
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "stopped".into(),
+            name: "Stopped".into(),
+            vaults: vec![],
+        })
+        .await?;
+    let thread = agent.new_thread(Default::default()).await?;
+    let sandbox = thread
+        .create_sandbox(provider_state_test_create_request())
+        .await?;
+    thread.stop_sandbox(sandbox).await?;
+    let before_delete = *backend.cleanup_count.lock().await;
+    assert!(agent.delete_conversation(&thread.record().id).await?);
+    assert_eq!(*backend.cleanup_count.lock().await, before_delete + 1);
+    Ok(())
+}
+
 struct TestProviderStateBackend {
     state: Value,
     requests: Arc<AsyncMutex<Vec<Option<Value>>>>,
@@ -2570,7 +2597,7 @@ async fn restored_sandbox_image_persists_for_cross_process_reattach() {
     agent
         .start_sandbox(StartSandboxRequest {
             id: sandbox_id.clone(),
-            snapshot_id,
+            snapshot_id: Some(snapshot_id),
             idle_seconds: None,
             provider: None,
         })

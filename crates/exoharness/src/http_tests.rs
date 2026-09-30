@@ -384,7 +384,7 @@ async fn http_exoharness_supports_turn_scoped_sandbox_snapshot_and_start() {
         .expect("turn snapshot");
     turn.start_sandbox(StartSandboxRequest {
         id: sandbox_id.clone(),
-        snapshot_id,
+        snapshot_id: Some(snapshot_id),
         idle_seconds: Some(60),
         provider: None,
     })

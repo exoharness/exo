@@ -20,7 +20,7 @@ it, and the restore path that actually consumes it.
 
 - `ConversationHandle::snapshot_sandbox(id)` actually captures the live
   container's filesystem and persists it.
-- `ConversationHandle::start_sandbox(StartSandboxRequest { id, snapshot_id, .. })`
+- `ConversationHandle::start_sandbox(StartSandboxRequest { id, snapshot_id: Some(snapshot_id), .. })`
   starts a fresh container whose filesystem is sourced from the snapshot,
   preserving the original sandbox's mounts, network policy, and lifecycle.
 - A chat-REPL slash-command surface — `/snapshot`, `/snapshots`, `/rewind <id>`,
