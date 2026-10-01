@@ -34,29 +34,19 @@ exo agent run --agent support-analyst \
   --prompt "Triage this ticket: CSV uploads return HTTP 500 after 30 seconds."
 ```
 
-To serve the agent over HTTP, run:
+To serve your agent over HTTP, run:
 
 ```bash
-exo serve --agent support-analyst --bind 127.0.0.1:8080
+exo serve --bind 127.0.0.1:8080
 ```
 
-In another terminal, use the HTTP API. Creating a thread starts a new
-conversation; posting to that thread starts a turn:
+In another terminal, send a turn to the agent by its slug:
 
 ```bash
-BASE=http://127.0.0.1:8080/exo
-AGENT_ID=$(curl -fsS "$BASE/agent" | jq -r '.agents[0].id')
-THREAD_ID=$(curl -fsS -X POST "$BASE/agent/$AGENT_ID/thread" \
-  -H 'Content-Type: application/json' -d '{}' | jq -r '.thread.id')
-curl -fsS -X POST "$BASE/agent/$AGENT_ID/thread/$THREAD_ID/turn" \
+curl -N http://127.0.0.1:8080/exo/support-analyst/turn \
   -H 'Content-Type: application/json' \
-  -d '{"input":{"role":"user","content":"Triage this ticket: CSV uploads return HTTP 500 after 30 seconds."}}'
-curl -N "$BASE/agent/$AGENT_ID/thread/$THREAD_ID/event/watch"
+  -d '{"input":"Triage this ticket: CSV uploads return HTTP 500 after 30 seconds."}'
 ```
-
-The turn request returns a receipt; the event stream shows the agent's response.
-Post to the same `/turn` URL for another turn, or create another thread to start
-a separate conversation. This example uses `jq` to read the IDs from the API.
 
 There’s a lot more you can configure, including auth, sandboxes, policies, and more. We’ll get into all of that in the sections that follow.
 
