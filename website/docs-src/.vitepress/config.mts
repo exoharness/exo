@@ -8,11 +8,7 @@ import { defineConfig } from "vitepress";
 const exov2Dir = fileURLToPath(new URL("../exov2/", import.meta.url));
 const exov2Pages = readdirSync(exov2Dir)
   .filter((name) => name.endsWith(".md") && name !== "index.md")
-  .sort((a, b) => {
-    if (a === "README.md") return -1;
-    if (b === "README.md") return 1;
-    return a.localeCompare(b);
-  })
+  .sort((a, b) => a.localeCompare(b))
   .map((name) => {
     const { data } = matter(readFileSync(join(exov2Dir, name), "utf8"));
     if (typeof data.title !== "string" || !data.title.trim()) {

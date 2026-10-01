@@ -1,5 +1,5 @@
 ---
-title: README
+title: Exo
 description: An open-source runtime for self-improving agents
 ---
 
