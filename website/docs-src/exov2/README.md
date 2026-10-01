@@ -11,6 +11,6 @@ Exo supports popular harnesses like Codex, Claude Code, and Pi, as well as your 
 
 Exo's architecture enables use cases like:
 
-- Hosting agents powered by the harness of your choice, switching between them when you wish
-- Implementing security best practices like credential substitution and granular network policies, so your agent can run with minimal supervision
-- Automatic self-improvement by giving an agent access to its own history and code, allowing it to inspect failures, revise its prompts, tools, or harness, and test the results
+- Hosting agents powered by the harness of your choice, switching between them when you wish.
+- Credential substitution and granular network policies, so your agent can run with minimal supervision and still access protected resources.
+- Automatic self-improvement by letting an agent safely access its own history and code, allowing it to inspect failures, revise its prompts/tools/harness, and test results.
