@@ -1,3 +1,6 @@
+// SmolVM's CLI owns the guest PTY; this host PTY carries its I/O and resize signals.
+// Firecracker instead owns a Linux guest PTY and exposes it over the process bridge,
+// so its guest-side PTY implementation cannot supply these host AsyncRead/Write handles.
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};

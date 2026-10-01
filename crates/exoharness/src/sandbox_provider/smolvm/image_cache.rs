@@ -94,6 +94,8 @@ pub(super) fn resolve_image(
                 .context("registry image was not prepared")?
         }
     };
+    // smolmachines 1.20 exposes image identity, but not OCI startup configuration.
+    // Read the prepared image's entrypoint, environment and healthcheck for templates.
     #[derive(Deserialize)]
     struct ImageConfiguration {
         config: crate::SandboxImageConfiguration,

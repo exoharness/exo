@@ -4994,6 +4994,8 @@ fn launch_snapshot_clone(
         },
         FIRECRACKER_API_TIMEOUT,
     )?;
+    // prepare_and_launch runs this sequence in spawn_blocking. Keep the VM paused
+    // until every resource drive points at this sandbox's disk, then resume it.
     for index in 0..request.spec.mounts.len() {
         firecracker_api_request(
             &api,

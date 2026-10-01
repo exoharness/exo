@@ -53,15 +53,16 @@ impl ResourceStore {
             validate_key(&snapshot)?;
             let _lock = self.lock(&snapshot)?;
             if !self.root.join("snapshots").join(&snapshot).exists() {
-                self.publish(&snapshot, |target| {
+                self.publish(&snapshot, |_, volume| {
+                    let target = self.mount_volume(volume)?;
                     checked(
                         Command::new("tar")
                             .args(["--no-same-owner", "-xpf"])
                             .arg(&source)
                             .arg("-C")
-                            .arg(target),
+                            .arg(&target),
                     )?;
-                    Ok(())
+                    self.prepare_ownership(&target)
                 })?;
             }
         }

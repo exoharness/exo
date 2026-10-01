@@ -90,14 +90,15 @@ impl ResourceStore {
                 let destination = self.root.join("snapshots").join(&key);
                 if !destination.exists() {
                     tracing::info!(resource = definition.name, "preparing filesystem resource");
-                    self.publish(&key, |workspace| {
+                    self.publish(&key, |_, volume| {
+                        let workspace = self.mount_volume(volume)?;
                         if matches!(definition.source, ResourceSource::GitRepository { .. }) {
-                            local_git(source, workspace, &self.excluded)?;
+                            local_git(source, &workspace, &self.excluded)?;
                         } else {
-                            copy_directory(source, workspace, &self.excluded, false)?;
+                            copy_directory(source, &workspace, &self.excluded, false)?;
                         }
                         ensure!(self.fingerprint(source)? == before, "resource changed during preparation; retry when writes have finished");
-                        Ok(())
+                        self.prepare_ownership(&workspace)
                     })?;
                 }
                 Some(key)
@@ -332,21 +333,45 @@ impl ResourceStore {
         Ok(format!("{:x}", hash.finalize()))
     }
 
-    fn publish(&self, key: &str, populate: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
-        let snapshots = self.root.join("snapshots");
-        let staging = tempfile::tempdir_in(&snapshots)?;
-        self.create_volume(staging.path())?;
-        let workspace = self.mount_volume(staging.path())?;
-        let populated = populate(&workspace).and_then(|()| self.prepare_ownership(&workspace));
-        let detached = self.unmount_volume(staging.path());
-        if let Err(error) = detached {
-            let path = staging.keep();
-            return Err(error).with_context(|| {
-                format!("could not unmount preparation volume at {}", path.display())
-            });
+    fn publish(
+        &self,
+        key: &str,
+        populate: impl FnOnce(ResourceScope, &Path) -> Result<()>,
+    ) -> Result<()> {
+        let destination = self.root.join("snapshots").join(key);
+        let agent_id = crate::Uuid7::now();
+        let thread_id = crate::Uuid7::now();
+        let threads = self.root.join("threads");
+        fs::create_dir_all(&threads)?;
+        // Guest preparation must use the same scoped paths as normal resource mounts.
+        let temporary = tempfile::Builder::new()
+            .prefix(&agent_id.to_string())
+            .rand_bytes(0)
+            .tempdir_in(&threads)?;
+        let staging = temporary.path().join(thread_id.to_string()).join("volume");
+        fs::create_dir_all(&staging)?;
+        if destination.exists() {
+            self.clone_volume(&destination, &staging)?;
+        } else {
+            self.create_volume(&staging)?;
+        }
+        let populated = populate(
+            ResourceScope::Thread {
+                agent_id,
+                thread_id,
+            },
+            &staging,
+        );
+        if let Err(error) = self.unmount_volume(&staging) {
+            drop(temporary.keep());
+            return Err(error)
+                .with_context(|| format!("unmounting prepared resource at {}", staging.display()));
         }
         populated?;
-        fs::rename(staging.path(), snapshots.join(key))?;
+        if destination.exists() {
+            fs::remove_dir_all(&destination)?;
+        }
+        fs::rename(&staging, &destination)?;
         Ok(())
     }
 
