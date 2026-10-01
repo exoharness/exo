@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use exoharness::Uuid7;
 use serde::Serialize;
 use tokio::fs;
+use tokio::sync::Mutex;
 
 use crate::scheduler_types::{
     NewScheduledTask, ScheduledFireRecord, ScheduledTaskRecord, ScheduledTaskRunRecord,
@@ -13,11 +15,15 @@ use crate::scheduler_types::{
 #[derive(Debug, Clone)]
 pub struct SchedulerStore {
     root: PathBuf,
+    task_lock: Arc<Mutex<()>>,
 }
 
 impl SchedulerStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            task_lock: Arc::new(Mutex::new(())),
+        }
     }
 
     pub fn root(&self) -> &Path {
@@ -81,24 +87,23 @@ impl SchedulerStore {
             .collect())
     }
 
-    /// Reads, leases, and writes back without a conditional put, so two
-    /// runners racing the same due task can both win. The PID lockfile in the
-    /// runner is the real guard today. The fix is a claim keyed by
-    /// `(task, slot)` written conditionally, which is deferred pending the
-    /// conditional puts in upstream PR #113 rather than raced against it.
+    /// Reads and leases due tasks while holding the same store lock used by
+    /// deletion and conditional completion updates. This prevents a delete
+    /// from being followed by a stale claim write in this scheduler process.
     pub async fn claim_due_tasks(
         &self,
         now_ms: u64,
         limit: usize,
         lease_ms: u64,
     ) -> Result<Vec<ScheduledTaskRecord>> {
+        let _guard = self.task_lock.lock().await;
         let mut due = self.due_tasks(now_ms).await?;
         due.sort_by_key(|task| task.next_run_at_ms);
         due.truncate(limit);
         let mut claimed = Vec::new();
         for mut task in due {
             task.claim(now_ms, lease_ms);
-            self.put_task(&task).await?;
+            self.put_task_locked(&task).await?;
             claimed.push(task);
         }
         Ok(claimed)
@@ -115,6 +120,11 @@ impl SchedulerStore {
     }
 
     pub async fn put_task(&self, task: &ScheduledTaskRecord) -> Result<()> {
+        let _guard = self.task_lock.lock().await;
+        self.put_task_locked(task).await
+    }
+
+    async fn put_task_locked(&self, task: &ScheduledTaskRecord) -> Result<()> {
         fs::create_dir_all(self.tasks_dir()).await?;
         let path = self.task_path(&task.id);
         write_json_file(&path, task)
@@ -122,17 +132,60 @@ impl SchedulerStore {
             .with_context(|| format!("failed to write scheduled task {}", path.display()))
     }
 
+    /// Updates a leased task only while the same lease is still present.
+    ///
+    /// The conditional check and replacement share the store lock with
+    /// deletion, so a task removed while its command is running cannot be
+    /// recreated by the stale in-memory record when the command finishes.
+    pub async fn put_task_if_lease(
+        &self,
+        task: &ScheduledTaskRecord,
+        lease_id: &str,
+    ) -> Result<bool> {
+        let _guard = self.task_lock.lock().await;
+        let path = self.task_path(&task.id);
+        let current = match fs::read(&path).await {
+            Ok(bytes) => decode_task(&bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to read scheduled task {}", path.display()));
+            }
+        };
+        if current.lease.as_ref().map(|lease| lease.id.as_str()) != Some(lease_id) {
+            return Ok(false);
+        }
+        self.put_task_locked(task).await?;
+        Ok(true)
+    }
+
+    /// Replaces a task only while its record still exists. This is used by
+    /// unleased compatibility callers; the existence check and write are
+    /// serialized with deletion by the same store lock.
+    pub async fn put_task_if_present(&self, task: &ScheduledTaskRecord) -> Result<bool> {
+        let _guard = self.task_lock.lock().await;
+        match fs::metadata(self.task_path(&task.id)).await {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        }
+        self.put_task_locked(task).await?;
+        Ok(true)
+    }
+
     pub async fn disable_task(&self, task_id: &str) -> Result<Option<ScheduledTaskRecord>> {
+        let _guard = self.task_lock.lock().await;
         let Some(mut task) = self.get_task(task_id).await? else {
             return Ok(None);
         };
         task.enabled = false;
         task.updated_at_ms = now_ms();
-        self.put_task(&task).await?;
+        self.put_task_locked(&task).await?;
         Ok(Some(task))
     }
 
     pub async fn delete_task(&self, task_id: &str) -> Result<Option<ScheduledTaskRecord>> {
+        let _guard = self.task_lock.lock().await;
         let Some(task) = self.get_task(task_id).await? else {
             return Ok(None);
         };
@@ -530,6 +583,36 @@ mod tests {
         assert_eq!(claimed.len(), 1);
         assert!(store.claim_due_tasks(3, 10, 100).await.unwrap().is_empty());
         assert_eq!(store.claim_due_tasks(103, 10, 100).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn deleted_task_racing_stale_lease_update_is_not_resurrected() {
+        let tempdir = TempDir::new().unwrap();
+        let store = SchedulerStore::new(tempdir.path());
+        let mut task = store
+            .create_task(NewScheduledTask {
+                agent_id: "agent".to_string(),
+                conversation_id: "conversation".to_string(),
+                name: "check".to_string(),
+                schedule: "@every 1m".to_string(),
+                sandbox_mode: None,
+                setup_command: None,
+                command: vec!["true".to_string()],
+                report_prompt: "Report.".to_string(),
+                max_output_bytes: None,
+                missed: None,
+            })
+            .await
+            .unwrap();
+        task.claim(2, 100);
+        let lease_id = task.lease.as_ref().unwrap().id.clone();
+        store.put_task(&task).await.unwrap();
+
+        let stale = task.clone();
+        let update = async { store.put_task_if_lease(&stale, &lease_id).await.unwrap() };
+        let delete = async { store.delete_task(&task.id).await.unwrap() };
+        let (_updated, _deleted) = tokio::join!(update, delete);
+        assert!(store.get_task(&task.id).await.unwrap().is_none());
     }
 
     fn fire(task_id: &str, slot_ms: u64) -> ScheduledFireRecord {
