@@ -55,6 +55,7 @@ async fn in_memory_state_does_not_create_files_or_survive_reopening() -> crate::
         .begin_turn(BeginTurnRequest {
             session_id: None,
             input: vec![user_message("remember this")],
+            ..Default::default()
         })
         .await?;
     turn.write_artifact(WriteArtifactRequest {
@@ -970,6 +971,7 @@ async fn turn_events_continue_after_artifact_writes() {
         .begin_turn(BeginTurnRequest {
             session_id: None,
             input: vec![user_message("ping")],
+            ..Default::default()
         })
         .await
         .expect("turn");
@@ -1027,6 +1029,7 @@ async fn turn_artifact_write_allows_interleaved_conversation_writes() {
         .begin_turn(BeginTurnRequest {
             session_id: None,
             input: vec![user_message("ping")],
+            ..Default::default()
         })
         .await
         .expect("turn");
@@ -1462,6 +1465,7 @@ async fn conversation_create_sandbox_is_not_turn_scoped() {
         .begin_turn(BeginTurnRequest {
             session_id: None,
             input: vec![user_message("start turn")],
+            ..Default::default()
         })
         .await
         .expect("turn should begin");

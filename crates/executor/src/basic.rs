@@ -151,13 +151,18 @@ where
             )
             .await?;
 
-            let events = model_response_events(response, &self.pricing);
-            turn.add_events(events.clone()).await?;
-
+            let mut events = model_response_events(response, &self.pricing);
             let tool_requests = collect_tool_requests(&events);
             if tool_requests.is_empty() {
+                // Commit the final answer and completion marker together for recovery.
+                events.push(EventData::Custom {
+                    event_type: crate::harness_executor::RUNTIME_TURN_COMPLETED.to_owned(),
+                    payload: serde_json::Value::Null,
+                });
+                turn.add_events(events).await?;
                 return Ok(());
             }
+            turn.add_events(events).await?;
 
             let tool_results = self
                 .execute_tool_round(

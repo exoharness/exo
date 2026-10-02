@@ -75,6 +75,7 @@ pub async fn run(runtime: Arc<Runtime>, root: &Path, args: ServeArgs) -> Result<
     } else {
         None
     };
+    runtime.recover_unfinished_turns().await?;
     let mut service = RuntimeHttpService::new(runtime.clone(), None)?;
     if let Some(auth) = &auth {
         service = service.with_auth(auth.clone(), args.multiplayer);

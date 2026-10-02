@@ -374,6 +374,7 @@ async fn http_exoharness_supports_turn_scoped_sandbox_snapshot_and_start() {
         .begin_turn(BeginTurnRequest {
             session_id: None,
             input: Vec::new(),
+            ..Default::default()
         })
         .await
         .expect("turn");

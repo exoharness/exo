@@ -25,6 +25,10 @@ pub trait Provider: AgentBackend {
 
     fn harness(&self) -> &dyn Harness<ProviderTurn>;
 
+    async fn recover_unfinished_turns(&self, _runtime: Runtime) -> Result<()> {
+        Ok(())
+    }
+
     async fn is_turn_active(
         &self,
         thread: &dyn ThreadHandle,
@@ -112,6 +116,10 @@ impl LocalProvider {
 
 #[async_trait]
 impl Provider for LocalProvider {
+    async fn recover_unfinished_turns(&self, runtime: Runtime) -> Result<()> {
+        runtime.recover_local_turns(self).await
+    }
+
     fn with_caller(&self, caller: exoharness::access::Caller) -> Result<Arc<dyn Provider>> {
         let state = self.state.with_caller(caller)?;
         let executor = self.executor.with_state(state.clone())?;
@@ -225,6 +233,7 @@ impl Harness<ProviderTurn> for LocalProvider {
                         work.request,
                         work.streaming,
                         work.config_override,
+                        None,
                     )
                     .await?;
                 if work.receipt.send(result).is_err() {

@@ -3240,6 +3240,7 @@ impl ConversationHandle for BasicConversationHandle {
         events_to_append.push(EventData::TurnStarted {
             user_id: self.harness.caller.as_ref().map(|c| c.principal.clone()),
         });
+        events_to_append.extend(request.initial_events);
         if !request.input.is_empty() {
             events_to_append.push(EventData::Messages {
                 messages: request.input,

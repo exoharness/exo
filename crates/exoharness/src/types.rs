@@ -328,6 +328,9 @@ pub struct TurnRecord {
 pub struct BeginTurnRequest {
     pub session_id: Option<SessionId>,
     pub input: Vec<Message>,
+    /// Events committed in the same write as TurnStarted and the input.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub initial_events: Vec<EventData>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

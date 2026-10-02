@@ -69,6 +69,12 @@ impl RuntimeHttpService {
         if token.is_some_and(|token| token.trim().is_empty()) {
             bail!("runtime HTTP service bearer token must not be empty");
         }
+        let recovery_runtime = Arc::clone(&runtime);
+        tokio::spawn(async move {
+            if let Err(error) = recovery_runtime.recover_unfinished_turns().await {
+                tracing::error!(%error, "failed to recover unfinished turns");
+            }
+        });
         Ok(Self {
             runtime,
             auth: None,
