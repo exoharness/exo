@@ -25,6 +25,7 @@ oauth2.workspace = true
 keyring = "4.0.0-rc.3"
 keyring-core = "0.7.2"
 futures.workspace = true
+httparse = "1.10"
 async-trait.workspace = true
 exo-managed-agents = { path = "../managed-agents" }
 anyhow.workspace = true

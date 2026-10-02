@@ -13,12 +13,20 @@ use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 static BACKEND_PROGRESS: Mutex<Option<String>> = Mutex::new(None);
 
-pub(crate) fn init_progress() -> Result<()> {
+pub(crate) fn init_progress(verbose: bool) -> Result<()> {
     tracing_subscriber::registry()
         .with(
             ProgressLayer.with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
                 metadata.target() == "exoharness::progress"
             })),
+        )
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_ansi(false)
+                .with_filter(tracing_subscriber::filter::filter_fn(move |metadata| {
+                    verbose && metadata.target().starts_with("exoharness::egress")
+                })),
         )
         .try_init()?;
     Ok(())

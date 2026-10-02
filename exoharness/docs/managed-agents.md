@@ -40,6 +40,10 @@ and query parameters without interpreting them.
 
 ## Setup
 
+Local state defaults to `~/.exo`, shared across working directories. `--root`
+selects a different state directory. Explicit provider selections and saved
+remote aliases continue to select their configured state or server.
+
 From this checkout:
 
 ```bash
@@ -86,6 +90,54 @@ Use `--tui` to opt into the full-screen interface. Type `/help` for commands or
 Your turn streams as it runs. Updates from other clients appear when you submit
 the next line; pressing Enter on an empty prompt also checks for updates.
 
+### Browser previews
+
+Configure browser previews explicitly in an environment. Raw `config.tcp_ports`
+alone does not enable them:
+
+```yaml
+name: dev
+config:
+  image: my-dev-image
+  tcp_ports: [13000, 8000]
+previews:
+  domain: exo.localhost
+  services:
+    app: 13000
+```
+
+`exo agent run` prints a preview index and a URL for each configured service:
+
+```text
+previews: http://my-project-<id>.dev.exo.localhost:<port>
+  app (port 13000): http://app.my-project-<id>.dev.exo.localhost:<port>
+```
+
+Exo derives the hostname from the agent slug, thread slug, and a short hash of
+the thread ID, under `previews.domain`. `.localhost` names resolve to loopback in
+browsers; no hosts-file edits or DNS service are needed. For a custom domain,
+configure its DNS to resolve these names to loopback. The local proxy binds only to `127.0.0.1`, saves
+its port under the selected state root's `previews/` directory, and reuses it on
+resume. Each thread gets its own listener, so multiple sessions can run together.
+An occupied saved port produces an error instead of changing the URL.
+
+The proxy follows the thread's currently running sandbox and forwards HTTP and
+WebSocket traffic through its published TCP ports. It starts and stops with the
+CLI session; it does not keep a VM running after exit. Services still need to be
+started in the sandbox. The app must generate browser API and WebSocket URLs
+using the preview's origin. Exo includes these browser URLs in the agent's
+thread context so it can construct correct links.
+
+To display the saved URLs again without starting a VM:
+
+```sh
+exo thread ports AGENT THREAD
+```
+
+Previews currently use HTTP. A remote provider also needs to support TCP
+connections through its API for client-side preview forwarding.
+Use `--verbosity full` on `exo agent run` to include egress proxy diagnostics.
+
 ```bash
 exo agent run --agent-file exoharness/examples/managed-agents/support-analyst.md
 
@@ -106,11 +158,23 @@ exo agent create support --file exoharness/examples/managed-agents/support-analy
 exo agent list
 exo agent run --agent support
 exo thread list support
-exo agent run --agent support --thread <thread-slug>
+exo agent run --agent support --thread my-project
 ```
 
 The CLI prints the agent and thread ids. Both ids and slugs work when resuming.
-A missing `--thread` starts a new thread; an unknown thread is an error.
+Without `--thread`, each run starts a new thread. `--thread NAME` creates a thread
+with that name on the first run and resumes it on subsequent runs.
+Select VM settings explicitly with `--environment NAME`:
+
+```bash
+exo agent create support --file agent.md
+exo environment create local-dev --file environment.yaml
+exo agent run --agent support --environment local-dev --thread my-project
+```
+
+The environment file's `name` must match the name passed to `environment create`.
+The selected configuration is saved on the thread; resuming without `--environment`
+retains it. Passing `--environment` again applies the current saved definition.
 Add `--prompt "..."` to run a single turn and exit.
 
 Direct local CLI sessions stop their managed thread sandboxes when the session

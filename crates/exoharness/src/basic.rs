@@ -3021,11 +3021,16 @@ impl ConversationHandle for BasicConversationHandle {
         let _guard = self.harness.inner.write_lock.lock().await;
         let mut record = self.load_record().await?;
         if record.environment.as_ref() != Some(&environment) {
-            if self
-                .harness
-                .inner
-                .resources
-                .has_thread(self.agent_id, record.id)
+            let replace_sandboxes = record
+                .environment
+                .as_ref()
+                .is_none_or(|previous| previous.config != environment.config);
+            if replace_sandboxes
+                && self
+                    .harness
+                    .inner
+                    .resources
+                    .has_thread(self.agent_id, record.id)
             {
                 anyhow::ensure!(
                     self.harness
@@ -3037,11 +3042,13 @@ impl ConversationHandle for BasicConversationHandle {
                     "cannot move a thread's existing resources between local and Firecracker storage"
                 );
             }
-            let scope = self.sandbox_handle();
-            for sandbox in scope.list_sandboxes().await? {
-                scope.terminate_sandbox_locked(sandbox.id).await?;
+            if replace_sandboxes {
+                let scope = self.sandbox_handle();
+                for sandbox in scope.list_sandboxes().await? {
+                    scope.terminate_sandbox_locked(sandbox.id).await?;
+                }
+                record = self.load_record().await?;
             }
-            record = self.load_record().await?;
             record.environment = Some(environment);
             self.harness
                 .inner

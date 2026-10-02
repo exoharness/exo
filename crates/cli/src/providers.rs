@@ -156,6 +156,7 @@ pub(crate) fn validate_http_command(command: &crate::Commands) -> Result<()> {
             command:
                 ConversationCommands::List { .. }
                 | ConversationCommands::Get { .. }
+                | ConversationCommands::Ports { .. }
                 | ConversationCommands::Events { .. }
                 | ConversationCommands::Send { .. }
                 | ConversationCommands::Delete { .. },

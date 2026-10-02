@@ -21,7 +21,7 @@ pub struct ThreadArgs {
     pub agent_file: Option<PathBuf>,
     #[arg(long, required_unless_present = "agent_file")]
     pub agent: Option<String>,
-    /// Resume a saved thread by slug or id.
+    /// Start a named thread, or resume it by slug or id if it already exists.
     #[arg(long)]
     pub thread: Option<String>,
     /// Override the model name for this thread.
@@ -186,21 +186,23 @@ pub async fn open_thread(
         )
         .await?
     };
+    let saved_thread = match args.thread.as_deref() {
+        Some(reference) => managed::get_thread(agent.as_ref(), reference).await?,
+        None => None,
+    };
     if egress_policy_selected
         && environment.is_none()
-        && let Some(reference) = args.thread.as_deref()
+        && saved_thread.as_ref().is_some_and(|thread| {
+            thread
+                .record()
+                .environment
+                .as_ref()
+                .is_some_and(|environment| environment.config.policy.is_some())
+        })
     {
-        let thread = managed::find_thread(agent.as_ref(), reference).await?;
-        if thread
-            .record()
-            .environment
-            .as_ref()
-            .is_some_and(|environment| environment.config.policy.is_some())
-        {
-            bail!(
-                "--egress-policy conflicts with this thread's saved environment policy; update the environment policy or remove --egress-policy"
-            );
-        }
+        bail!(
+            "--egress-policy conflicts with this thread's saved environment policy; update the environment policy or remove --egress-policy"
+        );
     }
     let vaults = futures::future::try_join_all(
         args.vault
@@ -223,12 +225,16 @@ pub async fn open_thread(
         }
         environment.validate()?;
     }
-    let slug = crate::generate_fun_slug();
+    let slug = args.thread.clone().unwrap_or_else(crate::generate_fun_slug);
+    anyhow::ensure!(!slug.trim().is_empty(), "thread name must not be empty");
+    let reference = saved_thread
+        .as_ref()
+        .map(|thread| thread.record().id.to_string());
     eprintln!("Opening thread...");
     let opened = runtime
         .open_managed_thread(
             &agent,
-            args.thread.as_deref(),
+            reference.as_deref(),
             NewThreadRequest {
                 environment,
                 vaults: vaults.iter().map(|vault| vault.record().id).collect(),

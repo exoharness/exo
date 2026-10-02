@@ -60,10 +60,10 @@ pub use conversation_events::{
 };
 pub use conversation_wakeup::send_conversation_wakeup;
 pub use executor_types::{
-    AgentConfig, AgentHarnessKind, AgentSandboxConfig, ConversationConfig, ConversationModelConfig,
-    ExecutionStreamEvent, ExecutionStreamHandle, ModelClient, ModelRequest, ModelResponse,
-    ModelResponseStream, PendingToolCall, SandboxScope, SendRequest, SendResult, ToolDefinition,
-    ToolRuntime, TypeScriptHarnessConfig, effective_sandbox_scope,
+    AgentConfig, AgentHarnessKind, AgentSandboxConfig, BrowserPreview, ConversationConfig,
+    ConversationModelConfig, ExecutionStreamEvent, ExecutionStreamHandle, ModelClient,
+    ModelRequest, ModelResponse, ModelResponseStream, PendingToolCall, SandboxScope, SendRequest,
+    SendResult, ToolDefinition, ToolRuntime, TypeScriptHarnessConfig, effective_sandbox_scope,
 };
 pub use exoharness::{
     AgentHandle, AttachSandboxRequest, BasicExoHarness, BasicExoHarnessConfig, Binding,

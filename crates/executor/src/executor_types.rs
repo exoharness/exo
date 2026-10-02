@@ -63,6 +63,8 @@ pub fn default_enable_agent_tool_creation() -> bool {
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct ConversationConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub browser_previews: Vec<BrowserPreview>,
     #[serde(default)]
     pub resources: Vec<exoharness::resources::PreparedResource>,
     #[serde(default)]
@@ -84,6 +86,13 @@ pub struct ConversationConfig {
     pub durable_file_systems: Vec<DurableFileSystem>,
     #[serde(default)]
     pub sandbox_scope: Option<SandboxScope>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserPreview {
+    pub name: String,
+    pub port: u16,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +117,7 @@ impl fmt::Display for ConversationModelConfig {
 impl Default for ConversationConfig {
     fn default() -> Self {
         Self {
+            browser_previews: Default::default(),
             resources: Vec::new(),
             resource_mounts: Vec::new(),
             permissions: Default::default(),

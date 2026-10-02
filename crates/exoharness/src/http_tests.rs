@@ -693,6 +693,7 @@ async fn http_vault_contexts_and_secrets_round_trip() -> crate::Result<()> {
     assert!(sibling.get_vault(&user.record().id).await?.is_none());
     let sibling = sibling.attach_vaults(vaults.clone()).await?;
     let environment = crate::EnvironmentDefinition {
+        previews: None,
         name: "updated".into(),
         config: crate::CreateSandboxRequest {
             tcp_ports: vec![],

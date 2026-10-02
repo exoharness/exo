@@ -2740,6 +2740,7 @@ dependencies = [
  "exo-mcp",
  "exoharness",
  "futures",
+ "httparse",
  "keyring",
  "keyring-core",
  "lingua",

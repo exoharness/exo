@@ -4,6 +4,108 @@ use anyhow::{Context, Result};
 use support::{Fixture, thread_slug};
 
 #[actix_web::test]
+async fn named_threads_keep_history_and_explicit_environment_for_local_and_http() -> Result<()> {
+    for provider in ["local", "remote"] {
+        let f = Fixture::new().await?;
+        f.cli(&["provider", "switch", provider]).await?;
+        f.cli(&[
+            "agent",
+            "create",
+            "braintrust-dev",
+            "--file",
+            f.agent_file.to_str().context("agent path")?,
+        ])
+        .await?;
+        let environment_file = f.temp.path().join("environment.yaml");
+        let environment: exoharness::EnvironmentDefinition = serde_yaml_ng::from_str(
+            "name: local-dev\nconfig:\n  provider: local_process\n  image: unused\n",
+        )?;
+        std::fs::write(&environment_file, serde_yaml_ng::to_string(&environment)?)?;
+        f.cli(&[
+            "environment",
+            "create",
+            "local-dev",
+            "--file",
+            environment_file.to_str().context("environment path")?,
+        ])
+        .await?;
+        let first = f
+            .cli(&[
+                "agent",
+                "run",
+                "--agent",
+                "braintrust-dev",
+                "--environment",
+                "local-dev",
+                "--thread",
+                "my-project-name",
+                "--prompt",
+                "first named input",
+            ])
+            .await?;
+        assert_eq!(thread_slug(&first)?, "my-project-name");
+        let root = f.runtime.exoharness_handle();
+        let agent = exo_managed_agents::find_agent(root.as_ref(), "braintrust-dev").await?;
+        let thread = exo_managed_agents::find_thread(agent.as_ref(), "my-project-name").await?;
+        assert_eq!(thread.record().environment.as_ref(), Some(&environment));
+        let id = thread.record().id;
+        let second = f
+            .cli(&[
+                "agent",
+                "run",
+                "--agent",
+                "braintrust-dev",
+                "--environment",
+                "local-dev",
+                "--thread",
+                "my-project-name",
+                "--prompt",
+                "second named input",
+            ])
+            .await?;
+        assert_eq!(thread_slug(&second)?, "my-project-name");
+        let resumed = exo_managed_agents::find_thread(agent.as_ref(), "my-project-name").await?;
+        assert_eq!(resumed.record().id, id);
+        assert_eq!(resumed.record().environment.as_ref(), Some(&environment));
+        assert_eq!(
+            exo_managed_agents::list_threads(agent.as_ref())
+                .await?
+                .len(),
+            1
+        );
+        let history = support::success(
+            f.output(
+                &[
+                    "agent",
+                    "run",
+                    "--agent",
+                    "braintrust-dev",
+                    "--thread",
+                    "my-project-name",
+                ],
+                None,
+                Some("/history\n/quit\n"),
+            )
+            .await?,
+        )?;
+        assert!(
+            history.contains("first named input") && history.contains("second named input"),
+            "{history}"
+        );
+        assert_eq!(
+            exo_managed_agents::find_thread(agent.as_ref(), "my-project-name")
+                .await?
+                .record()
+                .environment
+                .as_ref(),
+            Some(&environment)
+        );
+        f.stop().await?;
+    }
+    Ok(())
+}
+
+#[actix_web::test]
 async fn explicit_egress_policy_conflicting_with_environment_is_rejected() -> Result<()> {
     let f = Fixture::new().await?;
     f.cli(&["provider", "switch", "local"]).await?;

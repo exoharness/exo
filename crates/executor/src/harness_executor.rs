@@ -308,6 +308,19 @@ impl Runtime {
                 .instructions
                 .push(crate::harness_helpers::system_message(&locations));
         }
+        if !thread_config.browser_previews.is_empty() {
+            let mut previews = String::from("Browser preview URLs on the user's computer:\n");
+            for preview in &thread_config.browser_previews {
+                previews.push_str(&format!(
+                    "- {} (guest TCP port {}): {}\n",
+                    preview.name, preview.port, preview.url
+                ));
+            }
+            previews.push_str("Use these origins when giving the user browser links, preserving paths, query parameters and fragments. Inside the sandbox, connect to the original guest ports. These previews are available while the user's CLI session is open.");
+            agent_config
+                .instructions
+                .push(crate::harness_helpers::system_message(&previews));
+        }
         provider
             .executor
             .prepare_conversation(
@@ -711,6 +724,7 @@ impl Runtime {
             }
         };
         let conversation_config = ConversationConfig {
+            browser_previews: Default::default(),
             resources: agent_config.resources.clone(),
             resource_mounts,
             sandbox_image: request.sandbox_image.or(agent_config.sandbox.image),

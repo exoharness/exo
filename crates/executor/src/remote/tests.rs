@@ -1189,6 +1189,7 @@ async fn host_configuration_requires_the_operator() -> Result<()> {
     )?;
     let agent = runtime.create_managed_agent(&definition, "worker").await?;
     let environment = exoharness::EnvironmentDefinition {
+        previews: None,
         name: "published".into(),
         config: serde_json::from_value(json!({ "provider": "local-process", "image": "local" }))?,
     };

@@ -9,6 +9,7 @@ mod mount_tests;
 mod naming_tests;
 mod oauth;
 mod port_forward;
+mod previews;
 mod providers;
 mod render;
 #[cfg(test)]
@@ -71,7 +72,7 @@ struct Cli {
     /// Directory containing saved provider profiles and authentication state.
     #[arg(long, global = true, env = "EXO_CONFIG_DIR")]
     config_dir: Option<PathBuf>,
-    /// Home directory used when --config-dir is not set.
+    /// Home directory used for default local state and configuration directories.
     #[arg(long, global = true, env = "HOME")]
     home: Option<PathBuf>,
     #[command(subcommand)]
@@ -80,9 +81,9 @@ struct Cli {
 
 #[derive(Debug, Args)]
 struct RuntimeArgs {
-    /// Directory containing local Exo state.
-    #[arg(long, global = true, default_value = ".exo")]
-    root: PathBuf,
+    /// Directory containing local Exo state (defaults to ~/.exo).
+    #[arg(long, global = true)]
+    root: Option<PathBuf>,
     /// Store used to protect vault credentials.
     #[arg(long, global = true, value_enum, env = "EXO_SECRET_BACKEND")]
     secret_backend: Option<SecretBackendArg>,
@@ -92,6 +93,24 @@ struct RuntimeArgs {
     /// Load environment variables from a file.
     #[arg(long, global = true)]
     env_file: Option<PathBuf>,
+}
+
+impl RuntimeArgs {
+    fn state_root(&self, home: Option<&Path>) -> Result<PathBuf> {
+        match &self.root {
+            Some(root) => Ok(root.clone()),
+            None => {
+                let root = home
+                    .context("HOME is not set; provide --home or --root for local Exo state")?
+                    .join(".exo");
+                std::fs::create_dir_all(&root).with_context(|| {
+                    format!("creating local state directory {}", root.display())
+                })?;
+                root.canonicalize()
+                    .with_context(|| format!("resolving local state directory {}", root.display()))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -426,7 +445,7 @@ fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
         .map(|path| read_config_file(path))
         .transpose()?;
     Ok(BasicExoHarnessConfig {
-        root: cli.runtime().root.join("exoharness"),
+        root: cli.state_root()?.join("exoharness"),
         secret_backend,
         sandbox_default: default_local_sandbox_provider(),
         sandbox_policy,
@@ -512,6 +531,10 @@ macro_rules! runtime_accessor {
 impl Cli {
     runtime_accessor!(runtime);
     runtime_accessor!(runtime_mut, mut);
+
+    fn state_root(&self) -> Result<PathBuf> {
+        self.runtime().state_root(self.home.as_deref())
+    }
 
     fn execution(&self) -> Option<&ExecutionArgs> {
         match &self.command {
@@ -642,6 +665,12 @@ enum AgentMountCommands {
 
 #[derive(Debug, Subcommand)]
 enum ConversationCommands {
+    /// Show this thread's saved browser preview URLs.
+    Ports {
+        agent: String,
+        #[arg(value_name = "THREAD")]
+        conversation: String,
+    },
     List {
         agent: String,
     },
@@ -936,7 +965,7 @@ async fn main() -> Result<(), CliError> {
             ..
         }
     ) {
-        turn_display::init_progress().map_err(|error| CliError { error, verbose })?;
+        turn_display::init_progress(verbose).map_err(|error| CliError { error, verbose })?;
     }
     run(cli).await.map_err(|error| CliError { error, verbose })
 }
@@ -1006,7 +1035,7 @@ async fn run_selected(
                 (Some(client), account)
             }
             providers::Connection::Local { root } => {
-                cli.runtime_mut().root = root.clone();
+                cli.runtime_mut().root = Some(root.clone());
                 (None, root.display().to_string())
             }
         };
@@ -1077,7 +1106,18 @@ async fn run_selected(
     }
     let harness = providers::runtime(&cli, http_client, definition.as_ref(), &env).await?;
     let env_vars = env.into_vars();
-    let root = cli.runtime().root.clone();
+    let home = cli.home.clone();
+    let preview_root = if matches!(
+        &cli.command,
+        Commands::Agent {
+            command: AgentCommands::Run { .. },
+            ..
+        }
+    ) {
+        Some(cli.state_root()?)
+    } else {
+        None
+    };
     let mut session_thread = None;
     let result: Result<()> = async {
     match cli.command {
@@ -1097,6 +1137,10 @@ async fn run_selected(
                 execution.egress_policy.is_some(),
             )
             .await?;
+            let _previews = previews::PreviewSession::start(
+                harness.as_ref(), agent.as_ref(), Arc::clone(&conversation),
+                preview_root.as_deref().context("preview state root is missing")?,
+            ).await?;
             if local {
                 session_thread = Some(Arc::clone(&conversation));
             }
@@ -1126,8 +1170,8 @@ async fn run_selected(
                 run_chat_repl(Arc::clone(&harness), agent, conversation, thread.verbosity).await?;
             }
         }
-        Commands::Serve { args, .. } => {
-            serve::run(harness.clone(), &root, *args).await?;
+        Commands::Serve { args, runtime } => {
+            serve::run(harness.clone(), &runtime.state_root(home.as_deref())?, *args).await?;
         }
         Commands::Agent { command, .. } => match command {
             AgentCommands::Run { .. } => unreachable!(),
@@ -1328,6 +1372,10 @@ async fn run_selected(
             }
         },
         Commands::Conversation { command, .. } => match command {
+            ConversationCommands::Ports { agent, conversation } => {
+                let conversation = must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
+                previews::print(harness.as_ref(), conversation.as_ref()).await?;
+            },
             ConversationCommands::List { agent } => {
                 managed_agents::list_threads(harness.as_ref(), &agent).await?;
             }
@@ -1916,6 +1964,10 @@ fn command_refs_mut(command: &mut Commands) -> (Option<&mut String>, Option<&mut
                 ..
             }
             | ConversationCommands::Get {
+                agent,
+                conversation,
+            }
+            | ConversationCommands::Ports {
                 agent,
                 conversation,
             }
@@ -2553,6 +2605,29 @@ mod command_tests {
             chat_command("support", "saved"),
             "exo agent run --agent support --thread saved"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_state_symlink_keeps_the_existing_keychain_account() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
+        let saved = temp.path().join("saved-state");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&saved)?;
+        std::os::unix::fs::symlink(&saved, home.join(".exo"))?;
+        let cli = Cli::try_parse_from([
+            "exo",
+            "--home",
+            home.to_str().context("home path")?,
+            "agent",
+            "list",
+        ])?;
+        assert_eq!(
+            build_exo_config(&cli)?.root,
+            saved.canonicalize()?.join("exoharness")
+        );
+        Ok(())
     }
 
     #[test]

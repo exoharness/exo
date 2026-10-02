@@ -9,6 +9,29 @@ pub(crate) async fn run(
     port: u16,
     bind: SocketAddr,
 ) -> Result<()> {
+    let sandbox_id = published_sandbox(conversation.as_ref(), port).await?;
+    ensure!(
+        conversation
+            .sandbox_supports_tcp(sandbox_id.clone())
+            .await?,
+        "sandbox provider does not support TCP connections"
+    );
+    let listener = TcpListener::bind(bind)
+        .await
+        .context("binding local port forward")?;
+    println!(
+        "Forwarding {} to {} guest port {} (Ctrl-C to stop)",
+        listener.local_addr()?,
+        conversation.record().slug,
+        port
+    );
+    forward(conversation, sandbox_id, port, listener).await
+}
+
+pub(crate) async fn published_sandbox(
+    conversation: &dyn ConversationHandle,
+    port: u16,
+) -> Result<executor::SandboxId> {
     let running = conversation.list_sandboxes().await?;
     let events = conversation
         .get_events(Some(EventQuery {
@@ -17,7 +40,7 @@ pub(crate) async fn run(
             ..Default::default()
         }))
         .await?;
-    let sandbox_id = events
+    events
         .events
         .into_iter()
         .find_map(|event| match event.data {
@@ -34,22 +57,15 @@ pub(crate) async fn run(
             }
             _ => None,
         })
-        .ok_or_else(|| anyhow!("no running thread sandbox publishes TCP port {port}"))?;
-    ensure!(
-        conversation
-            .sandbox_supports_tcp(sandbox_id.clone())
-            .await?,
-        "sandbox provider does not support TCP connections"
-    );
-    let listener = TcpListener::bind(bind)
-        .await
-        .context("binding local port forward")?;
-    println!(
-        "Forwarding {} to {} guest port {} (Ctrl-C to stop)",
-        listener.local_addr()?,
-        conversation.record().slug,
-        port
-    );
+        .ok_or_else(|| anyhow!("no running thread sandbox publishes TCP port {port}"))
+}
+
+async fn forward(
+    conversation: Arc<dyn ConversationHandle>,
+    sandbox_id: executor::SandboxId,
+    port: u16,
+    listener: TcpListener,
+) -> Result<()> {
     let mut connections = JoinSet::new();
     loop {
         tokio::select! {

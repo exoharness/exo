@@ -271,12 +271,12 @@ async fn file_runs_reuse_saved_agents_and_mounts_stay_on_threads() -> Result<()>
     );
     let mut resume = thread_args(&first.record().slug);
     resume.thread = Some("missing".to_string());
-    assert!(
-        open_configured_thread(runtime.as_ref(), None, &resume)
-            .await
-            .is_err()
-    );
-    assert_eq!(managed::list_threads(first.as_ref()).await?.len(), 2);
+    let (_, named) = open_configured_thread(runtime.as_ref(), None, &resume).await?;
+    assert_eq!(named.record().slug, "missing");
+    assert_eq!(named.record().name, "missing");
+    let (_, resumed) = open_configured_thread(runtime.as_ref(), None, &resume).await?;
+    assert_eq!(named.record().id, resumed.record().id);
+    assert_eq!(managed::list_threads(first.as_ref()).await?.len(), 3);
     Ok(())
 }
 

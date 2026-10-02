@@ -238,10 +238,8 @@ async fn conversation_sandbox_candidates(
         }
     }
     candidates.retain(|candidate| !inactive.contains(candidate.id()));
-    if conversation.caller().is_some() {
-        let owned = conversation.list_sandboxes().await?;
-        candidates.retain(|candidate| owned.iter().any(|sandbox| sandbox.id == candidate.id()));
-    }
+    let owned = conversation.list_sandboxes().await?;
+    candidates.retain(|candidate| owned.iter().any(|sandbox| sandbox.id == candidate.id()));
     Ok(candidates)
 }
 
@@ -651,6 +649,74 @@ mod tests {
     use exoharness::{CredentialNetworkPolicy, SandboxNetworkPolicy};
 
     #[tokio::test]
+    async fn preview_changes_preserve_sandboxes_and_deleted_sandboxes_are_replaced() -> Result<()> {
+        use exoharness::{ExoHarness, NewAgentRequest};
+        let temp = tempfile::tempdir()?;
+        let harness =
+            exoharness::BasicExoHarness::new(crate::test_support::local_test_config(temp.path()))
+                .await?;
+        let agent = harness
+            .new_agent(NewAgentRequest {
+                slug: "previews".into(),
+                name: "Previews".into(),
+                vaults: vec![],
+            })
+            .await?;
+        let mut environment: exoharness::EnvironmentDefinition = serde_json::from_str(
+            r#"{"name":"web","config":{"provider":"local_process","image":"unused","tcp_ports":[3000],"enable_networking":true}}"#,
+        )?;
+        let thread = agent
+            .new_thread(exoharness::NewThreadRequest {
+                environment: Some(environment.clone()),
+                ..Default::default()
+            })
+            .await?;
+        let definition = exo_managed_agents::AgentDefinition::parse(
+            "---\nname: previews\nharness: basic\nconfig:\n  model: test\n---\nUse tools.".into(),
+        )?;
+        let agent_config = crate::managed_agents::agent_config(
+            &definition,
+            SandboxProvider::LocalProcess,
+            None,
+            None,
+        )?;
+        let mut config = ConversationConfig {
+            environment: Some(environment.clone()),
+            ..Default::default()
+        };
+        let first =
+            ensure_conversation_sandbox(thread.as_ref(), &agent_config, &config, None).await?;
+        environment.previews = Some(exoharness::BrowserPreviewConfig {
+            domain: "exo.localhost".into(),
+            services: std::collections::BTreeMap::from([("app".into(), 3000)]),
+        });
+        let thread = thread.update_environment(environment.clone()).await?;
+        config.environment = Some(environment.clone());
+        assert_eq!(thread.list_sandboxes().await?[0].id, first);
+        assert_eq!(
+            ensure_conversation_sandbox(thread.as_ref(), &agent_config, &config, None).await?,
+            first
+        );
+        thread.stop_sandbox(first.clone()).await?;
+        environment.previews.as_mut().expect("previews").domain = "dev.localhost".into();
+        let thread = thread.update_environment(environment.clone()).await?;
+        assert_eq!(thread.list_sandboxes().await?[0].id, first);
+        assert!(!thread.list_sandboxes().await?[0].running);
+        environment.config.image = "replacement".into();
+        let thread = thread.update_environment(environment.clone()).await?;
+        assert!(thread.list_sandboxes().await?.is_empty());
+        config.environment = Some(environment);
+        let replacement =
+            ensure_conversation_sandbox(thread.as_ref(), &agent_config, &config, None).await?;
+        assert_ne!(replacement, first);
+        thread.terminate_sandbox(replacement.clone()).await?;
+        let recreated =
+            ensure_conversation_sandbox(thread.as_ref(), &agent_config, &config, None).await?;
+        assert_ne!(recreated, replacement);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn environment_ports_are_published_and_part_of_sandbox_identity() -> Result<()> {
         use exoharness::{ExoHarness, NewAgentRequest};
 
@@ -934,6 +1000,7 @@ mod tests {
             }
         );
         config.environment = Some(exoharness::EnvironmentDefinition {
+            previews: None,
             name: "restricted".into(),
             config: exoharness::CreateSandboxRequest {
                 tcp_ports: vec![],
