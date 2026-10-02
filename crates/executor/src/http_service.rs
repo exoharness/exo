@@ -69,12 +69,6 @@ impl RuntimeHttpService {
         if token.is_some_and(|token| token.trim().is_empty()) {
             bail!("runtime HTTP service bearer token must not be empty");
         }
-        let recovery_runtime = Arc::clone(&runtime);
-        tokio::spawn(async move {
-            if let Err(error) = recovery_runtime.recover_unfinished_turns().await {
-                tracing::error!(%error, "failed to recover unfinished turns");
-            }
-        });
         Ok(Self {
             runtime,
             auth: None,
@@ -95,6 +89,25 @@ impl RuntimeHttpService {
         self.auth = Some(auth);
         self.multiplayer = multiplayer;
         self
+    }
+
+    pub fn spawn_recovery(&self) {
+        self.runtime.begin_recovery_scan();
+        let service = self.clone();
+        tokio::spawn(async move {
+            let resolver = service.auth.as_ref().map(|_| {
+                let service = service.clone();
+                Arc::new(move |principal: String| service.caller_runtime(principal))
+                    as crate::harness_executor::RecoveryRuntimeResolver
+            });
+            if let Err(error) = service
+                .runtime
+                .recover_unfinished_turns_with_resolver(resolver)
+                .await
+            {
+                tracing::error!(%error, "failed to recover unfinished turns");
+            }
+        });
     }
 
     pub fn caller_runtime(&self, principal: String) -> Result<Arc<Runtime>> {
@@ -168,7 +181,8 @@ impl RuntimeHttpService {
 }
 
 pub fn server(listener: TcpListener, service: Arc<RuntimeHttpService>) -> std::io::Result<Server> {
-    Ok(HttpServer::new(move || {
+    let recovery_service = Arc::clone(&service);
+    let server = HttpServer::new(move || {
         let app = App::new().app_data(web::Data::new(Arc::clone(&service)));
         let auth = service.auth.clone();
         app.configure(move |cfg| {
@@ -179,8 +193,9 @@ pub fn server(listener: TcpListener, service: Arc<RuntimeHttpService>) -> std::i
             configure(cfg);
         })
     })
-    .listen(listener)?
-    .run())
+    .listen(listener)?;
+    recovery_service.spawn_recovery();
+    Ok(server.run())
 }
 
 pub fn configure(cfg: &mut web::ServiceConfig) {

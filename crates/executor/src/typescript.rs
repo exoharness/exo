@@ -216,6 +216,9 @@ where
                 turn.as_ref(),
                 self.tools
                     .permission_policy(&conversation_config.permissions, &request.function_name),
+                None,
+                None,
+                false,
                 request,
                 stream_mode,
             )

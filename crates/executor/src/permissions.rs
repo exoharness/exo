@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail, ensure};
 use exo_managed_agents::{http::protocol::ApprovalResponseBody, permissions::PermissionPolicy};
 use exoharness::{
     Event, EventData, EventId, EventKind, EventQuery, EventQueryDirection, ThreadHandle,
-    ToolRequest, TurnHandle, TurnRecord, Uuid7,
+    ToolCallId, ToolRequest, TurnHandle, TurnRecord, Uuid7,
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -12,17 +12,21 @@ use serde::{Deserialize, Serialize};
 use crate::{ExecutionStreamEvent, harness_executor::ExecutorStreamMode};
 
 pub(crate) const APPROVAL_REQUESTED: &str = "agent_runtime.approval_requested";
-const APPROVAL_RESPONSE: &str = "agent_runtime.approval_response";
+pub(crate) const APPROVAL_RESPONSE: &str = "agent_runtime.approval_response";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalRequest {
     pub approval_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<ToolCallId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub round: Option<u32>,
     pub request: ToolRequest,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ApprovalResponse {
-    approval_id: String,
+pub(crate) struct ApprovalResponse {
+    pub(crate) approval_id: String,
     approved: bool,
     allowed_tool_name: Option<String>,
 }
@@ -121,48 +125,127 @@ pub(crate) async fn authorize(
     thread: &dyn ThreadHandle,
     turn: &dyn TurnHandle,
     policy: PermissionPolicy,
+    tool_call_id: Option<&str>,
+    round: Option<u32>,
+    resuming_approval: bool,
     request: &ToolRequest,
     stream: ExecutorStreamMode<'_>,
 ) -> Result<()> {
-    if matches!(policy, PermissionPolicy::AlwaysAllow {}) {
+    if !resuming_approval && matches!(policy, PermissionPolicy::AlwaysAllow {}) {
         return Ok(());
     }
-    for event in approval_events(
-        thread,
-        EventQuery {
-            session_id: Some(turn.record().session_id),
-            ..Default::default()
-        },
-    )
-    .await?
+    let turn_events = if resuming_approval {
+        approval_events(
+            thread,
+            EventQuery {
+                turn_id: Some(turn.record().id),
+                session_id: Some(turn.record().session_id),
+                ..Default::default()
+            },
+        )
+        .await?
+    } else {
+        Vec::new()
+    };
+    let mut existing = None;
+    for event in &turn_events {
+        match &event.data {
+            EventData::Custom {
+                event_type,
+                payload,
+            } if event_type == APPROVAL_REQUESTED => {
+                let approval: ApprovalRequest = serde_json::from_value(payload.clone())?;
+                if tool_call_id.is_some()
+                    && approval.tool_call_id.as_deref() == tool_call_id
+                    && approval.round == round
+                {
+                    ensure!(
+                        approval.request == *request,
+                        "saved approval has a different tool request"
+                    );
+                    existing = Some((approval, None));
+                }
+            }
+            EventData::Custom {
+                event_type,
+                payload,
+            } if event_type == APPROVAL_RESPONSE => {
+                let response: ApprovalResponse = serde_json::from_value(payload.clone())?;
+                if let Some((approval, answer)) = &mut existing
+                    && response.approval_id == approval.approval_id
+                {
+                    *answer = Some(response);
+                }
+            }
+            _ => {}
+        }
+    }
+    ensure!(
+        !resuming_approval || existing.is_some(),
+        "cannot safely resume tool call without its pending approval"
+    );
+    if let Some((approval, response)) = &existing
+        && let Some(response) = response
     {
-        if let EventData::Custom {
-            event_type,
-            payload,
-        } = event.data
-            && event_type == APPROVAL_RESPONSE
+        ensure!(
+            response.approved,
+            "tool call denied by the user: {}",
+            request.function_name
+        );
+        tracing::debug!(approval_id = %approval.approval_id, "using saved tool approval");
+        return Ok(());
+    }
+    if existing.is_none() {
+        for event in approval_events(
+            thread,
+            EventQuery {
+                session_id: Some(turn.record().session_id),
+                ..Default::default()
+            },
+        )
+        .await?
         {
-            let response: ApprovalResponse = serde_json::from_value(payload)?;
-            if response.approved
-                && response.allowed_tool_name.as_deref() == Some(&request.function_name)
+            if let EventData::Custom {
+                event_type,
+                payload,
+            } = event.data
+                && event_type == APPROVAL_RESPONSE
             {
-                return Ok(());
+                let response: ApprovalResponse = serde_json::from_value(payload)?;
+                if response.approved
+                    && response.allowed_tool_name.as_deref() == Some(&request.function_name)
+                {
+                    return Ok(());
+                }
             }
         }
     }
-    let approval = ApprovalRequest {
-        approval_id: Uuid7::now().to_string(),
-        request: request.clone(),
+    let (approval, after) = match existing {
+        Some((approval, None)) => {
+            let after = turn_events
+                .last()
+                .context("saved approval has no event")?
+                .id;
+            (approval, after)
+        }
+        Some((_, Some(_))) => unreachable!("answered approval returned above"),
+        None => {
+            let approval = ApprovalRequest {
+                approval_id: Uuid7::now().to_string(),
+                tool_call_id: tool_call_id.map(str::to_owned),
+                round,
+                request: request.clone(),
+            };
+            let appended = turn
+                .add_events(vec![EventData::Custom {
+                    event_type: APPROVAL_REQUESTED.to_owned(),
+                    payload: serde_json::to_value(&approval)?,
+                }])
+                .await?;
+            (approval, appended.latest_event_id)
+        }
     };
-    let appended = turn
-        .add_events(vec![EventData::Custom {
-            event_type: APPROVAL_REQUESTED.to_owned(),
-            payload: serde_json::to_value(&approval)?,
-        }])
-        .await?;
-    let mut events = thread
-        .watch_events(Bound::Excluded(appended.latest_event_id))
-        .await?;
+    let mut events = thread.watch_events(Bound::Excluded(after)).await?;
     if let ExecutorStreamMode::Enabled(sender) = stream
         && sender
             .send(Ok(ExecutionStreamEvent::ApprovalRequested {

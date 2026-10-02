@@ -22,6 +22,7 @@ pub(crate) struct ExecutorTurn {
     pub agent_config: AgentConfig,
     pub thread_config: ConversationConfig,
     pub request: crate::SendRequest,
+    pub recovering: bool,
     pub stream: Option<mpsc::UnboundedSender<Result<ExecutionStreamEvent>>>,
     pub(crate) trace: Option<Arc<dyn TurnExecutionTrace>>,
 }
@@ -154,19 +155,40 @@ impl Harness<ExecutorTurn> for ExecutorHarness {
                 events.clone(),
                 key,
             ));
-            let execution = executor.execute_turn(
-                work.agent.as_ref(),
-                Arc::clone(&work.thread),
-                turn,
-                &work.agent_config,
-                &work.thread_config,
-                &work.request,
-                work.stream
+            let execution = async {
+                let stream = work
+                    .stream
                     .as_ref()
                     .map(ExecutorStreamMode::Enabled)
-                    .unwrap_or(ExecutorStreamMode::Disabled),
-                work.trace.as_deref(),
-            );
+                    .unwrap_or(ExecutorStreamMode::Disabled);
+                if work.recovering {
+                    executor
+                        .resume_turn(
+                            work.agent.as_ref(),
+                            Arc::clone(&work.thread),
+                            turn,
+                            &work.agent_config,
+                            &work.thread_config,
+                            &work.request,
+                            stream,
+                            work.trace.as_deref(),
+                        )
+                        .await
+                } else {
+                    executor
+                        .execute_turn(
+                            work.agent.as_ref(),
+                            Arc::clone(&work.thread),
+                            turn,
+                            &work.agent_config,
+                            &work.thread_config,
+                            &work.request,
+                            stream,
+                            work.trace.as_deref(),
+                        )
+                        .await
+                }
+            };
             let outcome = tokio::select! {
                 result = std::panic::AssertUnwindSafe(execution).catch_unwind() => match result {
                     Ok(Ok(())) => HarnessTurnOutcome::Completed(None),
@@ -189,8 +211,16 @@ impl Harness<ExecutorTurn> for ExecutorHarness {
                 .await
                 {
                     Ok(Ok(())) => outcome,
+                    Ok(Err(error)) if matches!(outcome, HarnessTurnOutcome::Interrupted) => {
+                        tracing::error!(?key, %error, "failed to clean up interrupted harness turn");
+                        outcome
+                    }
                     Ok(Err(error)) => {
                         HarnessTurnOutcome::Failed(error.context("failed to cancel harness turn"))
+                    }
+                    Err(_) if matches!(outcome, HarnessTurnOutcome::Interrupted) => {
+                        tracing::error!(?key, "harness cleanup panicked during shutdown");
+                        outcome
                     }
                     Err(_) => HarnessTurnOutcome::Failed(anyhow!("harness cancellation panicked")),
                 }

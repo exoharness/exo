@@ -153,6 +153,10 @@ impl HarnessExecutor for ManagedExecutor {
         "local"
     }
 
+    fn can_resume_pending_approval(&self, config: &AgentConfig) -> bool {
+        config.harness == AgentHarnessKind::Basic
+    }
+
     fn agent_config(
         &self,
         definition: &exo_managed_agents::AgentDefinition,
@@ -223,6 +227,40 @@ impl HarnessExecutor for ManagedExecutor {
             .context("managed executor was not initialized")?
             .executor
             .execute_turn(
+                agent,
+                thread,
+                turn,
+                agent_config,
+                thread_config,
+                request,
+                stream,
+                trace,
+            )
+            .await
+    }
+
+    async fn resume_turn(
+        &self,
+        agent: &dyn AgentHandle,
+        thread: Arc<dyn ThreadHandle>,
+        turn: Arc<dyn TurnHandle>,
+        agent_config: &AgentConfig,
+        thread_config: &ConversationConfig,
+        request: &SendRequest,
+        stream: ExecutorStreamMode<'_>,
+        trace: Option<&dyn TurnExecutionTrace>,
+    ) -> Result<()> {
+        let cell = self
+            .threads
+            .lock()
+            .expect("managed executors poisoned")
+            .get(&thread.record().id)
+            .cloned()
+            .context("thread executor was not prepared")?;
+        cell.get()
+            .context("managed executor was not initialized")?
+            .executor
+            .resume_turn(
                 agent,
                 thread,
                 turn,
