@@ -225,6 +225,7 @@ interface RawTypeScriptInitPayload {
   conversation_config: RawConversationConfig;
   request: RawSendRequest;
   streaming: boolean;
+  recovering: boolean;
   braintrust_parent?: string | null;
 }
 
@@ -1743,7 +1744,16 @@ async function main(): Promise<void> {
           false,
         );
       }
-      await harness.runTurn(context);
+      if (init.recovering) {
+        if (!harness.resumeTurn) {
+          throw new Error(
+            "this TypeScript harness cannot safely resume an unfinished turn",
+          );
+        }
+        await harness.resumeTurn(context);
+      } else {
+        await harness.runTurn(context);
+      }
       await client.done();
     } catch (error) {
       await client.fail(error);

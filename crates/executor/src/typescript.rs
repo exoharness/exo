@@ -31,7 +31,18 @@ use crate::execution_tracing::TurnExecutionTrace;
 use crate::harness_executor::{ExecutorStreamMode, HarnessExecutor};
 use crate::harness_tool::ensure_shell_sandbox;
 use crate::shared::try_send_stream_event;
-use crate::{AgentConfig, ConversationConfig, ExecutionStreamEvent, SendRequest, ToolRuntime};
+use crate::{
+    AgentConfig, AgentHarnessKind, ConversationConfig, ExecutionStreamEvent, SendRequest,
+    ToolRuntime,
+};
+
+pub(crate) fn is_codex_harness(config: &AgentConfig) -> bool {
+    config.harness == AgentHarnessKind::TypeScript
+        && config.typescript.as_ref().is_some_and(|typescript| {
+            Path::new(&typescript.module_path)
+                .ends_with("exoharness/examples/typescript/codex-harness.ts")
+        })
+}
 
 pub struct TypeScriptExecutor<T> {
     root: Arc<dyn ExoHarness>,
@@ -65,6 +76,10 @@ where
 {
     fn name(&self) -> &'static str {
         "typescript"
+    }
+
+    fn can_reconcile_unresolved_tool_call(&self, config: &AgentConfig) -> bool {
+        is_codex_harness(config)
     }
 
     async fn cancel_turn(
@@ -121,6 +136,62 @@ where
         stream_mode: ExecutorStreamMode<'_>,
         turn_trace: Option<&dyn TurnExecutionTrace>,
     ) -> Result<()> {
+        self.run_turn(
+            agent,
+            conversation,
+            turn,
+            agent_config,
+            conversation_config,
+            prepared,
+            stream_mode,
+            turn_trace,
+            false,
+        )
+        .await
+    }
+
+    async fn resume_turn(
+        &self,
+        agent: &dyn AgentHandle,
+        conversation: Arc<dyn ConversationHandle>,
+        turn: Arc<dyn TurnHandle>,
+        agent_config: &AgentConfig,
+        conversation_config: &ConversationConfig,
+        prepared: &SendRequest,
+        stream_mode: ExecutorStreamMode<'_>,
+        turn_trace: Option<&dyn TurnExecutionTrace>,
+    ) -> Result<()> {
+        self.run_turn(
+            agent,
+            conversation,
+            turn,
+            agent_config,
+            conversation_config,
+            prepared,
+            stream_mode,
+            turn_trace,
+            true,
+        )
+        .await
+    }
+}
+
+impl<T> TypeScriptExecutor<T>
+where
+    T: ToolRuntime + 'static,
+{
+    async fn run_turn(
+        &self,
+        agent: &dyn AgentHandle,
+        conversation: Arc<dyn ConversationHandle>,
+        turn: Arc<dyn TurnHandle>,
+        agent_config: &AgentConfig,
+        conversation_config: &ConversationConfig,
+        prepared: &SendRequest,
+        stream_mode: ExecutorStreamMode<'_>,
+        turn_trace: Option<&dyn TurnExecutionTrace>,
+        recovering: bool,
+    ) -> Result<()> {
         let module_path = agent_config
             .typescript
             .as_ref()
@@ -148,6 +219,7 @@ where
                         prepared,
                         stream_mode,
                         turn_trace,
+                        recovering,
                     },
                 )
                 .await
@@ -162,12 +234,6 @@ where
 
         result
     }
-}
-
-impl<T> TypeScriptExecutor<T>
-where
-    T: ToolRuntime + 'static,
-{
     async fn runner(
         &self,
         key: &str,
@@ -288,6 +354,7 @@ struct TypeScriptTurn<'a> {
     prepared: &'a SendRequest,
     stream_mode: ExecutorStreamMode<'a>,
     turn_trace: Option<&'a dyn TurnExecutionTrace>,
+    recovering: bool,
 }
 
 impl TypeScriptRunnerProcess {
@@ -404,6 +471,7 @@ impl TypeScriptRunnerProcess {
             prepared,
             stream_mode,
             turn_trace,
+            recovering,
         } = turn;
         let exoharness_server = ExoHarnessServer::new(Arc::clone(&executor.root));
         let conversation_info = ConversationHandleInfo {
@@ -425,6 +493,7 @@ impl TypeScriptRunnerProcess {
                     conversation_config: conversation_config.clone(),
                     request: prepared.clone(),
                     streaming: matches!(stream_mode, ExecutorStreamMode::Enabled(_)),
+                    recovering,
                     tools: executor.tools.definitions(),
                     mcp_servers: executor.tools.mcp_servers(conversation).await?,
                     braintrust_parent: turn_trace.and_then(TurnExecutionTrace::export_parent),
@@ -1039,6 +1108,7 @@ struct TypeScriptInitPayload {
     conversation_config: ConversationConfig,
     request: SendRequest,
     streaming: bool,
+    recovering: bool,
     braintrust_parent: Option<String>,
 }
 
@@ -1334,6 +1404,113 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use super::*;
+
+    #[tokio::test]
+    async fn recovery_calls_typescript_resume_turn_instead_of_run_turn() -> Result<()> {
+        use crate::{BasicToolRuntime, LocalProvider, Runtime, test_support::local_test_config};
+        use exoharness::{BasicExoHarness, BeginTurnRequest, NewAgentRequest};
+
+        let temp = tempfile::TempDir::new()?;
+        let module = temp.path().join("resume-turn.mjs");
+        std::fs::write(
+            &module,
+            r#"
+export default {
+  async runTurn() { throw new Error("runTurn replayed interrupted work"); },
+  async resumeTurn(context) {
+    await context.exoharness.current.turn.addEvents([
+      { type: "messages", response_id: null,
+        messages: [{ role: "assistant", content: "resumed" }] }
+    ]);
+  }
+};
+"#,
+        )?;
+        let state_path = temp.path().join("state");
+        let state: Arc<dyn ExoHarness> =
+            Arc::new(BasicExoHarness::new(local_test_config(&state_path)).await?);
+        let agent = state
+            .new_agent(NewAgentRequest {
+                slug: "typescript-recovery".into(),
+                name: "TypeScript recovery".into(),
+                vaults: vec![],
+            })
+            .await?;
+        let thread = agent.new_conversation(Default::default()).await?;
+        let agent_id = agent.record().id;
+        let thread_id = thread.record().id;
+        let config: AgentConfig = serde_json::from_value(serde_json::json!({
+            "instructions": [], "harness": "typescript",
+            "typescript": { "module_path": module },
+            "sandbox": { "provider": "local_process" }, "model": "gpt-5-mini"
+        }))?;
+        let work = crate::harness_executor::RecoverableTurn {
+            agent_config: config,
+            thread_config: ConversationConfig::default(),
+            request: SendRequest {
+                input: vec![],
+                session_id: None,
+            },
+        };
+        let turn = thread
+            .begin_turn(BeginTurnRequest {
+                session_id: None,
+                input: vec![],
+                initial_events: vec![work.event()?],
+            })
+            .await?;
+        let turn_id = turn.record().id;
+        drop(turn);
+        drop(thread);
+        drop(agent);
+        drop(state);
+
+        let state: Arc<dyn ExoHarness> =
+            Arc::new(BasicExoHarness::new(local_test_config(&state_path)).await?);
+        let runtime = Runtime::new(
+            LocalProvider::typescript(
+                Arc::clone(&state),
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+                HashMap::new(),
+                Arc::new(BasicToolRuntime),
+            ),
+            None,
+        );
+        runtime.recover_unfinished_turns().await?;
+        let agent = state.get_agent(&agent_id).await?.unwrap();
+        let thread = agent.get_thread(&thread_id).await?.unwrap();
+        let events = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let events = thread
+                    .get_events(Some(EventQuery {
+                        turn_id: Some(turn_id),
+                        ..Default::default()
+                    }))
+                    .await?
+                    .events;
+                if events
+                    .iter()
+                    .any(|event| matches!(event.data, EventData::TurnEnded))
+                {
+                    return Ok::<_, anyhow::Error>(events);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        assert!(events.iter().any(|event| matches!(
+            &event.data,
+            EventData::Messages { messages, .. }
+                if messages.iter().any(|message| matches!(message, lingua::Message::Assistant { .. }))
+        )));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.data, EventData::Error { .. }))
+        );
+        runtime.shutdown().await?;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn canonical_turn_events_publish_tool_progress_once() -> Result<()> {

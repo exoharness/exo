@@ -1209,6 +1209,93 @@ async fn new_turn_waits_for_older_turn_recovery() -> Result<()> {
 }
 
 #[tokio::test]
+async fn interrupted_rlm_turn_is_failed_without_replaying_its_input() -> Result<()> {
+    let tempdir = TempDir::new()?;
+    let root = tempdir.path().join("exoharness");
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    create_test_credential(state.as_ref()).await;
+    let blocked_model = Arc::new(BlockingModelClient::default());
+    let runtime = Runtime::new(
+        LocalProvider::rlm(
+            Arc::clone(&state),
+            Arc::clone(&blocked_model),
+            Arc::new(BasicToolRuntime),
+        ),
+        None,
+    );
+    let agent = runtime
+        .create_agent(CreateAgentRequest {
+            ..crate::test_support::agent_request("interrupted-rlm", crate::AgentHarnessKind::Rlm)
+        })
+        .await?;
+    let thread = runtime
+        .create_conversation(agent.as_ref(), CreateConversationRequest::default())
+        .await?;
+    let agent_id = agent.record().id;
+    let thread_id = thread.record().id;
+    let (turn, mut stream) = runtime
+        .start_turn(
+            Arc::clone(&agent),
+            Arc::clone(&thread),
+            SendRequest {
+                input: vec![user_message("do the work")],
+                session_id: None,
+            },
+            false,
+            None,
+        )
+        .await?;
+    tokio::time::timeout(Duration::from_secs(3), blocked_model.entered.notified()).await?;
+    runtime.shutdown().await?;
+    assert!(matches!(stream.next().await, Some(Err(_))));
+    drop(thread);
+    drop(agent);
+    drop(runtime);
+    drop(state);
+
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let model = Arc::new(FakeModelClient::default());
+    let runtime = Runtime::new(
+        LocalProvider::rlm(
+            Arc::clone(&state),
+            Arc::clone(&model),
+            Arc::new(BasicToolRuntime),
+        ),
+        None,
+    );
+    runtime.recover_unfinished_turns().await?;
+    let agent = state.get_agent(&agent_id).await?.unwrap();
+    let thread = agent.get_thread(&thread_id).await?.unwrap();
+    let events = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let events = thread
+                .get_events(Some(EventQuery {
+                    turn_id: Some(turn.id),
+                    ..Default::default()
+                }))
+                .await?
+                .events;
+            if events
+                .iter()
+                .any(|event| matches!(event.data, EventData::TurnEnded))
+            {
+                return Ok::<_, anyhow::Error>(events);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    assert!(model.requests().is_empty());
+    assert!(events.iter().any(|event| matches!(&event.data,
+        EventData::Error { message, .. } if message.contains("cannot safely resume")
+    )));
+    runtime.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn graceful_shutdown_leaves_active_turn_for_restart() -> Result<()> {
     let tempdir = TempDir::new()?;
     let root = tempdir.path().join("exoharness");

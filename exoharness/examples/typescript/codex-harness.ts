@@ -3,6 +3,7 @@ import {
   appendCustomEvent,
   assistantTextMessage,
   defineHarness,
+  materializeConversationMessages,
   validateToolPolicies,
   messageText,
   messagesEvent,
@@ -57,6 +58,12 @@ import {
   replayCodexHistory,
 } from "../../typescript/codex/replay";
 import {
+  assertNativeToolSafety,
+  nativeItemComplete,
+  nativeTurnSnapshot,
+  type NativeTurnSnapshot,
+} from "../../typescript/codex/recovery";
+import {
   accumulateCodexUsage,
   codexUsageEvent,
   type CodexTokenUsage,
@@ -98,6 +105,92 @@ interface CodexWarmSessionRecord {
   threadId: string;
 }
 
+interface SavedCodexTurn {
+  threadId: string;
+  turnId: string;
+  completed: boolean;
+  projectedItems: Set<string>;
+}
+
+async function savedCodexTurn(
+  context: TurnContext,
+): Promise<SavedCodexTurn | null> {
+  let cursor: string | null = null;
+  let saved: SavedCodexTurn | null = null;
+  const projectedItems = new Set<string>();
+  const turnId = context.exoharness.current.turn.record.id;
+  do {
+    const page = await context.exoharness.current.conversation.getEvents({
+      cursor,
+      direction: "asc",
+      limit: 100,
+      turnId,
+      types: [
+        "codex_turn_started",
+        "codex_turn_completed",
+        "codex_item_projected",
+      ],
+    });
+    for (const event of page.events) {
+      if (event.data.type !== "custom") continue;
+      if (event.data.event_type === "codex_turn_started") {
+        const payload = asRecord(event.data.payload);
+        if (
+          typeof payload.codex_thread_id === "string" &&
+          typeof payload.codex_turn_id === "string"
+        ) {
+          saved = {
+            threadId: payload.codex_thread_id,
+            turnId: payload.codex_turn_id,
+            completed: false,
+            projectedItems,
+          };
+        }
+      } else if (event.data.event_type === "codex_turn_completed" && saved) {
+        const status = asRecord(asRecord(event.data.payload).turn).status;
+        if (status === "completed") saved.completed = true;
+        if (status === "failed" || status === "interrupted") {
+          throw new Error(`saved Codex turn ended with status ${status}`);
+        }
+      } else if (event.data.event_type === "codex_item_projected") {
+        const payload = asRecord(event.data.payload);
+        if (
+          typeof payload.turn_id === "string" &&
+          typeof payload.item_id === "string"
+        ) {
+          projectedItems.add(`${payload.turn_id}:${payload.item_id}`);
+        }
+      }
+    }
+    cursor = page.cursor ?? null;
+  } while (cursor);
+  return saved;
+}
+
+async function unresolvedToolCallIds(
+  context: TurnContext,
+): Promise<Set<string>> {
+  let cursor: string | null = null;
+  const unresolved = new Set<string>();
+  do {
+    const page = await context.exoharness.current.conversation.getEvents({
+      cursor,
+      direction: "asc",
+      limit: 100,
+      turnId: context.exoharness.current.turn.record.id,
+      types: ["tool_requested", "tool_result"],
+    });
+    for (const event of page.events) {
+      const id = event.data.tool_call_id;
+      if (typeof id !== "string") continue;
+      if (event.data.type === "tool_requested") unresolved.add(id);
+      if (event.data.type === "tool_result") unresolved.delete(id);
+    }
+    cursor = page.cursor ?? null;
+  } while (cursor);
+  return unresolved;
+}
+
 class CodexWarmSession {
   threadId: string | null;
   resumeThreadId: string | null = null;
@@ -118,6 +211,10 @@ class CodexWarmSession {
     sessionKey: string,
   ): Promise<CodexWarmSession> {
     let session: CodexWarmSession | null = null;
+    let sessionReady: (session: CodexWarmSession) => void = () => {};
+    const attachedSession = new Promise<CodexWarmSession>((resolve) => {
+      sessionReady = resolve;
+    });
     const pendingProtocol: CodexProtocolLogEntry[] = [];
     const process = await scope.context.startSandboxProcess({
       command: codexSandboxCommand(scope.context),
@@ -139,7 +236,9 @@ class CodexWarmSession {
         }
       },
       onServerRequest: (request: CodexServerRequest) =>
-        session?.handleServerRequest(request),
+        process.reused
+          ? attachedSession.then((ready) => ready.handleServerRequest(request))
+          : session?.handleServerRequest(request),
     };
     const server = process.reused
       ? await CodexAppServer.attachToSandbox(options)
@@ -153,6 +252,7 @@ class CodexWarmSession {
     session.resumeThreadId = process.reused
       ? null
       : (warmRecord?.threadId ?? null);
+    sessionReady(session);
     for (const entry of pendingProtocol) {
       session.recordProtocol(entry);
     }
@@ -221,7 +321,19 @@ export default defineHarness({
     await ensureTable();
     const modelBinding = resolveSandboxModel(context);
     await traceExecutorTurn(context, (turnParent) =>
-      runCodexTurn(context, turnParent, modelBinding),
+      runCodexTurn(context, turnParent, modelBinding, false),
+    );
+  },
+  async resumeTurn(context) {
+    validateToolPolicies(
+      context,
+      context.tools.map((tool) => tool.name),
+      false,
+    );
+    await ensureTable();
+    const modelBinding = resolveSandboxModel(context);
+    await traceExecutorTurn(context, (turnParent) =>
+      runCodexTurn(context, turnParent, modelBinding, true),
     );
   },
 });
@@ -230,10 +342,21 @@ async function runCodexTurn(
   context: TurnContext,
   turnParent: TraceParent,
   modelBinding: SandboxModel,
+  recovering: boolean,
 ): Promise<string | null> {
   await requireCodexSandboxNetworking(context);
 
   const { turn } = context.exoharness.current;
+  const savedTurn = recovering ? await savedCodexTurn(context) : null;
+  const unresolvedTools = recovering
+    ? await unresolvedToolCallIds(context)
+    : new Set<string>();
+  if (recovering && !savedTurn) {
+    throw new Error(
+      "cannot safely resume Codex turn without a saved native turn ID",
+    );
+  }
+  if (savedTurn?.completed) return null;
   const protocolLog = new CodexProtocolEventBuffer(context);
   const traceState: CodexTurnTraceState = {
     finalText: "",
@@ -269,17 +392,56 @@ async function runCodexTurn(
   session.setTurnScope(scope);
 
   try {
+    if (savedTurn) {
+      session.threadId = session.process.reused ? savedTurn.threadId : null;
+      session.resumeThreadId = session.process.reused
+        ? null
+        : savedTurn.threadId;
+    }
     let threadReused = session.threadId !== null;
+    let nativeSnapshot: NativeTurnSnapshot | null = null;
+    if (savedTurn && session.process.reused) {
+      // The native process may have kept running after Exo disconnected.
+      // Read its state before issuing another turn/start.
+      const response = await session.server.request<JsonObject>("thread/read", {
+        threadId: savedTurn.threadId,
+        includeTurns: true,
+      });
+      nativeSnapshot = nativeTurnSnapshot(response, savedTurn.turnId);
+      if (!nativeSnapshot) {
+        throw new Error(
+          `live Codex thread has no saved turn ${savedTurn.turnId}`,
+        );
+      }
+    }
     if (session.threadId === null && session.resumeThreadId !== null) {
       try {
-        session.threadId = await startCodexThread(
+        const resumedThreadId = await startCodexThread(
           session.server,
           context,
           modelBinding,
           session.resumeThreadId,
         );
+        if (savedTurn) {
+          const response = await session.server.request<JsonObject>(
+            "thread/read",
+            {
+              threadId: resumedThreadId,
+              includeTurns: true,
+            },
+          );
+          nativeSnapshot = nativeTurnSnapshot(response, savedTurn.turnId);
+          if (!nativeSnapshot) {
+            throw new Error(
+              `resumed Codex thread has no saved turn ${savedTurn.turnId}`,
+            );
+          }
+        }
+        session.threadId = resumedThreadId;
         threadReused = true;
       } catch (error) {
+        session.threadId = null;
+        threadReused = false;
         await appendCustomEvent(
           context.exoharness.current.turn,
           "codex_resume_failed",
@@ -305,45 +467,98 @@ async function runCodexTurn(
         () => startCodexThread(session.server, context, modelBinding),
       ));
     session.threadId = threadId;
+    const activeItems = new Set(unresolvedTools);
+    const projectedItems = savedTurn?.projectedItems ?? new Set<string>();
+    assertNativeToolSafety(
+      nativeSnapshot,
+      unresolvedTools,
+      session.process.reused,
+    );
+    if (nativeSnapshot && savedTurn) {
+      await projectNativeSnapshot(
+        context,
+        turnParent,
+        nativeSnapshot,
+        projectedItems,
+        activeItems,
+      );
+      if (nativeSnapshot.status === "failed") {
+        throw new Error(codexTurnError(asRecord(nativeSnapshot)));
+      }
+      if (nativeSnapshot.status === "completed") {
+        await appendCustomEvent(turn, "codex_turn_completed", {
+          threadId,
+          turn: toJsonValue(nativeSnapshot),
+        });
+        await recordCodexWarmSession(
+          context,
+          sessionKey,
+          session.process,
+          threadId,
+        );
+        return null;
+      }
+    }
+    const attachingLiveTurn =
+      nativeSnapshot?.status === "inProgress" && session.process.reused;
     const priorItems = threadReused
       ? []
-      : codexReplayItems(await materializePriorConversationMessages(context));
+      : codexReplayItems(
+          recovering
+            ? await materializeConversationMessages(
+                context.exoharness.current.conversation,
+              )
+            : await materializePriorConversationMessages(context),
+        );
     await replayCodexHistory(session.server, threadId, priorItems);
 
-    const turnInput = messagesToUserInput(context.request.input);
-    const turnStart = await traceCodexTask(
-      turnParent,
-      "codex_turn_start",
-      {
-        thread_id: threadId,
-        model: modelBinding.model,
-        input: turnInput,
-        external_sandbox: true,
-      },
-      () =>
-        session.server.request<JsonObject>("turn/start", {
-          threadId,
-          input: turnInput,
-          model: modelBinding.model,
-          ...(context.agentConfig.reasoningEffort
-            ? { effort: context.agentConfig.reasoningEffort }
-            : {}),
-          approvalPolicy: "on-request",
-          sandboxPolicy: {
-            type: "externalSandbox",
-            networkAccess: "restricted",
+    const turnInput = recovering
+      ? []
+      : messagesToUserInput(context.request.input);
+    const turnStart = attachingLiveTurn
+      ? null
+      : await traceCodexTask(
+          turnParent,
+          "codex_turn_start",
+          {
+            thread_id: threadId,
+            model: modelBinding.model,
+            input: turnInput,
+            external_sandbox: true,
           },
-        }),
-    );
-    await appendCustomEvent(turn, "codex_turn_started", {
-      metadata: turnMetadata(context),
-      codex_thread_id: threadId,
-      codex_turn: turnStart.turn ?? null,
-      hydrated_from: threadReused ? "warm_codex_thread" : "exoharness_events",
-      injected_response_items: priorItems.length,
-      warm_app_server_reused: appServerReused,
-      warm_thread_reused: threadReused,
-    });
+          () =>
+            session.server.request<JsonObject>("turn/start", {
+              threadId,
+              input: turnInput,
+              model: modelBinding.model,
+              ...(context.agentConfig.reasoningEffort
+                ? { effort: context.agentConfig.reasoningEffort }
+                : {}),
+              approvalPolicy: "on-request",
+              sandboxPolicy: {
+                type: "externalSandbox",
+                networkAccess: "restricted",
+              },
+            }),
+        );
+    const nativeTurnId = attachingLiveTurn
+      ? savedTurn?.turnId
+      : asRecord(turnStart?.turn).id;
+    if (typeof nativeTurnId !== "string") {
+      throw new Error("Codex turn/start returned no native turn ID");
+    }
+    if (turnStart) {
+      await appendCustomEvent(turn, "codex_turn_started", {
+        metadata: turnMetadata(context),
+        codex_thread_id: threadId,
+        codex_turn_id: nativeTurnId,
+        codex_turn: turnStart.turn ?? null,
+        hydrated_from: threadReused ? "warm_codex_thread" : "exoharness_events",
+        injected_response_items: priorItems.length,
+        warm_app_server_reused: appServerReused,
+        warm_thread_reused: threadReused,
+      });
+    }
 
     await traceCodexLlmTurn(
       turnParent,
@@ -354,13 +569,41 @@ async function runCodexTurn(
       modelBinding,
       async () => {
         let completed = false;
-        const activeItems = new Set<string>();
         for await (const notification of session.server.events()) {
+          if (
+            !notificationBelongsToTurn(notification, threadId, nativeTurnId)
+          ) {
+            continue;
+          }
+          if (notification.method === "turn/completed") {
+            const response = await session.server.request<JsonObject>(
+              "thread/read",
+              { threadId, includeTurns: true },
+            );
+            const completedSnapshot = nativeTurnSnapshot(
+              response,
+              nativeTurnId,
+            );
+            if (!completedSnapshot) {
+              throw new Error(
+                `Codex thread has no completed turn ${nativeTurnId}`,
+              );
+            }
+            await projectNativeSnapshot(
+              context,
+              turnParent,
+              completedSnapshot,
+              projectedItems,
+              activeItems,
+            );
+          }
           const outcome = await handleCodexNotification(
             context,
             turnParent,
             notification,
             activeItems,
+            projectedItems,
+            nativeTurnId,
             traceState,
           );
           if (outcome === "completed") {
@@ -751,6 +994,8 @@ async function handleCodexNotification(
   turnParent: TraceParent,
   notification: CodexNotification,
   activeItems: Set<string>,
+  projectedItems: Set<string>,
+  nativeTurnId: string,
   traceState: CodexTurnTraceState,
 ): Promise<"running" | "completed"> {
   const { turn } = context.exoharness.current;
@@ -771,27 +1016,24 @@ async function handleCodexNotification(
     }
     case "item/started": {
       const item = notificationItem(notification);
+      const itemId = itemIdFromItem(item);
+      if (itemId && projectedItems.has(`${nativeTurnId}:${itemId}`)) {
+        return "running";
+      }
       const events = projectStartedItem(context, item, activeItems);
       await appendEvents(context, events);
       return "running";
     }
     case "item/completed": {
       const item = notificationItem(notification);
-      const events = projectCompletedItem(context, item, activeItems);
-      await appendEvents(context, events);
-      const itemId = itemIdFromItem(item);
-      const toolCall = itemId
-        ? toolCallFromCodexItem(context, item, itemId)
-        : null;
-      if (toolCall) {
-        await traceObservedToolCall(
-          context,
-          turnParent,
-          toolCall,
-          toolResultFromCodexItem(item),
-          "codex_observed_tool",
-        );
-      }
+      await projectNativeItem(
+        context,
+        turnParent,
+        item,
+        nativeTurnId,
+        activeItems,
+        projectedItems,
+      );
       return "running";
     }
     case "turn/plan/updated":
@@ -812,7 +1054,7 @@ async function handleCodexNotification(
       const params = asRecord(notification.params);
       const completedTurn = asRecord(params.turn);
       const status = completedTurn.status;
-      if (status === "failed") {
+      if (status !== "completed") {
         const message = codexTurnError(completedTurn);
         await streamCodexStatus(context, traceState, `error: ${message}`);
         throw new Error(message);
@@ -842,6 +1084,104 @@ async function handleCodexNotification(
   }
 }
 
+function notificationBelongsToTurn(
+  notification: CodexNotification,
+  threadId: string,
+  turnId: string,
+): boolean {
+  const params = asRecord(notification.params);
+  if (typeof params.threadId === "string" && params.threadId !== threadId) {
+    return false;
+  }
+  const eventTurnId =
+    notification.method === "turn/completed"
+      ? asRecord(params.turn).id
+      : params.turnId;
+  return typeof eventTurnId !== "string" || eventTurnId === turnId;
+}
+
+async function projectNativeSnapshot(
+  context: TurnContext,
+  turnParent: TraceParent,
+  snapshot: NativeTurnSnapshot,
+  projectedItems: Set<string>,
+  activeItems: Set<string>,
+): Promise<void> {
+  const events: EventData[] = [];
+  const observed: Array<{ call: PendingToolCall; result: JsonValue }> = [];
+  for (const item of snapshot.items) {
+    // Items without a status may still be changing in a live turn.
+    if (snapshot.status === "inProgress" && !("status" in item)) {
+      continue;
+    }
+    if (nativeItemComplete(item)) {
+      const itemId = itemIdFromItem(item);
+      const key = itemId ? `${snapshot.id}:${itemId}` : null;
+      if (key && projectedItems.has(key)) continue;
+      events.push(...projectCompletedItem(context, item, activeItems));
+      if (itemId) {
+        events.push(
+          customItemEvent("codex_item_projected", {
+            turn_id: snapshot.id,
+            item_id: itemId,
+          }),
+        );
+      }
+      if (key) projectedItems.add(key);
+      const call = itemId ? toolCallFromCodexItem(context, item, itemId) : null;
+      if (call) observed.push({ call, result: toolResultFromCodexItem(item) });
+    } else {
+      events.push(...projectStartedItem(context, item, activeItems));
+    }
+  }
+  await appendEvents(context, events);
+  await Promise.all(
+    observed.map(({ call, result }) =>
+      traceObservedToolCall(
+        context,
+        turnParent,
+        call,
+        result,
+        "codex_observed_tool",
+      ),
+    ),
+  );
+}
+
+async function projectNativeItem(
+  context: TurnContext,
+  turnParent: TraceParent,
+  item: Record<string, unknown>,
+  nativeTurnId: string,
+  activeItems: Set<string>,
+  projectedItems: Set<string>,
+): Promise<void> {
+  const itemId = itemIdFromItem(item);
+  const key = itemId ? `${nativeTurnId}:${itemId}` : null;
+  if (key && projectedItems.has(key)) return;
+  const events = projectCompletedItem(context, item, activeItems);
+  if (itemId) {
+    events.push(
+      customItemEvent("codex_item_projected", {
+        turn_id: nativeTurnId,
+        item_id: itemId,
+      }),
+    );
+  }
+  await appendEvents(context, events);
+  if (key) projectedItems.add(key);
+  const toolCall = itemId ? toolCallFromCodexItem(context, item, itemId) : null;
+  if (toolCall) {
+    await traceObservedToolCall(
+      context,
+      turnParent,
+      toolCall,
+      toolResultFromCodexItem(item),
+      "codex_observed_tool",
+    );
+  }
+}
+
 function projectStartedItem(
   context: TurnContext,
   item: Record<string, unknown>,
@@ -852,7 +1192,7 @@ function projectStartedItem(
     return [];
   }
   const toolCall = toolCallFromCodexItem(context, item, itemId);
-  if (!toolCall) {
+  if (!toolCall || activeItems.has(itemId)) {
     return [];
   }
   activeItems.add(itemId);

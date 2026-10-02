@@ -177,6 +177,10 @@ pub(crate) trait HarnessExecutor: Send + Sync + 'static {
         false
     }
 
+    fn can_reconcile_unresolved_tool_call(&self, _config: &AgentConfig) -> bool {
+        false
+    }
+
     fn agent_config(
         &self,
         _definition: &exo_managed_agents::AgentDefinition,
@@ -228,6 +232,8 @@ pub(crate) trait HarnessExecutor: Send + Sync + 'static {
         turn_trace: Option<&dyn TurnExecutionTrace>,
     ) -> Result<()>;
 
+    // A harness must opt in after it can reconstruct execution progress without
+    // repeating tool or sandbox side effects from the interrupted turn.
     async fn resume_turn(
         &self,
         _agent: &dyn AgentHandle,
@@ -644,7 +650,11 @@ impl Runtime {
                                     && !approval_responses.get(&turn_id).is_some_and(|responses| responses.contains(&approval.approval_id))
                             })
                         });
-                    if !pending_approval {
+                    if !pending_approval
+                        && !provider
+                            .executor
+                            .can_reconcile_unresolved_tool_call(&work.agent_config)
+                    {
                         anyhow::bail!(
                             "cannot safely resume unresolved tool call `{tool_call_id}` (`{}`) for turn {turn_id}",
                             request.function_name
