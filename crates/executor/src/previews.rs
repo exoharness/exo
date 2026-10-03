@@ -38,7 +38,7 @@ pub fn previews_for(
     thread: &ThreadRecord,
     endpoint: &PreviewEndpoint,
 ) -> Result<Option<PreviewUrls>> {
-    let Some(environment) = environment.filter(|env| env.previews.is_some()) else {
+    let Some(environment) = environment.filter(|env| !env.config.tcp_ports.is_empty()) else {
         return Ok(None);
     };
     let slug: String = thread

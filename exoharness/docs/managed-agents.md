@@ -95,14 +95,13 @@ the next line; pressing Enter on an empty prompt also checks for updates.
 
 ### Browser previews
 
-Enable previews for an environment's published TCP ports:
+Declaring TCP ports in an environment automatically provides browser previews:
 
 ```yaml
 name: dev
 config:
   image: my-dev-image
   tcp_ports: [5173, 8000]
-previews: {}
 ```
 
 `exo agent run` prints a clickable sandbox services page and one URL per port:
@@ -113,7 +112,8 @@ sandbox: http://my-project-<id>.localhost:<port>
   port 8000: http://8000.my-project-<id>.localhost:<port>
 ```
 
-The HTML page lists every service link. Exo also gives these URLs to the agent,
+Environments with no published ports have no browser previews. The HTML page
+lists every service link. Exo also gives these URLs to the agent,
 so it can start services and configure browser API URLs and CORS origins.
 `.localhost` names resolve to loopback in browsers without DNS or hosts-file
 changes. HTTP and WebSocket paths and application headers pass through unchanged.
@@ -141,7 +141,8 @@ exo thread ports AGENT THREAD
 
 This command uses the selected provider's preview address. Links require the
 owning CLI session or server and the sandbox services to be running. Previews
-currently use HTTP.
+currently use HTTP. Browser links work for HTTP and WebSocket services; use
+`exo thread sandbox forward` for other TCP services.
 
 #### Preview troubleshooting
 
@@ -437,8 +438,7 @@ operators.
 new threads. Resume with `--agent NAME --thread THREAD --environment NAME` or
 `--environment-file path.yaml` to apply an updated definition to a saved thread.
 A changed sandbox configuration replaces its sandbox and preserves thread history
-and filesystem resources; files outside persistent mounts are discarded. Changes
-to preview enablement preserve the sandbox. Omitting
+and filesystem resources; files outside persistent mounts are discarded. Omitting
 both environment flags retains the thread's saved configuration. Reapplying the
 same definition reuses its sandbox. To upgrade the image of an existing sandbox,
 change the image reference in the environment; use a versioned tag or digest.

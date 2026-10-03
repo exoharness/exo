@@ -62,7 +62,6 @@ async fn direct_connections_preserve_upgrade_bytes_and_report_unavailable_servic
     let environment = EnvironmentDefinition {
         name: "dev".into(),
         config: request.clone(),
-        previews: Some(Default::default()),
     };
     let thread = agent
         .new_thread(exoharness::NewThreadRequest {
@@ -159,10 +158,9 @@ async fn hostnames_are_stable_bounded_and_distinguish_equal_thread_names() -> Re
     record.slug = "Hello / world".repeat(20);
     let mut config = exoharness::test_support::sandbox_request();
     config.tcp_ports = vec![5173, 8000];
-    let env = EnvironmentDefinition {
+    let mut env = EnvironmentDefinition {
         name: "dev".into(),
         config,
-        previews: Some(Default::default()),
     };
     let endpoint = PreviewEndpoint {
         domain: "localhost".into(),
@@ -180,6 +178,8 @@ async fn hostnames_are_stable_bounded_and_distinguish_equal_thread_names() -> Re
         first.page,
         previews_for(Some(&env), &record, &endpoint)?.unwrap().page
     );
+    env.config.tcp_ports.clear();
+    assert!(previews_for(Some(&env), &record, &endpoint)?.is_none());
     Ok(())
 }
 

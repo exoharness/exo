@@ -16,4 +16,3 @@ config:
   policy:
     networking:
       type: unrestricted
-previews: {}

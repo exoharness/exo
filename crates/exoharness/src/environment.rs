@@ -8,13 +8,7 @@ use crate::CreateSandboxRequest;
 pub struct EnvironmentDefinition {
     pub name: String,
     pub config: CreateSandboxRequest,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub previews: Option<BrowserPreviewConfig>,
 }
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct BrowserPreviewConfig {}
 
 impl EnvironmentDefinition {
     pub fn validate_name(name: &str) -> Result<()> {
@@ -31,13 +25,10 @@ impl EnvironmentDefinition {
 
     pub fn validate(&self) -> Result<()> {
         Self::validate_name(&self.name)?;
-        if self.previews.is_some() {
-            ensure!(
-                !self.config.tcp_ports.is_empty()
-                    && self.config.tcp_ports.iter().all(|port| *port > 0),
-                "previews require nonzero published TCP ports"
-            );
-        }
+        ensure!(
+            self.config.tcp_ports.iter().all(|port| *port > 0),
+            "published TCP ports must be nonzero"
+        );
         ensure!(
             !self.config.image.trim().is_empty(),
             "environment image must not be empty"
@@ -87,13 +78,12 @@ mod tests {
     }
 
     #[test]
-    fn previews_require_published_ports() -> Result<()> {
-        let mut environment: EnvironmentDefinition = serde_json::from_str(
-            r#"{"name":"dev","config":{"image":"dev","tcp_ports":[13000]},"previews":{}}"#,
-        )?;
+    fn published_tcp_ports_must_be_nonzero() -> Result<()> {
+        let mut environment: EnvironmentDefinition =
+            serde_json::from_str(r#"{"name":"dev","config":{"image":"dev","tcp_ports":[13000]}}"#)?;
         environment.validate()?;
         environment.config.tcp_ports.clear();
-        assert!(environment.validate().is_err());
+        environment.validate()?;
         environment.config.tcp_ports.push(0);
         assert!(environment.validate().is_err());
         Ok(())

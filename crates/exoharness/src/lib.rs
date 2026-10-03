@@ -13,7 +13,7 @@ pub mod contract_tests;
 pub mod egress;
 mod environment;
 mod error;
-pub use environment::{BrowserPreviewConfig, EnvironmentDefinition};
+pub use environment::EnvironmentDefinition;
 mod credential_policy;
 pub mod harness;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]

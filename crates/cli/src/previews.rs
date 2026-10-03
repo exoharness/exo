@@ -17,7 +17,7 @@ pub(crate) async fn print(
     thread: Arc<dyn ConversationHandle>,
 ) -> Result<()> {
     let previews = runtime.preview_urls(agent, thread).await?.context(
-        "no previews have been assigned; enable previews in the environment and run this thread",
+        "no browser previews are available; declare config.tcp_ports in the environment and run this thread",
     )?;
     println!("sandbox: {}", previews.page);
     crate::print_table(

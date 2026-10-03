@@ -634,7 +634,7 @@ mod tests {
     use exoharness::{CredentialNetworkPolicy, SandboxNetworkPolicy};
 
     #[tokio::test]
-    async fn preview_changes_preserve_sandboxes_and_deleted_sandboxes_are_replaced() -> Result<()> {
+    async fn changed_environments_and_deleted_sandboxes_are_replaced() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let harness =
             exoharness::BasicExoHarness::new(crate::test_support::local_test_config(temp.path()))
@@ -664,17 +664,7 @@ mod tests {
         };
         let first =
             ensure_conversation_sandbox(thread.as_ref(), &agent_config, &config, None).await?;
-        environment.previews = Some(exoharness::BrowserPreviewConfig::default());
-        let thread = thread.update_environment(environment.clone()).await?;
-        config.environment = Some(environment.clone());
-        assert_eq!(thread.list_sandboxes().await?[0].id, first);
-        assert_eq!(
-            ensure_conversation_sandbox(thread.as_ref(), &agent_config, &config, None).await?,
-            first
-        );
         thread.stop_sandbox(first.clone()).await?;
-        environment.previews = None;
-        let thread = thread.update_environment(environment.clone()).await?;
         assert_eq!(thread.list_sandboxes().await?[0].id, first);
         assert!(!thread.list_sandboxes().await?[0].running);
         environment.config.image = "replacement".into();
@@ -969,7 +959,6 @@ mod tests {
             }
         );
         config.environment = Some(exoharness::EnvironmentDefinition {
-            previews: None,
             name: "restricted".into(),
             config: exoharness::CreateSandboxRequest {
                 tcp_ports: vec![],

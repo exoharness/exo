@@ -156,7 +156,7 @@ impl Runtime {
             .record()
             .environment
             .as_ref()
-            .is_none_or(|env| env.previews.is_none())
+            .is_none_or(|env| env.config.tcp_ports.is_empty())
         {
             return Ok(());
         }
@@ -196,7 +196,7 @@ impl Runtime {
             .record()
             .environment
             .as_ref()
-            .is_none_or(|env| env.previews.is_none())
+            .is_none_or(|env| env.config.tcp_ports.is_empty())
         {
             if let Some(proxy) = self.previews.get() {
                 proxy.remove(thread.record().id);
