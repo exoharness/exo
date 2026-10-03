@@ -177,6 +177,7 @@ impl Fixture {
         let mut command = Command::new(binary);
         command
             .env_clear()
+            .env("EXO_HOME", &self.root)
             .env("EXO_CONFIG_DIR", self.temp.path().join("config"))
             .env("SMOKE_API_KEY", "fixture-model-key")
             .env("RUNTIME_TOKEN", "workflow-token")

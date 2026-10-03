@@ -40,12 +40,24 @@ and query parameters without interpreting them.
 
 ## Setup
 
-Local state defaults to `~/.exo`, shared across working directories. `--root`
-selects a different state directory. Explicit provider selections and saved
+Exo home defaults to `$HOME/.exo`, shared across working directories. `--root`
+or `EXO_HOME` selects a different home; the flag takes precedence. Provider profiles
+and authentication default to `<root>/config`, runtime state to `<root>/exoharness`,
+and the pricing cache to `<root>/cache`. Docker and Apple container durable filesystems
+live in `<root>/exoharness/durable-filesystems`; `EXO_DURABLE_FILE_SYSTEM_ROOT`
+overrides that location. Local TypeScript harnesses receive the
+resolved home as `EXO_HOME`. `--config-dir` overrides the profile directory;
+`--master-key-path` overrides the file encryption key, which otherwise lives at
+`<root>/exoharness/master.key`. Explicit provider selections and saved
 remote aliases continue to select their configured state or server.
 State created under the previous `./.exo` default stays in that directory;
 use `--root /absolute/path/to/previous-checkout/.exo` to access it. Exo does not
 move it automatically.
+
+For provider profiles saved under the previous `~/.config/exo` default, pass
+`--config-dir ~/.config/exo`. For existing file-encrypted state, keep using its
+original key with `--master-key-path /path/to/master.key`. macOS Keychain accounts
+remain tied to the runtime state directory.
 
 From this checkout:
 

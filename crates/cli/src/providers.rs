@@ -59,7 +59,8 @@ pub(crate) async fn runtime(
     };
     let state_root = state_root.context("local provider requires a state root")?;
     let config = crate::build_exo_config(cli, state_root)?;
-    let env_vars = env.clone().into_vars();
+    let mut env_vars = env.clone().into_vars();
+    env_vars.insert("EXO_HOME".into(), state_root.to_string_lossy().into_owned());
     let state: Arc<dyn ExoHarness> = Arc::new(
         BasicExoHarness::new(config.clone())
             .await?
@@ -91,7 +92,14 @@ pub(crate) async fn runtime(
             .unwrap_or_default(),
     };
     let pricing = Arc::new(match execution {
-        Some(args) => cost::load(args.pricing_path.clone(), args.pricing_url.clone()).await,
+        Some(args) => {
+            cost::load(
+                args.pricing_path.clone(),
+                args.pricing_url.clone(),
+                &state_root.join("cache/litellm_prices.json"),
+            )
+            .await
+        }
         None => cost::PricingTable::empty(),
     });
     let provider = executor::LocalProvider::managed(state, config, env_vars, pricing)?

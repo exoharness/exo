@@ -18,6 +18,30 @@ fn request(name: &str, value: &str, target: Option<CredentialDestination>) -> Pu
 }
 
 #[tokio::test]
+async fn default_file_key_is_scoped_to_the_configured_root_and_reopens() -> Result<()> {
+    let temp = TempDir::new()?;
+    let mut config = local_test_config(temp.path().join("state"));
+    config.secret_backend = crate::SecretBackendChoice::File { path: None };
+    let harness = BasicExoHarness::new(config.clone()).await?;
+    let vault = harness.create_vault("test").await?;
+    let id = vault
+        .put_secret(request("key", "test-secret", None))
+        .await?;
+    assert!(config.root.join("master.key").is_file());
+    config
+        .validate_secret_mount(&config.root)
+        .expect_err("key must not be mounted");
+    drop(harness);
+    let reopened = BasicExoHarness::new(config).await?;
+    let reopened_vault = reopened.get_vault(&vault.record().id).await?.unwrap();
+    assert_eq!(
+        reopened_vault.get_secret(&id).await?,
+        Some(key("test-secret"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn vault_secrets_share_one_store_and_rotate_without_changing_id() -> Result<()> {
     let temp = TempDir::new()?;
     let harness = BasicExoHarness::new(local_test_config(temp.path())).await?;
@@ -279,10 +303,7 @@ async fn metadata_tampering_cannot_redirect_secrets() -> Result<()> {
 async fn legacy_secrets_move_into_global_vault_with_stable_ids() -> Result<()> {
     let temp = TempDir::new()?;
     let config = local_test_config(temp.path());
-    let cipher = crate::basic::build_secret_cipher(
-        config.secret_backend.clone(),
-        temp.path().to_string_lossy().into_owned(),
-    )?;
+    let cipher = crate::basic::build_secret_cipher(config.secret_backend.clone(), temp.path());
     #[derive(Serialize)]
     struct LegacySecret {
         metadata: SecretMetadata,

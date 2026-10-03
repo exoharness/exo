@@ -1472,25 +1472,7 @@ fn durable_file_system_root(configured_root: Option<&Path>) -> Result<PathBuf> {
     if let Some(root) = configured_root {
         return Ok(root.to_path_buf());
     }
-    if let Some(value) = std::env::var_os("XDG_DATA_HOME") {
-        let path = PathBuf::from(value);
-        if !path.as_os_str().is_empty() {
-            return Ok(path.join("exo").join("durable-filesystems"));
-        }
-    }
-    if let Some(value) = std::env::var_os("HOME") {
-        let path = PathBuf::from(value);
-        if !path.as_os_str().is_empty() {
-            return Ok(path
-                .join(".local")
-                .join("share")
-                .join("exo")
-                .join("durable-filesystems"));
-        }
-    }
-    bail!(
-        "could not determine durable file system root: set {DURABLE_FILE_SYSTEM_ROOT_ENV}, XDG_DATA_HOME, or HOME"
-    )
+    bail!("durable file system root must be configured on the sandbox backend")
 }
 
 pub(crate) fn stable_fnv1a_hex(input: &str) -> String {

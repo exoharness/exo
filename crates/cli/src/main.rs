@@ -65,24 +65,21 @@ use tui::run_chat_repl;
 #[command(name = "exo")]
 #[command(about = "CLI for exo agents")]
 struct Cli {
+    /// Exo home directory for local state, configuration, and caches.
+    #[arg(long, global = true, env = "EXO_HOME", default_value = default_exo_home(), required = false)]
+    root: PathBuf,
     /// Override the provider and use its profile context, ignoring directory/global context (saved aliases retain theirs).
     #[arg(long = "provider", global = true)]
     provider_profile: Option<String>,
-    /// Directory containing saved provider profiles and authentication state.
+    /// Directory containing provider profiles and authentication (defaults to <root>/config).
     #[arg(long, global = true, env = "EXO_CONFIG_DIR")]
     config_dir: Option<PathBuf>,
-    /// Home directory used for default local state and configuration directories.
-    #[arg(long, global = true, env = "HOME")]
-    home: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
 }
 
 #[derive(Debug, Args)]
 struct RuntimeArgs {
-    /// Directory containing local Exo state (defaults to ~/.exo).
-    #[arg(long, global = true)]
-    root: Option<PathBuf>,
     /// Store used to protect vault credentials.
     #[arg(long, global = true, value_enum, env = "EXO_SECRET_BACKEND")]
     secret_backend: Option<SecretBackendArg>,
@@ -94,21 +91,12 @@ struct RuntimeArgs {
     env_file: Option<PathBuf>,
 }
 
-impl RuntimeArgs {
-    fn state_root(root: Option<&Path>, home: Option<&Path>) -> Result<PathBuf> {
-        match root {
-            Some(root) => Ok(root.to_owned()),
-            None => {
-                let root = home
-                    .context("HOME is not set; provide --home or --root for local Exo state")?
-                    .join(".exo");
-                std::fs::create_dir_all(&root).with_context(|| {
-                    format!("creating local state directory {}", root.display())
-                })?;
-                root.canonicalize()
-                    .with_context(|| format!("resolving local state directory {}", root.display()))
-            }
-        }
+fn default_exo_home() -> clap::builder::Resettable<clap::builder::OsStr> {
+    match std::env::var_os("HOME").filter(|home| !home.is_empty()) {
+        Some(home) => clap::builder::Resettable::Value(
+            PathBuf::from(home).join(".exo").into_os_string().into(),
+        ),
+        None => clap::builder::Resettable::Reset,
     }
 }
 
@@ -509,31 +497,27 @@ impl From<SandboxScopeArg> for SandboxScope {
     }
 }
 
-// Provider and FirecrackerBridge return from run before runtime options are accessed.
-macro_rules! runtime_accessor {
-    ($name:ident $(, $mutable:tt)?) => {
-        fn $name(&$($mutable)? self) -> &$($mutable)? RuntimeArgs {
-            match &$($mutable)? self.command {
-                Commands::Environment { runtime, .. }
-                | Commands::Vault { runtime, .. }
-                | Commands::Serve { runtime, .. }
-                | Commands::Agent { runtime, .. }
-                | Commands::Conversation { runtime, .. }
-                => runtime,
-                Commands::Provider { .. } | Commands::FirecrackerBridge => {
-                    unreachable!("command does not use runtime options")
-                }
+impl Cli {
+    // Provider and FirecrackerBridge return before runtime options are accessed.
+    fn runtime(&self) -> &RuntimeArgs {
+        match &self.command {
+            Commands::Environment { runtime, .. }
+            | Commands::Vault { runtime, .. }
+            | Commands::Serve { runtime, .. }
+            | Commands::Agent { runtime, .. }
+            | Commands::Conversation { runtime, .. } => runtime,
+            Commands::Provider { .. } | Commands::FirecrackerBridge => {
+                unreachable!("command does not use runtime options")
             }
         }
-    };
-}
-
-impl Cli {
-    runtime_accessor!(runtime);
-    runtime_accessor!(runtime_mut, mut);
+    }
 
     fn state_root(&self) -> Result<PathBuf> {
-        RuntimeArgs::state_root(self.runtime().root.as_deref(), self.home.as_deref())
+        std::fs::create_dir_all(&self.root)
+            .with_context(|| format!("creating local state directory {}", self.root.display()))?;
+        self.root
+            .canonicalize()
+            .with_context(|| format!("resolving local state directory {}", self.root.display()))
     }
 
     fn execution(&self) -> Option<&ExecutionArgs> {
@@ -983,14 +967,10 @@ async fn run(mut cli: Cli) -> Result<()> {
         #[cfg(not(feature = "firecracker"))]
         bail!("Firecracker bridge support requires building Exo with --features firecracker");
     }
-    let config_directory = match cli.config_dir.clone() {
-        Some(path) => path,
-        None => cli
-            .home
-            .as_ref()
-            .context("--config-dir or --home is required")?
-            .join(".config/exo"),
-    };
+    let config_directory = cli
+        .config_dir
+        .clone()
+        .unwrap_or_else(|| cli.root.join("config"));
     let mut provider_store = providers::Store::load(config_directory)?;
     if let Commands::Provider { command } = &cli.command {
         return providers::run(command.as_ref(), &mut provider_store).await;
@@ -1035,7 +1015,7 @@ async fn run_selected(
                 (Some(client), account)
             }
             providers::Connection::Local { root } => {
-                cli.runtime_mut().root = Some(root.clone());
+                cli.root = root.clone();
                 (None, root.display().to_string())
             }
         };
@@ -2603,7 +2583,7 @@ mod command_tests {
 
     #[cfg(unix)]
     #[test]
-    fn default_state_symlink_keeps_the_existing_keychain_account() -> Result<()> {
+    fn state_symlink_keeps_the_existing_keychain_account() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let home = temp.path().join("home");
         let saved = temp.path().join("saved-state");
@@ -2612,8 +2592,8 @@ mod command_tests {
         std::os::unix::fs::symlink(&saved, home.join(".exo"))?;
         let cli = Cli::try_parse_from([
             "exo",
-            "--home",
-            home.to_str().context("home path")?,
+            "--root",
+            home.join(".exo").to_str().context("home path")?,
             "agent",
             "list",
         ])?;
