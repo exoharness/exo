@@ -125,7 +125,7 @@ where
         stream_mode: ExecutorStreamMode<'_>,
         turn_trace: Option<&dyn TurnExecutionTrace>,
     ) -> Result<()> {
-        self.run_turn(
+        self.run_turn(TypeScriptTurn {
             agent,
             conversation,
             turn,
@@ -134,8 +134,8 @@ where
             prepared,
             stream_mode,
             turn_trace,
-            false,
-        )
+            recovering: false,
+        })
         .await
     }
 
@@ -150,7 +150,7 @@ where
         stream_mode: ExecutorStreamMode<'_>,
         turn_trace: Option<&dyn TurnExecutionTrace>,
     ) -> Result<()> {
-        self.run_turn(
+        self.run_turn(TypeScriptTurn {
             agent,
             conversation,
             turn,
@@ -159,8 +159,8 @@ where
             prepared,
             stream_mode,
             turn_trace,
-            true,
-        )
+            recovering: true,
+        })
         .await
     }
 }
@@ -169,19 +169,9 @@ impl<T> TypeScriptExecutor<T>
 where
     T: ToolRuntime + 'static,
 {
-    async fn run_turn(
-        &self,
-        agent: &dyn AgentHandle,
-        conversation: Arc<dyn ConversationHandle>,
-        turn: Arc<dyn TurnHandle>,
-        agent_config: &AgentConfig,
-        conversation_config: &ConversationConfig,
-        prepared: &SendRequest,
-        stream_mode: ExecutorStreamMode<'_>,
-        turn_trace: Option<&dyn TurnExecutionTrace>,
-        recovering: bool,
-    ) -> Result<()> {
-        let module_path = agent_config
+    async fn run_turn(&self, turn: TypeScriptTurn<'_>) -> Result<()> {
+        let module_path = turn
+            .agent_config
             .typescript
             .as_ref()
             .map(|config| config.module_path.clone())
@@ -190,28 +180,13 @@ where
             bail!("typescript harness module does not exist: {module_path}");
         }
 
-        let key = format!("{}:{}", conversation.record().id, module_path);
+        let key = format!("{}:{}", turn.conversation.record().id, module_path);
         let runner = self
-            .runner(&key, &module_path, Arc::clone(&conversation))
+            .runner(&key, &module_path, Arc::clone(&turn.conversation))
             .await?;
         let result = {
             let mut runner = runner.lock().await;
-            runner
-                .execute_turn(
-                    self,
-                    TypeScriptTurn {
-                        agent,
-                        conversation: conversation.as_ref(),
-                        turn,
-                        agent_config,
-                        conversation_config,
-                        prepared,
-                        stream_mode,
-                        turn_trace,
-                        recovering,
-                    },
-                )
-                .await
+            runner.execute_turn(self, turn).await
         };
 
         if result.is_err() {
@@ -336,7 +311,7 @@ struct TypeScriptSandboxProcessReuseEvent {
 
 struct TypeScriptTurn<'a> {
     agent: &'a dyn AgentHandle,
-    conversation: &'a dyn ConversationHandle,
+    conversation: Arc<dyn ConversationHandle>,
     turn: Arc<dyn TurnHandle>,
     agent_config: &'a AgentConfig,
     conversation_config: &'a ConversationConfig,
@@ -453,7 +428,7 @@ impl TypeScriptRunnerProcess {
     {
         let TypeScriptTurn {
             agent,
-            conversation,
+            conversation: conversation_arc,
             turn,
             agent_config,
             conversation_config,
@@ -462,6 +437,7 @@ impl TypeScriptRunnerProcess {
             turn_trace,
             recovering,
         } = turn;
+        let conversation = conversation_arc.as_ref();
         let exoharness_server = ExoHarnessServer::new(Arc::clone(&executor.root));
         let conversation_info = ConversationHandleInfo {
             agent_id: agent.record().id,

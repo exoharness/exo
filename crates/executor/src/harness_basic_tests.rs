@@ -1032,9 +1032,8 @@ async fn completed_tool_result_survives_restart_before_next_tool_approval() -> R
 #[tokio::test]
 async fn thread_created_during_recovery_can_send_immediately() -> Result<()> {
     let tempdir = TempDir::new()?;
-    let state: Arc<dyn ExoHarness> = Arc::new(
-        BasicExoHarness::new(local_test_config(&tempdir.path().join("exoharness"))).await?,
-    );
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness"))).await?);
     create_test_credential(state.as_ref()).await;
     let model = Arc::new(FakeModelClient::new(vec![ModelResponse {
         provider_cost_usd: None,

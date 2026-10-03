@@ -605,13 +605,12 @@ impl Runtime {
                     }
                 }
                 EventData::ToolResult { tool_call_id, .. } => {
-                    if let Some(turn_id) = event.turn_id {
-                        if let Some(pending) = tool_requests.get_mut(&turn_id)
-                            && let Some(index) =
-                                pending.iter().position(|(_, id, _)| *id == tool_call_id)
-                        {
-                            pending.remove(index);
-                        }
+                    if let Some(turn_id) = event.turn_id
+                        && let Some(pending) = tool_requests.get_mut(&turn_id)
+                        && let Some(index) =
+                            pending.iter().position(|(_, id, _)| *id == tool_call_id)
+                    {
+                        pending.remove(index);
                     }
                 }
                 _ => {}
