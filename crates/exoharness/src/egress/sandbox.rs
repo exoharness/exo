@@ -227,6 +227,24 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
             .await
     }
 
+    pub(crate) async fn restore_with_proxy<T, TF, B, BF>(
+        &self,
+        request: SandboxRequest,
+        external_proxy: Option<&super::ExternalProxyConfig>,
+        proxy: T,
+        build: B,
+        terminate: impl Future<Output = Result<()>>,
+    ) -> Result<Arc<H>>
+    where
+        T: FnOnce(State, CancellationToken) -> TF,
+        TF: Future<Output = Result<P>>,
+        B: FnOnce(Option<Arc<SandboxEgress<P>>>) -> BF,
+        BF: Future<Output = Result<H>>,
+    {
+        self.acquire_with_proxy_inner(request, external_proxy, false, proxy, build, terminate)
+            .await
+    }
+
     async fn acquire_with_proxy_inner<T, TF, B, BF>(
         &self,
         request: SandboxRequest,
