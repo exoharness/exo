@@ -288,6 +288,7 @@ impl FirecrackerArgs {
             state_root: self.state_root.clone(),
             image_size_gib: self.image_size_gib,
             workspace_size_gib: self.workspace_size_gib,
+            template_resource_slots: 0,
             jailer_uid_base: self.jailer_uid_base,
             dns_server: self.dns_server,
             allowed_egress_cidrs,

@@ -10,6 +10,261 @@ fn resource(source: ResourceSource) -> ResourceDefinition {
     }
 }
 
+#[cfg(all(target_os = "macos", feature = "smolvm"))]
+#[tokio::test]
+#[ignore = "requires SmolVM and EXO_SMOLVM_TEST_IMAGE with Git and CA certificates"]
+async fn smolvm_isolated_git_resources_live() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = ResourceStore::new(&temp.path().join("state"))?.with_volume_size(1)?;
+    let backend = std::sync::Arc::new(crate::SmolvmSandboxBackend::from_config(
+        crate::SmolvmBackendConfig {
+            mode: crate::SmolvmExecutionMode::Warm,
+            image_cache: Some(temp.path().join("images")),
+            ..Default::default()
+        },
+    ));
+    isolated_git_resources_live(store, backend, std::env::var("EXO_SMOLVM_TEST_IMAGE")?).await
+}
+
+#[cfg(all(target_os = "linux", feature = "firecracker"))]
+#[tokio::test]
+#[ignore = "requires Linux/KVM, XFS and EXO_FIRECRACKER_TEST_IMAGE"]
+async fn firecracker_isolated_git_resources_live() -> Result<()> {
+    let temp = tempfile::tempdir_in("/var/lib/exo")?;
+    let image = std::env::var("EXO_FIRECRACKER_TEST_IMAGE")?;
+    let state_root = temp.path().join("state");
+    let store = ResourceStore::image_store(&state_root, 1)?;
+    let backend = std::sync::Arc::new(
+        crate::FirecrackerSandboxBackend::new(crate::FirecrackerConfig {
+            state_root,
+            allowed_local_images: vec![image.clone().into()],
+            image_size_gib: 4,
+            workspace_size_gib: 1,
+            ..Default::default()
+        })
+        .await?,
+    );
+    isolated_git_resources_live(store, backend, image).await
+}
+
+#[cfg(any(
+    all(target_os = "macos", feature = "smolvm"),
+    all(target_os = "linux", feature = "firecracker")
+))]
+async fn isolated_git_resources_live(
+    store: ResourceStore,
+    backend: std::sync::Arc<dyn crate::ManagedSandboxBackend>,
+    image: String,
+) -> Result<()> {
+    use crate::{
+        SandboxCommand, SandboxLifecycleConfig, SandboxNetworkPolicy, SandboxRequest,
+        SandboxResourceShape, SandboxSpec,
+    };
+    let definition = resource(ResourceSource::GitRepository {
+        path: None,
+        url: Some("https://github.com/octocat/Hello-World.git".into()),
+        checkout: None,
+        credential: None,
+    });
+    let request = SandboxRequest {
+        sandbox_id: format!("resource-preparation-{}", Uuid7::now()),
+        scope: ResourceScope::Global,
+        provider_state: None,
+        spec: SandboxSpec {
+            image: backend.resolve_image(&image).await?.image,
+            resources: SandboxResourceShape::new(1, 1024),
+            mounts: vec![],
+            durable_file_systems: vec![],
+            tcp_ports: vec![],
+            policy: SandboxNetworkPolicy::Limited {
+                allowed_hosts: vec!["github.com".into()],
+            }
+            .into(),
+            default_workdir: "/tmp/exo-home/workspace".into(),
+        },
+        lifecycle: SandboxLifecycleConfig {
+            idle_ttl: Some(std::time::Duration::from_secs(180)),
+        },
+    };
+    let prepared = {
+        let store = store.clone();
+        let backend = backend.clone();
+        let request = request.clone();
+        let runtime = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            let command = SandboxCommand {
+                argv: vec![
+                    "git".into(),
+                    "clone".into(),
+                    "--depth=1".into(),
+                    "--single-branch".into(),
+                    "--no-tags".into(),
+                    "https://github.com/octocat/Hello-World.git".into(),
+                    "checkout".into(),
+                ],
+                env: HashMap::new(),
+                display_argv: None,
+                cwd: Some("/workspace".into()),
+                timeout: Some(std::time::Duration::from_secs(120)),
+            };
+            store.prepare_volume(definition, "test-project", |scope, mount| {
+                let mut request = request;
+                request.scope = scope;
+                runtime.block_on(run_resource_command(
+                    backend.as_ref(),
+                    request,
+                    mount,
+                    command,
+                ))
+            })
+        })
+        .await??
+    };
+    let agent = Uuid7::now();
+    let first = Uuid7::now();
+    let second = Uuid7::now();
+    let result = async {
+        let copies = {
+            let store = store.clone();
+            let prepared = prepared.clone();
+            tokio::task::spawn_blocking(move || {
+                Ok::<_, anyhow::Error>([
+                    store.materialize(agent, first, vec![prepared.clone()], vec![None])?.remove(0),
+                    store.materialize(agent, second, vec![prepared], vec![None])?.remove(0),
+                ])
+            }).await??
+        };
+        let command = |thread, script: &str| -> Result<SandboxCommand> { Ok(SandboxCommand {
+            argv: vec!["/bin/sh".into(), "-ceu".into(), script.into()],
+            env: store.command_env(ResourceScope::Thread { agent_id: agent, thread_id: thread }, &copies, HashMap::new())?, display_argv: None, cwd: Some("/workspace".into()),
+            timeout: Some(std::time::Duration::from_secs(10)),
+        }) };
+        let mut offline = request.clone();
+        offline.spec.policy = SandboxNetworkPolicy::Disabled.into();
+        offline.scope = ResourceScope::Thread { agent_id: agent, thread_id: first };
+        offline.sandbox_id = format!("resource-private-{}", Uuid7::now());
+        run_resource_command(backend.as_ref(), offline.clone(), copies[0].clone(), command(first,
+            "test -d checkout/.git; test \"$(git -C checkout rev-parse --is-shallow-repository)\" = true; test \"$(git -C checkout rev-list --count HEAD)\" = 1; printf kept > edits"
+        )?).await?;
+        offline.scope = ResourceScope::Thread { agent_id: agent, thread_id: second };
+        offline.sandbox_id = format!("resource-other-{}", Uuid7::now());
+        run_resource_command(backend.as_ref(), offline.clone(), copies[1].clone(), command(second,
+            "test -d checkout/.git; test ! -e edits"
+        )?).await?;
+        {
+            let store = store.clone();
+            let prepared = prepared.clone();
+            tokio::task::spawn_blocking(move || {
+                store.remove_snapshot(prepared.snapshot.as_deref().unwrap())?;
+                store.materialize(agent, first, vec![prepared], vec![None])
+            }).await??;
+        }
+        offline.scope = ResourceScope::Thread { agent_id: agent, thread_id: first };
+        offline.sandbox_id = format!("resource-replacement-{}", Uuid7::now());
+        run_resource_command(backend.as_ref(), offline, copies[0].clone(), command(first,
+            "test \"$(cat edits)\" = kept; test -d checkout/.git"
+        )?).await?;
+        Ok(())
+    }.await;
+    tokio::task::spawn_blocking(move || {
+        store.remove_thread(agent, first)?;
+        store.remove_thread(agent, second)
+    })
+    .await??;
+    result
+}
+
+#[cfg(any(
+    all(target_os = "macos", feature = "smolvm"),
+    all(target_os = "linux", feature = "firecracker")
+))]
+async fn run_resource_command(
+    backend: &dyn crate::ManagedSandboxBackend,
+    mut request: crate::SandboxRequest,
+    mount: FileSystemMount,
+    command: crate::SandboxCommand,
+) -> Result<()> {
+    request.spec.mounts = vec![crate::SandboxMount {
+        host_path: mount.host_path.into(),
+        guest_path: mount.mount_path,
+        access: crate::SandboxMountAccess::ReadWrite,
+        internal: true,
+    }];
+    let handle = backend.acquire(request.clone()).await?;
+    let output = handle.exec(&command).await;
+    backend.terminate(request).await?;
+    let output = output?;
+    ensure!(output.ok, "resource command failed: {}", output.stderr);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "requires APFS disk images on macOS"]
+fn isolated_preparation_preserves_edits_and_purge_preserves_private_copies() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = ResourceStore::new(&temp.path().join("state"))?.with_volume_size(1)?;
+    let definition = resource(ResourceSource::GitRepository {
+        path: None,
+        url: Some("https://github.com/acme/repository.git".into()),
+        checkout: None,
+        credential: Some("github".into()),
+    });
+    let agent = Uuid7::now();
+    let first = Uuid7::now();
+    let second = Uuid7::now();
+    let result = (|| {
+        let prepared = store.prepare_volume(definition.clone(), "project-a", |_scope, mount| {
+            fs::write(Path::new(&mount.host_path).join("README"), "pristine")?;
+            Ok(())
+        })?;
+        let mounts = store.materialize(agent, first, vec![prepared.clone()], vec![None])?;
+        let private = Path::new(&mounts[0].host_path).join("README");
+        fs::write(&private, "thread edits")?;
+        let updated = store.prepare_volume(definition.clone(), "project-a", |_scope, mount| {
+            let file = Path::new(&mount.host_path).join("README");
+            assert_eq!(fs::read_to_string(&file)?, "pristine");
+            fs::write(file, "updated")?;
+            Ok(())
+        })?;
+        assert_eq!(prepared.snapshot, updated.snapshot);
+        assert_eq!(
+            store.materialize(agent, first, vec![updated.clone()], vec![None])?[0].host_path,
+            mounts[0].host_path
+        );
+        assert_eq!(fs::read_to_string(&private)?, "thread edits");
+        assert!(
+            store
+                .prepare_volume(definition.clone(), "project-a", |_scope, mount| {
+                    fs::write(Path::new(&mount.host_path).join("README"), "incomplete")?;
+                    bail!("fetch failed")
+                })
+                .is_err()
+        );
+        let other = store.materialize(agent, second, vec![updated.clone()], vec![None])?;
+        assert_eq!(
+            fs::read_to_string(Path::new(&other[0].host_path).join("README"))?,
+            "updated"
+        );
+        let partitioned = store.prepare_volume(definition, "project-b", |_scope, mount| {
+            assert!(!Path::new(&mount.host_path).join("README").exists());
+            Ok(())
+        })?;
+        assert_ne!(updated.snapshot, partitioned.snapshot);
+        store.remove_snapshot(updated.snapshot.as_deref().unwrap())?;
+        assert_eq!(fs::read_to_string(&private)?, "thread edits");
+        assert_eq!(
+            fs::read_to_string(Path::new(&other[0].host_path).join("README"))?,
+            "updated"
+        );
+        store.remove_snapshot(partitioned.snapshot.as_deref().unwrap())?;
+        Ok(())
+    })();
+    store.remove_thread(agent, first)?;
+    store.remove_thread(agent, second)?;
+    result
+}
+
 fn commit(path: &Path, contents: &str) -> Result<String> {
     fs::write(path.join("README"), contents)?;
     git(path, ["add", "README"], None)?;
