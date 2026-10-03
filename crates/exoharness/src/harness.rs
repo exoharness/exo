@@ -25,6 +25,7 @@ pub enum HarnessTurnOutcome {
     Completed(Option<String>),
     Failed(Error),
     Cancelled,
+    Interrupted,
 }
 
 pub enum HarnessEvent {

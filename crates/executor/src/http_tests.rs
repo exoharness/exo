@@ -51,6 +51,9 @@ impl HarnessExecutor for ControlledExecutor {
             thread.as_ref(),
             turn.as_ref(),
             config.permissions.for_tool("test_tool"),
+            None,
+            None,
+            false,
             &exoharness::ToolRequest {
                 function_name: "test_tool".into(),
                 namespace: None,
@@ -1024,6 +1027,8 @@ async fn reconnect_skips_orphaned_turns_and_follows_live_turns() -> Result<()> {
                         event_type: crate::permissions::APPROVAL_REQUESTED.into(),
                         payload: serde_json::to_value(crate::permissions::ApprovalRequest {
                             approval_id: "orphaned-approval".into(),
+                            tool_call_id: None,
+                            round: None,
                             request: exoharness::ToolRequest {
                                 namespace: None,
                                 function_name: "test_tool".into(),

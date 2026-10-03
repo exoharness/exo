@@ -114,6 +114,20 @@ impl BasicObjectStore {
         Ok(keys)
     }
 
+    pub(crate) async fn list_directories(&self, prefix: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
+        let prefix = object_prefix(prefix.as_ref())?;
+        let mut directories = self
+            .store
+            .list_with_delimiter(Some(&prefix))
+            .await?
+            .common_prefixes
+            .into_iter()
+            .map(|path| PathBuf::from(path.to_string()))
+            .collect::<Vec<_>>();
+        directories.sort();
+        Ok(directories)
+    }
+
     /// Delete the object at exactly `key`, tolerating absence. Unlike
     /// `delete_prefix`, this works for a single object: `list`-based prefix
     /// deletion never matches an object at exactly the prefix path.

@@ -34,6 +34,7 @@ struct ControlledExecutor {
     cancelling: Arc<Notify>,
     cleanup: Arc<Semaphore>,
     running: Arc<AtomicUsize>,
+    fail_cleanup: bool,
 }
 
 impl Default for ControlledExecutor {
@@ -44,6 +45,7 @@ impl Default for ControlledExecutor {
             cancelling: Arc::default(),
             cleanup: Arc::new(Semaphore::new(0)),
             running: Arc::default(),
+            fail_cleanup: false,
         }
     }
 }
@@ -81,6 +83,9 @@ impl HarnessExecutor for ControlledExecutor {
 
     async fn cancel_turn(&self, _: &dyn ConversationHandle, _: &AgentConfig) -> Result<()> {
         self.cancelling.notify_one();
+        if self.fail_cleanup {
+            anyhow::bail!("cleanup failed");
+        }
         self.cleanup.acquire().await?.forget();
         Ok(())
     }
@@ -161,6 +166,7 @@ impl Fixture {
                 },
                 session_id: None,
             },
+            recovering: false,
             stream: None,
             trace: None,
         }
@@ -242,6 +248,45 @@ async fn submission_is_nonblocking_and_cancellation_waits_for_cleanup() -> Resul
             .await
             .is_err()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_shutdown_cleanup_keeps_turn_interrupted() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let executor = ControlledExecutor {
+        fail_cleanup: true,
+        ..Default::default()
+    };
+    let harness = Arc::new(ExecutorHarness::new(Arc::new(executor.clone())));
+    let (tx, mut events) = mpsc::unbounded_channel();
+    harness
+        .init(HarnessEventSink::new(Arc::new(Recorder(tx))))
+        .await?;
+    let turn = fixture
+        .thread
+        .begin_turn(BeginTurnRequest::default())
+        .await?;
+    harness
+        .submit(HarnessCommand::StartTurn(fixture.work(turn, false)))
+        .await?;
+    executor.started.notified().await;
+    let shutdown = {
+        let harness = Arc::clone(&harness);
+        tokio::spawn(async move { harness.shutdown().await })
+    };
+    assert!(matches!(
+        events.recv().await,
+        Some(HarnessEvent::TurnFinished {
+            outcome: HarnessTurnOutcome::Interrupted,
+            ..
+        })
+    ));
+    assert!(matches!(
+        events.recv().await,
+        Some(HarnessEvent::ExecutionStopped { .. })
+    ));
+    shutdown.await??;
     Ok(())
 }
 

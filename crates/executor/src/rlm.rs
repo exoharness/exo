@@ -173,6 +173,9 @@ where
                             &conversation_config.permissions,
                             &tool_call.request.function_name,
                         ),
+                        None,
+                        None,
+                        false,
                         &tool_call.request,
                         stream_mode,
                     )

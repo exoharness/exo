@@ -657,6 +657,7 @@ async fn multiplayer_shares_history_but_keeps_vaults_models_and_approvals_privat
         .begin_turn(exoharness::BeginTurnRequest {
             session_id: None,
             input: vec![],
+            ..Default::default()
         })
         .await?;
     assert_eq!(
