@@ -4671,15 +4671,20 @@ fn remove_directory_if_present(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn snapshot_directory_bytes(directory: &Path) -> Result<u64> {
+fn snapshot_directory_bytes(directory: &Path, inodes: &mut HashSet<(u64, u64)>) -> Result<u64> {
     let mut total = 0u64;
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
         let kind = entry.file_type()?;
         let bytes = if kind.is_dir() {
-            snapshot_directory_bytes(&entry.path())?
+            snapshot_directory_bytes(&entry.path(), inodes)?
         } else if kind.is_file() {
-            entry.metadata()?.len()
+            let metadata = entry.metadata()?;
+            if inodes.insert((metadata.dev(), metadata.ino())) {
+                metadata.blocks() * 512
+            } else {
+                0
+            }
         } else {
             bail!("unexpected file in Firecracker snapshot storage");
         };
@@ -4688,8 +4693,9 @@ fn snapshot_directory_bytes(directory: &Path) -> Result<u64> {
     Ok(total)
 }
 
-fn enforce_snapshot_budget(config: &FirecrackerConfig, capture_bytes: u64) -> Result<()> {
-    let mut retained = snapshot_directory_bytes(&config.state_root.join("snapshots"))?;
+fn enforce_snapshot_budget(config: &FirecrackerConfig) -> Result<()> {
+    let mut inodes = HashSet::new();
+    let mut retained = snapshot_directory_bytes(&config.state_root.join("snapshots"), &mut inodes)?;
     let machines = match fs::read_dir(jail_dir(config, "")) {
         Ok(machines) => Some(machines),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -4701,14 +4707,13 @@ fn enforce_snapshot_budget(config: &FirecrackerConfig, capture_bytes: u64) -> Re
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error).context("reading Firecracker snapshot memory base"),
         };
-        retained = retained
-            .checked_add(memory.len())
-            .context("snapshot size overflow")?;
+        if inodes.insert((memory.dev(), memory.ino())) {
+            retained = retained
+                .checked_add(memory.blocks() * 512)
+                .context("snapshot size overflow")?;
+        }
     }
-    if retained
-        .checked_add(capture_bytes)
-        .is_none_or(|total| total > MAX_SNAPSHOT_BYTES)
-    {
+    if retained > MAX_SNAPSHOT_BYTES {
         bail!("Firecracker snapshot storage budget exhausted");
     }
     Ok(())
@@ -4751,7 +4756,7 @@ fn capture_snapshot_template(
         .and_then(|bytes| bytes.checked_mul(2))
         .and_then(|bytes| bytes.checked_add(disk_bytes))
         .context("computing Firecracker snapshot capture size")?;
-    enforce_snapshot_budget(config, capture_bytes)?;
+    enforce_snapshot_budget(config)?;
     let filesystem = rustix::fs::statvfs(&config.state_root)?;
     let available = filesystem.f_bavail.saturating_mul(filesystem.f_frsize);
     let reserve =
@@ -4887,6 +4892,7 @@ fn capture_snapshot_template(
             fs::set_permissions(&path, Permissions::from_mode(0o444))?;
             File::open(path)?.sync_all()?;
         }
+        enforce_snapshot_budget(config)?;
         let lease = temporary.join(SNAPSHOT_LEASE_FILE);
         let lease_file = OpenOptions::new()
             .read(true)

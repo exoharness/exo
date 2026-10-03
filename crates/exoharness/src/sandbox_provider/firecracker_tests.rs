@@ -771,7 +771,7 @@ fn persistent_snapshot_expiry_reclaims_files() {
 }
 
 #[test]
-fn snapshot_budget_counts_retained_logical_bytes_and_pending_capture() {
+fn snapshot_budget_counts_allocated_blocks_once_per_inode() {
     let directory = tempfile::tempdir().unwrap();
     fs::create_dir(directory.path().join("snapshots")).unwrap();
     let config = FirecrackerConfig {
@@ -783,22 +783,40 @@ fn snapshot_budget_counts_retained_logical_bytes_and_pending_capture() {
         &"a".repeat(64),
         SnapshotTemplateLifecycle::Snapshot,
     );
-    File::create(snapshot.join("memory"))
-        .unwrap()
-        .set_len(1024)
-        .unwrap();
-    assert!(enforce_snapshot_budget(&config, MAX_SNAPSHOT_BYTES - 1024).is_ok());
-    assert!(enforce_snapshot_budget(&config, MAX_SNAPSHOT_BYTES - 1023).is_err());
-    assert!(enforce_snapshot_budget(&config, u64::MAX).is_err());
+    let mut memory = File::create(snapshot.join("memory")).unwrap();
+    memory.set_len(32 * 1024 * 1024 * 1024).unwrap();
+    memory.write_all(&[1; 4096]).unwrap();
+    memory.sync_all().unwrap();
+    let allocated = memory.metadata().unwrap().blocks() * 512;
+    assert!(allocated >= 4096 && allocated < memory.metadata().unwrap().len());
+    assert_eq!(
+        snapshot_directory_bytes(&snapshot, &mut HashSet::new()).unwrap(),
+        allocated,
+    );
+
+    let second = config.state_root.join("snapshots").join("second");
+    fs::create_dir(&second).unwrap();
+    let mut second_memory = File::create(second.join("memory")).unwrap();
+    second_memory.set_len(MAX_SNAPSHOT_BYTES).unwrap();
+    second_memory.write_all(&[2; 4096]).unwrap();
+    second_memory.sync_all().unwrap();
+    assert!(enforce_snapshot_budget(&config).is_ok());
 
     let machine = jail_dir(&config, "fc-0000000000000000-00000000");
     fs::create_dir_all(&machine).unwrap();
     fs::hard_link(snapshot.join("memory"), machine.join("snapshot-memory")).unwrap();
-    assert!(enforce_snapshot_budget(&config, MAX_SNAPSHOT_BYTES - 2048).is_ok());
-    assert!(enforce_snapshot_budget(&config, MAX_SNAPSHOT_BYTES - 2047).is_err());
+    let mut inodes = HashSet::new();
+    assert_eq!(
+        snapshot_directory_bytes(&snapshot, &mut inodes).unwrap(),
+        allocated
+    );
+    assert_eq!(snapshot_directory_bytes(&machine, &mut inodes).unwrap(), 0);
     fs::remove_dir_all(snapshot).unwrap();
-    assert!(enforce_snapshot_budget(&config, MAX_SNAPSHOT_BYTES - 1024).is_ok());
-    assert!(enforce_snapshot_budget(&config, MAX_SNAPSHOT_BYTES - 1023).is_err());
+    assert_eq!(
+        snapshot_directory_bytes(&machine, &mut HashSet::new()).unwrap(),
+        allocated,
+    );
+    assert!(enforce_snapshot_budget(&config).is_ok());
 }
 
 fn test_shared(
