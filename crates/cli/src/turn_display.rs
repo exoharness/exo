@@ -14,11 +14,23 @@ use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 static BACKEND_PROGRESS: Mutex<Option<String>> = Mutex::new(None);
 
 pub(crate) fn init_progress(verbose: bool) -> Result<()> {
+    let interactive = io::stderr().is_terminal();
     tracing_subscriber::registry()
         .with(
             ProgressLayer.with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
                 metadata.target() == "exoharness::progress"
             })),
+        )
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(io::stderr)
+                .with_ansi(false)
+                .without_time()
+                .with_level(false)
+                .with_target(false)
+                .with_filter(tracing_subscriber::filter::filter_fn(move |metadata| {
+                    !interactive && metadata.target() == "exoharness::progress"
+                })),
         )
         .with(
             tracing_subscriber::fmt::layer()
@@ -75,7 +87,7 @@ impl TurnProgress {
     pub(crate) fn new() -> Self {
         *BACKEND_PROGRESS.lock().expect("backend progress poisoned") = None;
         Self {
-            enabled: io::stdout().is_terminal(),
+            enabled: io::stderr().is_terminal(),
             status: Some("Starting turn".to_string()),
             frame: 0,
             rendered: false,
@@ -108,8 +120,9 @@ impl TurnProgress {
                     }
                     let frame = ["-", "\\", "|", "/"][self.frame % 4];
                     self.frame = self.frame.wrapping_add(1);
-                    print!("\r\x1b[2K{frame} {}", self.status.as_deref().unwrap_or_default());
-                    io::stdout().flush()?;
+                    let mut stderr = io::stderr().lock();
+                    write!(stderr, "\r\x1b[2K{frame} {}", self.status.as_deref().unwrap_or_default())?;
+                    stderr.flush()?;
                     self.rendered = true;
                 }
             }
@@ -119,8 +132,9 @@ impl TurnProgress {
     fn clear(&mut self) -> Result<()> {
         *BACKEND_PROGRESS.lock().expect("backend progress poisoned") = None;
         if self.rendered {
-            print!("\r\x1b[2K");
-            io::stdout().flush()?;
+            let mut stderr = io::stderr().lock();
+            write!(stderr, "\r\x1b[2K")?;
+            stderr.flush()?;
             self.rendered = false;
         }
         Ok(())

@@ -116,19 +116,30 @@ async fn named_threads_keep_history_and_explicit_environment_for_local_and_http(
         ])
         .await?;
         let first = f
-            .cli(&[
-                "agent",
-                "run",
-                "--agent",
-                "braintrust-dev",
-                "--environment",
-                "local-dev",
-                "--thread",
-                "my-project-name",
-                "--prompt",
-                "first named input",
-            ])
+            .output(
+                &[
+                    "agent",
+                    "run",
+                    "--agent",
+                    "braintrust-dev",
+                    "--environment",
+                    "local-dev",
+                    "--thread",
+                    "my-project-name",
+                    "--prompt",
+                    "first named input",
+                ],
+                None,
+                None,
+            )
             .await?;
+        assert!(
+            String::from_utf8_lossy(&first.stderr)
+                .lines()
+                .any(|line| line == "Creating thread my-project-name...")
+        );
+        let first = support::success(first)?;
+        assert!(!first.contains("Creating thread"));
         assert_eq!(thread_slug(&first)?, "my-project-name");
         let root = f.runtime.exoharness_handle();
         let agent = exo_managed_agents::find_agent(root.as_ref(), "braintrust-dev").await?;
@@ -136,19 +147,30 @@ async fn named_threads_keep_history_and_explicit_environment_for_local_and_http(
         assert_eq!(thread.record().environment.as_ref(), Some(&environment));
         let id = thread.record().id;
         let second = f
-            .cli(&[
-                "agent",
-                "run",
-                "--agent",
-                "braintrust-dev",
-                "--environment",
-                "local-dev",
-                "--thread",
-                "my-project-name",
-                "--prompt",
-                "second named input",
-            ])
+            .output(
+                &[
+                    "agent",
+                    "run",
+                    "--agent",
+                    "braintrust-dev",
+                    "--environment",
+                    "local-dev",
+                    "--thread",
+                    "my-project-name",
+                    "--prompt",
+                    "second named input",
+                ],
+                None,
+                None,
+            )
             .await?;
+        assert!(
+            String::from_utf8_lossy(&second.stderr)
+                .lines()
+                .any(|line| line == "Opening thread...")
+        );
+        let second = support::success(second)?;
+        assert!(!second.contains("Opening thread"));
         assert_eq!(thread_slug(&second)?, "my-project-name");
         let resumed = exo_managed_agents::find_thread(agent.as_ref(), "my-project-name").await?;
         assert_eq!(resumed.record().id, id);

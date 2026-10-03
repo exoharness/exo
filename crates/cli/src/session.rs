@@ -118,7 +118,7 @@ impl LocalSession {
             .iter()
             .any(|sandbox| sandbox.running && !sandbox.attached)
         {
-            eprintln!("Stopping sandboxes left by the previous local session...");
+            tracing::info!(target: "exoharness::progress", "Stopping sandboxes left by the previous local session...");
             stop_owned_sandboxes(thread.as_ref()).await?;
         }
         Ok(Self {

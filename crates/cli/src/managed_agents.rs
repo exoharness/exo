@@ -165,6 +165,8 @@ pub async fn open_thread(
     local_root: Option<Arc<crate::session::LocalRootLease>>,
 ) -> Result<OpenedThread> {
     let mut session = None;
+    let mut progress = crate::turn_display::TurnProgress::new();
+    progress.set_status(Some("Preparing thread".into()));
     let result = async {
         let root = runtime.exoharness_handle();
         let mut environment = match (&args.environment_file, &args.environment) {
@@ -195,14 +197,16 @@ pub async fn open_thread(
                 crate::slugify(&name.to_string_lossy()),
                 &hash[..16]
             );
-            eprintln!("Syncing agent resources...");
-            match runtime.get_agent(&slug).await? {
-                Some(agent) => {
-                    runtime.update_managed_agent(&agent, definition).await?;
-                    agent
+            progress.wait(async {
+                tracing::info!(target: "exoharness::progress", "Syncing agent resources...");
+                match runtime.get_agent(&slug).await? {
+                    Some(agent) => {
+                        runtime.update_managed_agent(&agent, definition).await?;
+                        Ok(agent)
+                    }
+                    None => runtime.create_managed_agent(definition, &slug).await,
                 }
-                None => runtime.create_managed_agent(definition, &slug).await?,
-            }
+            }).await?
         } else {
             crate::must_get_agent(
                 runtime,
@@ -262,16 +266,16 @@ pub async fn open_thread(
             && let Some(thread) = &saved_thread
         {
             session = Some(
-                crate::session::LocalSession::start(root.clone(), agent.record().id, thread.clone())
+                progress.wait(crate::session::LocalSession::start(root.clone(), agent.record().id, thread.clone()))
                     .await?,
             );
         }
         if reference.is_some() {
-            eprintln!("Opening thread...");
+            tracing::info!(target: "exoharness::progress", "Opening thread...");
         } else {
-            eprintln!("Creating thread {slug}...");
+            tracing::info!(target: "exoharness::progress", "Creating thread {slug}...");
         }
-        let opened = runtime
+        let opened = progress.wait(runtime
             .open_managed_thread(
                 &agent,
                 reference.as_deref(),
@@ -281,13 +285,13 @@ pub async fn open_thread(
                     slug: Some(slug.clone()),
                     name: Some(slug),
                 },
-            )
+            ))
             .await?;
         if let Some(root) = local_root
             && session.is_none()
         {
             session = Some(
-                crate::session::LocalSession::start(root, agent.record().id, opened.thread.clone())
+                progress.wait(crate::session::LocalSession::start(root, agent.record().id, opened.thread.clone()))
                     .await?,
             );
         }
