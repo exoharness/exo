@@ -12,6 +12,7 @@ import {
   toolRequestedEvent,
   toolResultEvent,
   turnMetadata,
+  type Event,
   type EventData,
   type JsonObject,
   type JsonValue,
@@ -121,28 +122,51 @@ interface SavedCodexRecovery {
 async function savedCodexRecovery(
   context: TurnContext,
 ): Promise<SavedCodexRecovery> {
+  const pageSize = 1000;
   let saved: SavedCodexTurn | null = null;
   let pendingStartIntent = false;
   const projectedItems = new Set<string>();
   const pendingToolCalls = new Map<string, number>();
   const pendingApprovals = new Set<string>();
-  // Projected items and approval/tool results anywhere in the turn affect
-  // replay safety, so read the turn once in event order.
-  const events = await context.exoharness.current.conversation.getEvents({
-    direction: "asc",
-    turnId: context.exoharness.current.turn.record.id,
-    types: [
-      "codex_turn_started",
-      "codex_turn_start_intent",
-      "codex_turn_completed",
-      "codex_item_projected",
-      "tool_requested",
-      "tool_result",
-      "agent_runtime.approval_requested",
-      "agent_runtime.approval_response",
-    ],
-  });
-  for (const event of events.events) {
+  const events: Event[] = [];
+  let cursor: string | null = null;
+  // Read only this unfinished turn, stopping at its start. Fold the events in
+  // chronological order so tool results and approvals match their requests.
+  while (true) {
+    const page = await context.exoharness.current.conversation.getEvents({
+      cursor,
+      direction: "desc",
+      limit: pageSize,
+      turnId: context.exoharness.current.turn.record.id,
+      types: [
+        "turn_started",
+        "codex_turn_started",
+        "codex_turn_start_intent",
+        "codex_turn_completed",
+        "codex_item_projected",
+        "tool_requested",
+        "tool_result",
+        "agent_runtime.approval_requested",
+        "agent_runtime.approval_response",
+      ],
+    });
+    const startIndex = page.events.findIndex(
+      (event) => event.data.type === "turn_started",
+    );
+    events.push(
+      ...page.events.slice(0, startIndex < 0 ? page.events.length : startIndex),
+    );
+    if (startIndex >= 0) break;
+    if (
+      page.events.length < pageSize ||
+      !page.cursor ||
+      page.cursor === cursor
+    ) {
+      throw new Error("saved Codex recovery has no turn_started event");
+    }
+    cursor = page.cursor;
+  }
+  for (const event of events.reverse()) {
     const data = event.data;
     if (data.type === "tool_requested") {
       if (typeof data.tool_call_id === "string") {

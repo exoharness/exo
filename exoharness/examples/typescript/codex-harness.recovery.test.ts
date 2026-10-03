@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Event, EventData, TurnContext } from "@exo/harness";
+import type { Event, EventData, EventQuery, TurnContext } from "@exo/harness";
 import { FakeCodexAppServer } from "../../typescript/codex/fixtures/fake-app-server";
 
 vi.mock("@exo/model-runtime/cost", () => ({
@@ -34,9 +34,11 @@ function testContext(
     savedTurn?: boolean;
     startIntent?: boolean;
     approvalRequested?: boolean;
+    projectedItems?: number;
   } = {},
-): { context: TurnContext; events: Event[] } {
+): { context: TurnContext; events: Event[]; queries: EventQuery[] } {
   const events: Event[] = [];
+  const queries: EventQuery[] = [];
   const add = (data: EventData) => {
     events.push({
       id: String(events.length + 1),
@@ -47,6 +49,7 @@ function testContext(
       data,
     });
   };
+  add({ type: "turn_started" });
   add({
     type: "messages",
     messages: [{ role: "user", content: "do the work" }],
@@ -77,6 +80,13 @@ function testContext(
       payload: { approval_id: "approval-1" },
     });
   }
+  for (let index = 0; index < (options.projectedItems ?? 0); index++) {
+    add({
+      type: "custom",
+      event_type: "codex_item_projected",
+      payload: { turn_id: "old-turn", item_id: `item-${index}` },
+    });
+  }
   const context = {
     mcpServers: [],
     tools: [],
@@ -100,8 +110,9 @@ function testContext(
         agent: { record: { id: `agent-${id}`, slug: "codex" } },
         conversation: {
           record: { id },
-          getEvents: async (query?: { turnId?: string; types?: string[] }) => ({
-            events: events.filter(
+          getEvents: async (query?: EventQuery) => {
+            if (query) queries.push(query);
+            const matching = events.filter(
               (event) =>
                 (!query?.turnId || event.turnId === query.turnId) &&
                 (!query?.types ||
@@ -109,10 +120,16 @@ function testContext(
                     event.data.type === "custom"
                       ? String(event.data.event_type)
                       : event.data.type,
-                  )),
-            ),
-            cursor: null,
-          }),
+                  )) &&
+                (!query?.cursor ||
+                  (query.direction === "desc"
+                    ? Number(event.id) < Number(query.cursor)
+                    : Number(event.id) > Number(query.cursor))),
+            );
+            if (query?.direction === "desc") matching.reverse();
+            const page = matching.slice(0, query?.limit ?? matching.length);
+            return { events: page, cursor: page.at(-1)?.id ?? null };
+          },
         },
         turn: {
           record: { id: "exo-turn", sessionId: "session-1" },
@@ -129,10 +146,32 @@ function testContext(
       text: async () => {},
     },
   } as unknown as TurnContext;
-  return { context, events };
+  return { context, events, queries };
 }
 
 describe("Codex harness recovery", () => {
+  it("reads the unfinished turn backwards in 1000-event pages", async () => {
+    const server = new FakeCodexAppServer({ resumeAvailable: true });
+    const { context, queries } = testContext(server, "long-turn", {
+      savedTurn: true,
+      projectedItems: 1001,
+    });
+    await harness.resumeTurn!(context);
+    const recoveryQueries = queries.filter((query) =>
+      query.types?.includes("turn_started"),
+    );
+    expect(recoveryQueries).toHaveLength(2);
+    expect(recoveryQueries[0]).toMatchObject({
+      direction: "desc",
+      limit: 1000,
+      turnId: "exo-turn",
+    });
+    expect(recoveryQueries[1]?.cursor).toBeTruthy();
+    expect(
+      server.requests.some((request) => request.method === "thread/resume"),
+    ).toBe(true);
+  });
+
   it("continues a saved turn on a resumed native thread with empty input", async () => {
     const server = new FakeCodexAppServer({ resumeAvailable: true });
     const { context, events } = testContext(server, "resumed", {
