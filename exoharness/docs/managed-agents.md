@@ -106,10 +106,14 @@ previews:
     app: 13000
 ```
 
-`exo agent run` prints a preview index and a URL for each configured service:
+`exo agent run` prints the sandbox services page and a URL for each published
+port. Configured service names become URL labels; unnamed ports use their port
+number:
 
 ```text
-previews: http://my-project-<id>.dev.exo.localhost:<port>
+sandbox: http://my-project-<id>.dev.exo.localhost:<port>
+  Open this page for service links. Services must be running in the sandbox.
+  8000 (port 8000): http://8000.my-project-<id>.dev.exo.localhost:<port>
   app (port 13000): http://app.my-project-<id>.dev.exo.localhost:<port>
 ```
 
@@ -129,10 +133,11 @@ its configured hostnames in the proxy's in-memory route table over a private
 Unix socket. Closing a session removes only its routes; other sessions continue
 using the shared listener. Exo starts the proxy automatically and it exits after
 five idle seconds with no sessions. It does not keep a VM running after exit.
-Services still need to be
-started in the sandbox. The app must generate browser API and WebSocket URLs
-using the preview's origin. Exo includes these browser URLs in the agent's
-thread context so it can construct correct links.
+The sandbox services page contains a clickable list of services, their guest
+ports, and browser URLs. Services still need to be started in the sandbox. The
+app must generate browser API and WebSocket URLs using the corresponding service
+preview's origin. Exo includes the page URL, service mapping, and a short explanation
+in the agent's instructions so it can help the user open and troubleshoot previews.
 
 To display the saved URLs again without starting a VM:
 

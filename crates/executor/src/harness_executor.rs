@@ -309,14 +309,18 @@ impl Runtime {
                 .push(crate::harness_helpers::system_message(&locations));
         }
         if !thread_config.browser_previews.is_empty() {
-            let mut previews = String::from("Browser preview URLs on the user's computer:\n");
+            let mut previews = String::from("Exo sandbox previews:\n");
+            if let Some(url) = &thread_config.browser_preview_url {
+                previews.push_str(&format!("Sandbox services page: {url}\n"));
+            }
+            previews.push_str("Exo's local HTTP proxy routes each hostname to a service in this sandbox. All previews share one browser port. The services page lists clickable links for every published port.\n");
             for preview in &thread_config.browser_previews {
                 previews.push_str(&format!(
                     "- {} (guest TCP port {}): {}\n",
                     preview.name, preview.port, preview.url
                 ));
             }
-            previews.push_str("Use these origins when giving the user browser links, preserving paths, query parameters and fragments. Inside the sandbox, connect to the original guest ports. These previews are available while the user's CLI session is open.");
+            previews.push_str("Use these URLs for user-facing links and browser API/CORS configuration, preserving paths, query parameters and fragments. Inside the sandbox, use the original guest ports. Start the services before opening their links; a 502 means the service could not be reached. Previews remain available while the user's CLI session is open.");
             agent_config
                 .instructions
                 .push(crate::harness_helpers::system_message(&previews));
@@ -724,6 +728,7 @@ impl Runtime {
             }
         };
         let conversation_config = ConversationConfig {
+            browser_preview_url: None,
             browser_previews: Default::default(),
             resources: agent_config.resources.clone(),
             resource_mounts,

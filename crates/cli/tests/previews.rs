@@ -68,7 +68,7 @@ async fn separate_cli_processes_share_the_proxy_and_close_independently() -> Res
     let environment = fixture.temp.path().join("environment.yaml");
     std::fs::write(
         &environment,
-        "name: dev\nconfig:\n  provider: local_process\n  image: unused\n  tcp_ports: [5173, 8000]\npreviews:\n  domain: exo.localhost\n  services:\n    app: 5173\n    api: 8000\n",
+        "name: dev\nconfig:\n  provider: local_process\n  image: unused\n  tcp_ports: [5173, 8000, 9000]\npreviews:\n  domain: exo.localhost\n  services:\n    app: 5173\n    api: 8000\n",
     )?;
     fixture
         .cli(&[
@@ -87,11 +87,11 @@ async fn separate_cli_processes_share_the_proxy_and_close_independently() -> Res
     let agent = exo_managed_agents::find_agent(root.as_ref(), "dev").await?;
     let first_thread = exo_managed_agents::find_thread(agent.as_ref(), "first").await?;
     let second_thread = exo_managed_agents::find_thread(agent.as_ref(), "second").await?;
-    let first_previews = fixture
+    let first_config = fixture
         .runtime
         .get_conversation_config(first_thread.as_ref())
-        .await?
-        .browser_previews;
+        .await?;
+    let first_previews = first_config.browser_previews;
     let second_previews = fixture
         .runtime
         .get_conversation_config(second_thread.as_ref())
@@ -100,6 +100,12 @@ async fn separate_cli_processes_share_the_proxy_and_close_independently() -> Res
     let port = url::Url::parse(&first_previews[0].url)?
         .port()
         .context("preview port")?;
+    assert_eq!(first_previews.len(), 3);
+    assert!(
+        first_previews
+            .iter()
+            .any(|preview| preview.name == "9000" && preview.port == 9000)
+    );
     for preview in first_previews.iter().chain(&second_previews) {
         assert_eq!(url::Url::parse(&preview.url)?.port(), Some(port));
     }
@@ -120,15 +126,22 @@ async fn separate_cli_processes_share_the_proxy_and_close_independently() -> Res
     );
     let http = reqwest::Client::new();
     let endpoint = format!("http://127.0.0.1:{port}");
-    for host in [&first_portal, &second_portal] {
-        assert_eq!(
-            http.get(&endpoint)
-                .header("Host", host)
-                .send()
-                .await?
-                .status(),
-            200
-        );
+    assert_eq!(
+        first_config.browser_preview_url,
+        Some(format!("http://{first_portal}"))
+    );
+    for (host, previews) in [
+        (&first_portal, &first_previews),
+        (&second_portal, &second_previews),
+    ] {
+        let page = http.get(&endpoint).header("Host", host).send().await?;
+        assert_eq!(page.status(), 200);
+        let html = page.text().await?;
+        assert!(html.contains("Sandbox services"));
+        for preview in previews {
+            assert!(html.contains(&format!("href=\"{}\"", preview.url)));
+            assert!(html.contains(&format!("<td>{}</td>", preview.port)));
+        }
     }
     let group = format!("-{}", first.id().context("first session pid")?);
     assert!(
@@ -207,7 +220,9 @@ async fn named_previews_are_assigned_displayed_and_reused_on_resume() -> Result<
         "--thread",
         "project",
     ];
-    let first = support::success(fixture.output(&args, None, Some("/quit\n")).await?)?;
+    let mut initial_args = args.to_vec();
+    initial_args.extend(["--prompt", "Explain how to open this sandbox's services."]);
+    let first = fixture.cli(&initial_args).await?;
     assert_eq!(support::thread_slug(&first)?, "project");
     let urls = fixture.cli(&["thread", "ports", "dev", "project"]).await?;
     assert!(urls.contains("app.project-"));
@@ -216,14 +231,29 @@ async fn named_previews_are_assigned_displayed_and_reused_on_resume() -> Result<
     let root = fixture.runtime.exoharness_handle();
     let agent = exo_managed_agents::find_agent(root.as_ref(), "dev").await?;
     let thread = exo_managed_agents::find_thread(agent.as_ref(), "project").await?;
-    let previews = fixture
+    let config = fixture
         .runtime
         .get_conversation_config(thread.as_ref())
-        .await?
-        .browser_previews;
+        .await?;
+    let index_url = config.browser_preview_url.context("sandbox services URL")?;
+    let previews = config.browser_previews;
+    assert!(first.contains(&format!("sandbox: {index_url}")));
+    assert!(urls.contains(&index_url));
+    let requests = fixture
+        .model
+        .received_requests()
+        .await
+        .context("model requests")?;
+    let model_request = requests
+        .iter()
+        .find(|request| request.url.path() == "/responses")
+        .context("agent model request")?;
+    let model_context = std::str::from_utf8(&model_request.body)?;
+    assert!(model_context.contains(&index_url));
     assert_eq!(previews.len(), 2);
     for preview in &previews {
         assert!(first.contains(&preview.url));
+        assert!(model_context.contains(&preview.url));
     }
     let session_lock = std::fs::OpenOptions::new().write(true).open(
         fixture
@@ -281,15 +311,13 @@ async fn named_previews_are_assigned_displayed_and_reused_on_resume() -> Result<
         ])
         .await?;
     let disabled = support::success(fixture.output(&args, None, Some("/quit\n")).await?)?;
-    assert!(!disabled.contains("previews:"));
-    assert!(
-        fixture
-            .runtime
-            .get_conversation_config(thread.as_ref())
-            .await?
-            .browser_previews
-            .is_empty()
-    );
+    assert!(!disabled.contains("sandbox:"));
+    let disabled_config = fixture
+        .runtime
+        .get_conversation_config(thread.as_ref())
+        .await?;
+    assert!(disabled_config.browser_previews.is_empty());
+    assert!(disabled_config.browser_preview_url.is_none());
     fixture.stop().await?;
     Ok(())
 }

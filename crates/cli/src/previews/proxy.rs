@@ -284,14 +284,27 @@ async fn handle(mut client: TcpStream, state: Arc<Mutex<State>>) -> Result<()> {
             let links = previews
                 .iter()
                 .map(|preview| {
-                    format!(
-                        "<li><a href=\"{}\">{} (port {})</a></li>",
-                        preview.url, preview.name, preview.port,
-                    )
+                    format!("<tr><td><a href=\"{}\">{}</a></td><td>{}</td><td><a href=\"{}\">{}</a></td></tr>", preview.url, preview.name, preview.port, preview.url, preview.url)
                 })
                 .collect::<String>();
             let body = format!(
-                "<!doctype html><html><head><meta charset=\"utf-8\"><title>Exo previews</title></head><body><h1>Thread previews</h1><ul>{links}</ul><p>Start the services in your agent session to open a preview.</p></body></html>"
+                r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sandbox services · Exo</title>
+<style>
+:root {{ color-scheme: light dark; font-family: system-ui, sans-serif; }}
+body {{ max-width: 1000px; margin: 64px auto; padding: 0 24px; }}
+h1 {{ margin-bottom: 8px; }}
+.address {{ color: light-dark(#555, #aaa); overflow-wrap: anywhere; }}
+table {{ width: 100%; margin: 32px 0; border-collapse: collapse; text-align: left; }}
+th, td {{ padding: 16px 12px; border-bottom: 1px solid light-dark(#ddd, #444); }}
+td:last-child {{ overflow-wrap: anywhere; }}
+a {{ color: light-dark(#245dcc, #90b6ff); text-underline-offset: 3px; }}
+.note {{ line-height: 1.6; color: light-dark(#555, #aaa); }}
+@media (max-width: 600px) {{ body {{ margin-top: 32px; padding: 0 16px; }} th, td {{ padding: 12px 6px; }} }}
+</style></head><body><h1>Sandbox services</h1><p class="address">{host}</p>
+<table><thead><tr><th>Service</th><th>Sandbox port</th><th>Browser URL</th></tr></thead><tbody>{links}</tbody></table>
+<p class="note">Start the services in your agent session, then open a link above. You can ask the agent to start them or help diagnose a connection problem.<br>Keep your Exo session open while using these links.</p>
+</body></html>"#
             );
             reply(&mut client, "200 OK", "text/html", &body).await
         }

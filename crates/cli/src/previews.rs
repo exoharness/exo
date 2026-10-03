@@ -46,7 +46,8 @@ impl PreviewSession {
             .as_ref()
             .and_then(|environment| environment.previews.clone());
         let Some(preview_config) = preview_config else {
-            if !config.browser_previews.is_empty() {
+            if config.browser_preview_url.is_some() || !config.browser_previews.is_empty() {
+                config.browser_preview_url = None;
                 config.browser_previews.clear();
                 runtime
                     .put_conversation_config(thread.as_ref(), config)
@@ -74,15 +75,30 @@ impl PreviewSession {
             &thread.record().id.to_string(),
             &preview_config.domain,
         )?;
+        let mut services = preview_config.services;
+        for port in &config
+            .environment
+            .as_ref()
+            .context("preview environment is missing")?
+            .config
+            .tcp_ports
+        {
+            if !services.values().any(|service_port| service_port == port) {
+                let name = port.to_string();
+                ensure!(
+                    !services.contains_key(&name),
+                    "service name {name} conflicts with published port {port}; configure a service name for that port"
+                );
+                services.insert(name, *port);
+            }
+        }
         ensure!(
-            preview_config
-                .services
+            services
                 .keys()
                 .all(|name| name.len() + hostname.len() + 1 <= 253),
             "preview hostname exceeds the DNS length limit"
         );
-        let previews: Vec<_> = preview_config
-            .services
+        let previews: Vec<_> = services
             .into_iter()
             .map(|(name, guest_port)| BrowserPreview {
                 url: format!("http://{name}.{hostname}:{port}"),
@@ -90,6 +106,8 @@ impl PreviewSession {
                 port: guest_port,
             })
             .collect();
+        let index_url = format!("http://{hostname}:{port}");
+        config.browser_preview_url = Some(index_url.clone());
         config.browser_previews = previews.clone();
         let gateway = tempfile::tempdir_in("/tmp")?;
         let socket = gateway.path().join("gateway.sock");
@@ -113,7 +131,8 @@ impl PreviewSession {
         runtime
             .put_conversation_config(thread.as_ref(), config)
             .await?;
-        println!("previews: http://{hostname}:{port}");
+        println!("sandbox: {index_url}");
+        println!("  Open this page for service links. Services must be running in the sandbox.");
         for preview in &previews {
             println!(
                 "  {} (port {}): {}",
@@ -283,6 +302,9 @@ pub(crate) async fn print(runtime: &Runtime, thread: &dyn ConversationHandle) ->
         bail!(
             "no previews have been assigned; configure previews in the environment and run this thread"
         );
+    }
+    if let Some(url) = &config.browser_preview_url {
+        println!("sandbox: {url}");
     }
     crate::print_table(
         &["SERVICE", "PORT", "BROWSER URL"],
