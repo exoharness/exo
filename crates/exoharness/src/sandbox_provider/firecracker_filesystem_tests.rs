@@ -2,6 +2,7 @@ use super::*;
 
 fn fixture(config: &FirecrackerConfig) -> Result<SnapshotPayload> {
     let manifest = FilesystemManifest {
+        template: false,
         version: 1,
         key: "a".repeat(64),
         sandbox_id: "filesystem-test".into(),
@@ -268,6 +269,33 @@ async fn filesystem_snapshot_suspend_restart_and_import_round_trip() -> Result<(
     drop(files);
     backend.delete_snapshot(snapshot).await?;
     backend.delete_snapshot(suspended).await?;
+    let mut seed = native_request(&config, "seed", &image)?;
+    seed.spec.mounts.clear();
+    seed.spec.durable_file_systems.clear();
+    let source = backend.acquire(seed.clone()).await?;
+    shell(&source, "printf prebuilt > /tmp/prebuild-marker").await?;
+    let seed_capture = source
+        .snapshot_template(crate::SnapshotKind::Filesystem)
+        .await?;
+    backend.terminate(seed.clone()).await?;
+    drop(source);
+    for id in ["seed-first", "seed-second"] {
+        let target = native_request(&config, id, &image)?;
+        let restored = backend
+            .acquire_from_snapshot(target.clone(), seed_capture.clone())
+            .await?;
+        assert_eq!(
+            shell(&restored, "cat /tmp/prebuild-marker").await?,
+            "prebuilt"
+        );
+        shell(
+            &restored,
+            "printf private > /repo/edit; printf workspace > /workspace/state",
+        )
+        .await?;
+        backend.terminate(target).await?;
+    }
+    backend.delete_snapshot(seed_capture).await?;
     drop(backend);
     fs::remove_dir_all(temp)?;
     Ok(())
@@ -278,4 +306,32 @@ fn capture_rejects_runtimes_with_the_vsock_resume_bug() {
     assert!(validate_capture_runtime("v1.16.1").is_err());
     assert!(validate_capture_runtime("v1.16.2").is_ok());
     assert!(validate_capture_runtime("v1.17.0").is_ok());
+}
+
+#[tokio::test]
+async fn startup_collection_preserves_cataloged_captures() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config = FirecrackerConfig {
+        state_root: temp.path().into(),
+        ..Default::default()
+    };
+    let payload = fixture(&config)?;
+    let kept = FilesystemManifest::from_payload(&payload)?.key;
+    let mut orphan = FilesystemManifest::from_payload(&payload)?;
+    orphan.key = "c".repeat(64);
+    let source = FilesystemManifest::from_payload(&payload)?.directory(&config);
+    let target = orphan.directory(&config);
+    fs::create_dir_all(&target)?;
+    for file in ["lease", "base.ext4", "overlay.ext4"] {
+        fs::copy(source.join(file), target.join(file))?;
+    }
+    fs::write(target.join("manifest.json"), serde_json::to_vec(&orphan)?)?;
+    assert!(source.to_string_lossy().contains(&kept));
+    let lease = open_capture(&config, orphan.payload()?)?;
+    assert!(collect_captures(&config, vec![payload.clone()]).is_err());
+    drop(lease);
+    assert_eq!(collect_captures(&config, vec![payload.clone()])?, 1);
+    assert_eq!(collect_captures(&config, vec![payload.clone()])?, 0);
+    assert!(open_capture(&config, payload).is_ok());
+    Ok(())
 }

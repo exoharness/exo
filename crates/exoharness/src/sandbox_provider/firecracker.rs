@@ -652,7 +652,7 @@ struct Shared {
     lifecycle_locks: MachineLifecycleLocks,
     capacity_gate: Mutex<()>,
     starting_machines: Arc<StdMutex<HashSet<String>>>,
-    base_image_digests: StdMutex<HashMap<PathBuf, String>>,
+    base_image_digests: StdMutex<HashMap<(u64, u64, u64, i64, i64), String>>,
 }
 
 impl Drop for Shared {
@@ -1519,7 +1519,7 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
         self.egress
             .suspend(
                 &id,
-                filesystem::snapshot_filesystem(Arc::clone(&self.shared), request, true),
+                filesystem::snapshot_filesystem(Arc::clone(&self.shared), request, true, false),
             )
             .await
     }
@@ -1823,13 +1823,23 @@ impl ManagedSandboxHandle for FirecrackerSandboxHandle {
                 Arc::clone(&self.shared),
                 self.request.sandbox.clone(),
                 false,
+                false,
             )
             .await;
         }
         self.capture_snapshot(false).await
     }
 
-    async fn snapshot_template(&self) -> Result<SnapshotPayload> {
+    async fn snapshot_template(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
+        if kind == crate::SnapshotKind::Filesystem {
+            return filesystem::snapshot_filesystem(
+                Arc::clone(&self.shared),
+                self.request.sandbox.clone(),
+                false,
+                true,
+            )
+            .await;
+        }
         self.capture_snapshot(true).await
     }
 }
