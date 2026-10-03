@@ -63,6 +63,10 @@ use super::firecracker_image::validate_ext4_image;
 #[path = "firecracker_lima_storage.rs"]
 pub(super) mod lima_storage;
 
+#[path = "firecracker_filesystem.rs"]
+mod filesystem;
+pub use filesystem::FirecrackerFilesystemCapture;
+
 const GUEST_READY_TIMEOUT: Duration = Duration::from_secs(30);
 const PID_FILE_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -101,7 +105,10 @@ pub const DEFAULT_JAILER_UID_BASE: u32 = 100_000;
 pub const DEFAULT_VCPU_COUNT: u8 = crate::DEFAULT_SANDBOX_VCPU_COUNT;
 pub const DEFAULT_MEMORY_MIB: u32 = crate::DEFAULT_SANDBOX_MEMORY_MIB;
 const SNAPSHOT_FORMAT_VERSION: u32 = 2;
-static CONSUMABLE_SNAPSHOT_FORMATS: [SnapshotFormat; 1] = [SnapshotFormat::FirecrackerHostRef];
+static CONSUMABLE_SNAPSHOT_FORMATS: [SnapshotFormat; 2] = [
+    SnapshotFormat::FirecrackerHostRef,
+    SnapshotFormat::FirecrackerFilesystemRef,
+];
 // Upstream warns that a compromised guest kernel can reactivate the serial
 // device even with 8250.nr_uarts=0, and unbounded console output written to a
 // host file is their named disk-fill DoS. VMM output therefore goes to
@@ -623,6 +630,7 @@ struct Shared {
     lifecycle_locks: MachineLifecycleLocks,
     capacity_gate: Mutex<()>,
     starting_machines: Arc<StdMutex<HashSet<String>>>,
+    base_image_digests: StdMutex<HashMap<PathBuf, String>>,
 }
 
 impl Drop for Shared {
@@ -922,6 +930,7 @@ impl FirecrackerSandboxBackend {
                 lifecycle_locks: MachineLifecycleLocks::default(),
                 capacity_gate: Mutex::new(()),
                 starting_machines: Arc::new(StdMutex::new(HashSet::new())),
+                base_image_digests: StdMutex::new(HashMap::new()),
             }),
         })
     }
@@ -1424,6 +1433,24 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
             .map(|handle| crate::with_process_management(handle))
     }
 
+    async fn suspend(
+        &self,
+        request: SandboxRequest,
+        kind: crate::SnapshotKind,
+    ) -> Result<SnapshotPayload> {
+        ensure!(
+            kind == crate::SnapshotKind::Filesystem,
+            "Firecracker full suspension is not implemented"
+        );
+        let id = request.sandbox_id.clone();
+        self.egress
+            .suspend(
+                &id,
+                filesystem::snapshot_filesystem(Arc::clone(&self.shared), request, true),
+            )
+            .await
+    }
+
     async fn attach(
         &self,
         _request: SandboxRequest,
@@ -1523,6 +1550,9 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
             .spec
             .policy
             .validate_basic("Firecracker snapshot restore")?;
+        if payload.format == SnapshotFormat::FirecrackerFilesystemRef {
+            return self.acquire_filesystem_snapshot(request, payload).await;
+        }
         let manifest = FirecrackerSnapshotManifest::from_payload(payload)?;
         let request = self.resolve_request(request.into()).await?;
         Ok(crate::with_process_management(Arc::new(
@@ -1532,7 +1562,7 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
     }
 }
 
-struct FirecrackerSandboxHandle {
+pub(super) struct FirecrackerSandboxHandle {
     egress: Option<Arc<SandboxEgress>>,
     id: String,
     machine: Machine,
@@ -1708,7 +1738,15 @@ impl ManagedSandboxHandle for FirecrackerSandboxHandle {
         self.shared.delete_snapshot(payload).await
     }
 
-    async fn snapshot(&self) -> Result<SnapshotPayload> {
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
+        if kind == crate::SnapshotKind::Filesystem {
+            return filesystem::snapshot_filesystem(
+                Arc::clone(&self.shared),
+                self.request.sandbox.clone(),
+                false,
+            )
+            .await;
+        }
         let _lifecycle_guard = self
             .shared
             .lifecycle_locks
@@ -1763,6 +1801,13 @@ impl Shared {
     }
 
     async fn delete_snapshot(&self, payload: SnapshotPayload) -> Result<()> {
+        if payload.format == SnapshotFormat::FirecrackerFilesystemRef {
+            let config = self.config.clone();
+            return tokio::task::spawn_blocking(move || {
+                filesystem::delete_capture(&config, payload)
+            })
+            .await?;
+        }
         let manifest = FirecrackerSnapshotManifest::from_payload(payload)?;
         let config = self.config.clone();
         tokio::task::spawn_blocking(move || {
@@ -4519,15 +4564,18 @@ fn remove_directory_if_present(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn snapshot_directory_bytes(directory: &Path) -> Result<u64> {
+fn snapshot_directory_bytes(
+    directory: &Path,
+    size: fn(&fs::Metadata) -> Result<u64>,
+) -> Result<u64> {
     let mut total = 0u64;
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
         let kind = entry.file_type()?;
         let bytes = if kind.is_dir() {
-            snapshot_directory_bytes(&entry.path())?
+            snapshot_directory_bytes(&entry.path(), size)?
         } else if kind.is_file() {
-            entry.metadata()?.len()
+            size(&entry.metadata()?)?
         } else {
             bail!("unexpected file in Firecracker snapshot storage");
         };
@@ -4537,7 +4585,8 @@ fn snapshot_directory_bytes(directory: &Path) -> Result<u64> {
 }
 
 fn enforce_snapshot_budget(config: &FirecrackerConfig, capture_bytes: u64) -> Result<()> {
-    let mut retained = snapshot_directory_bytes(&config.state_root.join("snapshots"))?;
+    let mut retained =
+        snapshot_directory_bytes(&config.state_root.join("snapshots"), |file| Ok(file.len()))?;
     let machines = match fs::read_dir(jail_dir(config, "")) {
         Ok(machines) => Some(machines),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -4559,6 +4608,69 @@ fn enforce_snapshot_budget(config: &FirecrackerConfig, capture_bytes: u64) -> Re
     {
         bail!("Firecracker snapshot storage budget exhausted");
     }
+    Ok(())
+}
+
+fn with_paused_snapshot_source<T>(
+    root: &Path,
+    machine_id: &str,
+    suspend: bool,
+    capture: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let api = root.join("run/firecracker.socket");
+    let pid = root.join("firecracker.pid");
+    let running = process_running(&pid);
+    if running {
+        firecracker_api_patch(&api, "/vm", &FirecrackerVmState { state: "Paused" })?;
+    }
+    let result = capture().and_then(|value| {
+        if running && suspend {
+            stop_machine_process_blocking(machine_id, &pid)?;
+        }
+        Ok(value)
+    });
+    if running && (!suspend || result.is_err()) {
+        match (
+            result,
+            firecracker_api_patch(&api, "/vm", &FirecrackerVmState { state: "Resumed" }),
+        ) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(error)) => Err(error.context("resuming Firecracker snapshot source")),
+            (Err(error), Err(resume)) => {
+                Err(error.context(format!("source resume also failed: {resume:#}")))
+            }
+        }
+    } else {
+        result
+    }
+}
+
+fn seal_snapshot_files(directory: &Path, names: &[&str]) -> Result<()> {
+    for name in names {
+        let path = directory.join(name);
+        chown(&path, Some(0), Some(0))?;
+        fs::set_permissions(&path, Permissions::from_mode(0o444))?;
+        File::open(path)?.sync_all()?;
+    }
+    let lease = directory.join(SNAPSHOT_LEASE_FILE);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&lease)?;
+    fs::set_permissions(lease, Permissions::from_mode(0o600))?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn publish_snapshot_directory(temporary: &Path, destination: &Path) -> Result<()> {
+    File::open(temporary)?.sync_all()?;
+    fs::rename(temporary, destination)
+        .with_context(|| format!("publishing Firecracker snapshot {}", destination.display()))?;
+    let parent = destination.parent().context("missing snapshot parent")?;
+    File::open(parent)?.sync_all()?;
+    File::open(parent.parent().context("missing snapshot namespace")?)?.sync_all()?;
     Ok(())
 }
 
@@ -4631,15 +4743,9 @@ fn capture_snapshot_template(
     fs::set_permissions(&output, Permissions::from_mode(0o700))?;
 
     let api = wait_for_firecracker_api(&root, &source.machine_id)?;
-    if let Err(error) = firecracker_api_patch(&api, "/vm", &FirecrackerVmState { state: "Paused" })
-    {
-        remove_directory_if_present(&temporary)?;
-        remove_directory_if_present(&output)?;
-        return Err(error).context("pausing Firecracker snapshot source");
-    }
     let snapshot_path = format!("/{output_name}/state");
     let memory_path = format!("/{output_name}/memory");
-    let paused_result = (|| {
+    let result = with_paused_snapshot_source(&root, &source.machine_id, false, || {
         let base = if memory_base.try_exists()? {
             Some(memory_base.clone())
         } else {
@@ -4704,16 +4810,7 @@ fn capture_snapshot_template(
         // writing to it again the moment it resumes.
         copy_sparse_reflink(&root.join("overlay.ext4"), &temporary.join("overlay.ext4"))?;
         Ok::<(), anyhow::Error>(())
-    })();
-    let resume = firecracker_api_patch(&api, "/vm", &FirecrackerVmState { state: "Resumed" });
-    let result = match (paused_result, resume) {
-        (Err(error), Err(resume_error)) => Err(error).context(format!(
-            "creating Firecracker snapshot; source resume also failed: {resume_error:#}"
-        )),
-        (Err(error), Ok(())) => Err(error).context("creating Firecracker snapshot"),
-        (Ok(()), Err(error)) => Err(error).context("resuming Firecracker snapshot source"),
-        (Ok(()), Ok(())) => Ok(()),
-    };
+    });
     let result = result.and_then(|()| {
         // Copy -- never hard-link -- the snapshot out of the source VM's jail.
         // The state and memory files were created by the jailed VMM under its
@@ -4726,23 +4823,7 @@ fn capture_snapshot_template(
         for name in ["state", "memory"] {
             copy_sparse_reflink(&output.join(name), &temporary.join(name))?;
         }
-        for path in [
-            temporary.join("state"),
-            temporary.join("memory"),
-            temporary.join("overlay.ext4"),
-        ] {
-            chown(&path, Some(0), Some(0))?;
-            fs::set_permissions(&path, Permissions::from_mode(0o444))?;
-            File::open(path)?.sync_all()?;
-        }
-        let lease = temporary.join(SNAPSHOT_LEASE_FILE);
-        let lease_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&lease)?;
-        fs::set_permissions(&lease, Permissions::from_mode(0o600))?;
-        lease_file.sync_all()?;
+        seal_snapshot_files(&temporary, &["state", "memory", "overlay.ext4"])?;
         if lifecycle == SnapshotTemplateLifecycle::Machine {
             let marker = temporary.join(SNAPSHOT_FORK_TEMPLATE_FILE);
             File::create(&marker)?.sync_all()?;
@@ -4770,8 +4851,7 @@ fn capture_snapshot_template(
         }
         return Err(error);
     }
-    fs::rename(&temporary, &destination)
-        .with_context(|| format!("publishing Firecracker snapshot {}", destination.display()))?;
+    publish_snapshot_directory(&temporary, &destination)?;
     validate_snapshot_template(config, &destination, source.runtime.memory_mib)?;
     replace_hard_link(&destination.join("memory"), &memory_base)?;
     fs::remove_file(&capture_pending)?;

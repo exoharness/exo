@@ -94,7 +94,7 @@ async fn daytona_snapshot_and_rewind_round_trip() {
 
     // Phase 2: snapshot (native Daytona checkpoint).
     let snapshot_id = conv
-        .snapshot_sandbox(sandbox_id.clone())
+        .snapshot_sandbox(sandbox_id.clone(), exoharness::SnapshotKind::Filesystem)
         .await
         .expect("snapshot_sandbox");
 

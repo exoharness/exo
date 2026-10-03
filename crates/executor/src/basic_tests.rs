@@ -795,7 +795,11 @@ impl AgentHandle for FakeAgentHandle {
 
 #[async_trait]
 impl SnapshotHandle for FakeAgentHandle {
-    async fn snapshot_sandbox(&self, _id: SandboxId) -> Result<SnapshotId> {
+    async fn snapshot_sandbox(
+        &self,
+        _id: SandboxId,
+        _kind: exoharness::SnapshotKind,
+    ) -> Result<SnapshotId> {
         Ok(Uuid7::now())
     }
 
@@ -1065,7 +1069,11 @@ impl ConversationHandle for FakeConversationHandle {
 
 #[async_trait]
 impl SnapshotHandle for FakeConversationHandle {
-    async fn snapshot_sandbox(&self, _id: SandboxId) -> Result<SnapshotId> {
+    async fn snapshot_sandbox(
+        &self,
+        _id: SandboxId,
+        _kind: exoharness::SnapshotKind,
+    ) -> Result<SnapshotId> {
         Err(anyhow!("not implemented"))
     }
 
@@ -1166,7 +1174,11 @@ struct FakeTurnHandle {
 
 #[async_trait]
 impl SnapshotHandle for FakeTurnHandle {
-    async fn snapshot_sandbox(&self, _id: SandboxId) -> Result<SnapshotId> {
+    async fn snapshot_sandbox(
+        &self,
+        _id: SandboxId,
+        _kind: exoharness::SnapshotKind,
+    ) -> Result<SnapshotId> {
         Err(anyhow!("not implemented"))
     }
 

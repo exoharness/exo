@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -393,7 +393,11 @@ impl ManagedSandboxHandle for E2bSandboxHandle {
         bail!("E2B sandboxes cannot be detached")
     }
 
-    async fn snapshot(&self) -> Result<SnapshotPayload> {
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
+        ensure!(
+            kind == crate::SnapshotKind::Full,
+            "e2b does not support the requested snapshot kind"
+        );
         let base_template = resolve_template_id(&self.request.spec, &self.backend.template_id);
         save_snapshot_via_backend(&self.backend, &self.sandbox_id, base_template).await
     }

@@ -51,7 +51,7 @@ function listSandboxSnapshotsTool(): ToolInstance {
   return hostTool({
     name: "list_sandbox_snapshots",
     description:
-      "List filesystem snapshots for the current Exo sandbox. Use scope 'agent' or null for the shared persistent agent sandbox; use 'conversation' only when the conversation has its own sandbox.",
+      "List snapshots for the current Exo sandbox. Use scope 'agent' or null for the shared persistent agent sandbox; use 'conversation' only when the conversation has its own sandbox.",
     parameters: scopeParameters(),
   });
 }
@@ -60,8 +60,21 @@ function snapshotSandboxTool(): ToolInstance {
   return hostTool({
     name: "snapshot_sandbox",
     description:
-      "Capture a filesystem snapshot of the current Exo sandbox so it can be rewound later. Use this before risky edits or experiments.",
-    parameters: scopeParameters(),
+      "Capture the requested sandbox state so it can be rewound later. Filesystem snapshots restore files with a fresh process runtime; full snapshots also restore memory and execution. Unsupported kinds fail.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        scope: scopeProperty(),
+        kind: {
+          type: "string",
+          enum: ["filesystem", "full"],
+          description:
+            "State to capture: all writable filesystems, or filesystems plus memory and execution.",
+        },
+      },
+      required: ["scope", "kind"],
+    },
   });
 }
 

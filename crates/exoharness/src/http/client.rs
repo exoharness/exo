@@ -341,11 +341,13 @@ async fn http_snapshot_sandbox(
     harness: &HttpExoHarness,
     scope: SnapshotScope,
     id: SandboxId,
+    kind: crate::SnapshotKind,
 ) -> Result<SnapshotId> {
     match harness
         .request(Request::SnapshotSandbox {
             scope,
             sandbox_id: id,
+            snapshot_kind: kind,
         })
         .await?
     {
@@ -665,13 +667,18 @@ impl AgentHandle for HttpAgentHandle {
 
 #[async_trait]
 impl SnapshotHandle for HttpAgentHandle {
-    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
+    async fn snapshot_sandbox(
+        &self,
+        id: SandboxId,
+        kind: crate::SnapshotKind,
+    ) -> Result<SnapshotId> {
         http_snapshot_sandbox(
             &self.harness,
             SnapshotScope::Resource {
                 scope: self.sandbox_scope(),
             },
             id,
+            kind,
         )
         .await
     }
@@ -1022,13 +1029,18 @@ impl ConversationHandle for HttpConversationHandle {
 
 #[async_trait]
 impl SnapshotHandle for HttpConversationHandle {
-    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
+    async fn snapshot_sandbox(
+        &self,
+        id: SandboxId,
+        kind: crate::SnapshotKind,
+    ) -> Result<SnapshotId> {
         http_snapshot_sandbox(
             &self.harness,
             SnapshotScope::Resource {
                 scope: self.sandbox_scope(),
             },
             id,
+            kind,
         )
         .await
     }
@@ -1161,8 +1173,12 @@ impl HttpTurnHandle {
 
 #[async_trait]
 impl SnapshotHandle for HttpTurnHandle {
-    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
-        http_snapshot_sandbox(&self.harness, self.sandbox_scope(), id).await
+    async fn snapshot_sandbox(
+        &self,
+        id: SandboxId,
+        kind: crate::SnapshotKind,
+    ) -> Result<SnapshotId> {
+        http_snapshot_sandbox(&self.harness, self.sandbox_scope(), id, kind).await
     }
 
     async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {

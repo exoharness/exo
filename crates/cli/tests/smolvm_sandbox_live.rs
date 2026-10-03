@@ -464,7 +464,10 @@ async fn snapshot_round_trip_preserves_guest_state() {
         .expect("exec write");
     assert!(write.ok, "write failed: {}", write.stderr);
 
-    let payload = source.snapshot().await.expect("snapshot");
+    let payload = source
+        .snapshot(exoharness::SnapshotKind::Filesystem)
+        .await
+        .expect("snapshot");
     println!(
         "snapshot format={} manifest={} bytes",
         payload.format,

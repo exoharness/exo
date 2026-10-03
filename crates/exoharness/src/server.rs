@@ -312,8 +312,14 @@ impl ExoHarnessServer {
             Request::DetachSandbox { scope, sandbox_id } => Ok(Response::SandboxAttachment {
                 attachment: self.detach_sandbox(scope, sandbox_id).await?,
             }),
-            Request::SnapshotSandbox { scope, sandbox_id } => Ok(Response::SnapshotId {
-                snapshot_id: self.snapshot_sandbox(scope, sandbox_id).await?,
+            Request::SnapshotSandbox {
+                scope,
+                sandbox_id,
+                snapshot_kind,
+            } => Ok(Response::SnapshotId {
+                snapshot_id: self
+                    .snapshot_sandbox(scope, sandbox_id, snapshot_kind)
+                    .await?,
             }),
             Request::StartSandbox { scope, request } => {
                 self.start_sandbox(scope, request).await?;
@@ -637,10 +643,11 @@ impl ExoHarnessServer {
         &self,
         scope: SnapshotScope,
         sandbox_id: SandboxId,
+        kind: crate::SnapshotKind,
     ) -> Result<SnapshotId> {
         self.snapshot_context(scope)
             .await?
-            .snapshot_sandbox(sandbox_id)
+            .snapshot_sandbox(sandbox_id, kind)
             .await
     }
 

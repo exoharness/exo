@@ -218,6 +218,24 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
         B: FnOnce(Option<Arc<SandboxEgress<P>>>) -> BF,
         BF: Future<Output = Result<H>>,
     {
+        self.acquire_with_proxy_inner(request, true, proxy, build, terminate)
+            .await
+    }
+
+    async fn acquire_with_proxy_inner<T, TF, B, BF>(
+        &self,
+        request: SandboxRequest,
+        reuse: bool,
+        proxy: T,
+        build: B,
+        terminate: impl Future<Output = Result<()>>,
+    ) -> Result<Arc<H>>
+    where
+        T: FnOnce(State, CancellationToken) -> TF,
+        TF: Future<Output = Result<P>>,
+        B: FnOnce(Option<Arc<SandboxEgress<P>>>) -> BF,
+        BF: Future<Output = Result<H>>,
+    {
         // Serialize this sandbox's acquire/terminate operations; other sandboxes
         // can acquire independently.
         let _guard = self.lock(&request.sandbox_id).await;
@@ -233,6 +251,7 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
                 && egress.is_open()
                 && handle.is_running().await? == Some(true)
             {
+                ensure!(reuse, "snapshot restore target already has an allocation");
                 ensure!(
                     unchanged,
                     "stop the protected sandbox before changing its configuration"
@@ -279,8 +298,10 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
                 },
             );
         }
+        let mut built = false;
         let result = async {
             let handle = Arc::new(build(Some(egress.clone())).await?);
+            built = true;
             let mut sandboxes = self.sandboxes();
             self.ensure_open()?;
             sandboxes
@@ -296,7 +317,9 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
             if let Err(cleanup) = egress.proxy.shutdown().await {
                 tracing::warn!(sandbox_id = %request.sandbox_id, %cleanup, "egress cleanup after failed acquisition");
             }
-            if let Err(cleanup) = terminate.await {
+            if (reuse || built)
+                && let Err(cleanup) = terminate.await
+            {
                 tracing::warn!(sandbox_id = %request.sandbox_id, %cleanup, "sandbox cleanup after failed acquisition");
             }
         }
@@ -320,6 +343,18 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
         let _guard = self.lock(id).await;
         self.remove(id).await?;
         terminate.await
+    }
+
+    #[cfg(feature = "firecracker")]
+    pub(crate) async fn suspend<T>(
+        &self,
+        id: &str,
+        suspend: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let _guard = self.lock(id).await;
+        let result = suspend.await?;
+        self.remove(id).await?;
+        Ok(result)
     }
 
     pub(crate) fn shutdown(&self) {
@@ -349,6 +384,32 @@ impl<H: ManagedSandboxHandle + 'static> EgressRuntime<H> {
         let policy = request.spec.policy.networking.clone();
         self.acquire_with_proxy(
             request,
+            |state, cancel| async move {
+                EgressProxy::start_with_transport(transport(policy).await?, state, cancel).await
+            },
+            build,
+            terminate,
+        )
+        .await
+    }
+    #[cfg(feature = "firecracker")]
+    pub(crate) async fn restore<T, TF, B, BF>(
+        &self,
+        request: SandboxRequest,
+        transport: T,
+        build: B,
+        terminate: impl Future<Output = Result<()>>,
+    ) -> Result<Arc<H>>
+    where
+        T: FnOnce(crate::SandboxNetworkPolicy) -> TF,
+        TF: Future<Output = Result<Arc<dyn EgressTransport>>>,
+        B: FnOnce(Option<Arc<SandboxEgress>>) -> BF,
+        BF: Future<Output = Result<H>>,
+    {
+        let policy = request.spec.policy.networking.clone();
+        self.acquire_with_proxy_inner(
+            request,
+            false,
             |state, cancel| async move {
                 EgressProxy::start_with_transport(transport(policy).await?, state, cancel).await
             },
@@ -398,7 +459,7 @@ mod tests {
         async fn detach(&self) -> Result<crate::SandboxAttachment> {
             unreachable!()
         }
-        async fn snapshot(&self) -> Result<crate::SnapshotPayload> {
+        async fn snapshot(&self, _kind: crate::SnapshotKind) -> Result<crate::SnapshotPayload> {
             unreachable!()
         }
     }
@@ -459,6 +520,67 @@ mod tests {
                 idle_ttl: Some(Duration::from_secs(60)),
             },
         }
+    }
+
+    #[cfg(feature = "firecracker")]
+    #[tokio::test]
+    async fn restore_rejects_a_live_cached_allocation_without_mutating_it() -> Result<()> {
+        let runtime = EgressRuntime::<Handle>::new(None, Arc::new(PublicUpstreamResolver));
+        let transport = Arc::new(Transport::default());
+        runtime
+            .acquire(
+                request("one"),
+                |_| async { Ok(transport.clone() as Arc<dyn EgressTransport>) },
+                |_| async { Ok(Handle(Some(true))) },
+                async { panic!("successful acquisition must not terminate") },
+            )
+            .await?;
+        let result = runtime
+            .restore(
+                request("one"),
+                |_| async { panic!("restore must not replace the existing proxy") },
+                |_| async { panic!("restore must not overwrite the existing VM") },
+                async { panic!("rejected restore must not terminate the existing VM") },
+            )
+            .await;
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("already has an allocation")
+        );
+        assert!(!transport.is_closed());
+        assert_eq!(runtime.sandboxes().len(), 1);
+        runtime.shutdown();
+        Ok(())
+    }
+
+    #[cfg(feature = "firecracker")]
+    #[tokio::test]
+    async fn suspension_preserves_egress_on_failure_and_closes_it_after_success() -> Result<()> {
+        let runtime = EgressRuntime::<Handle>::new(None, Arc::new(PublicUpstreamResolver));
+        let transport = Arc::new(Transport::default());
+        runtime
+            .acquire(
+                request("one"),
+                |_| async { Ok(transport.clone() as Arc<dyn EgressTransport>) },
+                |_| async { Ok(Handle(Some(true))) },
+                async { panic!("successful acquisition must not terminate") },
+            )
+            .await?;
+        let failure = runtime
+            .suspend("one", async {
+                Err::<(), _>(anyhow::anyhow!("capture failed"))
+            })
+            .await;
+        assert!(failure.is_err());
+        assert!(!transport.is_closed());
+        assert_eq!(runtime.sandboxes().len(), 1);
+        assert_eq!(runtime.suspend("one", async { Ok(42) }).await?, 42);
+        assert!(transport.shutdown_completed.load(Ordering::SeqCst));
+        assert!(runtime.sandboxes().is_empty());
+        Ok(())
     }
 
     #[tokio::test]

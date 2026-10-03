@@ -935,7 +935,7 @@ impl ManagedSandboxHandle for SmolvmOneShotHandle {
         bail!("one-shot smolvm sandboxes cannot be detached")
     }
 
-    async fn snapshot(&self) -> Result<SnapshotPayload> {
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
         bail!(
             "snapshot needs a persistent VM; construct the backend with SmolvmExecutionMode::Warm"
         )
@@ -1059,7 +1059,19 @@ impl ManagedSandboxHandle for SmolvmWarmHandle {
         bail!("smolvm sandboxes cannot be detached")
     }
 
-    async fn snapshot(&self) -> Result<SnapshotPayload> {
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
+        ensure!(
+            kind == crate::SnapshotKind::Filesystem,
+            "smolvm does not support full execution snapshots"
+        );
+        ensure!(
+            self.request
+                .spec
+                .mounts
+                .iter()
+                .all(|mount| mount.access == crate::SandboxMountAccess::ReadOnly),
+            "smolvm filesystem snapshots cannot capture writable mounted volumes"
+        );
         ensure!(
             self.egress.is_none(),
             "smolvm proxy egress does not support snapshots"
