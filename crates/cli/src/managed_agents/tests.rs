@@ -6,7 +6,7 @@ use executor::{
     ModelRequest, ModelResponse, ModelResponseStream, Runtime, SandboxBackendRegistration,
     SandboxProvider, SecretBackendChoice, SendRequest,
 };
-use exoharness::ReadArtifactRequest;
+use exoharness::{ExoHarness, ReadArtifactRequest};
 use lingua::Message;
 use lingua::universal::{AssistantContent, UserContent};
 use tempfile::TempDir;
@@ -125,7 +125,7 @@ async fn open_configured_thread(
     args: &ThreadArgs,
 ) -> Result<(Arc<dyn AgentHandle>, Arc<dyn ConversationHandle>)> {
     let runtime = configured_runtime(runtime, definition, args)?;
-    let opened = super::open_thread(&runtime, definition, args, false, None).await?;
+    let opened = super::open_thread(&runtime, definition, args, false).await?;
     Ok((opened.agent, opened.thread))
 }
 
@@ -160,24 +160,40 @@ async fn rejected_local_session_does_not_reconfigure_an_open_thread() -> Result<
     args.agent_file = Some(source);
     args.agent = None;
     let (agent, thread) = open_configured_thread(&runtime, Some(&definition), &args).await?;
-    let root = Arc::new(crate::session::LocalRootLease::acquire(temp.path())?);
-    let _active =
-        crate::session::LocalSession::start(root.clone(), agent.record().id, thread.clone())
-            .await?;
+    let state_root = temp.path().join("state");
+    let owner = BasicExoHarness::new(storage_config(&state_root))
+        .await?
+        .with_local_sessions(state_root.clone());
+    let owned_agent = owner.get_agent(&agent.record().id).await?.unwrap();
+    owned_agent
+        .get_thread(&thread.record().id)
+        .await?
+        .unwrap()
+        .claim_local_session()
+        .await?;
     let before = executor::get_conversation_model_override(thread.as_ref()).await?;
     let mut args = thread_args(&agent.record().slug);
     args.thread = Some(thread.record().slug.clone());
     args.model = Some("changed-model".into());
-    let configured = configured_runtime(&runtime, None, &args)?;
-    let error = super::open_thread(&configured, None, &args, false, Some(root))
+    let contender = Runtime::new(
+        LocalProvider::basic(
+            Arc::new(
+                BasicExoHarness::new(storage_config(&state_root))
+                    .await?
+                    .with_local_sessions(state_root),
+            ),
+            Arc::new(RecordingModel::default()),
+            Arc::new(BasicToolRuntime),
+            Arc::new(cost::PricingTable::empty()),
+        ),
+        None,
+    );
+    let configured = configured_runtime(&contender, None, &args)?;
+    let error = super::open_thread(&configured, None, &args, false)
         .await
         .err()
         .context("second session should be rejected")?;
-    assert!(
-        error
-            .to_string()
-            .contains("already has a local CLI session")
-    );
+    assert!(error.to_string().contains("owned by another local process"));
     assert_eq!(
         executor::get_conversation_model_override(thread.as_ref()).await?,
         before

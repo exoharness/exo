@@ -322,6 +322,7 @@ pub async fn open_thread(
         Some(reference) => find_thread(agent.as_ref(), reference).await?,
         None => agent.new_thread(new_thread).await?,
     };
+    thread.claim_local_session().await?;
     let thread = if let Some(environment) = environment
         && thread.record().environment.as_ref() != Some(&environment)
     {

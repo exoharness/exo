@@ -15,7 +15,6 @@ mod render;
 #[cfg(test)]
 mod secret_tests;
 mod serve;
-mod session;
 mod tui;
 mod tui_app;
 mod turn_display;
@@ -1106,19 +1105,6 @@ async fn run_selected(
         bail!("--egress-policy is local-only; put the policy in the remote environment definition");
     }
     let state_root = local.then(|| cli.state_root()).transpose()?;
-    let _server_root = match (state_root.as_deref(), &cli.command) {
-        (Some(root), Commands::Serve { .. }) => Some(session::lock_server_root(root)?),
-        _ => None,
-    };
-    let local_root = if session::needs_local_root_lock(&cli.command) {
-        state_root
-            .as_deref()
-            .map(session::LocalRootLease::acquire)
-            .transpose()?
-            .map(Arc::new)
-    } else {
-        None
-    };
     let harness = providers::runtime(
         &cli,
         http_client,
@@ -1128,7 +1114,6 @@ async fn run_selected(
     )
     .await?;
     let env_vars = env.into_vars();
-    let mut session = None;
     let result: Result<()> = async {
     match cli.command {
         Commands::Environment { command, .. } => environment::run(harness.exoharness_handle().as_ref(), command).await?,
@@ -1145,10 +1130,8 @@ async fn run_selected(
                 definition.as_ref(),
                 &thread,
                 execution.egress_policy.is_some(),
-                local_root.clone(),
             )
             .await?;
-            session = opened.session;
             let (agent, conversation) = (opened.agent, opened.thread);
             if local {
                 harness.start_inline_previews(agent.as_ref(), conversation.clone()).await?;
@@ -1720,8 +1703,7 @@ async fn run_selected(
                         .get_conversation(agent_handle.as_ref(), &conversation)
                         .await?
                         .ok_or_else(|| anyhow!("conversation not found: {}", conversation))?;
-                    if let Some(root) = &local_root {
-                        session = Some(session::LocalSession::start(root.clone(), agent_handle.record().id, Arc::clone(&conversation)).await?);
+                    if local {
                         harness.start_inline_previews(agent_handle.as_ref(), conversation.clone()).await?;
                     }
                     let output = run_sandbox_shell_command(
@@ -1910,8 +1892,7 @@ async fn run_selected(
                 let conversation =
                     must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
                 let agent = must_get_agent(harness.as_ref(), &agent).await?;
-                if let Some(root) = &local_root {
-                    session = Some(session::LocalSession::start(root.clone(), agent.record().id, Arc::clone(&conversation)).await?);
+                if local {
                     harness.start_inline_previews(agent.as_ref(), conversation.clone()).await?;
                 }
                 let previous_messages =
@@ -1944,13 +1925,8 @@ async fn run_selected(
     Ok(())
     }.await;
     let shutdown = harness.shutdown().await;
-    let stopped = match session {
-        Some(session) => session.finish().await,
-        None => Ok(()),
-    };
     result?;
-    shutdown?;
-    stopped
+    shutdown
 }
 
 fn command_refs_mut(command: &mut Commands) -> (Option<&mut String>, Option<&mut String>) {

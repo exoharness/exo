@@ -216,9 +216,10 @@ startup command on resume. Deleting the thread removes its managed VM and disks.
 HTTP clients leave sandbox lifetime with the server, so use `exo serve` when
 services should stay running between client sessions.
 
-Local one-off commands and interactive sessions use exclusive thread ownership;
+Local one-off commands, interactive sessions, and provider servers use the same
+exclusive thread ownership. Different threads can run under the same state root;
 see [Local sandbox lifetime](../../docs/resources.md#local-sandbox-lifetime) for
-the command ownership rules, server root lock, and crash recovery behavior.
+the command ownership rules and crash recovery behavior.
 
 Each `--agent-file` invocation creates or updates a saved agent from the Markdown
 file, then starts a saved thread. The agent slug combines the filename with a hash

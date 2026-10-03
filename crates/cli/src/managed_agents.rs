@@ -154,7 +154,6 @@ pub fn local_agent_config(
 pub struct OpenedThread {
     pub agent: Arc<dyn AgentHandle>,
     pub thread: Arc<dyn ConversationHandle>,
-    pub session: Option<crate::session::LocalSession>,
 }
 
 pub async fn open_thread(
@@ -162,9 +161,7 @@ pub async fn open_thread(
     definition: Option<&AgentDefinition>,
     args: &ThreadArgs,
     egress_policy_selected: bool,
-    local_root: Option<Arc<crate::session::LocalRootLease>>,
 ) -> Result<OpenedThread> {
-    let mut session = None;
     let mut progress = crate::turn_display::TurnProgress::new();
     progress.set_status(Some("Preparing thread".into()));
     let result = async {
@@ -262,14 +259,6 @@ pub async fn open_thread(
         let reference = saved_thread
             .as_ref()
             .map(|thread| thread.record().id.to_string());
-        if let Some(root) = &local_root
-            && let Some(thread) = &saved_thread
-        {
-            session = Some(
-                progress.wait(crate::session::LocalSession::start(root.clone(), agent.record().id, thread.clone()))
-                    .await?,
-            );
-        }
         if reference.is_some() {
             tracing::info!(target: "exoharness::progress", "Opening thread...");
         } else {
@@ -287,14 +276,6 @@ pub async fn open_thread(
                 },
             ))
             .await?;
-        if let Some(root) = local_root
-            && session.is_none()
-        {
-            session = Some(
-                progress.wait(crate::session::LocalSession::start(root, agent.record().id, opened.thread.clone()))
-                    .await?,
-            );
-        }
         println!("agent: {} ({})", agent.record().slug, agent.record().id);
         println!(
             "thread: {} ({})",
@@ -355,22 +336,11 @@ pub async fn open_thread(
         Ok((agent, opened.thread))
     }.await;
     match result {
-        Ok((agent, thread)) => Ok(OpenedThread {
-            agent,
-            thread,
-            session,
-        }),
+        Ok((agent, thread)) => Ok(OpenedThread { agent, thread }),
         Err(error) => {
             let shutdown = runtime.shutdown().await;
-            let stopped = match session {
-                Some(session) => session.finish().await,
-                None => Ok(()),
-            };
             shutdown.with_context(|| {
                 format!("thread setup failed: {error:#}; shutting down the harness")
-            })?;
-            stopped.with_context(|| {
-                format!("thread setup failed: {error:#}; stopping its sandboxes")
             })?;
             Err(error)
         }

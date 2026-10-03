@@ -38,17 +38,29 @@ async fn setup(provider: &str) -> Result<Fixture> {
 }
 
 async fn open_session(f: &Fixture, thread: &str) -> Result<Child> {
+    open_session_on(f, thread, None).await
+}
+
+async fn open_session_on(f: &Fixture, thread: &str, provider: Option<&str>) -> Result<Child> {
+    let agent =
+        exo_managed_agents::find_agent(f.runtime.exoharness_handle().as_ref(), "dev").await?;
+    let agent_id = agent.record().id.to_string();
+    let mut args = Vec::new();
+    if let Some(provider) = provider {
+        args.extend(["--provider", provider]);
+    }
+    args.extend([
+        "agent",
+        "run",
+        "--agent",
+        agent_id.as_str(),
+        "--environment",
+        "dev",
+        "--thread",
+        thread,
+    ]);
     let mut child = f
-        .command(&[
-            "agent",
-            "run",
-            "--agent",
-            "dev",
-            "--environment",
-            "dev",
-            "--thread",
-            thread,
-        ])
+        .command(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -82,6 +94,108 @@ async fn close_session(mut child: Child) -> Result<()> {
         .await?;
     support::success(timeout(Duration::from_secs(10), child.wait_with_output()).await??)?;
     Ok(())
+}
+
+#[actix_web::test]
+async fn server_and_inline_threads_share_a_root_without_sharing_ownership() -> Result<()> {
+    let f = setup("remote").await?;
+    let remote = open_session_on(&f, "served", Some("remote")).await?;
+    let local = open_session_on(&f, "inline", Some("local")).await?;
+    let agent =
+        exo_managed_agents::find_agent(f.runtime.exoharness_handle().as_ref(), "dev").await?;
+    let served = exo_managed_agents::find_thread(agent.as_ref(), "served").await?;
+    let agent_id = agent.record().id.to_string();
+    let served_id = served.record().id.to_string();
+    let sandbox = served
+        .create_sandbox(exoharness::test_support::sandbox_request())
+        .await?;
+    assert!(!f.root.join("service.lock").exists());
+    for args in [
+        vec![
+            "agent",
+            "run",
+            "--agent",
+            agent_id.as_str(),
+            "--thread",
+            served_id.as_str(),
+        ],
+        vec!["thread", "delete", agent_id.as_str(), served_id.as_str()],
+        vec!["agent", "delete", agent_id.as_str()],
+        vec![
+            "thread",
+            "sandbox",
+            "run",
+            agent_id.as_str(),
+            served_id.as_str(),
+            "true",
+        ],
+    ] {
+        let mut local_args = vec!["--provider", "local"];
+        local_args.extend(args);
+        let rejected = f.output(&local_args, None, None).await?;
+        assert!(!rejected.status.success());
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains("owned by another local process"),
+            "{}",
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        assert!(
+            served
+                .list_sandboxes()
+                .await?
+                .iter()
+                .find(|s| s.id == sandbox)
+                .unwrap()
+                .running
+        );
+    }
+    f.cli(&[
+        "--provider",
+        "local",
+        "thread",
+        "get",
+        agent_id.as_str(),
+        served_id.as_str(),
+    ])
+    .await?;
+    close_session(remote).await?;
+    assert!(
+        served
+            .list_sandboxes()
+            .await?
+            .iter()
+            .find(|s| s.id == sandbox)
+            .unwrap()
+            .running
+    );
+    // HTTP clients leave ownership with the server, while an inline exit
+    // releases only that inline process's thread.
+    close_session(local).await?;
+    f.cli(&[
+        "--provider",
+        "local",
+        "agent",
+        "run",
+        "--agent",
+        agent_id.as_str(),
+        "--thread",
+        "inline",
+    ])
+    .await?;
+    f.runtime.shutdown().await?;
+    assert!(served.list_sandboxes().await?.iter().all(|s| !s.running));
+    f.cli(&[
+        "--provider",
+        "local",
+        "thread",
+        "sandbox",
+        "run",
+        agent_id.as_str(),
+        served_id.as_str(),
+        "true",
+    ])
+    .await?;
+    f.stop().await
 }
 
 async fn previews(f: &Fixture, name: &str) -> Result<executor::PreviewUrls> {

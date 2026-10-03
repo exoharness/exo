@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 use support::{Fixture, thread_slug};
 
 #[actix_web::test]
-async fn server_root_rejects_local_mutations_but_allows_queries_and_http() -> Result<()> {
+async fn thread_ownership_allows_template_updates_and_requires_owner_for_reconfiguration()
+-> Result<()> {
     let f = Fixture::new().await?;
     f.cli(&["provider", "switch", "local"]).await?;
     f.cli(&[
@@ -17,6 +18,11 @@ async fn server_root_rejects_local_mutations_but_allows_queries_and_http() -> Re
     .await?;
     f.cli(&["thread", "create", "saved", "Guarded", "--slug", "guarded"])
         .await?;
+    let agent =
+        exo_managed_agents::find_agent(f.runtime.exoharness_handle().as_ref(), "saved").await?;
+    let thread = exo_managed_agents::find_thread(agent.as_ref(), "guarded").await?;
+    let agent_id = agent.record().id.to_string();
+    let thread_id = thread.record().id.to_string();
     let mut environment: exoharness::EnvironmentDefinition = serde_yaml_ng::from_str(
         "name: dev\nconfig:\n  provider: local_process\n  image: unused\n",
     )?;
@@ -28,58 +34,92 @@ async fn server_root_rejects_local_mutations_but_allows_queries_and_http() -> Re
     environment.config.image = "updated-image".into();
     std::fs::write(&file, serde_yaml_ng::to_string(&environment)?)?;
 
-    // The fixture's HTTP service uses this root. Claim the exclusive lock that
-    // exo serve holds without launching a second service or any real VM.
-    let server_lock = std::fs::OpenOptions::new()
-        .write(true)
-        .open(f.root.join("service.lock"))?;
-    server_lock.try_lock()?;
+    f.cli(&[
+        "--provider",
+        "remote",
+        "agent",
+        "run",
+        "--agent",
+        agent_id.as_str(),
+        "--environment",
+        "dev",
+        "--thread",
+        thread_id.as_str(),
+    ])
+    .await?;
+    // Templates and unrelated vaults remain editable while a server owns a
+    // thread. Applying a changed template to that thread requires its owner.
+    f.cli(&["environment", "update", "dev", "--file", path])
+        .await?;
+    f.cli(&["vault", "create", "unrelated"]).await?;
     for args in [
-        vec!["environment", "update", "dev", "--file", path],
-        vec!["thread", "delete", "saved", "guarded"],
-        vec!["agent", "delete", "saved"],
-        vec!["vault", "create", "blocked"],
+        vec!["thread", "delete", agent_id.as_str(), thread_id.as_str()],
+        vec!["agent", "delete", agent_id.as_str()],
+        vec![
+            "agent",
+            "run",
+            "--agent",
+            agent_id.as_str(),
+            "--thread",
+            thread_id.as_str(),
+            "--environment",
+            "dev",
+        ],
     ] {
         let output = f.output(&args, None, None).await?;
         assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
         let error = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            error.contains("exo serve owns this local state root"),
-            "{error}"
-        );
+        assert!(error.contains("owned by another local process"), "{error}");
     }
     let saved: exoharness::EnvironmentDefinition =
         serde_yaml_ng::from_str(&f.cli(&["environment", "get", "dev"]).await?)?;
-    assert_eq!(saved.config.image, "unused");
-    f.cli(&["thread", "get", "saved", "guarded"]).await?;
+    assert_eq!(saved, environment);
+    f.cli(&["thread", "get", agent_id.as_str(), thread_id.as_str()])
+        .await?;
+    let agent =
+        exo_managed_agents::find_agent(f.runtime.exoharness_handle().as_ref(), agent_id.as_str())
+            .await?;
+    let before = exo_managed_agents::find_thread(agent.as_ref(), thread_id.as_str()).await?;
+    assert_eq!(
+        before.record().environment.as_ref().unwrap().config.image,
+        "unused"
+    );
     assert!(
-        !f.runtime
+        f.runtime
             .exoharness_handle()
             .list_vaults()
             .await?
             .iter()
-            .any(|vault| vault.record().name == "blocked")
+            .any(|vault| vault.record().name == "unrelated")
     );
-
     f.cli(&[
         "--provider",
         "remote",
-        "environment",
-        "update",
+        "agent",
+        "run",
+        "--agent",
+        agent_id.as_str(),
+        "--environment",
         "dev",
-        "--file",
-        path,
+        "--thread",
+        thread_id.as_str(),
     ])
     .await?;
-    let saved: exoharness::EnvironmentDefinition =
-        serde_yaml_ng::from_str(&f.cli(&["environment", "get", "dev"]).await?)?;
-    assert_eq!(saved, environment);
-
-    drop(server_lock);
-    f.cli(&["thread", "delete", "saved", "guarded"]).await?;
+    let after = exo_managed_agents::find_thread(agent.as_ref(), thread_id.as_str()).await?;
+    assert_eq!(after.record().environment.as_ref().unwrap(), &environment);
+    f.cli(&[
+        "--provider",
+        "remote",
+        "thread",
+        "delete",
+        agent_id.as_str(),
+        thread_id.as_str(),
+    ])
+    .await?;
     f.cli(&["environment", "delete", "dev"]).await?;
     let agent =
-        exo_managed_agents::find_agent(f.runtime.exoharness_handle().as_ref(), "saved").await?;
+        exo_managed_agents::find_agent(f.runtime.exoharness_handle().as_ref(), agent_id.as_str())
+            .await?;
     assert!(
         exo_managed_agents::list_threads(agent.as_ref())
             .await?

@@ -80,7 +80,11 @@ impl Fixture {
                 }),
             ],
         };
-        let state = Arc::new(BasicExoHarness::new(config.clone()).await?);
+        let state = Arc::new(
+            BasicExoHarness::new(config.clone())
+                .await?
+                .with_local_sessions(root.clone()),
+        );
         let runtime = Arc::new(Runtime::new(
             LocalProvider::managed(
                 state,

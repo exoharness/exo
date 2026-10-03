@@ -50,17 +50,19 @@ backed by `exo serve` for repeated commands sharing a running VM.
 `exo thread sandbox forward` only connects to published ports and does not take
 lifetime ownership.
 
-Local executions and commands that mutate local state share a root lock;
-`exo serve` takes that lock exclusively. These commands cannot run against the
-same local state root while the server owns it. Rejection happens before opening
-or changing state, so a local command cannot stop server-owned sandboxes or
-change their configuration. Read-only queries and port forwarding remain
-available. Use an HTTP provider to make changes through the server; HTTP clients
-leave sandbox lifetime to it.
+The CLI and `exo serve` use the same per-thread ownership. They can run different
+threads under the same state root concurrently. A process retains its thread's
+lease until shutdown; repeated HTTP requests reuse the server's lease. Another
+process cannot execute, reconfigure, or delete that thread while it is owned.
+Use the owner's HTTP provider to operate on a server-owned thread. Read-only
+queries and port forwarding do not claim ownership. Updating a saved environment
+changes the template for future opens; it does not reconfigure an active thread.
+Deleting an agent checks ownership of all its threads before stopping any VMs.
 
-Only one local CLI session can own a thread at a time. After a crash or SIGKILL,
-its machines may keep running until that thread is reopened. The next local run
-acquires the session lock and stops leftover managed sandboxes before resuming.
+After a crash or SIGKILL, machines may keep running until their thread is reopened.
+The OS releases the dead process's leases automatically. The next owner claims
+that thread and stops leftover managed sandboxes before resuming. Clean CLI or
+server shutdown stops managed sandboxes while retaining ownership through cleanup.
 Attached sandboxes keep their external owner. Deleting a thread or agent deletes
 retained SmolVM disks, so that deletion requires an available SmolVM runtime.
 

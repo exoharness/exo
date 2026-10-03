@@ -57,12 +57,14 @@ pub(crate) async fn runtime(
             .map(managed_agents::harness_selection)
             .transpose()?,
     };
-    let config = crate::build_exo_config(
-        cli,
-        state_root.context("local provider requires a state root")?,
-    )?;
+    let state_root = state_root.context("local provider requires a state root")?;
+    let config = crate::build_exo_config(cli, state_root)?;
     let env_vars = env.clone().into_vars();
-    let state: Arc<dyn ExoHarness> = Arc::new(BasicExoHarness::new(config.clone()).await?);
+    let state: Arc<dyn ExoHarness> = Arc::new(
+        BasicExoHarness::new(config.clone())
+            .await?
+            .with_local_sessions(state_root.to_owned()),
+    );
     if let Some(reference) = thread.and_then(|args| args.agent.as_deref())
         && let Some(selection) = selection.as_ref()
     {
