@@ -103,14 +103,16 @@ impl SecretKeyProvider for StaticSecretKeyProvider {
 #[cfg(feature = "apple-keychain")]
 pub(crate) struct AppleKeychainSecretKeyProvider {
     account: String,
+    lock_path: PathBuf,
     key: OnceLock<[u8; MASTER_KEY_LEN]>,
 }
 
 #[cfg(feature = "apple-keychain")]
 impl AppleKeychainSecretKeyProvider {
-    pub(crate) fn new(account: String) -> Self {
+    pub(crate) fn new(account: String, lock_path: PathBuf) -> Self {
         Self {
             account,
+            lock_path,
             key: OnceLock::new(),
         }
     }
@@ -124,7 +126,7 @@ impl SecretKeyProvider for AppleKeychainSecretKeyProvider {
         if let Some(key) = self.key.get() {
             return Ok(*key);
         }
-        let _lock = lock_secret_file(&default_master_key_path()?.with_extension("keychain.lock"))?;
+        let _lock = lock_secret_file(&self.lock_path)?;
         ensure_apple_keychain_store()?;
         let entry = Entry::new(KEYCHAIN_SERVICE, &self.account)?;
         let key = match entry.get_password() {
@@ -283,20 +285,4 @@ fn write_master_key_file(path: &Path, key: &[u8; MASTER_KEY_LEN]) -> Result<()> 
         .with_context(|| format!("persisting master key at {}", path.display()))?;
     std::fs::File::open(parent)?.sync_all()?;
     Ok(())
-}
-
-pub(crate) fn default_master_key_path() -> Result<PathBuf> {
-    if let Some(value) = std::env::var_os("XDG_CONFIG_HOME") {
-        let path = PathBuf::from(value);
-        if !path.as_os_str().is_empty() {
-            return Ok(path.join("exo").join("master.key"));
-        }
-    }
-    if let Some(value) = std::env::var_os("HOME") {
-        let path = PathBuf::from(value);
-        if !path.as_os_str().is_empty() {
-            return Ok(path.join(".config").join("exo").join("master.key"));
-        }
-    }
-    bail!("could not determine config directory: set XDG_CONFIG_HOME or HOME")
 }

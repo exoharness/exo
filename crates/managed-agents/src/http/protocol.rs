@@ -91,6 +91,13 @@ pub struct ProviderIdentity {
     pub account_id: String,
 }
 
+/// Browser preview address advertised by the process that owns the sandbox.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreviewEndpoint {
+    pub domain: String,
+    pub port: u16,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ThreadsQuery {
     #[serde(skip_serializing_if = "Option::is_none")]

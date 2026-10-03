@@ -2334,7 +2334,114 @@ fn provider_state_test_create_request() -> CreateSandboxRequest {
     }
 }
 
+#[tokio::test]
+async fn deleting_a_thread_terminates_a_stopped_sandbox_with_retained_disks() -> crate::Result<()> {
+    let temp = TempDir::new()?;
+    let mut backend = TestProviderStateBackend::new(serde_json::json!({"machine": "test"}));
+    backend.retains_disk_when_stopped = true;
+    let backend = Arc::new(backend);
+    let provider = SandboxProvider::from_static("persistent-test");
+    let mut config = local_test_config(temp.path());
+    config
+        .sandbox_backends
+        .push(SandboxBackendRegistration::from_backend(
+            provider.clone(),
+            backend.clone(),
+        ));
+    let harness = BasicExoHarness::new(config).await?;
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "stopped".into(),
+            name: "Stopped".into(),
+            vaults: vec![],
+        })
+        .await?;
+    let thread = agent.new_thread(Default::default()).await?;
+    let mut request = provider_state_test_create_request();
+    request.provider = provider;
+    let sandbox = thread.create_sandbox(request).await?;
+    thread.stop_sandbox(sandbox).await?;
+    let before_delete = *backend.cleanup_count.lock().await;
+    assert!(agent.delete_conversation(&thread.record().id).await?);
+    assert_eq!(*backend.cleanup_count.lock().await, before_delete + 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn deleting_stopped_remote_sandboxes_does_not_require_the_provider() -> crate::Result<()> {
+    let temp = TempDir::new()?;
+    let provider = SandboxProvider::Daytona;
+    let backend = Arc::new(TestProviderStateBackend::new(Value::Null));
+    let mut config = local_test_config(temp.path());
+    config
+        .sandbox_backends
+        .push(SandboxBackendRegistration::from_backend(
+            provider.clone(),
+            backend,
+        ));
+    let harness = BasicExoHarness::new(config).await?;
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "remote".into(),
+            name: "Remote".into(),
+            vaults: vec![],
+        })
+        .await?;
+    let first = agent.new_thread(Default::default()).await?;
+    let second = agent.new_thread(Default::default()).await?;
+    let mut request = provider_state_test_create_request();
+    request.provider = provider;
+    for thread in [&first, &second] {
+        let id = thread.create_sandbox(request.clone()).await?;
+        thread.stop_sandbox(id).await?;
+    }
+    let reloaded = BasicExoHarness::new(local_test_config(temp.path())).await?;
+    let reloaded_agent = reloaded.get_agent(&agent.record().id).await?.unwrap();
+    assert!(
+        reloaded_agent
+            .delete_conversation(&first.record().id)
+            .await?
+    );
+    assert!(reloaded.delete_agent(&agent.record().id).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn tcp_access_caches_full_handles_for_other_providers() -> crate::Result<()> {
+    let temp = TempDir::new()?;
+    let config = local_test_config(temp.path());
+    let backend = Arc::new(TestProviderStateBackend::new(Value::Null));
+    let harness = BasicExoHarness::new_with_sandbox_backend(config.clone(), backend).await?;
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "tcp".into(),
+            name: "TCP".into(),
+            vaults: vec![],
+        })
+        .await?;
+    let thread = agent.new_thread(Default::default()).await?;
+    let id = thread
+        .create_sandbox(provider_state_test_create_request())
+        .await?;
+    let backend = Arc::new(TestProviderStateBackend::new(Value::Null));
+    let reloaded = BasicExoHarness::new_with_sandbox_backend(config, backend.clone()).await?;
+    let agent = reloaded.get_agent(&agent.record().id).await?.unwrap();
+    let thread = agent.get_thread(&thread.record().id).await?.unwrap();
+    for _ in 0..3 {
+        assert!(thread.sandbox_supports_tcp(id.clone()).await?);
+        assert!(
+            thread
+                .connect_sandbox_tcp(id.clone(), 8000)
+                .await?
+                .is_some()
+        );
+    }
+    assert_eq!(backend.requests.lock().await.len(), 1);
+    Ok(())
+}
+
 struct TestProviderStateBackend {
+    retains_disk_when_stopped: bool,
     state: Value,
     requests: Arc<AsyncMutex<Vec<Option<Value>>>>,
     policies: Arc<AsyncMutex<Vec<crate::EgressPolicy>>>,
@@ -2344,6 +2451,7 @@ struct TestProviderStateBackend {
 impl TestProviderStateBackend {
     fn new(state: Value) -> Self {
         Self {
+            retains_disk_when_stopped: false,
             state,
             requests: Arc::new(AsyncMutex::new(Vec::new())),
             policies: Arc::new(AsyncMutex::new(Vec::new())),
@@ -2356,6 +2464,10 @@ impl TestProviderStateBackend {
 impl ManagedSandboxBackend for TestProviderStateBackend {
     fn is_local(&self) -> bool {
         false
+    }
+
+    fn retains_disk_when_stopped(&self) -> bool {
+        self.retains_disk_when_stopped
     }
 
     fn consumable_snapshot_formats(&self) -> &[SnapshotFormat] {
@@ -2410,6 +2522,15 @@ impl ManagedSandboxHandle for TestProviderStateHandle {
 
     fn provider_state(&self) -> Option<Value> {
         Some(self.state.clone())
+    }
+
+    fn supports_tcp(&self) -> bool {
+        true
+    }
+
+    async fn connect_tcp(&self, _port: u16) -> crate::Result<Option<crate::BoxSandboxTcpStream>> {
+        let (stream, _peer) = tokio::io::duplex(64);
+        Ok(Some(Box::pin(stream)))
     }
 
     async fn exec(&self, _command: &SandboxCommand) -> crate::Result<SandboxCommandOutput> {
@@ -2624,7 +2745,7 @@ async fn restored_sandbox_image_persists_for_cross_process_reattach() {
     agent
         .start_sandbox(StartSandboxRequest {
             id: sandbox_id.clone(),
-            snapshot_id,
+            snapshot_id: Some(snapshot_id),
             idle_seconds: None,
             provider: None,
         })

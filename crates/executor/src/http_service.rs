@@ -232,6 +232,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 web::get().to(get_thread),
             )
             .route(
+                "/agent/{agent_id}/thread/{thread_id}/previews",
+                web::get().to(preview_endpoint),
+            )
+            .route(
                 "/agent/{agent_id}/thread/{thread_id}",
                 web::delete().to(delete_thread),
             )
@@ -640,11 +644,11 @@ async fn delete_agent(
     path: web::Path<AgentPath>,
 ) -> Result<web::Json<bool>, Error> {
     service.require_full_provider()?;
+    let agent = service.agent(path.agent_id).await?;
     Ok(web::Json(
         service
             .runtime
-            .exoharness_handle()
-            .delete_agent(&path.agent_id)
+            .delete_agent(&agent.record().id.to_string())
             .await
             .map_err(ErrorBadRequest)?,
     ))
@@ -741,6 +745,26 @@ async fn get_thread(
         agent: agent.record().clone(),
         thread: thread.record().clone(),
     }))
+}
+
+async fn preview_endpoint(
+    service: Service,
+    path: web::Path<ThreadPath>,
+) -> Result<web::Json<Option<PreviewEndpoint>>, Error> {
+    let agent = service.agent(path.agent_id).await?;
+    let thread = service.thread(agent.as_ref(), path.thread_id).await?;
+    let endpoint = service.runtime.active_preview_endpoint();
+    if endpoint.is_some() {
+        let previews = service
+            .runtime
+            .preview_urls(agent.as_ref(), thread)
+            .await
+            .map_err(ErrorBadRequest)?;
+        if previews.is_none() {
+            return Ok(web::Json(None));
+        }
+    }
+    Ok(web::Json(endpoint))
 }
 
 async fn list_threads(
@@ -915,8 +939,9 @@ async fn delete_thread(
     path: web::Path<ThreadPath>,
 ) -> Result<web::Json<DeleteThreadResult>, Error> {
     let agent = service.agent(path.agent_id).await?;
-    let deleted = agent
-        .delete_thread(&path.thread_id)
+    let deleted = service
+        .runtime
+        .delete_conversation(agent.as_ref(), &path.thread_id.to_string())
         .await
         .map_err(ErrorBadRequest)?;
     Ok(web::Json(DeleteThreadResult {

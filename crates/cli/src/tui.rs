@@ -616,7 +616,7 @@ impl ChatRepl {
         self.conversation
             .start_sandbox(StartSandboxRequest {
                 id: sandbox_id.clone(),
-                snapshot_id,
+                snapshot_id: Some(snapshot_id),
                 idle_seconds: None,
                 provider: Some(provider.clone()),
             })
@@ -1054,7 +1054,7 @@ async fn rewind_to_snapshot(
     conversation
         .start_sandbox(StartSandboxRequest {
             id: sandbox_id,
-            snapshot_id,
+            snapshot_id: Some(snapshot_id),
             idle_seconds: None,
             provider: None,
         })
@@ -1093,7 +1093,7 @@ async fn teleport_sandbox(
     conversation
         .start_sandbox(StartSandboxRequest {
             id: sandbox_id.clone(),
-            snapshot_id,
+            snapshot_id: Some(snapshot_id),
             idle_seconds: None,
             provider: Some(provider.clone()),
         })

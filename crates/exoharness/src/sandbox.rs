@@ -368,6 +368,17 @@ pub trait ManagedSandboxBackend: Send + Sync {
 
     fn is_local(&self) -> bool;
 
+    /// Whether stopping leaves provider-owned disks that deletion must reclaim.
+    fn retains_disk_when_stopped(&self) -> bool {
+        false
+    }
+
+    /// Whether stopping an uncached sandbox needs persisted provider state.
+    /// Backends addressing resources directly by sandbox ID can skip loading it.
+    fn stop_requires_provider_state(&self) -> bool {
+        true
+    }
+
     /// Formats this backend can consume in `acquire_from_snapshot`.
     fn consumable_snapshot_formats(&self) -> &[SnapshotFormat];
 
@@ -378,6 +389,22 @@ pub trait ManagedSandboxBackend: Send + Sync {
     /// Enforce `request.spec.policy` before returning a usable handle. Attach,
     /// restore, and fork must provide the same guarantee or reject the policy.
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>>;
+
+    /// Connect to a published port. Backends whose acquisition changes lifecycle
+    /// ownership should inspect the existing sandbox without restarting it.
+    async fn connect_tcp(
+        &self,
+        request: SandboxRequest,
+        port: u16,
+    ) -> Result<Option<BoxSandboxTcpStream>> {
+        self.acquire(request).await?.connect_tcp(port).await
+    }
+
+    /// Stop a persisted sandbox when no in-process handle is available. Backends
+    /// with stable resource IDs can override this to avoid starting it first.
+    async fn stop(&self, request: SandboxRequest) -> Result<()> {
+        self.acquire(request).await?.stop().await
+    }
 
     /// Reconnect to an existing sandbox without provisioning a replacement.
     /// `request` is available when the caller retained the acquisition context;
@@ -1445,25 +1472,7 @@ fn durable_file_system_root(configured_root: Option<&Path>) -> Result<PathBuf> {
     if let Some(root) = configured_root {
         return Ok(root.to_path_buf());
     }
-    if let Some(value) = std::env::var_os("XDG_DATA_HOME") {
-        let path = PathBuf::from(value);
-        if !path.as_os_str().is_empty() {
-            return Ok(path.join("exo").join("durable-filesystems"));
-        }
-    }
-    if let Some(value) = std::env::var_os("HOME") {
-        let path = PathBuf::from(value);
-        if !path.as_os_str().is_empty() {
-            return Ok(path
-                .join(".local")
-                .join("share")
-                .join("exo")
-                .join("durable-filesystems"));
-        }
-    }
-    bail!(
-        "could not determine durable file system root: set {DURABLE_FILE_SYSTEM_ROOT_ENV}, XDG_DATA_HOME, or HOME"
-    )
+    bail!("durable file system root must be configured on the sandbox backend")
 }
 
 pub(crate) fn stable_fnv1a_hex(input: &str) -> String {

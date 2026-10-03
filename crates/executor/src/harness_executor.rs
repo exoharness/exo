@@ -288,6 +288,7 @@ pub(crate) trait HarnessExecutor: Send + Sync + 'static {
 #[derive(Clone)]
 pub struct Runtime {
     provider: Arc<dyn Provider>,
+    previews: Arc<OnceCell<crate::previews::PreviewProxy>>,
     initialized: Arc<OnceCell<()>>,
     events: Arc<HarnessEvents>,
     finalizers: Arc<tokio::sync::Mutex<tokio::task::JoinSet<()>>>,
@@ -314,6 +315,7 @@ impl Runtime {
     ) -> Self {
         Self {
             provider: Arc::new(provider),
+            previews: Arc::default(),
             initialized: Arc::default(),
             events: Arc::default(),
             finalizers: Arc::default(),
@@ -323,6 +325,99 @@ impl Runtime {
             recovery_agent_concurrency: Arc::new(AtomicUsize::new(4)),
             recovery_thread_concurrency: Arc::new(AtomicUsize::new(4)),
         }
+    }
+
+    /// Own a single preview listener for every thread served by this runtime.
+    pub async fn start_preview_server(
+        &self,
+        root: &std::path::Path,
+        domain: &str,
+    ) -> Result<crate::PreviewEndpoint> {
+        let proxy = self
+            .previews
+            .get_or_try_init(|| crate::previews::PreviewProxy::start_server(root, domain))
+            .await?;
+        Ok(proxy.endpoint.clone())
+    }
+
+    /// Own this inline thread's listener and retain its port across resumes.
+    pub async fn start_inline_previews(
+        &self,
+        agent: &dyn AgentHandle,
+        thread: Arc<dyn ConversationHandle>,
+    ) -> Result<()> {
+        if thread
+            .record()
+            .environment
+            .as_ref()
+            .is_none_or(|env| env.config.tcp_ports.is_empty())
+        {
+            return Ok(());
+        }
+        thread.claim_local_session().await?;
+        let mut config = self.get_conversation_config(thread.as_ref()).await?;
+        let proxy = self
+            .previews
+            .get_or_try_init(|| {
+                crate::previews::PreviewProxy::start(config.preview_port, "localhost")
+            })
+            .await?;
+        if config.preview_port.is_none() {
+            config.preview_port = Some(proxy.endpoint.port);
+            self.put_conversation_config(thread.as_ref(), config)
+                .await?;
+        }
+        if let Some(previews) = crate::previews_for(
+            thread.record().environment.as_ref(),
+            thread.record(),
+            &proxy.endpoint,
+        )? {
+            proxy.register(agent.record().id, thread, &previews);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn active_preview_endpoint(&self) -> Option<crate::PreviewEndpoint> {
+        self.previews.get().map(|proxy| proxy.endpoint.clone())
+    }
+
+    /// Discover the owner's address; URLs are derived, never stored on the thread.
+    pub async fn preview_urls(
+        &self,
+        agent: &dyn AgentHandle,
+        thread: Arc<dyn ConversationHandle>,
+    ) -> Result<Option<crate::PreviewUrls>> {
+        if thread
+            .record()
+            .environment
+            .as_ref()
+            .is_none_or(|env| env.config.tcp_ports.is_empty())
+        {
+            if let Some(proxy) = self.previews.get() {
+                proxy.remove(thread.record().id);
+            }
+            return Ok(None);
+        }
+        let endpoint = match self.active_preview_endpoint() {
+            Some(endpoint) => Some(endpoint),
+            None => {
+                self.provider
+                    .preview_endpoint(agent, thread.as_ref())
+                    .await?
+            }
+        };
+        let Some(endpoint) = endpoint else {
+            return Ok(None);
+        };
+        let previews = crate::previews_for(
+            thread.record().environment.as_ref(),
+            thread.record(),
+            &endpoint,
+        )?;
+        if let (Some(proxy), Some(previews)) = (self.previews.get(), &previews) {
+            proxy.register(agent.record().id, thread, previews);
+        }
+        Ok(previews)
     }
 
     pub fn set_recovery_concurrency(&self, agents: NonZeroUsize, threads: NonZeroUsize) {
@@ -515,6 +610,7 @@ impl Runtime {
         thread: Arc<dyn ConversationHandle>,
         resolver: Option<RecoveryRuntimeResolver>,
     ) -> Result<()> {
+        thread.claim_local_session().await?;
         let events = thread
             .get_events(Some(EventQuery {
                 direction: Some(EventQueryDirection::Asc),
@@ -817,6 +913,7 @@ impl Runtime {
         if recovery.is_none() {
             self.recovery_gate.wait(thread.record().id).await;
         }
+        thread.claim_local_session().await?;
         self.initialized
             .get_or_try_init(|| {
                 provider
@@ -876,6 +973,13 @@ impl Runtime {
                     .instructions
                     .push(crate::harness_helpers::system_message(&locations));
             }
+        }
+        if let Some(previews) = self.preview_urls(agent.as_ref(), thread.clone()).await? {
+            agent_config
+                .instructions
+                .push(crate::harness_helpers::system_message(
+                    &previews.instructions(),
+                ));
         }
         provider
             .executor
@@ -1132,14 +1236,32 @@ impl Runtime {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
+        if let Some(previews) = self.previews.get() {
+            previews.stop();
+        }
         let shutdown = self.provider.harness().shutdown().await;
         let mut finalizers = self.finalizers.lock().await;
+        let mut finalizer_error = None;
         while let Some(result) = finalizers.join_next().await {
-            result?;
+            if let Err(error) = result {
+                finalizer_error = Some(error);
+            }
         }
+        drop(finalizers);
         let flush = self.tracer.flush().await;
+        // Caller runtimes share the server's ownership. The root runtime
+        // releases it after every caller's execution has drained.
+        let stopped = if self.provider.exoharness().caller().is_none() {
+            self.provider.exoharness().release_local_sessions().await
+        } else {
+            Ok(())
+        };
         shutdown?;
-        flush
+        if let Some(error) = finalizer_error {
+            return Err(error.into());
+        }
+        flush?;
+        stopped
     }
 }
 
@@ -1214,6 +1336,8 @@ impl Runtime {
         if opened.created {
             self.recovery_gate.new_thread(opened.thread.record().id);
         }
+        self.preview_urls(agent.as_ref(), opened.thread.clone())
+            .await?;
         Ok(opened)
     }
 
@@ -1279,10 +1403,15 @@ impl Runtime {
         else {
             return Ok(false);
         };
-        self.provider
+        let deleted = self
+            .provider
             .exoharness()
             .delete_agent(&agent.record().id)
-            .await
+            .await?;
+        if deleted && let Some(proxy) = self.previews.get() {
+            proxy.remove_agent(agent.record().id);
+        }
+        Ok(deleted)
     }
 
     pub async fn get_conversation(
@@ -1301,7 +1430,11 @@ impl Runtime {
         let Some(thread) = resolve_conversation_handle(agent, reference).await? else {
             return Ok(false);
         };
-        agent.delete_conversation(&thread.record().id).await
+        let deleted = agent.delete_conversation(&thread.record().id).await?;
+        if deleted && let Some(proxy) = self.previews.get() {
+            proxy.remove(thread.record().id);
+        }
+        Ok(deleted)
     }
 
     pub async fn create_conversation(
@@ -1336,6 +1469,7 @@ impl Runtime {
             }
         };
         let conversation_config = ConversationConfig {
+            preview_port: None,
             resources: agent_config.resources.clone(),
             resource_mounts,
             sandbox_image: request.sandbox_image.or(agent_config.sandbox.image),

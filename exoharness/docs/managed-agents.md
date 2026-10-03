@@ -40,6 +40,25 @@ and query parameters without interpreting them.
 
 ## Setup
 
+Exo home defaults to `$HOME/.exo`, shared across working directories. `--root`
+or `EXO_HOME` selects a different home; the flag takes precedence. Provider profiles
+and authentication default to `<root>/config`, runtime state to `<root>/exoharness`,
+and the pricing cache to `<root>/cache`. Docker and Apple container durable filesystems
+live in `<root>/exoharness/durable-filesystems`; `EXO_DURABLE_FILE_SYSTEM_ROOT`
+overrides that location. Local TypeScript harnesses receive the
+resolved home as `EXO_HOME`. `--config-dir` overrides the profile directory;
+`--master-key-path` overrides the file encryption key, which otherwise lives at
+`<root>/exoharness/master.key`. Explicit provider selections and saved
+remote aliases continue to select their configured state or server.
+State created under the previous `./.exo` default stays in that directory;
+use `--root /absolute/path/to/previous-checkout/.exo` to access it. Exo does not
+move it automatically.
+
+For provider profiles saved under the previous `~/.config/exo` default, pass
+`--config-dir ~/.config/exo`. For existing file-encrypted state, keep using its
+original key with `--master-key-path /path/to/master.key`. macOS Keychain accounts
+remain tied to the runtime state directory.
+
 From this checkout:
 
 ```bash
@@ -86,6 +105,76 @@ Use `--tui` to opt into the full-screen interface. Type `/help` for commands or
 Your turn streams as it runs. Updates from other clients appear when you submit
 the next line; pressing Enter on an empty prompt also checks for updates.
 
+### Browser previews
+
+Declaring TCP ports in an environment automatically provides browser previews:
+
+```yaml
+name: dev
+config:
+  image: my-dev-image
+  tcp_ports: [5173, 8000]
+```
+
+`exo agent run` prints a clickable sandbox services page and one URL per port:
+
+```text
+sandbox: http://my-project-<id>.localhost:<port>
+  port 5173: http://5173.my-project-<id>.localhost:<port>
+  port 8000: http://8000.my-project-<id>.localhost:<port>
+```
+
+Environments with no published ports have no browser previews. The HTML page
+lists every service link. Exo also gives these URLs to the agent,
+so it can start services and configure browser API URLs and CORS origins.
+`.localhost` names resolve to loopback in browsers without DNS or hosts-file
+changes. HTTP and WebSocket paths and application headers pass through unchanged.
+
+An inline run owns one browser listener for its thread. All of that thread's
+services share its port; other open threads have their own ports. Resume reuses
+the saved port and URLs. Keep the CLI session open while using previews.
+
+With an HTTP provider, `exo serve` owns one shared preview listener for its
+threads. Closing a client does not close previews or stop the server's services.
+The server saves its listener port across restarts. `exo serve --preview-domain
+DOMAIN` sets the advertised DNS suffix for its previews; the default is
+`localhost`. Preview listeners bind to `127.0.0.1`. For a remote server, forward
+the printed preview port with SSH, using the same port locally:
+
+```sh
+ssh -L PORT:127.0.0.1:PORT SERVER
+```
+
+Display a thread's URLs without starting a VM:
+
+```sh
+exo thread ports AGENT THREAD
+```
+
+This command uses the selected provider's preview address. Links require the
+owning CLI session or server and the sandbox services to be running. Previews
+currently use HTTP. Browser links work for HTTP and WebSocket services; use
+`exo thread sandbox forward` for other TCP services.
+
+#### Preview troubleshooting
+
+| Symptom                                      | What to check                                                                                                                                                                                                                  |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Connection refused                           | Keep the inline agent session or provider server running. For remote providers, check the SSH forward.                                                                                                                         |
+| `404 Unknown preview hostname`               | Use the exact URL printed when opening the thread through this provider.                                                                                                                                                       |
+| `502 Bad Gateway`                            | Start the sandbox and its services. Check the guest port and listen on an interface reachable by sandbox forwarding; the FastAPI example uses `0.0.0.0`.                                                                       |
+| UI loads, but API or WebSocket requests fail | Use the API service's browser origin. Allow the full frontend origin, including its port, in backend CORS and allow preview hostnames in development-server host checks. Guest-local URLs still work for server-side requests. |
+| Saved port is occupied                       | Release the conflicting listener. Exo reports the bind error and preserves the port so browser origins stay stable.                                                                                                            |
+
+Listener startup and accept errors appear in Exo's output; routine browser
+disconnects stay at debug level. Service logs stay inside the sandbox; the
+FastAPI example writes frontend/API logs under `/var/lib/fastapi-demo/logs` and
+PostgreSQL logs to `/var/lib/fastapi-demo/postgres/server.log`. Ask the agent to
+inspect them when a service is unavailable. `--verbosity full` includes egress
+diagnostics.
+
+### Named agents and threads
+
 ```bash
 exo agent run --agent-file exoharness/examples/managed-agents/support-analyst.md
 
@@ -106,12 +195,43 @@ exo agent create support --file exoharness/examples/managed-agents/support-analy
 exo agent list
 exo agent run --agent support
 exo thread list support
-exo agent run --agent support --thread <thread-slug>
+exo agent run --agent support --thread my-project
 ```
 
 The CLI prints the agent and thread ids. Both ids and slugs work when resuming.
-A missing `--thread` starts a new thread; an unknown thread is an error.
+Without `--thread`, each run starts a new thread. `--thread NAME` creates a thread
+with that name on the first run and resumes it on subsequent runs.
+
+New names must contain 1–128 ASCII letters, digits, hyphens, or underscores and
+start with a letter or digit; spaces and slashes are rejected. An unknown
+UUID-shaped reference returns `thread ... not found` instead of creating a
+thread with that name. Startup announces whether it is creating or opening a
+thread.
+
+Select VM settings explicitly with `--environment NAME`:
+
+```bash
+exo agent create support --file agent.md
+exo environment create local-dev --file environment.yaml
+exo agent run --agent support --environment local-dev --thread my-project
+```
+
+The environment file's `name` must match the name passed to `environment create`.
+The selected configuration is saved on the thread; resuming without `--environment`
+retains it. Passing `--environment` again applies the current saved definition.
 Add `--prompt "..."` to run a single turn and exit.
+
+Direct local CLI sessions stop their managed thread sandboxes when the session
+exits. With SmolVM, resuming the thread restarts the same VM with its disks and
+chat retained. Processes inside the VM restart; a development stack needs its
+startup command on resume. Deleting the thread removes its managed VM and disks.
+HTTP clients leave sandbox lifetime with the server, so use `exo serve` when
+services should stay running between client sessions.
+
+Local one-off commands, interactive sessions, and provider servers use the same
+exclusive thread ownership. Different threads can run under the same state root;
+see [Local sandbox lifetime](../../docs/resources.md#local-sandbox-lifetime) for
+the command ownership rules and crash recovery behavior.
 
 Each `--agent-file` invocation creates or updates a saved agent from the Markdown
 file, then starts a saved thread. The agent slug combines the filename with a hash
@@ -167,6 +287,8 @@ exo --provider served agent run --agent support --prompt "Summarize today's tick
 
 The server uses the existing managed-agent HTTP API: agent discovery, saved
 threads, turns, event streaming, cancellation, approval responses, and reconnect.
+`GET /exo/agent/{agent_id}/thread/{thread_id}/previews` returns the server's
+`{domain, port}` preview address, or `null` when previews are unavailable.
 With `--agent NAME`, only that agent is visible and other agents are inaccessible.
 Omit `--agent` to serve the local provider, including agent creation. This does not expose the raw ExoHarness `/request` transport.
 
@@ -303,16 +425,23 @@ The Codex example at `exoharness/examples/environments/codex-smolvm.yaml` uses
 the published `ghcr.io/exoharness/codex-devbox:latest`. To use a locally built
 image instead, change its `config.image` to `exo-codex-devbox:latest`.
 Definitions forward the existing sandbox settings: `provider`, `image`,
-`resources`, `default_workdir`, `file_system_mounts`, `durable_file_systems`, `policy`,
+`resources`, `default_workdir`, `file_system_mounts`, `durable_file_systems`, `tcp_ports`, `policy`,
 `enable_networking`, and `idle_seconds`. `policy.networking` takes precedence over
 `enable_networking`. Omitted `provider` selects SmolVM, and omitted networking
 allows unrestricted access. Unsupported network policies are rejected by the backend.
 Omitting `resources` preserves the container backend's defaults; Firecracker uses
 its default VM size. Local-process execution has no container resource or filesystem isolation.
 
+SmolVM also accepts `resources.storage_gib` and `resources.overlay_gib` to size
+its storage and persistent root filesystem disks. Both must be positive integers;
+other backends reject these settings. These are virtual disk sizes, not RAM.
+
 Use `--environment-file path.yaml` without saving a definition. An HTTP provider
 receives the definition's contents and provisions it on its host. Mount paths in
-that spec must be absolute paths on the runtime host. The CLI's `--mount` option
+that spec must refer to directories on the runtime host. Relative `host_path`
+values in environment files resolve against the file's directory and are saved
+as absolute paths. For HTTP providers, use absolute paths on the server.
+The CLI's `--mount` option
 can add local mounts at thread creation; it is rejected for HTTP providers.
 The OSS HTTP bearer grants runtime-owner access, including saving environments,
 mounting host paths, and local-process execution. Give it only to trusted runtime
@@ -321,14 +450,64 @@ operators.
 `exo environment update NAME --file path.yaml` changes the saved definition for
 new threads. Resume with `--agent NAME --thread THREAD --environment NAME` or
 `--environment-file path.yaml` to apply an updated definition to a saved thread.
-A changed definition replaces its sandbox and preserves thread history and
-filesystem resources; files outside persistent mounts are discarded. Omitting
+A changed sandbox configuration replaces its sandbox and preserves thread history
+and filesystem resources; files outside persistent mounts are discarded. Omitting
 both environment flags retains the thread's saved configuration. Reapplying the
 same definition reuses its sandbox. To upgrade the image of an existing sandbox,
 change the image reference in the environment; use a versioned tag or digest.
 `exo environment delete NAME` removes only the definition. Explicit host mounts can share data between sandboxes; ordinary sandbox files are private
 to their thread. Persistence after a backend terminates a sandbox still follows
 that backend's existing lifecycle and durable-file-system support.
+
+## Development service ports
+
+Declare the guest ports a thread needs in its environment:
+
+```yaml
+name: web-dev
+config:
+  provider: smolvm
+  image: my-devbox:latest
+  tcp_ports: [3000, 8000]
+```
+
+After starting the services in the thread, forward a declared port to the local
+machine:
+
+```sh
+exo thread sandbox forward my-agent THREAD --port 3000 --bind 127.0.0.1:13000
+```
+
+Open `http://127.0.0.1:13000`. The forward carries TCP, including HTTP and
+WebSockets, until Ctrl-C. Omitting `--bind` allocates a loopback port and prints
+its address. Each thread can use the same guest ports with different local
+listeners. Browser requests to additional services need their own forwards and
+matching browser URLs, or an application proxy serving those services together.
+
+This command currently requires a local Exo provider and a sandbox backend with
+TCP support. SmolVM port access inspects the running VM without restarting it or
+taking over its credential proxy. Changing an environment's `tcp_ports` or
+`resources` replaces its sandbox when the updated environment is applied to the
+thread.
+
+### FastAPI development example
+
+This example uses the shared Codex devbox and a public repository with a frontend
+on port 5173, an API on port 8000, and PostgreSQL inside the VM. With an OpenAI
+credential saved as `openai` in the global vault, run from this checkout:
+
+```sh
+exo agent create fastapi-dev --file exoharness/examples/managed-agents/fastapi-developer.md
+exo environment create fastapi-local --file exoharness/examples/environments/fastapi-smolvm.yaml
+exo agent run --agent fastapi-dev --environment fastapi-local --thread demo
+```
+
+Ask the agent to start the services, then open the printed sandbox services page.
+The browser contacts the API preview directly; the setup script configures its
+URL and the backend's allowed frontend origin. Log in with `admin@example.com`
+and `changethis`. Initial setup installs the tools and locked dependencies on the
+VM's persistent disks. Resume with `exo agent run --agent fastapi-dev --thread demo`
+and ask the agent to start the services again.
 
 ## Pi
 

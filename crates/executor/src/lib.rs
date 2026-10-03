@@ -68,6 +68,8 @@ pub use executor_types::{
     ModelResponseStream, PendingToolCall, SandboxScope, SendRequest, SendResult, ToolDefinition,
     ToolRuntime, TypeScriptHarnessConfig, effective_sandbox_scope,
 };
+pub mod local_net;
+pub mod previews;
 pub use exoharness::{
     AgentHandle, AttachSandboxRequest, BasicExoHarness, BasicExoHarnessConfig, Binding,
     BindingRecord, ConversationHandle, CreateSandboxRequest, DEFAULT_SANDBOX_IMAGE,
@@ -103,6 +105,7 @@ pub use harness_types::{CreateAgentRequest, CreateConversationRequest};
 pub use http_provider::HttpProvider;
 pub use local_sandbox::LocalSandboxExoHarness;
 pub use mcp::{McpToolRuntime, NativeMcpServer, NativeMcpTool};
+pub use previews::{BrowserPreview, PreviewEndpoint, PreviewUrls, previews_for};
 pub use provider::{LocalProvider, Provider, ProviderTurn};
 pub use scheduler_runtime::{
     SchedulerRunOptions, redeliver_pending_wakes, run_due_tasks, run_task,

@@ -3,7 +3,7 @@
 // cache, or its own fetch) and does not depend on the Rust loader having run.
 
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 export type ModelEntry = {
   litellm_provider?: string;
@@ -177,8 +177,6 @@ function writeCache(path: string, body: string): void {
 }
 
 function cachePath(): string | null {
-  const base =
-    process.env.XDG_CACHE_HOME ??
-    (process.env.HOME ? `${process.env.HOME}/.cache` : null);
-  return base ? `${base}/exo/litellm_prices.json` : null;
+  const home = process.env.EXO_HOME;
+  return home ? join(home, "cache", "litellm_prices.json") : null;
 }

@@ -29,6 +29,9 @@ pub struct ServeArgs {
     /// Address for the HTTP server.
     #[arg(long, default_value = "127.0.0.1:4766")]
     bind: SocketAddr,
+    /// DNS suffix for browser previews; resolve it to this host or an SSH tunnel.
+    #[arg(long, default_value = "localhost")]
+    preview_domain: String,
     /// Deployment configuration for adapters named in agent specs.
     #[arg(long)]
     adapters_file: Option<PathBuf>,
@@ -67,14 +70,6 @@ pub async fn run(runtime: Arc<Runtime>, root: &Path, args: ServeArgs) -> Result<
         .with_max_level(tracing::Level::INFO)
         .try_init()
         .map_err(|error| anyhow::anyhow!("initializing service logging: {error}"))?;
-    std::fs::create_dir_all(root)?;
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(root.join("service.lock"))?;
-    lock.try_lock()
-        .context("another agent service is using this root")?;
     let auth = if let Some(path) = &args.auth_file {
         let config: executor::remote::AuthConfig = crate::read_config_file(path)?;
         eprintln!("OIDC callback: {}", config.callback_url());
@@ -134,6 +129,13 @@ pub async fn run(runtime: Arc<Runtime>, root: &Path, args: ServeArgs) -> Result<
         service.shutdown_callers().await?;
         return result;
     }
+    let previews = runtime
+        .start_preview_server(root, &args.preview_domain)
+        .await?;
+    println!(
+        "preview listener: 127.0.0.1:{} (domain: {})",
+        previews.port, previews.domain
+    );
     let listener = TcpListener::bind(args.bind)?;
     println!(
         "listening: http://{}{}",

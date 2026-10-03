@@ -6,7 +6,7 @@ use executor::{
     ModelRequest, ModelResponse, ModelResponseStream, Runtime, SandboxBackendRegistration,
     SandboxProvider, SecretBackendChoice, SendRequest,
 };
-use exoharness::ReadArtifactRequest;
+use exoharness::{ExoHarness, ReadArtifactRequest};
 use lingua::Message;
 use lingua::universal::{AssistantContent, UserContent};
 use tempfile::TempDir;
@@ -125,7 +125,8 @@ async fn open_configured_thread(
     args: &ThreadArgs,
 ) -> Result<(Arc<dyn AgentHandle>, Arc<dyn ConversationHandle>)> {
     let runtime = configured_runtime(runtime, definition, args)?;
-    super::open_thread(&runtime, definition, args, false).await
+    let opened = super::open_thread(&runtime, definition, args, false).await?;
+    Ok((opened.agent, opened.thread))
 }
 
 fn thread_args(agent: &str) -> ThreadArgs {
@@ -142,6 +143,62 @@ fn thread_args(agent: &str) -> ThreadArgs {
         mounts: Vec::new(),
         verbosity: Verbosity::Minimal,
     }
+}
+
+#[tokio::test]
+async fn rejected_local_session_does_not_reconfigure_an_open_thread() -> Result<()> {
+    let temp = TempDir::new()?;
+    let runtime = harness(
+        &temp.path().join("state"),
+        Arc::new(RecordingModel::default()),
+    )
+    .await?;
+    let definition = AgentDefinition::parse(SOURCE.to_string())?;
+    let mut args = thread_args("unused");
+    let source = temp.path().join("agent.md");
+    std::fs::write(&source, SOURCE)?;
+    args.agent_file = Some(source);
+    args.agent = None;
+    let (agent, thread) = open_configured_thread(&runtime, Some(&definition), &args).await?;
+    let state_root = temp.path().join("state");
+    let owner = BasicExoHarness::new(storage_config(&state_root))
+        .await?
+        .with_local_sessions(state_root.clone());
+    let owned_agent = owner.get_agent(&agent.record().id).await?.unwrap();
+    owned_agent
+        .get_thread(&thread.record().id)
+        .await?
+        .unwrap()
+        .claim_local_session()
+        .await?;
+    let before = executor::get_conversation_model_override(thread.as_ref()).await?;
+    let mut args = thread_args(&agent.record().slug);
+    args.thread = Some(thread.record().slug.clone());
+    args.model = Some("changed-model".into());
+    let contender = Runtime::new(
+        LocalProvider::basic(
+            Arc::new(
+                BasicExoHarness::new(storage_config(&state_root))
+                    .await?
+                    .with_local_sessions(state_root),
+            ),
+            Arc::new(RecordingModel::default()),
+            Arc::new(BasicToolRuntime),
+            Arc::new(cost::PricingTable::empty()),
+        ),
+        None,
+    );
+    let configured = configured_runtime(&contender, None, &args)?;
+    let error = super::open_thread(&configured, None, &args, false)
+        .await
+        .err()
+        .context("second session should be rejected")?;
+    assert!(error.to_string().contains("owned by another local process"));
+    assert_eq!(
+        executor::get_conversation_model_override(thread.as_ref()).await?,
+        before
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -271,12 +328,27 @@ async fn file_runs_reuse_saved_agents_and_mounts_stay_on_threads() -> Result<()>
     );
     let mut resume = thread_args(&first.record().slug);
     resume.thread = Some("missing".to_string());
-    assert!(
-        open_configured_thread(runtime.as_ref(), None, &resume)
-            .await
-            .is_err()
-    );
-    assert_eq!(managed::list_threads(first.as_ref()).await?.len(), 2);
+    let (_, named) = open_configured_thread(runtime.as_ref(), None, &resume).await?;
+    assert_eq!(named.record().slug, "missing");
+    assert_eq!(named.record().name, "missing");
+    let (_, resumed) = open_configured_thread(runtime.as_ref(), None, &resume).await?;
+    assert_eq!(named.record().id, resumed.record().id);
+    for name in [
+        "bad/name",
+        "two words",
+        "",
+        "-starts-with-hyphen",
+        "01a10310-447a-76e0-9d99-fde61956321b",
+    ] {
+        resume.thread = Some(name.into());
+        assert!(
+            open_configured_thread(runtime.as_ref(), None, &resume)
+                .await
+                .is_err(),
+            "created invalid thread {name:?}"
+        );
+    }
+    assert_eq!(managed::list_threads(first.as_ref()).await?.len(), 3);
     Ok(())
 }
 

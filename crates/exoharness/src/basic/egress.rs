@@ -14,6 +14,7 @@ impl LocalEgressResolver {
         rejected: Option<&str>,
     ) -> Result<String> {
         let mut harness = BasicExoHarness {
+            sessions: None,
             caller: None,
             inner: self
                 .harness

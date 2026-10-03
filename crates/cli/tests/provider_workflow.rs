@@ -141,8 +141,14 @@ async fn local_and_http_threads_accept_additional_vaults() -> Result<()> {
             f.agent_file.to_str().unwrap(),
         ])
         .await?;
-        let state = f.runtime.exoharness_handle();
-        let agent = exo_managed_agents::find_agent(state.as_ref(), "saved").await?;
+        // Arrange records without claiming them for the server. The selected
+        // provider below must be the first runtime to take thread ownership.
+        let mut config = exoharness::test_support::local_test_config(f.root.join("exoharness"));
+        config.secret_backend = exoharness::SecretBackendChoice::File {
+            path: Some(f.temp.path().join("master-key")),
+        };
+        let state = exoharness::BasicExoHarness::new(config).await?;
+        let agent = exo_managed_agents::find_agent(&state, "saved").await?;
         let original = agent
             .new_thread(exoharness::NewThreadRequest {
                 slug: Some("original".into()),

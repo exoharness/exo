@@ -2705,6 +2705,7 @@ dependencies = [
  "exo-mcp",
  "exoharness",
  "futures",
+ "httparse",
  "libc",
  "lingua",
  "openidconnect",
