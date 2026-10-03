@@ -66,6 +66,11 @@ struct ToolRoundContext<'a> {
     turn_trace: Option<&'a dyn TurnExecutionTrace>,
 }
 
+struct TurnProgress {
+    start_round: u32,
+    pending_tool_requests: Option<Vec<ExecutableToolRequest>>,
+}
+
 impl<M, T> BasicExecutor<M, T>
 where
     M: ModelClient + 'static,
@@ -134,52 +139,72 @@ where
         conversation_config: &ConversationConfig,
         stream_mode: ExecutorStreamMode<'_>,
         turn_trace: Option<&dyn TurnExecutionTrace>,
-        start_round: u32,
+        recovering: bool,
     ) -> Result<()> {
+        let TurnProgress {
+            start_round,
+            mut pending_tool_requests,
+        } = if recovering {
+            self.load_turn_progress(conversation, turn.as_ref()).await?
+        } else {
+            TurnProgress {
+                start_round: 0,
+                pending_tool_requests: None,
+            }
+        };
         for round in start_round.. {
-            if agent_config
-                .max_tool_round_trips
-                .is_some_and(|limit| round > limit)
+            let (tool_requests, resume_first_approval) = if let Some(saved_requests) =
+                pending_tool_requests.take()
             {
-                return Ok(());
-            }
+                // This model round was already committed; finish its tools before
+                // applying the limit to the next model call.
+                (saved_requests, true)
+            } else {
+                if agent_config
+                    .max_tool_round_trips
+                    .is_some_and(|limit| round > limit)
+                {
+                    return Ok(());
+                }
 
-            let messages = self
-                .materialize_prompt_history(conversation, &agent_config.instructions)
-                .await?;
-            let mut request =
-                build_model_request(conversation, agent_config, conversation_config, messages)
+                let messages = self
+                    .materialize_prompt_history(conversation, &agent_config.instructions)
                     .await?;
-            request.tools.extend(self.tools.definitions());
-            let response = complete_model_round(
-                self.model.as_ref(),
-                request,
-                round as usize,
-                stream_mode,
-                ModelStreamOutput::Visible,
-                turn_trace,
-            )
-            .await?;
+                let mut request =
+                    build_model_request(conversation, agent_config, conversation_config, messages)
+                        .await?;
+                request.tools.extend(self.tools.definitions());
+                let response = complete_model_round(
+                    self.model.as_ref(),
+                    request,
+                    round as usize,
+                    stream_mode,
+                    ModelStreamOutput::Visible,
+                    turn_trace,
+                )
+                .await?;
 
-            let mut events = model_response_events(response, &self.pricing);
-            let tool_requests = collect_tool_requests(&events);
-            if tool_requests.is_empty() {
-                // Commit the final answer and completion marker together for recovery.
-                events.push(EventData::Custom {
-                    event_type: crate::harness_executor::RUNTIME_TURN_COMPLETED.to_owned(),
-                    payload: serde_json::Value::Null,
-                });
+                let mut events = model_response_events(response, &self.pricing);
+                let tool_requests = collect_tool_requests(&events);
+                if tool_requests.is_empty() {
+                    // Commit the final answer and completion marker together for recovery.
+                    events.push(EventData::Custom {
+                        event_type: crate::harness_executor::RUNTIME_TURN_COMPLETED.to_owned(),
+                        payload: serde_json::Value::Null,
+                    });
+                    turn.add_events(events).await?;
+                    return Ok(());
+                }
+                events.insert(
+                    0,
+                    EventData::Custom {
+                        event_type: BASIC_TOOL_ROUND.to_owned(),
+                        payload: serde_json::to_value(BasicToolRound { round })?,
+                    },
+                );
                 turn.add_events(events).await?;
-                return Ok(());
-            }
-            events.insert(
-                0,
-                EventData::Custom {
-                    event_type: BASIC_TOOL_ROUND.to_owned(),
-                    payload: serde_json::to_value(BasicToolRound { round })?,
-                },
-            );
-            turn.add_events(events).await?;
+                (tool_requests, false)
+            };
 
             self.execute_tool_round(
                 ToolRoundContext {
@@ -189,7 +214,7 @@ where
                     agent_config,
                     conversation_config,
                     round,
-                    resume_first_approval: false,
+                    resume_first_approval,
                     stream_mode,
                     turn_trace,
                 },
@@ -271,19 +296,13 @@ where
         Ok(())
     }
 
-    async fn resume_pending_tool_round(
+    async fn load_turn_progress(
         &self,
-        agent: &dyn AgentHandle,
         conversation: &dyn ConversationHandle,
-        turn: Arc<dyn TurnHandle>,
-        agent_config: &AgentConfig,
-        conversation_config: &ConversationConfig,
-        stream_mode: ExecutorStreamMode<'_>,
-        turn_trace: Option<&dyn TurnExecutionTrace>,
-    ) -> Result<u32> {
-        // The model response is already saved. Rebuild only the pending calls,
-        // then use the same execute_tool_round path as a new turn. Calling the
-        // model again here could produce a different tool round.
+        turn: &dyn TurnHandle,
+    ) -> Result<TurnProgress> {
+        // Rebuild the saved model round before entering the normal turn loop.
+        // Calling the model again could produce a different set of tool calls.
         let events = conversation
             .get_events(Some(EventQuery {
                 turn_id: Some(turn.record().id),
@@ -333,7 +352,10 @@ where
         }
         let next_round = round.map_or(0, |round| round + 1);
         if pending.is_empty() {
-            return Ok(next_round);
+            return Ok(TurnProgress {
+                start_round: next_round,
+                pending_tool_requests: None,
+            });
         }
         let first = &pending[0];
         let round = round.expect("pending tool call has a saved round");
@@ -358,22 +380,10 @@ where
             first.request.function_name,
             turn.record().id
         );
-        self.execute_tool_round(
-            ToolRoundContext {
-                agent,
-                conversation,
-                turn: Arc::clone(&turn),
-                agent_config,
-                conversation_config,
-                round,
-                resume_first_approval: true,
-                stream_mode,
-                turn_trace,
-            },
-            pending,
-        )
-        .await?;
-        Ok(next_round)
+        Ok(TurnProgress {
+            start_round: round,
+            pending_tool_requests: Some(pending),
+        })
     }
 }
 
@@ -428,7 +438,7 @@ where
             conversation_config,
             stream_mode,
             turn_trace,
-            0,
+            false,
         )
         .await
     }
@@ -444,17 +454,6 @@ where
         stream_mode: ExecutorStreamMode<'_>,
         turn_trace: Option<&dyn TurnExecutionTrace>,
     ) -> Result<()> {
-        let next_round = self
-            .resume_pending_tool_round(
-                agent,
-                conversation.as_ref(),
-                Arc::clone(&turn),
-                agent_config,
-                conversation_config,
-                stream_mode,
-                turn_trace,
-            )
-            .await?;
         self.run_turn_loop(
             agent,
             conversation.as_ref(),
@@ -463,7 +462,7 @@ where
             conversation_config,
             stream_mode,
             turn_trace,
-            next_round,
+            true,
         )
         .await
     }
