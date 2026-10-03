@@ -46,7 +46,6 @@ export function nativeItemComplete(item: Record<string, unknown>): boolean {
 export function assertNativeToolSafety(
   snapshot: NativeTurnSnapshot | null,
   unresolvedToolIds: Set<string>,
-  liveProcess: boolean,
 ): void {
   if (!snapshot) {
     if (unresolvedToolIds.size > 0) {
@@ -54,17 +53,15 @@ export function assertNativeToolSafety(
     }
     return;
   }
-  const attached = liveProcess && snapshot.status === "inProgress";
   for (const id of unresolvedToolIds) {
     const item = snapshot.items.find((candidate) => candidate.id === id);
-    if (!item || (!nativeItemComplete(item) && !attached)) {
+    if (!item || !nativeItemComplete(item)) {
       throw new Error(
         `cannot safely resume unresolved native Codex tool call ${id}`,
       );
     }
   }
   if (
-    !attached &&
     snapshot.items.some(
       (item) =>
         !nativeItemComplete(item) &&
@@ -75,6 +72,8 @@ export function assertNativeToolSafety(
           item.type === "fileChange"),
     )
   ) {
-    throw new Error("cannot safely resume unresolved native Codex tool call");
+    throw new Error(
+      "cannot safely reattach an in-progress native Codex tool call; its approval request may have been missed",
+    );
   }
 }

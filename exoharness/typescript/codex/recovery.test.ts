@@ -55,7 +55,7 @@ describe("Codex native turn recovery", () => {
     ).toThrow("incomplete item history");
   });
 
-  it("reattaches a live tool but rejects replay when its result is unknown", () => {
+  it("fails an in-progress tool before a missed approval can hang reattachment", () => {
     const snapshot = nativeTurnSnapshot(
       {
         thread: {
@@ -79,13 +79,13 @@ describe("Codex native turn recovery", () => {
     );
     expect(snapshot).not.toBeNull();
     expect(() =>
-      assertNativeToolSafety(snapshot, new Set(["shell-1"]), true),
-    ).not.toThrow();
-    expect(() =>
-      assertNativeToolSafety(snapshot, new Set(["shell-1"]), false),
+      assertNativeToolSafety(snapshot, new Set(["shell-1"])),
     ).toThrow("cannot safely resume unresolved native Codex tool call");
-    expect(() =>
-      assertNativeToolSafety(null, new Set(["shell-1"]), false),
-    ).toThrow("cannot safely replay unresolved native Codex tool call");
+    expect(() => assertNativeToolSafety(snapshot, new Set())).toThrow(
+      "approval request may have been missed",
+    );
+    expect(() => assertNativeToolSafety(null, new Set(["shell-1"]))).toThrow(
+      "cannot safely replay unresolved native Codex tool call",
+    );
   });
 });

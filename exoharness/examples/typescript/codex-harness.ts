@@ -117,6 +117,7 @@ async function savedCodexTurn(
 ): Promise<SavedCodexTurn | null> {
   let cursor: string | null = null;
   let saved: SavedCodexTurn | null = null;
+  let pendingStartIntent = false;
   const projectedItems = new Set<string>();
   const turnId = context.exoharness.current.turn.record.id;
   do {
@@ -127,13 +128,16 @@ async function savedCodexTurn(
       turnId,
       types: [
         "codex_turn_started",
+        "codex_turn_start_intent",
         "codex_turn_completed",
         "codex_item_projected",
       ],
     });
     for (const event of page.events) {
       if (event.data.type !== "custom") continue;
-      if (event.data.event_type === "codex_turn_started") {
+      if (event.data.event_type === "codex_turn_start_intent") {
+        pendingStartIntent = true;
+      } else if (event.data.event_type === "codex_turn_started") {
         const payload = asRecord(event.data.payload);
         if (
           typeof payload.codex_thread_id === "string" &&
@@ -145,6 +149,7 @@ async function savedCodexTurn(
             completed: false,
             projectedItems,
           };
+          pendingStartIntent = false;
         }
       } else if (event.data.event_type === "codex_turn_completed" && saved) {
         const status = asRecord(asRecord(event.data.payload).turn).status;
@@ -164,6 +169,11 @@ async function savedCodexTurn(
     }
     cursor = page.cursor ?? null;
   } while (cursor);
+  if (pendingStartIntent) {
+    throw new Error(
+      "cannot safely resume Codex turn after turn/start was attempted without a saved native turn ID",
+    );
+  }
   return saved;
 }
 
@@ -189,6 +199,35 @@ async function unresolvedToolCallIds(
     cursor = page.cursor ?? null;
   } while (cursor);
   return unresolved;
+}
+
+async function hasUnansweredApproval(context: TurnContext): Promise<boolean> {
+  const pending = new Set<string>();
+  let cursor: string | null = null;
+  do {
+    const page = await context.exoharness.current.conversation.getEvents({
+      cursor,
+      direction: "asc",
+      limit: 100,
+      turnId: context.exoharness.current.turn.record.id,
+      types: [
+        "agent_runtime.approval_requested",
+        "agent_runtime.approval_response",
+      ],
+    });
+    for (const event of page.events) {
+      if (event.data.type !== "custom") continue;
+      const approvalId = asRecord(event.data.payload).approval_id;
+      if (typeof approvalId !== "string") continue;
+      if (event.data.event_type === "agent_runtime.approval_requested") {
+        pending.add(approvalId);
+      } else if (event.data.event_type === "agent_runtime.approval_response") {
+        pending.delete(approvalId);
+      }
+    }
+    cursor = page.cursor ?? null;
+  } while (cursor);
+  return pending.size > 0;
 }
 
 class CodexWarmSession {
@@ -312,6 +351,7 @@ const codexSessions = new WarmResourceCache<CodexWarmSession>();
 
 export default defineHarness({
   nativeToolApprovals: false,
+  reconcileUnresolvedToolCalls: true,
   async runTurn(context) {
     validateToolPolicies(
       context,
@@ -351,9 +391,9 @@ async function runCodexTurn(
   const unresolvedTools = recovering
     ? await unresolvedToolCallIds(context)
     : new Set<string>();
-  if (recovering && !savedTurn) {
+  if (recovering && !savedTurn && unresolvedTools.size > 0) {
     throw new Error(
-      "cannot safely resume Codex turn without a saved native turn ID",
+      "cannot safely resume Codex turn with an unresolved tool call",
     );
   }
   if (savedTurn?.completed) return null;
@@ -469,11 +509,16 @@ async function runCodexTurn(
     session.threadId = threadId;
     const activeItems = new Set(unresolvedTools);
     const projectedItems = savedTurn?.projectedItems ?? new Set<string>();
-    assertNativeToolSafety(
-      nativeSnapshot,
-      unresolvedTools,
-      session.process.reused,
-    );
+    if (
+      session.process.reused &&
+      nativeSnapshot?.status === "inProgress" &&
+      (await hasUnansweredApproval(context))
+    ) {
+      throw new Error(
+        "cannot reattach Codex turn with an unanswered approval; the native request was lost during restart",
+      );
+    }
+    assertNativeToolSafety(nativeSnapshot, unresolvedTools);
     if (nativeSnapshot && savedTurn) {
       await projectNativeSnapshot(
         context,
@@ -504,7 +549,7 @@ async function runCodexTurn(
     const priorItems = threadReused
       ? []
       : codexReplayItems(
-          recovering
+          recovering && savedTurn
             ? await materializeConversationMessages(
                 context.exoharness.current.conversation,
               )
@@ -512,9 +557,13 @@ async function runCodexTurn(
         );
     await replayCodexHistory(session.server, threadId, priorItems);
 
-    const turnInput = recovering
-      ? []
-      : messagesToUserInput(context.request.input);
+    const turnInput =
+      recovering && savedTurn ? [] : messagesToUserInput(context.request.input);
+    if (!attachingLiveTurn) {
+      await appendCustomEvent(turn, "codex_turn_start_intent", {
+        codex_thread_id: threadId,
+      });
+    }
     const turnStart = attachingLiveTurn
       ? null
       : await traceCodexTask(

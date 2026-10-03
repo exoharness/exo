@@ -158,7 +158,7 @@ impl HarnessExecutor for ManagedExecutor {
     }
 
     fn can_reconcile_unresolved_tool_call(&self, config: &AgentConfig) -> bool {
-        crate::typescript::is_codex_harness(config)
+        config.harness == AgentHarnessKind::TypeScript
     }
 
     fn agent_config(

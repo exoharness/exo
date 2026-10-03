@@ -1710,6 +1710,33 @@ function runnerErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+async function hasUnresolvedToolCalls(context: TurnContext): Promise<boolean> {
+  const pending = new Map<string, number>();
+  let cursor: string | null = null;
+  do {
+    const page = await context.exoharness.current.conversation.getEvents({
+      cursor,
+      direction: "asc",
+      limit: 100,
+      turnId: context.exoharness.current.turn.record.id,
+      types: ["tool_requested", "tool_result"],
+    });
+    for (const event of page.events) {
+      const id = event.data.tool_call_id;
+      if (typeof id !== "string") continue;
+      if (event.data.type === "tool_requested") {
+        pending.set(id, (pending.get(id) ?? 0) + 1);
+      } else if (event.data.type === "tool_result") {
+        const count = pending.get(id) ?? 0;
+        if (count <= 1) pending.delete(id);
+        else pending.set(id, count - 1);
+      }
+    }
+    cursor = page.cursor ?? null;
+  } while (cursor);
+  return pending.size > 0;
+}
+
 async function main(): Promise<void> {
   const client = new ProtocolClient();
   const modulePath = process.argv[2];
@@ -1748,6 +1775,14 @@ async function main(): Promise<void> {
         if (!harness.resumeTurn) {
           throw new Error(
             "this TypeScript harness cannot safely resume an unfinished turn",
+          );
+        }
+        if (
+          harness.reconcileUnresolvedToolCalls !== true &&
+          (await hasUnresolvedToolCalls(context))
+        ) {
+          throw new Error(
+            "this TypeScript harness cannot safely resume an unresolved tool call",
           );
         }
         await harness.resumeTurn(context);

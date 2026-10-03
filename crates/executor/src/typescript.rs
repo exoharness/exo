@@ -31,18 +31,7 @@ use crate::execution_tracing::TurnExecutionTrace;
 use crate::harness_executor::{ExecutorStreamMode, HarnessExecutor};
 use crate::harness_tool::ensure_shell_sandbox;
 use crate::shared::try_send_stream_event;
-use crate::{
-    AgentConfig, AgentHarnessKind, ConversationConfig, ExecutionStreamEvent, SendRequest,
-    ToolRuntime,
-};
-
-pub(crate) fn is_codex_harness(config: &AgentConfig) -> bool {
-    config.harness == AgentHarnessKind::TypeScript
-        && config.typescript.as_ref().is_some_and(|typescript| {
-            Path::new(&typescript.module_path)
-                .ends_with("exoharness/examples/typescript/codex-harness.ts")
-        })
-}
+use crate::{AgentConfig, ConversationConfig, ExecutionStreamEvent, SendRequest, ToolRuntime};
 
 pub struct TypeScriptExecutor<T> {
     root: Arc<dyn ExoHarness>,
@@ -79,7 +68,7 @@ where
     }
 
     fn can_reconcile_unresolved_tool_call(&self, config: &AgentConfig) -> bool {
-        is_codex_harness(config)
+        config.typescript.is_some()
     }
 
     async fn cancel_turn(
@@ -1416,9 +1405,11 @@ mod tests {
             &module,
             r#"
 export default {
+  reconcileUnresolvedToolCalls: true,
   async runTurn() { throw new Error("runTurn replayed interrupted work"); },
   async resumeTurn(context) {
     await context.exoharness.current.turn.addEvents([
+      { type: "tool_result", tool_call_id: "saved-call", result: { ok: true } },
       { type: "messages", response_id: null,
         messages: [{ role: "assistant", content: "resumed" }] }
     ]);
@@ -1456,7 +1447,18 @@ export default {
             .begin_turn(BeginTurnRequest {
                 session_id: None,
                 input: vec![],
-                initial_events: vec![work.event()?],
+                initial_events: vec![
+                    work.event()?,
+                    EventData::ToolRequested {
+                        tool_call_id: "saved-call".into(),
+                        response_id: None,
+                        request: ToolRequest {
+                            namespace: None,
+                            function_name: "shell".into(),
+                            arguments: Default::default(),
+                        },
+                    },
+                ],
             })
             .await?;
         let turn_id = turn.record().id;
@@ -1503,10 +1505,119 @@ export default {
             EventData::Messages { messages, .. }
                 if messages.iter().any(|message| matches!(message, lingua::Message::Assistant { .. }))
         )));
+        assert!(events.iter().any(|event| matches!(
+            &event.data,
+            EventData::ToolResult { tool_call_id, .. } if tool_call_id == "saved-call"
+        )));
         assert!(
             !events
                 .iter()
                 .any(|event| matches!(event.data, EventData::Error { .. }))
+        );
+        runtime.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unresolved_tool_requires_typescript_recovery_capability() -> Result<()> {
+        use crate::{BasicToolRuntime, LocalProvider, Runtime, test_support::local_test_config};
+        use exoharness::{BasicExoHarness, BeginTurnRequest, NewAgentRequest};
+
+        let temp = tempfile::TempDir::new()?;
+        let module = temp.path().join("no-tool-recovery.mjs");
+        std::fs::write(
+            &module,
+            r#"
+export default {
+  async runTurn() { throw new Error("unexpected runTurn"); },
+  async resumeTurn(context) {
+    await context.exoharness.current.turn.addEvents([
+      { type: "messages", messages: [{ role: "assistant", content: "unsafe replay" }] }
+    ]);
+  }
+};
+"#,
+        )?;
+        let state: Arc<dyn ExoHarness> =
+            Arc::new(BasicExoHarness::new(local_test_config(temp.path().join("state"))).await?);
+        let agent = state
+            .new_agent(NewAgentRequest {
+                slug: "typescript-no-tool-recovery".into(),
+                name: "No tool recovery".into(),
+                vaults: vec![],
+            })
+            .await?;
+        let thread = agent.new_conversation(Default::default()).await?;
+        let config: AgentConfig = serde_json::from_value(serde_json::json!({
+            "instructions": [], "harness": "typescript",
+            "typescript": { "module_path": module },
+            "sandbox": { "provider": "local_process" }, "model": "gpt-5-mini"
+        }))?;
+        let work = crate::harness_executor::RecoverableTurn {
+            agent_config: config,
+            thread_config: ConversationConfig::default(),
+            request: SendRequest {
+                input: vec![],
+                session_id: None,
+            },
+        };
+        let turn = thread
+            .begin_turn(BeginTurnRequest {
+                session_id: None,
+                input: vec![],
+                initial_events: vec![
+                    work.event()?,
+                    EventData::ToolRequested {
+                        tool_call_id: "saved-call".into(),
+                        response_id: None,
+                        request: ToolRequest {
+                            namespace: None,
+                            function_name: "shell".into(),
+                            arguments: Default::default(),
+                        },
+                    },
+                ],
+            })
+            .await?;
+        let turn_id = turn.record().id;
+        let runtime = Runtime::new(
+            LocalProvider::typescript(
+                state,
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+                HashMap::new(),
+                Arc::new(BasicToolRuntime),
+            ),
+            None,
+        );
+        runtime.recover_unfinished_turns().await?;
+        let events = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let events = thread
+                    .get_events(Some(EventQuery {
+                        turn_id: Some(turn_id),
+                        ..Default::default()
+                    }))
+                    .await?
+                    .events;
+                if events
+                    .iter()
+                    .any(|event| matches!(event.data, EventData::TurnEnded))
+                {
+                    return Ok::<_, anyhow::Error>(events);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.data, EventData::Error { .. }))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.data, EventData::Messages { .. }))
         );
         runtime.shutdown().await?;
         Ok(())

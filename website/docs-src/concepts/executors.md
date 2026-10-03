@@ -69,7 +69,10 @@ If the service restarts during a turn, `basic` resumes from saved model,
 tool, and approval events. Codex first reconnects to a live native turn;
 if the native process is gone, it resumes the saved Codex thread or starts
 a new thread with the Exo conversation history. Recovery fails when a
-tool call's outcome cannot be established. RLM and other TypeScript
+tool call's outcome cannot be established, including a native tool still
+in progress when Exo reconnects. A custom TypeScript harness can implement
+`resumeTurn` and declare `reconcileUnresolvedToolCalls: true` if it can
+establish the outcome of unresolved calls. RLM and other TypeScript
 harnesses, including Claude Code, Cursor, and Pi, currently end the
 interrupted turn as failed. You can start a new turn on the same
 conversation afterward.
