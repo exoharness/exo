@@ -152,6 +152,14 @@ pub struct FirecrackerFilesystemCapture {
     _lease: File,
 }
 
+impl Drop for FirecrackerFilesystemCapture {
+    fn drop(&mut self) {
+        if let Err(error) = flock(&self._lease, FlockOperation::Unlock) {
+            tracing::warn!(%error, "failed to release filesystem capture lease");
+        }
+    }
+}
+
 fn open_capture(
     config: &FirecrackerConfig,
     payload: SnapshotPayload,
