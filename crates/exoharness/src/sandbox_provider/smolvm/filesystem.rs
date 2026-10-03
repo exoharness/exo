@@ -47,6 +47,14 @@ pub(super) struct Lease {
     _file: File,
 }
 
+impl Drop for Lease {
+    fn drop(&mut self) {
+        if let Err(error) = lock(&self._file, libc::LOCK_UN) {
+            tracing::warn!(%error, "failed to release filesystem capture lease");
+        }
+    }
+}
+
 fn lock(file: &File, operation: i32) -> Result<()> {
     ensure!(
         unsafe { libc::flock(file.as_raw_fd(), operation) } == 0,
@@ -246,6 +254,41 @@ pub(super) fn delete(root: &Path, payload: &SnapshotPayload) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn collect(root: &Path, keep: &[SnapshotPayload]) -> Result<usize> {
+    let keep = keep
+        .iter()
+        .map(Manifest::parse)
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .map(|manifest| manifest.key)
+        .collect::<BTreeSet<_>>();
+    if !root.exists() {
+        return Ok(0);
+    }
+    let mut removed = 0;
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let path = entry.path().join("manifest.json");
+        if !path.is_file() {
+            continue;
+        }
+        let bytes = fs::read(path)?;
+        let payload = SnapshotPayload {
+            format: SnapshotFormat::SmolvmMachinePack,
+            bytes: bytes.into(),
+        };
+        let manifest = Manifest::parse(&payload)?;
+        if !keep.contains(&manifest.key) {
+            delete(root, &payload)?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,39 +372,4 @@ mod tests {
         delete(root.path(), &payload)?;
         Ok(())
     }
-}
-
-pub(super) fn collect(root: &Path, keep: &[SnapshotPayload]) -> Result<usize> {
-    let keep = keep
-        .iter()
-        .map(Manifest::parse)
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .map(|manifest| manifest.key)
-        .collect::<BTreeSet<_>>();
-    if !root.exists() {
-        return Ok(0);
-    }
-    let mut removed = 0;
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let path = entry.path().join("manifest.json");
-        if !path.is_file() {
-            continue;
-        }
-        let bytes = fs::read(path)?;
-        let payload = SnapshotPayload {
-            format: SnapshotFormat::SmolvmMachinePack,
-            bytes: bytes.into(),
-        };
-        let manifest = Manifest::parse(&payload)?;
-        if !keep.contains(&manifest.key) {
-            delete(root, &payload)?;
-            removed += 1;
-        }
-    }
-    Ok(removed)
 }
