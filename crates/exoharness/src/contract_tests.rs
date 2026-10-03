@@ -251,6 +251,7 @@ pub async fn list_conversations_returns_recent_first_and_paginates(harness: Arc<
         .list_conversations(ListConversationsRequest {
             cursor: None,
             limit: Some(2),
+            ..Default::default()
         })
         .await
         .expect("first page");
@@ -269,6 +270,7 @@ pub async fn list_conversations_returns_recent_first_and_paginates(harness: Arc<
         .list_conversations(ListConversationsRequest {
             cursor: page.next_cursor,
             limit: Some(2),
+            ..Default::default()
         })
         .await
         .expect("second page");

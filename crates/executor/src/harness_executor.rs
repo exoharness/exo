@@ -1,14 +1,16 @@
 use std::collections::HashSet;
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use exoharness::{
     AgentHandle, AgentRecord, BeginTurnRequest, ConversationHandle, EventData, EventKind,
-    EventQuery, EventQueryDirection, ExoHarness, ListThreadsRequest, NewAgentRequest,
-    NewConversationRequest, Result, TurnHandle, TurnRecord,
+    EventQuery, EventQueryDirection, ExoHarness, NewAgentRequest, NewConversationRequest, Result,
+    TurnHandle, TurnRecord,
 };
-use futures::{StreamExt, TryStreamExt};
+use futures::StreamExt;
 use tokio::sync::{Notify, OnceCell, mpsc};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
@@ -48,7 +50,8 @@ struct RecoveryGate {
 struct RecoveryGateState {
     running: bool,
     done: bool,
-    scanned_threads: HashSet<exoharness::ThreadId>,
+    indexed: bool,
+    pending_threads: HashSet<exoharness::ThreadId>,
     new_threads: HashSet<exoharness::ThreadId>,
 }
 
@@ -60,10 +63,19 @@ impl RecoveryGate {
         }
     }
 
+    fn index(&self, pending_threads: HashSet<exoharness::ThreadId>) {
+        let mut state = self.state.lock().expect("recovery gate poisoned");
+        if state.running {
+            state.pending_threads = pending_threads;
+            state.indexed = true;
+            self.changed.notify_waiters();
+        }
+    }
+
     fn thread_done(&self, thread: exoharness::ThreadId) {
         let mut state = self.state.lock().expect("recovery gate poisoned");
         if state.running {
-            state.scanned_threads.insert(thread);
+            state.pending_threads.remove(&thread);
             self.changed.notify_waiters();
         }
     }
@@ -76,11 +88,19 @@ impl RecoveryGate {
         }
     }
 
+    fn is_new_thread(&self, thread: exoharness::ThreadId) -> bool {
+        self.state
+            .lock()
+            .expect("recovery gate poisoned")
+            .new_threads
+            .contains(&thread)
+    }
+
     fn finish(&self) {
         let mut state = self.state.lock().expect("recovery gate poisoned");
         state.running = false;
         state.done = true;
-        state.scanned_threads.clear();
+        state.pending_threads.clear();
         state.new_threads.clear();
         self.changed.notify_waiters();
     }
@@ -94,7 +114,7 @@ impl RecoveryGate {
                 let state = self.state.lock().expect("recovery gate poisoned");
                 !state.running
                     || state.done
-                    || state.scanned_threads.contains(&thread)
+                    || (state.indexed && !state.pending_threads.contains(&thread))
                     || state.new_threads.contains(&thread)
             };
             if ready {
@@ -108,6 +128,7 @@ impl RecoveryGate {
 #[cfg(test)]
 mod recovery_gate_tests {
     use super::RecoveryGate;
+    use std::collections::HashSet;
     use std::time::Duration;
 
     #[tokio::test]
@@ -125,6 +146,18 @@ mod recovery_gate_tests {
         tokio::time::timeout(Duration::from_millis(20), gate.wait(new))
             .await
             .expect("new thread should not wait for recovery");
+        gate.index(HashSet::from([old]));
+        tokio::time::timeout(
+            Duration::from_millis(20),
+            gate.wait(exoharness::Uuid7::now()),
+        )
+        .await
+        .expect("a thread without unfinished turns should proceed");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), gate.wait(old))
+                .await
+                .is_err()
+        );
         gate.thread_done(old);
         tokio::time::timeout(Duration::from_millis(20), gate.wait(old))
             .await
@@ -261,6 +294,8 @@ pub struct Runtime {
     tracer: Arc<dyn ExecutionTracer>,
     recovery: Arc<OnceCell<()>>,
     recovery_gate: Arc<RecoveryGate>,
+    recovery_agent_concurrency: Arc<AtomicUsize>,
+    recovery_thread_concurrency: Arc<AtomicUsize>,
 }
 
 impl Runtime {
@@ -285,7 +320,16 @@ impl Runtime {
             tracer: Arc::new(BraintrustTracer::new(runtime_config)),
             recovery: Arc::default(),
             recovery_gate: Arc::default(),
+            recovery_agent_concurrency: Arc::new(AtomicUsize::new(4)),
+            recovery_thread_concurrency: Arc::new(AtomicUsize::new(4)),
         }
+    }
+
+    pub fn set_recovery_concurrency(&self, agents: NonZeroUsize, threads: NonZeroUsize) {
+        self.recovery_agent_concurrency
+            .store(agents.get(), Ordering::Relaxed);
+        self.recovery_thread_concurrency
+            .store(threads.get(), Ordering::Relaxed);
     }
 
     pub async fn recover_unfinished_turns(&self) -> Result<()> {
@@ -406,60 +450,61 @@ impl Runtime {
         provider: &crate::LocalProvider,
         resolver: Option<RecoveryRuntimeResolver>,
     ) -> Result<()> {
-        // Rebuild the single-process work queue from turns that were durably admitted.
-        const AGENT_CONCURRENCY: usize = 4;
         let agents = provider.state.list_agents().await?;
-        futures::stream::iter(agents)
-            .for_each_concurrent(AGENT_CONCURRENCY, |agent| {
+        let listings = agents
+            .into_iter()
+            .map(|agent| async move {
+                let result = agent
+                    .list_threads(exoharness::ListThreadsRequest {
+                        unfinished_only: true,
+                        ..Default::default()
+                    })
+                    .await;
+                (agent, result)
+            })
+            .collect::<Vec<_>>();
+        let pages = futures::stream::iter(listings)
+            .buffer_unordered(self.recovery_agent_concurrency.load(Ordering::Relaxed))
+            .collect::<Vec<_>>()
+            .await;
+        let mut threads = Vec::new();
+        for (agent, result) in pages {
+            match result {
+                Ok(page) => threads.extend(page.threads.into_iter().filter_map(|thread| {
+                    (!self.recovery_gate.is_new_thread(thread.record().id))
+                        .then_some((Arc::clone(&agent), thread))
+                })),
+                Err(error) => {
+                    tracing::error!(agent_id = %agent.record().id, %error, "failed to list unfinished threads");
+                }
+            }
+        }
+        self.recovery_gate.index(
+            threads
+                .iter()
+                .map(|(_, thread)| thread.record().id)
+                .collect(),
+        );
+        let recoveries = threads
+            .into_iter()
+            .map(|(agent, thread)| {
                 let resolver = resolver.clone();
                 async move {
-                    let agent_id = agent.record().id;
-                    if let Err(error) = self.recover_local_agent(provider, agent, resolver).await {
-                        tracing::error!(%agent_id, %error, "failed to scan agent for recovery");
+                    let thread_id = thread.record().id;
+                    let result = self
+                        .recover_local_thread(provider, agent, thread, resolver)
+                        .await;
+                    self.recovery_gate.thread_done(thread_id);
+                    if let Err(error) = result {
+                        tracing::error!(%thread_id, %error, "failed to recover thread");
                     }
                 }
             })
+            .collect::<Vec<_>>();
+        futures::stream::iter(recoveries)
+            .buffer_unordered(self.recovery_thread_concurrency.load(Ordering::Relaxed))
+            .collect::<Vec<_>>()
             .await;
-        Ok(())
-    }
-
-    async fn recover_local_agent(
-        &self,
-        provider: &crate::LocalProvider,
-        agent: Arc<dyn AgentHandle>,
-        resolver: Option<RecoveryRuntimeResolver>,
-    ) -> Result<()> {
-        const THREAD_CONCURRENCY: usize = 4;
-        let mut cursor = None;
-        loop {
-            let page = agent
-                .list_threads(ListThreadsRequest {
-                    cursor,
-                    limit: None,
-                })
-                .await?;
-            futures::stream::iter(page.threads.into_iter().map(Ok::<_, anyhow::Error>))
-                .try_for_each_concurrent(THREAD_CONCURRENCY, |thread| {
-                    let agent = Arc::clone(&agent);
-                    let resolver = resolver.clone();
-                    async move {
-                        let thread_id = thread.record().id;
-                        let result = self
-                            .recover_local_thread(provider, agent, thread, resolver)
-                            .await;
-                        self.recovery_gate.thread_done(thread_id);
-                        if let Err(error) = result {
-                            tracing::error!(%thread_id, %error, "failed to read thread for recovery");
-                        }
-                        Ok(())
-                    }
-                })
-                .await?;
-            let Some(next_cursor) = page.next_cursor else {
-                break;
-            };
-            cursor = Some(next_cursor);
-        }
         Ok(())
     }
 

@@ -1089,6 +1089,62 @@ async fn thread_created_during_recovery_can_send_immediately() -> Result<()> {
 }
 
 #[tokio::test]
+async fn recovery_clears_marker_for_deleted_thread() -> Result<()> {
+    let tempdir = TempDir::new()?;
+    let root = tempdir.path().join("exoharness");
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let agent = state
+        .new_agent(exoharness::NewAgentRequest {
+            slug: "deleted-recovery-thread".to_string(),
+            name: "Deleted recovery thread".to_string(),
+            vaults: Vec::new(),
+        })
+        .await?;
+    let agent_id = agent.record().id;
+    let thread = agent.new_thread(Default::default()).await?;
+    let turn = thread.begin_turn(BeginTurnRequest::default()).await?;
+    let unfinished = exoharness::ListThreadsRequest {
+        unfinished_only: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        agent.list_threads(unfinished.clone()).await?.threads.len(),
+        1
+    );
+    agent.delete_thread(&thread.record().id).await?;
+    drop(turn);
+    drop(thread);
+    drop(agent);
+    drop(state);
+
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let runtime = Runtime::new(
+        LocalProvider::basic(
+            Arc::clone(&state),
+            Arc::new(FakeModelClient::default()),
+            Arc::new(BasicToolRuntime),
+            Arc::new(cost::PricingTable::empty()),
+        ),
+        None,
+    );
+    runtime.recover_unfinished_turns().await?;
+    assert!(
+        state
+            .get_agent(&agent_id)
+            .await?
+            .expect("agent exists")
+            .list_threads(unfinished)
+            .await?
+            .threads
+            .is_empty()
+    );
+    runtime.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn new_turn_waits_for_older_turn_recovery() -> Result<()> {
     let tempdir = TempDir::new()?;
     let root = tempdir.path().join("exoharness");

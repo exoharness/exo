@@ -37,6 +37,56 @@ use crate::{
 const DEFAULT_DURABLE_CONTRACT_MOUNT_PATH: &str = "/home/exo/workspace";
 
 #[tokio::test]
+async fn unfinished_turn_index_survives_restart_and_excludes_finished_threads() -> crate::Result<()>
+{
+    let temp = TempDir::new()?;
+    let harness = BasicExoHarness::new(local_test_config(temp.path())).await?;
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            vaults: vec![],
+            slug: "indexed-turns".to_string(),
+            name: "Indexed turns".to_string(),
+        })
+        .await?;
+    let finished_thread = agent
+        .new_conversation(NewConversationRequest::default())
+        .await?;
+    let finished = finished_thread
+        .begin_turn(BeginTurnRequest::default())
+        .await?;
+    finished.finish().await?;
+    let unfinished_thread = agent
+        .new_conversation(NewConversationRequest::default())
+        .await?;
+    let unfinished = unfinished_thread
+        .begin_turn(BeginTurnRequest::default())
+        .await?;
+    let agent_id = agent.record().id;
+    let thread_id = unfinished_thread.record().id;
+    let turn_record = unfinished.record().clone();
+    let query = crate::ListThreadsRequest {
+        unfinished_only: true,
+        ..Default::default()
+    };
+    assert_eq!(agent.list_threads(query.clone()).await?.threads.len(), 1);
+
+    drop(unfinished);
+    drop(unfinished_thread);
+    drop(finished);
+    drop(finished_thread);
+    drop(agent);
+    drop(harness);
+
+    let reopened = BasicExoHarness::new(local_test_config(temp.path())).await?;
+    let agent = reopened.get_agent(&agent_id).await?.expect("agent exists");
+    assert_eq!(agent.list_threads(query.clone()).await?.threads.len(), 1);
+    let thread = agent.get_thread(&thread_id).await?.expect("thread exists");
+    thread.turn_handle(turn_record).await?.finish().await?;
+    assert!(agent.list_threads(query).await?.threads.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
 async fn in_memory_state_does_not_create_files_or_survive_reopening() -> crate::Result<()> {
     let temp = TempDir::new()?;
     let root = temp.path().join("unused");

@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     net::{SocketAddr, TcpListener},
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -34,6 +35,12 @@ pub struct ServeArgs {
     /// Maximum number of adapter workers.
     #[arg(long, default_value_t = 10)]
     adapter_limit: usize,
+    /// Concurrent agent listings during recovery.
+    #[arg(long, default_value = "4")]
+    recovery_agent_concurrency: NonZeroUsize,
+    /// Concurrent thread resumptions during recovery.
+    #[arg(long, default_value = "4")]
+    recovery_thread_concurrency: NonZeroUsize,
     #[arg(long)]
     drain_marker: Option<PathBuf>,
     #[arg(long)]
@@ -47,6 +54,10 @@ pub struct ServeArgs {
 }
 
 pub async fn run(runtime: Arc<Runtime>, root: &Path, args: ServeArgs) -> Result<()> {
+    runtime.set_recovery_concurrency(
+        args.recovery_agent_concurrency,
+        args.recovery_thread_concurrency,
+    );
     anyhow::ensure!(
         args.adapters_only || args.bind.ip().is_loopback() || args.auth_file.is_some(),
         "non-loopback serving requires --auth-file"

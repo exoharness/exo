@@ -112,122 +112,104 @@ interface SavedCodexTurn {
   projectedItems: Set<string>;
 }
 
-async function savedCodexTurn(
+interface SavedCodexRecovery {
+  turn: SavedCodexTurn | null;
+  unresolvedTools: Set<string>;
+  unansweredApproval: boolean;
+}
+
+async function savedCodexRecovery(
   context: TurnContext,
-): Promise<SavedCodexTurn | null> {
-  let cursor: string | null = null;
+): Promise<SavedCodexRecovery> {
   let saved: SavedCodexTurn | null = null;
   let pendingStartIntent = false;
   const projectedItems = new Set<string>();
-  const turnId = context.exoharness.current.turn.record.id;
-  do {
-    const page = await context.exoharness.current.conversation.getEvents({
-      cursor,
-      direction: "asc",
-      limit: 100,
-      turnId,
-      types: [
-        "codex_turn_started",
-        "codex_turn_start_intent",
-        "codex_turn_completed",
-        "codex_item_projected",
-      ],
-    });
-    for (const event of page.events) {
-      if (event.data.type !== "custom") continue;
-      if (event.data.event_type === "codex_turn_start_intent") {
-        pendingStartIntent = true;
-      } else if (event.data.event_type === "codex_turn_started") {
-        const payload = asRecord(event.data.payload);
-        if (
-          typeof payload.codex_thread_id === "string" &&
-          typeof payload.codex_turn_id === "string"
-        ) {
-          saved = {
-            threadId: payload.codex_thread_id,
-            turnId: payload.codex_turn_id,
-            completed: false,
-            projectedItems,
-          };
-          pendingStartIntent = false;
-        }
-      } else if (event.data.event_type === "codex_turn_completed" && saved) {
-        const status = asRecord(asRecord(event.data.payload).turn).status;
-        if (status === "completed") saved.completed = true;
-        if (status === "failed" || status === "interrupted") {
-          throw new Error(`saved Codex turn ended with status ${status}`);
-        }
-      } else if (event.data.event_type === "codex_item_projected") {
-        const payload = asRecord(event.data.payload);
-        if (
-          typeof payload.turn_id === "string" &&
-          typeof payload.item_id === "string"
-        ) {
-          projectedItems.add(`${payload.turn_id}:${payload.item_id}`);
-        }
+  const pendingToolCalls = new Map<string, number>();
+  const pendingApprovals = new Set<string>();
+  // Projected items and approval/tool results anywhere in the turn affect
+  // replay safety, so read the turn once in event order.
+  const events = await context.exoharness.current.conversation.getEvents({
+    direction: "asc",
+    turnId: context.exoharness.current.turn.record.id,
+    types: [
+      "codex_turn_started",
+      "codex_turn_start_intent",
+      "codex_turn_completed",
+      "codex_item_projected",
+      "tool_requested",
+      "tool_result",
+      "agent_runtime.approval_requested",
+      "agent_runtime.approval_response",
+    ],
+  });
+  for (const event of events.events) {
+    const data = event.data;
+    if (data.type === "tool_requested") {
+      if (typeof data.tool_call_id === "string") {
+        pendingToolCalls.set(
+          data.tool_call_id,
+          (pendingToolCalls.get(data.tool_call_id) ?? 0) + 1,
+        );
       }
+      continue;
     }
-    cursor = page.cursor ?? null;
-  } while (cursor);
+    if (data.type === "tool_result") {
+      if (typeof data.tool_call_id === "string") {
+        const count = pendingToolCalls.get(data.tool_call_id) ?? 0;
+        if (count <= 1) pendingToolCalls.delete(data.tool_call_id);
+        else pendingToolCalls.set(data.tool_call_id, count - 1);
+      }
+      continue;
+    }
+    if (data.type !== "custom") continue;
+    if (data.event_type === "codex_turn_start_intent") {
+      pendingStartIntent = true;
+    } else if (data.event_type === "codex_turn_started") {
+      const payload = asRecord(data.payload);
+      if (
+        typeof payload.codex_thread_id === "string" &&
+        typeof payload.codex_turn_id === "string"
+      ) {
+        saved = {
+          threadId: payload.codex_thread_id,
+          turnId: payload.codex_turn_id,
+          completed: false,
+          projectedItems,
+        };
+        pendingStartIntent = false;
+      }
+    } else if (data.event_type === "codex_turn_completed" && saved) {
+      const status = asRecord(asRecord(data.payload).turn).status;
+      if (status === "completed") saved.completed = true;
+      if (status === "failed" || status === "interrupted") {
+        throw new Error(`saved Codex turn ended with status ${status}`);
+      }
+    } else if (data.event_type === "codex_item_projected") {
+      const payload = asRecord(data.payload);
+      if (
+        typeof payload.turn_id === "string" &&
+        typeof payload.item_id === "string"
+      ) {
+        projectedItems.add(`${payload.turn_id}:${payload.item_id}`);
+      }
+    } else if (data.event_type === "agent_runtime.approval_requested") {
+      const id = asRecord(data.payload).approval_id;
+      if (typeof id === "string") pendingApprovals.add(id);
+    } else if (data.event_type === "agent_runtime.approval_response") {
+      const id = asRecord(data.payload).approval_id;
+      if (typeof id === "string") pendingApprovals.delete(id);
+    }
+  }
   if (pendingStartIntent) {
     throw new Error(
       "cannot safely resume Codex turn after turn/start was attempted without a saved native turn ID",
     );
   }
-  return saved;
-}
-
-async function unresolvedToolCallIds(
-  context: TurnContext,
-): Promise<Set<string>> {
-  let cursor: string | null = null;
-  const unresolved = new Set<string>();
-  do {
-    const page = await context.exoharness.current.conversation.getEvents({
-      cursor,
-      direction: "asc",
-      limit: 100,
-      turnId: context.exoharness.current.turn.record.id,
-      types: ["tool_requested", "tool_result"],
-    });
-    for (const event of page.events) {
-      const id = event.data.tool_call_id;
-      if (typeof id !== "string") continue;
-      if (event.data.type === "tool_requested") unresolved.add(id);
-      if (event.data.type === "tool_result") unresolved.delete(id);
-    }
-    cursor = page.cursor ?? null;
-  } while (cursor);
-  return unresolved;
-}
-
-async function hasUnansweredApproval(context: TurnContext): Promise<boolean> {
-  const pending = new Set<string>();
-  let cursor: string | null = null;
-  do {
-    const page = await context.exoharness.current.conversation.getEvents({
-      cursor,
-      direction: "asc",
-      limit: 100,
-      turnId: context.exoharness.current.turn.record.id,
-      types: [
-        "agent_runtime.approval_requested",
-        "agent_runtime.approval_response",
-      ],
-    });
-    for (const event of page.events) {
-      if (event.data.type !== "custom") continue;
-      const approvalId = asRecord(event.data.payload).approval_id;
-      if (typeof approvalId !== "string") continue;
-      if (event.data.event_type === "agent_runtime.approval_requested") {
-        pending.add(approvalId);
-      } else if (event.data.event_type === "agent_runtime.approval_response") {
-        pending.delete(approvalId);
-      }
-    }
-    cursor = page.cursor ?? null;
-  } while (cursor);
-  return pending.size > 0;
+  return {
+    turn: saved,
+    unresolvedTools: new Set(pendingToolCalls.keys()),
+    unansweredApproval: pendingApprovals.size > 0,
+  };
 }
 
 class CodexWarmSession {
@@ -387,10 +369,9 @@ async function runCodexTurn(
   await requireCodexSandboxNetworking(context);
 
   const { turn } = context.exoharness.current;
-  const savedTurn = recovering ? await savedCodexTurn(context) : null;
-  const unresolvedTools = recovering
-    ? await unresolvedToolCallIds(context)
-    : new Set<string>();
+  const recovery = recovering ? await savedCodexRecovery(context) : null;
+  const savedTurn = recovery?.turn ?? null;
+  const unresolvedTools = recovery?.unresolvedTools ?? new Set<string>();
   if (recovering && !savedTurn && unresolvedTools.size > 0) {
     throw new Error(
       "cannot safely resume Codex turn with an unresolved tool call",
@@ -456,7 +437,7 @@ async function runCodexTurn(
     }
     if (session.threadId === null && session.resumeThreadId !== null) {
       try {
-        const resumedThreadId = await startCodexThread(
+        const resumedThreadId = await startOrResumeCodexThread(
           session.server,
           context,
           modelBinding,
@@ -504,7 +485,7 @@ async function runCodexTurn(
           cwd: codexAppServerCwd(context),
           external_sandbox: true,
         },
-        () => startCodexThread(session.server, context, modelBinding),
+        () => startOrResumeCodexThread(session.server, context, modelBinding),
       ));
     session.threadId = threadId;
     const activeItems = new Set(unresolvedTools);
@@ -512,7 +493,7 @@ async function runCodexTurn(
     if (
       session.process.reused &&
       nativeSnapshot?.status === "inProgress" &&
-      (await hasUnansweredApproval(context))
+      recovery?.unansweredApproval
     ) {
       throw new Error(
         "cannot reattach Codex turn with an unanswered approval; the native request was lost during restart",
@@ -831,7 +812,7 @@ function codexLlmTraceOutput(
   };
 }
 
-async function startCodexThread(
+async function startOrResumeCodexThread(
   codex: CodexAppServer,
   context: TurnContext,
   modelBinding: SandboxModel,

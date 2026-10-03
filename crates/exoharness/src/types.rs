@@ -279,6 +279,10 @@ pub struct NewThreadRequest {
 pub struct ListThreadsRequest {
     pub cursor: Option<EventId>,
     pub limit: Option<usize>,
+    /// Return threads with a durable unfinished-turn marker. A crash between
+    /// TurnEnded and marker deletion can leave a finished turn as a candidate.
+    #[serde(default)]
+    pub unfinished_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

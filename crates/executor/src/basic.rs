@@ -281,6 +281,9 @@ where
         stream_mode: ExecutorStreamMode<'_>,
         turn_trace: Option<&dyn TurnExecutionTrace>,
     ) -> Result<u32> {
+        // The model response is already saved. Rebuild only the pending calls,
+        // then use the same execute_tool_round path as a new turn. Calling the
+        // model again here could produce a different tool round.
         let events = conversation
             .get_events(Some(EventQuery {
                 turn_id: Some(turn.record().id),

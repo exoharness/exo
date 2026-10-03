@@ -70,6 +70,31 @@ async fn http_harness_with_sandbox_backend(
 }
 
 #[actix_web::test]
+async fn http_exoharness_lists_unfinished_threads() -> crate::Result<()> {
+    let fixture = http_harness().await;
+    let agent = fixture
+        .harness
+        .new_agent(crate::NewAgentRequest {
+            slug: "http-recovery-index".to_string(),
+            name: "HTTP recovery index".to_string(),
+            vaults: Vec::new(),
+        })
+        .await?;
+    let thread = agent.new_thread(Default::default()).await?;
+    let turn = thread.begin_turn(BeginTurnRequest::default()).await?;
+    let query = crate::ListThreadsRequest {
+        unfinished_only: true,
+        ..Default::default()
+    };
+    let indexed = agent.list_threads(query.clone()).await?;
+    assert_eq!(indexed.threads.len(), 1);
+    assert_eq!(indexed.threads[0].record().id, thread.record().id);
+    turn.finish().await?;
+    assert!(agent.list_threads(query).await?.threads.is_empty());
+    Ok(())
+}
+
+#[actix_web::test]
 async fn http_exoharness_supports_agent_and_conversation_crud() {
     let fixture = http_harness().await;
     crate::contract_tests::supports_agent_and_conversation_crud(Arc::clone(&fixture.harness)).await;

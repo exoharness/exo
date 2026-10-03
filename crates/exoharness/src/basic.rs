@@ -65,6 +65,24 @@ mod egress;
 use egress::LocalEgressResolver;
 
 const SANDBOX_PROVIDER_STATE_EVENT: &str = "sandbox_provider_state";
+const UNFINISHED_TURNS_DIR: &str = "recovery/unfinished_turns";
+
+fn unfinished_turn_marker_path(
+    agent_id: AgentId,
+    thread_id: ConversationId,
+    turn_id: TurnId,
+) -> PathBuf {
+    Path::new(UNFINISHED_TURNS_DIR)
+        .join(agent_id.to_string())
+        .join(thread_id.to_string())
+        .join(format!("{turn_id}.json"))
+}
+
+fn unfinished_thread_markers_dir(agent_id: AgentId, thread_id: ConversationId) -> PathBuf {
+    Path::new(UNFINISHED_TURNS_DIR)
+        .join(agent_id.to_string())
+        .join(thread_id.to_string())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct SandboxProviderStatePayload {
@@ -1059,18 +1077,29 @@ impl BasicExoHarness {
     }
 
     async fn list_agent_records(&self) -> Result<Vec<AgentRecord>> {
-        let mut agents = Vec::new();
-        for key in self.inner.storage.list_keys(self.agents_dir()).await? {
-            if !key.ends_with("/record.json") || Path::new(&key).components().count() != 3 {
-                continue;
-            }
-            agents.push(
-                self.inner
-                    .storage
-                    .get_json::<AgentRecord>(Path::new(&key))
-                    .await?,
-            );
-        }
+        let storage = &self.inner.storage;
+        let directories = storage
+            .list_directories(self.agents_dir())
+            .await?
+            .into_iter()
+            .filter(|directory| {
+                directory
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.parse::<AgentId>().is_ok())
+            });
+        let mut agents = stream::iter(directories)
+            .map(|directory| async move {
+                storage
+                    .get_json_if_exists::<AgentRecord>(directory.join("record.json"))
+                    .await
+            })
+            .buffer_unordered(16)
+            .try_collect::<Vec<_>>()
+            .await?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         agents.sort_by_key(|record| record.id);
         Ok(agents)
     }
@@ -1136,23 +1165,26 @@ impl ExoHarness for BasicExoHarness {
 
     async fn list_agents(&self) -> Result<Vec<Arc<dyn AgentHandle>>> {
         self.check(ResourceScope::Global).await?;
-        let mut handles: Vec<Arc<dyn AgentHandle>> = Vec::new();
-        for record in self.list_agent_records().await? {
-            if self
-                .check(ResourceScope::Agent {
+        Ok(stream::iter(self.list_agent_records().await?)
+            .map(|record| async move {
+                self.check(ResourceScope::Agent {
                     agent_id: record.id,
                 })
                 .await
-                .is_err()
-            {
-                continue;
-            }
-            handles.push(Arc::new(BasicAgentHandle {
-                harness: self.clone(),
-                record,
-            }));
-        }
-        Ok(handles)
+                .ok()
+                .map(|_| {
+                    Arc::new(BasicAgentHandle {
+                        harness: self.clone(),
+                        record,
+                    }) as Arc<dyn AgentHandle>
+                })
+            })
+            .buffered(16)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .flatten()
+            .collect())
     }
 
     async fn get_agent(&self, id: &AgentId) -> Result<Option<Arc<dyn AgentHandle>>> {
@@ -1282,6 +1314,10 @@ impl ExoHarness for BasicExoHarness {
                 );
             }
             self.inner.storage.delete_prefix(agent_dir).await?;
+            self.inner
+                .storage
+                .delete_prefix(Path::new(UNFINISHED_TURNS_DIR).join(id.to_string()))
+                .await?;
             return Ok(true);
         }
         bail!("agent {id} kept acquiring sandboxes while it was being deleted")
@@ -1548,26 +1584,30 @@ impl AgentHandle for BasicAgentHandle {
                 agent_id: self.record.id,
             })
             .await?;
-        let mut handles: Vec<Arc<dyn ConversationHandle>> = Vec::new();
         let result = self.list_conversation_records(request).await?;
-        for record in result.conversations {
-            if self
-                .harness
-                .check(ResourceScope::Thread {
-                    agent_id: self.record.id,
-                    thread_id: record.id,
-                })
-                .await
-                .is_err()
-            {
-                continue;
-            }
-            handles.push(Arc::new(BasicConversationHandle {
-                harness: self.harness.clone(),
-                agent_id: self.record.id,
-                record,
-            }));
-        }
+        let handles = stream::iter(result.conversations)
+            .map(|record| async move {
+                self.harness
+                    .check(ResourceScope::Thread {
+                        agent_id: self.record.id,
+                        thread_id: record.id,
+                    })
+                    .await
+                    .ok()
+                    .map(|_| {
+                        Arc::new(BasicConversationHandle {
+                            harness: self.harness.clone(),
+                            agent_id: self.record.id,
+                            record,
+                        }) as Arc<dyn ConversationHandle>
+                    })
+            })
+            .buffered(16)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
         Ok(ListConversationsResult {
             conversations: handles,
             next_cursor: result.next_cursor,
@@ -1767,6 +1807,11 @@ impl AgentHandle for BasicAgentHandle {
                 .storage
                 .delete_prefix(conversation_dir)
                 .await?;
+            self.harness
+                .inner
+                .storage
+                .delete_prefix(unfinished_thread_markers_dir(self.record.id, *id))
+                .await?;
             return Ok(true);
         }
         bail!("conversation {id} kept acquiring sandboxes while it was being deleted")
@@ -1847,25 +1892,42 @@ impl BasicAgentHandle {
         &self,
         request: ListConversationsRequest,
     ) -> Result<ListConversationsResult<ConversationRecord>> {
-        let mut conversations = Vec::new();
-        for key in self
-            .harness
-            .inner
-            .storage
-            .list_keys(self.conversations_dir())
-            .await?
-        {
-            if !key.ends_with("/record.json") || Path::new(&key).components().count() != 5 {
-                continue;
+        let storage = &self.harness.inner.storage;
+        let paths = if request.unfinished_only {
+            let prefix = Path::new(UNFINISHED_TURNS_DIR).join(self.record.id.to_string());
+            let mut thread_ids = HashSet::new();
+            for key in storage.list_keys(&prefix).await? {
+                let Ok(relative) = Path::new(&key).strip_prefix(&prefix) else {
+                    continue;
+                };
+                if relative.components().count() != 2 || !key.ends_with(".json") {
+                    continue;
+                }
+                let Some(thread_id) = relative.components().next() else {
+                    continue;
+                };
+                thread_ids.insert(thread_id.as_os_str().to_string_lossy().into_owned());
             }
-            conversations.push(
-                self.harness
-                    .inner
-                    .storage
-                    .get_json::<ConversationRecord>(Path::new(&key))
-                    .await?,
-            );
-        }
+            thread_ids
+                .into_iter()
+                .map(|id| self.conversations_dir().join(id).join("record.json"))
+                .collect::<Vec<_>>()
+        } else {
+            storage
+                .list_directories(self.conversations_dir())
+                .await?
+                .into_iter()
+                .map(|directory| directory.join("record.json"))
+                .collect::<Vec<_>>()
+        };
+        let mut conversations = stream::iter(paths)
+            .map(|path| async move { storage.get_json_if_exists::<ConversationRecord>(path).await })
+            .buffer_unordered(16)
+            .try_collect::<Vec<_>>()
+            .await?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         conversations.sort_by_key(conversation_recency_key);
         conversations.reverse();
         paginate_conversation_records(conversations, request)
@@ -3232,6 +3294,16 @@ impl ConversationHandle for BasicConversationHandle {
             id: Uuid7::now(),
             session_id,
         };
+        // Write the marker first: a crash may leave an extra candidate to scan,
+        // but cannot leave an admitted turn absent from the recovery index.
+        self.harness
+            .inner
+            .storage
+            .put_bytes(
+                unfinished_turn_marker_path(self.agent_id, self.record.id, turn_record.id),
+                Vec::new(),
+            )
+            .await?;
         let mut events_to_append = Vec::new();
 
         if request.session_id.is_none() {
@@ -4355,13 +4427,29 @@ impl TurnHandle for BasicTurnHandle {
 
     async fn finish(&self) -> Result<EventId> {
         let _guard = self.harness.inner.write_lock.lock().await;
-        {
+        let finished_event_id = {
             let state = self.state.lock().expect("turn state poisoned");
             if state.finished {
-                return state
-                    .latest_event_id
-                    .ok_or_else(|| anyhow!("turn has no latest event id"));
+                Some(
+                    state
+                        .latest_event_id
+                        .ok_or_else(|| anyhow!("turn has no latest event id"))?,
+                )
+            } else {
+                None
             }
+        };
+        if let Some(event_id) = finished_event_id {
+            self.harness
+                .inner
+                .storage
+                .delete_key_if_exists(unfinished_turn_marker_path(
+                    self.agent_id,
+                    self.conversation_id,
+                    self.record.id,
+                ))
+                .await?;
+            return Ok(event_id);
         }
         let mut record = self
             .harness
@@ -4387,9 +4475,20 @@ impl TurnHandle for BasicTurnHandle {
             .put_json(self.conversation_dir.join("record.json"), &record)
             .await?;
         let latest = add_result.latest_event_id;
-        let mut state = self.state.lock().expect("turn state poisoned");
-        state.latest_event_id = Some(latest);
-        state.finished = true;
+        {
+            let mut state = self.state.lock().expect("turn state poisoned");
+            state.latest_event_id = Some(latest);
+            state.finished = true;
+        }
+        self.harness
+            .inner
+            .storage
+            .delete_key_if_exists(unfinished_turn_marker_path(
+                self.agent_id,
+                self.conversation_id,
+                self.record.id,
+            ))
+            .await?;
         Ok(latest)
     }
 }
