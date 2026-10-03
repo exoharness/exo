@@ -4575,6 +4575,7 @@ impl From<StoredSandbox> for SandboxRecord {
             name: sandbox.name,
             provider: sandbox.provider,
             image: sandbox.image,
+            tcp_ports: sandbox.tcp_ports,
             running: sandbox.running,
         }
     }

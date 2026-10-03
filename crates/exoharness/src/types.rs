@@ -756,6 +756,7 @@ pub struct SandboxRecord {
     pub name: Option<String>,
     pub provider: SandboxProvider,
     pub image: String,
+    pub tcp_ports: Vec<u16>,
     pub running: bool,
 }
 

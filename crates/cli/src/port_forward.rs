@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::{Context, Result, anyhow, ensure};
-use executor::{ConversationHandle, EventData, EventKind, EventQuery, EventQueryDirection};
+use executor::ConversationHandle;
 use tokio::{io::copy_bidirectional, net::TcpListener, task::JoinSet};
 
 pub(crate) async fn run(
@@ -32,31 +32,12 @@ pub(crate) async fn published_sandbox(
     conversation: &dyn ConversationHandle,
     port: u16,
 ) -> Result<executor::SandboxId> {
-    let running = conversation.list_sandboxes().await?;
-    let events = conversation
-        .get_events(Some(EventQuery {
-            direction: Some(EventQueryDirection::Desc),
-            types: Some(vec![EventKind::SANDBOX_CREATED]),
-            ..Default::default()
-        }))
-        .await?;
-    events
-        .events
+    conversation
+        .list_sandboxes()
+        .await?
         .into_iter()
-        .find_map(|event| match event.data {
-            EventData::SandboxCreated {
-                sandbox_id,
-                tcp_ports,
-                ..
-            } if tcp_ports.contains(&port)
-                && running
-                    .iter()
-                    .any(|sandbox| sandbox.id == sandbox_id && sandbox.running) =>
-            {
-                Some(sandbox_id)
-            }
-            _ => None,
-        })
+        .find(|sandbox| sandbox.running && sandbox.tcp_ports.contains(&port))
+        .map(|sandbox| sandbox.id)
         .ok_or_else(|| anyhow!("no running thread sandbox publishes TCP port {port}"))
 }
 

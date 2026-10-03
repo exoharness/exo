@@ -122,7 +122,8 @@ resume. Each thread gets its own listener, so multiple sessions can run together
 An occupied saved port produces an error instead of changing the URL.
 
 The proxy follows the thread's currently running sandbox and forwards HTTP and
-WebSocket traffic through its published TCP ports. It starts and stops with the
+WebSocket traffic through its published TCP ports. Routing reads current sandbox
+metadata without reading the thread's event history. It starts and stops with the
 CLI session; it does not keep a VM running after exit. Services still need to be
 started in the sandbox. The app must generate browser API and WebSocket URLs
 using the preview's origin. Exo includes these browser URLs in the agent's
