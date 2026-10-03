@@ -41,8 +41,10 @@ pub mod remote;
 mod rlm;
 #[cfg(test)]
 mod rlm_tests;
+pub mod scheduler_backend;
+pub mod scheduler_backend_memory;
 mod scheduler_runtime;
-mod scheduler_store;
+pub mod scheduler_store;
 mod scheduler_types;
 mod shared;
 #[cfg(test)]

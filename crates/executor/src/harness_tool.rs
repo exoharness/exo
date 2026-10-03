@@ -12,6 +12,7 @@ use crate::conversation_sandbox::{
     agent_sandbox_spec, attached_conversation_sandbox, conversation_sandbox_spec,
     conversation_sandboxes, ensure_conversation_sandbox,
 };
+use crate::scheduler_backend::SchedulerStoreBackend;
 use crate::scheduler_store::SchedulerStore;
 use crate::scheduler_types::{
     DEFAULT_MAX_OUTPUT_BYTES, MissedPolicy, NewScheduledTask, ScheduledTaskSandboxMode,
@@ -374,7 +375,7 @@ struct SandboxSnapshotCurrent {
 async fn execute_schedule_task_tool(
     agent: &dyn AgentHandle,
     conversation: &dyn ConversationHandle,
-    store: &SchedulerStore,
+    store: &dyn SchedulerStoreBackend,
     request: &ToolRequest,
 ) -> Result<ToolResult> {
     let args =
@@ -405,7 +406,7 @@ async fn execute_schedule_task_tool(
 async fn execute_list_scheduled_tasks_tool(
     agent: &dyn AgentHandle,
     conversation: &dyn ConversationHandle,
-    store: &SchedulerStore,
+    store: &dyn SchedulerStoreBackend,
     request: &ToolRequest,
 ) -> Result<ToolResult> {
     let args = serde_json::from_value::<ConversationScopedArguments>(Value::Object(
@@ -427,7 +428,7 @@ async fn execute_list_scheduled_tasks_tool(
 async fn execute_cancel_scheduled_task_tool(
     agent: &dyn AgentHandle,
     conversation: &dyn ConversationHandle,
-    store: &SchedulerStore,
+    store: &dyn SchedulerStoreBackend,
     request: &ToolRequest,
 ) -> Result<ToolResult> {
     let args = serde_json::from_value::<ScheduledTaskIdArguments>(Value::Object(
@@ -462,7 +463,7 @@ async fn execute_cancel_scheduled_task_tool(
 async fn execute_delete_scheduled_task_tool(
     agent: &dyn AgentHandle,
     conversation: &dyn ConversationHandle,
-    store: &SchedulerStore,
+    store: &dyn SchedulerStoreBackend,
     request: &ToolRequest,
 ) -> Result<ToolResult> {
     let args = serde_json::from_value::<ScheduledTaskIdArguments>(Value::Object(

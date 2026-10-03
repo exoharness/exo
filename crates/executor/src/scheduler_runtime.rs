@@ -8,7 +8,7 @@ use serde::Serialize;
 use crate::agent_sandbox::ensure_agent_sandbox;
 use crate::conversation_sandbox::{create_conversation_sandbox, ensure_conversation_sandbox};
 use crate::conversation_wakeup::send_conversation_wakeup;
-use crate::scheduler_store::SchedulerStore;
+use crate::scheduler_backend::SchedulerStoreBackend;
 use crate::scheduler_types::{
     DEFAULT_COMMAND_TIMEOUT_MS, DEFAULT_TASK_LEASE_MS, ScheduledFireRecord, ScheduledTaskRecord,
     ScheduledTaskRunRecord, ScheduledTaskSandboxMode, now_ms,
@@ -45,7 +45,7 @@ struct ScheduledTaskArtifact {
 
 pub async fn run_due_tasks(
     harness: Arc<Runtime>,
-    store: &SchedulerStore,
+    store: &dyn SchedulerStoreBackend,
     options: SchedulerRunOptions,
 ) -> Result<Vec<ScheduledTaskRunRecord>> {
     let due = store
@@ -70,7 +70,7 @@ pub async fn run_due_tasks(
 /// keeps that bounded to one repeat rather than a loop.
 pub async fn redeliver_pending_wakes(
     harness: Arc<Runtime>,
-    store: &SchedulerStore,
+    store: &dyn SchedulerStoreBackend,
 ) -> Result<usize> {
     let mut delivered = 0;
     for fire in store.pending_fires().await? {
@@ -107,7 +107,7 @@ pub async fn redeliver_pending_wakes(
 /// none under [`MissedPolicy::Skip`](crate::MissedPolicy::Skip).
 pub async fn run_task(
     harness: Arc<Runtime>,
-    store: &SchedulerStore,
+    store: &dyn SchedulerStoreBackend,
     mut task: ScheduledTaskRecord,
 ) -> Result<Vec<ScheduledTaskRunRecord>> {
     let plan = task.plan_missed_fires(now_ms())?;
@@ -127,7 +127,7 @@ pub async fn run_task(
 
 async fn fire_once(
     harness: Arc<Runtime>,
-    store: &SchedulerStore,
+    store: &dyn SchedulerStoreBackend,
     task: &mut ScheduledTaskRecord,
     slot_ms: u64,
 ) -> Result<ScheduledTaskRunRecord> {
@@ -204,7 +204,7 @@ struct TaskOutput {
 
 async fn run_task_inner(
     harness: Arc<Runtime>,
-    store: &SchedulerStore,
+    store: &dyn SchedulerStoreBackend,
     task: &mut ScheduledTaskRecord,
     run_id: &str,
     slot_ms: u64,
