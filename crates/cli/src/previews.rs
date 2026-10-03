@@ -230,7 +230,9 @@ pub(crate) async fn print(runtime: &Runtime, thread: &dyn ConversationHandle) ->
             .into_iter()
             .map(|preview| vec![preview.name, preview.port.to_string(), preview.url])
             .collect(),
-    )
+    )?;
+    println!("Saved URLs: preview links require an open agent session and running services.");
+    Ok(())
 }
 
 #[cfg(test)]

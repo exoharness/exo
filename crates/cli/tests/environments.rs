@@ -4,6 +4,92 @@ use anyhow::{Context, Result};
 use support::{Fixture, thread_slug};
 
 #[actix_web::test]
+async fn server_root_rejects_local_mutations_but_allows_queries_and_http() -> Result<()> {
+    let f = Fixture::new().await?;
+    f.cli(&["provider", "switch", "local"]).await?;
+    f.cli(&[
+        "agent",
+        "create",
+        "saved",
+        "--file",
+        f.agent_file.to_str().context("agent path")?,
+    ])
+    .await?;
+    f.cli(&["thread", "create", "saved", "Guarded", "--slug", "guarded"])
+        .await?;
+    let mut environment: exoharness::EnvironmentDefinition = serde_yaml_ng::from_str(
+        "name: dev\nconfig:\n  provider: local_process\n  image: unused\n",
+    )?;
+    let file = f.temp.path().join("environment.yaml");
+    std::fs::write(&file, serde_yaml_ng::to_string(&environment)?)?;
+    let path = file.to_str().context("environment path")?;
+    f.cli(&["environment", "create", "dev", "--file", path])
+        .await?;
+    environment.config.image = "updated-image".into();
+    std::fs::write(&file, serde_yaml_ng::to_string(&environment)?)?;
+
+    // The fixture's HTTP service uses this root. Claim the exclusive lock that
+    // exo serve holds without launching a second service or any real VM.
+    let server_lock = std::fs::OpenOptions::new()
+        .write(true)
+        .open(f.root.join("service.lock"))?;
+    server_lock.try_lock()?;
+    for args in [
+        vec!["environment", "update", "dev", "--file", path],
+        vec!["thread", "delete", "saved", "guarded"],
+        vec!["agent", "delete", "saved"],
+        vec!["vault", "create", "blocked"],
+    ] {
+        let output = f.output(&args, None, None).await?;
+        assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("exo serve owns this local state root"),
+            "{error}"
+        );
+    }
+    let saved: exoharness::EnvironmentDefinition =
+        serde_yaml_ng::from_str(&f.cli(&["environment", "get", "dev"]).await?)?;
+    assert_eq!(saved.config.image, "unused");
+    f.cli(&["thread", "get", "saved", "guarded"]).await?;
+    assert!(
+        !f.runtime
+            .exoharness_handle()
+            .list_vaults()
+            .await?
+            .iter()
+            .any(|vault| vault.record().name == "blocked")
+    );
+
+    f.cli(&[
+        "--provider",
+        "remote",
+        "environment",
+        "update",
+        "dev",
+        "--file",
+        path,
+    ])
+    .await?;
+    let saved: exoharness::EnvironmentDefinition =
+        serde_yaml_ng::from_str(&f.cli(&["environment", "get", "dev"]).await?)?;
+    assert_eq!(saved, environment);
+
+    drop(server_lock);
+    f.cli(&["thread", "delete", "saved", "guarded"]).await?;
+    f.cli(&["environment", "delete", "dev"]).await?;
+    let agent =
+        exo_managed_agents::find_agent(f.runtime.exoharness_handle().as_ref(), "saved").await?;
+    assert!(
+        exo_managed_agents::list_threads(agent.as_ref())
+            .await?
+            .is_empty()
+    );
+    assert!(f.cli(&["environment", "list"]).await?.trim().is_empty());
+    f.stop().await
+}
+
+#[actix_web::test]
 async fn named_threads_keep_history_and_explicit_environment_for_local_and_http() -> Result<()> {
     for provider in ["local", "remote"] {
         let f = Fixture::new().await?;

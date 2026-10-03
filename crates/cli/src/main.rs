@@ -1116,7 +1116,7 @@ async fn run_selected(
         (Some(root), Commands::Serve { .. }) => Some(session::lock_server_root(root)?),
         _ => None,
     };
-    let local_root = if session::needs_local_session(&cli.command) {
+    let local_root = if session::needs_local_root_lock(&cli.command) {
         state_root
             .as_deref()
             .map(session::LocalRootLease::acquire)

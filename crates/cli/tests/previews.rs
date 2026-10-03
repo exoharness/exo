@@ -235,6 +235,7 @@ async fn named_previews_are_assigned_displayed_and_reused_on_resume() -> Result<
     assert!(urls.contains("app.project-"));
     assert!(urls.contains("api.project-"));
     assert!(urls.contains(".dev.exo.localhost:"));
+    assert!(urls.contains("preview links require an open agent session and running services"));
     let root = fixture.runtime.exoharness_handle();
     let agent = exo_managed_agents::find_agent(root.as_ref(), "dev").await?;
     let thread = exo_managed_agents::find_thread(agent.as_ref(), "project").await?;

@@ -50,11 +50,13 @@ backed by `exo serve` for repeated commands sharing a running VM.
 `exo thread sandbox forward` only connects to published ports and does not take
 lifetime ownership.
 
-Local executions share a root lock; `exo serve` takes that lock exclusively.
-They cannot run against the same local state root simultaneously. A rejected
-local run fails before opening or reconfiguring the thread, so it cannot stop
-server-owned sandboxes. HTTP clients execute through the server and leave
-sandbox lifetime to it.
+Local executions and commands that mutate local state share a root lock;
+`exo serve` takes that lock exclusively. These commands cannot run against the
+same local state root while the server owns it. Rejection happens before opening
+or changing state, so a local command cannot stop server-owned sandboxes or
+change their configuration. Read-only queries and port forwarding remain
+available. Use an HTTP provider to make changes through the server; HTTP clients
+leave sandbox lifetime to it.
 
 Only one local CLI session can own a thread at a time. After a crash or SIGKILL,
 its machines may keep running until that thread is reopened. The next local run

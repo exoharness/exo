@@ -7,22 +7,55 @@ use std::{
 use anyhow::{Context, Result};
 use exoharness::{AgentId, ConversationHandle};
 
-pub(crate) fn needs_local_session(command: &crate::Commands) -> bool {
-    matches!(
-        command,
-        crate::Commands::Agent {
-            command: crate::AgentCommands::Run { .. },
-            ..
-        } | crate::Commands::Conversation {
-            command: crate::ConversationCommands::Send { .. },
-            ..
-        } | crate::Commands::Conversation {
-            command: crate::ConversationCommands::Sandbox {
-                command: crate::ConversationSandboxCommands::Run { .. }
-            },
-            ..
-        }
-    )
+pub(crate) fn needs_local_root_lock(command: &crate::Commands) -> bool {
+    use crate::{
+        AgentCommands, AgentMountCommands, Commands, ConversationCommands,
+        ConversationMountCommands, ConversationSandboxCommands,
+        environment::{EnvironmentCommands, ProviderCommands},
+        vaults::VaultCommands,
+    };
+
+    // Queries and forwarding can coexist with a server. All state changes must
+    // go through that server while it owns the root.
+    match command {
+        Commands::Agent { command, .. } => !matches!(
+            command,
+            AgentCommands::List
+                | AgentCommands::Get { .. }
+                | AgentCommands::Mount {
+                    command: AgentMountCommands::List { .. }
+                }
+        ),
+        Commands::Conversation { command, .. } => !matches!(
+            command,
+            ConversationCommands::Ports { .. }
+                | ConversationCommands::List { .. }
+                | ConversationCommands::Get { .. }
+                | ConversationCommands::Events { .. }
+                | ConversationCommands::Mount {
+                    command: ConversationMountCommands::List { .. }
+                }
+                | ConversationCommands::Sandbox {
+                    command: ConversationSandboxCommands::Forward { .. }
+                }
+        ),
+        Commands::Environment { command, .. } => !matches!(
+            command,
+            EnvironmentCommands::List
+                | EnvironmentCommands::Get { .. }
+                | EnvironmentCommands::Provider {
+                    command: ProviderCommands::List
+                }
+        ),
+        Commands::Vault { command, .. } => !matches!(
+            command,
+            VaultCommands::List { .. } | VaultCommands::Get { .. }
+        ),
+        Commands::Serve { .. }
+        | Commands::Provider { .. }
+        | Commands::FirecrackerBridge
+        | Commands::PreviewProxy { .. } => false,
+    }
 }
 
 fn open_root_lock(root: &Path) -> Result<File> {
@@ -34,7 +67,7 @@ fn open_root_lock(root: &Path) -> Result<File> {
         .open(root.join("service.lock"))?)
 }
 
-/// Local executions share the root, while a server owns it exclusively.
+/// Local executions and state changes share the root; a server owns it exclusively.
 /// Acquire this before opening a thread or changing its configuration.
 pub(crate) struct LocalRootLease {
     root: PathBuf,
@@ -55,7 +88,7 @@ impl LocalRootLease {
 pub(crate) fn lock_server_root(root: &Path) -> Result<File> {
     let lock = open_root_lock(root)?;
     lock.try_lock()
-        .context("a local CLI session or another agent service is using this root")?;
+        .context("a local CLI command or another agent service is using this root")?;
     Ok(lock)
 }
 

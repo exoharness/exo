@@ -101,6 +101,9 @@ type SandboxBackendFactory = Arc<
 pub struct SandboxBackendRegistration {
     provider: SandboxProvider,
     is_local: bool,
+    // Copy the backend capability so deletion can decide whether to resolve a
+    // lazy factory (and its credentials). from_backend reads the trait method;
+    // lazy registrations must keep this field in sync with their backend.
     retains_disk_when_stopped: bool,
     factory: SandboxBackendFactory,
 }
