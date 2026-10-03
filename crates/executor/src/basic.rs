@@ -8,6 +8,7 @@ use exoharness::{
     EventQueryDirection, Result, ToolCallId, ToolRequest, TurnHandle,
 };
 use lingua::Message;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::execution_tracing::TurnExecutionTrace;
@@ -27,6 +28,13 @@ pub struct BasicExecutor<M, T> {
     tools: Arc<T>,
     history_cache: Arc<RwLock<HashMap<ConversationId, HistoryCacheEntry>>>,
     pricing: Arc<PricingTable>,
+}
+
+pub(crate) const BASIC_TOOL_ROUND: &str = "exo.basic.tool_round";
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct BasicToolRound {
+    pub(crate) round: u32,
 }
 
 impl<M, T> BasicExecutor<M, T> {
@@ -52,9 +60,15 @@ struct ToolRoundContext<'a> {
     turn: Arc<dyn TurnHandle>,
     agent_config: &'a AgentConfig,
     conversation_config: &'a ConversationConfig,
-    round: usize,
+    round: u32,
+    resume_first_approval: bool,
     stream_mode: ExecutorStreamMode<'a>,
     turn_trace: Option<&'a dyn TurnExecutionTrace>,
+}
+
+struct TurnProgress {
+    start_round: u32,
+    pending_tool_requests: Option<Vec<ExecutableToolRequest>>,
 }
 
 impl<M, T> BasicExecutor<M, T>
@@ -125,56 +139,88 @@ where
         conversation_config: &ConversationConfig,
         stream_mode: ExecutorStreamMode<'_>,
         turn_trace: Option<&dyn TurnExecutionTrace>,
+        recovering: bool,
     ) -> Result<()> {
-        for round in 0u32.. {
-            if agent_config
-                .max_tool_round_trips
-                .is_some_and(|limit| round > limit)
+        let TurnProgress {
+            start_round,
+            mut pending_tool_requests,
+        } = if recovering {
+            self.load_turn_progress(conversation, turn.as_ref()).await?
+        } else {
+            TurnProgress {
+                start_round: 0,
+                pending_tool_requests: None,
+            }
+        };
+        for round in start_round.. {
+            let (tool_requests, resume_first_approval) = if let Some(saved_requests) =
+                pending_tool_requests.take()
             {
-                return Ok(());
-            }
+                // This model round was already committed; finish its tools before
+                // applying the limit to the next model call.
+                (saved_requests, true)
+            } else {
+                if agent_config
+                    .max_tool_round_trips
+                    .is_some_and(|limit| round > limit)
+                {
+                    return Ok(());
+                }
 
-            let messages = self
-                .materialize_prompt_history(conversation, &agent_config.instructions)
-                .await?;
-            let mut request =
-                build_model_request(conversation, agent_config, conversation_config, messages)
+                let messages = self
+                    .materialize_prompt_history(conversation, &agent_config.instructions)
                     .await?;
-            request.tools.extend(self.tools.definitions());
-            let response = complete_model_round(
-                self.model.as_ref(),
-                request,
-                round as usize,
-                stream_mode,
-                ModelStreamOutput::Visible,
-                turn_trace,
-            )
-            .await?;
-
-            let events = model_response_events(response, &self.pricing);
-            turn.add_events(events.clone()).await?;
-
-            let tool_requests = collect_tool_requests(&events);
-            if tool_requests.is_empty() {
-                return Ok(());
-            }
-
-            let tool_results = self
-                .execute_tool_round(
-                    ToolRoundContext {
-                        agent,
-                        conversation,
-                        turn: Arc::clone(&turn),
-                        agent_config,
-                        conversation_config,
-                        round: round as usize,
-                        stream_mode,
-                        turn_trace,
-                    },
-                    tool_requests,
+                let mut request =
+                    build_model_request(conversation, agent_config, conversation_config, messages)
+                        .await?;
+                request.tools.extend(self.tools.definitions());
+                let response = complete_model_round(
+                    self.model.as_ref(),
+                    request,
+                    round as usize,
+                    stream_mode,
+                    ModelStreamOutput::Visible,
+                    turn_trace,
                 )
                 .await?;
-            turn.add_events(tool_results).await?;
+
+                let mut events = model_response_events(response, &self.pricing);
+                let tool_requests = collect_tool_requests(&events);
+                if tool_requests.is_empty() {
+                    // Commit the final answer and completion marker together for recovery.
+                    events.push(EventData::Custom {
+                        event_type: crate::harness_executor::RUNTIME_TURN_COMPLETED.to_owned(),
+                        payload: serde_json::Value::Null,
+                    });
+                    turn.add_events(events).await?;
+                    return Ok(());
+                }
+                events.insert(
+                    0,
+                    EventData::Custom {
+                        event_type: BASIC_TOOL_ROUND.to_owned(),
+                        payload: serde_json::to_value(BasicToolRound { round })?,
+                    },
+                );
+                turn.add_events(events).await?;
+                (tool_requests, false)
+            };
+
+            self.execute_tool_round(
+                ToolRoundContext {
+                    agent,
+                    conversation,
+                    turn: Arc::clone(&turn),
+                    agent_config,
+                    conversation_config,
+                    round,
+                    resume_first_approval,
+                    stream_mode,
+                    turn_trace,
+                },
+                tool_requests,
+            )
+            .await?;
         }
 
         Ok(())
@@ -184,14 +230,12 @@ where
         &self,
         context: ToolRoundContext<'_>,
         tool_requests: Vec<ExecutableToolRequest>,
-    ) -> Result<Vec<EventData>> {
-        let mut tool_results = Vec::with_capacity(tool_requests.len());
-
-        for tool_request in tool_requests {
+    ) -> Result<()> {
+        for (index, tool_request) in tool_requests.into_iter().enumerate() {
             let mut tool_trace = match context.turn_trace {
                 Some(turn_trace) => {
                     turn_trace
-                        .start_tool_call(&tool_request.request, context.round)
+                        .start_tool_call(&tool_request.request, context.round as usize)
                         .await
                 }
                 None => None,
@@ -204,6 +248,9 @@ where
                         &context.conversation_config.permissions,
                         &tool_request.request.function_name,
                     ),
+                    Some(&tool_request.tool_call_id),
+                    Some(context.round),
+                    context.resume_first_approval && index == 0,
                     &tool_request.request,
                     context.stream_mode,
                 )
@@ -237,13 +284,106 @@ where
             if tool_succeeded && let Some(tool_trace) = tool_trace.take() {
                 tool_trace.finish_success(&result).await;
             }
-            tool_results.push(EventData::ToolResult {
-                tool_call_id: tool_request.tool_call_id,
-                result,
-            });
+            context
+                .turn
+                .add_events(vec![EventData::ToolResult {
+                    tool_call_id: tool_request.tool_call_id,
+                    result,
+                }])
+                .await?;
         }
 
-        Ok(tool_results)
+        Ok(())
+    }
+
+    async fn load_turn_progress(
+        &self,
+        conversation: &dyn ConversationHandle,
+        turn: &dyn TurnHandle,
+    ) -> Result<TurnProgress> {
+        // Rebuild the saved model round before entering the normal turn loop.
+        // Calling the model again could produce a different set of tool calls.
+        let events = conversation
+            .get_events(Some(EventQuery {
+                turn_id: Some(turn.record().id),
+                session_id: Some(turn.record().session_id),
+                direction: Some(EventQueryDirection::Asc),
+                types: Some(vec![
+                    EventKind::custom(BASIC_TOOL_ROUND),
+                    EventKind::TOOL_REQUESTED,
+                    EventKind::TOOL_RESULT,
+                ]),
+                ..Default::default()
+            }))
+            .await?
+            .events;
+        let mut round = None;
+        let mut pending = Vec::new();
+        for event in events {
+            match event.data {
+                EventData::Custom {
+                    event_type,
+                    payload,
+                } if event_type == BASIC_TOOL_ROUND => {
+                    anyhow::ensure!(pending.is_empty(), "previous tool round is incomplete");
+                    round = Some(serde_json::from_value::<BasicToolRound>(payload)?.round);
+                }
+                EventData::ToolRequested {
+                    tool_call_id,
+                    request,
+                    ..
+                } => {
+                    anyhow::ensure!(round.is_some(), "tool call has no saved round");
+                    pending.push(ExecutableToolRequest {
+                        tool_call_id,
+                        request,
+                    });
+                }
+                EventData::ToolResult { tool_call_id, .. } => {
+                    if let Some(index) = pending
+                        .iter()
+                        .position(|request| request.tool_call_id == tool_call_id)
+                    {
+                        pending.remove(index);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let next_round = round.map_or(0, |round| round + 1);
+        if pending.is_empty() {
+            return Ok(TurnProgress {
+                start_round: next_round,
+                pending_tool_requests: None,
+            });
+        }
+        let first = &pending[0];
+        let round = round.expect("pending tool call has a saved round");
+        let approvals = crate::permissions::approval_events(
+            conversation,
+            EventQuery {
+                turn_id: Some(turn.record().id),
+                session_id: Some(turn.record().session_id),
+                ..Default::default()
+            },
+        )
+        .await?;
+        anyhow::ensure!(
+            crate::permissions::pending_from_events(approvals)?
+                .iter()
+                .any(|approval| approval.tool_call_id.as_deref()
+                    == Some(first.tool_call_id.as_str())
+                    && approval.round == Some(round)
+                    && approval.request == first.request),
+            "cannot safely resume unresolved tool call `{}` (`{}`) for turn {}",
+            first.tool_call_id,
+            first.request.function_name,
+            turn.record().id
+        );
+        Ok(TurnProgress {
+            start_round: round,
+            pending_tool_requests: Some(pending),
+        })
     }
 }
 
@@ -255,6 +395,10 @@ where
 {
     fn name(&self) -> &'static str {
         "basic"
+    }
+
+    fn can_resume_pending_approval(&self, _config: &AgentConfig) -> bool {
+        true
     }
 
     async fn prepare_conversation(
@@ -294,6 +438,31 @@ where
             conversation_config,
             stream_mode,
             turn_trace,
+            false,
+        )
+        .await
+    }
+
+    async fn resume_turn(
+        &self,
+        agent: &dyn AgentHandle,
+        conversation: Arc<dyn ConversationHandle>,
+        turn: Arc<dyn TurnHandle>,
+        agent_config: &AgentConfig,
+        conversation_config: &ConversationConfig,
+        _request: &SendRequest,
+        stream_mode: ExecutorStreamMode<'_>,
+        turn_trace: Option<&dyn TurnExecutionTrace>,
+    ) -> Result<()> {
+        self.run_turn_loop(
+            agent,
+            conversation.as_ref(),
+            turn,
+            agent_config,
+            conversation_config,
+            stream_mode,
+            turn_trace,
+            true,
         )
         .await
     }

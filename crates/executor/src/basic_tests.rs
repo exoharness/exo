@@ -63,6 +63,7 @@ async fn send_appends_user_and_assistant_messages() {
         .begin_turn(BeginTurnRequest {
             session_id: None,
             input: vec![user_message("ping")],
+            ..Default::default()
         })
         .await
         .expect("begin turn should succeed");
@@ -115,8 +116,13 @@ async fn send_appends_user_and_assistant_messages() {
     assert!(matches!(events[1].data, EventData::TurnStarted { .. }));
     assert!(matches!(events[2].data, EventData::Messages { .. }));
     assert!(matches!(events[3].data, EventData::Messages { .. }));
-    assert!(matches!(events[4].data, EventData::TurnEnded));
-    assert_eq!(latest_event_id, events[4].id);
+    assert!(matches!(
+        &events[4].data,
+        EventData::Custom { event_type, .. }
+            if event_type == crate::harness_executor::RUNTIME_TURN_COMPLETED
+    ));
+    assert!(matches!(events[5].data, EventData::TurnEnded));
+    assert_eq!(latest_event_id, events[5].id);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -180,6 +186,7 @@ async fn send_executes_tool_round_trip() {
         .begin_turn(BeginTurnRequest {
             session_id: None,
             input: vec![user_message("run it")],
+            ..Default::default()
         })
         .await
         .expect("begin turn should succeed");
@@ -299,6 +306,7 @@ async fn send_records_tool_result_when_tool_execution_fails() {
         .begin_turn(BeginTurnRequest {
             session_id: None,
             input: vec![user_message("run it")],
+            ..Default::default()
         })
         .await
         .expect("begin turn should succeed");
@@ -404,6 +412,7 @@ async fn send_stream_emits_chunks_and_persists_final_response() {
         .begin_turn(BeginTurnRequest {
             session_id: None,
             input: vec![user_message("stream it")],
+            ..Default::default()
         })
         .await
         .expect("begin turn should succeed");
