@@ -265,10 +265,9 @@ async fn named_previews_are_assigned_displayed_and_reused_on_resume() -> Result<
     let session_lock = std::fs::OpenOptions::new().write(true).open(
         fixture
             .root
-            .join("previews")
+            .join("sessions")
             .join(agent.record().id.to_string())
-            .join(thread.record().id.to_string())
-            .join("session.lock"),
+            .join(format!("{}.lock", thread.record().id)),
     )?;
     session_lock.lock()?;
     let sandbox = thread
@@ -286,7 +285,7 @@ async fn named_previews_are_assigned_displayed_and_reused_on_resume() -> Result<
     assert!(!duplicate.status.success());
     assert!(
         String::from_utf8_lossy(&duplicate.stderr)
-            .contains("this thread already has a local preview session")
+            .contains("this thread already has a local CLI session")
     );
     assert!(thread.list_sandboxes().await?[0].running);
     thread.terminate_sandbox(sandbox).await?;

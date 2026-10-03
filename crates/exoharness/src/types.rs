@@ -756,8 +756,11 @@ pub struct SandboxRecord {
     pub name: Option<String>,
     pub provider: SandboxProvider,
     pub image: String,
+    /// Guest TCP ports published by the sandbox backend.
     pub tcp_ports: Vec<u16>,
+    /// The harness's recorded running state, not a service health check.
     pub running: bool,
+    /// Whether an external owner controls this attached sandbox's lifecycle.
     pub attached: bool,
 }
 
@@ -992,9 +995,8 @@ pub struct StartSandboxRequest {
     /// Restore a snapshot, or resume the existing sandbox when omitted.
     pub snapshot_id: Option<SnapshotId>,
     pub idle_seconds: Option<u64>,
-    // If unspecified, starts sandbox where it was last run. If specified, will attempt to
-    // start the sandbox on the specified provider, if supported. If successful, the
-    // sandbox will start there going forward.
+    /// Omit to retain the current provider. Changing providers requires a
+    /// snapshot ID and a snapshot format supported by the destination backend.
     #[serde(default)]
     pub provider: Option<SandboxProvider>,
 }

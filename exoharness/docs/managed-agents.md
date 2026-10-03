@@ -43,6 +43,9 @@ and query parameters without interpreting them.
 Local state defaults to `~/.exo`, shared across working directories. `--root`
 selects a different state directory. Explicit provider selections and saved
 remote aliases continue to select their configured state or server.
+State created under the previous `./.exo` default stays in that directory;
+use `--root /absolute/path/to/previous-checkout/.exo` to access it. Exo does not
+move it automatically.
 
 From this checkout:
 
@@ -123,6 +126,10 @@ browsers; no hosts-file edits or DNS service are needed. For a custom domain,
 configure its DNS to resolve these names to loopback. One shared local proxy binds
 to `127.0.0.1` for all preview sessions using the same state root. Every service
 and thread uses the same browser port; the hostname selects its destination.
+The proxy reads the HTTP `Host` header to select a route, then relays the
+connection, including WebSockets. Request paths and application headers are
+forwarded unchanged.
+
 The port is saved in `previews/listener.json` under the state root and reused on
 resume. An occupied saved port produces an error instead of changing the URLs.
 
@@ -152,6 +159,33 @@ Previews currently use HTTP. A remote provider also needs to support TCP
 connections through its API for client-side preview forwarding.
 Use `--verbosity full` on `exo agent run` to include egress proxy diagnostics.
 
+#### Preview troubleshooting
+
+`exo thread ports` displays saved URLs; opening an `exo agent run` session
+registers their routes. Keep that session open while using previews.
+
+| Symptom                                      | What to check                                                                                                                                                                                                                                                                                                                                                    |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `404 Unknown preview hostname`               | Use the exact URL printed by the active session. The hostname has no registered route in the proxy receiving the request. Reopen the thread if its session has closed.                                                                                                                                                                                           |
+| `502 Bad Gateway`                            | The hostname is registered, but the VM or service is unreachable. Ask the agent to start the services and check the declared guest port. Services must listen on an interface reachable by the sandbox's port forwarding; the FastAPI example binds to `0.0.0.0`.                                                                                                |
+| UI loads, but API or WebSocket requests fail | Configure browser requests with the corresponding API or WebSocket preview origin. Different service hostnames are different origins even though they share a port. Allow the full frontend origin, including its port, in backend CORS and allow preview hostnames in development-server host checks. Server-side requests can continue using guest-local URLs. |
+| Proxy fails to bind its saved port           | Check `<root>/previews/listener.json` and release the port occupied by another process. Exo preserves the saved port so existing URLs remain valid.                                                                                                                                                                                                              |
+
+To assign a different browser port, close all sessions using that state root and
+let the shared preview proxy exit. Remove `<root>/previews/listener.json`, then
+reopen the thread. The newly printed URLs use the new port; update any application
+configuration that contains the old URLs.
+
+Preview proxy startup and exit errors are written to `<root>/previews/proxy.log`
+(`~/.exo/previews/proxy.log` with the default root). Service logs stay where the
+application writes them inside the VM. The FastAPI example writes frontend and
+API logs to `/var/lib/fastapi-demo/logs/app.log` and
+`/var/lib/fastapi-demo/logs/api.log`, and PostgreSQL logs to
+`/var/lib/fastapi-demo/postgres/server.log`. Ask the agent to inspect these logs
+or probe the guest service directly when a preview returns 502.
+
+### Named agents and threads
+
 ```bash
 exo agent run --agent-file exoharness/examples/managed-agents/support-analyst.md
 
@@ -178,6 +212,13 @@ exo agent run --agent support --thread my-project
 The CLI prints the agent and thread ids. Both ids and slugs work when resuming.
 Without `--thread`, each run starts a new thread. `--thread NAME` creates a thread
 with that name on the first run and resumes it on subsequent runs.
+
+New names must contain 1–128 ASCII letters, digits, hyphens, or underscores and
+start with a letter or digit; spaces and slashes are rejected. An unknown
+UUID-shaped reference returns `thread ... not found` instead of creating a
+thread with that name. Startup announces whether it is creating or opening a
+thread.
+
 Select VM settings explicitly with `--environment NAME`:
 
 ```bash
@@ -197,6 +238,10 @@ chat retained. Processes inside the VM restart; a development stack needs its
 startup command on resume. Deleting the thread removes its managed VM and disks.
 HTTP clients leave sandbox lifetime with the server, so use `exo serve` when
 services should stay running between client sessions.
+
+Local one-off commands and interactive sessions use exclusive thread ownership;
+see [Local sandbox lifetime](../../docs/resources.md#local-sandbox-lifetime) for
+the command ownership rules, server root lock, and crash recovery behavior.
 
 Each `--agent-file` invocation creates or updates a saved agent from the Markdown
 file, then starts a saved thread. The agent slug combines the filename with a hash
