@@ -116,15 +116,20 @@ previews: http://my-project-<id>.dev.exo.localhost:<port>
 Exo derives the hostname from the agent slug, thread slug, and a short hash of
 the thread ID, under `previews.domain`. `.localhost` names resolve to loopback in
 browsers; no hosts-file edits or DNS service are needed. For a custom domain,
-configure its DNS to resolve these names to loopback. The local proxy binds only to `127.0.0.1`, saves
-its port under the selected state root's `previews/` directory, and reuses it on
-resume. Each thread gets its own listener, so multiple sessions can run together.
-An occupied saved port produces an error instead of changing the URL.
+configure its DNS to resolve these names to loopback. One shared local proxy binds
+to `127.0.0.1` for all preview sessions using the same state root. Every service
+and thread uses the same browser port; the hostname selects its destination.
+The port is saved in `previews/listener.json` under the state root and reused on
+resume. An occupied saved port produces an error instead of changing the URLs.
 
 The proxy follows the thread's currently running sandbox and forwards HTTP and
 WebSocket traffic through its published TCP ports. Routing reads current sandbox
-metadata without reading the thread's event history. It starts and stops with the
-CLI session; it does not keep a VM running after exit. Services still need to be
+metadata without reading the thread's event history. Each CLI session registers
+its configured hostnames in the proxy's in-memory route table over a private
+Unix socket. Closing a session removes only its routes; other sessions continue
+using the shared listener. Exo starts the proxy automatically and it exits after
+five idle seconds with no sessions. It does not keep a VM running after exit.
+Services still need to be
 started in the sandbox. The app must generate browser API and WebSocket URLs
 using the preview's origin. Exo includes these browser URLs in the agent's
 thread context so it can construct correct links.

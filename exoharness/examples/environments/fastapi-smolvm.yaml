@@ -1,0 +1,23 @@
+name: fastapi-local
+config:
+  provider: smolvm
+  image: ghcr.io/exoharness/codex-devbox@sha256:d6c147fb855862aef256672a81f28ad7970e510bee7c07553b69c282709311f7
+  resources:
+    vcpu_count: 2
+    memory_mib: 4096
+    storage_gib: 16
+    overlay_gib: 16
+  default_workdir: /workspace
+  file_system_mounts:
+    - host_path: /Users/ankur/projects/exo/exoharness/examples/fastapi
+      mount_path: /opt/fastapi-demo
+      mode: ro
+  tcp_ports: [5173, 8000]
+  policy:
+    networking:
+      type: unrestricted
+previews:
+  domain: exo.localhost
+  services:
+    app: 5173
+    api: 8000

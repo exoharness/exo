@@ -520,7 +520,7 @@ macro_rules! runtime_accessor {
                 | Commands::Agent { runtime, .. }
                 | Commands::Conversation { runtime, .. }
                 => runtime,
-                Commands::Provider { .. } | Commands::FirecrackerBridge => {
+                Commands::Provider { .. } | Commands::FirecrackerBridge | Commands::PreviewProxy { .. } => {
                     unreachable!("command does not use runtime options")
                 }
             }
@@ -570,6 +570,8 @@ enum Commands {
     },
     #[command(hide = true)]
     FirecrackerBridge,
+    #[command(hide = true)]
+    PreviewProxy { directory: PathBuf },
     /// Serve agents and vaults over HTTP.
     Serve {
         #[command(flatten)]
@@ -971,6 +973,9 @@ async fn main() -> Result<(), CliError> {
 }
 
 async fn run(mut cli: Cli) -> Result<()> {
+    if let Commands::PreviewProxy { directory } = &cli.command {
+        return previews::run_proxy(directory).await;
+    }
     if matches!(cli.command, Commands::FirecrackerBridge) {
         #[cfg(feature = "firecracker")]
         {
@@ -1124,6 +1129,9 @@ async fn run_selected(
         Commands::Environment { command, .. } => environment::run(harness.exoharness_handle().as_ref(), command).await?,
         Commands::FirecrackerBridge => {
             unreachable!("Firecracker bridge returns before harness startup")
+        }
+        Commands::PreviewProxy { .. } => {
+            unreachable!("preview proxy returns before harness startup")
         }
         Commands::Provider { .. } => {
             unreachable!("management commands return before harness startup")
@@ -2026,6 +2034,7 @@ fn command_refs_mut(command: &mut Commands) -> (Option<&mut String>, Option<&mut
             ConversationCommands::CompleteRebuildUpdate { .. } => (None, None),
         },
         Commands::FirecrackerBridge
+        | Commands::PreviewProxy { .. }
         | Commands::Provider { .. }
         | Commands::Environment { .. }
         | Commands::Vault { .. } => (None, None),

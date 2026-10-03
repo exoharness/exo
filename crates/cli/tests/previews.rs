@@ -1,7 +1,174 @@
 mod support;
 
 use anyhow::{Context, Result};
+use std::{process::Stdio, time::Duration};
 use support::Fixture;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    process::{Child, Command},
+    time::{sleep, timeout},
+};
+
+async fn open_session(fixture: &Fixture, thread: &str) -> Result<Child> {
+    let mut child = fixture
+        .command(&[
+            "agent",
+            "run",
+            "--agent",
+            "dev",
+            "--environment",
+            "dev",
+            "--thread",
+            thread,
+        ])
+        .process_group(0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stdout = BufReader::new(child.stdout.take().context("session stdout")?).lines();
+    timeout(Duration::from_secs(10), async {
+        while let Some(line) = stdout.next_line().await? {
+            if line.starts_with("  app (port") {
+                return Ok::<_, anyhow::Error>(());
+            }
+        }
+        anyhow::bail!("session exited before assigning previews");
+    })
+    .await??;
+    child.stdout = Some(stdout.into_inner().into_inner());
+    Ok(child)
+}
+
+async fn close_session(mut child: Child) -> Result<()> {
+    child
+        .stdin
+        .as_mut()
+        .context("session stdin")?
+        .write_all(b"/quit\n")
+        .await?;
+    let output = timeout(Duration::from_secs(10), child.wait_with_output()).await??;
+    support::success(output)?;
+    Ok(())
+}
+
+#[actix_web::test]
+async fn separate_cli_processes_share_the_proxy_and_close_independently() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    fixture.cli(&["provider", "switch", "local"]).await?;
+    fixture
+        .cli(&[
+            "agent",
+            "create",
+            "dev",
+            "--file",
+            fixture.agent_file.to_str().context("agent file")?,
+        ])
+        .await?;
+    let environment = fixture.temp.path().join("environment.yaml");
+    std::fs::write(
+        &environment,
+        "name: dev\nconfig:\n  provider: local_process\n  image: unused\n  tcp_ports: [5173, 8000]\npreviews:\n  domain: exo.localhost\n  services:\n    app: 5173\n    api: 8000\n",
+    )?;
+    fixture
+        .cli(&[
+            "environment",
+            "create",
+            "dev",
+            "--file",
+            environment.to_str().context("environment file")?,
+        ])
+        .await?;
+    let (mut first, second) = tokio::try_join!(
+        open_session(&fixture, "first"),
+        open_session(&fixture, "second"),
+    )?;
+    let root = fixture.runtime.exoharness_handle();
+    let agent = exo_managed_agents::find_agent(root.as_ref(), "dev").await?;
+    let first_thread = exo_managed_agents::find_thread(agent.as_ref(), "first").await?;
+    let second_thread = exo_managed_agents::find_thread(agent.as_ref(), "second").await?;
+    let first_previews = fixture
+        .runtime
+        .get_conversation_config(first_thread.as_ref())
+        .await?
+        .browser_previews;
+    let second_previews = fixture
+        .runtime
+        .get_conversation_config(second_thread.as_ref())
+        .await?
+        .browser_previews;
+    let port = url::Url::parse(&first_previews[0].url)?
+        .port()
+        .context("preview port")?;
+    for preview in first_previews.iter().chain(&second_previews) {
+        assert_eq!(url::Url::parse(&preview.url)?.port(), Some(port));
+    }
+    let portal = |preview: &executor::BrowserPreview| {
+        preview.url.split_once("http://app.").unwrap().1.to_owned()
+    };
+    let first_portal = portal(
+        first_previews
+            .iter()
+            .find(|preview| preview.name == "app")
+            .context("first app")?,
+    );
+    let second_portal = portal(
+        second_previews
+            .iter()
+            .find(|preview| preview.name == "app")
+            .context("second app")?,
+    );
+    let http = reqwest::Client::new();
+    let endpoint = format!("http://127.0.0.1:{port}");
+    for host in [&first_portal, &second_portal] {
+        assert_eq!(
+            http.get(&endpoint)
+                .header("Host", host)
+                .send()
+                .await?
+                .status(),
+            200
+        );
+    }
+    let group = format!("-{}", first.id().context("first session pid")?);
+    assert!(
+        Command::new("/bin/kill")
+            .args(["-TERM", &group])
+            .status()
+            .await?
+            .success()
+    );
+    assert!(
+        !timeout(Duration::from_secs(10), first.wait())
+            .await??
+            .success()
+    );
+    timeout(Duration::from_secs(2), async {
+        while http
+            .get(&endpoint)
+            .header("Host", &first_portal)
+            .send()
+            .await?
+            .status()
+            != 404
+        {
+            sleep(Duration::from_millis(10)).await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+    assert_eq!(
+        http.get(&endpoint)
+            .header("Host", &second_portal)
+            .send()
+            .await?
+            .status(),
+        200
+    );
+    close_session(second).await?;
+    fixture.stop().await?;
+    Ok(())
+}
 
 #[actix_web::test]
 async fn named_previews_are_assigned_displayed_and_reused_on_resume() -> Result<()> {

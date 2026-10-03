@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fs::File, net::Ipv4Addr, path::Path, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, fs::File, net::Ipv4Addr, path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use executor::{AgentHandle, BrowserPreview, ConversationHandle, Runtime};
@@ -6,10 +6,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpStream, UnixListener, UnixStream},
     task::{JoinHandle, JoinSet},
     time::timeout,
 };
+
+mod proxy;
+pub(crate) use proxy::run as run_proxy;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -19,6 +22,8 @@ struct SavedListener {
 
 pub(crate) struct PreviewSession {
     task: JoinHandle<()>,
+    _proxy: proxy::Client,
+    _gateway: tempfile::TempDir,
     _lock: File,
 }
 
@@ -49,20 +54,20 @@ impl PreviewSession {
             }
             return Ok(None);
         };
-        let directory = root
-            .join("previews")
+        let directory = root.join("previews");
+        let session_directory = directory
             .join(agent.record().id.to_string())
             .join(thread.record().id.to_string());
-        std::fs::create_dir_all(&directory)?;
+        std::fs::create_dir_all(&session_directory)?;
         let lock = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(directory.join("session.lock"))?;
+            .open(session_directory.join("session.lock"))?;
         lock.try_lock()
             .context("this thread already has a local preview session")?;
-        let listener = saved_listener(&directory.join("listener.json")).await?;
-        let port = listener.local_addr()?.port();
+        let proxy = proxy::Client::connect(&directory).await?;
+        let port = proxy.port;
         let hostname = thread_hostname(
             &agent.record().slug,
             &thread.record().slug,
@@ -86,6 +91,25 @@ impl PreviewSession {
             })
             .collect();
         config.browser_previews = previews.clone();
+        let gateway = tempfile::tempdir_in("/tmp")?;
+        let socket = gateway.path().join("gateway.sock");
+        let listener = UnixListener::bind(&socket).context("binding preview session gateway")?;
+        let ports = previews.iter().map(|preview| preview.port).collect();
+        let task = tokio::spawn(serve_gateway(listener, thread.clone(), ports));
+        let mut session = Self {
+            task,
+            _proxy: proxy,
+            _gateway: gateway,
+            _lock: lock,
+        };
+        session
+            ._proxy
+            .register(proxy::Registration {
+                gateway: socket,
+                portal: format!("{hostname}:{port}"),
+                previews: previews.clone(),
+            })
+            .await?;
         runtime
             .put_conversation_config(thread.as_ref(), config)
             .await?;
@@ -96,18 +120,7 @@ impl PreviewSession {
                 preview.name, preview.port, preview.url
             );
         }
-        let portal = format!("{hostname}:{port}");
-        let routes = previews
-            .iter()
-            .map(|preview| {
-                (
-                    preview.url.trim_start_matches("http://").to_owned(),
-                    preview.port,
-                )
-            })
-            .collect();
-        let task = tokio::spawn(serve(listener, thread, portal, previews, routes));
-        Ok(Some(Self { task, _lock: lock }))
+        Ok(Some(session))
     }
 }
 
@@ -119,7 +132,7 @@ async fn saved_listener(path: &Path) -> Result<TcpListener> {
     };
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, saved.as_ref().map_or(0, |s| s.port)))
         .await
-        .context("binding this thread's saved preview port; another process may be using it")?;
+        .context("binding Exo's shared preview port; another process may be using it")?;
     if saved.is_none() {
         std::fs::write(
             path,
@@ -154,12 +167,10 @@ fn thread_hostname(agent: &str, thread: &str, id: &str, domain: &str) -> Result<
     ))
 }
 
-async fn serve(
-    listener: TcpListener,
+async fn serve_gateway(
+    listener: UnixListener,
     thread: Arc<dyn ConversationHandle>,
-    portal: String,
-    previews: Vec<BrowserPreview>,
-    routes: BTreeMap<String, u16>,
+    ports: BTreeSet<u16>,
 ) {
     let mut connections = JoinSet::new();
     loop {
@@ -173,11 +184,9 @@ async fn serve(
                     }
                 };
                 let thread = thread.clone();
-                let portal = portal.clone();
-                let previews = previews.clone();
-                let routes = routes.clone();
+                let ports = ports.clone();
                 connections.spawn(async move {
-                    handle(client, thread, &portal, &previews, &routes).await
+                    handle_gateway(client, thread.as_ref(), &ports).await
                 });
             }
             completed = connections.join_next(), if !connections.is_empty() => {
@@ -191,52 +200,22 @@ async fn serve(
     }
 }
 
-async fn handle(
-    mut client: TcpStream,
-    thread: Arc<dyn ConversationHandle>,
-    portal: &str,
-    previews: &[BrowserPreview],
-    routes: &BTreeMap<String, u16>,
+async fn handle_gateway(
+    mut client: UnixStream,
+    thread: &dyn ConversationHandle,
+    ports: &BTreeSet<u16>,
 ) -> Result<()> {
-    let (host, initial) = timeout(Duration::from_secs(10), read_request(&mut client)).await??;
-    if host == portal {
-        let links = previews
-            .iter()
-            .map(|preview| {
-                format!(
-                    "<li><a href=\"{}\">{} (port {})</a></li>",
-                    preview.url, preview.name, preview.port
-                )
-            })
-            .collect::<String>();
-        let body = format!(
-            "<!doctype html><html><head><meta charset=\"utf-8\"><title>Exo previews</title></head><body><h1>Thread previews</h1><ul>{links}</ul><p>Start the services in your agent session to open a preview.</p></body></html>"
-        );
-        return reply(&mut client, "200 OK", "text/html", &body).await;
-    }
-    let Some(port) = routes.get(&host) else {
-        return reply(
-            &mut client,
-            "404 Not Found",
-            "text/plain",
-            "Unknown preview hostname",
-        )
-        .await;
-    };
-    let mut upstream = match connect(thread.as_ref(), *port).await {
+    let port = timeout(Duration::from_secs(10), client.read_u16()).await??;
+    ensure!(ports.contains(&port), "undeclared preview port");
+    let mut upstream = match connect(thread, port).await {
         Ok(upstream) => upstream,
         Err(error) => {
             tracing::debug!(%error, "preview service unavailable");
-            return reply(
-                &mut client,
-                "502 Bad Gateway",
-                "text/plain",
-                "Preview unavailable. Resume the thread and start its services.",
-            )
-            .await;
+            client.write_u8(0).await?;
+            return Ok(());
         }
     };
-    upstream.write_all(&initial).await?;
+    client.write_u8(1).await?;
     copy_bidirectional(&mut client, &mut upstream).await?;
     Ok(())
 }
