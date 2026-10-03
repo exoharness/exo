@@ -115,7 +115,7 @@ pub struct SmolvmBackendConfig {
     pub image_cache: Option<PathBuf>,
 }
 
-type TcpHandleCell = Arc<OnceCell<Arc<SmolvmTcpHandle>>>;
+type TcpPortsCell = Arc<OnceCell<BTreeMap<u16, u16>>>;
 
 /// Backend driving the `smolvm` CLI.
 #[derive(Clone)]
@@ -136,7 +136,7 @@ pub struct SmolvmSandboxBackend {
     capabilities: Arc<OnceCell<Capabilities>>,
     /// TCP access does not acquire lifecycle ownership or egress credentials.
     /// One inspection per sandbox, shared even across concurrent connections.
-    tcp_handles: Arc<Mutex<HashMap<String, TcpHandleCell>>>,
+    tcp_forwards: Arc<Mutex<HashMap<String, TcpPortsCell>>>,
     egress: Arc<EgressRuntime<SmolvmWarmHandle, SmolvmProxy>>,
 }
 
@@ -173,7 +173,7 @@ impl SmolvmSandboxBackend {
             #[cfg(target_os = "macos")]
             image_cache: config.image_cache,
             capabilities: Arc::new(OnceCell::new()),
-            tcp_handles: Arc::new(Mutex::new(HashMap::new())),
+            tcp_forwards: Arc::new(Mutex::new(HashMap::new())),
             egress: Arc::new(EgressRuntime::new(None, Arc::new(PublicUpstreamResolver))),
         }
     }
@@ -551,15 +551,15 @@ impl SmolvmSandboxBackend {
         Ok((host_ports, reservations))
     }
 
-    fn invalidate_tcp_handle(&self, id: &str) {
-        self.tcp_handles
+    fn invalidate_tcp_forwards(&self, id: &str) {
+        self.tcp_forwards
             .lock()
             .expect("smolvm TCP handle cache poisoned")
             .remove(id);
     }
 
     async fn stop_machine(&self, id: &str) -> Result<()> {
-        self.invalidate_tcp_handle(id);
+        self.invalidate_tcp_forwards(id);
         self.egress
             .terminate(id, async {
                 stop_machine(self.binary().await?, &machine_name(id)).await
@@ -667,7 +667,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
     }
 
     async fn terminate(&self, request: SandboxRequest) -> Result<()> {
-        self.invalidate_tcp_handle(&request.sandbox_id);
+        self.invalidate_tcp_forwards(&request.sandbox_id);
         let machine = machine_name(&request.sandbox_id);
         self.egress
             .terminate(
@@ -687,7 +687,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
         sandbox_id: &str,
         previous: &Arc<dyn ManagedSandboxHandle>,
     ) -> Result<()> {
-        self.invalidate_tcp_handle(sandbox_id);
+        self.invalidate_tcp_forwards(sandbox_id);
         self.egress.terminate(sandbox_id, previous.stop()).await
     }
 
@@ -702,7 +702,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             let image = self.prepare_image(&request.spec.image).await?;
             reject_unsupported_spec(&request.spec, &image)?;
             let boot_binary = self.boot_binary().await?.clone();
-            self.invalidate_tcp_handle(&request.sandbox_id);
+            self.invalidate_tcp_forwards(&request.sandbox_id);
             return Ok(crate::with_process_management(Arc::new(
                 SmolvmOneShotHandle {
                     id: format!("smolvm-oneshot:{}", request.sandbox_id),
@@ -749,31 +749,30 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
                 self.delete_machine_if_present(&machine),
             )
             .await?;
-        self.invalidate_tcp_handle(&request.sandbox_id);
+        self.invalidate_tcp_forwards(&request.sandbox_id);
         Ok(crate::with_process_management(handle))
     }
 
-    async fn acquire_tcp(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
+    async fn connect_tcp(
+        &self,
+        request: SandboxRequest,
+        port: u16,
+    ) -> Result<Option<BoxSandboxTcpStream>> {
         let cell = self
-            .tcp_handles
+            .tcp_forwards
             .lock()
             .expect("smolvm TCP handle cache poisoned")
             .entry(request.sandbox_id.clone())
             .or_default()
             .clone();
-        let handle = cell
+        let host_ports = cell
             .get_or_try_init(|| async {
                 let machine = machine_name(&request.sandbox_id);
-                let host_ports = self
-                    .existing_tcp_forwards(&machine, &request.spec.tcp_ports, None)
-                    .await?;
-                Ok::<_, anyhow::Error>(Arc::new(SmolvmTcpHandle {
-                    id: format!("smolvm:{machine}"),
-                    host_ports,
-                }))
+                self.existing_tcp_forwards(&machine, &request.spec.tcp_ports, None)
+                    .await
             })
             .await?;
-        Ok(handle.clone())
+        connect_published_tcp(host_ports, port).await
     }
 
     async fn attach(
@@ -790,7 +789,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
         request: SandboxRequest,
         payload: SnapshotPayload,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        self.invalidate_tcp_handle(&request.sandbox_id);
+        self.invalidate_tcp_forwards(&request.sandbox_id);
         request.spec.policy.validate_basic("smolvm")?;
         if payload.format != SnapshotFormat::SmolvmMachinePack {
             bail!(
@@ -932,46 +931,6 @@ struct SmolvmWarmHandle {
     request: SandboxRequest,
     egress: Option<Arc<SandboxEgress<SmolvmProxy>>>,
     host_ports: BTreeMap<u16, u16>,
-}
-
-struct SmolvmTcpHandle {
-    id: String,
-    host_ports: BTreeMap<u16, u16>,
-}
-
-#[async_trait]
-impl ManagedSandboxHandle for SmolvmTcpHandle {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn supports_tcp(&self) -> bool {
-        !self.host_ports.is_empty()
-    }
-
-    async fn connect_tcp(&self, port: u16) -> Result<Option<BoxSandboxTcpStream>> {
-        connect_published_tcp(&self.host_ports, port).await
-    }
-
-    async fn exec(&self, _command: &SandboxCommand) -> Result<SandboxCommandOutput> {
-        bail!("TCP access does not permit command execution")
-    }
-
-    async fn start_process(&self, _command: &SandboxCommand) -> Result<crate::SandboxProcessParts> {
-        bail!("TCP access does not permit starting processes")
-    }
-
-    async fn stop(&self) -> Result<()> {
-        bail!("TCP access does not permit stopping the sandbox")
-    }
-
-    async fn detach(&self) -> Result<SandboxAttachment> {
-        bail!("TCP access does not permit detaching the sandbox")
-    }
-
-    async fn snapshot(&self) -> Result<SnapshotPayload> {
-        bail!("TCP access does not permit snapshotting the sandbox")
-    }
 }
 
 async fn connect_published_tcp(
@@ -1515,19 +1474,21 @@ mod tests {
         request.spec.tcp_ports = vec![20_000];
         let shared_backend = backend.clone();
         let (first, second) = tokio::try_join!(
-            backend.acquire_tcp(request.clone()),
-            shared_backend.acquire_tcp(request.clone())
+            backend.connect_tcp(request.clone(), 20_000),
+            shared_backend.connect_tcp(request.clone(), 20_000)
         )?;
-        assert!(Arc::ptr_eq(&first, &second));
-        let handle = backend.acquire_tcp(request.clone()).await?;
+        assert!(first.is_some() && second.is_some());
+        assert!(
+            backend
+                .connect_tcp(request.clone(), 20_000)
+                .await?
+                .is_some()
+        );
         assert_eq!(std::fs::read_to_string(&inspected)?, "status\n");
-        assert!(handle.supports_tcp());
-        assert!(handle.connect_tcp(20_000).await?.is_some());
         listener.accept().await?;
-        assert!(handle.connect_tcp(20_001).await.is_err());
-        assert!(handle.stop().await.is_err());
+        assert!(backend.connect_tcp(request.clone(), 20_001).await.is_err());
         backend.stop(request.clone()).await?;
-        shared_backend.acquire_tcp(request).await?;
+        assert!(shared_backend.connect_tcp(request, 20_000).await?.is_some());
         assert_eq!(std::fs::read_to_string(inspected)?, "status\nstatus\n");
         Ok(())
     }

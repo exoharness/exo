@@ -19,6 +19,20 @@ use crate::{
 
 #[async_trait]
 pub trait Provider: AgentBackend {
+    async fn preview_endpoint(
+        &self,
+        _agent: &dyn AgentHandle,
+        thread: &dyn ThreadHandle,
+    ) -> Result<Option<exo_managed_agents::http::protocol::PreviewEndpoint>> {
+        Ok(crate::load_conversation_config(thread)
+            .await?
+            .preview_port
+            .map(|port| exo_managed_agents::http::protocol::PreviewEndpoint {
+                domain: "localhost".into(),
+                port,
+            }))
+    }
+
     fn with_caller(&self, _caller: exoharness::access::Caller) -> Result<Arc<dyn Provider>> {
         anyhow::bail!("this provider does not support caller-scoped execution")
     }

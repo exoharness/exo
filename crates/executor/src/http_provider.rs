@@ -129,6 +129,17 @@ impl AgentBackend for HttpProvider {
 
 #[async_trait]
 impl Provider for HttpProvider {
+    async fn preview_endpoint(
+        &self,
+        agent: &dyn exoharness::AgentHandle,
+        thread: &dyn exoharness::ThreadHandle,
+    ) -> Result<Option<PreviewEndpoint>> {
+        self.transport
+            .client
+            .preview_endpoint(agent.record().id, thread.record().id)
+            .await
+    }
+
     async fn is_turn_active(
         &self,
         thread: &dyn exoharness::ThreadHandle,

@@ -103,6 +103,7 @@ pub(crate) trait HarnessExecutor: Send + Sync + 'static {
 #[derive(Clone)]
 pub struct Runtime {
     provider: Arc<dyn Provider>,
+    previews: Arc<OnceCell<crate::previews::PreviewProxy>>,
     initialized: Arc<OnceCell<()>>,
     events: Arc<HarnessEvents>,
     finalizers: Arc<tokio::sync::Mutex<tokio::task::JoinSet<()>>>,
@@ -124,11 +125,104 @@ impl Runtime {
     ) -> Self {
         Self {
             provider: Arc::new(provider),
+            previews: Arc::default(),
             initialized: Arc::default(),
             events: Arc::default(),
             finalizers: Arc::default(),
             tracer: Arc::new(BraintrustTracer::new(runtime_config)),
         }
+    }
+
+    /// Own a single preview listener for every thread served by this runtime.
+    pub async fn start_preview_server(
+        &self,
+        root: &std::path::Path,
+        domain: &str,
+    ) -> Result<crate::PreviewEndpoint> {
+        let proxy = self
+            .previews
+            .get_or_try_init(|| crate::previews::PreviewProxy::start_server(root, domain))
+            .await?;
+        Ok(proxy.endpoint.clone())
+    }
+
+    /// Own this inline thread's listener and retain its port across resumes.
+    pub async fn start_inline_previews(
+        &self,
+        agent: &dyn AgentHandle,
+        thread: Arc<dyn ConversationHandle>,
+    ) -> Result<()> {
+        if thread
+            .record()
+            .environment
+            .as_ref()
+            .is_none_or(|env| env.previews.is_none())
+        {
+            return Ok(());
+        }
+        let mut config = self.get_conversation_config(thread.as_ref()).await?;
+        let proxy = self
+            .previews
+            .get_or_try_init(|| {
+                crate::previews::PreviewProxy::start(config.preview_port, "localhost")
+            })
+            .await?;
+        if config.preview_port.is_none() {
+            config.preview_port = Some(proxy.endpoint.port);
+            self.put_conversation_config(thread.as_ref(), config)
+                .await?;
+        }
+        if let Some(previews) = crate::previews_for(
+            thread.record().environment.as_ref(),
+            thread.record(),
+            &proxy.endpoint,
+        )? {
+            proxy.register(agent.record().id, thread, &previews);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn active_preview_endpoint(&self) -> Option<crate::PreviewEndpoint> {
+        self.previews.get().map(|proxy| proxy.endpoint.clone())
+    }
+
+    /// Discover the owner's address; URLs are derived, never stored on the thread.
+    pub async fn preview_urls(
+        &self,
+        agent: &dyn AgentHandle,
+        thread: Arc<dyn ConversationHandle>,
+    ) -> Result<Option<crate::PreviewUrls>> {
+        if thread
+            .record()
+            .environment
+            .as_ref()
+            .is_none_or(|env| env.previews.is_none())
+        {
+            if let Some(proxy) = self.previews.get() {
+                proxy.remove(thread.record().id);
+            }
+            return Ok(None);
+        }
+        let endpoint = match self.active_preview_endpoint() {
+            Some(endpoint) => Some(endpoint),
+            None => {
+                self.provider
+                    .preview_endpoint(agent, thread.as_ref())
+                    .await?
+            }
+        };
+        let Some(endpoint) = endpoint else {
+            return Ok(None);
+        };
+        let previews = crate::previews_for(
+            thread.record().environment.as_ref(),
+            thread.record(),
+            &endpoint,
+        )?;
+        if let (Some(proxy), Some(previews)) = (self.previews.get(), &previews) {
+            proxy.register(agent.record().id, thread, previews);
+        }
+        Ok(previews)
     }
 
     pub async fn approval_response(
@@ -308,21 +402,12 @@ impl Runtime {
                 .instructions
                 .push(crate::harness_helpers::system_message(&locations));
         }
-        if !thread_config.browser_previews.is_empty() {
-            let mut previews = String::from("Exo sandbox previews:\n");
-            if let Some(url) = &thread_config.browser_preview_url {
-                previews.push_str(&format!("Sandbox services page: {url}\n"));
-            }
-            for preview in &thread_config.browser_previews {
-                previews.push_str(&format!(
-                    "- {} (guest TCP port {}): {}\n",
-                    preview.name, preview.port, preview.url
-                ));
-            }
-            previews.push_str("Use these URLs for browser links, API URLs, and CORS origins; preserve paths, queries, and fragments. Inside the sandbox use guest ports. Start the services first; a 502 means a service is unreachable. Previews require the CLI session to stay open.");
+        if let Some(previews) = self.preview_urls(agent.as_ref(), thread.clone()).await? {
             agent_config
                 .instructions
-                .push(crate::harness_helpers::system_message(&previews));
+                .push(crate::harness_helpers::system_message(
+                    &previews.instructions(),
+                ));
         }
         provider
             .executor
@@ -528,6 +613,9 @@ impl Runtime {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
+        if let Some(previews) = self.previews.get() {
+            previews.stop();
+        }
         let shutdown = self.provider.harness().shutdown().await;
         let mut finalizers = self.finalizers.lock().await;
         while let Some(result) = finalizers.join_next().await {
@@ -607,6 +695,8 @@ impl Runtime {
         let opened =
             exo_managed_agents::open_thread(self.provider.as_ref(), agent, reference, request)
                 .await?;
+        self.preview_urls(agent.as_ref(), opened.thread.clone())
+            .await?;
         Ok(opened)
     }
 
@@ -672,10 +762,15 @@ impl Runtime {
         else {
             return Ok(false);
         };
-        self.provider
+        let deleted = self
+            .provider
             .exoharness()
             .delete_agent(&agent.record().id)
-            .await
+            .await?;
+        if deleted && let Some(proxy) = self.previews.get() {
+            proxy.remove_agent(agent.record().id);
+        }
+        Ok(deleted)
     }
 
     pub async fn get_conversation(
@@ -694,7 +789,11 @@ impl Runtime {
         let Some(thread) = resolve_conversation_handle(agent, reference).await? else {
             return Ok(false);
         };
-        agent.delete_conversation(&thread.record().id).await
+        let deleted = agent.delete_conversation(&thread.record().id).await?;
+        if deleted && let Some(proxy) = self.previews.get() {
+            proxy.remove(thread.record().id);
+        }
+        Ok(deleted)
     }
 
     pub async fn create_conversation(
@@ -729,8 +828,7 @@ impl Runtime {
             }
         };
         let conversation_config = ConversationConfig {
-            browser_preview_url: None,
-            browser_previews: Default::default(),
+            preview_port: None,
             resources: agent_config.resources.clone(),
             resource_mounts,
             sandbox_image: request.sandbox_image.or(agent_config.sandbox.image),

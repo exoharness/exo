@@ -1,7 +1,8 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Context, Result, ensure};
 use executor::ConversationHandle;
+pub(crate) use executor::previews::published_sandbox;
 use tokio::{io::copy_bidirectional, net::TcpListener};
 
 #[cfg(test)]
@@ -31,19 +32,6 @@ pub(crate) async fn run(
     forward(conversation, sandbox_id, port, listener).await
 }
 
-pub(crate) async fn published_sandbox(
-    conversation: &dyn ConversationHandle,
-    port: u16,
-) -> Result<executor::SandboxId> {
-    conversation
-        .list_sandboxes()
-        .await?
-        .into_iter()
-        .find(|sandbox| sandbox.running && sandbox.tcp_ports.contains(&port))
-        .map(|sandbox| sandbox.id)
-        .ok_or_else(|| anyhow!("no running thread sandbox publishes TCP port {port}"))
-}
-
 async fn forward(
     conversation: Arc<dyn ConversationHandle>,
     sandbox_id: executor::SandboxId,
@@ -51,7 +39,7 @@ async fn forward(
     listener: TcpListener,
 ) -> Result<()> {
     tokio::select! {
-        result = crate::local_net::serve_connections(
+        result = executor::local_net::serve_connections(
             || async { Ok(listener.accept().await?.0) },
             move |mut client| {
                 let conversation = Arc::clone(&conversation);

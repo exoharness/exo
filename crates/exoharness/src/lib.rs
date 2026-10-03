@@ -37,8 +37,12 @@ mod secrets;
 pub mod server;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod storage;
-#[cfg(all(test, not(target_arch = "wasm32"), feature = "basic-backend"))]
-mod test_support;
+#[cfg(all(
+    any(test, feature = "contract-tests"),
+    not(target_arch = "wasm32"),
+    feature = "basic-backend"
+))]
+pub mod test_support;
 mod types;
 mod uuid7;
 pub use credential_policy::{CredentialDestination, CredentialPolicy};

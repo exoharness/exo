@@ -125,8 +125,8 @@ async fn open_configured_thread(
     args: &ThreadArgs,
 ) -> Result<(Arc<dyn AgentHandle>, Arc<dyn ConversationHandle>)> {
     let runtime = configured_runtime(runtime, definition, args)?;
-    let mut session = None;
-    super::open_thread(&runtime, definition, args, false, None, &mut session).await
+    let opened = super::open_thread(&runtime, definition, args, false, None).await?;
+    Ok((opened.agent, opened.thread))
 }
 
 fn thread_args(agent: &str) -> ThreadArgs {
@@ -169,24 +169,15 @@ async fn rejected_local_session_does_not_reconfigure_an_open_thread() -> Result<
     args.thread = Some(thread.record().slug.clone());
     args.model = Some("changed-model".into());
     let configured = configured_runtime(&runtime, None, &args)?;
-    let mut rejected_session = None;
-    let error = super::open_thread(
-        &configured,
-        None,
-        &args,
-        false,
-        Some(root),
-        &mut rejected_session,
-    )
-    .await
-    .err()
-    .context("second session should be rejected")?;
+    let error = super::open_thread(&configured, None, &args, false, Some(root))
+        .await
+        .err()
+        .context("second session should be rejected")?;
     assert!(
         error
             .to_string()
             .contains("already has a local CLI session")
     );
-    assert!(rejected_session.is_none());
     assert_eq!(
         executor::get_conversation_model_override(thread.as_ref()).await?,
         before

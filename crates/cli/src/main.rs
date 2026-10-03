@@ -2,7 +2,6 @@ mod env;
 #[cfg(test)]
 mod env_tests;
 mod environment;
-mod local_net;
 mod managed_agents;
 #[cfg(test)]
 mod mount_tests;
@@ -522,7 +521,7 @@ macro_rules! runtime_accessor {
                 | Commands::Agent { runtime, .. }
                 | Commands::Conversation { runtime, .. }
                 => runtime,
-                Commands::Provider { .. } | Commands::FirecrackerBridge | Commands::PreviewProxy { .. } => {
+                Commands::Provider { .. } | Commands::FirecrackerBridge => {
                     unreachable!("command does not use runtime options")
                 }
             }
@@ -572,8 +571,6 @@ enum Commands {
     },
     #[command(hide = true)]
     FirecrackerBridge,
-    #[command(hide = true)]
-    PreviewProxy { directory: PathBuf },
     /// Serve agents and vaults over HTTP.
     Serve {
         #[command(flatten)]
@@ -975,9 +972,6 @@ async fn main() -> Result<(), CliError> {
 }
 
 async fn run(mut cli: Cli) -> Result<()> {
-    if let Commands::PreviewProxy { directory } = &cli.command {
-        return previews::run_proxy(directory).await;
-    }
     if matches!(cli.command, Commands::FirecrackerBridge) {
         #[cfg(feature = "firecracker")]
         {
@@ -1134,8 +1128,6 @@ async fn run_selected(
     )
     .await?;
     let env_vars = env.into_vars();
-    let home = cli.home.clone();
-    let remote_root = cli.runtime().root.clone();
     let mut session = None;
     let result: Result<()> = async {
     match cli.command {
@@ -1143,30 +1135,27 @@ async fn run_selected(
         Commands::FirecrackerBridge => {
             unreachable!("Firecracker bridge returns before harness startup")
         }
-        Commands::PreviewProxy { .. } => {
-            unreachable!("preview proxy returns before harness startup")
-        }
         Commands::Provider { .. } => {
             unreachable!("management commands return before harness startup")
         }
         Commands::Vault { command, .. } => vaults::run(harness.exoharness_handle().as_ref(), &command, &env_vars, local).await?,
         Commands::Agent { command: AgentCommands::Run { thread, tui, prompt, execution, .. }, .. } => {
-            let (agent, conversation) = managed_agents::open_thread(
+            let opened = managed_agents::open_thread(
                 harness.as_ref(),
                 definition.as_ref(),
                 &thread,
                 execution.egress_policy.is_some(),
                 local_root.clone(),
-                &mut session,
             )
             .await?;
-            let _previews = previews::PreviewSession::start(
-                harness.as_ref(), agent.as_ref(), Arc::clone(&conversation),
-                || match &state_root {
-                    Some(root) => Ok(root.clone()),
-                    None => RuntimeArgs::state_root(remote_root.as_deref(), home.as_deref()),
-                },
-            ).await?;
+            session = opened.session;
+            let (agent, conversation) = (opened.agent, opened.thread);
+            if local {
+                harness.start_inline_previews(agent.as_ref(), conversation.clone()).await?;
+            }
+            if let Some(previews) = harness.preview_urls(agent.as_ref(), conversation.clone()).await? {
+                previews::print_startup(&previews);
+            }
             if let Some(provider) = &selected_provider {
                 provider_store.pin_thread(
                     conversation.record().slug.clone(),
@@ -1397,7 +1386,8 @@ async fn run_selected(
         Commands::Conversation { command, .. } => match command {
             ConversationCommands::Ports { agent, conversation } => {
                 let conversation = must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
-                previews::print(harness.as_ref(), conversation.as_ref()).await?;
+                let agent = must_get_agent(harness.as_ref(), &agent).await?;
+                previews::print(harness.as_ref(), agent.as_ref(), conversation).await?;
             },
             ConversationCommands::List { agent } => {
                 managed_agents::list_threads(harness.as_ref(), &agent).await?;
@@ -1732,6 +1722,7 @@ async fn run_selected(
                         .ok_or_else(|| anyhow!("conversation not found: {}", conversation))?;
                     if let Some(root) = &local_root {
                         session = Some(session::LocalSession::start(root.clone(), agent_handle.record().id, Arc::clone(&conversation)).await?);
+                        harness.start_inline_previews(agent_handle.as_ref(), conversation.clone()).await?;
                     }
                     let output = run_sandbox_shell_command(
                         agent_handle.as_ref(),
@@ -1921,6 +1912,7 @@ async fn run_selected(
                 let agent = must_get_agent(harness.as_ref(), &agent).await?;
                 if let Some(root) = &local_root {
                     session = Some(session::LocalSession::start(root.clone(), agent.record().id, Arc::clone(&conversation)).await?);
+                    harness.start_inline_previews(agent.as_ref(), conversation.clone()).await?;
                 }
                 let previous_messages =
                     executor::materialize_conversation_messages(conversation.as_ref()).await?;
@@ -1952,9 +1944,10 @@ async fn run_selected(
     Ok(())
     }.await;
     let shutdown = harness.shutdown().await;
-    let stopped =
-        session::stop_session_sandboxes(session.as_ref().map(|session| session.thread.as_ref()))
-            .await;
+    let stopped = match session {
+        Some(session) => session.finish().await,
+        None => Ok(()),
+    };
     result?;
     shutdown?;
     stopped
@@ -2051,7 +2044,6 @@ fn command_refs_mut(command: &mut Commands) -> (Option<&mut String>, Option<&mut
             ConversationCommands::CompleteRebuildUpdate { .. } => (None, None),
         },
         Commands::FirecrackerBridge
-        | Commands::PreviewProxy { .. }
         | Commands::Provider { .. }
         | Commands::Environment { .. }
         | Commands::Vault { .. } => (None, None),

@@ -3,13 +3,7 @@ use std::future::Future;
 use anyhow::Result;
 use tokio::task::JoinSet;
 
-pub(crate) fn socket_directory() -> Result<tempfile::TempDir> {
-    // Unix socket paths are limited to roughly 100 bytes. macOS TMPDIR and
-    // the user's state root can exceed that before the socket name is added.
-    Ok(tempfile::tempdir_in("/tmp")?)
-}
-
-pub(crate) async fn serve_connections<S, A, H>(
+pub async fn serve_connections<S, A, H>(
     mut accept: impl FnMut() -> A,
     handle: impl Fn(S) -> H,
     name: &str,

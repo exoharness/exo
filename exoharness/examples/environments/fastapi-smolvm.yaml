@@ -16,8 +16,4 @@ config:
   policy:
     networking:
       type: unrestricted
-previews:
-  domain: exo.localhost
-  services:
-    app: 5173
-    api: 8000
+previews: {}

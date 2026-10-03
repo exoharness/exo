@@ -390,10 +390,14 @@ pub trait ManagedSandboxBackend: Send + Sync {
     /// restore, and fork must provide the same guarantee or reject the policy.
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>>;
 
-    /// Obtain access to published ports. Backends whose acquisition changes
-    /// lifecycle ownership should inspect the existing sandbox without restarting it.
-    async fn acquire_tcp(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        self.acquire(request).await
+    /// Connect to a published port. Backends whose acquisition changes lifecycle
+    /// ownership should inspect the existing sandbox without restarting it.
+    async fn connect_tcp(
+        &self,
+        request: SandboxRequest,
+        port: u16,
+    ) -> Result<Option<BoxSandboxTcpStream>> {
+        self.acquire(request).await?.connect_tcp(port).await
     }
 
     /// Stop a persisted sandbox when no in-process handle is available. Backends

@@ -28,6 +28,9 @@ pub struct ServeArgs {
     /// Address for the HTTP server.
     #[arg(long, default_value = "127.0.0.1:4766")]
     bind: SocketAddr,
+    /// DNS suffix for browser previews; resolve it to this host or an SSH tunnel.
+    #[arg(long, default_value = "localhost")]
+    preview_domain: String,
     /// Deployment configuration for adapters named in agent specs.
     #[arg(long)]
     adapters_file: Option<PathBuf>,
@@ -114,6 +117,13 @@ pub async fn run(runtime: Arc<Runtime>, root: &Path, args: ServeArgs) -> Result<
         service.shutdown_callers().await?;
         return result;
     }
+    let previews = runtime
+        .start_preview_server(root, &args.preview_domain)
+        .await?;
+    println!(
+        "preview listener: 127.0.0.1:{} (domain: {})",
+        previews.port, previews.domain
+    );
     let listener = TcpListener::bind(args.bind)?;
     println!(
         "listening: http://{}{}",

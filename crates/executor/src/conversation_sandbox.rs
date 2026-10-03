@@ -635,18 +635,11 @@ mod tests {
 
     #[tokio::test]
     async fn preview_changes_preserve_sandboxes_and_deleted_sandboxes_are_replaced() -> Result<()> {
-        use exoharness::{ExoHarness, NewAgentRequest};
         let temp = tempfile::tempdir()?;
         let harness =
             exoharness::BasicExoHarness::new(crate::test_support::local_test_config(temp.path()))
                 .await?;
-        let agent = harness
-            .new_agent(NewAgentRequest {
-                slug: "previews".into(),
-                name: "Previews".into(),
-                vaults: vec![],
-            })
-            .await?;
+        let agent = exoharness::test_support::new_test_agent(&harness, "previews").await?;
         let mut environment: exoharness::EnvironmentDefinition = serde_json::from_str(
             r#"{"name":"web","config":{"provider":"local_process","image":"unused","tcp_ports":[3000],"enable_networking":true}}"#,
         )?;
@@ -671,10 +664,7 @@ mod tests {
         };
         let first =
             ensure_conversation_sandbox(thread.as_ref(), &agent_config, &config, None).await?;
-        environment.previews = Some(exoharness::BrowserPreviewConfig {
-            domain: "exo.localhost".into(),
-            services: std::collections::BTreeMap::from([("app".into(), 3000)]),
-        });
+        environment.previews = Some(exoharness::BrowserPreviewConfig::default());
         let thread = thread.update_environment(environment.clone()).await?;
         config.environment = Some(environment.clone());
         assert_eq!(thread.list_sandboxes().await?[0].id, first);
@@ -683,7 +673,7 @@ mod tests {
             first
         );
         thread.stop_sandbox(first.clone()).await?;
-        environment.previews.as_mut().expect("previews").domain = "dev.localhost".into();
+        environment.previews = None;
         let thread = thread.update_environment(environment.clone()).await?;
         assert_eq!(thread.list_sandboxes().await?[0].id, first);
         assert!(!thread.list_sandboxes().await?[0].running);
@@ -703,19 +693,13 @@ mod tests {
 
     #[tokio::test]
     async fn environment_ports_are_published_and_part_of_sandbox_identity() -> Result<()> {
-        use exoharness::{ExoHarness, NewAgentRequest};
+        use exoharness::ExoHarness;
 
         let temp = tempfile::tempdir()?;
         let harness =
             exoharness::BasicExoHarness::new(crate::test_support::local_test_config(temp.path()))
                 .await?;
-        let agent = harness
-            .new_agent(NewAgentRequest {
-                slug: "ports".into(),
-                name: "ports".into(),
-                vaults: vec![],
-            })
-            .await?;
+        let agent = exoharness::test_support::new_test_agent(&harness, "ports").await?;
         let thread = agent.new_thread(Default::default()).await?;
         let definition = exo_managed_agents::AgentDefinition::parse(
             "---\nname: ports\nharness: basic\nconfig:\n  model: test\n---\nUse tools.".into(),

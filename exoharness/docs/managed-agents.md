@@ -95,94 +95,70 @@ the next line; pressing Enter on an empty prompt also checks for updates.
 
 ### Browser previews
 
-Configure browser previews explicitly in an environment. Raw `config.tcp_ports`
-alone does not enable them:
+Enable previews for an environment's published TCP ports:
 
 ```yaml
 name: dev
 config:
   image: my-dev-image
-  tcp_ports: [13000, 8000]
-previews:
-  domain: exo.localhost
-  services:
-    app: 13000
+  tcp_ports: [5173, 8000]
+previews: {}
 ```
 
-`exo agent run` prints the sandbox services page and a URL for each published
-port. Configured service names become URL labels; unnamed ports use their port
-number:
+`exo agent run` prints a clickable sandbox services page and one URL per port:
 
 ```text
-sandbox: http://my-project-<id>.dev.exo.localhost:<port>
-  Open this page for service links. Services must be running in the sandbox.
-  8000 (port 8000): http://8000.my-project-<id>.dev.exo.localhost:<port>
-  app (port 13000): http://app.my-project-<id>.dev.exo.localhost:<port>
+sandbox: http://my-project-<id>.localhost:<port>
+  port 5173: http://5173.my-project-<id>.localhost:<port>
+  port 8000: http://8000.my-project-<id>.localhost:<port>
 ```
 
-Exo derives the hostname from the agent slug, thread slug, and a short hash of
-the thread ID, under `previews.domain`. `.localhost` names resolve to loopback in
-browsers; no hosts-file edits or DNS service are needed. For a custom domain,
-configure its DNS to resolve these names to loopback. One shared local proxy binds
-to `127.0.0.1` for all preview sessions using the same state root. Every service
-and thread uses the same browser port; the hostname selects its destination.
-The proxy reads the HTTP `Host` header to select a route, then relays the
-connection, including WebSockets. Request paths and application headers are
-forwarded unchanged.
+The HTML page lists every service link. Exo also gives these URLs to the agent,
+so it can start services and configure browser API URLs and CORS origins.
+`.localhost` names resolve to loopback in browsers without DNS or hosts-file
+changes. HTTP and WebSocket paths and application headers pass through unchanged.
 
-The port is saved in `previews/listener.json` under the state root and reused on
-resume. An occupied saved port produces an error instead of changing the URLs.
+An inline run owns one browser listener for its thread. All of that thread's
+services share its port; other open threads have their own ports. Resume reuses
+the saved port and URLs. Keep the CLI session open while using previews.
 
-The proxy follows the thread's currently running sandbox and forwards HTTP and
-WebSocket traffic through its published TCP ports. Routing reads current sandbox
-metadata without reading the thread's event history. Each CLI session registers
-its configured hostnames in the proxy's in-memory route table over a private
-Unix socket. Closing a session removes only its routes; other sessions continue
-using the shared listener. Exo starts the proxy automatically and it exits after
-five idle seconds with no sessions. It does not keep a VM running after exit.
-The sandbox services page contains a clickable list of services, their guest
-ports, and browser URLs. Services still need to be started in the sandbox. The
-app must generate browser API and WebSocket URLs using the corresponding service
-preview's origin. Exo includes the page URL, service mapping, and a short explanation
-in the agent's instructions so it can help the user open and troubleshoot previews.
-The page is available as soon as its routes are registered, before repository
-preparation finishes. During that wait, interactive startup displays checkout
-progress. Resuming with unchanged URLs does not rewrite the preview metadata.
+With an HTTP provider, `exo serve` owns one shared preview listener for its
+threads. Closing a client does not close previews or stop the server's services.
+The server saves its listener port across restarts. `exo serve --preview-domain
+DOMAIN` sets the advertised DNS suffix for its previews; the default is
+`localhost`. Preview listeners bind to `127.0.0.1`. For a remote server, forward
+the printed preview port with SSH, using the same port locally:
 
-To display the saved URLs again without starting a VM:
+```sh
+ssh -L PORT:127.0.0.1:PORT SERVER
+```
+
+Display a thread's URLs without starting a VM:
 
 ```sh
 exo thread ports AGENT THREAD
 ```
 
-Previews currently use HTTP. A remote provider also needs to support TCP
-connections through its API for client-side preview forwarding.
-Use `--verbosity full` on `exo agent run` to include egress proxy diagnostics.
+This command uses the selected provider's preview address. Links require the
+owning CLI session or server and the sandbox services to be running. Previews
+currently use HTTP.
 
 #### Preview troubleshooting
 
-`exo thread ports` displays saved URLs; opening an `exo agent run` session
-registers their routes. Keep that session open while using previews.
+| Symptom                                      | What to check                                                                                                                                                                                                                  |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Connection refused                           | Keep the inline agent session or provider server running. For remote providers, check the SSH forward.                                                                                                                         |
+| `404 Unknown preview hostname`               | Use the exact URL printed when opening the thread through this provider.                                                                                                                                                       |
+| `502 Bad Gateway`                            | Start the sandbox and its services. Check the guest port and listen on an interface reachable by sandbox forwarding; the FastAPI example uses `0.0.0.0`.                                                                       |
+| UI loads, but API or WebSocket requests fail | Use the API service's browser origin. Allow the full frontend origin, including its port, in backend CORS and allow preview hostnames in development-server host checks. Guest-local URLs still work for server-side requests. |
+| Saved port is occupied                       | Release the conflicting listener. Exo reports the bind error and preserves the port so browser origins stay stable.                                                                                                            |
 
-| Symptom                                      | What to check                                                                                                                                                                                                                                                                                                                                                    |
-| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `404 Unknown preview hostname`               | Use the exact URL printed by the active session. The hostname has no registered route in the proxy receiving the request. Reopen the thread if its session has closed.                                                                                                                                                                                           |
-| `502 Bad Gateway`                            | The hostname is registered, but the VM or service is unreachable. Ask the agent to start the services and check the declared guest port. Services must listen on an interface reachable by the sandbox's port forwarding; the FastAPI example binds to `0.0.0.0`.                                                                                                |
-| UI loads, but API or WebSocket requests fail | Configure browser requests with the corresponding API or WebSocket preview origin. Different service hostnames are different origins even though they share a port. Allow the full frontend origin, including its port, in backend CORS and allow preview hostnames in development-server host checks. Server-side requests can continue using guest-local URLs. |
-| Proxy fails to bind its saved port           | Check `<root>/previews/listener.json` and release the port occupied by another process. Exo preserves the saved port so existing URLs remain valid.                                                                                                                                                                                                              |
-
-To assign a different browser port, close all sessions using that state root and
-let the shared preview proxy exit. Remove `<root>/previews/listener.json`, then
-reopen the thread. The newly printed URLs use the new port; update any application
-configuration that contains the old URLs.
-
-Preview proxy startup and exit errors are written to `<root>/previews/proxy.log`
-(`~/.exo/previews/proxy.log` with the default root). Service logs stay where the
-application writes them inside the VM. The FastAPI example writes frontend and
-API logs to `/var/lib/fastapi-demo/logs/app.log` and
-`/var/lib/fastapi-demo/logs/api.log`, and PostgreSQL logs to
-`/var/lib/fastapi-demo/postgres/server.log`. Ask the agent to inspect these logs
-or probe the guest service directly when a preview returns 502.
+Listener startup and accept errors appear in Exo's output; routine browser
+disconnects stay at debug level. Service logs stay inside the sandbox; the
+FastAPI example writes frontend/API logs under `/var/lib/fastapi-demo/logs` and
+PostgreSQL logs to `/var/lib/fastapi-demo/postgres/server.log`. Ask the agent to
+inspect them when a service is unavailable. `--verbosity full` includes egress
+diagnostics.
 
 ### Named agents and threads
 
@@ -297,6 +273,8 @@ exo --provider served agent run --agent support --prompt "Summarize today's tick
 
 The server uses the existing managed-agent HTTP API: agent discovery, saved
 threads, turns, event streaming, cancellation, approval responses, and reconnect.
+`GET /exo/agent/{agent_id}/thread/{thread_id}/previews` returns the server's
+`{domain, port}` preview address, or `null` when previews are unavailable.
 With `--agent NAME`, only that agent is visible and other agents are inaccessible.
 Omit `--agent` to serve the local provider, including agent creation. This does not expose the raw ExoHarness `/request` transport.
 
@@ -460,7 +438,7 @@ new threads. Resume with `--agent NAME --thread THREAD --environment NAME` or
 `--environment-file path.yaml` to apply an updated definition to a saved thread.
 A changed sandbox configuration replaces its sandbox and preserves thread history
 and filesystem resources; files outside persistent mounts are discarded. Changes
-to preview names or the preview domain preserve the sandbox. Omitting
+to preview enablement preserve the sandbox. Omitting
 both environment flags retains the thread's saved configuration. Reapplying the
 same definition reuses its sandbox. To upgrade the image of an existing sandbox,
 change the image reference in the environment; use a versioned tag or digest.

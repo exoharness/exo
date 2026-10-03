@@ -29,6 +29,7 @@ exoharness = { path = "../exoharness", features = [
   "basic-backend",
 ] }
 futures.workspace = true
+httparse = "1.10"
 lingua.workspace = true
 reqwest.workspace = true
 openidconnect = "4.0.1"
@@ -46,6 +47,7 @@ url.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
+exoharness = { path = "../exoharness", features = ["contract-tests"] }
 rsa = { version = "0.9", features = ["getrandom"] }
 rmcp = { workspace = true, features = ["auth"] }
 futures.workspace = true

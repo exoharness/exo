@@ -51,10 +51,7 @@ pub(crate) fn needs_local_root_lock(command: &crate::Commands) -> bool {
             command,
             VaultCommands::List { .. } | VaultCommands::Get { .. }
         ),
-        Commands::Serve { .. }
-        | Commands::Provider { .. }
-        | Commands::FirecrackerBridge
-        | Commands::PreviewProxy { .. } => false,
+        Commands::Serve { .. } | Commands::Provider { .. } | Commands::FirecrackerBridge => false,
     }
 }
 
@@ -95,7 +92,7 @@ pub(crate) fn lock_server_root(root: &Path) -> Result<File> {
 /// A local CLI owns a thread's VM lifetime. The OS releases this lock on a
 /// crash, allowing the next session to stop leftover VMs before resuming.
 pub(crate) struct LocalSession {
-    pub thread: Arc<dyn ConversationHandle>,
+    thread: Arc<dyn ConversationHandle>,
     _lock: File,
     _root: Arc<LocalRootLease>,
 }
@@ -122,7 +119,7 @@ impl LocalSession {
             .any(|sandbox| sandbox.running && !sandbox.attached)
         {
             eprintln!("Stopping sandboxes left by the previous local session...");
-            stop_session_sandboxes(Some(thread.as_ref())).await?;
+            stop_owned_sandboxes(thread.as_ref()).await?;
         }
         Ok(Self {
             thread,
@@ -130,14 +127,16 @@ impl LocalSession {
             _root: root,
         })
     }
+
+    /// Release managed sandboxes after the harness has finished shutting down.
+    pub(crate) async fn finish(self) -> Result<()> {
+        stop_owned_sandboxes(self.thread.as_ref()).await
+    }
 }
 
 /// Local sessions release their managed sandboxes after the harness has exited.
-/// HTTP clients leave lifecycle ownership with the server and pass no thread.
-pub(crate) async fn stop_session_sandboxes(thread: Option<&dyn ConversationHandle>) -> Result<()> {
-    let Some(thread) = thread else {
-        return Ok(());
-    };
+/// Attached sandboxes keep their external owner.
+async fn stop_owned_sandboxes(thread: &dyn ConversationHandle) -> Result<()> {
     let mut failure = None;
     for sandbox in thread.list_sandboxes().await? {
         if sandbox.running
@@ -157,42 +156,21 @@ pub(crate) async fn stop_session_sandboxes(thread: Option<&dyn ConversationHandl
 mod tests {
     use super::*;
     use exoharness::{
-        AttachSandboxRequest, BasicExoHarness, BasicExoHarnessConfig, CreateSandboxRequest,
-        ExoHarness, LocalProcessSandboxBackend, ManagedSandboxBackend, ManagedSandboxHandle,
-        NewAgentRequest, SandboxAttachment, SandboxBackendRegistration, SandboxProvider,
-        SandboxRequest, SecretBackendChoice, SnapshotFormat, SnapshotPayload,
+        AttachSandboxRequest, BasicExoHarness, BasicExoHarnessConfig, ExoHarness,
+        LocalProcessSandboxBackend, ManagedSandboxBackend, ManagedSandboxHandle, SandboxAttachment,
+        SandboxBackendRegistration, SandboxProvider, SandboxRequest, SnapshotFormat,
+        SnapshotPayload,
     };
 
     fn config(root: &Path) -> BasicExoHarnessConfig {
-        BasicExoHarnessConfig {
-            root: root.to_owned(),
-            secret_backend: SecretBackendChoice::Static([7; 32]),
-            sandbox_default: SandboxProvider::LocalProcess,
-            sandbox_policy: None,
-            sandbox_backends: vec![
-                SandboxBackendRegistration::local_process(),
-                SandboxBackendRegistration::from_backend(
-                    SandboxProvider::Docker,
-                    Arc::new(AttachedBackend),
-                ),
-            ],
-        }
-    }
-
-    fn request() -> CreateSandboxRequest {
-        CreateSandboxRequest {
-            provider: SandboxProvider::LocalProcess,
-            image: "unused".into(),
-            tcp_ports: vec![],
-            name: None,
-            resources: None,
-            default_workdir: None,
-            file_system_mounts: None,
-            durable_file_systems: None,
-            policy: None,
-            enable_networking: Some(true),
-            idle_seconds: Some(300),
-        }
+        let mut config = exoharness::test_support::local_test_config(root);
+        config
+            .sandbox_backends
+            .push(SandboxBackendRegistration::from_backend(
+                SandboxProvider::Docker,
+                Arc::new(AttachedBackend),
+            ));
+        config
     }
 
     struct AttachedBackend;
@@ -228,16 +206,18 @@ mod tests {
     async fn session_exit_stops_only_its_managed_sandboxes() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let harness = BasicExoHarness::new(config(temp.path())).await?;
-        let agent = harness
-            .new_agent(NewAgentRequest {
-                slug: "session".into(),
-                name: "Session".into(),
-                vaults: vec![],
-            })
-            .await?;
+        let agent = exoharness::test_support::new_test_agent(&harness, "session").await?;
         let session = agent.new_thread(Default::default()).await?;
         let other = agent.new_thread(Default::default()).await?;
-        let managed = session.create_sandbox(request()).await?;
+        let local_session = LocalSession::start(
+            Arc::new(LocalRootLease::acquire(temp.path())?),
+            agent.record().id,
+            session.clone(),
+        )
+        .await?;
+        let managed = session
+            .create_sandbox(exoharness::test_support::sandbox_request())
+            .await?;
         let attached = session
             .attach_sandbox(AttachSandboxRequest {
                 attachment: SandboxAttachment::DockerContainer {
@@ -246,8 +226,9 @@ mod tests {
                 default_workdir: None,
             })
             .await?;
-        other.create_sandbox(request()).await?;
-        stop_session_sandboxes(None).await?;
+        other
+            .create_sandbox(exoharness::test_support::sandbox_request())
+            .await?;
         let events = temp
             .path()
             .join("agents")
@@ -257,7 +238,7 @@ mod tests {
             .join("events");
         std::fs::write(events.join("unreadable.json"), b"invalid event JSON")?;
         assert!(session.get_events(None).await.is_err());
-        stop_session_sandboxes(Some(session.as_ref())).await?;
+        local_session.finish().await?;
         let sandboxes = session.list_sandboxes().await?;
         assert!(!sandboxes.iter().find(|s| s.id == managed).unwrap().running);
         let external = sandboxes.iter().find(|s| s.id == attached).unwrap();
@@ -270,17 +251,13 @@ mod tests {
     async fn reopening_recovers_abandoned_sandboxes_and_excludes_live_sessions() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let harness = BasicExoHarness::new(config(temp.path())).await?;
-        let agent = harness
-            .new_agent(NewAgentRequest {
-                slug: "recovery".into(),
-                name: "Recovery".into(),
-                vaults: vec![],
-            })
-            .await?;
+        let agent = exoharness::test_support::new_test_agent(&harness, "recovery").await?;
         let thread = agent.new_thread(Default::default()).await?;
         let root = Arc::new(LocalRootLease::acquire(temp.path())?);
         let session = LocalSession::start(root.clone(), agent.record().id, thread.clone()).await?;
-        thread.create_sandbox(request()).await?;
+        thread
+            .create_sandbox(exoharness::test_support::sandbox_request())
+            .await?;
         // Simulate process death: release its OS lock without clean shutdown.
         drop(session);
         let reopened = BasicExoHarness::new(config(temp.path())).await?;
@@ -289,7 +266,9 @@ mod tests {
         let recovered =
             LocalSession::start(root.clone(), agent.record().id, thread.clone()).await?;
         assert!(!thread.list_sandboxes().await?[0].running);
-        let active = thread.create_sandbox(request()).await?;
+        let active = thread
+            .create_sandbox(exoharness::test_support::sandbox_request())
+            .await?;
         assert!(
             LocalSession::start(root, agent.record().id, thread.clone())
                 .await
@@ -304,7 +283,7 @@ mod tests {
                 .unwrap()
                 .running
         );
-        stop_session_sandboxes(Some(recovered.thread.as_ref())).await?;
+        recovered.finish().await?;
         Ok(())
     }
 
@@ -312,15 +291,11 @@ mod tests {
     async fn server_and_local_sessions_cannot_claim_each_others_sandboxes() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let harness = BasicExoHarness::new(config(temp.path())).await?;
-        let agent = harness
-            .new_agent(NewAgentRequest {
-                slug: "ownership".into(),
-                name: "Ownership".into(),
-                vaults: vec![],
-            })
-            .await?;
+        let agent = exoharness::test_support::new_test_agent(&harness, "ownership").await?;
         let thread = agent.new_thread(Default::default()).await?;
-        thread.create_sandbox(request()).await?;
+        thread
+            .create_sandbox(exoharness::test_support::sandbox_request())
+            .await?;
         let server = lock_server_root(temp.path())?;
         assert!(LocalRootLease::acquire(temp.path()).is_err());
         assert!(thread.list_sandboxes().await?[0].running);

@@ -2443,6 +2443,15 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         if !sandbox.running {
             bail!("sandbox is not running: {id}");
         }
+        if sandbox.provider == SandboxProvider::Smolvm && sandbox.attachment.is_none() {
+            return self
+                .harness
+                .inner
+                .sandbox_backend_for_provider(sandbox.provider.clone())
+                .await?
+                .connect_tcp(sandbox_request(self.owner, &id, &sandbox, None), port)
+                .await;
+        }
         let sandbox_handle = self.tcp_sandbox_handle(&id, &sandbox).await?;
         sandbox_handle.connect_tcp(port).await
     }
@@ -2453,6 +2462,9 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         let sandbox = self.load_sandbox(&id).await?;
         if !sandbox.running {
             bail!("sandbox is not running: {id}");
+        }
+        if sandbox.provider == SandboxProvider::Smolvm && sandbox.attachment.is_none() {
+            return Ok(!sandbox.tcp_ports.is_empty());
         }
         let sandbox_handle = self.tcp_sandbox_handle(&id, &sandbox).await?;
         Ok(sandbox_handle.supports_tcp())
@@ -2900,15 +2912,6 @@ impl<'a> BasicScopedSandboxHandle<'a> {
             .cloned()
         {
             return Ok(handle);
-        }
-        if sandbox.provider == SandboxProvider::Smolvm && sandbox.attachment.is_none() {
-            return self
-                .harness
-                .inner
-                .sandbox_backend_for_provider(sandbox.provider.clone())
-                .await?
-                .acquire_tcp(sandbox_request(self.owner, id, sandbox, None))
-                .await;
         }
         let (handle, provider_state_event) =
             active_sandbox_handle(self.harness, &self.owner_dir, self.owner, id, sandbox).await?;
